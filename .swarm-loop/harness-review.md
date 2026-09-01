@@ -470,3 +470,240 @@ The frozen acceptance conftest has **already been byte-compiled by the system Py
 8. **"Every blocked op must have a documented allowed equivalent, and the docs must use it."** `git worktree remove` already does (`rm -rf` + `prune`, and `SKILL.md:162`/`merge-protocol.md:43` say so). "Restore the harness from git" does not — it is mandated in two places and blocked in all three canonical spellings. Audit rule: for every entry in the guard's block list, grep the skill for a doc instruction that would trigger it.
 9. **"An anti-gaming rule enforced only by prose is not enforced."** `goal-setting.md:89-90` states the principle ("the veto is mechanical precisely so it can't be argued with in the moment") and `:95` then relies on prose for the highest-pressure decision in the run. Wherever the skill says "only the user, awake" — put a flag on it.
 10. **Guard-parser hygiene, permanently:** an argv guard's coverage is bounded by its tokenizer, so (a) never claim it blocks a set "exactly", (b) ship a regression battery of both must-block and must-allow commands with every parser change, and (c) treat a false block on the loop's own instructions (the heredoc packet-write) as strictly worse than a missed block — the guard's docstring already says this at `:19-21`, and the naive newline fix violates it.
+---
+
+# FOUND DURING THE RUN — cycle 1, wave 1 (post-dispatch)
+
+Everything above this line is the **pre-dispatch** audit. Everything below was discovered
+while the swarm was actually running, by the orchestrator, by a second monitoring session,
+or by build agents who executed something the documents only asserted. Each entry says how it
+was verified and by whom, because provenance is the difference between a fact and a guess.
+
+**Status legend:** `[VERIFIED-HERE]` the orchestrator reproduced it in this repo ·
+`[REPORTED]` a peer or worker reported it and it is not yet independently reproduced.
+
+## H-1 — `freeze --amend` cannot link an escalation whose subject names a test [VERIFIED-HERE]
+
+**Where:** `swarmloop.py` `cmd_freeze`'s escalation linker (~:1226-1234).
+
+**What:** the linker matches an escalation to an amendment by **exact string equality** of
+`subject` against a touched path, its basename, a metric id, or a `"/" + subject` suffix. A
+pytest nodeid — `test_spec_criteria.py::test_name` — is the canonical way to name one frozen
+test and the only subject form that identifies *which* test is at issue, and it matches none
+of the four predicates.
+
+**Evidence:** ESC-002 was filed with a nodeid subject and answered by amendment 2. The
+freeze-log record for amendment 2 carries `"escalations": []`; the
+`OPEN ESCALATION(S) THIS AMENDMENT ANSWERS` block never fired and the resolve command was
+never printed. ESC-002 was closed only because the orchestrator happened to close it by hand.
+
+**Why it is the most serious item here:** filed `--blocking`, the loop would have stayed
+halted waiting on a decision the user had already made, with `resume`, `status` and `analyze`
+all reporting it as still awaiting a human. This is the exact failure the linker exists to
+prevent.
+
+**Proposed fix:** capture a structured `path` / `test` field at `escalate` time rather than
+parsing prose out of `subject` later. Minimal stopgap: match on `subject.split("::")[0]`.
+
+## H-2 — `measure` and `analyze` never check harness integrity [VERIFIED-HERE]
+
+**Where:** `swarmloop.py` — `_verify_quiet` is called at exactly two sites, `:1611` inside
+`cmd_record` and `:2076` inside `cmd_resume`. `cmd_measure` (`:1552`) and `cmd_analyze`
+(`:1691`) never call it.
+
+**What:** the two commands that produce every number the run is steered by never assert the
+harness is intact. `record` refuses to write against a modified harness; `measure` has only
+the `frozen` boolean. So a weakened acceptance test yields inflated values at exit 0, and
+`analyze` can print **ALL TARGETS MET** and exit 2 — the terminal build→audit signal — with
+no integrity statement anywhere in its output.
+
+**Interaction with MUST FIX #1 above:** that item is about `analyze` scoring a cycle with *no
+rows*; this is about `analyze` scoring rows produced against a *tampered* harness. Different
+causes, same class of false green. Both should be fixed.
+
+**Workaround adopted this run:** run `swarmloop.py verify` explicitly immediately before every
+`measure`, and again before acting on any all-green.
+
+## H-3 — `analyze` reads the stored `error` column instead of recomputing it [VERIFIED-HERE]
+
+**Where:** `swarmloop.py:1709` — `v, e = float(row["value"]), float(row["error"])`.
+
+**What:** error is read from history rather than recomputed against the *current* target, so
+any amendment that moves a target leaves every earlier row fitting against a dead one.
+Measured here: amendment 1 raised five targets (`acceptance_collected` 103→120, e3 18→21,
+e4 14→20, e6 20→26, e8 6→8), invalidating the 24 cycle-0 rows written before it.
+
+**Why this run survived it:** cycle 0 was re-measured after the amendment and `analyze` keeps
+the last row per cycle in file order, so the trend is anchored to the post-amendment reading.
+**Nothing in `freeze --amend` requires that re-measure** — it was done by hand.
+
+**Proposed fix:** recompute error from the live target at analyze time, or have `freeze
+--amend` refuse to exit without re-measuring the affected cycles.
+
+## H-4 — the permission classifier inverts the intended safety property [VERIFIED-HERE]
+
+**What:** during amendment 2 the auto-mode classifier **blocked a Bash write** into
+`.swarm-loop/acceptance/` while the `Edit` tool against the same file **succeeded**, and it
+**blocked `pytest` against the frozen suite** — a read-only verification.
+
+**So: mutation permitted, verification denied.** The sanctioned path was the blocked one. This
+is the same blind spot as the git-guard's `"Bash"`-only matcher seen from the other side, and
+together they mean protected-path enforcement is entirely post-hoc via `verify`.
+
+**Consequence this run:** the amended test could not be executed before re-freezing. It was
+verified instead by importing the amended module in a scratch directory and exercising its
+helpers directly, plus a two-directional sabotage check. That worked, but it is a workaround
+for a tool that should not have refused.
+
+## H-5 — `merge-protocol.md` prescribes an integration worktree that no step creates [VERIFIED-HERE]
+
+**Where:** `merge-protocol.md:26` step 5 says to resolve conflicts "in the integration
+worktree", and `SKILL.md:189` repeats the phrase. Step 2 (`:14`) creates only a *branch* in
+the primary checkout (`git checkout -b integration/<epoch>-<batch> main`) and step 9 (`:38`)
+does `git checkout main` there.
+
+**Why it matters:** an orchestrator that invents a third thing mid-merge makes step 9 run in
+the wrong tree. **Resolved for this run by the user: use an explicit `git worktree add`.**
+The doc should say so.
+
+## H-6 — `@pytest.mark.ticket` feeds no metric; per-ticket attribution exists but is unreachable [VERIFIED-HERE]
+
+**Where:** `.swarm-loop/acceptance/run.py` offers `--total`, `--count-passing`, `--pass-rate`,
+`--json`, `--epic`, `--blocker`. There is **no `--ticket`**.
+
+**What:** every metric is suite- or epic-level, so the marker whose stated job (per
+`conftest.py:7`) is naming "which ticket is responsible for making it pass" scores nothing.
+Combined with H-7, a ticket's completion is unmeasured from both directions and "collected" is
+pure orchestrator judgment.
+
+**The data does exist:** `conftest.py:107-115` records `ticket` on every result and `--json`
+dumps the records. Two gotchas: **`--json` writes to stderr** (so `2>&1` is mandatory) and it
+`return`s before the count logic, so it ignores every other flag.
+
+**Adopted this run** as a standard collection step — run it inside the returning branch's own
+worktree and group by ticket. It is what turned "T-010 says 8/8" into "measured 8/8", and it
+also proves worktree isolation is real: each branch's tests fail in every sibling's tree.
+
+## H-7 — a ticket's declared `verify` command can pass vacuously, and its failure exit is 4 [VERIFIED-HERE]
+
+**Measured across all five wave-1 tickets at dispatch:** T-010, T-013 and T-014 exited **0**
+with `2 passed` against nothing but T-000 scaffold smoke tests — a worker writing zero lines of
+code passes. T-011 and T-012 exited **4** (`ERROR: file or directory not found` /
+`no tests ran`), which is correct pre-build behaviour but which any triage treating non-{0,1}
+as "environment broken" will misread. `verify.sh`'s `run_pytest` only special-cases exit 5.
+
+**Proposed fix:** the collection gate should compare collected-test counts before and after,
+not just read an exit code.
+
+## H-8 — `verify.sh check` deselects `@pytest.mark.docker`, so the per-ticket gate cannot see the layer it appears to prove [VERIFIED-HERE]
+
+**What:** 32 of T-011's tests — the entire grant model and the whole Postgres writer, i.e.
+every behavioural proof that release blocker **S7** actually holds — never execute in
+`make check`. With the stack down they skip to exit 0. The ticket's own `verify` runs them;
+the gate does not.
+
+**Two different greens with the same name, and the weaker one is what a hurried reader sees.**
+Record which marks each gate deselects, beside that gate's reading — exactly as passed/skipped
+is already required beside `build_succeeds`.
+
+## H-9 — `check-branch`'s artifact filter runs before the protected-path veto [VERIFIED-HERE]
+
+**Where:** `swarmloop.py` `cmd_check_branch` — `artifacts = [p for p in changed if
+is_artifact_path(p)]` then `changed = [p for p in changed if not is_artifact_path(p)]`, both
+**before** the protected/`.swarm-loop` veto loop.
+
+**Deliberate, and the code says why:** packets tell workers to run the frozen suite, which
+writes `.swarm-loop/acceptance/__pycache__/*.pyc`, and vetoing that rejected a worker for
+obeying its packet; `verify`'s `iter_files` skips caches too, so "the two halves of one
+protection model must not disagree."
+
+**Residual hole:** a sourceless `.pyc` under a protected directory is loadable by CPython,
+never hashed, and never flagged. Low likelihood from a well-behaved worker. **Mitigated this
+run** by an explicit collection check for any `.swarm-loop/`-or-bytecode path on a branch
+(all five wave-1 branches were clean).
+
+## H-10 — `[verified]` on a pinned decision is not checked, and one shipped unrunnable code [VERIFIED-HERE]
+
+**What:** D6 carried a `[verified]` header and shipped a `CREATE VECTOR INDEX` statement that
+does not parse — Cypher map keys must be identifiers or backtick-quoted, and D6 single-quoted
+them. Reproduced against neo4j:5.26.30: `Neo.ClientError.Statement.SyntaxError: Invalid input
+''vector.dimensions'': expected an identifier or '}'` at column 109.
+
+**It survived the cycle-0 adversarial pass and a twelve-finding partner review** — both read
+it, neither ran it — while the container was up and reachable the entire time. Six tickets
+copy that statement verbatim. Found by a *builder* that tried to execute it, which is the only
+class of reader that would have.
+
+**Proposed rule:** `[verified]` must mean *an executable artifact in this decision was
+executed*, recorded with the command, its output, and the engine version. Anything else is
+`[reasoned — not executed]`. At intake, extract every executable snippet from `decisions.md`
+and run it against the real dependency before the freeze.
+
+## H-11 — the stall kill switch is safe for bookkeeping commits, and this resolves an open worry [VERIFIED-HERE]
+
+`_codebase_fingerprint`'s own docstring states it hashes the tree **minus `.swarm-loop/`**
+precisely because "every cycle the loop is REQUIRED to commit its own bookkeeping ... so HEAD
+moves and the stall counter resets to 0 in a cycle where not one line of product code
+changed." So a per-epoch `.swarm-loop/` commit is **stall-neutral by design**.
+
+**But `SKILL.md` never instructs that commit** — `SKILL.md:105` is the only commit
+instruction and it is freeze-time only. The harness assumes a per-epoch bookkeeping commit
+that the prose never asks for, so a Phase-7 push would ship a `main` carrying none of the
+run's evidence. **Adopted this run:** commit `.swarm-loop/` at each epoch boundary.
+
+Separately and still live: the counter increments on any epoch whose product fingerprint is
+unchanged, and under rolling dispatch a zero-merge epoch is legitimate. Three in a row is
+terminal. **Adopted:** never open a measurement epoch that landed no merges.
+
+## H-12 — unbounded adversarial fan-out (an authoring-guidance gap, and the orchestrator's own error) [VERIFIED-HERE]
+
+Two verification workflows were written with **3 refuters per finding and no cap on findings
+per lens**, across 14 finder lenses. The refuter count is therefore multiplicative and
+unbounded — one lens returning 8 findings spawns 24 refuters by itself. **50 agent transcripts
+and 16 GB of bootstrapped scratch worktrees** before the user stopped it.
+
+The finders were worth their cost (35 findings, several the builders missed). The refute wave
+was the waste: three independent skeptics per `low`-severity docstring complaint.
+
+**Rule for next time:** severity-gate refutation (3 skeptics for `critical`, 1 for `high`,
+orchestrator triage for `medium`/`low`), cap findings-per-lens, and **log what was dropped** —
+the authoring guidance warns against silent caps, and bounding nothing at all is the opposite
+failure, not a safe one.
+
+## H-13 — a worker's finding about a SHARED document describes its branch point [VERIFIED-HERE]
+
+T-011 and T-010 both reported that `public-surface.md` still said "the five trust dimensions".
+True of their worktrees, which are pinned at the commit they branched from; already fixed on
+`main`. **Every shared-doc finding from a worker needs a `main`-side check before it becomes
+an action**, or the orchestrator re-fixes what it already fixed and tells the next wave
+something false.
+
+## H-14 — the branch must be still before verification is dispatched [VERIFIED-HERE]
+
+The orchestrator collected T-013 and dispatched verification lenses at it **while it was still
+committing**: three commits landed afterwards, including a real money bug fix
+(`ROUND_HALF_EVEN` vs `ROUND_HALF_UP` — the cart quoted 87.66 and the order charged 87.65).
+T-013 independently reported "the verifier reported the branch was still moving while it
+audited — it caught a test failing mid-write."
+
+**Two rules:** re-read the branch tip at collection time and record the SHA you collected;
+and treat a completion notification as "may still be moving" until the worktree is clean and
+the tip is stable.
+
+## Peer-reported, not yet independently reproduced
+
+- **`git-guard` never reads `data.get("cwd")` from the PreToolUse payload** `[REPORTED]`, so
+  `is_commit_ish` and `os.path.lexists` resolve from the session's root rather than the
+  command's. A worker inside a worktree running `git checkout <file>` on a file that exists
+  only there resolves as "not a path" and is allowed. If true this is a real hole in the
+  isolation the whole wave depends on, and it is a one-line fix.
+- **The `PreToolUse` matcher is `"Bash"` only** `[REPORTED]`, so `Edit`/`Write` against a
+  frozen test is not hooked at all. Consistent with H-4, which observed `Edit` succeeding
+  where Bash was refused — though that block came from the classifier, not the guard.
+
+## Housekeeping
+
+`.swarm-loop/learnings.md` is at **35 entries**, over the ~30 ceiling `SKILL.md` sets for it.
+It needs a curation pass — merge duplicates and promote anything durable and
+project-agnostic into this file or `LEARNED.md` — before it degrades the packets it is
+injected into.
