@@ -109,6 +109,20 @@ def test_the_miss_message_names_the_closest_recorded_prompt() -> None:
     assert "summarize the envelope" in message, "the near-miss must be suggested"
 
 
+def test_the_miss_error_survives_pickling_and_copying() -> None:
+    """It crosses process boundaries: a subprocess worker or a retry wrapper's copy."""
+    import copy
+    import pickle
+
+    double = RecordedLLM(RECORDINGS)
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        double.complete("nothing recorded for this")
+    for revived in (pickle.loads(pickle.dumps(excinfo.value)), copy.copy(excinfo.value)):
+        assert isinstance(revived, UnrecordedPromptError)
+        assert revived.prompt == "nothing recorded for this"
+        assert str(revived) == str(excinfo.value)
+
+
 def test_whitespace_is_significant_because_the_lookup_is_exact() -> None:
     double = RecordedLLM(RECORDINGS)
     with pytest.raises(UnrecordedPromptError):

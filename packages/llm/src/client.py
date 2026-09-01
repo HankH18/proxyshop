@@ -10,9 +10,10 @@ when someone actually calls a live model.
 Choose an implementation with :func:`build_llm`, which reads ``LLM_PROVIDER`` and defaults
 to the offline double::
 
-    client = build_llm("store_agent")            # -> DeterministicLLM (LLM_PROVIDER unset)
+    client = build_llm("store_agent")                     # -> DeterministicLLM (env unset)
     client = build_llm("store_agent", recordings=table)   # -> RecordedLLM
-    client = build_llm("store_agent")            # -> AnthropicLLM, iff LLM_PROVIDER=anthropic
+    client = build_llm("store_agent", provider="anthropic")  # -> AnthropicLLM
+    # ...or the same first call, with LLM_PROVIDER=anthropic exported (D20).
 """
 
 from __future__ import annotations

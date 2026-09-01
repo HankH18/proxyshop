@@ -27,6 +27,7 @@ also what the frozen acceptance suite asserts.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
 
 class LLMError(Exception):
@@ -48,14 +49,31 @@ class _MessageError(LLMError):
     def __str__(self) -> str:
         return self.message
 
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        """Make the error picklable and copyable.
+
+        Every subclass here overrides ``__init__`` with arguments that are not
+        ``self.args``, and the default unpickling path calls ``cls(*args)`` — which raised
+        ``TypeError: __init__() missing 1 required positional argument`` instead of
+        re-raising the original error. Five tickets depend on this package; a retry
+        wrapper doing ``copy.copy(exc)``, or any process boundary, would have turned a
+        carefully written message into an opaque TypeError.
+        """
+        return (self.__class__, (self.message,))
+
 
 class UnknownRoleError(_MessageError, KeyError):
     """A role with no configured model. Raised by :func:`llm.config.resolve_model`."""
 
     def __init__(self, role: object, known_roles: Iterable[str]) -> None:
-        known = ", ".join(sorted(known_roles))
+        self.known_roles = tuple(known_roles)
+        known = ", ".join(sorted(self.known_roles))
         super().__init__(f"unknown LLM role {role!r}; the configured roles are: {known}")
         self.role = role
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        """Keep the error picklable and copyable — see :class:`_MessageError`."""
+        return (self.__class__, (self.role, self.known_roles))
 
 
 class ProviderNotConfiguredError(LLMError, ValueError):
@@ -81,6 +99,10 @@ class UnrecordedPromptError(_MessageError, KeyError):
     nobody reviewed, and falling through to a live client would break D3.
     """
 
-    def __init__(self, message: str, *, prompt: str) -> None:
+    def __init__(self, message: str, prompt: str = "") -> None:
         super().__init__(message)
         self.prompt = prompt
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        """Keep the error picklable and copyable — see :class:`_MessageError`."""
+        return (self.__class__, (self.message, self.prompt))

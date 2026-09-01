@@ -58,11 +58,17 @@ class CachedPrompt:
         dynamic_tail: the per-request text. Never appears before the boundary.
         separator: the string joining the two halves; part of the cacheable prefix.
 
-    The invariant every consumer may rely on::
+    The invariant every consumer may rely on, for ANY tail including an empty one::
 
         prompt.text == prompt.cacheable_prefix + prompt.dynamic_tail
         prompt.cache_boundary == len(prompt.cacheable_prefix)
         prompt.text.startswith(prompt.static_context)
+        prompt.with_dynamic(anything).cacheable_prefix == prompt.cacheable_prefix
+
+    Note that :attr:`text` is the *assembled* form — one string, static half first. It is
+    what the doubles look up and what a human reads. It is NOT byte-identical to the wire
+    payload: :meth:`to_system_blocks` sends :attr:`static_context` without the trailing
+    separator, and :meth:`to_messages` sends the tail as a separate user turn.
     """
 
     static_context: str
@@ -71,9 +77,14 @@ class CachedPrompt:
 
     @property
     def cacheable_prefix(self) -> str:
-        """Everything up to the cache boundary, separator included."""
-        if not self.dynamic_tail:
-            return self.static_context
+        """Everything up to the cache boundary, separator included.
+
+        The separator is part of the prefix **unconditionally**, even when the tail is
+        empty. It used to be dropped in that case, which quietly broke the one invariant
+        this class exists to provide: ``prompt.with_dynamic("")`` — a turn that clears the
+        tail — returned a *different* prefix from its parent, so the cache entry the
+        parent had just paid to write could never be read back.
+        """
         return self.static_context + self.separator
 
     @property
@@ -109,6 +120,10 @@ class CachedPrompt:
         Args:
             cache: attach ``cache_control`` to the final static block. Off is for
                 one-shot calls where a cache write would never be read back.
+
+        The block carries :attr:`static_context` alone — the trailing separator that
+        :attr:`cacheable_prefix` includes is a feature of the assembled string, not of
+        the wire format.
         """
         block: dict[str, Any] = {"type": "text", "text": self.static_context}
         if cache:

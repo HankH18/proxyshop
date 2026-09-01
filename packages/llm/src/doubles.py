@@ -36,7 +36,13 @@ SUGGESTION_COUNT = 3
 
 @dataclass(frozen=True)
 class LLMCall:
-    """One invocation of a double, kept so tests can assert on what was sent."""
+    """One invocation of a double, kept so tests can assert on what was sent.
+
+    ``frozen=True`` stops the *fields* being rebound; it does not deep-freeze
+    :attr:`kwargs`, which is a plain dict and can be mutated in place (that also makes
+    the instance unhashable). The dict is a copy taken at call time, so mutating it
+    cannot reach back into the caller's arguments.
+    """
 
     prompt: str
     role: str | None = None
@@ -48,7 +54,10 @@ def prompt_text(prompt: Any) -> str:
     """Normalise anything a caller may pass as a prompt to the exact string sent.
 
     A :class:`llm.prompting.CachedPrompt` becomes its assembled ``text`` — static context
-    first — so a recording key is the same string a live call would have sent.
+    first — so a recording key is the prompt as assembled, not as split for the wire.
+    (:class:`llm.client.AnthropicLLM` sends the two halves as a system block and a user
+    turn, so the assembled string is what a human reads and what the doubles key on, not
+    a byte-for-byte copy of the request body.)
     """
     if isinstance(prompt, str):
         return prompt

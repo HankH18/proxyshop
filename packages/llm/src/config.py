@@ -124,9 +124,13 @@ def resolve_model(role: str, env: Mapping[str, str] | None = None) -> str:
     Returns:
         The value of the role's environment variable **verbatim** when it is set to
         anything non-blank, otherwise the documented default from
-        :data:`DEFAULT_MODEL_BY_ROLE`. A variable set to ``""`` or to whitespace is
-        treated as unset — an empty ``BUYER_MODEL=`` line in a ``.env`` is a typo, and
-        sending an empty model id to the API is a 400 nobody can read.
+        :data:`DEFAULT_MODEL_BY_ROLE`.
+
+        Verbatim means verbatim: a value with surrounding whitespace is returned with it,
+        because the caller asked for that string and silently editing a configured model
+        id would be worse than a legible API error. The one exception is a value that is
+        *entirely* blank (``""`` or whitespace) — an empty ``BUYER_MODEL=`` line in a
+        ``.env`` is a typo rather than a request, and there is nothing to send.
 
     Raises:
         UnknownRoleError: if ``role`` is not a configured role.

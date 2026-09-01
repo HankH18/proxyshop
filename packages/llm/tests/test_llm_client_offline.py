@@ -31,7 +31,6 @@ import pytest
 from packages.llm import (
     AnthropicLLM,
     DeterministicLLM,
-    LLMClient,
     MissingApiKeyError,
     ProviderNotConfiguredError,
     RecordedLLM,
@@ -114,11 +113,23 @@ def test_a_fresh_interpreter_imports_the_package_without_the_sdk_or_a_socket() -
 
 
 def test_reimporting_the_package_with_broken_sockets_still_works(no_network) -> None:
+    """Re-import from scratch under blocked sockets — and leave NOTHING behind.
+
+    The cleanup is as load-bearing as the assertion. `importlib.import_module` rebinds the
+    `llm` **attribute** on the `packages` namespace package as well as filling
+    `sys.modules`, and restoring only `sys.modules` left the two disagreeing for the rest
+    of the session: measured, `sys.modules["packages.llm"].RecordedLLM` was no longer
+    `packages.llm.RecordedLLM`, so a later module's `except UnrecordedPromptError` could
+    silently miss. A whole-repo run is one session, and five tickets import this package.
+    """
+    import packages
+
     saved = {
         name: module
         for name, module in sys.modules.items()
-        if name == "llm" or name.startswith("llm.") or name == "packages.llm"
+        if name.startswith("llm") or name.startswith("packages.llm")
     }
+    saved_attr = getattr(packages, "llm", None)
     for name in saved:
         del sys.modules[name]
     try:
@@ -126,7 +137,18 @@ def test_reimporting_the_package_with_broken_sockets_still_works(no_network) -> 
         assert module.RecordedLLM({"p": "r"}).complete("p") == "r"
         assert module.resolve_model("buyer")
     finally:
+        for name in [
+            n
+            for n in sys.modules
+            if n.startswith("packages.llm") or n == "llm" or n.startswith("llm.")
+        ]:
+            del sys.modules[name]
         sys.modules.update(saved)
+        if saved_attr is not None:
+            packages.llm = saved_attr
+
+    assert sys.modules["packages.llm"] is packages.llm
+    assert packages.llm.RecordedLLM is RecordedLLM, "the re-import poisoned the session"
 
 
 # --------------------------------------------------------------------------------------
@@ -231,7 +253,6 @@ def test_build_llm_defaults_to_the_double(monkeypatch, no_network) -> None:
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
     client = build_llm("buyer")
     assert isinstance(client, DeterministicLLM)
-    assert isinstance(client, LLMClient)
     assert client.complete("anything").startswith("double:buyer:")
 
 

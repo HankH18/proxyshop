@@ -203,10 +203,20 @@ def test_an_empty_static_context_is_refused(empty) -> None:
 
 def test_a_prompt_with_no_dynamic_tail_has_no_user_turn_to_send() -> None:
     prompt = assemble_prompt(STORE_CONTEXT)
-    assert prompt.text == STORE_CONTEXT
-    assert prompt.cache_boundary == len(STORE_CONTEXT)
+    assert prompt.text == STORE_CONTEXT + SECTION_SEPARATOR
+    assert prompt.cache_boundary == len(STORE_CONTEXT) + len(SECTION_SEPARATOR)
     with pytest.raises(PromptAssemblyError):
         prompt.to_messages()
+
+
+def test_clearing_the_tail_does_not_move_the_cache_boundary() -> None:
+    """The empty tail is the case that used to silently invalidate the cached prefix."""
+    prompt = assemble_prompt(STORE_CONTEXT, TAIL_ONE)
+    for tail in (TAIL_TWO, "", "   ", ["", ""]):
+        cleared = prompt.with_dynamic(tail)
+        assert cleared.cacheable_prefix == prompt.cacheable_prefix
+        assert cleared.cache_boundary == prompt.cache_boundary
+        assert cleared.prefix_digest == prompt.prefix_digest
 
 
 def test_cached_prompt_is_frozen_and_stringifies_to_its_text() -> None:

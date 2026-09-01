@@ -60,8 +60,16 @@ def _env_example() -> dict[str, str]:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        line = line.removeprefix("export ").strip()
         key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
+        value = value.strip()
+        # Tolerate the shapes a .env may legally take, so this suite fails only for
+        # reasons that are actually about packages/llm.
+        if value[:1] in {'"', "'"} and value[-1:] == value[:1] and len(value) >= 2:
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].strip()
+        values[key.strip()] = value
     return values
 
 
@@ -165,6 +173,19 @@ def test_api_key_and_limits_resolve_from_env_with_safe_defaults() -> None:
     for bad in ("not-a-number", "0", "-5"):
         with pytest.raises(ProviderNotConfiguredError):
             resolve_max_tokens({"LLM_MAX_TOKENS": bad})
+
+
+def test_the_role_error_survives_pickling_and_copying() -> None:
+    """Five tickets consume this package; a process boundary or a retry wrapper's
+    copy.copy() must not turn a legible error into an opaque TypeError."""
+    import copy
+    import pickle
+
+    original = UnknownRoleError("storeagent", ("buyer", "extract"))
+    for revived in (pickle.loads(pickle.dumps(original)), copy.copy(original)):
+        assert isinstance(revived, UnknownRoleError)
+        assert str(revived) == str(original)
+        assert revived.role == "storeagent"
 
 
 def test_no_model_id_is_written_down_outside_a_module_level_default_table() -> None:
