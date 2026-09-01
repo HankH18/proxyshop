@@ -39,3 +39,5 @@ build/
 
 # Docker volumes
 .docker-data/
+.claude/.claude-build.json
+*.py[co]
