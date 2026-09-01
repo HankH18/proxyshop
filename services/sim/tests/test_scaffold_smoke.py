@@ -14,6 +14,8 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -29,3 +31,20 @@ def test_scope_directories_exist() -> None:
     """Every directory a ticket scope names is present, so `pytest <path>` cannot exit 4."""
     for relative in []:
         assert (REPO_ROOT / relative).is_dir(), relative
+
+
+@pytest.mark.docker
+def test_the_sim_lane_holds_the_d37_neo4j_lock(_neo4j_guard) -> None:
+    """D37: ``services/sim`` gets the same graph lock every other directory gets.
+
+    ``sim`` drives whole-market simulations that read the graph the ingest lane builds. It
+    had no ``conftest.py`` at all — so no ``_fixtures_*.py`` discovery either — and would
+    have inherited the old ``False`` default, running unserialized against the single
+    Community database (D4).
+
+    No ``@pytest.mark.graph``: this asserts the guard, it does not write.
+    """
+    from proxyshop_support.neo4j_lock import held_depth
+
+    assert _neo4j_guard is True
+    assert held_depth() >= 1

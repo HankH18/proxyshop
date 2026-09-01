@@ -1,9 +1,9 @@
-"""Per-directory pytest fixtures for ``packages/store-agent``.
+"""Per-directory pytest fixtures for ``services/shopify-stub``.
 
 Orchestrator-owned (T-000) and **frozen** — no worker edits this file. To add a fixture,
 create a file you own next to this one::
 
-    packages/store-agent/tests/_fixtures_<topic>.py
+    services/shopify-stub/tests/_fixtures_<topic>.py
 
 and define ordinary ``@pytest.fixture`` functions in it. Everything in every
 ``_fixtures_*.py`` here is loaded into this conftest's namespace automatically, so pytest

@@ -37,7 +37,7 @@ Fixture              Scope      Yields
                                 worker's database.
 ``pg_role``          function   ``Callable[[str], psycopg.Connection]`` — a connection as
                                 one of the least-privilege roles (D5).
-``neo4j_session``    function   ``neo4j.Session`` — inside the D37 flock where one applies.
+``neo4j_session``    function   ``neo4j.Session`` — always inside the D37 flock.
 ``redis_client``     function   ``WorkerRedis`` — DB ``N``, ``w{N}:`` prefixed, flushed.
 ``shopify_stub_url`` function   ``str`` — base URL of an in-process shopify-stub on an
                                 ephemeral port (D40).
@@ -60,7 +60,7 @@ from proxyshop_support import reachability
 from proxyshop_support.clock import EPOCH, ManualClock
 from proxyshop_support.embedding import EMBEDDING_DIM, hash_embed
 from proxyshop_support.llm_double import LLMDouble
-from proxyshop_support.neo4j_lock import reset_graph
+from proxyshop_support.neo4j_lock import neo4j_flock, reset_graph
 from proxyshop_support.postgres import ensure_worker_database, role_dsn
 from proxyshop_support.redis_client import WorkerRedis, worker_redis
 from proxyshop_support.worker import ENV_VAR, worker_id
@@ -242,27 +242,50 @@ def pg_role(
 
 @pytest.fixture(scope="session")
 def _neo4j_guard() -> Iterator[bool]:
-    """Serialization hook for Neo4j (D37).
+    """Take the cross-worker Neo4j lock for this whole session (D37). Always.
 
-    Yields whether this session holds the cross-worker lock and therefore owns the single
-    Community-edition database exclusively.
+    Yields ``True``: every pytest session that touches Neo4j holds the ``flock`` on
+    ``/tmp/proxyshop-neo4j.lock`` and therefore owns the single Community-edition database
+    (D4: there is exactly ONE, so this lock is the only isolation that exists) exclusively
+    for as long as it runs.
 
-    The default is ``False`` — no lock, no reset. ``services/ingest/tests/conftest.py`` and
-    ``apps/exchange/tests/conftest.py`` **override** this fixture with one that holds the
-    ``flock`` on ``/tmp/proxyshop-neo4j.lock`` for the whole session and yields ``True``.
+    **This used to yield ``False`` by default and be overridden to ``True`` in exactly two
+    lane conftests, and that shape was unsound twice over.** Measured, both:
+
+    1. Any directory without an override — ``e2e/`` most importantly, where three tickets
+       read a graph a fourth one writes — got no lock *and* no :func:`reset_graph`. An e2e
+       test finished in 0.45 s while an ingest lane held the flock for 6 s, and read a node
+       a previous lane had left behind.
+    2. ``neo4j_driver`` below is **session**-scoped, so pytest builds it once and caches it.
+       Only the *first* requester's ``_neo4j_guard`` is ever consulted. In a whole-repo run
+       collecting ``apps/`` before ``e2e/`` that happened to be a lane with the override —
+       but reorder the collection, or run ``pytest e2e apps/exchange``, and the guardless
+       directory wins for the entire session and silently disarms the lanes that do care.
+
+    A single unconditional definition removes both failure modes: there is no override to
+    resolve, so there is nothing for the cache to pick the wrong answer from.
+
+    Cost is nil when no graph test runs: this fixture is only ever built as a dependency of
+    :func:`neo4j_driver`, which nothing but a Neo4j test requests. The stack-reachability
+    check happens **before** the lock is taken, so a session running against a down stack
+    skips immediately instead of making every sibling worker wait out its 600 s timeout.
+
     The flock is re-entrant within a process (see ``proxyshop_support.neo4j_lock``), so a
-    whole-repo run that collects both graph lanes takes it once and does not self-deadlock.
+    nested acquisition — a test that takes it explicitly, a lane conftest that still wraps
+    it — costs nothing and cannot self-deadlock.
     """
-    yield False
+    _require_stack()
+    with neo4j_flock():
+        yield True
 
 
 @pytest.fixture(scope="session")
 def neo4j_driver(_neo4j_guard: bool) -> Iterator[Any]:
     """Session-scoped ``neo4j.Driver`` for the compose Neo4j (D6: 5.26 Community).
 
-    When this session holds the D37 lock (``_neo4j_guard`` is ``True``) the graph is reset
-    once, here, *inside* the lock — before any test runs and while no other worker can be
-    writing. Without that, one lane's nodes are still present when the next lane asserts.
+    ``_neo4j_guard`` has already taken the D37 lock, so the graph is reset once, here,
+    *inside* the lock — before any test runs and while no other worker can be writing.
+    Without that, one lane's nodes are still present when the next lane asserts.
 
     Requires ``@pytest.mark.docker`` (and, for writes, ``@pytest.mark.graph``).
     """
