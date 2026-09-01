@@ -64,4 +64,4 @@ source_modules =
 forbidden_modules =
     redis
 ignore_imports =
-    * -> redis.exceptions
+    ** -> redis.exceptions
