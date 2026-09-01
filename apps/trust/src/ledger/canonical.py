@@ -1,0 +1,268 @@
+"""RFC-8785 JCS canonicalisation and the D16 event hash. Owned by T-011.
+
+D16 fixes one hashing rule for the whole system::
+
+    event_hash = sha256(prev_hash || canonical_json(event))
+
+where ``canonical_json`` is **RFC-8785 JCS** -- object members sorted by their UTF-16 code
+units, no insignificant whitespace, ECMAScript number serialisation -- and timestamps are
+UTC RFC-3339 at **millisecond** precision. ``commerce_events.idempotency_key`` *is*
+``LedgerEvent.event_id``; there is no second identifier.
+
+Nothing outside ``apps/trust/src/ledger/`` may define its own hashing. That is not a style
+preference: two implementations of "canonical" JSON that disagree about key ordering, about
+``1.0`` versus ``1``, or about whether a ``None`` field is present produce different hashes
+for the same event, and the disagreement surfaces as a chain that fails verification with no
+tampering anywhere. So the append path, the verifier, the replay reader and the Postgres
+round trip all call :func:`canonical_json` here, and callers outside this package import it
+rather than re-deriving it (T-060's ``append`` in particular).
+
+Why hand-rolled rather than ``json.dumps(sort_keys=True)``: three of JCS's rules are not
+things ``json`` does.
+
+* **Sorting is by UTF-16 code unit, not by code point.** They differ above the BMP: ``"￿"``
+  sorts *before* ``"\U0001f600"`` by code point but *after* it by UTF-16 code unit, because
+  the emoji encodes to the surrogate pair ``D83D DE00`` and ``D83D < FFFF``. Python's default
+  string ordering is by code point, so ``sort_keys=True`` is simply a different order.
+* **Numbers use ECMAScript ``Number::toString``.** ``1.0`` serialises as ``1``, and every
+  finite double takes its shortest round-tripping form.
+* **Non-ASCII characters are literal.** ``ensure_ascii=True`` -- the ``json`` default --
+  would emit ``é`` where JCS requires the UTF-8 byte.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import hashlib
+import math
+import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+#: The chain's genesis link. Sixty-four ``0`` characters -- a value no SHA-256 digest of any
+#: real input will collide with in practice, and one the ``char(64)`` hex CHECK accepts.
+GENESIS_HASH = "0" * 64
+
+#: Fields the chain writes *onto* an event. They are excluded from the hashed body, because
+#: an event cannot commit to its own digest.
+CHAIN_FIELDS = ("prev_hash", "event_hash", "seq")
+
+#: The LedgerEvent fields carried into the hash, in DESIGN §Interfaces order. Optional ones
+#: are omitted entirely when absent rather than hashed as ``null`` -- ``{"a": 1}`` and
+#: ``{"a": 1, "store_id": null}`` must not be two different events.
+EVENT_FIELDS = ("event_id", "ts", "kind", "auction_id", "store_id", "order_ref", "payload")
+
+_ESCAPES = {
+    '"': '\\"',
+    "\\": "\\\\",
+    "\b": "\\b",
+    "\f": "\\f",
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+_RFC3339_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})"
+    r"(?:\.(\d+))?"
+    r"(Z|z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+class CanonicalisationError(ValueError):
+    """A value cannot be canonicalised deterministically.
+
+    Raised rather than coerced: a NaN, an infinity or an object of an unsupported type has
+    no JCS representation, and silently substituting one would make the chain agree with
+    itself while disagreeing with every other reader.
+    """
+
+
+# ---------------------------------------------------------------------------------------
+# timestamps
+# ---------------------------------------------------------------------------------------
+
+
+def rfc3339_ms(value: Any) -> str:
+    """Normalise ``value`` to UTC RFC-3339 with exactly three fractional digits (D16).
+
+    Accepts a :class:`datetime.datetime` (naive values are read as UTC) or an RFC-3339
+    string with any offset and any fractional precision. Sub-millisecond digits are
+    **truncated, not rounded**, so a value that has already round-tripped through
+    ``timestamptz`` normalises to the same string it did on the way in.
+
+    Args:
+        value: the instant to normalise.
+
+    Returns:
+        e.g. ``"2026-01-01T00:00:00.000Z"``.
+
+    Raises:
+        CanonicalisationError: the value is neither a datetime nor a parseable RFC-3339
+            string. A timestamp this function cannot read is a timestamp two readers would
+            hash differently.
+    """
+    if isinstance(value, _dt.datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=_dt.UTC)
+        moment = moment.astimezone(_dt.UTC)
+        return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond // 1000:03d}Z"
+    if isinstance(value, str):
+        match = _RFC3339_RE.match(value.strip())
+        if match is None:
+            raise CanonicalisationError(f"not an RFC-3339 timestamp: {value!r}")
+        year, month, day, hour, minute, second, fraction, offset = match.groups()
+        milliseconds = int((fraction or "").ljust(3, "0")[:3] or 0)
+        moment = _dt.datetime(
+            int(year),
+            int(month),
+            int(day),
+            int(hour),
+            int(minute),
+            int(second),
+            milliseconds * 1000,
+            tzinfo=_dt.UTC,
+        )
+        if offset and offset not in ("Z", "z"):
+            sign = 1 if offset[0] == "+" else -1
+            digits = offset[1:].replace(":", "")
+            delta = _dt.timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+            moment -= sign * delta
+        return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{moment.microsecond // 1000:03d}Z"
+    raise CanonicalisationError(f"cannot normalise {type(value).__name__} as a timestamp")
+
+
+# ---------------------------------------------------------------------------------------
+# JCS
+# ---------------------------------------------------------------------------------------
+
+
+def _serialise_string(value: str) -> str:
+    out = ['"']
+    for character in value:
+        escape = _ESCAPES.get(character)
+        if escape is not None:
+            out.append(escape)
+        elif character < " ":
+            out.append(f"\\u{ord(character):04x}")
+        else:
+            out.append(character)
+    out.append('"')
+    return "".join(out)
+
+
+def _serialise_number(value: float | int) -> str:
+    """ECMAScript ``Number::toString`` for the values JSON can carry."""
+    if isinstance(value, int):
+        return str(value)
+    if math.isnan(value) or math.isinf(value):
+        raise CanonicalisationError(f"{value!r} has no JSON representation")
+    if value == int(value) and abs(value) < 1e21:
+        # ES6 prints an integral double without a fractional part: 1.0 -> "1", -0.0 -> "0".
+        return str(int(value))
+    text = repr(value)  # shortest round-tripping form, as ES6 specifies
+    if "e" in text:
+        mantissa, _, exponent = text.partition("e")
+        sign = "+" if not exponent.startswith("-") else "-"
+        text = f"{mantissa}e{sign}{exponent.lstrip('+-').lstrip('0') or '0'}"
+    return text
+
+
+def _sort_key(name: str) -> tuple[int, ...]:
+    """RFC-8785 §3.2.3: object members sort by their UTF-16 code units."""
+    encoded = name.encode("utf-16-be")
+    return tuple(int.from_bytes(encoded[i : i + 2], "big") for i in range(0, len(encoded), 2))
+
+
+def canonical_json(value: Any) -> str:
+    """Serialise ``value`` to its RFC-8785 JCS form.
+
+    Args:
+        value: any JSON-compatible tree -- mappings, sequences, strings, numbers, booleans
+            and ``None``. ``datetime`` values are normalised with :func:`rfc3339_ms` first,
+            so a caller never has to remember to do it.
+
+    Returns:
+        The canonical string. Two structurally equal trees always produce the same string,
+        whatever order their mappings were built in.
+
+    Raises:
+        CanonicalisationError: on a non-finite float, a non-string mapping key, or a value
+            of a type JSON cannot carry.
+    """
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return _serialise_string(value)
+    if isinstance(value, _dt.datetime):
+        return _serialise_string(rfc3339_ms(value))
+    if isinstance(value, int | float):
+        return _serialise_number(value)
+    if isinstance(value, Mapping):
+        for key in value:
+            if not isinstance(key, str):
+                raise CanonicalisationError(f"object keys must be strings, got {key!r}")
+        members = []
+        for key in sorted(value.keys(), key=_sort_key):
+            members.append(f"{_serialise_string(key)}:{canonical_json(value[key])}")
+        return "{" + ",".join(members) + "}"
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return "[" + ",".join(canonical_json(item) for item in value) + "]"
+    raise CanonicalisationError(f"cannot canonicalise {type(value).__name__}")
+
+
+def canonical_bytes(value: Any) -> bytes:
+    """:func:`canonical_json` as UTF-8 -- the exact bytes that are hashed."""
+    return canonical_json(value).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------------------
+# the event body and its hash
+# ---------------------------------------------------------------------------------------
+
+
+def canonical_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """The hashed body of a ``LedgerEvent``: normalised, chain fields removed.
+
+    Three normalisations, each of which exists because the alternative makes a
+    database round trip change the hash:
+
+    * ``ts`` is forced to UTC RFC-3339 milliseconds (D16), so the value that comes back out
+      of a ``timestamptz`` column hashes to the string that went in;
+    * the chain's own fields (:data:`CHAIN_FIELDS`) are dropped -- an event cannot commit to
+      its own digest;
+    * optional fields that are absent *or* ``None`` are omitted entirely, so a reader that
+      materialises ``store_id`` as SQL ``NULL`` agrees with a writer that never set it.
+
+    Any field not in :data:`EVENT_FIELDS` is carried through untouched, so an extended event
+    shape still hashes over everything it carries.
+    """
+    body: dict[str, Any] = {}
+    for name, value in event.items():
+        if name in CHAIN_FIELDS or value is None:
+            continue
+        body[name] = rfc3339_ms(value) if name == "ts" else value
+    missing = [name for name in ("event_id", "kind") if name not in body]
+    if missing:
+        raise CanonicalisationError(f"LedgerEvent is missing required field(s): {missing}")
+    return body
+
+
+def compute_event_hash(prev_hash: str, event: Mapping[str, Any]) -> str:
+    """``sha256(prev_hash || canonical_json(event))`` -- D16, and the only definition of it.
+
+    Args:
+        prev_hash: the previous link, or :data:`GENESIS_HASH` for the first event.
+        event: the ``LedgerEvent``; chain fields on it are ignored (see
+            :func:`canonical_event`), so re-hashing an already-sealed event is safe.
+
+    Returns:
+        The 64-character lowercase hex digest.
+    """
+    digest = hashlib.sha256()
+    digest.update(prev_hash.encode("ascii"))
+    digest.update(canonical_bytes(canonical_event(event)))
+    return digest.hexdigest()
