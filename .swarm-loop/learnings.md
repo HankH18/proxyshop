@@ -259,3 +259,30 @@ Entries are injected selectively into task packets — only those relevant to a 
   match, not a failure. Anything thresholding on raw similarity inflates silently and
   forever. Put a measured note in every consumer's packet, not only in the decision that
   owns the index.
+
+- **A worker's finding about a SHARED document reflects its branch point, not current `main` —
+  check before acting on it.** T-011 reported that `public-surface.md` still said "the five
+  trust dimensions" when the amendment had made it six. True of its worktree, which is pinned
+  at the commit it branched from; already fixed on `main`, which by then read "the six trust
+  dimensions (D53)" and named `catalog_claim_accuracy` nineteen times. The worker was reporting
+  honestly and was looking at real bytes — just not the current ones. **Every shared-doc finding
+  from a worker needs a `main`-side check before it becomes an action**, or the orchestrator
+  re-fixes what it already fixed and tells the next wave something false. Say so in the reply,
+  because the worker cannot see the difference from inside its own tree.
+
+- **Ask what the PER-TICKET gate deselects, not just what the suite skips.** `verify.sh check`
+  deselects `@pytest.mark.docker`, so 32 of T-011's tests — the entire grant model and the whole
+  Postgres writer, i.e. the S7 release blocker this ticket exists to prove — never execute in
+  the gate that decides whether the ticket looks done. The ticket's own `verify` command does
+  run them; the gate does not. Two different greens with the same name, and the weaker one is
+  the one a hurried orchestrator reads. **Record which marks each gate deselects, next to the
+  gate's reading**, exactly as passed/skipped is recorded beside `build_succeeds`.
+
+- **A static scan of SQL text is weaker than a live ACL assertion, and the frozen one may be the
+  static one.** The frozen S7 grant test skips any statement not containing the token
+  `exchange`, so `GRANT USAGE ON SCHEMA sealed TO PUBLIC` — which every role inherits — is never
+  inspected, and the assertion still reads `{ledger, app}`. The builder found it, verified the
+  bypass against a real database, and closed it with a live test observing actual ACLs. **Where
+  a frozen test parses text to infer a runtime property, expect the inference to have a hole,
+  and prefer the ticket's own live assertion as the real guarantee.** The frozen test's green is
+  then evidence about the parse, not about the database.
