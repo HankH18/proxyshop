@@ -1,0 +1,265 @@
+"""Idempotent Neo4j schema: uniqueness constraints on every stable ID, plus the D6 vector
+index (T-012, acceptance 1).
+
+Everything here is ``IF NOT EXISTS``. That is a hard requirement, not a nicety: D38 makes
+Neo4j Community's single database shared between seven graph tickets serialised by the
+scheduler and an ``flock``, so :func:`apply_schema` runs many times per day from many
+processes and must be a no-op after the first. **A re-run error is never fixed by dropping
+an index** — see :func:`rebuild_vector_index` for the one narrow case where a drop is
+correct, and for why it is opt-in.
+
+A NOTE ON D6, MEASURED HERE
+---------------------------
+D6 pins the vector index parameters and quotes the statement as::
+
+    CREATE VECTOR INDEX product_embedding FOR (p:Product) ON (p.embedding)
+    OPTIONS {indexConfig: {'vector.dimensions': 1024, 'vector.similarity_function': 'cosine'}}
+
+That text does **not** parse on the neo4j 5.26.30 Community container this repo runs.
+Measured, verbatim::
+
+    Neo.ClientError.Statement.SyntaxError:
+    Invalid input ''vector.dimensions'': expected an identifier or '}'
+    (line 1, column 109)
+
+Cypher map keys must be identifiers or backtick-quoted; single quotes make a string, and a
+string is not a map key. :data:`VECTOR_INDEX_STATEMENT` below therefore backtick-quotes the
+two dotted keys. **Every parameter D6 fixes is preserved exactly** — index name
+``product_embedding``, label ``Product``, property ``embedding``, 1024 dimensions, cosine
+similarity — and ``SHOW INDEXES`` on the created index reports
+``{'vector.dimensions': 1024, 'vector.similarity_function': 'COSINE'}``. This is a syntax
+correction to an unrunnable quotation, not a change to the decision; it is reported upward
+in the T-012 completion report so D6's text can be repaired at the source.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from .model import EMBEDDING_PROPERTY, ID_PROPERTY
+
+#: The index D6 names. T-031's retrieval and every candidate query go through it.
+VECTOR_INDEX_NAME = "product_embedding"
+
+#: D6, exactly: 1024 dimensions, cosine similarity, on ``Product.embedding``.
+VECTOR_INDEX_DIMENSIONS = 1024
+VECTOR_INDEX_SIMILARITY = "cosine"
+
+#: The runnable form of D6's statement. See the module docstring for why the keys are
+#: backtick-quoted rather than single-quoted.
+VECTOR_INDEX_STATEMENT = (
+    f"CREATE VECTOR INDEX {VECTOR_INDEX_NAME} IF NOT EXISTS "
+    "FOR (p:Product) ON (p.embedding) "
+    "OPTIONS {indexConfig: {"
+    f"`vector.dimensions`: {VECTOR_INDEX_DIMENSIONS}, "
+    f"`vector.similarity_function`: '{VECTOR_INDEX_SIMILARITY}'"
+    "}}"
+)
+
+#: Non-unique range indexes for the predicates the candidate query and the adapters filter
+#: on. Purely a read-path concern — correctness does not depend on them, so they are listed
+#: separately from the constraints and a reviewer can tell the two apart at a glance.
+LOOKUP_INDEXES: tuple[tuple[str, str, str], ...] = (
+    ("attribute_value_key", "AttributeValue", "canonical_key"),
+    ("attribute_value_string", "AttributeValue", "value_string"),
+    ("attribute_value_number", "AttributeValue", "value_number"),
+    ("ingredient_canonical_name", "Ingredient", "canonical_name"),
+    ("category_slug", "Category", "slug"),
+    ("product_status", "Product", "status"),
+    ("product_brand", "Product", "brand"),
+    ("offer_observed_at", "Offer", "observed_at"),
+    ("source_content_hash", "Source", "content_hash"),
+    ("store_domain", "Store", "domain"),
+)
+
+
+def constraint_name(label: str) -> str:
+    """The deterministic constraint name for ``label``.
+
+    Args:
+        label: a node label from :data:`~ingest.graph.model.ID_PROPERTY`.
+
+    Returns:
+        e.g. ``"product_id_unique"``. Naming them explicitly (rather than letting Neo4j
+        generate ``constraint_a1b2c3``) is what lets :func:`schema_report` assert the schema
+        by name instead of by shape.
+    """
+    return f"{ID_PROPERTY[label]}_unique"
+
+
+def constraint_statements() -> list[str]:
+    """One ``IS UNIQUE`` constraint per stable ID, in a stable order.
+
+    DESIGN: "Uniqueness constraints on every stable ID." :data:`ID_PROPERTY` *is* that list,
+    so this cannot drift from the model by editing one and forgetting the other.
+
+    Returns:
+        Cypher statements, all ``IF NOT EXISTS``.
+    """
+    return [
+        f"CREATE CONSTRAINT {constraint_name(label)} IF NOT EXISTS "
+        f"FOR (n:{label}) REQUIRE n.{prop} IS UNIQUE"
+        for label, prop in sorted(ID_PROPERTY.items())
+    ]
+
+
+def lookup_index_statements() -> list[str]:
+    """The read-path range indexes.
+
+    Returns:
+        Cypher statements, all ``IF NOT EXISTS``.
+    """
+    return [
+        f"CREATE INDEX {name} IF NOT EXISTS FOR (n:{label}) ON (n.{prop})"
+        for name, label, prop in LOOKUP_INDEXES
+    ]
+
+
+def schema_statements() -> list[str]:
+    """Every statement :func:`apply_schema` runs, in order.
+
+    Returns:
+        Constraints first (they own correctness), then lookup indexes, then the D6 vector
+        index.
+    """
+    return [*constraint_statements(), *lookup_index_statements(), VECTOR_INDEX_STATEMENT]
+
+
+@dataclass(frozen=True)
+class SchemaReport:
+    """What the database actually has, read back after applying the schema."""
+
+    constraints: dict[str, str]
+    indexes: dict[str, str]
+    vector_index: dict[str, Any] | None
+
+    @property
+    def vector_dimensions(self) -> int | None:
+        """The dimension count the live vector index was created with, or ``None``."""
+        if not self.vector_index:
+            return None
+        config = (self.vector_index.get("options") or {}).get("indexConfig") or {}
+        value = config.get("vector.dimensions")
+        return None if value is None else int(value)
+
+    @property
+    def vector_similarity(self) -> str | None:
+        """The similarity function the live vector index was created with, lowercased."""
+        if not self.vector_index:
+            return None
+        config = (self.vector_index.get("options") or {}).get("indexConfig") or {}
+        value = config.get("vector.similarity_function")
+        return None if value is None else str(value).lower()
+
+
+def apply_schema(session: Any, *, await_online: bool = True, timeout: int = 300) -> SchemaReport:
+    """Create every constraint and index, idempotently, and read the result back.
+
+    Safe to call from any process at any time — the first call creates, every later call is
+    a no-op, and two concurrent calls both succeed (``IF NOT EXISTS`` is the whole point of
+    D38(c)).
+
+    Args:
+        session: an open ``neo4j.Session``.
+        await_online: block until the indexes finish populating. A vector index that is
+            still ``POPULATING`` answers ``db.index.vector.queryNodes`` with fewer rows than
+            it holds, which reads as a retrieval bug rather than a timing one.
+        timeout: seconds to wait for population.
+
+    Returns:
+        A :class:`SchemaReport` describing what is now in the database.
+    """
+    for statement in schema_statements():
+        session.run(statement).consume()
+    if await_online:
+        await_indexes(session, timeout=timeout)
+    return schema_report(session)
+
+
+def await_indexes(session: Any, *, timeout: int = 300) -> None:
+    """Block until every index has finished populating.
+
+    Call this after a write batch too, not only after :func:`apply_schema`: vector index
+    updates land asynchronously, so a query issued microseconds after an upsert can
+    legitimately miss the row it just wrote.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        timeout: seconds to wait.
+    """
+    session.run("CALL db.awaitIndexes($timeout)", timeout=int(timeout)).consume()
+
+
+def schema_report(session: Any) -> SchemaReport:
+    """Read the live constraints and indexes back out of the database.
+
+    Args:
+        session: an open ``neo4j.Session``.
+
+    Returns:
+        A :class:`SchemaReport`. Reading back rather than trusting the writes is what makes
+        the idempotency test evidence instead of a claim.
+    """
+    constraints = {
+        row["name"]: f"{(row['labelsOrTypes'] or [''])[0]}.{(row['properties'] or [''])[0]}"
+        for row in session.run(
+            "SHOW CONSTRAINTS YIELD name, labelsOrTypes, properties RETURN *"
+        ).data()
+    }
+    indexes: dict[str, str] = {}
+    vector_index: dict[str, Any] | None = None
+    for row in session.run(
+        "SHOW INDEXES YIELD name, type, entityType, labelsOrTypes, properties, options, state "
+        "RETURN *"
+    ).data():
+        indexes[row["name"]] = str(row["type"])
+        if row["name"] == VECTOR_INDEX_NAME:
+            vector_index = dict(row)
+    return SchemaReport(constraints=constraints, indexes=indexes, vector_index=vector_index)
+
+
+def rebuild_vector_index(session: Any, *, timeout: int = 300) -> SchemaReport:
+    """Drop and re-create the vector index. **Only** for a provider dimension change.
+
+    This is the one function in the module that drops anything, and it exists for exactly
+    one situation: a re-embed onto a provider whose vectors are a different width, where the
+    old index is structurally wrong and ``IF NOT EXISTS`` would therefore keep the wrong
+    thing. It is opt-in from :func:`ingest.graph.reembed.main` (``--rebuild-index``) and is
+    never reached from :func:`apply_schema`.
+
+    It is explicitly **not** the way to handle an error from re-running index creation.
+    Re-running :data:`VECTOR_INDEX_STATEMENT` cannot error — it carries ``IF NOT EXISTS`` —
+    so an error there means something else is wrong and dropping the index would destroy a
+    working index while hiding the real fault.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        timeout: seconds to wait for the fresh index to populate.
+
+    Returns:
+        A :class:`SchemaReport` read back after the rebuild.
+    """
+    session.run(f"DROP INDEX {VECTOR_INDEX_NAME} IF EXISTS").consume()
+    session.run(VECTOR_INDEX_STATEMENT).consume()
+    await_indexes(session, timeout=timeout)
+    return schema_report(session)
+
+
+__all__ = [
+    "EMBEDDING_PROPERTY",
+    "LOOKUP_INDEXES",
+    "VECTOR_INDEX_DIMENSIONS",
+    "VECTOR_INDEX_NAME",
+    "VECTOR_INDEX_SIMILARITY",
+    "VECTOR_INDEX_STATEMENT",
+    "SchemaReport",
+    "apply_schema",
+    "await_indexes",
+    "constraint_name",
+    "constraint_statements",
+    "lookup_index_statements",
+    "rebuild_vector_index",
+    "schema_report",
+    "schema_statements",
+]
