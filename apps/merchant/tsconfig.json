@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "build/.types",
+    "tsBuildInfoFile": "build/.tsbuildinfo",
+    "jsx": "react-jsx",
+    "types": [
+      "vitest/globals",
+      "node"
+    ]
+  },
+  "include": [
+    "app/**/*.ts",
+    "app/**/*.tsx"
+  ]
+}

@@ -1,0 +1,17 @@
+[project]
+name = "proxyshop-fixtures"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []                      # ALL deps live in the root manifest only
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# T-000 (R1b / U2): `fixtures/` has NO `src/` directory — its thirteen data directories are
+# addressed directly by ticket scope globs (`fixtures/pages/**`, `fixtures/golden/**`, ...)
+# and the Makefile runs `python -m fixtures.seed` from the repo root, i.e. `fixtures` is a
+# top-level package resolved from the repo root itself (which is on `sys.path` via the root
+# distribution's `dev-mode-dirs` and the root pytest `pythonpath`). Ships no files.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true

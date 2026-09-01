@@ -1,0 +1,11 @@
+# Compose fragment included by the root docker-compose.yml. Created by T-000 as a valid
+# empty stub so the root file's `include:` list is static from day one and no worker ever
+# edits it (B6(ii)). Owner: the ingest lane.
+#
+# The ingest worker service.
+#
+# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
+# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
+# only env-overridable ports (D40), and keep the service name unique across all nine
+# fragments.
+services: {}

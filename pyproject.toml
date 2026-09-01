@@ -1,0 +1,105 @@
+[project]
+name = "proxyshop"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "proxyshop-contracts","proxyshop-llm","proxyshop-store-agent","proxyshop-verification",
+  "proxyshop-buyer-svc","proxyshop-merchant-svc","proxyshop-exchange","proxyshop-trust",
+  "proxyshop-seller-reference","proxyshop-ingest","proxyshop-shopify-stub","proxyshop-sim",
+  "proxyshop-fixtures",
+  "fastapi==0.141.1","uvicorn[standard]==0.52.4","python-multipart==0.0.32",
+  "pydantic==2.13.5","pydantic-settings==2.15.0","email-validator==2.3.0",
+  "httpx==0.28.1","anthropic==1.2.0","mcp==2.1.1",
+  "psycopg[binary,pool]==3.3.5","neo4j==5.28.5","redis[hiredis]==8.1.0",
+  "jsonschema[format]==4.26.0","cryptography==50.0.1","pyjwt==2.13.0",
+  "beautifulsoup4==4.15.0","lxml==6.1.2","protego==0.6.2",
+  "numpy==2.5.2","scipy==1.18.1",
+  "pyyaml==6.0.3","structlog==26.1.0","tenacity==9.1.2",
+]
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers==6.0.1","torch==2.13.0"]   # NEVER installed by default (D18)
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1","pytest-asyncio==1.4.0","pytest-cov==7.1.0","pytest-timeout==2.4.0",
+  "pytest-socket==0.7.0","hypothesis==6.167.1","respx==0.23.1","time-machine==3.5.0",
+  "syrupy==6.0.0","datamodel-code-generator==0.76.0",
+  "ruff==0.16.5","mypy==2.3.1","import-linter==2.14",
+  "types-jsonschema==4.26.0.20260518","types-pyyaml==6.0.12.20260815",
+]
+
+[tool.uv.sources]
+proxyshop-contracts = { workspace = true }
+proxyshop-llm = { workspace = true }
+proxyshop-store-agent = { workspace = true }
+proxyshop-verification = { workspace = true }
+proxyshop-buyer-svc = { workspace = true }
+proxyshop-merchant-svc = { workspace = true }
+proxyshop-exchange = { workspace = true }
+proxyshop-trust = { workspace = true }
+proxyshop-seller-reference = { workspace = true }
+proxyshop-ingest = { workspace = true }
+proxyshop-shopify-stub = { workspace = true }
+proxyshop-sim = { workspace = true }
+proxyshop-fixtures = { workspace = true }
+
+[tool.uv.workspace]
+# explicit list: an `apps/*` glob does NOT match apps/buyer/svc or apps/merchant/svc
+members = [
+  "packages/contracts","packages/llm","packages/store-agent","packages/verification",
+  "apps/buyer/svc","apps/merchant/svc","apps/exchange","apps/trust","apps/seller-reference",
+  "services/ingest","services/shopify-stub","services/sim","fixtures",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# T-000 (R1b): the root distribution ships `proxyshop_support/` — the orchestrator-owned
+# shared runtime helpers (Redis worker wrapper D39, clocks, doubles, fixture loader) — and,
+# in editable mode, puts the repo root and `.pkgroot/` on `sys.path`. `.pkgroot/<pkg>` is a
+# tracked symlink to each workspace member's FLAT `src/` directory, which is what makes
+# `exchange.ranking`, `store_agent.hooks`, `merchant_svc.onboarding`, ... importable under
+# the flat layout that every `tickets.json` scope glob requires. See the member manifests.
+[tool.hatch.build.targets.wheel]
+packages = ["proxyshop_support"]
+dev-mode-dirs = [".", ".pkgroot"]
+
+[tool.pytest.ini_options]
+minversion = "8.2"
+addopts = "--import-mode=importlib --strict-markers --strict-config --timeout=300 -ra"
+consider_namespace_packages = true
+pythonpath = [".", ".pkgroot"]   # .pkgroot: flat-src import namespaces (R1b)
+testpaths = ["packages","apps","services","pixel","fixtures","e2e","docs"]
+norecursedirs = [".*", "node_modules", "dist", "build", ".venv", "*.egg-info", ".swarm-loop"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "docker: requires the compose datastore stack",
+  "graph: writes to Neo4j (takes the shared flock)",
+  "slow: long-running simulation or e2e",
+  "needs_model: requires downloaded embedding weights; deselected from make verify",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["node_modules",".venv","dist","build",".swarm-loop",".pkgroot"]
+[tool.ruff.lint]
+select = ["E","F","I","UP","B","ASYNC"]
+ignore = ["E501"]
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["B"]
+"e2e/**" = ["B"]
+
+[tool.mypy]
+python_version = "3.12"
+namespace_packages = true
+explicit_package_bases = true
+files = ["packages","apps","services","e2e"]
+exclude = "(node_modules|\\.venv|dist|build|\\.swarm-loop)"
+ignore_missing_imports = true          # workers cannot edit this file to add overrides
+strict = false
+disallow_untyped_defs = false
+warn_unused_ignores = false

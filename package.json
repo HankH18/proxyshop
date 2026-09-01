@@ -1,0 +1,28 @@
+{
+  "name": "proxyshop",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "workspaces": ["packages/contracts", "apps/buyer", "apps/merchant", "pixel"],
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "24.10.1",
+    "vite": "8.2.2",
+    "vitest": "4.1.11",
+    "@vitest/coverage-v8": "4.1.11",
+    "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "29.1.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/jest-dom": "6.6.3",
+    "eslint": "9.39.5",
+    "typescript-eslint": "8.69.0",
+    "@eslint/js": "9.39.5",
+    "json-schema-to-typescript": "16.0.0"
+  }
+}

@@ -1,0 +1,22 @@
+[project]
+name = "proxyshop-llm"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []                      # ALL deps live in the root manifest only
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# T-000 (R1b): this distribution ships NO files. The source layout is FLAT — feature
+# directories sit directly under `src/` (`src/<feature>/`, never `src/<pkg>/<feature>/`),
+# because every `tickets.json` scope glob uses that form. A flat `src/` cannot be installed
+# as the `llm` namespace by any build backend (hatchling refuses editable installs whose
+# `sources` REWRITES a prefix rather than removing one), so the import namespace is provided
+# instead by the tracked symlink `.pkgroot/llm` -> this member's `src/`, with `.pkgroot`
+# placed on `sys.path` by the root distribution's `dev-mode-dirs` and by the root pytest
+# `pythonpath`. Result: `src/<feature>/x.py` imports as `llm.<feature>.x`, a subpackage
+# created AFTER `uv sync` needs no re-sync and no manifest edit, and no two members can
+# collide on a top-level module name.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
