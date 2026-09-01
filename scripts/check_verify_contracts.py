@@ -28,10 +28,18 @@ Fatal checks
    ``proxyshop_support.redis_client.worker_redis``. (``.importlinter`` forbids importing
    ``redis`` from member *source* at all; this check additionally covers tests, scripts and
    anything else import-linter's root packages do not span.)
+6. **No duplicate fixture name in one test directory.** Up to seven tickets share a single
+   ``tests/`` directory and each drops its own ``_fixtures_<topic>.py`` there. Two of them
+   choosing the same fixture name is a real defect — pytest can only bind one — but it must
+   be *the offending ticket's* defect. ``proxyshop_support.fixture_loader`` therefore
+   degrades the name to a fixture that raises only when requested, instead of raising at
+   conftest-import time and taking down every already-merged ticket's tests in that
+   directory. This static check is what makes the defect fatal, in the gate of the ticket
+   that introduced it, without any innocent test going red.
 
 Non-fatal report
 ----------------
-6. Ticket verify paths that do not exist yet. This is a scaffold sanity check, printed and
+7. Ticket verify paths that do not exist yet. This is a scaffold sanity check, printed and
    never fatal: on a fresh scaffold nearly all of them are legitimately missing.
 
 Note on check 4 vs. the original specification: the intake specified "any ticket whose
@@ -44,6 +52,7 @@ status store ever appears (see :func:`_load_ticket_status`).
 
 from __future__ import annotations
 
+import ast
 import configparser
 import json
 import re
@@ -93,7 +102,14 @@ _WALK_SKIP = {
 
 
 def tracked_files() -> list[str]:
-    """Repo-relative paths of every tracked file.
+    """Repo-relative paths of every tracked **and every not-yet-committed** file.
+
+    ``--others --exclude-standard`` is not a detail: a worker runs ``make check`` on work it
+    has not committed yet, and that is exactly when these contracts are worth enforcing. A
+    brand-new ``_fixtures_<topic>.py`` colliding with a merged ticket's fixture name, or a
+    new module building a raw Redis client, was invisible to every check here while it sat
+    uncommitted — the gate went green and the defect was found later by somebody else.
+    ``--exclude-standard`` honours ``.gitignore``, so caches and ``.venv`` stay out.
 
     Falls back to a filesystem walk when git cannot answer — an exported tarball or a
     build artifact directory is not a git repository, and crashing with a traceback there
@@ -101,9 +117,13 @@ def tracked_files() -> list[str]:
     """
     try:
         out = subprocess.run(
-            ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
-        return [line for line in out.splitlines() if line]
+        return sorted({line for line in out.splitlines() if line})
     except (OSError, subprocess.CalledProcessError):
         print("  note: not a git checkout; falling back to a filesystem walk.")
         found = []
@@ -292,6 +312,70 @@ def check_no_raw_redis_clients(failures: list[str]) -> None:
 
 # ---------------------------------------------------------------------------- check 6
 
+#: Worker-owned fixture files, discovered by ``proxyshop_support.fixture_loader``.
+FIXTURE_FILE_GLOB_PREFIX = "_fixtures_"
+
+
+def _fixture_names(path: Path) -> list[str]:
+    """Names ``fixture_loader`` would export from one ``_fixtures_*.py`` file.
+
+    Parsed with :mod:`ast` rather than imported: this checker runs in ``make check`` on
+    every ticket, and importing another ticket's fixture module would execute its
+    module-level code (and its imports) here.
+    """
+    try:
+        tree = ast.parse(path.read_text(errors="ignore"))
+    except (OSError, SyntaxError):
+        return []
+    names: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        if node.name.startswith("pytest_"):
+            names.append(node.name)
+            continue
+        for decorator in node.decorator_list:
+            call = decorator.func if isinstance(decorator, ast.Call) else decorator
+            attribute = getattr(call, "attr", None) or getattr(call, "id", None)
+            if attribute == "fixture":
+                # `@pytest.fixture(name="x")` renames the fixture; honour it.
+                alias = node.name
+                if isinstance(decorator, ast.Call):
+                    for keyword in decorator.keywords:
+                        if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                            alias = str(keyword.value.value)
+                names.append(alias)
+                break
+    return names
+
+
+def check_no_duplicate_fixture_names(failures: list[str]) -> None:
+    """No two ``_fixtures_*.py`` files in one directory define the same fixture name."""
+    by_directory: dict[str, dict[str, list[str]]] = {}
+    for path in source_files():
+        name = Path(path).name
+        if not (name.startswith(FIXTURE_FILE_GLOB_PREFIX) and name.endswith(".py")):
+            continue
+        directory = str(Path(path).parent)
+        for fixture in _fixture_names(ROOT / path):
+            by_directory.setdefault(directory, {}).setdefault(fixture, []).append(path)
+    for directory, fixtures in sorted(by_directory.items()):
+        for fixture, paths in sorted(fixtures.items()):
+            if len(paths) < 2:
+                continue
+            failures.append(
+                f"fixture {fixture!r} is defined {len(paths)} times in {directory}/: "
+                f"{', '.join(sorted(paths))}. pytest binds one name to one fixture, so "
+                f"these shadow each other. Rename all but one — prefix it with the "
+                f"defining ticket's topic. (At runtime the loader degrades the name to a "
+                f"fixture that raises only when requested, so the directory's other tests "
+                f"keep passing; this gate is what makes the defect fatal for the ticket "
+                f"that introduced it.)"
+            )
+
+
+# ---------------------------------------------------------------------------- check 7
+
 
 def _load_ticket_status() -> dict[str, str]:
     """Return ``{ticket_id: status}`` from whichever status store exists, or ``{}``.
@@ -381,6 +465,7 @@ def main() -> int:
     check_no_empty_test_dirs(failures)
     check_vitest_projects_have_tests(failures)
     check_no_raw_redis_clients(failures)
+    check_no_duplicate_fixture_names(failures)
     report_missing_verify_paths(_load_ticket_status(), failures)
 
     if failures:
@@ -389,8 +474,8 @@ def main() -> int:
             print(f"  - {failure}", file=sys.stderr)
         return 1
     print(
-        "  OK: pytest-config, test-path-filter, schema-package, non-empty-test-dir and "
-        "raw-Redis-client contracts all hold."
+        "  OK: pytest-config, test-path-filter, schema-package, non-empty-test-dir, "
+        "raw-Redis-client and unique-fixture-name contracts all hold."
     )
     return 0
 
