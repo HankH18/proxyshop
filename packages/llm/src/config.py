@@ -97,11 +97,13 @@ def model_env_var(role: str) -> str:
     """The environment variable that configures ``role``.
 
     Raises:
-        UnknownRoleError: if ``role`` is not one of :data:`KNOWN_ROLES`.
+        UnknownRoleError: if ``role`` is not one of :data:`KNOWN_ROLES`. ``TypeError`` is
+            caught too, so an unhashable argument gets the same legible message instead of
+            a bare "unhashable type" from the dict lookup.
     """
     try:
         return ROLE_ENV_VARS[role]
-    except KeyError:
+    except (KeyError, TypeError):
         raise UnknownRoleError(role, KNOWN_ROLES) from None
 
 

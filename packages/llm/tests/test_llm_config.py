@@ -134,6 +134,13 @@ def test_an_unknown_role_fails_loudly_and_says_which_roles_exist() -> None:
         default_model("nope")
 
 
+@pytest.mark.parametrize("role", [None, 123, ["buyer"], {"role": "buyer"}])
+def test_a_role_that_is_not_even_a_string_gets_the_same_legible_error(role) -> None:
+    """An unhashable argument used to surface as a bare `unhashable type: 'list'`."""
+    with pytest.raises(UnknownRoleError):
+        resolve_model(role)
+
+
 def test_provider_defaults_to_the_double_and_rejects_a_typo(monkeypatch) -> None:
     """D20: the offline double is the default; only an explicit opt-in selects live."""
     monkeypatch.delenv(PROVIDER_ENV_VAR, raising=False)
