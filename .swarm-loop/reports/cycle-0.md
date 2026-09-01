@@ -4,7 +4,8 @@
 **Tracked files at that head:** 232 · **now:** 245 (the freeze added the nine acceptance test
 modules, `manifest.json`, `freeze-log.jsonl` and this cycle's analysis)
 **Codebase hash:** `78458198bdc1f587c3c1e6c235a62c6f173ef100b7cad06c1b1cb9b4f4cfdb36`
-**Targets met:** 2 / 12 · **Tickets closed:** 1 / 44 · **Tickets minted:** 0
+**Targets met:** 2 / 12 · **Tickets closed:** 1 · **Tickets minted:** 1 (`T-086`, post-checkpoint — §6)
+**Ticket graph:** 44 open of 45 (was 43 of 44 before §9-A was approved)
 
 ---
 
@@ -80,12 +81,25 @@ point. Slopes become meaningful from cycle 2.
 
 ## 4. Tickets minted
 
-**None.** No defect from the T-000 ladder required a new ticket: every one was fixable inside
-T-000's own scope, and the four that were deliberately deferred are carried as backlog
-entries (CF-1…CF-4) with existing tickets as owners rather than as new work.
+**One — `T-086`, and not from the verification ladder.**
 
-Intake §9-A8 proposed a **new T-086** for S6's integration half. It was **not** minted this
-epoch — see §6.
+No defect from the T-000 ladder required a new ticket: every one was fixable inside T-000's
+own scope, and the four deliberately deferred are carried as backlog entries (CF-1…CF-4)
+with existing tickets as owners rather than as new work.
+
+`T-086` was minted separately, **after** the cycle-0 checkpoint, when Hank approved intake
+§9-A (§6). It closes a coverage gap rather than a defect: SPEC **S6** — the
+interview → approved envelope → shadow-mode bid log → activation seam — was owned by
+nobody. `T-053` and `T-043` each build one side of it, ref neither S6 nor each other, and
+live in different packages, so nothing asserted the join.
+
+**It carries no frozen acceptance coverage, and that is not fixable.** The suite was frozen
+at 103 tests mapped to the tickets that existed at freeze time; `T-086` appears **zero**
+times under `.swarm-loop/acceptance/`. The only S6 mention in the whole frozen suite is an
+incidental docstring on a test marked **T-085** — S6's *manual demo* half. So `T-086` is
+measured by its own `verify` command alone and moves **no** frozen metric, not even
+`spec_criteria_passing`. A green `T-086` will be real work that shows up in no number;
+read it from the ticket ledger, never from the metric table.
 
 ## 5. The two at-target metrics — why each is legitimate, not vacuous
 
@@ -185,20 +199,63 @@ Applied in a previous epoch and standing (D11, `722733e`): §9-A1 — `T-065.dep
 with `fixtures/golden/**` removed from T-065's scope, so T-065 no longer authors the golden set
 it is graded against. That edit is what moved the gated set to 15 and buildable-meanwhile to 28.
 
-### Declined for now
+### Applied after this checkpoint — intake §9-A at `e196ef5`
 
-Hank declined the remainder of intake §9-A/B. Recorded so they are not silently re-raised, and
-because three of them are live risks the scheduler must carry instead:
+**Hank approved §9-A after this report's checkpoint was taken, and it was applied.** Recorded
+here rather than deferred to cycle 1's report because it reverses six rows of the *Declined for
+now* table immediately below, and a divergence log that says "declined" while the graph says
+otherwise is worse than no log. Seven edits:
 
-| # | proposal | consequence of declining |
+| # | edit | why |
 |---|---|---|
-| §9-A2 | `T-082.depends_on += T-032, T-041, T-062` | T-082's acceptance asserts hosted bids, blacklist eligibility and the full `LedgerEvent` set; its current deps (T-061, T-072, T-081) do not guarantee any of the three. T-082 can be scheduled ready while its assertions are unreachable. |
-| §9-A3 | `T-050.depends_on += T-010` | The merchant app emits contract-typed `LedgerEvent`s but does not depend on the package that defines them. Free to add (T-010 is depth 1); until then the scheduler must not start T-050 before T-010 merges. |
-| §9-A4 | `T-083.depends_on += T-061` | D31's outcome producer is not a declared dependency of the ticket that consumes it. |
-| §9-A5 | narrow `T-080.scope` from `fixtures/**` | **Live hazard.** `fixtures/**` strictly contains six other tickets' fixture directories (T-021, T-022, T-023, T-040, T-053, T-071) while T-080 is marked `parallel_safe: true`. Ownership must be enforced per-file from §4. |
-| §9-A6 | `T-053.scope += .../envelope/**` | Same class as A7, unfixed: T-053 may need to write envelope code its scope excludes. |
-| §9-A8 | mint **T-086** for S6's integration half | S6's integration coverage gap stays open; no ticket owns it. |
-| §9-B (rest) | acceptance-text edits to T-000, T-060, T-054, T-062, T-011, T-012, T-013, T-085 | Each ticket's text keeps a known imprecision. The two consequential ones: **T-011** does not carry the import-lint criterion (D35) or the second-database migration criterion (D39), and **T-054** acceptance 2 asserts a cross-service behaviour its vitest-only verify cannot check. |
+| §9-A2 | **`T-082.depends_on += T-032, T-041, T-062`** | Its acceptance asserts hosted bids, blacklist eligibility and the full `LedgerEvent` set; its old parents (T-061, T-072, T-081) guaranteed none of the three, so it could be scheduled ready with its assertions unreachable. Depth unchanged at 6. |
+| §9-A3 | **`T-050.depends_on += T-010`** | The merchant app emits contract-typed `LedgerEvent`s without depending on the package that defines them. This is decision 8 of §8 below, discharged — the scheduler no longer carries the edge by hand. |
+| §9-A4 | **`T-083.depends_on += T-061`** | D31's outcome producer was not a declared dependency of its consumer. Depth unchanged at 8. |
+| §9-A5 | **`T-080.scope` narrowed off `fixtures/**`** to `fixtures/{manifest,approval,seed,catalog,personas,golden,tests}/**` | Closes residual risk 4 outright: the seven paths are disjoint from all six other tickets' fixture directories, so `parallel_safe: true` is now truthful for T-080. |
+| §9-A6 | **`T-053.scope += apps/merchant/svc/src/envelope/**`** (D33, flat per D42) | Same class as the A7 edit above: T-053 needed to write envelope code its scope excluded. |
+| §9-A8 | **new ticket T-086**, "Onboarding drives a shadow store to its first real bid" | SPEC S6's machine-checkable half, previously owned by nobody — T-053 and T-043 each cover one side of the interview → envelope → shadow → activation seam, ref neither S6 nor each other, and live in different packages. Depth 5, deps T-043 + T-053, 4 criteria, `parallel_safe: false`, scope `e2e/test_onboarding.py` + `e2e/support/onboarding/**` (with a `.gitkeep` so the support directory materialises in a worktree). This reverses §4's "not minted this epoch". |
+| — | **`T-032.refs += DESIGN#interfaces-contracts-between-tickets`** | Applied *instead of* the proposed `T-064 → T-032` edge, which was **deliberately not applied**: it would serialize the whole exchange lane behind the human gate for no verification gain. EXECUTION rule 1 restricts a worker to the sections its ticket refs, so the ref is what actually lets T-032 load the contract shapes it must honour. |
+
+Graph re-validated after all seven: **45 tickets, 87 edges, acyclic, single root T-000, max
+depth still 10, T-086 at depth 5, T-080 still gating 15** — and buildable-meanwhile moves 28 → 29,
+T-086 being the twenty-ninth. No depth moved anywhere in the graph; seventeen open tickets'
+unblock counts rose, T-010's from 26 to 32. Full re-derivation and the retired `fixtures/**`
+constraint are in `backlog.md`.
+
+**None of this touches a frozen target, which is why it was safe to apply post-freeze.** Every
+metric in `goals.json` measures by *executing the frozen suite* — `run.py --pass-rate`,
+`run.py --total`, `run.py --count-passing --epic <E1…E8|SPEC>` — plus `make verify` for
+`build_succeeds`. **Not one metric command reads `tickets.json`.** Targets were set from the
+frozen suite's own per-epic composition, never from ticket criterion counts, so adding a ticket,
+adding an edge or rewriting a scope glob cannot move a baseline, a target, or a reading. The
+sixteen hashed files are untouched and `freeze-log.jsonl` stays at amendment 0.
+
+The corollary is the cost: **the criteria total moved 133 → 137** (T-086's four), and **that
+number is not frozen and never was** — it is a property of the plan, reported for orientation.
+It appears in no metric and in no `history.csv` column. Symmetrically, **T-086 carries no frozen
+acceptance coverage at all**: the suite was frozen at 103 tests mapped to the tickets that
+existed then, `T-086` appears zero times under `.swarm-loop/acceptance/`, and the only S6
+reference in the frozen suite is an incidental docstring in a test marked T-085 (the manual-demo
+half of S6). T-086 is therefore measured by its own verify command alone and moves no frozen
+metric. A reader must not read a green T-086 as progress on any number in this report.
+
+### Declined at this checkpoint — six rows since reversed
+
+Hank declined the remainder of intake §9-A/B *at the time of this checkpoint*. **§9-A2, A3, A4,
+A5, A6 and A8 were subsequently approved and applied at `e196ef5`** — see the section directly
+above; their rows below are superseded and the consequences they describe no longer stand. The
+§9-B row is still declined and its consequence is live. Kept in full so the reasoning is not
+silently re-raised:
+
+| # | status | proposal | consequence of declining |
+|---|---|---|---|
+| §9-A2 | ~~declined~~ **APPLIED `e196ef5`** | `T-082.depends_on += T-032, T-041, T-062` | T-082's acceptance asserts hosted bids, blacklist eligibility and the full `LedgerEvent` set; its current deps (T-061, T-072, T-081) do not guarantee any of the three. T-082 can be scheduled ready while its assertions are unreachable. |
+| §9-A3 | ~~declined~~ **APPLIED `e196ef5`** | `T-050.depends_on += T-010` | The merchant app emits contract-typed `LedgerEvent`s but does not depend on the package that defines them. Free to add (T-010 is depth 1); until then the scheduler must not start T-050 before T-010 merges. |
+| §9-A4 | ~~declined~~ **APPLIED `e196ef5`** | `T-083.depends_on += T-061` | D31's outcome producer is not a declared dependency of the ticket that consumes it. |
+| §9-A5 | ~~declined~~ **APPLIED `e196ef5`** | narrow `T-080.scope` from `fixtures/**` | **Live hazard.** `fixtures/**` strictly contains six other tickets' fixture directories (T-021, T-022, T-023, T-040, T-053, T-071) while T-080 is marked `parallel_safe: true`. Ownership must be enforced per-file from §4. |
+| §9-A6 | ~~declined~~ **APPLIED `e196ef5`** | `T-053.scope += .../envelope/**` | Same class as A7, unfixed: T-053 may need to write envelope code its scope excludes. |
+| §9-A8 | ~~declined~~ **APPLIED `e196ef5`** | mint **T-086** for S6's integration half | S6's integration coverage gap stays open; no ticket owns it. |
+| §9-B (rest) | **still declined** | acceptance-text edits to T-000, T-060, T-054, T-062, T-011, T-012, T-013, T-085 | Each ticket's text keeps a known imprecision. The two consequential ones: **T-011** does not carry the import-lint criterion (D35) or the second-database migration criterion (D39), and **T-054** acceptance 2 asserts a cross-service behaviour its vitest-only verify cannot check. |
 
 Not a divergence, but decided this epoch and settled: **report-reuse is removed from the
 frozen runner permanently (D43).** `--write-report`/`--from-report` were built for intake
