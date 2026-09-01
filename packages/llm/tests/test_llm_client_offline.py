@@ -197,6 +197,17 @@ def test_an_injected_client_is_used_as_is(no_network) -> None:
     assert recorder["request"]["messages"][0]["content"][0]["text"] == "hi"
 
 
+def test_a_bare_string_prompt_sends_no_system_block_at_all(no_network) -> None:
+    """No static half means nothing to cache; sending an empty system block would be junk."""
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    assert AnthropicLLM("buyer", model="sentinel", client=fake).complete("just this") == (
+        "fake reply"
+    )
+    assert "system" not in recorder["request"]
+    assert recorder["request"]["messages"][0]["content"][0]["text"] == "just this"
+
+
 def test_response_text_reads_objects_and_dicts_and_ignores_non_text_blocks() -> None:
     class _Block:
         def __init__(self, type_: str, text: str) -> None:
