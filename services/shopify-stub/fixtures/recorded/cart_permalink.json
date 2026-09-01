@@ -1,23 +1,33 @@
 {
   "$provenance": {
     "source": "https://shopify.dev/docs/apps/build/checkout/create-cart-permalinks",
-    "api_version": "2026-07",
+    "api_version": "unversioned",
     "retrieved": "2026-09-01",
     "derivation": "Hand-authored per D21. The URL format and the documented query parameters were transcribed from the page above. No live capture (D3).",
     "caveats": [
       "THE BEHAVIOUR THIS STUB IS GRADED ON IS NOT DOCUMENTED. Neither shopify.dev nor help.shopify.com says what a cart permalink does with a discount code that is invalid, expired, exhausted or non-combinable. There is no quote to give because no such sentence exists. The 'silently ignored' behaviour the stub implements is mandated by T-013 acceptance criterion 2, and is consistent with the Storefront API modelling a non-applying code as CartDiscountCode.applicable:false on an otherwise successful mutation — but that is INFERENCE, not documentation of permalink behaviour. Anyone who later gets access to a dev store should verify it empirically.",
       "The documented format supports COMMA-SEPARATED variants (/cart/70881412:1,70881382:1) and comma-separated codes (?discount=A,B). D22 pins the single-variant, single-code form for this system, and the stub implements only that, refusing the multi-variant form explicitly rather than half-handling it.",
-      "The published help text about invalid codes is scoped to a customer TYPING a code at checkout ('Enter a valid discount code'), which is a different surface from a permalink and is not evidence about this one."
+      "The published help text about invalid codes is scoped to a customer TYPING a code at checkout ('Enter a valid discount code'), which is a different surface from a permalink and is not evidence about this one.",
+      "api_version is 'unversioned' because THIS PAGE CARRIES NO API VERSION. Unlike the Admin GraphQL pages, which render a version selector and stamp api_version: 2026-07 in their frontmatter, the cart-permalink page has neither. Stamping '2026-07' here — as this header previously did — asserted a provenance the page cannot support."
     ]
   },
   "template": "https://{shop_domain}/cart/{variant_id}:{quantity}?discount={code}",
   "example": "https://proxyshop-demo.myshopify.com/cart/44352913:1?discount=PSX-7QK2ZB0M",
   "documented_query_parameters": [
-    "discount", "properties", "checkout[...]", "access_token", "source_name", "note",
-    "attributes[...]", "ref", "storefront", "payment"
+    "discount",
+    "properties",
+    "checkout[...]",
+    "access_token",
+    "source_name",
+    "note",
+    "attributes[...]",
+    "ref",
+    "storefront",
+    "payment"
   ],
   "notes": [
-    "Variant ids in the path are NUMERIC; the official example strips the GID with v.id.split('/').pop().",
+    "CORRECTION (this header previously claimed otherwise). The page contains NO JavaScript: all 15 of its code fences are tagged `text`, and `split`, `.pop()` and `gid://` occur zero times in its content. The earlier note attributed an official `v.id.split('/').pop()` GID-stripping example to this page; no such example exists.",
+    "What the page DOES show is numeric variant ids by example only — `/cart/{variant_id}:{quantity}` with `70881412` and `70881382`. It never states that ids must be numeric and never mentions GIDs, so 'variant ids are numeric' is an inference from the examples, not a documented requirement.",
     "A discount code may not contain a comma, because commas separate multiple codes.",
     "Domain validation in this system compares the permalink HOST to the registered seller domain by exact match, with no subdomain wildcards (D22, release blocker S8-3). That is a ProxyShop rule, not a Shopify one."
   ]

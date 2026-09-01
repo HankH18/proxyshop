@@ -1,6 +1,6 @@
 {
   "$provenance": {
-    "source": "https://shopify.dev/docs/api/webhooks/latest (topic ORDERS_PAID; the raw markdown at .../latest.md was parsed as JSON rather than read through a summarizer)",
+    "source": "https://shopify.dev/docs/api/webhooks/latest (topic `orders/paid` — the page names it that way; the GraphQL-style constant ORDERS_PAID appears on it zero times). The canonical markdown at .../latest.md was parsed as JSON rather than read through a summarizer.",
     "supporting_sources": [
       "https://shopify.dev/docs/api/admin-rest/latest/resources/order (element shapes the webhook reference leaves empty)",
       "https://shopify.dev/docs/apps/build/webhooks/delivery-structure (headers)",
@@ -12,10 +12,12 @@
     "caveats": [
       "This recording's `payload` carries a SUBSET of the real sample's top-level keys — the ones this system reads. `documented_keys[\"\"]` lists 57 real key names, which is NOT the sample's full top-level key count; the earlier wording here claimed it was the \"full confirmed set\", and that was false and flattering, because it made a partial enumeration read as complete coverage of the invented-key check. Every name listed was individually confirmed present in the sample; names absent from the list are not thereby claimed to be absent from Shopify.",
       "`customer` is present in the real payload as a full object with email, phone, first_name, last_name and default_address. It is null here and in the stub BY DESIGN: SPEC C5 says the app holds no protected-customer-data scopes. This is a deliberate divergence, not a transcription gap.",
-      "`note_attributes` is present on the webhook sample but its value is [] there, so the {name, value} element shape below comes from the REST Order resource page, not from the webhook page.",
+      "`note_attributes` IS present on the orders/paid sample, but its value there is `[]`, so the {name, value} element shape below comes from the REST Order resource page rather than from the webhook sample.",
       "`fulfillments` is likewise [] in every webhook sample. The seven-key element shape below is the abbreviated form printed on the REST Order page. Whether a real webhook embeds that or the larger standalone Fulfillment shape is NOT documented.",
-      "NOT CONFIRMED: discount_applications[].value_type == \"percentage\". Only \"fixed_amount\" appears in the published discount_applications examples, and no page enumerates the allowed values. The stub emits \"percentage\" for a percentage discount because the downstream reconciler is specified in percentage terms; treat that specific string as unverified.",
-      "`checkout_id` does NOT appear anywhere in the webhook reference (0 occurrences) even though it is a real REST Order field. It is deliberately absent here."
+      "CORRECTION (this header previously described the evidence backwards). It claimed only \"fixed_amount\" appears in the published examples. On the webhooks page the truth is the reverse: `fixed_amount` appears ZERO times anywhere on it, and '\"value_type\": \"percentage\"' appears twice — though both are in draft-order payloads, not in an order one. So the page supports `percentage` as a real value_type while confirming nothing about which value_type an ORDER carries. The stub emits `percentage` for a percentage discount; treat that as reasoned, not cited.",
+      "`checkout_id` does NOT appear anywhere in the webhook reference (0 occurrences) even though it is a real REST Order field. It is deliberately absent here.",
+      "IMPORTANT, and missed on the first pass: `discount_applications` and `discount_codes` are BOTH `[]` in the orders/paid sample — as they are in every orders/* sample on that page. So neither element shape below is transcribed from that sample; both come from the REST Order resource page. This matters because those two arrays are the entire discount surface this system reads, and the page cited as `source` shows them empty.",
+      "The sample has exactly 93 top-level keys (extracted and JSON-parsed twice, from the rendered HTML and from the canonical markdown, with identical results). Every one of the 57 names in documented_keys[\"\"] was checked to be a member of that set, and every key this stub emits is a member of it too."
     ]
   },
   "topic": "orders/paid",

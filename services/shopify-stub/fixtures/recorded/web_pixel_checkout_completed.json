@@ -5,7 +5,7 @@
       "https://shopify.dev/docs/api/web-pixels-api (event envelope)",
       "https://shopify.dev/docs/api/web-pixels-api/standard-events (the 15 standard events)"
     ],
-    "api_version": "2026-07",
+    "api_version": "unversioned",
     "retrieved": "2026-09-01",
     "derivation": "Hand-authored per D21 from the standard-event page's type tables. The envelope members (id, name, timestamp, clientId, context, data, seq, type) and the data.checkout members below were transcribed from those tables. Values are invented. No live capture (D3).",
     "caveats": [
@@ -14,7 +14,8 @@
       "DiscountApplication in the Web Pixels API has NO `code` member. For a DISCOUNT_CODE application the documented carrier of the code is `title`. A fixture with a `code` key here would be invented.",
       "data.checkout.order has exactly two fields (id, customer) and the docs print NO example value for order.id, so whether it is a GID or a numeric string is unknown. The stub emits the numeric string and this is flagged rather than asserted.",
       "The inner shape of `context` (document.location.href) is NOT individually confirmed from a fetched page; `context` itself is a confirmed envelope member. Treat the inner path as this stub's plausible filling, not as documentation.",
-      "The real Checkout type also carries email, phone, billingAddress and shippingAddress. The stub emits none of them: SPEC C5 grants no protected-customer-data scopes."
+      "The real Checkout type also carries email, phone, billingAddress and shippingAddress. The stub emits none of them: SPEC C5 grants no protected-customer-data scopes.",
+      "api_version is 'unversioned': the Web Pixels API pages carry no version selector and no api_version frontmatter key, unlike the Admin GraphQL pages. The earlier '2026-07' here asserted a provenance those pages cannot support."
     ]
   },
   "event": "checkout_completed",

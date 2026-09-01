@@ -157,14 +157,45 @@ The honest gaps, collected in one place:
   acceptance criterion 2 and is consistent with the Storefront API modelling a non-applying
   code as `CartDiscountCode.applicable: false` on an otherwise successful mutation — but that
   is inference, not a quote. Verify it empirically if a dev store ever becomes available.
-* `discount_applications[].value_type == "percentage"` is unconfirmed; only `"fixed_amount"`
-  appears in the published examples.
+* **`discount_applications` and `discount_codes` are both `[]` in every published `orders/*`
+  webhook sample.** Those two arrays are the entire discount surface this system reads, and
+  the page cited as their source shows them empty — so their element shapes come from the
+  REST Order resource page, not from the webhook reference.
+* `discount_applications[].value_type == "percentage"` is reasoned, not cited. The webhooks
+  page shows `"value_type": "percentage"` twice (both in *draft*-order payloads) and shows
+  `fixed_amount` zero times, so it confirms the value exists but says nothing about which one
+  an order carries.
 * `note_attributes` and `fulfillments` are `[]` in every published webhook sample, so their
   element shapes come from the REST Order resource page instead.
 * `webhookSubscriptionCreate` is named nowhere in this repo's planning documents — only the
   three topics are. The mutation is the stub's choice.
 * Which fields the "orders query subset" contains is specified nowhere. The subset is the
   stub's design, chosen to mirror the webhook payload field for field.
+* Two recordings carry `api_version: "unversioned"` rather than `2026-07`: the Web Pixels API
+  pages and the cart-permalink guide have no version selector and no `api_version`
+  frontmatter, unlike every Admin GraphQL page.
+
+### Three headers were found FALSE and corrected
+
+An adversarial review checked the caveats against the pages they cite, and three of them
+asserted things those pages do not say. All three were re-verified independently and
+rewritten, and `test_no_recording_claims_a_correction_it_did_not_make` pins the corrections
+so they cannot silently regress:
+
+1. *"`usageLimit` is deprecated on the `DiscountCodeBasic` output type."* **False** — that
+   page's only deprecated fields are `customerSelection` and `discountClass`. The caveat
+   invented a deprecation and then justified a workaround for it.
+2. *"The official example strips the GID with `v.id.split('/').pop()`."* **False** — the
+   cart-permalink page contains no JavaScript at all; all 15 of its code fences are tagged
+   `text`, and `split`, `.pop()` and `gid://` occur zero times. Numeric variant ids are shown
+   by example only and never stated as a requirement.
+3. *"Only `fixed_amount` appears in the published `value_type` examples."* **Backwards** —
+   on the webhooks page `fixed_amount` appears zero times and `percentage` twice.
+
+A fourth, about this repo's own files, was corrected at the same time: `documented_keys`
+described itself as "the full confirmed set" of the sample's top-level keys while listing 57
+of 93. The recording now states exactly what it does and does not claim, and every one of
+those 57 names was mechanically checked to be a member of the real 93.
 
 ## Declared limitations
 

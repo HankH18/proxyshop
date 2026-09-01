@@ -65,7 +65,7 @@ def test_every_required_recording_is_present() -> None:
 
 
 @pytest.mark.parametrize("path", recording_paths(), ids=lambda p: p.stem)
-def test_every_recording_carries_a_provenance_header(path: Path) -> None:
+def test_every_recording_carries_a_provenance_header(path: Path) -> None:  # noqa: D401
     """D21: a recording without a named doc version is exactly the failure it forbids.
 
     A fixture invented from memory but labelled documentation-derived is worse than no
@@ -78,7 +78,18 @@ def test_every_recording_carries_a_provenance_header(path: Path) -> None:
     assert provenance["source"].startswith("https://shopify.dev/"), (
         "the source must be a published documentation URL"
     )
-    assert provenance["api_version"] == "2026-07"
+    # "unversioned" is the honest value for the two surfaces whose pages carry NO version:
+    # the Web Pixels API and the cart-permalink guide have neither a version selector nor an
+    # api_version frontmatter key, unlike every Admin GraphQL page. Stamping "2026-07" on
+    # them — which these headers originally did — asserts a provenance the page cannot
+    # support, so the vocabulary is closed to exactly two values rather than left free-form.
+    assert provenance["api_version"] in {"2026-07", "unversioned"}
+    unversioned = {"cart_permalink", "web_pixel_checkout_completed"}
+    expected = "unversioned" if path.stem in unversioned else "2026-07"
+    assert provenance["api_version"] == expected, (
+        f"{path.stem} claims api_version {provenance['api_version']!r}; the Admin GraphQL "
+        f"pages are version-stamped and the Web Pixels / cart-permalink pages are not"
+    )
     assert "No live capture" in provenance["derivation"] or "no live" in (
         provenance["derivation"].lower()
     ), "the derivation must state that no live capture was performed (D21/D3)"
@@ -322,3 +333,52 @@ async def test_the_permalink_the_stub_answers_is_the_recorded_template(
     response = await stub.http.get(url.replace(f"https://{parsed.shop_domain}", ""))
     assert response.status_code == 303
     assert response.json()["discount_code"] == parsed.code
+
+
+def test_no_recording_claims_a_correction_it_did_not_make() -> None:
+    """The three provenance headers found to be FALSE must stay corrected.
+
+    Adversarial review caught three caveats asserting things the cited pages do not say —
+    an invented `usageLimit` deprecation, a fabricated official JavaScript example, and a
+    backwards account of which `value_type` the docs show. All three were verified
+    independently and rewritten. On a ticket whose whole premise is that hand-authored
+    fixtures stand in for an API nobody here can call, a false provenance header is the most
+    expensive defect available, so the corrections are pinned rather than trusted to stay.
+    """
+    discount = load("admin_discount_code_basic_create")
+    caveats = " ".join(discount["$provenance"]["caveats"])
+    assert "usageLimit` is NOT deprecated" in caveats
+    assert "`customerSelection` and `discountClass`" in caveats
+    assert "DiscountPercentageInput" in discount["notes"], (
+        "the notes must record that this type name 404s, so nobody reintroduces it"
+    )
+
+    permalink = load("cart_permalink")
+    notes = " ".join(permalink["notes"])
+    assert "contains NO JavaScript" in notes
+    assert "split" in notes and "no such example exists" in notes
+
+    paid = load("webhook_orders_paid")
+    paid_caveats = " ".join(paid["$provenance"]["caveats"])
+    assert "described the evidence backwards" in paid_caveats
+    assert "BOTH `[]` in the orders/paid sample" in paid_caveats, (
+        "the sample's discount arrays are empty; the element shapes come from the REST page"
+    )
+
+
+def test_the_recorded_throttle_block_carries_the_documented_numbers() -> None:
+    """The rate-limit page has exactly ONE worked example; the recording uses its numbers.
+
+    The recording previously carried invented values (2000/1989/100) that appear nowhere on
+    the cited page — a fixture presenting made-up numbers as documentation-derived. The stub
+    itself still emits its own plausible values, because it does not model query cost, and
+    the parity check compares key names and types rather than values.
+    """
+    cost = load("admin_discount_code_basic_create")["response"]["extensions"]["cost"]
+    assert cost["requestedQueryCost"] == 101
+    assert cost["actualQueryCost"] == 46
+    assert cost["throttleStatus"] == {
+        "maximumAvailable": 1000,
+        "currentlyAvailable": 954,
+        "restoreRate": 50,
+    }

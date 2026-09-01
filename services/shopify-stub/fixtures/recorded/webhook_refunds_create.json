@@ -1,6 +1,6 @@
 {
   "$provenance": {
-    "source": "https://shopify.dev/docs/api/webhooks/latest (topic REFUNDS_CREATE)",
+    "source": "https://shopify.dev/docs/api/webhooks/latest (topic `refunds/create` — the page names topics in this slash form, never as a GraphQL-style constant)",
     "supporting_sources": [
       "https://shopify.dev/docs/api/admin-rest/latest/resources/refund"
     ],

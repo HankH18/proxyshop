@@ -1,6 +1,6 @@
 {
   "$provenance": {
-    "source": "https://shopify.dev/docs/api/webhooks/latest (topic ORDERS_FULFILLED)",
+    "source": "https://shopify.dev/docs/api/webhooks/latest (topic `orders/fulfilled` — the page names topics in this slash form, never as a GraphQL-style constant)",
     "supporting_sources": [
       "https://shopify.dev/docs/api/admin-rest/latest/resources/order (the abbreviated fulfillment element shape)"
     ],
@@ -11,7 +11,8 @@
       "Shopify's own ORDERS_FULFILLED sample is not actually fulfilled: it shows fulfillment_status: null and fulfillments: []. So the published page gives NO element shape for a fulfilled order's fulfillments array.",
       "The seven-key fulfillment element below (created_at, id, order_id, status, tracking_company, tracking_number, updated_at) is the abbreviated form printed on the REST Order resource page. The standalone REST Fulfillment resource carries a much larger set, and which one a real webhook embeds is NOT DOCUMENTED. The stub emits exactly these seven rather than guessing at the larger shape.",
       "Everything in webhook_orders_paid.json's caveats applies here too; the top-level shape is the same object.",
-      "documented_keys is INHERITED from webhook_orders_paid.json and then extended with the fulfillments[] element shape. That is not a shortcut: the two samples' top-level key sets were diffed and found identical, so maintaining a second hand-copied enumeration would only create an opportunity for the two to drift apart."
+      "documented_keys is INHERITED from webhook_orders_paid.json and then extended with the fulfillments[] element shape. That is not a shortcut: the two samples' top-level key sets were diffed and found identical, so maintaining a second hand-copied enumeration would only create an opportunity for the two to drift apart.",
+      "Also inherited from orders/paid, and true of every orders/* sample on the page: `discount_applications` and `discount_codes` are `[]` in the published sample, so their element shapes come from the REST Order resource page."
     ]
   },
   "topic": "orders/fulfilled",
