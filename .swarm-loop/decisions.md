@@ -112,3 +112,23 @@ rather than left unbounded.
 _Further rulings (rank formula, hash-chain definition, embeddings default, LedgerEvent
 payload shape, checkout URL shape) are appended from the adversarial intake report before
 first dispatch._
+
+## D11 — T-065 does not author the golden set it is graded against **[approved by Hank]**
+
+Intake blocker B7: `T-065`'s scope included `fixtures/golden/**` and its `depends_on` did not
+include `T-080` — so the ticket authored the golden set used to grade it, which is precisely
+the circularity SPEC §A3 exists to prevent (A3 caught the same trap for the dishonest-store
+fixture and ruled that behaviours live in a human-approved manifest).
+
+**Ruling (Hank approved, applied to `tickets.json`):**
+- `T-065.depends_on` += `T-080`.
+- `fixtures/golden/**` **removed** from `T-065.scope` — a prose note is insufficient, because
+  the scope glob is what a worker actually obeys.
+- Non-goal added to T-065: the golden set is T-080's human-approved ground truth, read-only.
+
+**Verified after the edit:** the graph is still acyclic, still 44 tickets. The T-080 gate set
+grows 12 → **15** (`T-032, T-034, T-035, T-045, T-054, T-062, T-063, T-064, T-065, T-073,
+T-081, T-082, T-083, T-084, T-085`), leaving **28** tickets buildable without approval.
+
+This is a deliberate, accepted cost: an uncircular S8 proof is the point of the ticket.
+Because the gate now blocks a third of the graph, dispatch T-080 as early as `T-013` allows.

@@ -31,7 +31,7 @@
   {
    "id": "T-010",
    "title": "Contracts generate typed models and enforce the dual-path bid boundary",
-   "objective": "packages/contracts: JSON Schemas per DESIGN \u00a7Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint.",
+   "objective": "packages/contracts: JSON Schemas per DESIGN §Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint.",
    "refs": [
     "R8",
     "R18",
@@ -41,7 +41,7 @@
     "DESIGN#interfaces-contracts-between-tickets"
    ],
    "acceptance": [
-    "1. Schema\u2192codegen produces importable py+ts types for all pinned objects incl. VerificationResult",
+    "1. Schema→codegen produces importable py+ts types for all pinned objects incl. VerificationResult",
     "2. Hosted-path bid with a seller_asserted claim rejects; external-path bid with the same claim admits flagged-for-verification; expired/blacklisted reject on both",
     "3. Round-trip serialization passes in both languages; every cross-domain endpoint has a checked-in OpenAPI example + contract test"
    ],
@@ -60,7 +60,7 @@
   {
    "id": "T-011",
    "title": "Postgres schemas enforce role isolation and hash-chained ledger",
-   "objective": "Create ledger/sealed/vault/app schemas with roles per DESIGN \u00a7Data models using the partner-reconciled table set (commerce_events with idempotency + prev_hash chain, claims, claim_verifications, verification_evidence_refs, trust_observations, trust_scores, policy_events, ranking_runs/candidates, catalog_snapshots, crawl tables, seller_blacklist with review states); replay library; grant tests prove exchange role cannot read sealed.* (S7).",
+   "objective": "Create ledger/sealed/vault/app schemas with roles per DESIGN §Data models using the partner-reconciled table set (commerce_events with idempotency + prev_hash chain, claims, claim_verifications, verification_evidence_refs, trust_observations, trust_scores, policy_events, ranking_runs/candidates, catalog_snapshots, crawl tables, seller_blacklist with review states); replay library; grant tests prove exchange role cannot read sealed.* (S7).",
    "refs": [
     "C3",
     "R15",
@@ -151,7 +151,7 @@
     "DESIGN#decisions--rationale"
    ],
    "acceptance": [
-    "1. Role\u2192model resolution from env with documented defaults",
+    "1. Role→model resolution from env with documented defaults",
     "2. Prompt assembly puts store context before dynamic tail (cache boundary test)",
     "3. Double replays recorded fixtures deterministically; no network in tests"
    ],
@@ -233,7 +233,7 @@
     "DESIGN#data-models"
    ],
    "acceptance": [
-    "1. On the approved ER fixture set, precision \u2265 configured floor and GTIN matches always link",
+    "1. On the approved ER fixture set, precision ≥ configured floor and GTIN matches always link",
     "2. Edges carry confidence; below-threshold pairs are not linked"
    ],
    "verify": "pytest services/ingest/tests/test_entity_resolution.py -q",
@@ -254,7 +254,7 @@
   {
    "id": "T-023",
    "title": "Catalog MCP adapter passes recorded-contract tests",
-   "objective": "catalog_mcp CatalogAdapter implementing the production-primary read path against recorded mocks (dev stores are not in Global Catalog \u2014 A1).",
+   "objective": "catalog_mcp CatalogAdapter implementing the production-primary read path against recorded mocks (dev stores are not in Global Catalog — A1).",
    "refs": [
     "C6",
     "A1"
@@ -362,7 +362,7 @@
   {
    "id": "T-032",
    "title": "Shortlists rank by the single published formula behind eligibility filters",
-   "objective": "Eligibility filters (blacklist fail-closed, offer expiry, checkout-domain validity, hard constraints requiring verified facts per R19), then published rank_score per DESIGN \u00a7Decisions with [0,1]-normalized features, policy penalties, stable tie-breaking, component map + human-readable explanation; slotting \u22644 with graceful collapse; provenance + verification-warning labels.",
+   "objective": "Eligibility filters (blacklist fail-closed, offer expiry, checkout-domain validity, hard constraints requiring verified facts per R19), then published rank_score per DESIGN §Decisions with [0,1]-normalized features, policy penalties, stable tie-breaking, component map + human-readable explanation; slotting ≤4 with graceful collapse; provenance + verification-warning labels.",
    "refs": [
     "R2",
     "R11",
@@ -371,9 +371,9 @@
     "DESIGN#decisions--rationale"
    ],
    "acceptance": [
-    "1. Golden tests: fixed inputs \u2192 exact eligibility set, ranking, slots, explanations",
+    "1. Golden tests: fixed inputs → exact eligibility set, ranking, slots, explanations",
     "2. Blindness test: tier/fee fields cannot alter score; contradicted hard constraint never wins regardless of other components (release blocker test)",
-    "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1\u20133 stores"
+    "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1–3 stores"
    ],
    "verify": "pytest apps/exchange/tests/test_ranking.py -q",
    "scope": [
@@ -398,7 +398,7 @@
     "A5"
    ],
    "acceptance": [
-    "1. Accept \u2192 code+permalink via stub; ledger events emitted",
+    "1. Accept → code+permalink via stub; ledger events emitted",
     "2. Merchant failure path re-offers deterministically",
     "3. Double-accept on one auction rejected",
     "4. Redirect mode: off-domain checkout_url is refused (release blocker test); emitted event kinds match the Shopify-mode golden sequence"
@@ -420,7 +420,7 @@
   {
    "id": "T-034",
    "title": "Exchange bandit shifts exposure with outcomes and honors exploration",
-   "objective": "Contextual Thompson sampling over cluster\u00d7store adjusting exposure/exploration (not formula weights); guaranteed exploration slice for low-data stores from trust snapshot.",
+   "objective": "Contextual Thompson sampling over cluster×store adjusting exposure/exploration (not formula weights); guaranteed exploration slice for low-data stores from trust snapshot.",
    "refs": [
     "R12",
     "R16",
@@ -474,7 +474,7 @@
   {
    "id": "T-040",
    "title": "Tool hooks are the only way facts and discounts enter a bid",
-   "objective": "Implement the six hooks per DESIGN \u00a7Tool hooks with Provenance on every return; authorize_discount enforces envelope walls; agent-side assembly cannot construct Claims directly (lint + runtime guard).",
+   "objective": "Implement the six hooks per DESIGN §Tool hooks with Provenance on every return; authorize_discount enforces envelope walls; agent-side assembly cannot construct Claims directly (lint + runtime guard).",
    "refs": [
     "R8",
     "DESIGN#tool-hooks-store-agent-internal-contract"
@@ -502,7 +502,7 @@
   {
    "id": "T-041",
    "title": "Advocate runtime bids within walls and defaults deterministically cold",
-   "objective": "BidRequest\u2192Bid|decline: cache-layout context assembly, hook-only claim emission, deterministic cold-start bid (list price + standing commitments + intro rule only).",
+   "objective": "BidRequest→Bid|decline: cache-layout context assembly, hook-only claim emission, deterministic cold-start bid (list price + standing commitments + intro rule only).",
    "refs": [
     "R8",
     "R10",
@@ -530,7 +530,7 @@
   {
    "id": "T-042",
    "title": "Store loop learns from its own outcomes only",
-   "objective": "Per-store Thompson sampling over discount-depth buckets \u00d7 commitment sets per cluster; network-prior intake; prior builder consumes pitch/value-prop outcomes only.",
+   "objective": "Per-store Thompson sampling over discount-depth buckets × commitment sets per cluster; network-prior intake; prior builder consumes pitch/value-prop outcomes only.",
    "refs": [
     "R17",
     "DESIGN#decisions--rationale"
@@ -723,7 +723,7 @@
     "DESIGN#data-models"
    ],
    "acceptance": [
-    "1. Transcript fixture \u2192 exact expected Envelope version (golden)",
+    "1. Transcript fixture → exact expected Envelope version (golden)",
     "2. No activation without recorded approval artifact",
     "3. Envelope edits create new versions; old versions immutable"
    ],
@@ -752,7 +752,7 @@
    "acceptance": [
     "1. Each pane renders from fixture APIs (component tests)",
     "2. Kill switch flips agent mode via API and is reflected in bid submission tests",
-    "3. Loss-report pane displays categories only \u2014 render test asserts absence of amount fields"
+    "3. Loss-report pane displays categories only — render test asserts absence of amount fields"
    ],
    "verify": "npx vitest run apps/merchant/app/dashboard",
    "scope": [
@@ -799,13 +799,13 @@
   {
    "id": "T-061",
    "title": "Webhook truth reconciles lossy pixel signals",
-   "objective": "Reconciliation: match checkout_pixel\u2194order_paid by join keys; emit reconciled events; derive price_honored/discount_honored comparisons from webhook data only.",
+   "objective": "Reconciliation: match checkout_pixel↔order_paid by join keys; emit reconciled events; derive price_honored/discount_honored comparisons from webhook data only.",
    "refs": [
     "R4",
     "DESIGN#decisions--rationale"
    ],
    "acceptance": [
-    "1. Matched pair \u2192 reconciled event with integrity comparisons",
+    "1. Matched pair → reconciled event with integrity comparisons",
     "2. Webhook-only order (pixel dropped) reconciles cleanly",
     "3. Price/discount mismatch fixture yields integrity deltas sourced from webhook fields"
    ],
@@ -924,23 +924,24 @@
    "scope": [
     "packages/verification/**",
     "apps/trust/src/verification/**",
-    "apps/trust/tests/**",
-    "fixtures/golden/**"
+    "apps/trust/tests/**"
    ],
    "depends_on": [
     "T-010",
     "T-021",
-    "T-060"
+    "T-060",
+    "T-080"
    ],
    "non_goals": [
-    "No trust score math (T-062); no ranking"
+    "No trust score math (T-062); no ranking",
+    "Does not author the golden set; fixtures/golden/** is T-080's human-approved ground truth, read-only here (closes the SPEC A3 circularity)."
    ],
    "parallel_safe": false
   },
   {
    "id": "T-070",
    "title": "Buyers authenticate lightly and stores never see who they are",
-   "objective": "Chat shell, magic-link auth, vault mapping email\u2194pseudonym history, per-session pseudonym rotation; only vault role reads mappings.",
+   "objective": "Chat shell, magic-link auth, vault mapping email↔pseudonym history, per-session pseudonym rotation; only vault role reads mappings.",
    "refs": [
     "R5",
     "DESIGN#data-models"
@@ -972,7 +973,7 @@
     "R5"
    ],
    "acceptance": [
-    "1. Scripted dialogues (fixtures) yield expected Intents within \u22643 questions",
+    "1. Scripted dialogues (fixtures) yield expected Intents within ≤3 questions",
     "2. Confirmation required before auction creation",
     "3. Bucket builder outputs only DESIGN profile fields; k-floor honored at configured value"
    ],
@@ -995,7 +996,7 @@
   {
    "id": "T-072",
    "title": "Shortlists render with provenance and accept hands off cleanly",
-   "objective": "Shortlist UI: slots, trust indicator, provenance labels ('store-confirmed' vs 'from their website'); accept \u2192 exchange accept \u2192 redirect to permalink.",
+   "objective": "Shortlist UI: slots, trust indicator, provenance labels ('store-confirmed' vs 'from their website'); accept → exchange accept → redirect to permalink.",
    "refs": [
     "R2",
     "R3"
@@ -1049,7 +1050,7 @@
   {
    "id": "T-080",
    "title": "The approved manifest and seed generator define ground truth",
-   "objective": "Fixture manifest: dishonest-store behaviors, new-store prior N, seeds, expected trust trajectories \u2014 submitted for human approval (approval artifact committed). Parameterized SEED_CATEGORY catalog generator + `make demo-seed` provisioning stub or live stores. Manifest also defines the golden intent/pitch set (incl. persona scripts, contradiction/stale/variant/unit/injection/claim-splitting cases) used by verification and eval gates.",
+   "objective": "Fixture manifest: dishonest-store behaviors, new-store prior N, seeds, expected trust trajectories — submitted for human approval (approval artifact committed). Parameterized SEED_CATEGORY catalog generator + `make demo-seed` provisioning stub or live stores. Manifest also defines the golden intent/pitch set (incl. persona scripts, contradiction/stale/variant/unit/injection/claim-splitting cases) used by verification and eval gates.",
    "refs": [
     "S2",
     "C9",
@@ -1075,7 +1076,7 @@
   {
    "id": "T-081",
    "title": "Simulated buyers exercise the whole network from one seed",
-   "objective": "services/sim: seeded traffic generator driving intents\u2192auctions\u2192acceptances\u2192stub purchases/returns; dishonest-store script executes manifest behaviors.",
+   "objective": "services/sim: seeded traffic generator driving intents→auctions→acceptances→stub purchases/returns; dishonest-store script executes manifest behaviors.",
    "refs": [
     "S1",
     "S4",
@@ -1103,7 +1104,7 @@
   {
    "id": "T-082",
    "title": "One scripted run proves the full S1 flow",
-   "objective": "E2E test: intent\u2192clarify\u2192bids\u2192shortlist\u2192accept\u2192code\u2192stub checkout\u2192pixel+webhook\u2192reconcile\u2192ledger\u2192trust update, all against compose.",
+   "objective": "E2E test: intent→clarify→bids→shortlist→accept→code→stub checkout→pixel+webhook→reconcile→ledger→trust update, all against compose.",
    "refs": [
     "S1"
    ],
@@ -1165,7 +1166,7 @@
    ],
    "acceptance": [
     "1. Trajectory within manifest tolerance bands",
-    "2. Blacklist event emitted at expected episode \u00b1band",
+    "2. Blacklist event emitted at expected episode ±band",
     "3. Post-blacklist auctions contain zero exposure for the store"
    ],
    "verify": "pytest e2e/test_dishonest.py -q",
@@ -1184,7 +1185,7 @@
   {
    "id": "T-085",
    "title": "The demo is a runbook anyone on the team can execute",
-   "objective": "Demo procedure doc: dev-store provisioning (app install, password config, Bogus Gateway), `make e2e-live` runbook, and the two demo beats (live auction; interview\u2192bidding onboarding). Lint-checked structure with required sections and command presence.",
+   "objective": "Demo procedure doc: dev-store provisioning (app install, password config, Bogus Gateway), `make e2e-live` runbook, and the two demo beats (live auction; interview→bidding onboarding). Lint-checked structure with required sections and command presence.",
    "refs": [
     "S1",
     "S6",
