@@ -61,8 +61,20 @@ async def test_the_event_carries_the_documented_standard_event_shape(
     assert "code" not in application
 
 
+#: With ``pixel_seed=1234`` and ``pixel_drop_rate=0.5``, 20 checkouts emit exactly this
+#: many events. Derived from ``random.Random(1234)``, whose sequence CPython documents as
+#: reproducible, and pinned as a literal rather than recomputed in the test — a test that
+#: recomputes the expected value with the same algorithm the code uses asserts nothing.
+SEEDED_EMISSIONS = 9
+
+
 async def test_a_seeded_drop_rate_produces_an_exact_count(stub: StubClient) -> None:
-    """A seed makes the loss reproducible, so the assertion is a number not a band."""
+    """A seed makes the loss reproducible, so the assertion is a number, not a band.
+
+    The exact count matters: a band like ``0 < emitted < 20`` is satisfied by an
+    implementation whose rate is 0.1 or 0.9 as readily as by one whose rate is the 0.5 that
+    was asked for, so it does not actually test the knob's *value*.
+    """
     await stub.configure(pixel_drop_rate=0.5, pixel_seed=1234)
     emitted = 0
     for _ in range(20):
@@ -71,12 +83,34 @@ async def test_a_seeded_drop_rate_produces_an_exact_count(stub: StubClient) -> N
 
     events = await stub.events()
     suppressed = await stub.suppressed()
-    assert len(events) == emitted
-    assert len(events) + len(suppressed) == 20, "every checkout is either emitted or logged"
-    assert 0 < emitted < 20, (
-        "a 50% rate that emitted everything or nothing would mean the knob does nothing"
+    assert emitted == SEEDED_EMISSIONS
+    assert len(events) == SEEDED_EMISSIONS, (
+        "the stub's own event log must agree with what it told each caller"
     )
+    assert len(suppressed) == 20 - SEEDED_EMISSIONS
     assert all(item["reason"] == "dropped" for item in suppressed)
+
+
+async def test_the_drop_rate_value_actually_changes_the_loss(stub: StubClient) -> None:
+    """Two different rates on the same seed must produce different counts.
+
+    The negative control for the knob itself: an implementation that ignored the configured
+    rate and used a fixed one would still pass a single-rate exact-count test, because that
+    test's expected number could just as well be the fixed rate's.
+    """
+    counts: dict[float, int] = {}
+    for rate in (0.1, 0.9):
+        await stub.http.post("/_stub/reset")
+        await stub.seed([SEED_VARIANT])
+        await stub.configure(pixel_drop_rate=rate, pixel_seed=1234)
+        emitted = 0
+        for _ in range(20):
+            emitted += bool((await stub.buy(VARIANT_ID))["pixel_event_emitted"])
+        counts[rate] = emitted
+    assert counts[0.1] > counts[0.9], f"a higher drop rate must lose more events; got {counts}"
+    assert counts[0.1] >= 15 and counts[0.9] <= 5, (
+        f"the counts must track the configured rate, not merely differ; got {counts}"
+    )
 
 
 async def test_the_same_seed_reproduces_the_same_drop_pattern(stub_server: str) -> None:
