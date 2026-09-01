@@ -1146,7 +1146,10 @@
         "fixtures/catalog/**",
         "fixtures/personas/**",
         "fixtures/golden/**",
-        "fixtures/tests/**"
+        "fixtures/tests/**",
+        "fixtures/manifest.json",
+        "fixtures/generator/**",
+        "fixtures/__init__.py"
       ],
       "depends_on": [
         "T-013"

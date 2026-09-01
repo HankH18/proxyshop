@@ -1,6 +1,6 @@
 {
   "frozen": true,
-  "frozen_at": "2026-09-01T13:28:50",
+  "frozen_at": "2026-09-01T14:45:56",
   "metrics": [
     {
       "id": "acceptance_pass_rate",
@@ -132,7 +132,7 @@
       "timeout": 2400
     }
   ],
-  "amendments": 1,
-  "last_amended_at": "2026-09-01T13:28:50",
-  "last_amend_reason": "Amendment 1, user-approved after an external review. Three frozen incidentals were distorting the architecture and are corrected: (1) external signing/replay fields become REQUIRED with a key_id-indexed keyring, canonical signing bytes and nonce persistence \u2014 they had been made optional only to preserve a fixture that omitted them, i.e. a test dictating a public security contract; (2) catalog_claim_accuracy becomes a real sixth trust dimension in the one trust system, replacing a mapping table that relocated product-fact semantics into transaction dimensions; (3) eligibility gains denial tests at the public orchestration boundary, since the pure positional functions bypassed the layer where the guarantee lives. Suite 103 -> 120 tests; zero of the 17 new tests pass at cycle 0; all sabotages caught; no existing test weakened or renamed. Breaking contract change recorded: receive_bid's keyring goes flat {signer_id: secret} -> nested {signer_id: {key_id: secret}} with new required kwargs."
+  "amendments": 2,
+  "last_amended_at": "2026-09-01T14:45:56",
+  "last_amend_reason": "Amendment 2, user-approved (ESC-002). test_compose_declares_healthchecked_postgres_neo4j_redis_and_separate_deployables was UNSATISFIABLE: it read services only from the root docker-compose.yml via a textual parser that never followed 'include:', while the four deployables (buyer/merchant/exchange/trust) live in per-lane fragments by design \u2014 the root file's own header states a service ticket fills its own fragment and no ticket ever edits the root. So the test could never pass whatever any ticket built, pinning acceptance_pass_rate (target 100, tolerance 0) permanently below target and spec_criteria_passing at 7/8. Fix: two new helpers, _compose_include_paths() parses the include: block textually (no PyYAML dependency, consistent with _compose_services), and _compose_stack_services() unions the root's services with every included fragment's; the test now reads that union. Verified in both directions before re-freezing: with the four fragments as shipped (empty 'services: {}' stubs) the test is RED for the correct reason, and with the four temporarily filled it is GREEN \u2014 so the amendment makes C1 reachable without making it free. No assertion was weakened, no test renamed, no test added or removed; the suite stays at 120. Only test_spec_criteria.py changed."
 }

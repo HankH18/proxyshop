@@ -312,6 +312,58 @@ def _compose_services(text: str) -> dict[str, str]:
     return {name: "\n".join(body) for name, body in services.items()}
 
 
+def _compose_include_paths(text: str) -> list[pathlib.Path]:
+    """Fragment paths listed under a top-level ``include:`` block, resolved from the root.
+
+    Textual for the same reason as :func:`_compose_services`: the frozen suite may not
+    assume PyYAML is installed. Reads the short form the root file uses (``- a/b.yaml``)
+    and the ``- path: a/b.yaml`` long form.
+    """
+    lines = text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if re.match(r"^include:\s*(#.*)?$", line):
+            start = index + 1
+            break
+    if start is None:
+        return []
+
+    paths: list[pathlib.Path] = []
+    for line in lines[start:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if len(line) - len(line.lstrip(" ")) == 0:
+            break
+        match = re.match(r"^\s*-\s*(?:path:\s*)?(\S+)\s*$", line)
+        if match:
+            candidate = REPO_ROOT / match.group(1)
+            if candidate.is_file():
+                paths.append(candidate)
+    return paths
+
+
+def _compose_stack_services() -> dict[str, str]:
+    """Every service the compose stack declares: the root file's own ``services:`` block
+    plus the block of every fragment its ``include:`` list pulls in.
+
+    AMENDMENT 2. The four deployables (buyer/merchant/exchange/trust) live in per-lane
+    fragments *by design* — the root file's own header states that a service ticket fills
+    its own fragment and that no ticket ever edits the root file — so a check that read
+    only the root could never see them, no matter what any ticket built. Reading the
+    fragments makes C1 reachable; it does not make it free, because a fragment that is
+    still an empty ``services: {}`` stub contributes nothing.
+    """
+    path = _compose_path()
+    if path is None:
+        return {}
+    text = _read_text(path)
+    services = _compose_services(text)
+    for fragment in _compose_include_paths(text):
+        for name, block in _compose_services(_read_text(fragment)).items():
+            services.setdefault(name, block)
+    return services
+
+
 def _sql_statements(text: str) -> list[str]:
     """Whitespace-normalised, comment-stripped SQL statements."""
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
@@ -716,8 +768,7 @@ def test_compose_declares_healthchecked_postgres_neo4j_redis_and_separate_deploy
         "no docker-compose file at the repo root — C7 requires every service to run under "
         "docker-compose locally"
     )
-    text = _read_text(path)
-    services = _compose_services(text)
+    services = _compose_stack_services()
     assert services, f"{path.name} declares no top-level `services:` block"
 
     def _find(token: str) -> str | None:
