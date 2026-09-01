@@ -1003,47 +1003,89 @@ because the loop's own dispatch writes packets by heredoc whose text quotes `git
 **Fix:** drop only the offending token or segment and evaluate the rest, rather than bailing
 on the entire command.
 
-## H-31 — `manifest.json` is an unauthenticated trust root [VERIFIED-HERE, framing narrowed]
+## H-31 — the git anchoring exists, is sound, and is attached to the wrong end [VERIFIED-HERE]
 
-**Confirmed here:** the manifest hashes **16 named files**; `manifest.json` is **not among
-them**, and the object carries **no `protected_paths` key** at all. So the file that defines
-what "frozen" means is not itself covered by the mechanism it defines.
+**Corrected twice. Read this version; the two earlier framings — mine and the peer's — were
+both wrong in different directions, and the corrected finding is sharper and cheaper to fix
+than either.**
 
-The attack is one step: weaken a frozen test, recompute that one hash into the manifest, and
-`verify` reports "OK — frozen harness intact" indefinitely — no freeze-log line, `amendments`
-unchanged, and `resume` / `status` / `analyze` all endorsing a clean run. **Every
-anti-goalpost defence in this document sits downstream of this one file.**
+**What is true.** `manifest.json` defines what "frozen" means: 16 file digests, plus
+`frozen_at` and `amendments`. It is a plain unsigned local JSON file, it is **not among the
+16 files it hashes**, and the detection paths trust it completely.
 
-**Narrowing the peer's framing, because I could not confirm all of it:** `cmd_verify` (`:1280`)
-*does* reference `_commit_with_blob` at `:1337`, so some git anchoring exists in that path.
-What I did confirm is that **`_verify_quiet` — the integrity check `cmd_record` and
-`cmd_resume` actually call — contains zero occurrences of `_commit_with_blob`**. So the
-cheap/automatic path is unanchored even where the explicit one may not be. Someone
-implementing this should read both paths rather than trusting either of our summaries.
+**What I got wrong.** I wrote that `cmd_verify` "does reference `_commit_with_blob` at
+`:1337`, so some git anchoring exists in that path." **It does not.** `cmd_verify` runs
+`:1280`–`:1319`; line 1337 is inside `cmd_restore_harness`, which starts at `:1320`. I read a
+grep line number and inferred the enclosing function instead of checking where it ended — the
+precise error H-10 and H-18 are about, committed while writing them up.
 
-**Trap for the implementer, flagged by the peer and worth repeating:** the freeze log's
-`goals.json` hash can never match the manifest's by construction, because `frozen_at` and
-`amendments` are stamped in *after* hashing. A naive reconciliation will report tamper on a
-clean tree.
+**The verified shape.** `_commit_with_blob` (`:493`) appears at exactly two call sites: `:516`
+inside `_print_unified` (a diff-display helper) and `:1337` inside `cmd_restore_harness`.
+**Neither `cmd_verify` nor `_verify_quiet` calls it.** Both detection paths do only two things
+— compare disk bytes to `manifest["files"]`, then the ADDED scan — and both take the manifest's
+word for what the digests should be.
 
-## H-32 — acceptance-suite MEMBERSHIP is not pinned, only file contents [VERIFIED-HERE]
+**So the finding is not "add git anchoring." The anchoring is already written and it is good.**
+`_commit_with_blob`'s own docstring shows the care in it: it deliberately does **not** use the
+freeze-time HEAD, because `.swarm-loop/` is committed *after* freeze and that commit does not
+contain the frozen files at all — it searches by digest instead, "and proves the bytes it holds
+are the frozen ones rather than assuming it." That is exactly the right primitive. **It is
+wired only into the repair path.**
 
-`manifest.json` hashes 16 **named** files, but `run.py` invokes pytest on
-`str(ACCEPTANCE_DIR)` — **the whole directory**. So the frozen set is closed under
-*modification* and wide open under *addition*.
+**Consequence, stated plainly:** the harness can faithfully *restore* frozen bytes that it can
+be fooled into believing were never altered. Weaken a frozen test, recompute that one digest
+into the manifest, and `verify` reports "OK — frozen harness intact" indefinitely: no
+freeze-log line, `amendments` unchanged, `resume` / `status` / `analyze` all endorsing a clean
+run. Every anti-goalpost defence in this document sits downstream of that one unsigned file.
 
-`acceptance_collected` is `direction: maximize` with target 120. Fifty trivially-green tests in
-a new `test_zz.py` marked `@pytest.mark.epic("E6")` would raise **three metrics at once**:
-`acceptance_collected` past 120, `e6_trust_passing` past 26, and `acceptance_pass_rate`.
+**Fix, and it is cheap.** Have `cmd_verify` / `_verify_quiet` call `_commit_with_blob` to
+confirm the manifest digest itself appears in git history. **It only needs to run when a hash
+MATCHES** — a mismatch is already a violation caught by the cheap byte comparison, so the git
+walk is the confirmation step, not the primary one.
 
-The suite's own guard (`test_spec_criteria.py:630`) asserts every test *carries* valid epic and
-ticket markers — it does not assert the **file belongs**. `check-branch` is the only defence
-and it sees branch commits only, so **an auditor or orchestrator working in the primary tree is
-entirely outside it**. That is not hypothetical: this run has had read-only agents in the
-primary tree throughout.
+**Trap for the implementer:** the freeze log's `goals.json` hash can never match the manifest's
+by construction, because `frozen_at` and `amendments` are stamped in *after* hashing. A naive
+reconciliation will report tamper on a clean tree.
 
-**Fix:** hash the directory *listing* alongside the file contents, and have `verify` fail on an
-unrecognised member — which is what `[ADDED]` reporting already half-does for protected paths.
+**One correction to my own earlier note:** I wrote that the manifest carries "no
+`protected_paths` key." True of `manifest.json`, but misleading — `protected_paths` lives in
+**`state.json`** and is populated: `['.swarm-loop/acceptance', '.swarm-loop/goals.json',
+'Makefile', 'scripts/verify.sh', 'scripts/check_verify_contracts.py']`. It is what both ADDED
+scans iterate.
+
+## H-32 — [RETRACTED] acceptance-suite membership IS pinned
+
+**Withdrawn by its author against their own evidence, and independently confirmed retracted
+here. A harness agent should skip this entry — there is no work in it.**
+
+The claim was that a stray `test_zz.py` dropped into `.swarm-loop/acceptance/` would go
+undetected and inflate three metrics at once, because `run.py` collects the whole directory
+while the manifest hashes 16 named files.
+
+**It would be detected.** Both integrity paths carry an identical ADDED scan over every
+protected *directory*, flagging any file not in `manifest["files"]` — `cmd_verify` at
+`:1291`-`:1301` and `_verify_quiet` at `:1922`-`:1932`:
+
+```python
+for path in iter_files(base):
+    rel = os.path.relpath(path, root)
+    if rel not in manifest["files"]:
+        bad.append("[ADDED] " + rel)
+```
+
+So the frozen set is closed under **addition** as well as modification, in both the explicit
+and the automatic path. The three-metrics scenario cannot run.
+
+**What survives is already recorded as H-9 and needs no separate entry.** `iter_files` filters
+`.pyc`/`.pyo` **by suffix**, so the one addition the scan cannot see is a sourceless
+`acceptance/helpers.pyc` — exactly the shape `SourcelessFileLoader` imports as a sibling. The
+fix is the one-line change to `is_artifact_path`: drop the suffix clause, keep the directory
+clause.
+
+**Why this entry stays in the file rather than being deleted:** both authors reached the same
+wrong conclusion by reasoning from two true facts (`run.py` collects a directory; the manifest
+lists 16 files) without reading the scan sitting in both verify paths. Recording the retraction
+is cheaper than someone re-deriving it a third time.
 
 ---
 
@@ -1056,6 +1098,9 @@ unrecognised member — which is what `[ADDED]` reporting already half-does for 
   reproductions stay in the file with their evidence. See pre-dispatch MUST FIX #7 for the
   worked example: acting on it would have added false-positive surface to the guard while
   leaving the real bypass (H-30) open.
+- `[RETRACTED]` — the **author withdrew it against their own evidence**. Distinct from
+  `[DISPUTED]`, where two parties still disagree: a retracted entry has no live claim in it and
+  can be skipped without reading the argument. See H-32.
 
 Keeping the provenance explicit is what let a disputed entry get caught before a fix shipped.
 Two parties disagreeing in the file, with both reproductions cited, is more useful to whoever
