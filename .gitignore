@@ -1,0 +1,41 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+*.tsbuildinfo
+.vitest/
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Tooling indexes
+.codegraph/
+
+# Swarm-loop: state + goals ARE committed; these are not
+.swarm-loop/worktrees/
+.swarm-loop/archive/
+.swarm-loop/tmp/
+
+# Local agent settings (permissions/hooks) stay local
+.claude/settings.local.json
+
+# Docker volumes
+.docker-data/

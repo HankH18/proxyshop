@@ -1,0 +1,1213 @@
+{
+ "version": 1,
+ "project": "proxyshop",
+ "full_verify": "make verify",
+ "tickets": [
+  {
+   "id": "T-000",
+   "title": "Monorepo skeleton with green empty verify pipeline",
+   "objective": "Bootstrap the repo so every downstream verify command can run: workspace layout per DESIGN Architecture, docker-compose (postgres, neo4j, redis), lint/type/test configs for py+ts, root `make verify` green on empty suites.",
+   "refs": [
+    "C1",
+    "C2",
+    "C7",
+    "DESIGN#architecture"
+   ],
+   "acceptance": [
+    "1. `make verify` exits 0 on fresh clone with services up",
+    "2. compose brings up postgres+neo4j+redis healthchecked",
+    "3. package layout matches DESIGN (packages/protocol, packages/store-agent, apps/{buyer,merchant,exchange,trust}, services/{ingest,shopify-stub,sim}, pixel/)"
+   ],
+   "verify": "make verify",
+   "scope": [
+    "**"
+   ],
+   "depends_on": [],
+   "non_goals": [
+    "No feature code; no schemas"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-010",
+   "title": "Contracts generate typed models and enforce the dual-path bid boundary",
+   "objective": "packages/contracts: JSON Schemas per DESIGN \u00a7Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint.",
+   "refs": [
+    "R8",
+    "R18",
+    "R19",
+    "S5",
+    "C10",
+    "DESIGN#interfaces-contracts-between-tickets"
+   ],
+   "acceptance": [
+    "1. Schema\u2192codegen produces importable py+ts types for all pinned objects incl. VerificationResult",
+    "2. Hosted-path bid with a seller_asserted claim rejects; external-path bid with the same claim admits flagged-for-verification; expired/blacklisted reject on both",
+    "3. Round-trip serialization passes in both languages; every cross-domain endpoint has a checked-in OpenAPI example + contract test"
+   ],
+   "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
+   "scope": [
+    "packages/contracts/**"
+   ],
+   "depends_on": [
+    "T-000"
+   ],
+   "non_goals": [
+    "No service code; schema changes after this land only via E1 tickets"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-011",
+   "title": "Postgres schemas enforce role isolation and hash-chained ledger",
+   "objective": "Create ledger/sealed/vault/app schemas with roles per DESIGN \u00a7Data models using the partner-reconciled table set (commerce_events with idempotency + prev_hash chain, claims, claim_verifications, verification_evidence_refs, trust_observations, trust_scores, policy_events, ranking_runs/candidates, catalog_snapshots, crawl tables, seller_blacklist with review states); replay library; grant tests prove exchange role cannot read sealed.* (S7).",
+   "refs": [
+    "C3",
+    "R15",
+    "S3",
+    "S7",
+    "DESIGN#data-models"
+   ],
+   "acceptance": [
+    "1. Migrations apply cleanly; all FKs + blacklist/idempotency indexes present",
+    "2. Grant test: exchange role SELECT on sealed.* fails",
+    "3. commerce_events enforces idempotency_key uniqueness and valid prev_hash; replay reproduces stream hash"
+   ],
+   "verify": "pytest apps/trust/tests/test_schema_grants.py apps/trust/tests/test_ledger_chain.py -q",
+   "scope": [
+    "db/migrations/**",
+    "apps/trust/src/ledger/**",
+    "apps/trust/tests/**"
+   ],
+   "depends_on": [
+    "T-000"
+   ],
+   "non_goals": [
+    "No scoring logic"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-012",
+   "title": "Neo4j attribute-node catalog with vector retrieval through EmbeddingProvider",
+   "objective": "Partner-reconciled graph model (Product/Variant/Offer/Category/AttributeValue/Ingredient/Source with SUPPORTED_BY provenance; uniqueness constraints on all stable IDs; no free-text-only product matching), 1024-dim cosine vector index on Product.embedding, EmbeddingProvider + HashEmbedding double, upsert + candidate-query library.",
+   "refs": [
+    "C2",
+    "C4",
+    "DESIGN#data-models"
+   ],
+   "acceptance": [
+    "1. Constraints + indexes created idempotently; every material fact upserts with a SUPPORTED_BY Source",
+    "2. Vector+attribute candidate query returns seeded products under HashEmbedding",
+    "3. Re-embed script passes on sample data; provider swap is config-only"
+   ],
+   "verify": "pytest services/ingest/tests/test_graph.py -q",
+   "scope": [
+    "services/ingest/src/graph/**",
+    "services/ingest/src/embeddings/**",
+    "services/ingest/tests/**"
+   ],
+   "depends_on": [
+    "T-000"
+   ],
+   "non_goals": [
+    "No adapters/extraction"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-013",
+   "title": "Shopify stub reproduces the exact surface the system uses",
+   "objective": "Local service implementing: discountCodeBasicCreate (usageLimit, expiry, combinesWith), orders query subset, webhook delivery (orders/paid, orders/fulfilled, refunds/create), cart-permalink redemption honoring code validity, and pixel event emission incl. documented non-firing mode (C9, A4).",
+   "refs": [
+    "C9",
+    "A1",
+    "A4",
+    "DESIGN#architecture"
+   ],
+   "acceptance": [
+    "1. Contract tests assert request/response parity with recorded real-API shapes for each mutation/query used",
+    "2. Permalink redemption applies valid codes and silently ignores invalid/conflicting ones (matching real behavior)",
+    "3. Configurable pixel drop-rate; webhooks always delivered"
+   ],
+   "verify": "pytest services/shopify-stub -q",
+   "scope": [
+    "services/shopify-stub/**"
+   ],
+   "depends_on": [
+    "T-000"
+   ],
+   "non_goals": [
+    "No merchant-app logic"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-014",
+   "title": "LLM client with per-role config, cache-first prompts, and test doubles",
+   "objective": "Wrapper for Anthropic API: model IDs from env per DESIGN, static-context-first prompt assembly for caching, recorded/deterministic doubles for tests.",
+   "refs": [
+    "C4",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Role\u2192model resolution from env with documented defaults",
+    "2. Prompt assembly puts store context before dynamic tail (cache boundary test)",
+    "3. Double replays recorded fixtures deterministically; no network in tests"
+   ],
+   "verify": "pytest packages/llm -q",
+   "scope": [
+    "packages/llm/**"
+   ],
+   "depends_on": [
+    "T-000"
+   ],
+   "non_goals": [
+    "No agent logic"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-020",
+   "title": "Signed fetch adapter ingests a storefront including password-protected dev stores",
+   "objective": "CatalogAdapter interface + signed_fetch impl: products.json + JSON-LD, storefront-password session, identified UA + robots.txt, content-hash change detection. SSRF-guarded fetching: private/link-local blocked, redirects bounded to allowed hosts, crawl budgets (pages, depth, time, bytes).",
+   "refs": [
+    "C6",
+    "A1",
+    "DESIGN#interfaces-contracts-between-tickets"
+   ],
+   "acceptance": [
+    "1. Adapter ingests stub storefront fixture incl. password mode",
+    "2. robots disallow honored (test)",
+    "3. Unchanged content produces zero re-extraction work (hash test)",
+    "4. SSRF tests: private-IP and unsafe-redirect fixtures are refused; budgets enforced"
+   ],
+   "verify": "pytest services/ingest/tests/test_signed_fetch.py -q",
+   "scope": [
+    "services/ingest/src/adapters/**",
+    "services/ingest/tests/**"
+   ],
+   "depends_on": [
+    "T-000",
+    "T-012"
+   ],
+   "non_goals": [
+    "No LLM extraction; no MCP"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-021",
+   "title": "Policy pages and marketing claims land in the graph with provenance",
+   "objective": "Fetch shipping/return/guarantee pages; Haiku-class extraction on hash change; decompose to atomic Claims; upsert with Source(source_class=scraped) and snapshot refs.",
+   "refs": [
+    "R8",
+    "C6",
+    "DESIGN#data-models"
+   ],
+   "acceptance": [
+    "1. Given fixture pages, extracted Claims match approved expectation file",
+    "2. Every claim/attribute has a SUPPORTED_BY Source with snapshot ref; low-confidence extraction is quarantined, not upserted",
+    "3. Re-run on unchanged pages performs no LLM calls (double counts)"
+   ],
+   "verify": "pytest services/ingest/tests/test_extraction.py -q",
+   "scope": [
+    "services/ingest/src/extraction/**",
+    "services/ingest/tests/**",
+    "fixtures/pages/**"
+   ],
+   "depends_on": [
+    "T-014",
+    "T-020"
+   ],
+   "non_goals": [
+    "No truth adjudication"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-022",
+   "title": "Same products across stores link via entity resolution",
+   "objective": "GTIN exact match plus embedding+attribute matcher producing SAME_AS edges with confidence; threshold config.",
+   "refs": [
+    "DESIGN#data-models"
+   ],
+   "acceptance": [
+    "1. On the approved ER fixture set, precision \u2265 configured floor and GTIN matches always link",
+    "2. Edges carry confidence; below-threshold pairs are not linked"
+   ],
+   "verify": "pytest services/ingest/tests/test_entity_resolution.py -q",
+   "scope": [
+    "services/ingest/src/er/**",
+    "services/ingest/tests/**",
+    "fixtures/er/**"
+   ],
+   "depends_on": [
+    "T-012",
+    "T-020"
+   ],
+   "non_goals": [
+    "No cross-category ontology"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-023",
+   "title": "Catalog MCP adapter passes recorded-contract tests",
+   "objective": "catalog_mcp CatalogAdapter implementing the production-primary read path against recorded mocks (dev stores are not in Global Catalog \u2014 A1).",
+   "refs": [
+    "C6",
+    "A1"
+   ],
+   "acceptance": [
+    "1. Adapter satisfies the CatalogAdapter interface tests",
+    "2. Contract tests replay recorded MCP responses; mapping to graph upserts matches signed_fetch semantics"
+   ],
+   "verify": "pytest services/ingest/tests/test_catalog_mcp.py -q",
+   "scope": [
+    "services/ingest/src/adapters/**",
+    "services/ingest/tests/**",
+    "fixtures/mcp/**"
+   ],
+   "depends_on": [
+    "T-020"
+   ],
+   "non_goals": [
+    "No live Shopify calls in verify"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-024",
+   "title": "Differential refresh keeps the graph current at field-appropriate cadence",
+   "objective": "Scheduler with per-field cadence config; only changed content re-extracts; refresh endpoint.",
+   "refs": [
+    "C6",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Cadence config drives which adapters run (frozen-clock test)",
+    "2. POST /refresh/{store} triggers one store's pipeline",
+    "3. No re-extraction without hash change across a full cycle"
+   ],
+   "verify": "pytest services/ingest/tests/test_refresh.py -q",
+   "scope": [
+    "services/ingest/src/scheduler/**",
+    "services/ingest/tests/**"
+   ],
+   "depends_on": [
+    "T-021",
+    "T-023"
+   ],
+   "non_goals": [
+    "No pixel-feed intake (arrives via merchant app events)"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-030",
+   "title": "Auctions fan out, time out, and always represent every store",
+   "objective": "Auction state machine in Redis; POST /auctions; parallel BidRequest fan-out with hard timeout; list-price fallback bids for Tier-0 and non-responding stores (R10).",
+   "refs": [
+    "R10",
+    "DESIGN#service-apis-pinned-routes"
+   ],
+   "acceptance": [
+    "1. Auction with 3 responsive + 1 silent + 2 Tier-0 stores yields 6 ranked entries, silent one at list price",
+    "2. Timeout enforced (frozen clock); late bids rejected",
+    "3. State machine transitions logged to ledger via trust API stub"
+   ],
+   "verify": "pytest apps/exchange/tests/test_auction.py -q",
+   "scope": [
+    "apps/exchange/src/auction/**",
+    "apps/exchange/tests/**"
+   ],
+   "depends_on": [
+    "T-010",
+    "T-013"
+   ],
+   "non_goals": [
+    "No ranking; no bandit"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-031",
+   "title": "Candidate retrieval and fit scoring feed the ranker",
+   "objective": "Vector+attribute retrieval from Neo4j, rerank behind an interface (deterministic double in tests), fit score per candidate logged per bid.",
+   "refs": [
+    "R11",
+    "A2",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Retrieval returns hard-criteria-satisfying candidates only",
+    "2. Fit scores deterministic under double; logged with auction",
+    "3. Latency budget test under fixture load"
+   ],
+   "verify": "pytest apps/exchange/tests/test_retrieval.py -q",
+   "scope": [
+    "apps/exchange/src/retrieval/**",
+    "apps/exchange/tests/**"
+   ],
+   "depends_on": [
+    "T-012",
+    "T-030"
+   ],
+   "non_goals": [
+    "No formula weights here"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-032",
+   "title": "Shortlists rank by the single published formula behind eligibility filters",
+   "objective": "Eligibility filters (blacklist fail-closed, offer expiry, checkout-domain validity, hard constraints requiring verified facts per R19), then published rank_score per DESIGN \u00a7Decisions with [0,1]-normalized features, policy penalties, stable tie-breaking, component map + human-readable explanation; slotting \u22644 with graceful collapse; provenance + verification-warning labels.",
+   "refs": [
+    "R2",
+    "R11",
+    "R19",
+    "A6",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Golden tests: fixed inputs \u2192 exact eligibility set, ranking, slots, explanations",
+    "2. Blindness test: tier/fee fields cannot alter score; contradicted hard constraint never wins regardless of other components (release blocker test)",
+    "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1\u20133 stores"
+   ],
+   "verify": "pytest apps/exchange/tests/test_ranking.py -q",
+   "scope": [
+    "apps/exchange/src/ranking/**",
+    "apps/exchange/tests/**"
+   ],
+   "depends_on": [
+    "T-031",
+    "T-065"
+   ],
+   "non_goals": [
+    "No trust computation (consumes snapshot)"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-033",
+   "title": "Accepting an offer produces a validated code and permalink",
+   "objective": "Accept endpoint delegates to merchant /codes, returns permalink; records accepted event; handles code-creation failure with re-offer of next slot. Starting-slice mode: simulated/redirect checkout validates the URL against the registered seller domain and emits checkout_redirect + downstream LedgerEvent kinds identical to the Shopify path (C11); Shopify mode delegates to merchant /codes as designed.",
+   "refs": [
+    "R3",
+    "A5"
+   ],
+   "acceptance": [
+    "1. Accept \u2192 code+permalink via stub; ledger events emitted",
+    "2. Merchant failure path re-offers deterministically",
+    "3. Double-accept on one auction rejected",
+    "4. Redirect mode: off-domain checkout_url is refused (release blocker test); emitted event kinds match the Shopify-mode golden sequence"
+   ],
+   "verify": "pytest apps/exchange/tests/test_accept.py -q",
+   "scope": [
+    "apps/exchange/src/accept/**",
+    "apps/exchange/tests/**"
+   ],
+   "depends_on": [
+    "T-030",
+    "T-052"
+   ],
+   "non_goals": [
+    "No checkout observation"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-034",
+   "title": "Exchange bandit shifts exposure with outcomes and honors exploration",
+   "objective": "Contextual Thompson sampling over cluster\u00d7store adjusting exposure/exploration (not formula weights); guaranteed exploration slice for low-data stores from trust snapshot.",
+   "refs": [
+    "R12",
+    "R16",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Seeded sim: positive outcomes for a store raise its exposure in-cluster (S4 pre-check)",
+    "2. Exploration slice floor holds for a new store across a window",
+    "3. Blacklisted stores draw zero exposure"
+   ],
+   "verify": "pytest apps/exchange/tests/test_bandit.py -q",
+   "scope": [
+    "apps/exchange/src/policy/**",
+    "apps/exchange/tests/**"
+   ],
+   "depends_on": [
+    "T-032",
+    "T-064"
+   ],
+   "non_goals": [
+    "No store-side learning"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-035",
+   "title": "Loss reports aggregate reasons without leaking amounts",
+   "objective": "Windowed job producing LossReport per store: reason categories from the ranking formula's dominant term, unmet criteria for fit losses, delayed release.",
+   "refs": [
+    "R9",
+    "DESIGN#interfaces-contracts-between-tickets"
+   ],
+   "acceptance": [
+    "1. Golden aggregation from a fixture auction log",
+    "2. Output schema contains no prices/amounts/rival ids (property test)",
+    "3. Release delay enforced"
+   ],
+   "verify": "pytest apps/exchange/tests/test_loss_reports.py -q",
+   "scope": [
+    "apps/exchange/src/reports/**",
+    "apps/exchange/tests/**"
+   ],
+   "depends_on": [
+    "T-032"
+   ],
+   "non_goals": [
+    "No dashboard UI"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-040",
+   "title": "Tool hooks are the only way facts and discounts enter a bid",
+   "objective": "Implement the six hooks per DESIGN \u00a7Tool hooks with Provenance on every return; authorize_discount enforces envelope walls; agent-side assembly cannot construct Claims directly (lint + runtime guard).",
+   "refs": [
+    "R8",
+    "DESIGN#tool-hooks-store-agent-internal-contract"
+   ],
+   "acceptance": [
+    "1. Each hook returns correctly sourced Provenance (unit)",
+    "2. authorize_discount denies below-floor/over-cap against approved envelope fixtures",
+    "3. Constructing a Claim outside hooks fails lint and runtime guard tests"
+   ],
+   "verify": "pytest packages/store-agent/tests/test_hooks.py -q",
+   "scope": [
+    "packages/store-agent/src/hooks/**",
+    "packages/store-agent/tests/**",
+    "fixtures/envelopes/**"
+   ],
+   "depends_on": [
+    "T-010",
+    "T-011"
+   ],
+   "non_goals": [
+    "No LLM runtime"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-041",
+   "title": "Advocate runtime bids within walls and defaults deterministically cold",
+   "objective": "BidRequest\u2192Bid|decline: cache-layout context assembly, hook-only claim emission, deterministic cold-start bid (list price + standing commitments + intro rule only).",
+   "refs": [
+    "R8",
+    "R10",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Cold agent on fixture store emits the exact deterministic default bid",
+    "2. All emitted claims trace to hooks (property test over recorded runs)",
+    "3. Decline path produces a valid decline with reason"
+   ],
+   "verify": "pytest packages/store-agent/tests/test_runtime.py -q",
+   "scope": [
+    "packages/store-agent/src/runtime/**",
+    "packages/store-agent/tests/**"
+   ],
+   "depends_on": [
+    "T-014",
+    "T-040"
+   ],
+   "non_goals": [
+    "No learning"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-042",
+   "title": "Store loop learns from its own outcomes only",
+   "objective": "Per-store Thompson sampling over discount-depth buckets \u00d7 commitment sets per cluster; network-prior intake; prior builder consumes pitch/value-prop outcomes only.",
+   "refs": [
+    "R17",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Seeded outcomes shift the store's own depth distribution toward winners (S4 pre-check)",
+    "2. Prior builder rejects/never reads discount fields (schema-level test)",
+    "3. Two stores' learned states are independent under identical priors + different outcomes"
+   ],
+   "verify": "pytest packages/store-agent/tests/test_learning.py -q",
+   "scope": [
+    "packages/store-agent/src/learning/**",
+    "packages/store-agent/tests/**"
+   ],
+   "depends_on": [
+    "T-041"
+   ],
+   "non_goals": [
+    "No exchange-side policy"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-043",
+   "title": "Shadow mode logs would-be bids and trust events adjust the agent",
+   "objective": "Shadow activation gates submission but logs full bids+rationale to sealed store state; TrustEventPayload intake adjusts policy/commitment posture and is visible in rationale.",
+   "refs": [
+    "R7",
+    "R13"
+   ],
+   "acceptance": [
+    "1. Shadow store: live intents produce logged bids, zero submissions",
+    "2. Injected trust event changes subsequent bid rationale deterministically under doubles",
+    "3. Activation flip submits without restart"
+   ],
+   "verify": "pytest packages/store-agent/tests/test_shadow_trust.py -q",
+   "scope": [
+    "packages/store-agent/src/modes/**",
+    "packages/store-agent/tests/**"
+   ],
+   "depends_on": [
+    "T-041"
+   ],
+   "non_goals": [
+    "No dashboard"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-044",
+   "title": "External bids enter signed and route to verification, not rejection",
+   "objective": "Signature registration + verification on POST /bid for non-hosted agents; schema validation admits seller_asserted claims and free-text message, marks the bid unverified, and enqueues extraction+verification; hosted path unchanged.",
+   "refs": [
+    "R8",
+    "DESIGN#service-apis-pinned-routes"
+   ],
+   "acceptance": [
+    "1. Registered-key signed external bid accepted and enqueued for verification; bad signature rejected",
+    "2. Hosted bid with non-hook provenance still rejects (regression)",
+    "3. Expired/blacklisted external bids reject before enqueue"
+   ],
+   "verify": "pytest packages/store-agent/tests/test_external_bids.py -q",
+   "scope": [
+    "packages/store-agent/src/external/**",
+    "packages/store-agent/tests/**"
+   ],
+   "depends_on": [
+    "T-041"
+   ],
+   "non_goals": [
+    "No packaging/distribution work"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-045",
+   "title": "Three seller personas exercise the external door adversarially",
+   "objective": "apps/seller-reference: value / specialist / aggressive personas with identity, catalog scope, tone, and offer policy; free-text pitches with asserted claims via the external /bid path; the aggressive persona emits manifest-scripted false and unsupported claims. Personas may tailor pitches but never redefine catalog facts.",
+   "refs": [
+    "R8",
+    "R18",
+    "S8",
+    "DESIGN#architecture"
+   ],
+   "acceptance": [
+    "1. Each persona answers a fixture intent concurrently within the deadline (LLM doubles)",
+    "2. Aggressive persona's pitches contain exactly the manifest-scripted false/unsupported claims",
+    "3. Persona claims arrive as seller_asserted and are marked unverified at intake"
+   ],
+   "verify": "pytest apps/seller-reference -q",
+   "scope": [
+    "apps/seller-reference/**"
+   ],
+   "depends_on": [
+    "T-014",
+    "T-044",
+    "T-080"
+   ],
+   "non_goals": [
+    "No verification logic; no hosted-agent code"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-050",
+   "title": "Installing the app wires pixel and webhooks against the stub",
+   "objective": "React Router v7 Shopify app scaffold; install/auth against shopify-stub; webPixelCreate with settings; webhook subscriptions per DESIGN.",
+   "refs": [
+    "R6",
+    "C5"
+   ],
+   "acceptance": [
+    "1. Install flow completes against stub; offline token stored per shop",
+    "2. webPixelCreate called with expected settings payload",
+    "3. Webhook subscriptions registered and receivable"
+   ],
+   "verify": "npx vitest run apps/merchant && pytest apps/merchant/svc/tests/test_install.py -q",
+   "scope": [
+    "apps/merchant/**"
+   ],
+   "depends_on": [
+    "T-013"
+   ],
+   "non_goals": [
+    "No dashboard pages beyond shell"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-051",
+   "title": "Pixel reports checkout outcomes the collector can join",
+   "objective": "Web pixel extension subscribing standard events; POST via fetch keepalive to collector with clientId, checkout token, order id, discountApplications; collector persists to app schema and forwards LedgerEvents.",
+   "refs": [
+    "R4",
+    "C5"
+   ],
+   "acceptance": [
+    "1. Stub-emitted checkout_completed lands as checkout_pixel LedgerEvent with join keys",
+    "2. Collector tolerates pixel drop-rate mode (no crash, gap visible)",
+    "3. No PII fields accepted (schema rejects)"
+   ],
+   "verify": "npx vitest run pixel && pytest apps/merchant/svc/tests/test_collector.py -q",
+   "scope": [
+    "pixel/**",
+    "apps/merchant/svc/src/collector/**",
+    "apps/merchant/svc/tests/**"
+   ],
+   "depends_on": [
+    "T-050"
+   ],
+   "non_goals": [
+    "No reconciliation logic"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-052",
+   "title": "Winning offers become single-use validated codes and permalinks",
+   "objective": "/codes: discountCodeBasicCreate usageLimit:1 + expiry, validity + combinesWith pre-check, unique code per accepted offer, permalink construction; duplicate redemption surfaces as offer-integrity event (A5).",
+   "refs": [
+    "R3",
+    "A5",
+    "C5"
+   ],
+   "acceptance": [
+    "1. Code created per offer; permalink applies it in stub redemption",
+    "2. Conflicting combinesWith detected pre-redirect (offer re-priced or rejected)",
+    "3. Duplicate use emits integrity LedgerEvent, not an exception"
+   ],
+   "verify": "pytest apps/merchant/svc/tests/test_codes.py -q",
+   "scope": [
+    "apps/merchant/svc/src/codes/**",
+    "apps/merchant/svc/tests/**"
+   ],
+   "depends_on": [
+    "T-050"
+   ],
+   "non_goals": [
+    "No exchange logic"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-053",
+   "title": "A plain-language interview yields an approved, versioned envelope",
+   "objective": "Onboarding interview service: LLM interview (double in tests, transcript fixture), envelope draft in plain English, merchant written approval gate, versioned persistence to sealed schema; shadow default.",
+   "refs": [
+    "R6",
+    "R7",
+    "DESIGN#data-models"
+   ],
+   "acceptance": [
+    "1. Transcript fixture \u2192 exact expected Envelope version (golden)",
+    "2. No activation without recorded approval artifact",
+    "3. Envelope edits create new versions; old versions immutable"
+   ],
+   "verify": "pytest apps/merchant/svc/tests/test_onboarding.py -q",
+   "scope": [
+    "apps/merchant/svc/src/onboarding/**",
+    "apps/merchant/svc/tests/**",
+    "fixtures/interviews/**"
+   ],
+   "depends_on": [
+    "T-014",
+    "T-050"
+   ],
+   "non_goals": [
+    "No walls enforcement (T-040 owns it)"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-054",
+   "title": "The dashboard shows the walls and the window",
+   "objective": "Merchant dashboard: bid log with rationale, loss reports, trust breakdown + event payloads, envelope editor (versioned), kill switch wired to agent mode. Includes verification outcomes per bid (statuses + evidence links).",
+   "refs": [
+    "R9"
+   ],
+   "acceptance": [
+    "1. Each pane renders from fixture APIs (component tests)",
+    "2. Kill switch flips agent mode via API and is reflected in bid submission tests",
+    "3. Loss-report pane displays categories only \u2014 render test asserts absence of amount fields"
+   ],
+   "verify": "npx vitest run apps/merchant/app/dashboard",
+   "scope": [
+    "apps/merchant/app/dashboard/**"
+   ],
+   "depends_on": [
+    "T-035",
+    "T-043",
+    "T-052",
+    "T-053",
+    "T-063"
+   ],
+   "non_goals": [
+    "No new APIs"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-060",
+   "title": "Every event lands once, chained, and replays exactly",
+   "objective": "Ledger writer service over T-011 lib: POST /events idempotency, hash chain continuation, replay endpoint proving S3.",
+   "refs": [
+    "R15",
+    "S3"
+   ],
+   "acceptance": [
+    "1. Duplicate event_id is a no-op",
+    "2. Chain verification detects tampering fixture",
+    "3. Replay reproduces served snapshot hashes on fixture stream"
+   ],
+   "verify": "pytest apps/trust/tests/test_events.py -q",
+   "scope": [
+    "apps/trust/src/events/**",
+    "apps/trust/tests/**"
+   ],
+   "depends_on": [
+    "T-011"
+   ],
+   "non_goals": [
+    "No scoring"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-061",
+   "title": "Webhook truth reconciles lossy pixel signals",
+   "objective": "Reconciliation: match checkout_pixel\u2194order_paid by join keys; emit reconciled events; derive price_honored/discount_honored comparisons from webhook data only.",
+   "refs": [
+    "R4",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Matched pair \u2192 reconciled event with integrity comparisons",
+    "2. Webhook-only order (pixel dropped) reconciles cleanly",
+    "3. Price/discount mismatch fixture yields integrity deltas sourced from webhook fields"
+   ],
+   "verify": "pytest apps/trust/tests/test_reconciliation.py -q",
+   "scope": [
+    "apps/trust/src/reconcile/**",
+    "apps/trust/tests/**"
+   ],
+   "depends_on": [
+    "T-051",
+    "T-060"
+   ],
+   "non_goals": [
+    "No score math"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-062",
+   "title": "Trust merges verification and outcome observations against the approved manifest",
+   "objective": "Merged observation framework: per-dimension Beta with observation-type weights (contradicted 2.0, severe policy 3.0, mismatch returns 1.5; verified claims + fulfilled purchases positive; capped conversion influence), time decay, neutral low-confidence prior ~Beta(2,2), score + confidence + score_version; published threshold; blacklist bound to business identity with review/appeal/expiry states and fail-closed reads.",
+   "refs": [
+    "R12",
+    "S2",
+    "DESIGN#decisions--rationale"
+   ],
+   "acceptance": [
+    "1. Golden trajectories (verification-only, outcomes-only, mixed) match human-approved fixture manifest expectations",
+    "2. Decay + confidence property tests; conversion influence cap holds",
+    "3. Blacklist: identity-bound persistence, expiry/appeal states, and fail-closed read behavior (unavailable state blocks checkout) all tested"
+   ],
+   "verify": "pytest apps/trust/tests/test_scoring.py -q",
+   "scope": [
+    "apps/trust/src/scoring/**",
+    "apps/trust/tests/**"
+   ],
+   "depends_on": [
+    "T-060",
+    "T-065",
+    "T-080"
+   ],
+   "non_goals": [
+    "No exploration logic (exchange consumes)"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-063",
+   "title": "Trust events reach the store agent and buyers close the loop",
+   "objective": "TrustEventPayload push to store-agent intake; feedback flow: routed-buyer-only prompt, buyer-track-record weighting, cross-check against return behavior.",
+   "refs": [
+    "R13",
+    "R14"
+   ],
+   "acceptance": [
+    "1. Scoring delta pushes payload consumed by T-043 intake (integration)",
+    "2. Non-routed buyer feedback rejected",
+    "3. 'Great'+returned cross-check downweights feedback (golden)"
+   ],
+   "verify": "pytest apps/trust/tests/test_feedback_push.py -q",
+   "scope": [
+    "apps/trust/src/feedback/**",
+    "apps/trust/tests/**"
+   ],
+   "depends_on": [
+    "T-043",
+    "T-062"
+   ],
+   "non_goals": [
+    "No UI"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-064",
+   "title": "Exchange consumes one snapshot shape for trust and exploration",
+   "objective": "TrustSnapshot API incl. blacklist + low-data flags for the exploration slice; versioned; exchange client.",
+   "refs": [
+    "R12",
+    "DESIGN#service-apis-pinned-routes"
+   ],
+   "acceptance": [
+    "1. Snapshot schema golden test",
+    "2. Blacklisted store flagged; low-data store flagged until manifest N episodes",
+    "3. Exchange client caches + refreshes on version bump"
+   ],
+   "verify": "pytest apps/trust/tests/test_snapshot.py -q",
+   "scope": [
+    "apps/trust/src/snapshot/**",
+    "apps/trust/tests/**"
+   ],
+   "depends_on": [
+    "T-062"
+   ],
+   "non_goals": [
+    "No ranking use (T-034)"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-065",
+   "title": "A golden pitch yields all four verification statuses with evidence",
+   "objective": "packages/verification + trust-service wiring: atomic typed claim extraction with source spans (LLM behind strict schemas, doubles in tests), seller/SKU/variant resolution (ambiguous on failure), unit/type canonicalization, deterministic comparators per DESIGN, statuses verified|contradicted|unsupported|ambiguous with evidence refs + confidence, idempotent per (pitch, verifier version, catalog snapshot), re-verify only on snapshot/verifier change; results persist to ledger tables and emit trust_observations + claim_verified events.",
+   "refs": [
+    "R18",
+    "R19",
+    "S8",
+    "DESIGN#interfaces-contracts-between-tickets"
+   ],
+   "acceptance": [
+    "1. Golden pitch fixture (true + false + unsupported + ambiguous claims) returns the four distinct statuses with evidence refs (S8, external ground truth: approved golden set)",
+    "2. Idempotency: re-running same (pitch, versions) writes nothing; snapshot bump re-verifies",
+    "3. Comparator unit tests: boolean/string normalization, numeric tolerance, price vs offer+catalog, set containment, relationship existence; injection strings in pitch text never execute (C10 test)"
+   ],
+   "verify": "pytest packages/verification apps/trust/tests/test_verification.py -q",
+   "scope": [
+    "packages/verification/**",
+    "apps/trust/src/verification/**",
+    "apps/trust/tests/**",
+    "fixtures/golden/**"
+   ],
+   "depends_on": [
+    "T-010",
+    "T-021",
+    "T-060"
+   ],
+   "non_goals": [
+    "No trust score math (T-062); no ranking"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-070",
+   "title": "Buyers authenticate lightly and stores never see who they are",
+   "objective": "Chat shell, magic-link auth, vault mapping email\u2194pseudonym history, per-session pseudonym rotation; only vault role reads mappings.",
+   "refs": [
+    "R5",
+    "DESIGN#data-models"
+   ],
+   "acceptance": [
+    "1. Login issues session + fresh pseudonym; prior pseudonyms never reissued",
+    "2. Grant test: non-vault roles cannot read vault.*",
+    "3. Profile objects contain no identity fields (schema property test)"
+   ],
+   "verify": "npx vitest run apps/buyer && pytest apps/buyer/svc/tests/test_auth_vault.py -q",
+   "scope": [
+    "apps/buyer/**"
+   ],
+   "depends_on": [
+    "T-010",
+    "T-011"
+   ],
+   "non_goals": [
+    "No intent logic"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-071",
+   "title": "Three questions or fewer produce a confirmed structured intent",
+   "objective": "Buyer agent: clarification loop capped at 3, Intent construction + buyer confirmation UI, profile bucket builder with k-floor config.",
+   "refs": [
+    "R1",
+    "R5"
+   ],
+   "acceptance": [
+    "1. Scripted dialogues (fixtures) yield expected Intents within \u22643 questions",
+    "2. Confirmation required before auction creation",
+    "3. Bucket builder outputs only DESIGN profile fields; k-floor honored at configured value"
+   ],
+   "verify": "pytest apps/buyer/svc/tests/test_intent.py -q && npx vitest run apps/buyer/app/intent",
+   "scope": [
+    "apps/buyer/svc/src/intent/**",
+    "apps/buyer/app/intent/**",
+    "apps/buyer/svc/tests/**",
+    "fixtures/dialogues/**"
+   ],
+   "depends_on": [
+    "T-014",
+    "T-070"
+   ],
+   "non_goals": [
+    "No retrieval"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-072",
+   "title": "Shortlists render with provenance and accept hands off cleanly",
+   "objective": "Shortlist UI: slots, trust indicator, provenance labels ('store-confirmed' vs 'from their website'); accept \u2192 exchange accept \u2192 redirect to permalink.",
+   "refs": [
+    "R2",
+    "R3"
+   ],
+   "acceptance": [
+    "1. Component tests for slot rendering incl. collapsed-slot cases",
+    "2. Provenance labels map from Provenance.source correctly (golden)",
+    "3. Accept path e2e-to-stub returns and follows permalink"
+   ],
+   "verify": "npx vitest run apps/buyer/app/shortlist && pytest apps/buyer/svc/tests/test_accept_flow.py -q",
+   "scope": [
+    "apps/buyer/app/shortlist/**",
+    "apps/buyer/svc/src/accept/**",
+    "apps/buyer/svc/tests/**"
+   ],
+   "depends_on": [
+    "T-033",
+    "T-071"
+   ],
+   "non_goals": [
+    "No feedback UI"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-073",
+   "title": "Routed buyers can answer one structured feedback prompt",
+   "objective": "Post-purchase feedback UI + intake wiring to trust feedback API; one prompt, structured options, no free text.",
+   "refs": [
+    "R14"
+   ],
+   "acceptance": [
+    "1. Prompt shown only for routed orders (fixture)",
+    "2. Submission lands as feedback LedgerEvent",
+    "3. No free-text field exists (render test)"
+   ],
+   "verify": "npx vitest run apps/buyer/app/feedback && pytest apps/buyer/svc/tests/test_feedback.py -q",
+   "scope": [
+    "apps/buyer/app/feedback/**",
+    "apps/buyer/svc/tests/**"
+   ],
+   "depends_on": [
+    "T-063",
+    "T-072"
+   ],
+   "non_goals": [
+    "No moderation"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-080",
+   "title": "The approved manifest and seed generator define ground truth",
+   "objective": "Fixture manifest: dishonest-store behaviors, new-store prior N, seeds, expected trust trajectories \u2014 submitted for human approval (approval artifact committed). Parameterized SEED_CATEGORY catalog generator + `make demo-seed` provisioning stub or live stores. Manifest also defines the golden intent/pitch set (incl. persona scripts, contradiction/stale/variant/unit/injection/claim-splitting cases) used by verification and eval gates.",
+   "refs": [
+    "S2",
+    "C9",
+    "SPEC#adversarial-review-resolved"
+   ],
+   "acceptance": [
+    "1. Manifest + golden set committed with recorded human approval artifact",
+    "2. Generator seeds N stores incl. the dishonest one into shopify-stub from SEED_CATEGORY config",
+    "3. `make demo-seed` idempotent against stub"
+   ],
+   "verify": "pytest fixtures/tests/test_seed.py -q",
+   "scope": [
+    "fixtures/**"
+   ],
+   "depends_on": [
+    "T-013"
+   ],
+   "non_goals": [
+    "No live-store provisioning in verify"
+   ],
+   "parallel_safe": true
+  },
+  {
+   "id": "T-081",
+   "title": "Simulated buyers exercise the whole network from one seed",
+   "objective": "services/sim: seeded traffic generator driving intents\u2192auctions\u2192acceptances\u2192stub purchases/returns; dishonest-store script executes manifest behaviors.",
+   "refs": [
+    "S1",
+    "S4",
+    "C9"
+   ],
+   "acceptance": [
+    "1. Fixed seed reproduces identical event streams twice",
+    "2. Dishonest script emits exactly the manifest behaviors",
+    "3. Sim runs headless against compose in bounded steps"
+   ],
+   "verify": "pytest services/sim -q",
+   "scope": [
+    "services/sim/**"
+   ],
+   "depends_on": [
+    "T-033",
+    "T-051",
+    "T-080"
+   ],
+   "non_goals": [
+    "No assertions about learning (T-083/084)"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-082",
+   "title": "One scripted run proves the full S1 flow",
+   "objective": "E2E test: intent\u2192clarify\u2192bids\u2192shortlist\u2192accept\u2192code\u2192stub checkout\u2192pixel+webhook\u2192reconcile\u2192ledger\u2192trust update, all against compose.",
+   "refs": [
+    "S1"
+   ],
+   "acceptance": [
+    "1. The full chain asserts each LedgerEvent kind appears exactly once for the run",
+    "2. Shortlist contained fallback + hosted bids",
+    "3. Run completes offline",
+    "4. Release-blocker assertions: no blacklisted seller eligible anywhere in the run; no off-domain checkout URL returned"
+   ],
+   "verify": "pytest e2e/test_s1_flow.py -q",
+   "scope": [
+    "e2e/**"
+   ],
+   "depends_on": [
+    "T-061",
+    "T-072",
+    "T-081"
+   ],
+   "non_goals": [
+    "No learning assertions"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-083",
+   "title": "Both learning loops demonstrably move under seeded outcomes",
+   "objective": "Simulation assertions for S4: outcome shifts reorder shortlists in-cluster (exchange loop); a store's discount-depth distribution tracks its own record (store loop).",
+   "refs": [
+    "S4",
+    "R16",
+    "R17"
+   ],
+   "acceptance": [
+    "1. Seeded run A vs B (outcome flip) produces the expected ranking reorder (golden)",
+    "2. Store depth distribution shifts direction matches record (statistical test, fixed seed)",
+    "3. Control store unaffected"
+   ],
+   "verify": "pytest e2e/test_learning.py -q",
+   "scope": [
+    "e2e/**"
+   ],
+   "depends_on": [
+    "T-034",
+    "T-042",
+    "T-081"
+   ],
+   "non_goals": [
+    "No live traffic"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-084",
+   "title": "The dishonest store ends below threshold and off the shortlist",
+   "objective": "Episode test for S2: run manifest budget of simulated episodes; assert trust trajectory matches approved manifest expectations, ends blacklisted, and store disappears from subsequent shortlists.",
+   "refs": [
+    "S2",
+    "R12"
+   ],
+   "acceptance": [
+    "1. Trajectory within manifest tolerance bands",
+    "2. Blacklist event emitted at expected episode \u00b1band",
+    "3. Post-blacklist auctions contain zero exposure for the store"
+   ],
+   "verify": "pytest e2e/test_dishonest.py -q",
+   "scope": [
+    "e2e/**"
+   ],
+   "depends_on": [
+    "T-062",
+    "T-083"
+   ],
+   "non_goals": [
+    "No manifest edits (would invalidate ground truth)"
+   ],
+   "parallel_safe": false
+  },
+  {
+   "id": "T-085",
+   "title": "The demo is a runbook anyone on the team can execute",
+   "objective": "Demo procedure doc: dev-store provisioning (app install, password config, Bogus Gateway), `make e2e-live` runbook, and the two demo beats (live auction; interview\u2192bidding onboarding). Lint-checked structure with required sections and command presence.",
+   "refs": [
+    "S1",
+    "S6",
+    "SPEC#adversarial-review-resolved"
+   ],
+   "acceptance": [
+    "1. Runbook lints: required sections + referenced make targets exist",
+    "2. Interview beat references T-053 transcript flow with a live-LLM variant flagged",
+    "3. No timeline content (lint rule)"
+   ],
+   "verify": "pytest docs/tests/test_runbook.py -q",
+   "scope": [
+    "docs/demo/**",
+    "docs/tests/**"
+   ],
+   "depends_on": [
+    "T-082",
+    "T-084"
+   ],
+   "non_goals": [
+    "No CI wiring of live runs"
+   ],
+   "parallel_safe": true
+  }
+ ]
+}
