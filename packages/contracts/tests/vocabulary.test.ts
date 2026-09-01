@@ -135,3 +135,45 @@ describe("D28 — store tiers", () => {
     expect([...STORE_TIERS]).toEqual([0, 1, 2]);
   });
 });
+
+describe("the label strings themselves, not the constants that name them", () => {
+  it("pins the two R2 literals", () => {
+    // Comparing `buyerLabel(x)` to `LABEL_STORE_CONFIRMED` imported from the module under test is
+    // a tautology: change the constant and both sides move together. These are the strings the
+    // buyer actually reads, and the Python peer pins the same two.
+    expect(LABEL_STORE_CONFIRMED).toBe("store-confirmed");
+    expect(LABEL_FROM_THEIR_WEBSITE).toBe("from their website");
+  });
+
+  it("labels each source with the literal the frozen suite requires", () => {
+    expect(buyerLabel("owner_statement")).toBe("store-confirmed");
+    expect(buyerLabel("envelope_rule")).toBe("store-confirmed");
+    expect(buyerLabel("learned_policy")).toBe("store-confirmed");
+    expect(buyerLabel("pixel_feed")).toBe("store-confirmed");
+    expect(buyerLabel("network")).toBe("store-confirmed");
+    expect(buyerLabel("scraped")).toBe("from their website");
+  });
+
+  it("keeps the seller-asserted badge out of the two R2 labels", () => {
+    expect(["store-confirmed", "from their website"]).not.toContain(buyerLabel("seller_asserted"));
+    expect(buyerLabel("seller_asserted").toLowerCase()).toContain("unverified");
+  });
+});
+
+describe("the vocabularies are non-empty", () => {
+  it("guards every it.each above", () => {
+    // `it.each([])` registers zero tests silently, which reads as green. These lengths are what
+    // makes emptying a vocabulary a failure rather than a disappearance.
+    expect(LEDGER_EVENT_KINDS.length).toBe(18);
+    expect(TRUST_DIMENSIONS.length).toBe(6);
+    expect(PROVENANCE_SOURCES.length).toBe(7);
+    expect(HOOK_PROVENANCE_SOURCES.length).toBe(6);
+    expect(CONSTRAINT_OPS.length).toBe(5);
+    expect(PREFERENCE_DIRECTIONS.length).toBe(3);
+    expect(ENVELOPE_ACTIVATIONS.length).toBe(3);
+    expect(SHORTLIST_SLOT_NAMES.length).toBe(4);
+    expect(CLAIM_VERIFICATION_STATUSES.length).toBe(4);
+    expect(STORE_TIERS.length).toBe(3);
+    expect(LEDGER_JOIN_KEYS.length).toBe(4);
+  });
+});

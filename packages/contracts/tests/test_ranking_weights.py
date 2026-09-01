@@ -196,3 +196,27 @@ def test_the_schema_cannot_express_the_sum_rule_so_both_languages_must() -> None
     )
     with pytest.raises(ValidationError):
         RankingWeights.model_validate(broken)
+
+
+def test_the_tolerance_itself_is_pinned() -> None:
+    """Without this, the tolerance could be loosened 100x and every other test here would still
+    pass: they all derive their inputs from the constant, so any value below 1e-6 satisfies them.
+    The number is the contract — it says representation error is forgiven and nothing else is."""
+    from contracts.ranking import WEIGHT_SUM_TOLERANCE
+
+    assert WEIGHT_SUM_TOLERANCE == 1e-9
+
+
+def test_a_set_off_by_a_thousand_times_the_tolerance_is_rejected() -> None:
+    """A hard-coded near-miss, independent of the constant, so loosening the constant is caught."""
+    with pytest.raises(ValidationError, match="sum to 1.0"):
+        RankingWeights.model_validate({**DEFAULT_RANKING_WEIGHTS.model_dump(), "w_m": 0.35 + 1e-6})
+
+
+def test_a_negative_penalty_is_rejected() -> None:
+    """A negative penalty is a bonus wearing a penalty's name: a store could improve its rank by
+    accumulating policy events."""
+    payload = DEFAULT_RANKING_WEIGHTS.model_dump()
+    payload["penalties"] = {**payload["penalties"], "per_kind": {"severe_policy_violation": -0.3}}
+    with pytest.raises(ValidationError, match="non-negative"):
+        RankingWeights.model_validate(payload)

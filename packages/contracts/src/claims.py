@@ -36,7 +36,11 @@ def canonicalize_value(value: Any) -> Any:
     """Normalize a claim value so equal meanings hash equally.
 
     Integral floats collapse to ints (`30.0` -> `30`), strings are stripped and case-folded,
-    mappings are sorted by key, sequences keep their order (a list of ingredients is not a set).
+    mappings are sorted by key, sequences keep their order (a list of ingredients is not a set),
+    and sets are SORTED — an unordered collection has no wire order to preserve, and hashing one
+    in iteration order would make `claim_id` depend on `PYTHONHASHSEED`, so the same claim would
+    get a different id in every process. That is exactly the idempotency this module exists to
+    provide, so it is not left to whatever order the set happens to iterate in.
     """
     if isinstance(value, bool):
         return value
@@ -49,6 +53,8 @@ def canonicalize_value(value: Any) -> Any:
             str(k): canonicalize_value(v)
             for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
         }
+    if isinstance(value, (set, frozenset)):
+        return sorted((canonicalize_value(item) for item in value), key=repr)
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [canonicalize_value(item) for item in value]
     return value
@@ -68,8 +74,12 @@ def claim_id(
         "value": canonicalize_value(value),
         "claim_type": str(getattr(claim_type, "value", claim_type) or ""),
     }
+    # No `default=`: a value the canonicalizer did not normalize would otherwise be stringified
+    # by `repr`, and `repr` of anything unordered or memory-addressed is not stable across
+    # processes. A claim whose value cannot be canonicalized has no stable id, and saying so is
+    # better than minting one that silently changes on the next run.
     encoded = json.dumps(
-        material, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+        material, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()
     return f"{CLAIM_ID_PREFIX}:{CLAIM_ID_ALGORITHM}:{digest}"

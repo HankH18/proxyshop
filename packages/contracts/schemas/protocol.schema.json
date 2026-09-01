@@ -6,7 +6,7 @@
   "$defs": {
     "ProvenanceSource": {
       "title": "ProvenanceSource",
-      "description": "DESIGN §Interfaces `Provenance.source`. Closed: an unknown source is a schema error.\n\nThe first six are HOOK provenances — a store-agent can only mint them by calling a tool hook\n(D40's hook→source table), which is what makes the hosted path checkable. `seller_asserted` is\nthe only source an external agent can assert freely, so it is the only non-hook source, and it\nis rejected outright on the hosted path (R8/S5).",
+      "description": "DESIGN §Interfaces `Provenance.source`. Closed: an unknown source is a schema error.\n\nThe first six are HOOK provenances — a store-agent can only mint them by calling a tool hook\n(the hook→source table T-040 pins), which is what makes the hosted path checkable. `seller_asserted` is\nthe only source an external agent can assert freely, so it is the only non-hook source, and it\nis rejected outright on the hosted path (R8/S5).",
       "type": "string",
       "enum": [
         "scraped",
@@ -666,7 +666,7 @@
 
     "RankingWeights": {
       "title": "RankingWeights",
-      "description": "D13 + D50. The ONE published rank formula is DESIGN's five-term one:\n\n    rank_score = w_m*intent_match + w_e*verified_claim_ratio + w_t*trust\n               + w_v*price_value + w_d*delivery_fit − policy_penalties\n\nThe three-term `w_f*fit + w_v*offer_value + w_t*trust` found elsewhere in DESIGN is superseded\nprose (D12): it predates the reconciliation amendment and lacks the `verified_claim_ratio` term.\n\nThe five weights MUST sum to 1.0. That rule cannot be written in JSON Schema, so it is enforced\nin both generated languages by `RankingWeights` / `validateRankingWeights` and is asserted by\ntests in both. `version` makes a weight change a visible, comparable event rather than a silent\nre-scoring of history.",
+      "description": "D13 + D50. The ONE published rank formula is DESIGN's five-term one:\n\n    rank_score = w_m*intent_match + w_e*verified_claim_ratio + w_t*trust\n               + w_v*price_value + w_d*delivery_fit − policy_penalties\n\nThe three-term `w_f*fit + w_v*offer_value + w_t*trust` found elsewhere in DESIGN is superseded\nprose (D12): it predates the reconciliation amendment and lacks the `verified_claim_ratio` term.\n\nThe five weights MUST sum to 1.0. That rule cannot be written in JSON Schema, so it is enforced\nin both generated languages by `RankingWeights` / `rankingWeightsErrors` and is asserted by\ntests in both. `version` makes a weight change a visible, comparable event rather than a silent\nre-scoring of history.",
       "type": "object",
       "additionalProperties": false,
       "required": ["version", "w_m", "w_e", "w_t", "w_v", "w_d", "normalization", "penalties", "tie_breakers"],

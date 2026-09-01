@@ -47,16 +47,22 @@ export const PAYLOAD_HASH_ALGORITHM = "sha256";
 export type Payload = Record<string, unknown>;
 
 /**
- * RFC-8785-style canonical JSON: sorted keys, no insignificant whitespace.
+ * RFC-8785 canonical JSON: UTF-16-ordered keys, ECMAScript numbers, no insignificant whitespace.
  *
  * Written by hand rather than with `JSON.stringify(value, Object.keys(value).sort())`, because
  * that only sorts the TOP level — a nested `offer` object would serialize in insertion order and
  * two structurally identical payloads would sign differently.
+ *
+ * `tests/canonicalization_corpus.json` pins 27 inputs against the output of a reference
+ * canonicalizer written straight from the RFC, and BOTH languages are checked against that same
+ * file. That is what makes the Python `canonical_json` and this function one implementation
+ * rather than two that happen to agree on the fixtures someone thought to try.
  */
 export function canonicalJson(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (typeof value === "object") {
+    // `a < b` on strings is UTF-16 code-unit order, which is what RFC 8785 §3.2.3 requires.
     const entries = Object.entries(value as Payload)
       .filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -64,12 +70,15 @@ export function canonicalJson(value: unknown): string {
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error("canonicalJson: non-finite numbers are not signable");
-    // RFC 8785 §3.2.2.3 defines number serialization as ECMAScript's, which is what `String`
-    // gives: `89.0` and `89` are the same amount and must sign identically. The Python side
-    // normalizes integral floats to ints for exactly this reason — see `contracts.signing`.
+    // RFC 8785 §3.2.2.3 defines number serialization as ECMAScript's, which is exactly `String`.
+    // The Python side reimplements `Number::toString` for the same reason — `repr` is NOT it.
     return String(value);
   }
-  return JSON.stringify(value) ?? "null";
+  if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  throw new TypeError(
+    `canonicalJson cannot sign a ${typeof value}; a signed payload must be plain JSON so both ` +
+      "sides can reproduce the bytes from the wire form alone",
+  );
 }
 
 /** A digest over the bid BODY — everything except the envelope and the signature itself. */

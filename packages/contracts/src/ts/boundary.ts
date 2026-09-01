@@ -16,7 +16,7 @@ export const EXTERNAL_PATH = "external" as const;
 export const BID_PATHS: readonly BidPathName[] = [HOSTED_PATH, EXTERNAL_PATH];
 
 /**
- * R8: the six provenance sources a store-agent can only mint by calling a tool hook (D40 pins the
+ * R8: the six provenance sources a store-agent can only mint by calling a tool hook (T-040 pins the
  * hook→source table). Anything else in a hosted bid means the hooks were bypassed.
  */
 export const HOOK_PROVENANCE_SOURCES: ReadonlySet<string> = new Set([
@@ -139,7 +139,10 @@ function eligibilityReasons(storeId: unknown, snapshot: TrustSnapshotMap): strin
   const row = readRecord(table[key]);
   // R12, fail-closed: blacklisted denies, and an unavailable read denies the same way.
   if (row === undefined) return [`${REASON_TRUST_SNAPSHOT_UNAVAILABLE}:${key}`];
-  if (row["blacklisted"] === true) return [`${REASON_STORE_BLACKLISTED}:${key}`];
+  // TRUTHY, not `=== true`. A strict comparison admits a store whose row spells the flag `1` or
+  // `"yes"` — the fail-OPEN direction, on the one check R12 exists to make fail closed. The
+  // Python peer reads it the same way, and `boundary.test.ts` pins both spellings.
+  if (row["blacklisted"]) return [`${REASON_STORE_BLACKLISTED}:${key}`];
   return [];
 }
 

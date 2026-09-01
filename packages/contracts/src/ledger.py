@@ -131,19 +131,27 @@ def validate_ledger_payload(kind: Any, payload: Mapping[str, Any]) -> list[str]:
     if not isinstance(payload, Mapping):
         return [f"payload for {raw_kind!r} must be a mapping, got {type(payload).__name__}"]
 
+    expected = LEDGER_PAYLOAD_SHAPES.get(raw_kind, ())
+
     if raw_kind in JOINABLE_KINDS:
-        # C11/D24: both checkout paths must be joinable, so these are checked by the join view
-        # rather than by literal key presence — the pixel spells one of them `clientId`.
-        view = join_key_view({"kind": raw_kind, "payload": payload})
-        for key in ("checkout_token",):
-            if view.get(key) is None:
+        # C11/D24: both checkout paths must be joinable. Their keys are read through the alias
+        # table rather than by literal presence — the pixel body is Shopify-shaped and spells its
+        # client id `clientId`, and the webhook carries `order_id` — but every published key is
+        # still checked, not just the join token.
+        for key in expected:
+            aliases = _JOIN_KEY_ALIASES.get(key, (key,))
+            if _read(payload, aliases) is None:
                 problems.append(
-                    f"{raw_kind!r} payload is missing join key {key!r}; the pixel and the "
-                    "webhook cannot be reconciled without it"
+                    f"{raw_kind!r} payload is missing published key {key!r} "
+                    f"(accepted spellings: {', '.join(aliases)})"
                 )
+        if _read(payload, _JOIN_KEY_ALIASES["checkout_token"]) is None:
+            problems.append(
+                f"{raw_kind!r} payload is missing join key 'checkout_token'; the pixel and the "
+                "webhook cannot be reconciled without it"
+            )
         return problems
 
-    expected = LEDGER_PAYLOAD_SHAPES.get(raw_kind, ())
     for key in expected:
         if key not in payload:
             problems.append(f"{raw_kind!r} payload is missing published key {key!r}")

@@ -197,3 +197,59 @@ describe("the keyring", () => {
     expect(keyringSecret({}, "store-external-1", "key-2026-01")).toBeUndefined();
   });
 });
+
+// ----------------------------------------------------------------------------------------------
+// Cross-language canonicalization, pinned against a reference implementation.
+//
+// `canonicalization_corpus.json` was produced by a canonicalizer written straight from RFC 8785,
+// with ECMAScript as the authority for number formatting (§3.2.2.3) and member ordering (§3.2.3).
+// BOTH language implementations are checked against that same file — `test_signing_envelope.py`
+// runs the identical corpus — which is what makes them one implementation rather than two that
+// happen to agree on whatever fixtures someone thought to try.
+// ----------------------------------------------------------------------------------------------
+import corpus from "./canonicalization_corpus.json" with {type: "json"};
+
+describe("the RFC 8785 corpus", () => {
+  it("is present and substantial", () => {
+    // Guards the cases below against passing vacuously on an empty file.
+    expect(corpus.length).toBeGreaterThanOrEqual(25);
+  });
+
+  it.each(corpus.map((c) => [c.expected.slice(0, 48), c] as const))(
+    "canonicalizes %s",
+    (_label, testCase) => {
+      expect(canonicalJson(testCase.input)).toBe(testCase.expected);
+    },
+  );
+});
+
+describe("canonicalization edge cases the fixtures do not reach", () => {
+  it.each([
+    [89.0, "89"],
+    [44.1, "44.1"],
+    [0, "0"],
+    [-0, "0"],
+    [1e-6, "0.000001"],
+    [1e-7, "1e-7"],
+    [0.00001, "0.00001"],
+    [1e21, "1e+21"],
+    [1e16, "10000000000000000"],
+    [1.5e-10, "1.5e-10"],
+    [5e-324, "5e-324"],
+    [1.7976931348623157e308, "1.7976931348623157e+308"],
+  ])("writes %s as %s", (value, expected) => {
+    // Every one of these is a magnitude where Python's `repr` gives a DIFFERENT string, so the
+    // two sides only agree because the Python peer implements Number::toString rather than repr.
+    expect(canonicalJson({n: value})).toBe(`{"n":${expected}}`);
+  });
+
+  it("orders keys by UTF-16 code unit, not code point", () => {
+    // Python's `<` compares code points and disagrees above the BMP; its peer encodes to UTF-16.
+    expect(canonicalJson({"Ｚ": 1, "\u{1F600}": 2})).toBe('{"\u{1F600}":2,"Ｚ":1}');
+  });
+
+  it("refuses a value it cannot canonicalize", () => {
+    expect(() => canonicalJson({n: () => 1})).toThrow();
+    expect(() => canonicalJson({n: Symbol("x")})).toThrow();
+  });
+});

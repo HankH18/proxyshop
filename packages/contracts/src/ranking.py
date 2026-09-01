@@ -85,7 +85,7 @@ class RankingWeights(_RankingWeightsSchema):
     """The generated `RankingWeights` schema type plus the cross-field rule JSON Schema cannot say.
 
     JSON Schema has no way to express "these five numbers sum to 1.0", so the constraint lives in
-    the model. The TypeScript half enforces the identical rule in `validateRankingWeights`, and
+    the model. The TypeScript half enforces the identical rule in `rankingWeightsErrors`, and
     both are asserted against the same fixture so the two languages cannot disagree about which
     weight sets are legal.
     """

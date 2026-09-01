@@ -14,6 +14,7 @@ useless:
 from __future__ import annotations
 
 import json
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -112,9 +113,17 @@ def test_the_bundle_validates_a_real_payload_through_the_registry() -> None:
     assert not is_valid("Bid", {})
 
 
-def test_the_committed_bundle_is_valid_json_and_stable() -> None:
+def test_the_committed_bundle_is_the_whole_protocol_on_disk() -> None:
+    """Asserting `json.load(f) == BUNDLE` alone would be a tautology — `BUNDLE` IS `json.load(f)`,
+    so it holds for an empty file too. The size and the pinned names are what make it a check."""
     with PROTOCOL_SCHEMA_PATH.open(encoding="utf-8") as handle:
-        assert json.load(handle) == BUNDLE
+        on_disk = json.load(handle)
+    assert on_disk == BUNDLE
+    assert on_disk["$id"] == "https://proxyshop.dev/schemas/protocol.schema.json"
+    assert len(on_disk["$defs"]) >= 40
+    assert set(PINNED_PROTOCOL_OBJECTS) <= set(on_disk["$defs"])
+    for name in ("SigningEnvelope", "SignedBidSubmission", "RankingWeights", "Store"):
+        assert name in on_disk["$defs"], f"{name} vanished from the bundle"
 
 
 # --- codegen drift --------------------------------------------------------------------------
@@ -126,10 +135,32 @@ def test_the_committed_python_models_match_the_schema() -> None:
     assert problems == [], "\n".join(problems)
 
 
-@pytest.mark.skipif(shutil.which("npx") is None, reason="npx is not on PATH")
 def test_the_committed_typescript_types_match_the_schema() -> None:
+    """Deliberately NOT skipped when `npx` is missing. Skipping would silently drop half the drift
+    check on exactly the machines least likely to have regenerated the `.d.ts` — and this repo
+    requires node anyway (`scripts/verify.sh` refuses to run without `node_modules`)."""
+    assert shutil.which("npx") is not None, (
+        "npx is required to check the generated TypeScript against the schema; run `npm ci`"
+    )
     problems = check(python=False, typescript=True)
     assert problems == [], "\n".join(problems)
+
+
+def test_the_drift_check_actually_detects_drift() -> None:
+    """A `check()` that returned `[]` unconditionally would satisfy both tests above. Comparing a
+    deliberately-wrong committed file proves the diff has teeth."""
+    import tempfile
+
+    from contracts.codegen import _diff, generate_python
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        fresh = generate_python(root / "fresh.py")
+        stale = root / "stale.py"
+        stale.write_text("# not the generated models\n", encoding="utf-8")
+        assert _diff("stale", stale, fresh), "the drift check did not notice a wrong file"
+        assert _diff("fresh", fresh, fresh) == [], "the drift check flagged an identical file"
+        assert _diff("absent", root / "nope.py", fresh), "a missing artifact must be reported"
 
 
 def test_the_generated_artifacts_are_committed_where_the_scope_names_them() -> None:
@@ -153,3 +184,12 @@ def test_the_codegen_cli_reports_rather_than_writes_under_check() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert PYTHON_OUT.read_bytes() == before
+
+
+def test_the_object_and_enum_partitions_are_non_empty() -> None:
+    """Guards every `@parametrize` in this file: an empty list turns them into SKIPS, which pytest
+    reports as neither passing nor failing and everyone reads as green."""
+    assert len(_OBJECTS) >= 25
+    assert len(_ENUMS) >= 9
+    assert set(_OBJECTS).isdisjoint(_ENUMS)
+    assert set(_OBJECTS) | _ENUMS == set(DEFS)

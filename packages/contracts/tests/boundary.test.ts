@@ -10,9 +10,22 @@ import {
   EXTERNAL_PATH,
   HOOK_PROVENANCE_SOURCES,
   HOSTED_PATH,
+  NON_HOOK_PROVENANCE_SOURCES,
+  REASON_CLAIM_PROVENANCE_EMPTY_SOURCE,
+  REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE,
+  REASON_CLAIM_WITHOUT_PROVENANCE,
+  REASON_HOSTED_NON_HOOK_PROVENANCE,
+  REASON_OFFER_EXPIRED,
+  REASON_OFFER_EXPIRY_MISSING,
+  REASON_OFFER_EXPIRY_UNPARSEABLE,
+  REASON_SCHEMA_INVALID,
+  REASON_STORE_BLACKLISTED,
+  REASON_TRUST_SNAPSHOT_UNAVAILABLE,
+  REASON_UNKNOWN_PATH,
   parseTimestamp,
   validateBid,
 } from "../src/ts/boundary.js";
+import {PROVENANCE_SOURCES} from "../src/ts/vocabulary.js";
 import {
   ASSERTED_PROVENANCE,
   HOOK_PROVENANCE,
@@ -200,5 +213,87 @@ describe("timestamp handling", () => {
 
   it.each([null, undefined, "", "   ", "not-a-date", {}])("refuses %s", (value) => {
     expect(parseTimestamp(value)).toBeUndefined();
+  });
+});
+
+// ----------------------------------------------------------------------------------------------
+// Reason codes and fail-closed edges — the parts a "reject everything" boundary would still pass.
+// ----------------------------------------------------------------------------------------------
+describe("the reason vocabulary is part of the contract", () => {
+  it("names the missing provenance and the claim it belongs to", () => {
+    const result = check(makeBid({claims: [{key: "spf", value: 30}]}), HOSTED_PATH);
+    expect(result.reasons.some((r) => r.startsWith("claim_without_provenance:0"))).toBe(true);
+  });
+
+  it("names an empty provenance source", () => {
+    const bid = makeBid({claims: [makeClaim("spf", 30, {...HOOK_PROVENANCE, source: ""})]});
+    expect(
+      check(bid, HOSTED_PATH).reasons.some((r) => r.startsWith("claim_provenance_empty_source:0")),
+    ).toBe(true);
+  });
+
+  it("names an unknown provenance source and quotes it", () => {
+    const bid = makeBid({claims: [makeClaim("spf", 30, {...HOOK_PROVENANCE, source: "vibes"})]});
+    expect(
+      check(bid, EXTERNAL_PATH).reasons.some((r) =>
+        r.startsWith("claim_provenance_unknown_source:0:vibes"),
+      ),
+    ).toBe(true);
+  });
+
+  it("names the claim index and the source on a hosted refusal", () => {
+    const bid = makeBid({
+      claims: [
+        makeClaim("free_returns", "30 days", HOOK_PROVENANCE),
+        makeClaim("spf", 30, ASSERTED_PROVENANCE),
+      ],
+    });
+    expect(check(bid, HOSTED_PATH).reasons).toContain("hosted_non_hook_provenance:1:seller_asserted");
+  });
+
+  it("uses the same literal reason strings as the Python peer", () => {
+    // These cross a network boundary; a rename is a contract change, not a refactor.
+    expect(REASON_UNKNOWN_PATH).toBe("unknown_path");
+    expect(REASON_SCHEMA_INVALID).toBe("schema_invalid");
+    expect(REASON_CLAIM_WITHOUT_PROVENANCE).toBe("claim_without_provenance");
+    expect(REASON_CLAIM_PROVENANCE_EMPTY_SOURCE).toBe("claim_provenance_empty_source");
+    expect(REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE).toBe("claim_provenance_unknown_source");
+    expect(REASON_HOSTED_NON_HOOK_PROVENANCE).toBe("hosted_non_hook_provenance");
+    expect(REASON_OFFER_EXPIRED).toBe("offer_expired");
+    expect(REASON_OFFER_EXPIRY_MISSING).toBe("offer_expiry_missing");
+    expect(REASON_OFFER_EXPIRY_UNPARSEABLE).toBe("offer_expiry_unparseable");
+    expect(REASON_STORE_BLACKLISTED).toBe("store_blacklisted");
+    expect(REASON_TRUST_SNAPSHOT_UNAVAILABLE).toBe("trust_snapshot_unavailable");
+  });
+
+  it("partitions the whole closed provenance enum", () => {
+    // Guards the `it.each` over HOOK_PROVENANCE_SOURCES above: an empty array would silently
+    // register zero tests, which reads as green.
+    expect(HOOK_PROVENANCE_SOURCES.size).toBe(6);
+    expect(NON_HOOK_PROVENANCE_SOURCES.size).toBe(1);
+    expect([...HOOK_PROVENANCE_SOURCES, ...NON_HOOK_PROVENANCE_SOURCES].sort()).toEqual(
+      [...PROVENANCE_SOURCES].sort(),
+    );
+  });
+});
+
+describe("R12 fail-closed, on the flag spellings a real snapshot uses", () => {
+  it.each(BOTH_PATHS)("denies a truthy-but-not-`true` blacklist flag on %s", (path) => {
+    // A strict `=== true` here admitted every one of these — fail-OPEN on the one check R12
+    // exists to make fail closed.
+    for (const flag of [true, 1, "yes", "true", [0]]) {
+      const snapshot = {"store-1": {store_id: "store-1", score: 0.6, blacklisted: flag}};
+      const result = check(makeBid(), path, snapshot as never);
+      expect(result.ok, `blacklisted=${JSON.stringify(flag)} was admitted`).toBe(false);
+      expect(result.reasons.join(" ")).toContain("store_blacklisted");
+    }
+  });
+
+  it.each(BOTH_PATHS)("still admits a falsy blacklist flag on %s", (path) => {
+    // The positive control: this is not "reject every row".
+    for (const flag of [false, 0, "", null, undefined]) {
+      const snapshot = {"store-1": {store_id: "store-1", score: 0.6, blacklisted: flag}};
+      expect(check(makeBid(), path, snapshot as never).ok).toBe(true);
+    }
   });
 });

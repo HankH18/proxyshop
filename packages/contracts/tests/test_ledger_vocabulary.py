@@ -158,8 +158,33 @@ def test_the_join_view_reads_a_model_as_well_as_a_mapping() -> None:
 
 def test_a_joinable_payload_without_a_checkout_token_is_reported() -> None:
     problems = validate_ledger_payload("checkout_pixel", {"clientId": "cid-1"})
-    assert problems and "checkout_token" in problems[0]
-    assert validate_ledger_payload("checkout_pixel", {"checkout_token": "ck-1"}) == []
+    assert problems and any("checkout_token" in problem for problem in problems)
+
+
+def test_a_joinable_kind_is_checked_against_its_published_shape_too() -> None:
+    """A joinable kind is not exempt from the rest of its shape: `checkout_token` alone is a
+    reconcilable event with nothing in it to reconcile."""
+    assert validate_ledger_payload("checkout_pixel", {"checkout_token": "ck-1"}) != []
+    assert validate_ledger_payload("order_paid", {"checkout_token": "ck-1"}) != []
+
+
+def test_a_joinable_payload_is_read_through_the_alias_table() -> None:
+    """The pixel body is Shopify-shaped (`clientId`) and the webhook carries `order_id`. Both are
+    well-formed, and a literal key check would reject the real thing on both paths."""
+    assert (
+        validate_ledger_payload(
+            "checkout_pixel",
+            {"checkout_token": "ck-1", "clientId": "cid-1", "total_price": 44.1},
+        )
+        == []
+    )
+    assert (
+        validate_ledger_payload(
+            "order_paid",
+            {"checkout_token": "ck-1", "order_id": "ord-1", "total_price": 44.1},
+        )
+        == []
+    )
 
 
 def test_a_payload_missing_a_published_key_is_reported() -> None:
@@ -197,3 +222,12 @@ def test_payload_validation_is_not_wired_into_the_model() -> None:
             "payload": {"nothing": "that a join could use"},
         }
     )
+
+
+def test_the_kind_vocabulary_is_non_empty() -> None:
+    """Guards the parametrized tests above: emptying `LedgerEventKind` would turn every
+    `@parametrize` over it into a SKIP, which is neither a pass nor a failure and gets read as
+    green."""
+    assert len(FROZEN_KINDS) == 18
+    assert len(LEDGER_EVENT_KINDS) == 18
+    assert len(LEDGER_PAYLOAD_SHAPES) == 18

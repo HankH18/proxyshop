@@ -33,7 +33,7 @@ from pydantic import ValidationError
 
 from contracts.protocol import Bid, BidValidationResult, ProvenanceSource
 
-#: R8: the six provenance sources a store-agent can only mint by calling a tool hook. D40 pins
+#: R8: the six provenance sources a store-agent can only mint by calling a tool hook. T-040 pins
 #: the hook→source table (`get_product_fact`→`scraped`, `get_live_state`→`pixel_feed`,
 #: `get_owner_commitments`→`owner_statement`, `authorize_discount`→`envelope_rule`,
 #: `choose_policy_action`→`learned_policy`, `get_network_prior`→`network`).
@@ -176,9 +176,18 @@ def _eligibility_reasons(store_id: Any, trust_snapshot: Any) -> list[str]:
     """R12, fail-closed: blacklisted denies, and an unavailable read denies the same way."""
     if not isinstance(trust_snapshot, Mapping):
         return [REASON_TRUST_SNAPSHOT_UNAVAILABLE]
-    row = trust_snapshot.get(store_id)
+    try:
+        row = trust_snapshot.get(store_id)
+    except TypeError:
+        # A malformed `store_id` — a dict or a list where a string belongs — is unhashable, and
+        # letting the lookup raise would turn a rejectable bid into a crash at the public
+        # boundary. It is not a store we know about, so it is denied like any other unknown one.
+        return [f"{REASON_TRUST_SNAPSHOT_UNAVAILABLE}:{store_id!r}"]
     if row is None:
         return [f"{REASON_TRUST_SNAPSHOT_UNAVAILABLE}:{store_id}"]
+    # Truthy, not `is True`: a snapshot row that spells the flag `1` or `"yes"` is still a
+    # blacklisted store, and R12 says the fail-closed direction is the one to take on doubt. The
+    # TypeScript peer reads it the same way, for the same reason.
     if bool(_get(row, "blacklisted", False)):
         return [f"{REASON_STORE_BLACKLISTED}:{store_id}"]
     return []

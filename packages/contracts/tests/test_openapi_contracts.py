@@ -122,3 +122,59 @@ def test_the_solicitation_route_does_not_carry_an_envelope() -> None:
     operation = documents()["store-agent"]["paths"]["/v1/bid-requests"]["post"]
     example = operation["responses"]["200"]["content"]["application/json"]["example"]
     assert set(example).isdisjoint({"signer_id", "key_id", "issued_at", "nonce"})
+
+
+# ---------------------------------------------------------------------------------------------
+# Negative controls.
+#
+# Everything above asserts `problems == []`. On its own that is unfalsifiable: an `example_errors`
+# that returned `[]` unconditionally would satisfy every one of those ~29 cases, and the file that
+# calls itself "the one with teeth" would have none. These prove the checker can say no.
+# ---------------------------------------------------------------------------------------------
+
+
+def _one_example(domain: str, path: str, where: str):
+    for example in ALL_EXAMPLES:
+        if example.domain == domain and example.path == path and example.where == where:
+            return example
+    raise AssertionError(f"no example for {domain} {path} {where}")
+
+
+def test_the_example_checker_rejects_a_broken_example() -> None:
+    """Corrupt a real example and the checker must object, naming the field."""
+    good = _one_example("store-agent", "/v1/bid-requests", "responses.200")
+    broken = good._replace(value={**good.value, "store_id": 12345})
+    problems = example_errors(broken)
+    assert problems, "a Bid whose store_id is a number must not validate as a Bid"
+    assert any("store_id" in problem for problem in problems)
+
+
+def test_the_example_checker_rejects_a_smuggled_field() -> None:
+    good = _one_example("store-agent", "/v1/bid-requests", "responses.200")
+    broken = good._replace(value={**good.value, "network_fee": 0.0})
+    assert example_errors(broken), "the protocol objects close their property sets"
+
+
+def test_the_example_checker_rejects_a_missing_signing_envelope() -> None:
+    """D52 at the contract level: the documented external submission cannot lose a field."""
+    good = _one_example("exchange", "/v1/auctions/{auction_id}/bids", "requestBody")
+    for field in ("signer_id", "key_id", "issued_at", "nonce", "schema_version"):
+        stripped = {k: v for k, v in good.value.items() if k != field}
+        assert example_errors(good._replace(value=stripped)), (
+            f"an external submission missing {field!r} must fail its own documented schema"
+        )
+
+
+def test_the_example_checker_rejects_an_empty_payload() -> None:
+    good = _one_example("trust", "/stores/{store_id}/trust", "responses.200")
+    assert example_errors(good._replace(value={}))
+
+
+def test_the_example_checker_resolves_protocol_refs_rather_than_ignoring_them() -> None:
+    """If the `$ref` silently failed to resolve, every example would validate against `true` and
+    the whole file would be green for the wrong reason."""
+    good = _one_example("trust", "/stores/{store_id}/trust", "responses.200")
+    five_dims = {k: v for k, v in good.value["dims"].items() if k != "catalog_claim_accuracy"}
+    assert example_errors(good._replace(value={**good.value, "dims": five_dims})), (
+        "a five-dimension TrustSnapshot must fail — if it passes, the $ref is not resolving"
+    )

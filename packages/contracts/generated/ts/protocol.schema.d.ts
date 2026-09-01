@@ -9,7 +9,7 @@
  * DESIGN §Interfaces `Provenance.source`. Closed: an unknown source is a schema error.
  *
  * The first six are HOOK provenances — a store-agent can only mint them by calling a tool hook
- * (D40's hook→source table), which is what makes the hosted path checkable. `seller_asserted` is
+ * (the hook→source table T-040 pins), which is what makes the hosted path checkable. `seller_asserted` is
  * the only source an external agent can assert freely, so it is the only non-hook source, and it
  * is rejected outright on the hosted path (R8/S5).
  *
@@ -676,7 +676,7 @@ export interface PenaltyCatalogue {
  * prose (D12): it predates the reconciliation amendment and lacks the `verified_claim_ratio` term.
  *
  * The five weights MUST sum to 1.0. That rule cannot be written in JSON Schema, so it is enforced
- * in both generated languages by `RankingWeights` / `validateRankingWeights` and is asserted by
+ * in both generated languages by `RankingWeights` / `rankingWeightsErrors` and is asserted by
  * tests in both. `version` makes a weight change a visible, comparable event rather than a silent
  * re-scoring of history.
  *

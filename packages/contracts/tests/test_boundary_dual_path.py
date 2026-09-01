@@ -277,3 +277,111 @@ def test_an_unparseable_expiry_fails_closed(path: str) -> None:
     result = check(make_bid(offer=make_offer(expires_at="soon")), path)
     assert result.ok is False
     assert any("offer_expiry" in reason for reason in result.reasons)
+
+
+# ---------------------------------------------------------------------------------------------
+# Reason codes are part of the contract, not decoration.
+#
+# The exchange logs them and the seller-facing rejection quotes them, so the STRING matters, not
+# only the boolean beside it. Without these, the whole per-claim provenance branch could be
+# deleted and every other test in this file would still pass — the schema check would reject the
+# same payloads for a different reason, and nobody would learn that the boundary had stopped
+# explaining itself.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_missing_provenance_is_reported_by_its_own_reason_code(path: str) -> None:
+    result = check(make_bid(claims=[make_claim("spf", 30, None)]), path)
+    assert any(reason.startswith("claim_without_provenance:0") for reason in result.reasons), (
+        f"expected a claim_without_provenance reason naming claim 0, got {list(result.reasons)}"
+    )
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_empty_provenance_source_is_reported_by_its_own_reason_code(path: str) -> None:
+    bid = make_bid(claims=[make_claim("spf", 30, {**HOOK_PROVENANCE, "source": ""})])
+    result = check(bid, path)
+    assert any(reason.startswith("claim_provenance_empty_source:0") for reason in result.reasons), (
+        f"expected a claim_provenance_empty_source reason, got {list(result.reasons)}"
+    )
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_unknown_provenance_source_is_reported_by_its_own_reason_code(path: str) -> None:
+    bid = make_bid(claims=[make_claim("spf", 30, {**HOOK_PROVENANCE, "source": "vibes"})])
+    result = check(bid, path)
+    assert any(
+        reason.startswith("claim_provenance_unknown_source:0:vibes") for reason in result.reasons
+    ), (
+        f"expected a claim_provenance_unknown_source reason naming 'vibes', got {list(result.reasons)}"
+    )
+
+
+def test_the_hosted_rejection_names_the_claim_and_the_source() -> None:
+    bid = make_bid(
+        claims=[
+            make_claim("free_returns", "30 days", dict(HOOK_PROVENANCE)),
+            make_claim("spf", 30, dict(ASSERTED_PROVENANCE)),
+        ]
+    )
+    result = check(bid, HOSTED_PATH)
+    assert "hosted_non_hook_provenance:1:seller_asserted" in list(result.reasons), (
+        f"the rejection must say WHICH claim and WHICH source, got {list(result.reasons)}"
+    )
+
+
+def test_the_reason_vocabulary_is_stable() -> None:
+    """These strings cross a network boundary. Renaming one is a contract change."""
+    from contracts import boundary
+
+    assert boundary.REASON_UNKNOWN_PATH == "unknown_path"
+    assert boundary.REASON_SCHEMA_INVALID == "schema_invalid"
+    assert boundary.REASON_CLAIM_WITHOUT_PROVENANCE == "claim_without_provenance"
+    assert boundary.REASON_CLAIM_PROVENANCE_EMPTY_SOURCE == "claim_provenance_empty_source"
+    assert boundary.REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE == "claim_provenance_unknown_source"
+    assert boundary.REASON_HOSTED_NON_HOOK_PROVENANCE == "hosted_non_hook_provenance"
+    assert boundary.REASON_OFFER_EXPIRED == "offer_expired"
+    assert boundary.REASON_OFFER_EXPIRY_MISSING == "offer_expiry_missing"
+    assert boundary.REASON_OFFER_EXPIRY_UNPARSEABLE == "offer_expiry_unparseable"
+    assert boundary.REASON_STORE_BLACKLISTED == "store_blacklisted"
+    assert boundary.REASON_TRUST_SNAPSHOT_UNAVAILABLE == "trust_snapshot_unavailable"
+
+
+def test_the_provenance_source_partition_is_the_whole_closed_enum() -> None:
+    """Guards the parametrized tests above: emptying either constant would turn them into SKIPS,
+    which pytest reports as neither a pass nor a failure and nobody reads."""
+    from packages.contracts import ProvenanceSource
+
+    assert len(HOOK_PROVENANCE_SOURCES) == 6
+    assert len(NON_HOOK_PROVENANCE_SOURCES) == 1
+    assert HOOK_PROVENANCE_SOURCES.isdisjoint(NON_HOOK_PROVENANCE_SOURCES)
+    assert HOOK_PROVENANCE_SOURCES | NON_HOOK_PROVENANCE_SOURCES == {
+        member.value for member in ProvenanceSource
+    }
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_blacklist_flag_that_is_truthy_but_not_true_still_denies(path: str) -> None:
+    """R12 fail-closed. A row spelling the flag `1` or `"yes"` is a blacklisted store, and the
+    TypeScript peer reads it the same way — a strict `=== true` there admitted all of these."""
+    for flag in (True, 1, "yes", "true", [0]):
+        snapshot = {"store-1": {"store_id": "store-1", "score": 0.6, "blacklisted": flag}}
+        result = check(make_bid(), path, snapshot=snapshot)
+        assert result.ok is False, f"blacklisted={flag!r} was admitted"
+        assert any("store_blacklisted" in reason for reason in result.reasons)
+
+    # Control: the falsy spellings still admit, so this is not "reject every row".
+    for flag in (False, 0, "", None):
+        snapshot = {"store-1": {"store_id": "store-1", "score": 0.6, "blacklisted": flag}}
+        assert check(make_bid(), path, snapshot=snapshot).ok is True
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_unhashable_store_id_is_rejected_rather_than_raising(path: str) -> None:
+    """A malformed wire payload must not crash the public boundary: `{}.get([1])` raises TypeError,
+    and a boundary that throws makes "reject" and "500" indistinguishable to the caller."""
+    for store_id in ({"a": 1}, ["x"], {1, 2}):
+        result = check(make_bid(store_id=store_id), path)
+        assert result.ok is False
+        assert result.reasons

@@ -118,3 +118,48 @@ function jsonBody(domain: string, path: string, method: string, where: string): 
       : dig(dig(asObject(operation), "responses"), where.split(".")[1] ?? "");
   return dig(holder, "content")["application/json"] as Json;
 }
+
+// ----------------------------------------------------------------------------------------------
+// Negative controls.
+//
+// Everything above asserts `exampleErrors(...) === []`. On its own that is unfalsifiable: an
+// `exampleErrors` that returned `[]` unconditionally would satisfy all ~29 cases and this file
+// would have no teeth at all. These prove the checker can say no.
+// ----------------------------------------------------------------------------------------------
+describe("the example checker can reject", () => {
+  const bidExample = examples().find(
+    (e) => e.domain === "store-agent" && e.where === "responses.200",
+  )!;
+  const snapshotExample = examples().find(
+    (e) => e.domain === "trust" && e.path === "/stores/{store_id}/trust",
+  )!;
+
+  it("rejects a Bid whose store_id is the wrong type", () => {
+    const value = {...(bidExample.value as Record<string, unknown>), store_id: 12345};
+    const problems = exampleErrors({...bidExample, value});
+    expect(problems.length).toBeGreaterThan(0);
+    expect(problems.join(" ")).toContain("store_id");
+  });
+
+  it("rejects a smuggled field", () => {
+    const value = {...(bidExample.value as Record<string, unknown>), network_fee: 0};
+    expect(exampleErrors({...bidExample, value}).length).toBeGreaterThan(0);
+  });
+
+  it("rejects an empty body", () => {
+    expect(exampleErrors({...bidExample, value: {}}).length).toBeGreaterThan(0);
+  });
+
+  it("resolves protocol $refs rather than silently ignoring them", () => {
+    // If the `$ref` did not resolve, every example would validate against `true` and this whole
+    // file would be green for the wrong reason.
+    const snapshot = snapshotExample.value as Record<string, Record<string, unknown>>;
+    const fiveDims = {...snapshot["dims"]};
+    delete fiveDims["catalog_claim_accuracy"];
+    const problems = exampleErrors({
+      ...snapshotExample,
+      value: {...snapshot, dims: fiveDims},
+    });
+    expect(problems.length).toBeGreaterThan(0);
+  });
+});

@@ -3,12 +3,13 @@
 Two separate things live here and it matters that they stay separate:
 
 **The envelope is a property of a SUBMISSION, not of a `Bid`.** `signer_id`, `key_id`,
-`issued_at`, `nonce` and `schema_version` are required on every bid that crosses the public
-boundary at `POST /v1/auctions/{auction_id}/bids`. They are *not* fields of `Bid`: a hosted
-Tier-1 agent answering `POST /v1/bid-requests` never crosses that boundary and holds no key, so
-requiring them on `Bid` itself would demand a signature from something that has nothing to sign
-with. The submission shape is `SignedBidSubmission` — `Bid` ∪ `SigningEnvelope`, all five
-required, no optional-field mode and no legacy-tolerant variant.
+`issued_at` and `nonce` are required on every bid that crosses the public boundary at
+`POST /v1/auctions/{auction_id}/bids`, alongside the `schema_version` a `Bid` already carries —
+five required fields in all. The four identity fields are *not* on `Bid`: a hosted Tier-1 agent
+answering `POST /v1/bid-requests` never crosses that boundary and holds no key, so requiring them
+on `Bid` itself would demand a signature from something that has nothing to sign with. The
+submission shape is `SignedBidSubmission` — `Bid` ∪ `SigningEnvelope`, all five required, no
+optional-field mode and no legacy-tolerant variant.
 
 **The canonical bytes are defined once, here, and called by both sides.** `sign_bid` and
 `receive_bid` (T-044, `packages.store_agent.src.external`) must produce and check the *same*
@@ -61,42 +62,124 @@ _NON_BODY_KEYS: frozenset[str] = frozenset(
 PAYLOAD_HASH_ALGORITHM = "sha256"
 
 
-def _jcs_numbers(value: Any) -> Any:
-    """Normalize integral floats to ints, recursively.
+#: JavaScript's exact-integer range. Beyond it a JSON integer is not representable as an
+#: ECMAScript number, so the two sides would read different values out of the same bytes.
+_MAX_SAFE_INTEGER = 2**53 - 1
 
-    RFC 8785 §3.2.2.3 defines canonical number serialization as ECMAScript's, where `89.0` and
-    `89` are the same number and print the same. Python's `json.dumps` disagrees — it writes
-    `89.0` — so without this pass a bid signed by a Node seller could not be verified by the
-    Python exchange, and the two `canonical_signing_bytes` implementations would silently be two
-    protocols. `bool` is excluded explicitly: it is an `int` subclass and must stay `true`/`false`.
+
+def _ecmascript_number(value: float) -> str:
+    """Serialize a number exactly as ECMAScript's `Number::toString` does (ES2023 6.1.6.1.20).
+
+    RFC 8785 §3.2.2.3 defines canonical JSON numbers as ECMAScript's, and Python's `repr` is NOT
+    that. Both produce the shortest round-tripping digit string, but they switch to exponential
+    notation at different magnitudes, so the two sides disagree on a real range of real prices::
+
+        1e-6   Python "1e-06"                  ECMAScript "0.000001"
+        1e21   Python "1e+21"                  ECMAScript "1e+21"
+        1e16   Python "1e+16"                  ECMAScript "10000000000000000"
+
+    `Offer.unit_price` is an unconstrained `number` and `Claim.value` is unconstrained entirely,
+    so those magnitudes are reachable from a legal bid — not a theoretical concern. Implementing
+    the spec'd algorithm is the only way the two canonicalizers stay one protocol.
     """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, float):
-        return int(value) if value.is_integer() else value
-    if isinstance(value, Mapping):
-        return {key: _jcs_numbers(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jcs_numbers(item) for item in value]
-    return value
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError("canonical_json: non-finite numbers are not signable")
+    if value == 0:
+        return "0"  # ECMAScript prints -0 as "0"
+    if value < 0:
+        return "-" + _ecmascript_number(-value)
+
+    # Decompose the shortest round-trip form into `digits × 10**(n - k)`, the (s, k, n) of the
+    # spec: `k` digits, value = 0.digits × 10**n.
+    text = repr(float(value))
+    mantissa, _, exponent_text = text.partition("e")
+    exponent = int(exponent_text) if exponent_text else 0
+    integer_part, _, fraction_part = mantissa.partition(".")
+    raw = integer_part + fraction_part
+    stripped = raw.lstrip("0")
+    leading_zeros = len(raw) - len(stripped)
+    n = len(integer_part) + exponent - leading_zeros
+    digits = stripped.rstrip("0") or "0"
+    k = len(digits)
+
+    if k <= n <= 21:
+        return digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return "0." + "0" * (-n) + digits
+    sign = "+" if n - 1 > 0 else "-"
+    head = digits if k == 1 else digits[0] + "." + digits[1:]
+    return f"{head}e{sign}{abs(n - 1)}"
+
+
+def _utf16_key(key: str) -> bytes:
+    """Sort key reproducing JavaScript's string ordering.
+
+    RFC 8785 §3.2.3 orders object members by UTF-16 code unit, which is what JavaScript's `<`
+    compares. Python's `<` compares CODE POINTS, and the two disagree for anything above the BMP:
+    `"😀" < ""` is true by code point and false by code unit. Encoding to UTF-16-BE and
+    comparing bytes reproduces the JavaScript order exactly.
+    """
+    return key.encode("utf-16-be", errors="surrogatepass")
 
 
 def canonical_json(value: Any) -> str:
-    """RFC-8785-style canonical JSON: sorted keys, no insignificant whitespace, UTF-8 text.
+    """RFC-8785 canonical JSON: UTF-16-ordered keys, ECMAScript numbers, no insignificant space.
 
     Deterministic for a given *content*, which is the only property the signature needs:
     reordering a mapping, round-tripping the payload through JSON, or writing `89` where the
-    other side wrote `89.0` must not change the bytes. Scoped to signing — the ledger's hash
-    chain has its own canonicalizer in `apps/trust/src/ledger` (D16) and neither borrows the
-    other's.
+    other side wrote `89.0` must not change the bytes. Written out by hand rather than delegated
+    to `json.dumps(sort_keys=True)`, because `json.dumps` gets both the key order and the number
+    format subtly wrong for a signature's purposes — see `_ecmascript_number` and `_utf16_key`.
+
+    Scoped to signing. The ledger's hash chain has its own canonicalizer in
+    `apps/trust/src/ledger` (D16) and neither borrows the other's.
     """
-    return json.dumps(
-        _jcs_numbers(value),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
+    out: list[str] = []
+    _write_canonical(value, out)
+    return "".join(out)
+
+
+def _write_canonical(value: Any, out: list[str]) -> None:
+    if value is None:
+        out.append("null")
+    elif value is True:
+        out.append("true")
+    elif value is False:
+        out.append("false")
+    elif isinstance(value, str):
+        # `ensure_ascii=False` so non-ASCII stays literal, matching `JSON.stringify`.
+        out.append(json.dumps(value, ensure_ascii=False))
+    elif isinstance(value, int):
+        # An integer beyond JavaScript's exact range would be READ BACK as a different number on
+        # the other side, so it is canonicalized through the double it will become there.
+        out.append(
+            str(value) if abs(value) <= _MAX_SAFE_INTEGER else _ecmascript_number(float(value))
+        )
+    elif isinstance(value, float):
+        out.append(_ecmascript_number(value))
+    elif isinstance(value, Mapping):
+        out.append("{")
+        for index, key in enumerate(sorted(value, key=_utf16_key)):
+            if index:
+                out.append(",")
+            out.append(json.dumps(str(key), ensure_ascii=False))
+            out.append(":")
+            _write_canonical(value[key], out)
+        out.append("}")
+    elif isinstance(value, (list, tuple)):
+        out.append("[")
+        for index, item in enumerate(value):
+            if index:
+                out.append(",")
+            _write_canonical(item, out)
+        out.append("]")
+    else:
+        raise TypeError(
+            f"canonical_json cannot sign a {type(value).__name__}; a signed payload must be "
+            "plain JSON so both sides can reproduce the bytes from the wire form alone"
+        )
 
 
 def payload_hash(payload: Mapping[str, Any]) -> str:

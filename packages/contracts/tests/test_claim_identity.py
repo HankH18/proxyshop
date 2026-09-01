@@ -8,6 +8,10 @@ must.
 
 from __future__ import annotations
 
+import pathlib
+
+import pytest
+
 from contracts.claims import canonicalize_value
 from packages.contracts import claim_id, claim_id_for
 
@@ -120,3 +124,59 @@ def test_canonicalization_leaves_booleans_alone() -> None:
     """`True` is an `int` subclass; collapsing it to 1 would merge "is vegan" with "count is 1"."""
     assert canonicalize_value(True) is True
     assert base(value=True) != base(value=1)
+
+
+# --- the id is stable ACROSS PROCESSES, not merely within one --------------------------------
+
+
+GOLDEN_CLAIM_ID = "claim:sha256:b672c908f89a24f5e5721f9e1b0ee63d92eceb17b39c37da320678683b24478d"
+
+
+def test_the_id_for_the_reference_claim_is_a_pinned_literal() -> None:
+    """Every other test here compares one `claim_id(...)` to another `claim_id(...)`, which stays
+    true no matter what the function computes. This one pins the actual value, so a change to the
+    hashing material or the canonicalization is a visible, reviewable diff rather than a silent
+    re-issue of every claim id in the system."""
+    assert base() == GOLDEN_CLAIM_ID
+
+
+def test_the_id_survives_a_different_process_hash_seed() -> None:
+    """`PYTHONHASHSEED` randomizes set and (historically) str iteration order. An id that moved
+    with it would be idempotent only within a single run, which is not idempotent at all."""
+    import subprocess
+    import sys
+
+    script = (
+        "import sys; sys.path.insert(0, '.pkgroot');"
+        "from contracts.claims import claim_id;"
+        "print(claim_id(pitch_ref='pitch:p-1', key='free_returns', value={'a', 'b', 'c', 'd'},"
+        " claim_type='return_policy'))"
+    )
+    ids = set()
+    for seed in ("0", "1", "12345", "random"):
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env={"PYTHONHASHSEED": seed, "PATH": "/usr/bin:/bin"},
+            cwd=str(pathlib.Path(__file__).resolve().parents[3]),
+        )
+        assert result.returncode == 0, result.stderr
+        ids.add(result.stdout.strip())
+    assert len(ids) == 1, f"claim_id changed with PYTHONHASHSEED: {ids}"
+
+
+def test_a_set_value_is_canonicalized_by_order_not_by_iteration() -> None:
+    """An unordered collection has no wire order to preserve, so two spellings of the same set are
+    the same claim."""
+    assert claim_id(pitch_ref="p", key="k", value={"b", "a"}) == claim_id(
+        pitch_ref="p", key="k", value={"a", "b"}
+    )
+    assert canonicalize_value({"b", "a"}) == ["a", "b"]
+
+
+def test_a_value_that_cannot_be_canonicalized_is_refused_rather_than_stringified() -> None:
+    """`repr` of a memory-addressed object is not stable across processes, so an id built from one
+    would silently differ on the next run — the exact failure this module exists to prevent."""
+    with pytest.raises(TypeError):
+        claim_id(pitch_ref="p", key="k", value=object())

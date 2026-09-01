@@ -18,6 +18,7 @@ implementations of a canonicalizer can be shown to be one protocol.
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -255,3 +256,88 @@ def test_an_unknown_key_never_falls_back_to_another_key_of_that_signer() -> None
     assert keyring_secret(keyring, "store-external-1", "key-2026-07") is None
     assert keyring_secret(keyring, "store-external-9", "key-2026-01") is None
     assert keyring_secret({}, "store-external-1", "key-2026-01") is None
+
+
+# ---------------------------------------------------------------------------------------------
+# Cross-language canonicalization, pinned against a reference implementation.
+#
+# `tests/canonicalization_corpus.json` was produced by a canonicalizer written straight from
+# RFC 8785, with ECMAScript as the authority for number formatting (§3.2.2.3) and member ordering
+# (§3.2.3) — because that is what the RFC cites. BOTH language implementations are checked against
+# that same file, which is what makes them one implementation rather than two that happen to agree
+# on whatever fixtures someone thought to try.
+#
+# The cases that matter are the ones where Python's obvious answer is WRONG:
+#   1e-6   `repr` says "1e-06",  ECMAScript says "0.000001"
+#   1e16   `repr` says "1e+16",  ECMAScript says "10000000000000000"
+#   "😀"   sorts before "Ｚ" by code point, AFTER it by UTF-16 code unit
+# `Offer.unit_price` is an unconstrained `number` and `Claim.value` is unconstrained entirely, so
+# every one of these is reachable from a schema-valid bid.
+# ---------------------------------------------------------------------------------------------
+
+_CORPUS_PATH = pathlib.Path(__file__).parent / "canonicalization_corpus.json"
+_CORPUS = json.loads(_CORPUS_PATH.read_text(encoding="utf-8"))
+
+
+def test_the_corpus_is_present_and_substantial() -> None:
+    """Guards the parametrized test below against passing vacuously on an empty file."""
+    assert len(_CORPUS) >= 25
+    assert all({"input", "expected"} <= set(case) for case in _CORPUS)
+
+
+@pytest.mark.parametrize("case", _CORPUS, ids=[case["expected"][:48] for case in _CORPUS])
+def test_canonical_json_matches_the_rfc_8785_reference(case: dict) -> None:
+    assert canonical_json(case["input"]) == case["expected"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (89.0, "89"),
+        (44.1, "44.1"),
+        (0.0, "0"),
+        (-0.0, "0"),
+        (1e-6, "0.000001"),
+        (1e-7, "1e-7"),
+        (0.00001, "0.00001"),
+        (0.0001, "0.0001"),
+        (1e21, "1e+21"),
+        (1e16, "10000000000000000"),
+        (1.5e-10, "1.5e-10"),
+        (5e-324, "5e-324"),
+        (1.7976931348623157e308, "1.7976931348623157e+308"),
+        (-44.1, "-44.1"),
+    ],
+)
+def test_numbers_serialize_the_way_ecmascript_does(value: float, expected: str) -> None:
+    """Every one of these is a magnitude where `repr(value)` gives a DIFFERENT string, so a
+    canonicalizer built on `repr` would sign differently from the Node peer."""
+    assert canonical_json({"n": value}) == f'{{"n":{expected}}}'
+
+
+def test_an_integer_beyond_javascript_s_exact_range_is_signed_as_the_double_it_becomes() -> None:
+    """The other side reads JSON numbers as doubles. Signing the exact integer would mean the two
+    ends canonicalize different values out of identical bytes."""
+    assert canonical_json({"n": 12345678901234567890}) == '{"n":12345678901234567000}'
+    assert canonical_json({"n": 2**53 - 1}) == '{"n":9007199254740991}'
+
+
+def test_keys_are_ordered_by_utf16_code_unit_not_code_point() -> None:
+    """RFC 8785 §3.2.3. Python's `<` compares code points and disagrees above the BMP, so an
+    emoji key would sort to the wrong side and the two implementations would sign differently."""
+    assert canonical_json({"Ｚ": 1, "\U0001f600": 2}) == '{"\U0001f600":2,"Ｚ":1}'
+
+
+def test_a_value_that_cannot_be_canonicalized_is_refused() -> None:
+    """Refusing beats stringifying: `repr` of an unordered or memory-addressed object is not
+    stable across processes, so the signature would not reproduce."""
+    with pytest.raises(TypeError):
+        canonical_json({"n": {1, 2, 3}})
+    with pytest.raises(TypeError):
+        canonical_json({"n": object()})
+
+
+def test_non_finite_numbers_are_refused() -> None:
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            canonical_json({"n": value})
