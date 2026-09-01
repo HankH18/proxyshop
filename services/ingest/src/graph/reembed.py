@@ -31,12 +31,13 @@ from typing import Any
 
 from ..embeddings import EmbeddingProvider, get_embedding_provider
 from .schema import (
-    VECTOR_INDEX_DIMENSIONS,
+    VECTOR_INDEX_NAME,
     apply_schema,
     await_indexes,
     rebuild_vector_index,
+    schema_report,
 )
-from .upsert import set_product_embedding
+from .upsert import EmbeddingDimensionMismatch, set_product_embedding
 
 #: How many products to pull per round trip.
 DEFAULT_BATCH_SIZE = 200
@@ -176,6 +177,23 @@ def reembed_products(
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
     resolved = provider or get_embedding_provider()
+    # The width the LIVE index was built for, not the width D6 pins: after an explicit
+    # `rebuild_vector_index(dimensions=N)` those differ, and the vectors have to match the
+    # index that exists, not the one the decision describes.
+    live = schema_report(session)
+    index_dimensions = live.vector_dimensions
+    if index_dimensions is None:
+        raise RuntimeError(
+            f"the {VECTOR_INDEX_NAME} index does not exist; call apply_schema(session) "
+            f"before embedding, or every vector written here is unreachable"
+        )
+    if resolved.dimension != index_dimensions:
+        raise EmbeddingDimensionMismatch(
+            f"provider {resolved.name!r} emits {resolved.dimension}-d vectors but the live "
+            f"{VECTOR_INDEX_NAME} index is {index_dimensions}-d. Neo4j would accept every "
+            f"write and then match none of them. Rebuild the index for this width first: "
+            f"python -m ingest.graph.reembed --provider {resolved.name} --rebuild-index"
+        )
     products = 0
     embedded = 0
     skipped: list[str] = []
@@ -194,7 +212,12 @@ def reembed_products(
                 # honest; writing a zero vector would make it silently unreachable instead.
                 skipped.append(row["product_id"])
                 continue
-            set_product_embedding(session, product_id=row["product_id"], embedding=vector)
+            set_product_embedding(
+                session,
+                product_id=row["product_id"],
+                embedding=vector,
+                dimensions=index_dimensions,
+            )
             embedded += 1
         skip += len(rows)
     if await_index:
@@ -280,16 +303,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     provider = get_embedding_provider(args.provider)
     with graph_driver() as driver, driver.session() as session:
         if args.rebuild_index:
-            if provider.dimension != VECTOR_INDEX_DIMENSIONS:
-                print(
-                    f"warning: provider {provider.name!r} is {provider.dimension}-d but D6 "
-                    f"pins the index at {VECTOR_INDEX_DIMENSIONS}-d",
-                    file=sys.stderr,
-                )
-            rebuild_vector_index(session)
+            # Rebuild for THIS provider's width. Rebuilding at D6's 1024 for a 512-d
+            # provider — which is what this did before — drops a working index, creates an
+            # identical one, and then embeds the entire catalog into an index that can never
+            # match it, with exit status 0.
+            rebuild_vector_index(session, dimensions=provider.dimension)
         else:
             apply_schema(session)
-        report = reembed_products(session, provider, batch_size=args.batch_size)
+        try:
+            report = reembed_products(session, provider, batch_size=args.batch_size)
+        except EmbeddingDimensionMismatch as exc:
+            # Loud and non-zero. Warning and proceeding would leave the whole catalog
+            # silently unretrievable while the command reported success.
+            print(f"FATAL: {exc}", file=sys.stderr)
+            return 2
     print(
         f"provider={report.provider} dim={report.dimension} "
         f"products={report.products} embedded={report.embedded} skipped={len(report.skipped)}"

@@ -62,7 +62,9 @@ from .query import (
 )
 from .reembed import ReembedReport, embedding_text, graph_driver, reembed_products
 from .schema import (
+    ADAPTER_LOOKUP_INDEXES,
     LOOKUP_INDEXES,
+    QUERY_PREDICATE_INDEXES,
     VECTOR_INDEX_DIMENSIONS,
     VECTOR_INDEX_NAME,
     VECTOR_INDEX_SIMILARITY,
@@ -76,8 +78,10 @@ from .schema import (
     rebuild_vector_index,
     schema_report,
     schema_statements,
+    vector_index_statement,
 )
 from .upsert import (
+    EmbeddingDimensionMismatch,
     ProvenanceRequired,
     ProvenanceViolation,
     assert_provenance_complete,
@@ -104,8 +108,10 @@ from .upsert import (
 
 __all__ = [
     "EMBEDDING_PROPERTY",
+    "ADAPTER_LOOKUP_INDEXES",
     "ID_PROPERTY",
     "LOOKUP_INDEXES",
+    "QUERY_PREDICATE_INDEXES",
     "MATERIAL_FACT_EDGES",
     "MATERIAL_FACT_LABELS",
     "SOURCE_CLASSES",
@@ -120,6 +126,7 @@ __all__ = [
     "AttributeValue",
     "Candidate",
     "Category",
+    "EmbeddingDimensionMismatch",
     "Ingredient",
     "IntentCluster",
     "Offer",
@@ -172,4 +179,5 @@ __all__ = [
     "upsert_source",
     "upsert_store",
     "upsert_variant",
+    "vector_index_statement",
 ]

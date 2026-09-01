@@ -271,7 +271,16 @@ def candidate_products(
     elif query_text:
         vector = list((provider or get_embedding_provider()).embed(query_text))
 
-    structured = bool(attribute_filters or category or ingredients_all or ingredients_none or brand)
+    # `is not None`, never truthiness: Product.brand DEFAULTS to "", so `brand=""` is the
+    # legitimate query "products with no brand" — and `bool("")` made it unaskable, raising
+    # UnretrievableQuery on a perfectly well-formed request. Same trap for `category=""`.
+    structured = (
+        len(attribute_filters) > 0
+        or len(ingredients_all) > 0
+        or len(ingredients_none) > 0
+        or category is not None
+        or brand is not None
+    )
     if vector is None and not structured:
         raise UnretrievableQuery(
             "a candidate query needs a vector (query_text/embedding) or at least one "

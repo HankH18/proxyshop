@@ -37,40 +37,86 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .model import EMBEDDING_PROPERTY, ID_PROPERTY
+from .model import EMBEDDING_DIMENSIONS, EMBEDDING_PROPERTY, ID_PROPERTY
 
 #: The index D6 names. T-031's retrieval and every candidate query go through it.
 VECTOR_INDEX_NAME = "product_embedding"
 
 #: D6, exactly: 1024 dimensions, cosine similarity, on ``Product.embedding``.
-VECTOR_INDEX_DIMENSIONS = 1024
+VECTOR_INDEX_DIMENSIONS = EMBEDDING_DIMENSIONS
 VECTOR_INDEX_SIMILARITY = "cosine"
+
+
+def vector_index_statement(
+    dimensions: int = VECTOR_INDEX_DIMENSIONS, similarity: str = VECTOR_INDEX_SIMILARITY
+) -> str:
+    """Build the ``CREATE VECTOR INDEX`` statement for a given width.
+
+    Parameterised rather than a bare constant because :func:`rebuild_vector_index` exists
+    precisely to change the width, and a constant with 1024 baked into it made that
+    function unable to do its one job: it dropped a 1024-d index and created another 1024-d
+    index, so a swap to a 512-d provider left the whole catalog in an index it could never
+    match. The default is D6 and nothing in the normal path passes anything else.
+
+    Args:
+        dimensions: the vector width the index is built for.
+        similarity: the similarity function (``cosine`` per D6).
+
+    Returns:
+        A re-runnable ``IF NOT EXISTS`` statement.
+
+    Raises:
+        ValueError: ``dimensions`` is not positive.
+    """
+    if dimensions <= 0:
+        raise ValueError(f"vector index dimensions must be positive, got {dimensions}")
+    return (
+        f"CREATE VECTOR INDEX {VECTOR_INDEX_NAME} IF NOT EXISTS "
+        "FOR (p:Product) ON (p.embedding) "
+        "OPTIONS {indexConfig: {"
+        f"`vector.dimensions`: {dimensions}, "
+        f"`vector.similarity_function`: '{similarity}'"
+        "}}"
+    )
+
 
 #: The runnable form of D6's statement. See the module docstring for why the keys are
 #: backtick-quoted rather than single-quoted.
-VECTOR_INDEX_STATEMENT = (
-    f"CREATE VECTOR INDEX {VECTOR_INDEX_NAME} IF NOT EXISTS "
-    "FOR (p:Product) ON (p.embedding) "
-    "OPTIONS {indexConfig: {"
-    f"`vector.dimensions`: {VECTOR_INDEX_DIMENSIONS}, "
-    f"`vector.similarity_function`: '{VECTOR_INDEX_SIMILARITY}'"
-    "}}"
-)
+VECTOR_INDEX_STATEMENT = vector_index_statement()
 
-#: Non-unique range indexes for the predicates the candidate query and the adapters filter
-#: on. Purely a read-path concern — correctness does not depend on them, so they are listed
-#: separately from the constraints and a reviewer can tell the two apart at a glance.
-LOOKUP_INDEXES: tuple[tuple[str, str, str], ...] = (
+#: Non-unique range indexes. Purely a read-path concern — correctness does not depend on
+#: them, so they are listed separately from the constraints and a reviewer can tell the two
+#: apart at a glance.
+#:
+#: Split into two groups on purpose. The first group is the set of properties
+#: :mod:`ingest.graph.query` actually compares against, and ``test_graph.py`` checks that
+#: membership *against the shipped Cypher* rather than against this list — the earlier
+#: version of that test simply restated this tuple, and so happily indexed
+#: ``value_string`` while the query compared ``canonical_value_string``.
+QUERY_PREDICATE_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("attribute_value_key", "AttributeValue", "canonical_key"),
-    ("attribute_value_string", "AttributeValue", "value_string"),
+    ("attribute_value_canonical_string", "AttributeValue", "canonical_value_string"),
     ("attribute_value_number", "AttributeValue", "value_number"),
-    ("ingredient_canonical_name", "Ingredient", "canonical_name"),
-    ("category_slug", "Category", "slug"),
+    ("attribute_value_bool", "AttributeValue", "value_bool"),
+    ("attribute_value_canonical_unit", "AttributeValue", "canonical_unit"),
     ("product_status", "Product", "status"),
     ("product_brand", "Product", "brand"),
+)
+
+#: The second group serves the *adapters* (T-020…T-024) resolving a term or a snapshot by
+#: its human-readable value. Nothing in the candidate query touches these.
+ADAPTER_LOOKUP_INDEXES: tuple[tuple[str, str, str], ...] = (
+    ("attribute_value_string", "AttributeValue", "value_string"),
+    ("ingredient_canonical_name", "Ingredient", "canonical_name"),
+    ("category_slug", "Category", "slug"),
     ("offer_observed_at", "Offer", "observed_at"),
     ("source_content_hash", "Source", "content_hash"),
     ("store_domain", "Store", "domain"),
+)
+
+LOOKUP_INDEXES: tuple[tuple[str, str, str], ...] = (
+    *QUERY_PREDICATE_INDEXES,
+    *ADAPTER_LOOKUP_INDEXES,
 )
 
 
@@ -219,7 +265,13 @@ def schema_report(session: Any) -> SchemaReport:
     return SchemaReport(constraints=constraints, indexes=indexes, vector_index=vector_index)
 
 
-def rebuild_vector_index(session: Any, *, timeout: int = 300) -> SchemaReport:
+def rebuild_vector_index(
+    session: Any,
+    *,
+    dimensions: int = VECTOR_INDEX_DIMENSIONS,
+    similarity: str = VECTOR_INDEX_SIMILARITY,
+    timeout: int = 300,
+) -> SchemaReport:
     """Drop and re-create the vector index. **Only** for a provider dimension change.
 
     This is the one function in the module that drops anything, and it exists for exactly
@@ -235,20 +287,36 @@ def rebuild_vector_index(session: Any, *, timeout: int = 300) -> SchemaReport:
 
     Args:
         session: an open ``neo4j.Session``.
+        dimensions: the width to build the new index for. Defaults to D6's 1024.
+        similarity: the similarity function. Defaults to D6's ``cosine``.
         timeout: seconds to wait for the fresh index to populate.
 
     Returns:
         A :class:`SchemaReport` read back after the rebuild.
+
+    Raises:
+        RuntimeError: the rebuilt index did not come back with the requested parameters.
+            Read back rather than assumed: this function is the last line of defence before
+            an entire catalog is embedded into an index that cannot match it.
     """
     session.run(f"DROP INDEX {VECTOR_INDEX_NAME} IF EXISTS").consume()
-    session.run(VECTOR_INDEX_STATEMENT).consume()
+    session.run(vector_index_statement(dimensions, similarity)).consume()
     await_indexes(session, timeout=timeout)
-    return schema_report(session)
+    report = schema_report(session)
+    if report.vector_dimensions != dimensions or report.vector_similarity != similarity.lower():
+        raise RuntimeError(
+            f"rebuilt {VECTOR_INDEX_NAME} reports "
+            f"{report.vector_dimensions}d/{report.vector_similarity}, expected "
+            f"{dimensions}d/{similarity}"
+        )
+    return report
 
 
 __all__ = [
+    "ADAPTER_LOOKUP_INDEXES",
     "EMBEDDING_PROPERTY",
     "LOOKUP_INDEXES",
+    "QUERY_PREDICATE_INDEXES",
     "VECTOR_INDEX_DIMENSIONS",
     "VECTOR_INDEX_NAME",
     "VECTOR_INDEX_SIMILARITY",
@@ -262,4 +330,5 @@ __all__ = [
     "rebuild_vector_index",
     "schema_report",
     "schema_statements",
+    "vector_index_statement",
 ]

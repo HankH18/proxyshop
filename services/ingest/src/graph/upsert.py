@@ -18,6 +18,21 @@ ingest of unchanged pages converges rather than duplicating. T-021 re-extracts o
 hash change and T-022 resolves entities on top of these nodes; both depend on the node
 identity being the ID, never the name (DESIGN: "never match products by free-text name
 alone").
+
+Two consequences of that shape, stated because an adapter author will hit both:
+
+* **A node accumulates one ``SUPPORTED_BY`` edge per distinct ``Source``.** That is
+  provenance history and is intended — a product asserted by three stores has three
+  supports. It is bounded by the number of distinct ``source_id`` values, so make
+  ``source_id`` content-addressed (url + content_hash), *not* per-crawl-run. A run-scoped
+  id would grow the graph without bound on a re-crawl schedule while every test still
+  passed.
+* **An edge keeps only its most recent ``source_id``.** ``MERGE`` collapses the
+  relationship and ``SET r += $props`` overwrites, so "which sources have ever asserted
+  this edge" is not recoverable from the edge. The trade is deliberate: one edge per
+  ``(a, type, b)`` keeps traversal cost flat and keeps the provenance audit a single-hop
+  check. A ticket that needs full edge-level provenance history should reify the assertion
+  as a node rather than change this.
 """
 
 from __future__ import annotations
@@ -27,6 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .model import (
+    EMBEDDING_DIMENSIONS,
     EMBEDDING_PROPERTY,
     ID_PROPERTY,
     MATERIAL_FACT_EDGES,
@@ -48,6 +64,10 @@ from .model import (
 
 class ProvenanceRequired(ValueError):
     """A material fact was offered without a resolvable :class:`~ingest.graph.model.Source`."""
+
+
+class EmbeddingDimensionMismatch(ValueError):
+    """A vector was offered whose width the ``product_embedding`` index cannot match."""
 
 
 # ---------------------------------------------------------------------------------------
@@ -162,6 +182,42 @@ def _vocabulary_node(session: Any, label: str, id_property: str, props: dict[str
         props=props,
     ).consume()
     return str(id_value)
+
+
+def _require_nodes(session: Any, endpoints: Sequence[tuple[str, str]]) -> None:
+    """Refuse before writing anything if any endpoint is missing.
+
+    A multi-node upsert (``upsert_offer`` writes an Offer, then MAKES_OFFER, then FOR) is
+    three statements, not one transaction, because the ``session`` argument may already be
+    inside a caller's transaction and opening another would deadlock against it. Without
+    this pre-flight, a bad ``store_id`` let the Offer node land and *then* raised — leaving
+    an orphaned Offer that ``provenance_violations()`` correctly reports as clean, because
+    it is properly sourced; it is simply attached to nothing. Checking first makes the whole
+    operation all-or-nothing in the only way available here.
+
+    Args:
+        session: an open ``neo4j.Session`` or transaction.
+        endpoints: ``(label, stable_id)`` pairs that must already exist.
+
+    Raises:
+        ProvenanceRequired: one or more endpoints do not exist. Named so the caller sees the
+            same error whether the endpoint was missing before or during the write.
+    """
+    missing = [
+        f"{label}({identity})"
+        for label, identity in endpoints
+        if session.run(
+            f"MATCH (n:{label} {{{ID_PROPERTY[label]}: $identity}}) RETURN count(n) AS c",
+            identity=identity,
+        ).single()["c"]
+        == 0
+    ]
+    if missing:
+        raise ProvenanceRequired(
+            f"cannot write: {', '.join(missing)} do(es) not exist. Upsert the node(s) with "
+            f"their own Source first — creating them here would be an unsourced fact, and "
+            f"writing the rest anyway would leave an orphan."
+        )
 
 
 def _fact_edge(
@@ -282,6 +338,8 @@ def upsert_variant(
         ``variant.variant_id``.
     """
     resolved = _require_source(source)
+    if product_id is not None:
+        _require_nodes(session, [("Product", product_id)])
     _fact_node(
         session, "Variant", "variant_id", variant.variant_id, variant.as_properties(), resolved
     )
@@ -313,6 +371,7 @@ def upsert_offer(
         ``offer.offer_id``.
     """
     resolved = _require_source(source)
+    _require_nodes(session, [("Store", store_id), ("Variant", variant_id)])
     _fact_node(session, "Offer", "offer_id", offer.offer_id, offer.as_properties(), resolved)
     _fact_edge(session, "MAKES_OFFER", "Store", store_id, "Offer", offer.offer_id, resolved)
     _fact_edge(session, "FOR", "Offer", offer.offer_id, "Variant", variant_id, resolved)
@@ -549,24 +608,50 @@ def link_states(session: Any, *, page_id: str, attribute: AttributeValue, source
 # ---------------------------------------------------------------------------------------
 
 
-def set_product_embedding(session: Any, *, product_id: str, embedding: Sequence[float]) -> None:
-    """Write ``Product.embedding`` through the procedure the vector index expects.
+def set_product_embedding(
+    session: Any,
+    *,
+    product_id: str,
+    embedding: Sequence[float],
+    dimensions: int = EMBEDDING_DIMENSIONS,
+) -> None:
+    """Write ``Product.embedding``, refusing any vector the index cannot match.
 
-    ``db.create.setNodeVectorProperty`` is used rather than a plain ``SET`` because it
-    validates the value is a numeric vector and stores it in the index's native
-    representation; a plain ``SET`` of a list of Python ``Decimal``/``int`` silently stores
-    something the index will not accept.
+    THE LENGTH CHECK IS THE POINT. Measured on neo4j 5.26.30: ``db.create.setNodeVectorProperty``
+    accepts a 512-d or a 1025-d vector **without error** and stores it verbatim. Nothing
+    downstream then complains — ``db.index.vector.queryNodes`` simply never returns that
+    node, ``candidate_products`` never surfaces it, ``products_missing_embeddings()``
+    reports it as embedded (it has *an* embedding), and ``provenance_violations()`` is
+    clean. The product becomes silently unrankable, which is exactly the failure
+    :func:`ingest.graph.reembed.reembed_products` refuses to cause for empty text. So the
+    width is checked here, in Python, before the write.
+
+    ``db.create.setNodeVectorProperty`` is still used rather than a plain ``SET`` because it
+    is the documented API for writing an indexed vector and coerces the value into the
+    index's native representation. Honesty about the strength of that claim: a plain ``SET``
+    was measured to work on this build too, so the procedure is the supported path, not a
+    load-bearing safety net — the safety net is the check above it.
 
     Args:
         session: an open ``neo4j.Session`` or transaction.
         product_id: the product to embed.
-        embedding: the vector, whose length must match the live index (D6: 1024).
+        embedding: the vector.
+        dimensions: the width the live index was built for. Defaults to D6's 1024; pass the
+            provider's width after a :func:`ingest.graph.schema.rebuild_vector_index`.
 
     Raises:
+        EmbeddingDimensionMismatch: ``embedding`` is not ``dimensions`` long.
         ProvenanceRequired: the product does not exist. An embedding is a derived value,
             not an independent fact, so it never creates a node — and a ``MERGE`` here would
             create an unsourced ``Product`` out of a typo'd id.
     """
+    vector = [float(component) for component in embedding]
+    if len(vector) != dimensions:
+        raise EmbeddingDimensionMismatch(
+            f"refusing to write a {len(vector)}-d vector for product_id={product_id!r}: the "
+            f"product_embedding index is {dimensions}-d, and Neo4j would accept the write "
+            f"silently and then never return this product from any vector query"
+        )
     result = session.run(
         f"""
         MATCH (p:Product {{product_id: $product_id}})
@@ -574,7 +659,7 @@ def set_product_embedding(session: Any, *, product_id: str, embedding: Sequence[
         RETURN count(p) AS updated
         """,
         product_id=product_id,
-        embedding=[float(component) for component in embedding],
+        embedding=vector,
     )
     if (result.single() or {"updated": 0})["updated"] == 0:
         raise ProvenanceRequired(
@@ -749,6 +834,7 @@ def seed_products(session: Any, records: Iterable[dict[str, Any]], *, source: So
 
 
 __all__ = [
+    "EmbeddingDimensionMismatch",
     "ProvenanceRequired",
     "ProvenanceViolation",
     "assert_provenance_complete",

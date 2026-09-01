@@ -66,6 +66,17 @@ MATERIAL_FACT_LABELS: frozenset[str] = frozenset(
 #: Nodes that are *vocabulary*, not observation: a category or an ingredient is a term, and
 #: the observed fact is a product's attachment to it. Those attachments are edges, and
 #: edges carry their provenance as :data:`SOURCE_ID_PROPERTY` (see below).
+#:
+#: THE INVARIANT THAT MAKES THIS SAFE, and the one a future ticket can break: a vocabulary
+#: node's properties are **derived from the term itself and nothing else**. Provenancing the
+#: term would be actively worse — it would attribute a shared node to whichever adapter
+#: happened to mint it first. But the moment someone adds an *observed* property
+#: (``Ingredient.is_allergen``, ``Category.regulated_in``, ``IntentCluster.observed_volume``)
+#: a real-world claim lands here unsourced and :func:`ingest.graph.upsert.provenance_violations`
+#: stays green, because these labels are excluded from the node audit by construction.
+#: Adding an observed property means moving the label into :data:`MATERIAL_FACT_LABELS`, not
+#: widening the dataclass. ``test_graph.py`` pins each vocabulary node's property set exactly
+#: so that widening one is a deliberate, visible act.
 VOCABULARY_LABELS: frozenset[str] = frozenset({"Category", "Ingredient", "IntentCluster"})
 
 #: The provenance edge itself. Never a material fact — it *is* the provenance.
@@ -97,6 +108,11 @@ SOURCE_ID_PROPERTY = "source_id"
 
 #: The property the D6 vector index is built on: ``Product.embedding``.
 EMBEDDING_PROPERTY = "embedding"
+
+#: D6's vector width. Lives here rather than in :mod:`ingest.graph.schema` so that
+#: :mod:`ingest.graph.upsert` can validate a vector's length without importing the schema
+#: module, and so there is exactly one literal ``1024`` in the package.
+EMBEDDING_DIMENSIONS = 1024
 
 #: ``Provenance.source`` (DESIGN §Interfaces): the closed vocabulary ``Source.source_class``
 #: carries. Mirrored here rather than imported from ``packages/contracts`` so that the graph
@@ -290,12 +306,23 @@ class Source:
     def __post_init__(self) -> None:
         """Validate the closed vocabulary and the confidence range.
 
+        A ``Source`` whose fields are all blank satisfies "every material fact has a
+        Source" while pointing at nothing, which would make the whole provenance rule
+        vacuous — an adapter could green the audit with ``Source("x", "", "", "", "", 0.0,
+        "seller_asserted")``. So every field that makes the record *traceable* is required,
+        not just the ones that make it well-formed.
+
         Raises:
-            ValueError: ``source_class`` is outside :data:`SOURCE_CLASSES`, ``source_id`` is
-                blank, or ``confidence`` is outside ``[0, 1]``.
+            ValueError: ``source_class`` is outside :data:`SOURCE_CLASSES`, ``confidence``
+                is outside ``[0, 1]``, or any of ``source_id`` / ``url`` /
+                ``content_hash`` / ``observed_at`` / ``extractor_version`` is blank.
         """
-        if not self.source_id:
-            raise ValueError("Source.source_id must be non-empty (it is the stable ID)")
+        for field_name in ("source_id", "url", "content_hash", "observed_at", "extractor_version"):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(
+                    f"Source.{field_name} must be non-empty: a Source that points at nothing "
+                    f"satisfies the provenance audit without providing any provenance"
+                )
         if self.source_class not in SOURCE_CLASSES:
             raise ValueError(
                 f"Source.source_class {self.source_class!r} is not one of "
@@ -545,6 +572,7 @@ class IntentCluster:
 
 
 __all__ = [
+    "EMBEDDING_DIMENSIONS",
     "EMBEDDING_PROPERTY",
     "ID_PROPERTY",
     "MATERIAL_FACT_LABELS",

@@ -58,6 +58,7 @@ from ingest.graph import (
     AttributeValue,
     Category,
     Ingredient,
+    IntentCluster,
     Offer,
     PolicyPage,
     Product,
@@ -70,9 +71,11 @@ from ingest.graph import (
     assert_provenance_complete,
     attribute_value_id,
     candidate_products,
+    category_id,
     constraint_name,
     constraint_statements,
     cosine_from_score,
+    ingredient_id,
     link_category,
     link_compatible_with,
     link_ingredient,
@@ -101,7 +104,16 @@ from ingest.graph.reembed import build_parser, embedding_text, read_products
 from proxyshop_support.embedding import EMBEDDING_DIM as SUPPORT_EMBEDDING_DIM
 from proxyshop_support.embedding import cosine, hash_embed
 
-GRAPH_SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "graph"
+INGEST_SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
+GRAPH_SRC = INGEST_SRC / "graph"
+
+#: Every shipped module of this service, recursively. The static scans below used
+#: ``GRAPH_SRC.glob("*.py")`` — five files, non-recursive — so a concrete provider
+#: constructed in ``src/adapters/``, or name-matching Cypher added in a future
+#: ``src/graph/retrieval/`` subpackage, was invisible to both of them.
+SCANNED_SOURCES = tuple(
+    path for path in sorted(INGEST_SRC.rglob("*.py")) if "__pycache__" not in path.parts
+)
 
 #: The two probes the frozen acceptance test uses, kept here so a change to either side is
 #: visible against the other. They are the same length on purpose (see the frozen test).
@@ -308,12 +320,14 @@ def test_no_caller_names_a_concrete_provider_class() -> None:
     config-only everywhere except the one place that mattered.
     """
     offenders = []
-    for path in sorted(GRAPH_SRC.glob("*.py")):
+    for path in SCANNED_SOURCES:
+        if path.parent.name == "embeddings":
+            continue  # the package that defines them is where they are allowed to be named
         source = path.read_text(encoding="utf-8")
         for pattern in (r"\bHashEmbedding\s*\(", r"\bLocalBgeEmbedding\s*\("):
             if re.search(pattern, source):
-                offenders.append(f"{path.name}: {pattern}")
-    assert not offenders, f"graph modules must go through get_embedding_provider(): {offenders}"
+                offenders.append(f"{path.relative_to(INGEST_SRC)}: {pattern}")
+    assert not offenders, f"every caller must go through get_embedding_provider(): {offenders}"
 
 
 def test_an_unknown_provider_fails_loudly_instead_of_falling_back(
@@ -673,8 +687,10 @@ def test_no_graph_module_matches_products_by_free_text_name() -> None:
     scan exists to catch the ordinary mistake before it reaches review.
     """
     offenders = []
-    for path in sorted(GRAPH_SRC.glob("*.py")):
-        offenders += _free_text_offenders(path.read_text(encoding="utf-8"), path.name)
+    for path in SCANNED_SOURCES:
+        offenders += _free_text_offenders(
+            path.read_text(encoding="utf-8"), str(path.relative_to(INGEST_SRC))
+        )
     assert not offenders, "free-text product matching is forbidden by DESIGN:\n" + "\n".join(
         offenders
     )
@@ -755,7 +771,17 @@ def test_apply_schema_from_an_empty_database_is_idempotent(neo4j_session: Any) -
     run, so this test genuinely empties the schema first. The ``finally`` restores it, so a
     failure here cannot cascade into every later test in the file.
     """
-    builtin = {"index_343aff4e", "index_f7700477"}
+    # Neo4j's two built-in token-lookup indexes must survive: nothing recreates them, and
+    # dropping them permanently degrades a database four agents share. Their generated
+    # names differ per container, so they are identified by TYPE, never by a hardcoded name
+    # — an earlier version pinned `index_343aff4e`/`index_f7700477`, which are correct only
+    # on this one container.
+    builtin = {
+        name
+        for name, kind in schema_report(neo4j_session).indexes.items()
+        if kind.upper() == "LOOKUP"
+    }
+    assert len(builtin) == 2, f"expected the two token-lookup indexes, found {builtin}"
     try:
         for name in list(schema_report(neo4j_session).constraints):
             neo4j_session.run(f"DROP CONSTRAINT {name} IF EXISTS").consume()
@@ -777,6 +803,7 @@ def test_apply_schema_from_an_empty_database_is_idempotent(neo4j_session: Any) -
         assert first.constraints[constraint_name(label)] == f"{label}.{prop}"
     for name, _label, _prop in LOOKUP_INDEXES:
         assert name in first.indexes
+    assert builtin <= set(first.indexes), "the built-in token-lookup indexes must survive"
     assert first.indexes[VECTOR_INDEX_NAME] == "VECTOR"
     assert first.vector_dimensions == 1024
     assert first.vector_similarity == "cosine"
@@ -963,6 +990,67 @@ def test_the_provenance_audit_catches_a_supported_by_pointing_at_a_non_source(
     ).consume()
     kinds = {v.kind for v in provenance_violations(graph_schema_session)}
     assert "supported_by_non_source" in kinds
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_fact_observed_from_two_sources_keeps_both_supports(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """Provenance is a set, not a last-writer-wins slot — for NODES.
+
+    A product asserted by three stores has three supports, and that is what makes
+    ``authority_rank`` arbitration possible downstream. It is bounded by the number of
+    *distinct* ``source_id`` values, which is why ``source_id`` must be content-addressed
+    (url + content_hash) and never scoped to a crawl run: a run-scoped id would grow this
+    set without bound on every re-crawl while every test here still passed.
+
+    The edge half is deliberately different and is asserted below: ``MERGE`` collapses the
+    relationship, so an edge keeps only its most recent ``source_id``. Both behaviours are
+    pinned so neither can change silently.
+    """
+    second = Source(
+        source_id="src-second",
+        url="https://other.example/p",
+        content_hash="sha256:bb",
+        observed_at="2026-02-02T00:00:00+00:00",
+        extractor_version="fixture@2",
+        confidence=0.5,
+        source_class="pixel_feed",
+    )
+    product = Product("p-multi", "Observed Twice")
+    upsert_product(graph_schema_session, product, source=graph_source)
+    upsert_product(graph_schema_session, product, source=second)
+
+    supports = graph_schema_session.run(
+        "MATCH (:Product {product_id:'p-multi'})-[:SUPPORTED_BY]->(s:Source) "
+        "RETURN s.source_id AS id ORDER BY id"
+    ).value()
+    assert supports == ["src-catalog-fixture", "src-second"]
+
+    # Re-asserting from a source already recorded must not add a duplicate edge.
+    upsert_product(graph_schema_session, product, source=graph_source)
+    assert (
+        graph_schema_session.run(
+            "MATCH (:Product {product_id:'p-multi'})-[r:SUPPORTED_BY]->() RETURN count(r) AS c"
+        ).single()["c"]
+        == 2
+    )
+
+    # The edge half: one relationship per (a, type, b), carrying the latest source_id.
+    upsert_product(graph_schema_session, Product("p-other", "Other"), source=graph_source)
+    link_compatible_with(
+        graph_schema_session, product_id="p-multi", other_id="p-other", source=graph_source
+    )
+    link_compatible_with(
+        graph_schema_session, product_id="p-multi", other_id="p-other", source=second
+    )
+    edges = graph_schema_session.run(
+        "MATCH (:Product {product_id:'p-multi'})-[r:COMPATIBLE_WITH]->() "
+        "RETURN r.source_id AS source_id"
+    ).value()
+    assert edges == ["src-second"], "an edge keeps one relationship and its latest source"
+    assert provenance_violations(graph_schema_session) == []
 
 
 @pytest.mark.docker
@@ -1312,27 +1400,36 @@ def test_the_query_filters_by_category_ingredient_and_brand(
 @pytest.mark.docker
 @pytest.mark.graph
 @pytest.mark.parametrize(
-    ("filter_kwargs", "expected"),
+    ("key", "filter_kwargs", "expected"),
     [
-        ({"value_bool": False}, {"prod-cream-night"}),
-        ({"value_bool": True}, {"prod-serum-c", "prod-spf-daily"}),
-        ({"equals_number": 0}, set()),
-        ({"min_number": 0}, set()),
+        # prod-cream-night is the only fragranced product: `False` must select it, and must
+        # NOT be read as "no fragrance filter supplied".
+        ("fragrance_free", {"value_bool": False}, {"prod-cream-night"}),
+        ("fragrance_free", {"value_bool": True}, {"prod-serum-c", "prod-spf-daily"}),
+        # prod-serum-c carries spf=0, prod-spf-daily carries spf=50, prod-cream-night has no
+        # spf attribute at all. So `equals_number=0` selects exactly the SPF-zero product,
+        # and `min_number=0` selects both products that carry an spf reading.
+        ("spf", {"equals_number": 0}, {"prod-serum-c"}),
+        ("spf", {"min_number": 0}, {"prod-serum-c", "prod-spf-daily"}),
+        ("spf", {"max_number": 0}, {"prod-serum-c"}),
     ],
 )
 def test_a_falsy_filter_component_is_still_a_filter(
-    graph_seeded_catalog: dict[str, Any], filter_kwargs: dict[str, Any], expected: set[str]
+    graph_seeded_catalog: dict[str, Any],
+    key: str,
+    filter_kwargs: dict[str, Any],
+    expected: set[str],
 ) -> None:
-    """``False``, ``0`` and ``""`` are *values*, not "unset" — the classic falsy-vs-None bug.
+    """``False`` and ``0`` are *values*, not "unset" — the classic falsy-vs-None bug.
 
     ``AttributeFilter.as_parameter`` distinguishes them with ``is None`` and the Cypher
     guards are ``f.X IS NULL OR …``. Written with a truthiness test on either side,
     ``value_bool=False`` would silently degrade into "no fragrance filter at all" and the
-    query would return the fragranced cream to a buyer who asked for fragrance-free —
-    a wrong answer that no error message would ever mention.
+    query would hand the fragranced cream to a buyer who asked for fragrance-free — a wrong
+    answer that no error message would ever mention. ``min_number=0`` and ``max_number=0``
+    are the same trap on the numeric side.
     """
     session = graph_seeded_catalog["session"]
-    key = "fragrance_free" if "value_bool" in filter_kwargs else "spf"
     results = candidate_products(
         session,
         query_text=PROBE_A,
@@ -1340,12 +1437,7 @@ def test_a_falsy_filter_component_is_still_a_filter(
         limit=10,
     )
     returned = {c.product_id for c in results}
-    if key == "spf":
-        # Only prod-serum-c carries spf, and it carries 0.0 — so both `equals_number=0` and
-        # `min_number=0` must select exactly it. A truthiness bug would return all three.
-        assert returned == {"prod-serum-c"}
-    else:
-        assert returned == expected
+    assert returned == expected
     assert returned != {"prod-serum-c", "prod-cream-night", "prod-spf-daily"}, (
         "the filter was ignored — a falsy component was treated as unset"
     )
@@ -1368,40 +1460,44 @@ def test_vector_path_recall_is_bounded_by_the_index_fetch_and_the_structured_pat
     can be issued with **no vector at all**, and that path has no top-k bound. This test
     asserts both halves so a future reader knows which tool to reach for.
     """
+    # 120 products; every EVEN-numbered one carries the filter attribute, so 60 match.
     seed_products(
         graph_schema_session,
         [
             {
                 "product_id": f"bulk-{i:03d}",
                 "canonical_name": f"Bulk Product {i}",
-                "attributes": ([AttributeValue("rare", value_bool=True)] if i == 29 else []),
+                "attributes": ([AttributeValue("half", value_bool=True)] if i % 2 == 0 else []),
             }
-            for i in range(30)
+            for i in range(120)
         ],
         source=graph_source,
     )
     reembed_products(graph_schema_session, HashEmbedding())
-    rare = [AttributeFilter("rare", value_bool=True)]
+    half = [AttributeFilter("half", value_bool=True)]
 
-    # The bound: a fetch of one row can return at most one row, whatever matches below it.
-    tiny = candidate_products(
-        graph_schema_session, query_text=PROBE_A, attribute_filters=rare, limit=1, oversample=1
+    matching = candidate_products(graph_schema_session, attribute_filters=half, limit=200)
+    assert len(matching) == 60, "the structured path sees every matching product"
+
+    # THE BOUND, demonstrated rather than asserted-into-existence. fetch = limit*oversample
+    # = 20 rows out of 120, and roughly half of those survive the filter — so the vector
+    # path returns FEWER than the 20 requested even though 60 products qualify. An earlier
+    # version of this test asserted `len(result) <= limit`, which the Cypher `LIMIT $limit`
+    # makes unconditionally true and which would have passed with a fetch of a million.
+    starved = candidate_products(
+        graph_schema_session, query_text=PROBE_A, attribute_filters=half, limit=20, oversample=1
     )
-    assert len(tiny) <= 1
+    assert len(starved) < 20, (
+        f"expected the post-filter to starve a fetch of 20 over 120 products, got "
+        f"{len(starved)} — if this stops being true the oversample bound has changed"
+    )
+    assert {c.product_id for c in starved} <= {c.product_id for c in matching}
 
-    # The structured path has no top-k, so selectivity alone finds it, every time.
-    assert [
-        c.product_id
-        for c in candidate_products(graph_schema_session, attribute_filters=rare, limit=10)
-    ] == ["bulk-029"]
-
-    # And at this catalog size the default oversample already covers the whole catalog.
-    assert [
-        c.product_id
-        for c in candidate_products(
-            graph_schema_session, query_text=PROBE_A, attribute_filters=rare, limit=10
-        )
-    ] == ["bulk-029"]
+    # Widening the window recovers them, which is what `oversample` is for.
+    wide = candidate_products(
+        graph_schema_session, query_text=PROBE_A, attribute_filters=half, limit=20, oversample=8
+    )
+    assert len(wide) == 20 > len(starved)
 
 
 @pytest.mark.docker
@@ -1616,3 +1712,348 @@ def test_the_whole_pipeline_is_provenanced_end_to_end(
     """
     assert_provenance_complete(graph_seeded_catalog["session"])
     assert provenance_violations(graph_seeded_catalog["session"]) == []
+
+
+# =======================================================================================
+# 12. Findings from the adversarial review — every one of these is a regression guard
+#     for a defect that shipped and was caught by a verifier, not by the suite above.
+# =======================================================================================
+
+
+#: Frozen golden values for every content-hashed stable ID. These are **persisted in a
+#: shared database** and six downstream tickets key on them, so the derivation is a
+#: published format, not an implementation detail: change it and every previously-written
+#: AttributeValue / Category / Ingredient node is orphaned while the graph still looks
+#: healthy. Three separate mutations of the digest (always-``repr`` numbers, a different
+#: prefix, a reordered digest tuple) passed the entire suite before these existed.
+GOLDEN_IDS = (
+    (lambda: attribute_value_id("spf", value_number=50), "av_spf_28ad4f935b11a89e782fad898c0bb8cd"),
+    (
+        lambda: attribute_value_id("fragrance_free", value_bool=True),
+        "av_fragrance-free_a98d914b39260a515c3cf4c8638cdc22",
+    ),
+    (
+        lambda: attribute_value_id("skin_type", value_string="Sensitive"),
+        "av_skin-type_0d80ebc63724e24211d495207b37dea6",
+    ),
+    (
+        lambda: attribute_value_id("volume", value_number=30, unit="ml"),
+        "av_volume_a2230b2389169769fafc60a8f121c397",
+    ),
+    (lambda: category_id("Serum"), "cat_serum_cb1b92104bae4ba70f1f20d3160967f2"),
+    (
+        lambda: category_id("Serum", parent="Skincare"),
+        "cat_serum_c5f463f0ea8ecd14f1db201d0b25be48",
+    ),
+    (lambda: ingredient_id("Ascorbic Acid"), "ing_ascorbic-acid_08442d1bb64c5a7db4358d2fc760cfce"),
+)
+
+
+@pytest.mark.parametrize(("compute", "expected"), GOLDEN_IDS, ids=[g[1][:14] for g in GOLDEN_IDS])
+def test_stable_ids_match_their_frozen_golden_values(compute: Any, expected: str) -> None:
+    """The ID derivation is a published format, not an implementation detail.
+
+    If this fails, the change is not "the test is stale" — it is a migration. Every node
+    already in the graph keeps its old id, so the new derivation silently forks the catalog
+    in two and entity resolution (T-022) resolves against half of it.
+    """
+    assert compute() == expected
+
+
+def test_the_number_token_distinguishes_integral_from_fractional_readings() -> None:
+    """``50`` and ``50.0`` are one reading; ``50`` and ``50.5`` are not.
+
+    Pinned separately from the golden values because the collapse is the *purpose* of
+    ``_number_token``: a mutation making it always ``repr()`` still produces stable, unique
+    ids — just different ones — so only a golden value or this equivalence catches it.
+    """
+    assert attribute_value_id("spf", value_number=50) == attribute_value_id(
+        "spf", value_number=50.0
+    )
+    assert attribute_value_id("spf", value_number=50) != attribute_value_id(
+        "spf", value_number=50.5
+    )
+
+
+@pytest.mark.parametrize(
+    ("factory", "expected_properties"),
+    [
+        (
+            lambda: Category(name="Serum", parent="Skincare"),
+            {"category_id", "name", "slug", "parent"},
+        ),
+        (lambda: Ingredient(name="Niacinamide"), {"ingredient_id", "name", "canonical_name"}),
+        (lambda: IntentCluster(cluster_id="c-1", label="serums"), {"cluster_id", "label"}),
+    ],
+)
+def test_vocabulary_nodes_carry_only_term_derived_properties(
+    factory: Any, expected_properties: set[str]
+) -> None:
+    """The invariant that makes the ``SUPPORTED_BY`` carve-out safe, pinned exactly.
+
+    ``Category`` / ``Ingredient`` / ``IntentCluster`` are excluded from the node provenance
+    audit because they are *terms*, not observations — the observation is the edge, and the
+    edge does carry a resolvable ``source_id``. That reasoning holds only while every
+    property is derived from the term itself. Add ``Ingredient.is_allergen`` or
+    ``Category.regulated_in`` and a real-world claim lands in the graph unsourced with
+    :func:`provenance_violations` still returning ``[]``.
+
+    So widening one of these dataclasses fails here, deliberately, and the fix is to move
+    the label into ``MATERIAL_FACT_LABELS`` rather than to update this expectation.
+    """
+    assert set(factory().as_properties()) == expected_properties
+
+
+def test_the_vector_index_statement_is_parameterised_by_width() -> None:
+    """``rebuild_vector_index`` exists to change the width, so the statement must vary.
+
+    It previously re-ran a module constant with 1024 baked in, which made the function a
+    no-op for its only purpose: a rebuild for a 512-d provider produced another 1024-d
+    index, and the subsequent re-embed wrote a whole catalog that the index could never
+    match — exit status 0, no warning that mattered.
+    """
+    from ingest.graph.schema import vector_index_statement
+
+    assert vector_index_statement() == VECTOR_INDEX_STATEMENT
+    assert "`vector.dimensions`: 512" in vector_index_statement(512)
+    assert "`vector.dimensions`: 1024" not in vector_index_statement(512)
+    assert "IF NOT EXISTS" in vector_index_statement(512)
+    with pytest.raises(ValueError, match="positive"):
+        vector_index_statement(0)
+
+
+def test_a_hollow_source_is_refused() -> None:
+    """ "Every material fact has a Source" must not be satisfiable by a Source pointing
+    at nothing.
+
+    Before this, ``Source("x", "", "", "", "", 0.0, "seller_asserted")`` constructed
+    happily, and a Product supported by it passed ``assert_provenance_complete()``. That
+    made the entire provenance rule greenable by an adapter that recorded no provenance.
+    """
+    base = {
+        "source_id": "src-1",
+        "url": "https://example.test/p",
+        "content_hash": "sha256:aa",
+        "observed_at": "2026-01-01T00:00:00+00:00",
+        "extractor_version": "v1",
+        "confidence": 0.5,
+        "source_class": "scraped",
+    }
+    for blank in ("url", "content_hash", "observed_at", "extractor_version"):
+        with pytest.raises(ValueError, match=blank):
+            Source(**{**base, blank: "   "})
+
+
+def test_the_source_scans_cover_every_module_in_the_service_not_just_src_graph() -> None:
+    """The static scans must be recursive and service-wide, or they check almost nothing.
+
+    Both scans used ``GRAPH_SRC.glob("*.py")`` — five files, non-recursive. A
+    ``HashEmbedding()`` in ``src/adapters/``, or name-matching Cypher in a future
+    ``src/graph/retrieval/`` subpackage, was simply invisible to them.
+    """
+    assert len(SCANNED_SOURCES) > 5
+    scanned = {p.name for p in SCANNED_SOURCES}
+    assert {"query.py", "upsert.py", "schema.py", "model.py", "reembed.py"} <= scanned
+    assert any("embeddings" in str(p) for p in SCANNED_SOURCES)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+@pytest.mark.parametrize("length", [512, 1023, 1025])
+def test_a_wrong_length_embedding_is_refused_rather_than_silently_stored(
+    graph_schema_session: Any, graph_source: Source, length: int
+) -> None:
+    """Measured: Neo4j accepts a 512-d or 1025-d vector into a 1024-d index without error.
+
+    Nothing downstream complains either — ``queryNodes`` just never returns that node,
+    ``candidate_products`` never surfaces it, and ``products_missing_embeddings()`` calls it
+    embedded because it *has* an embedding. The product is silently unrankable, which is the
+    single worst failure mode in this library: it looks exactly like a correct catalog. So
+    the width is refused in Python before the write reaches the procedure.
+    """
+    from ingest.graph import EmbeddingDimensionMismatch
+
+    upsert_product(graph_schema_session, Product("p-dim", "Dimension Probe"), source=graph_source)
+    with pytest.raises(EmbeddingDimensionMismatch, match=str(length)):
+        set_product_embedding(graph_schema_session, product_id="p-dim", embedding=[0.1] * length)
+    assert products_missing_embeddings(graph_schema_session) == ["p-dim"], (
+        "a refused write must leave the product visibly unembedded, not half-embedded"
+    )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_partial_upsert_never_leaves_an_orphaned_node(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """``upsert_offer`` is three statements; a bad endpoint must write none of them.
+
+    Before the pre-flight check, a typo'd ``store_id`` let the Offer node land and *then*
+    raised — leaving an orphaned, correctly-sourced Offer attached to nothing, which
+    ``provenance_violations()`` quite correctly reported as clean. The audit was not wrong;
+    the write was.
+    """
+    upsert_store(graph_schema_session, Store("st-real", "real.example"), source=graph_source)
+
+    with pytest.raises(ProvenanceRequired, match="Variant"):
+        upsert_offer(
+            graph_schema_session,
+            Offer("off-x", 9.99, "USD", "in_stock", "2026-01-01T00:00:00+00:00"),
+            store_id="st-real",
+            variant_id="v-missing",
+            source=graph_source,
+        )
+    assert graph_schema_session.run("MATCH (o:Offer) RETURN count(o) AS c").single()["c"] == 0, (
+        "the Offer node was written before the endpoint check failed"
+    )
+
+    with pytest.raises(ProvenanceRequired, match="Product"):
+        upsert_variant(
+            graph_schema_session,
+            Variant("v-x", "SKU-X"),
+            product_id="p-missing",
+            source=graph_source,
+        )
+    assert graph_schema_session.run("MATCH (v:Variant) RETURN count(v) AS c").single()["c"] == 0, (
+        "the Variant node was written before the endpoint check failed"
+    )
+    assert provenance_violations(graph_schema_session) == []
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_an_empty_brand_is_a_query_not_an_error(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """``Product.brand`` defaults to ``""``, so "products with no brand" must be askable.
+
+    The structured-predicate gate was a truthiness test, so ``brand=""`` fell through to
+    "no predicate supplied" and raised ``UnretrievableQuery`` on a perfectly well-formed
+    request.
+    """
+    seed_products(
+        graph_schema_session,
+        [
+            {"product_id": "p-nobrand", "canonical_name": "Unbranded Thing"},
+            {"product_id": "p-branded", "canonical_name": "Branded Thing", "brand": "Northlight"},
+        ],
+        source=graph_source,
+    )
+    reembed_products(graph_schema_session, HashEmbedding())
+    assert [c.product_id for c in candidate_products(graph_schema_session, brand="")] == [
+        "p-nobrand"
+    ]
+    assert [c.product_id for c in candidate_products(graph_schema_session, brand="Northlight")] == [
+        "p-branded"
+    ]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_rebuilding_the_index_at_another_width_actually_changes_the_width(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """The provider-swap path, end to end, for a provider that is NOT 1024-d.
+
+    Three things have to hold together or a non-1024 swap fails silently: the rebuild has
+    to produce an index of the requested width, the re-embed has to refuse to write vectors
+    that do not match the live index, and the refusal has to be loud.
+    """
+    from ingest.graph import EmbeddingDimensionMismatch
+
+    upsert_product(graph_schema_session, Product("p-w", "Width Probe"), source=graph_source)
+    try:
+        report = rebuild_vector_index(graph_schema_session, dimensions=512)
+        assert report.vector_dimensions == 512
+        assert report.vector_similarity == "cosine"
+
+        # HashEmbedding is 1024-d; against a 512-d index that must be refused, not written.
+        with pytest.raises(EmbeddingDimensionMismatch, match="512"):
+            reembed_products(graph_schema_session, HashEmbedding())
+        assert products_missing_embeddings(graph_schema_session) == ["p-w"]
+    finally:
+        rebuild_vector_index(graph_schema_session, dimensions=VECTOR_INDEX_DIMENSIONS)
+    assert schema_report(graph_schema_session).vector_dimensions == 1024
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_reembed_refuses_to_write_into_an_index_that_does_not_exist(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """Without the index, every vector written is unreachable — say so instead of writing."""
+    upsert_product(graph_schema_session, Product("p-noidx", "No Index"), source=graph_source)
+    graph_schema_session.run(f"DROP INDEX {VECTOR_INDEX_NAME} IF EXISTS").consume()
+    try:
+        with pytest.raises(RuntimeError, match=VECTOR_INDEX_NAME):
+            reembed_products(graph_schema_session, HashEmbedding())
+    finally:
+        apply_schema(graph_schema_session)
+    assert schema_report(graph_schema_session).vector_dimensions == 1024
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_apply_schema_actually_waits_for_the_indexes_it_creates(
+    graph_schema_session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``await_indexes`` was replaceable with ``return None`` and the suite stayed green.
+
+    That left the awaits untested in both directions: either they are load-bearing (and the
+    suite was only accidentally green, ready to flake on a slower host) or they are dead
+    blocking calls. This pins the plumbing — the call happens, and ``await_online=False``
+    genuinely skips it — so a future removal is a deliberate change to this test.
+    """
+    from ingest.graph import schema as schema_module
+
+    calls: list[int] = []
+    real = schema_module.await_indexes
+
+    def spy(session: Any, *, timeout: int = 300) -> None:
+        calls.append(timeout)
+        real(session, timeout=timeout)
+
+    monkeypatch.setattr(schema_module, "await_indexes", spy)
+    schema_module.apply_schema(graph_schema_session)
+    assert calls == [300], "apply_schema must wait for index population by default"
+
+    calls.clear()
+    schema_module.apply_schema(graph_schema_session, await_online=False)
+    assert calls == [], "await_online=False must actually skip the wait"
+
+    # And the real procedure must be callable and cheap on a settled database.
+    real(graph_schema_session, timeout=30)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_query_predicate_indexes_match_what_the_query_actually_compares(
+    graph_schema_session: Any,
+) -> None:
+    """The index list is checked against the shipped Cypher, not restated from itself.
+
+    The previous version of this test asserted that ``LOOKUP_INDEXES`` contained what
+    ``LOOKUP_INDEXES`` contained. It therefore never noticed that the query compares
+    ``a.canonical_value_string`` while the index was on ``AttributeValue.value_string``, nor
+    that ``ingredient_canonical_name`` and ``category_slug`` are never touched by the query
+    at all (it matches ingredients and categories by content-hashed id).
+    """
+    from ingest.graph.query import _FILTER_AND_RETURN
+    from ingest.graph.schema import QUERY_PREDICATE_INDEXES
+
+    # The filters run against a *collected map*, whose fields are renamed node properties
+    # (`key: a.canonical_key`). Resolve that renaming first, or the check compares map field
+    # names against node property names and is wrong in both directions.
+    aliases = dict(re.findall(r"(\w+):\s*a\.(\w+)", _FILTER_AND_RETURN))
+    assert aliases.get("key") == "canonical_key", "the collect-map aliasing changed"
+
+    compared = set(re.findall(r"\ba\.(\w+)\s*(?:=|>=|<=)\s*f\.", _FILTER_AND_RETURN))
+    compared |= {prop for prop in ("brand", "status") if f"p.{prop} = $" in _FILTER_AND_RETURN}
+    compared = {aliases.get(prop, prop) for prop in compared}
+    indexed = {prop for _name, _label, prop in QUERY_PREDICATE_INDEXES}
+    assert compared, "failed to extract any predicate from the shipped Cypher"
+    assert compared <= indexed, f"the query filters on unindexed properties: {compared - indexed}"
+
+    live = set(schema_report(graph_schema_session).indexes)
+    for name, _label, _prop in QUERY_PREDICATE_INDEXES:
+        assert name in live, f"{name} is declared but not present in the database"
