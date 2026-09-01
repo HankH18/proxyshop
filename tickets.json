@@ -368,7 +368,8 @@
         "R11",
         "R19",
         "A6",
-        "DESIGN#decisions--rationale"
+        "DESIGN#decisions--rationale",
+        "DESIGN#interfaces-contracts-between-tickets"
       ],
       "acceptance": [
         "1. Golden tests: fixed inputs → exact eligibility set, ranking, slots, explanations",
@@ -652,7 +653,8 @@
         "apps/merchant/**"
       ],
       "depends_on": [
-        "T-013"
+        "T-013",
+        "T-010"
       ],
       "non_goals": [
         "No dashboard pages beyond shell"
@@ -731,7 +733,8 @@
       "scope": [
         "apps/merchant/svc/src/onboarding/**",
         "apps/merchant/svc/tests/**",
-        "fixtures/interviews/**"
+        "fixtures/interviews/**",
+        "apps/merchant/svc/src/envelope/**"
       ],
       "depends_on": [
         "T-014",
@@ -1064,7 +1067,13 @@
       ],
       "verify": "pytest fixtures/tests/test_seed.py -q",
       "scope": [
-        "fixtures/**"
+        "fixtures/manifest/**",
+        "fixtures/approval/**",
+        "fixtures/seed/**",
+        "fixtures/catalog/**",
+        "fixtures/personas/**",
+        "fixtures/golden/**",
+        "fixtures/tests/**"
       ],
       "depends_on": [
         "T-013"
@@ -1122,7 +1131,10 @@
       "depends_on": [
         "T-061",
         "T-072",
-        "T-081"
+        "T-081",
+        "T-032",
+        "T-041",
+        "T-062"
       ],
       "non_goals": [
         "No learning assertions"
@@ -1150,7 +1162,8 @@
       "depends_on": [
         "T-034",
         "T-042",
-        "T-081"
+        "T-081",
+        "T-061"
       ],
       "non_goals": [
         "No live traffic"
@@ -1210,6 +1223,36 @@
         "No CI wiring of live runs"
       ],
       "parallel_safe": true
+    },
+    {
+      "id": "T-086",
+      "title": "Onboarding drives a shadow store to its first real bid",
+      "objective": "An integration test walks the whole S6 seam in one run: a mocked interview transcript produces an economic envelope, the merchant approves it in writing, the store agent runs in shadow mode logging would-be bids without submitting any, and activation turns the same live intent into a real submitted bid. T-053 and T-043 each own one half of this seam and neither refs S6; this ticket asserts the join.",
+      "refs": [
+        "S6",
+        "R6",
+        "R7"
+      ],
+      "depends_on": [
+        "T-043",
+        "T-053"
+      ],
+      "scope": [
+        "e2e/test_onboarding.py",
+        "e2e/support/onboarding/**"
+      ],
+      "verify": "pytest e2e/test_onboarding.py -q",
+      "parallel_safe": false,
+      "acceptance": [
+        "1. A mocked interview transcript yields an economic envelope carrying every R6 field: floors, max discount, budget cap, intents to pursue, and standing commitments.",
+        "2. Activation is refused while the envelope carries no recorded written merchant approval, and succeeds once it does (R6).",
+        "3. Before activation the store agent is in shadow mode: for a live intent it logs a would-be bid WITH its reasoning, and the exchange receives nothing — asserted by the absence of any bid_placed LedgerEvent for that auction, not merely by an empty return value (R7).",
+        "4. After activation the same live intent produces a real submitted bid, and a bid_placed LedgerEvent appears for it — so the test fails if activation is a no-op in either direction."
+      ],
+      "non_goals": [
+        "The manual demo run on a fresh dev store — that is T-085's runbook.",
+        "New product code: this ticket asserts the join between T-053's onboarding and T-043's shadow mode; a gap it finds is a defect report against those tickets, not a fix here."
+      ]
     }
   ]
 }
