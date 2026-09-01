@@ -219,3 +219,43 @@ Entries are injected selectively into task packets — only those relevant to a 
   tickets moved +1, not +2), and independently found four defects nobody had flagged — including
   that `acceptance_collected` is pinned at 120 rather than 103. Handing over facts saves the
   agent's context; demanding re-derivation is what makes the handoff safe.
+
+- **Attribute frozen-test results PER TICKET at collection, in the branch's own worktree —
+  the data exists and nothing reads it.** Every metric here is suite- or epic-level, and
+  `run.py` has `--epic` and `--blocker` but no `--ticket`, so `@pytest.mark.ticket(...)` —
+  the marker whose stated job is naming "which ticket is responsible for making it pass" —
+  feeds no metric at all. Combined with verify commands that pass vacuously, a ticket's
+  completion was unmeasured from both directions and "collected" was pure orchestrator
+  judgment. But the runner records `ticket` on every result and `--json` dumps it, so
+  running it inside the returning branch's worktree and grouping by ticket answers the one
+  question that matters at the moment you can still send the branch back: *did THIS
+  branch's own frozen tests actually turn green?* Two gotchas: `--json` writes to **stderr**
+  (so `2>&1` is mandatory) and it returns before the count logic, so it ignores other flags.
+  Without this, a ticket merged with its own tests red surfaces only as an epic shortfall at
+  cycle end, with no attribution and several merges of distance from the cause.
+
+- **`[verified]` on a pinned decision must mean "an executable artifact in it was EXECUTED",
+  and it must be re-checked at intake — otherwise the tag is worse than no tag.** D6 carried
+  a `[verified]` header and shipped a `CREATE VECTOR INDEX` statement that does not parse:
+  Cypher map keys must be identifiers or backtick-quoted, and D6 single-quoted them, so it
+  raised a `SyntaxError` at column 109 on the exact engine the decision named. It survived
+  the cycle-0 adversarial pass and a twelve-finding partner review; both read it, neither ran
+  it. Six tickets copy that statement verbatim, and the container was up and reachable the
+  entire time — the check was available all along and never taken. **The tag is what tells a
+  packet-writer "copy this verbatim, it is confirmed", so an unexecuted `[verified]` is a
+  claim with the authority of a measurement and the reliability of a guess.** Extract every
+  executable snippet from the decisions file at intake — SQL, Cypher, shell, API calls — run
+  each against the real dependency before freezing, and record the engine version beside the
+  claim. Anything not executed is `[reasoned — not executed]`.
+
+- **The first defect found by a BUILDER rather than an auditor was found by executing a
+  document.** Every other defect this run came from an adversarial reader. D6 came from an
+  agent that tried to run the thing and watched it fail. Auditors read for contradiction;
+  builders discover unrunnability. Both are needed, and a review programme made only of
+  readers has a blind spot shaped exactly like this.
+
+- **A rescaling with no error case is worse than a syntax error.** Neo4j returns cosine as
+  `(1 + cos) / 2`, so an orthogonal vector scores ≈ 0.5 rather than 0.0 — a plausible weak
+  match, not a failure. Anything thresholding on raw similarity inflates silently and
+  forever. Put a measured note in every consumer's packet, not only in the decision that
+  owns the index.
