@@ -61,11 +61,47 @@ SUPERSEDED_SCHEMA_DIR = "packages/" + "protocol"
 TEST_FILE_RE = re.compile(r"\.(test|spec)\.[^.]+$")
 
 
+#: Directories the filesystem fallback never descends into.
+_WALK_SKIP = {
+    ".git",
+    ".venv",
+    ".pkgroot",
+    ".swarm-loop",
+    "node_modules",
+    "dist",
+    "build",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".next",
+    ".react-router",
+}
+
+
 def tracked_files() -> list[str]:
-    out = subprocess.run(
-        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
-    ).stdout
-    return [line for line in out.splitlines() if line]
+    """Repo-relative paths of every tracked file.
+
+    Falls back to a filesystem walk when git cannot answer — an exported tarball or a
+    build artifact directory is not a git repository, and crashing with a traceback there
+    would be a far worse failure than scanning a few extra files.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True
+        ).stdout
+        return [line for line in out.splitlines() if line]
+    except (OSError, subprocess.CalledProcessError):
+        print("  note: not a git checkout; falling back to a filesystem walk.")
+        found = []
+        for path in ROOT.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(ROOT)
+            if _WALK_SKIP.intersection(relative.parts):
+                continue
+            found.append(str(relative))
+        return sorted(found)
 
 
 def source_files() -> list[str]:

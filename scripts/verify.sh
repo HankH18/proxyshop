@@ -52,7 +52,9 @@ banned_reset_gate() {
     esac
     [ -f "$f" ] || continue          # skip submodules and the .pkgroot/* symlinks
     candidates+=("$f")
-  done < <(git ls-files)
+  done < <(git ls-files 2>/dev/null || find . \
+      -path ./.git -prune -o -path ./.venv -prune -o -path ./node_modules -prune -o \
+      -path ./.pkgroot -prune -o -path ./.swarm-loop -prune -o -type f -print | sed 's|^\./||')
   if [ ${#candidates[@]} -eq 0 ]; then return 0; fi
   local hits
   hits="$(grep -l -I -F -e "$needle" -- "${candidates[@]}" 2>/dev/null || true)"
