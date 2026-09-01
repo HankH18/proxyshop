@@ -47,7 +47,27 @@ async def test_the_root_fixture_serves_a_working_stub(shopify_stub_url: str) -> 
             headers={"X-Shopify-Access-Token": DEFAULT_ACCESS_TOKEN},
         )
         assert graphql.status_code == 200
-        assert "orders" in graphql.json()["data"]
+        body = graphql.json()
+        assert "errors" not in body, body
+        # Not `"orders" in data` — that is an is-not-None-grade check that any garbage
+        # value satisfies. The connection has to be well formed.
+        connection = body["data"]["orders"]
+        assert isinstance(connection["edges"], list)
+        assert set(connection["pageInfo"]) == {
+            "hasNextPage",
+            "hasPreviousPage",
+            "startCursor",
+            "endCursor",
+        }
+
+        # And the auth path must really be enforced on this instance, not just on the
+        # per-test stubs — otherwise "the pinned entry point works" would be proven by an
+        # endpoint that answers anyone.
+        unauthenticated = await client.post(
+            "/admin/api/2026-07/graphql.json",
+            json={"query": "query { orders(first: 1) { edges { cursor } } }"},
+        )
+        assert unauthenticated.status_code == 401
 
 
 def test_the_recorded_fixtures_directory_is_where_d21_puts_it() -> None:

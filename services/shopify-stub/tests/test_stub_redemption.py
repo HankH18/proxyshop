@@ -93,9 +93,19 @@ async def test_an_expired_code_is_silently_ignored(stub: StubClient) -> None:
 
 
 async def test_a_not_yet_active_code_is_silently_ignored(stub: StubClient) -> None:
+    """Held to the same bar as the unknown-code case, not a weaker one.
+
+    This test used to assert only `discount_code is None` plus the control-plane reason,
+    which left the actual "indistinguishable from no code at all" property unchecked on this
+    branch — the money and the response shape were never compared to the baseline.
+    """
+    reference = await _cart(stub, None)
     await stub.create_code("PSX-FUTURE01", starts_at=_future(1), ends_at=_future(24))
     cart = await _cart(stub, "PSX-FUTURE01")
     assert cart["discount_code"] is None
+    assert cart["total_discount"] == "0.00"
+    assert cart["total_price"] == reference["total_price"]
+    assert set(cart) == set(reference)
     detail = (await stub.checkout(cart["token"])).json()
     assert detail["rejection_reason"] == "not_yet_active"
 
