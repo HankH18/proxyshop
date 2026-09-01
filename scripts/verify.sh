@@ -15,7 +15,7 @@ export PATH="$ROOT/.venv/bin:$ROOT/node_modules/.bin:$PATH"
 # pytest, and say exactly what to do about it.
 if [ -z "${PROXYSHOP_WORKER:-}" ]; then
   echo "FATAL: PROXYSHOP_WORKER is unset (D38). Every run is per-worker isolated." >&2
-  echo "       Export it and re-run, e.g.:  PROXYSHOP_WORKER=1 make ${1:-verify}" >&2
+  echo "       Export it and re-run, e.g.:  PROXYSHOP_WORKER=1 make verify" >&2
   exit 2
 fi
 

@@ -1,17 +1,37 @@
 # Import-linter contracts (D34). A STANDALONE file on purpose: S7's architectural contracts
 # grow as sealed modules land, and extending this file must never be a root-manifest edit.
-# T-011 owns the violating fixture that proves the contract fires, and extends the
-# `forbidden_modules` list below as new sealed module names appear.
+# T-011 owns the violating fixture that proves the contract fires, and extends
+# `forbidden_modules` below as new sealed module names appear. Measured on this repo:
+# import-linter 2.14 tolerates a forbidden module that does not exist yet (the contract is
+# simply vacuous until it does), so `trust.ledger.sealed` is listed ahead of T-011.
 #
 # Root packages are the flat-src import namespaces provided by the tracked `.pkgroot/`
 # symlinks (see any member pyproject.toml). `lint-imports` must therefore run with
 # `.pkgroot` on sys.path; scripts/verify.sh does that.
+#
+# NOTE ON SYNTAX: these lists are newline-separated. A single space-separated line is
+# parsed character-by-character by import-linter and fails with
+# "Could not find package 'e' in your Python path."
 
 [importlinter]
-root_packages = exchange trust store_agent merchant_svc buyer_svc ingest contracts llm claim_verification
+root_packages =
+    exchange
+    trust
+    store_agent
+    merchant_svc
+    buyer_svc
+    ingest
+    contracts
+    llm
+    claim_verification
 
 [importlinter:contract:c3-exchange-cannot-read-envelopes]
 name = C3/S7: exchange must never import sealed-state or envelope modules
 type = forbidden
-source_modules = exchange
-forbidden_modules = store_agent.modes merchant_svc.envelope merchant_svc.onboarding
+source_modules =
+    exchange
+forbidden_modules =
+    store_agent.modes
+    merchant_svc.envelope
+    merchant_svc.onboarding
+    trust.ledger.sealed

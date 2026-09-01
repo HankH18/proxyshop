@@ -97,7 +97,17 @@ ignore = ["E501"]
 python_version = "3.12"
 namespace_packages = true
 explicit_package_bases = true
-files = ["packages","apps","services","e2e"]
+# T-000 (R1b): mypy is pointed at `.pkgroot` rather than at ["packages","apps","services"].
+# Under the FLAT src layout the original list cannot work: with explicit_package_bases mypy
+# derives a module name from the path, and three member directories are hyphenated
+# (packages/store-agent, services/shopify-stub, apps/seller-reference) so `store-agent` is
+# not a valid identifier. mypy falls back to the __init__.py walk-up, which names all three
+# `src` and aborts with `Duplicate module named "src"` before checking anything. Going
+# through the `.pkgroot/<pkg>` symlinks gives every member its real, unique import name
+# (`exchange`, `store_agent`, ...), so ALL member source is type-checked — the trade is that
+# `<member>/tests/` is not (those paths hit the same hyphen/duplicate-basename problem).
+mypy_path = ".pkgroot"
+files = [".pkgroot", "e2e", "proxyshop_support", "conftest.py", "scripts"]
 exclude = "(node_modules|\\.venv|dist|build|\\.swarm-loop)"
 ignore_missing_imports = true          # workers cannot edit this file to add overrides
 strict = false

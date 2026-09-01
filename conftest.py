@@ -131,6 +131,21 @@ def _require_stack() -> None:
         pytest.skip(f"{reason} (mark this test @pytest.mark.docker so it skips cleanly)")
 
 
+def _missing_database(exc: Exception) -> bool:
+    """Is this connect failure "the per-worker database has not been created yet"?
+
+    The per-worker databases ``proxyshop_w<N>`` are created by the migrations ticket, so
+    before it lands they legitimately do not exist and every datastore test should SKIP,
+    not error. Everything else — a wrong password, a missing role, a refused connection —
+    must still fail loudly, so the match is narrow: SQLSTATE 3D000 (invalid_catalog_name).
+    psycopg reports it as a bare ``OperationalError`` when libpq tried several addresses,
+    so the message is checked too.
+    """
+    if getattr(exc, "sqlstate", None) == "3D000":
+        return True
+    return 'database "proxyshop_w' in str(exc) and "does not exist" in str(exc)
+
+
 # --------------------------------------------------------------------------------------
 # 1-2. Postgres
 # --------------------------------------------------------------------------------------
@@ -156,7 +171,13 @@ def pg_admin() -> Iterator[psycopg.Connection]:
     dsn = os.environ.get("PROXYSHOP_PG_DSN_ADMIN")
     if not dsn:
         pytest.skip("PROXYSHOP_PG_DSN_ADMIN is unset; copy .env.example to .env")
-    with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as conn:
+    try:
+        conn = psycopg.connect(dsn, autocommit=True, connect_timeout=5)
+    except psycopg.OperationalError as exc:
+        if not _missing_database(exc):
+            raise
+        pytest.skip("the per-worker Postgres database does not exist yet (T-011 creates it)")
+    with conn:
         yield conn
 
 
@@ -202,7 +223,14 @@ def pg_role() -> Iterator[Callable[[str], psycopg.Connection]]:
             dsn = os.environ.get(dsn_by_role[role])
             if not dsn:
                 pytest.skip(f"{dsn_by_role[role]} is unset; copy .env.example to .env")
-            open_connections[role] = psycopg.connect(dsn, connect_timeout=5)
+            try:
+                open_connections[role] = psycopg.connect(dsn, connect_timeout=5)
+            except psycopg.OperationalError as exc:
+                if not _missing_database(exc):
+                    raise
+                pytest.skip(
+                    "the per-worker Postgres database does not exist yet (T-011 creates it)"
+                )
         return open_connections[role]
 
     try:

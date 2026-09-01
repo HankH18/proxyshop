@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
 import redis
 
@@ -179,12 +179,17 @@ def worker_redis(url: str | None = None, *, worker: int | None = None) -> Worker
         key prefix already applied. ``decode_responses`` is on, so commands return ``str``.
     """
     url = url or os.environ.get("REDIS_URL") or "redis://localhost:6379"
-    client = WorkerRedis.from_url(
-        url,
-        db=redis_db_index(worker),
-        decode_responses=True,
-        socket_connect_timeout=2.0,
-        socket_timeout=5.0,
+    # redis-py types `from_url` as returning the base `Redis`, but it is a classmethod and
+    # really returns an instance of `cls`.
+    client = cast(
+        WorkerRedis,
+        WorkerRedis.from_url(
+            url,
+            db=redis_db_index(worker),
+            decode_responses=True,
+            socket_connect_timeout=2.0,
+            socket_timeout=5.0,
+        ),
     )
     client._prefix = key_prefix(worker)
     return client

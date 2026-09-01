@@ -17,18 +17,22 @@ fail() { echo "PREFLIGHT FAIL: $*" >&2; exit 1; }
 
 # --- 1. ports
 port_busy() { nc -z 127.0.0.1 "$1" >/dev/null 2>&1; }
+# Each spec is  <compose service>:<label>:<port>:<env var to override it>. The compose
+# SERVICE name is what `docker compose ps` reports, and it is not the same as the label —
+# neo4j publishes two ports from one service.
+running_services="$(docker compose ps --format '{{.Service}}' 2>/dev/null || true)"
 for spec in \
-  "postgres:${PG_PORT:-5432}" \
-  "redis:${REDIS_PORT:-6379}" \
-  "neo4j-http:${NEO4J_HTTP_PORT:-7474}" \
-  "neo4j-bolt:${NEO4J_BOLT_PORT:-7687}"
+  "postgres:postgres:${PG_PORT:-5432}:PG_PORT" \
+  "redis:redis:${REDIS_PORT:-6379}:REDIS_PORT" \
+  "neo4j:neo4j-http:${NEO4J_HTTP_PORT:-7474}:NEO4J_HTTP_PORT" \
+  "neo4j:neo4j-bolt:${NEO4J_BOLT_PORT:-7687}:NEO4J_BOLT_PORT"
 do
-  name="${spec%%:*}"; port="${spec##*:}"
+  IFS=: read -r service label port envvar <<<"$spec"
   if port_busy "$port"; then
-    if docker compose ps --format '{{.Service}}' 2>/dev/null | grep -qx "$name"; then
-      echo "    port $port ($name) is held by this project's own stack — fine"
+    if printf '%s\n' "$running_services" | grep -qx "$service"; then
+      echo "    port $port ($label) is held by this project's own stack — fine"
     else
-      fail "port $port is occupied but is not ProxyShop's $name. Free it, or override the port: ${name}=... in .env"
+      fail "port $port is occupied but is not ProxyShop's $label. Free it, or move the port with ${envvar}=... in .env"
     fi
   fi
 done

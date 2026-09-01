@@ -32,7 +32,23 @@ FIXTURE_GLOB = "_fixtures_*.py"
 
 
 def _is_pytest_fixture(obj: Any) -> bool:
-    return hasattr(obj, "_pytestfixturefunction")
+    """Is ``obj`` the product of ``@pytest.fixture``?
+
+    Deliberately version-tolerant. Up to pytest 8.3 the decorator returned the original
+    function carrying a ``_pytestfixturefunction`` attribute; from pytest 8.4 (and in the
+    9.1.1 pinned here) it returns a ``FixtureFunctionDefinition`` object instead. Checking
+    only the old attribute silently discovers **nothing** on modern pytest — the failure
+    mode is a "fixture not found" error in whichever ticket added the file, with no hint
+    that the loader was the problem — so both shapes are recognised, via pytest's own
+    marker accessor where it exists.
+    """
+    if hasattr(obj, "_pytestfixturefunction"):
+        return True
+    try:
+        from _pytest.fixtures import getfixturemarker
+    except ImportError:  # pragma: no cover - pytest is always installed here
+        return False
+    return getfixturemarker(obj) is not None
 
 
 def load_sibling_fixtures(conftest_file: str | Path, *, glob: str = FIXTURE_GLOB) -> dict[str, Any]:
