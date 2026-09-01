@@ -328,6 +328,50 @@ someone else's ticket id, so a verifier grading either one must read the *other*
 metric. Give all three a verifier who did not write them, as with everything else, and do not
 let a green run be reported as progress on any frozen target it does not actually own.
 
+## T-065's sixth frozen test is graded AFTER T-062 — not a defect in T-065
+
+**ESC-003, ruled by Hank at cycle 1: no amendment.** Recorded here because the next reader
+will otherwise re-derive it as a blocker, and because T-065's worker must be told.
+
+`test_e6_trust.py:1470`,
+`test_verification_results_are_typed_and_route_into_the_catalog_claim_dimension`, carries
+`@pytest.mark.ticket("T-065")` but does `from apps.trust.src.scoring import claim_dimension,
+score`. `apps/trust/src/scoring/**` is **T-062's exclusive scope**, and the edges run the
+wrong way: `T-062.depends_on` includes `T-065`, while `T-065.depends_on` does not include
+T-062. So T-065 builds and is graded first, when that module does not exist, and the import
+— which sits inside the test function — raises `ImportError` at call time.
+
+**The obvious repair is unavailable.** Adding `T-065 → T-062` creates a genuine cycle
+(verified programmatically), which would break the acyclicity the whole scheduler rests on.
+
+**Why no amendment was spent on it.** The frozen metric is indifferent: `e6_trust_passing`
+counts passing tests per **epic**, and this test is E6 under either marker. Once T-062 lands,
+the test passes and the metric arrives on schedule whichever ticket is blamed for it. The
+only thing at stake was T-065's ticket-closure bookkeeping — an orchestrator convention, not
+a frozen artifact — so re-markering it to T-062 would have cost amendment 3 plus a re-measure
+to buy something no number can see.
+
+**Consequences the scheduler and the packets must carry:**
+
+- **T-065's packet must say this explicitly.** Its sixth frozen test will fail with an
+  `ImportError` that is *expected* and that the worker **cannot fix from inside its own
+  scope** — `apps/trust/src/scoring/**` is not T-065's to write. A worker that does not know
+  this burns its session thrashing on it, and the natural "fix" (creating the module) is a
+  scope violation that `check-branch`'s ownership audit rejects.
+- **T-065 closes on its other five frozen tests plus its own verify command**
+  (`pytest packages/verification apps/trust/tests/test_verification.py -q`), not on 6/6.
+- **T-062's packet inherits the other half:** it must ship `claim_dimension` and `score` such
+  that this test passes, even though the test is not marked T-062. T-062 already owns the
+  other ten `catalog_claim_accuracy` tests, so this is the eleventh.
+
+**Blast radius is exactly one test.** An AST sweep of all 120 frozen tests — extracting each
+test's ticket marker, its function-level product imports, each imported module's owning ticket
+by scope glob, and whether that owner lies in the marked ticket's transitive dependency
+closure — found **exactly one** violation, this one. Every other cross-ticket import in the
+suite reads from a ticket the importer genuinely depends on, which is the legitimate and
+common pattern. The rule worth carrying: **a cross-ticket import is fine iff the imported
+module's owner is in the importing ticket's transitive dependency closure.**
+
 ## Carry-forward defects (found in cycle 0, not fixed)
 
 Each was seen by an adversarial verifier during T-000 and consciously deferred. None blocks
