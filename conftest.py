@@ -20,13 +20,21 @@ What this file guarantees for every pytest run in the repo:
   ``torch``/``sentence-transformers`` uninstalled by default, so those tests cannot pass
   here; ``make verify`` additionally deselects them with ``-m "not needs_model"``.
 
-The nine shared fixtures, in the order they are defined below:
+* **D38, Postgres** — the per-worker database ``proxyshop_w<N>`` is *created* by the
+  ``worker_database`` fixture if it is not already there, and every DSN's database
+  component is rewritten to it, so a shared ``.env`` cannot put two workers in one
+  database. A database that cannot be created is a **failure**, never a skip: a skipped
+  datastore test is indistinguishable from a passing one in the metrics.
+
+The shared fixtures, in the order they are defined below:
 
 ===================  =========  ==========================================================
 Fixture              Scope      Yields
 ===================  =========  ==========================================================
+``worker_database``  session    ``str`` — the name of this worker's Postgres database,
+                                created if absent (D38).
 ``pg_admin``         session    ``psycopg.Connection`` — autocommit superuser on this
-                                worker's database (``$PROXYSHOP_PG_DSN_ADMIN``).
+                                worker's database.
 ``pg_role``          function   ``Callable[[str], psycopg.Connection]`` — a connection as
                                 one of the least-privilege roles (D5).
 ``neo4j_session``    function   ``neo4j.Session`` — inside the D37 flock where one applies.
@@ -52,6 +60,8 @@ from proxyshop_support import reachability
 from proxyshop_support.clock import EPOCH, ManualClock
 from proxyshop_support.embedding import EMBEDDING_DIM, hash_embed
 from proxyshop_support.llm_double import LLMDouble
+from proxyshop_support.neo4j_lock import reset_graph
+from proxyshop_support.postgres import ensure_worker_database, role_dsn
 from proxyshop_support.redis_client import WorkerRedis, worker_redis
 from proxyshop_support.worker import ENV_VAR, worker_id
 
@@ -131,34 +141,38 @@ def _require_stack() -> None:
         pytest.skip(f"{reason} (mark this test @pytest.mark.docker so it skips cleanly)")
 
 
-def _missing_database(exc: Exception) -> bool:
-    """Is this connect failure "the per-worker database has not been created yet"?
-
-    The per-worker databases ``proxyshop_w<N>`` are created by the migrations ticket, so
-    before it lands they legitimately do not exist and every datastore test should SKIP,
-    not error. Everything else — a wrong password, a missing role, a refused connection —
-    must still fail loudly, so the match is narrow: SQLSTATE 3D000 (invalid_catalog_name).
-    psycopg reports it as a bare ``OperationalError`` when libpq tried several addresses,
-    so the message is checked too.
-    """
-    if getattr(exc, "sqlstate", None) == "3D000":
-        return True
-    return 'database "proxyshop_w' in str(exc) and "does not exist" in str(exc)
-
-
 # --------------------------------------------------------------------------------------
 # 1-2. Postgres
 # --------------------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="session")
-def pg_admin() -> Iterator[psycopg.Connection]:
+def worker_database(worker_index: int) -> str:
+    """Guarantee ``proxyshop_w<N>`` exists, and return its name (D38).
+
+    This is the fixture that makes every other Postgres fixture *run* rather than skip.
+    Nothing else in the repo creates the per-worker database, and a datastore test that
+    skips is indistinguishable from one that passes in the frozen metrics — so an absent,
+    uncreatable database raises :class:`~proxyshop_support.postgres.WorkerDatabaseError`
+    here and takes the run red. ``make deps-up`` / ``make db-init`` do the same thing ahead
+    of time; this is the backstop that makes the guarantee unconditional.
+
+    Requires ``@pytest.mark.docker`` — the stack being *down* is still a clean skip.
+    """
+    _require_stack()
+    return ensure_worker_database(worker_index)
+
+
+@pytest.fixture(scope="session")
+def pg_admin(worker_database: str, worker_index: int) -> Iterator[psycopg.Connection]:
     """Autocommit superuser connection to this worker's Postgres database.
 
-    DSN: ``$PROXYSHOP_PG_DSN_ADMIN`` (see ``.env.example``), which points at
-    ``proxyshop_w<N>``. Autocommit is on because the things an admin connection is for —
-    ``CREATE ROLE``, ``CREATE DATABASE``, ``GRANT``, ``TRUNCATE`` — either cannot run in a
-    transaction or should not be rolled back by accident.
+    DSN: ``$PROXYSHOP_PG_DSN_ADMIN`` (see ``.env.example``) with its database component
+    rewritten to ``proxyshop_w<N>`` for *this* worker — a shared ``.env`` therefore cannot
+    put two workers in one database. With no ``.env`` at all the compose defaults are used,
+    so a fresh clone connects. Autocommit is on because the things an admin connection is
+    for — ``CREATE ROLE``, ``GRANT``, ``TRUNCATE`` — either cannot run in a transaction or
+    should not be rolled back by accident.
 
     Session-scoped: one connection per pytest session. Tests that need transactional
     isolation should open their own connection through :func:`pg_role`, not reuse this one.
@@ -167,22 +181,19 @@ def pg_admin() -> Iterator[psycopg.Connection]:
     """
     import psycopg
 
-    _require_stack()
-    dsn = os.environ.get("PROXYSHOP_PG_DSN_ADMIN")
-    if not dsn:
-        pytest.skip("PROXYSHOP_PG_DSN_ADMIN is unset; copy .env.example to .env")
-    try:
-        conn = psycopg.connect(dsn, autocommit=True, connect_timeout=5)
-    except psycopg.OperationalError as exc:
-        if not _missing_database(exc):
-            raise
-        pytest.skip("the per-worker Postgres database does not exist yet (T-011 creates it)")
+    conn = psycopg.connect(
+        role_dsn("admin", worker_index, database=worker_database),
+        autocommit=True,
+        connect_timeout=5,
+    )
     with conn:
         yield conn
 
 
 @pytest.fixture
-def pg_role() -> Iterator[Callable[[str], psycopg.Connection]]:
+def pg_role(
+    worker_database: str, worker_index: int
+) -> Iterator[Callable[[str], psycopg.Connection]]:
     """Factory yielding a Postgres connection as one of the least-privilege roles (D5).
 
     Usage::
@@ -207,30 +218,14 @@ def pg_role() -> Iterator[Callable[[str], psycopg.Connection]]:
     """
     import psycopg
 
-    dsn_by_role = {
-        "exchange": "PROXYSHOP_PG_DSN_EXCHANGE",
-        "trust_rw": "PROXYSHOP_PG_DSN_TRUST_RW",
-        "buyer_vault": "PROXYSHOP_PG_DSN_VAULT",
-        "app": "PROXYSHOP_PG_DSN_APP",
-    }
     open_connections: dict[str, psycopg.Connection] = {}
 
     def connect(role: str) -> psycopg.Connection:
-        if role not in dsn_by_role:
-            raise KeyError(f"unknown role {role!r}; expected one of {sorted(dsn_by_role)}")
+        if role == "admin":
+            raise KeyError("pg_role is for the least-privilege roles; use pg_admin instead")
         if role not in open_connections:
-            _require_stack()
-            dsn = os.environ.get(dsn_by_role[role])
-            if not dsn:
-                pytest.skip(f"{dsn_by_role[role]} is unset; copy .env.example to .env")
-            try:
-                open_connections[role] = psycopg.connect(dsn, connect_timeout=5)
-            except psycopg.OperationalError as exc:
-                if not _missing_database(exc):
-                    raise
-                pytest.skip(
-                    "the per-worker Postgres database does not exist yet (T-011 creates it)"
-                )
+            dsn = role_dsn(role, worker_index, database=worker_database)
+            open_connections[role] = psycopg.connect(dsn, connect_timeout=5)
         return open_connections[role]
 
     try:
@@ -246,20 +241,28 @@ def pg_role() -> Iterator[Callable[[str], psycopg.Connection]]:
 
 
 @pytest.fixture(scope="session")
-def _neo4j_guard() -> Iterator[None]:
+def _neo4j_guard() -> Iterator[bool]:
     """Serialization hook for Neo4j (D37).
 
-    The default is a no-op. ``services/ingest/tests/conftest.py`` and
+    Yields whether this session holds the cross-worker lock and therefore owns the single
+    Community-edition database exclusively.
+
+    The default is ``False`` — no lock, no reset. ``services/ingest/tests/conftest.py`` and
     ``apps/exchange/tests/conftest.py`` **override** this fixture with one that holds the
-    cross-worker ``flock`` on ``/tmp/proxyshop-neo4j.lock`` for the whole session and
-    resets the database inside the lock.
+    ``flock`` on ``/tmp/proxyshop-neo4j.lock`` for the whole session and yields ``True``.
+    The flock is re-entrant within a process (see ``proxyshop_support.neo4j_lock``), so a
+    whole-repo run that collects both graph lanes takes it once and does not self-deadlock.
     """
-    yield None
+    yield False
 
 
 @pytest.fixture(scope="session")
-def neo4j_driver(_neo4j_guard: None) -> Iterator[Any]:
+def neo4j_driver(_neo4j_guard: bool) -> Iterator[Any]:
     """Session-scoped ``neo4j.Driver`` for the compose Neo4j (D6: 5.26 Community).
+
+    When this session holds the D37 lock (``_neo4j_guard`` is ``True``) the graph is reset
+    once, here, *inside* the lock — before any test runs and while no other worker can be
+    writing. Without that, one lane's nodes are still present when the next lane asserts.
 
     Requires ``@pytest.mark.docker`` (and, for writes, ``@pytest.mark.graph``).
     """
@@ -276,6 +279,8 @@ def neo4j_driver(_neo4j_guard: None) -> Iterator[Any]:
         driver.close()
         pytest.skip(f"neo4j is not reachable at {uri}: {exc}")
     try:
+        if _neo4j_guard:
+            reset_graph(driver)
         yield driver
     finally:
         driver.close()
@@ -368,9 +373,14 @@ def shopify_stub_url() -> Iterator[str]:
 def frozen_clock() -> Iterator[Any]:
     """Freeze the **global** wall clock at 2026-01-01T00:00:00Z.
 
-    Backed by ``time-machine``, so ``datetime.now()``, ``time.time()`` and
-    ``time.monotonic()`` all stop — including inside third-party libraries you cannot pass
-    a clock to.
+    Backed by ``time-machine``, so ``datetime.now()`` and ``time.time()`` stop — including
+    inside third-party libraries you cannot pass a clock to.
+
+    **``time.monotonic()`` does NOT stop** (measured; see
+    ``proxyshop_support/tests/test_shared_runtime.py``). Anything that measures a deadline
+    monotonically — ``asyncio.wait_for``, most timeout helpers — keeps running in real
+    time under this fixture, so a test that "advances an hour" past such a deadline will
+    actually wait an hour. Inject :func:`manual_clock` into that code instead.
 
     Yields:
         The ``time_machine.Coordinates`` object. ``clock.shift(seconds)`` moves time
