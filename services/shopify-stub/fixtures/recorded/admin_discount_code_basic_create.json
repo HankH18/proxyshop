@@ -35,10 +35,16 @@
           "shippingDiscounts": false
         },
         "customerGets": {
-          "value": { "percentage": 0.1 },
-          "items": { "all": true }
+          "value": {
+            "percentage": 0.1
+          },
+          "items": {
+            "all": true
+          }
         },
-        "tags": ["offer:4f2c9a10"]
+        "tags": [
+          "offer:4f2c9a10"
+        ]
       }
     }
   },
@@ -50,8 +56,17 @@
           "codeDiscount": {
             "title": "ProxyShop offer 4f2c",
             "status": "ACTIVE",
-            "codes": { "nodes": [{ "code": "PSX-7QK2ZB0M" }] },
-            "codesCount": { "count": 1, "precision": "EXACT" },
+            "codes": {
+              "nodes": [
+                {
+                  "code": "PSX-7QK2ZB0M"
+                }
+              ]
+            },
+            "codesCount": {
+              "count": 1,
+              "precision": "EXACT"
+            },
             "startsAt": "2026-01-01T00:00:00Z",
             "endsAt": "2026-01-03T00:00:00Z",
             "usageLimit": 1,
@@ -63,8 +78,12 @@
               "shippingDiscounts": false
             },
             "customerGets": {
-              "value": { "percentage": 0.1 },
-              "items": { "allItems": true }
+              "value": {
+                "percentage": 0.1
+              },
+              "items": {
+                "allItems": true
+              }
             }
           }
         },
@@ -89,7 +108,10 @@
         "codeDiscountNode": null,
         "userErrors": [
           {
-            "field": ["basicCodeDiscount", "code"],
+            "field": [
+              "basicCodeDiscount",
+              "code"
+            ],
             "message": "Discount code must be unique",
             "code": "TAKEN",
             "extraInfo": null
@@ -105,22 +127,108 @@
     }
   },
   "documented_keys": {
-    "": ["data", "extensions"],
-    "data.discountCodeBasicCreate": ["codeDiscountNode", "userErrors"],
-    "data.discountCodeBasicCreate.codeDiscountNode": ["id", "codeDiscount"],
+    "": [
+      "data",
+      "errors",
+      "extensions"
+    ],
+    "data": [
+      "discountCodeBasicCreate"
+    ],
+    "data.discountCodeBasicCreate": [
+      "codeDiscountNode",
+      "userErrors"
+    ],
+    "data.discountCodeBasicCreate.codeDiscountNode": [
+      "id",
+      "codeDiscount"
+    ],
     "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount": [
-      "__typename", "title", "status", "codes", "codesCount", "startsAt", "endsAt",
-      "usageLimit", "asyncUsageCount", "appliesOncePerCustomer", "combinesWith",
-      "customerGets", "context", "discountClasses", "shareableUrls", "shortSummary",
-      "summary", "totalSales", "hasTimelineComment", "minimumRequirement",
-      "recurringCycleLimit", "tags", "createdAt", "updatedAt"
+      "__typename",
+      "title",
+      "status",
+      "codes",
+      "codesCount",
+      "startsAt",
+      "endsAt",
+      "usageLimit",
+      "asyncUsageCount",
+      "appliesOncePerCustomer",
+      "combinesWith",
+      "customerGets",
+      "context",
+      "discountClasses",
+      "shareableUrls",
+      "shortSummary",
+      "summary",
+      "totalSales",
+      "hasTimelineComment",
+      "minimumRequirement",
+      "recurringCycleLimit",
+      "tags",
+      "createdAt",
+      "updatedAt"
+    ],
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.codes": [
+      "edges",
+      "nodes",
+      "pageInfo",
+      "edges",
+      "nodes",
+      "pageInfo"
+    ],
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.codes.nodes[]": [
+      "id",
+      "code",
+      "asyncUsageCount",
+      "createdBy"
+    ],
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.codesCount": [
+      "count",
+      "precision"
     ],
     "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.combinesWith": [
-      "orderDiscounts", "productDiscounts", "shippingDiscounts",
+      "orderDiscounts",
+      "productDiscounts",
+      "shippingDiscounts",
       "productDiscountsWithTagsOnSameCartLine"
     ],
-    "data.discountCodeBasicCreate.userErrors[]": ["field", "message", "code", "extraInfo"],
-    "extensions.cost": ["requestedQueryCost", "actualQueryCost", "throttleStatus"],
-    "extensions.cost.throttleStatus": ["maximumAvailable", "currentlyAvailable", "restoreRate"]
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.customerGets": [
+      "value",
+      "items",
+      "appliesOnOneTimePurchase",
+      "appliesOnSubscription"
+    ],
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.customerGets.items": [
+      "__typename",
+      "allItems",
+      "products",
+      "collections"
+    ],
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.customerGets.value": [
+      "percentage",
+      "amount",
+      "appliesOnEachItem",
+      "__typename"
+    ],
+    "data.discountCodeBasicCreate.userErrors[]": [
+      "field",
+      "message",
+      "code",
+      "extraInfo"
+    ],
+    "extensions": [
+      "cost"
+    ],
+    "extensions.cost": [
+      "requestedQueryCost",
+      "actualQueryCost",
+      "throttleStatus"
+    ],
+    "extensions.cost.throttleStatus": [
+      "maximumAvailable",
+      "currentlyAvailable",
+      "restoreRate"
+    ]
   }
 }

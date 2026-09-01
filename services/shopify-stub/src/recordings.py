@@ -190,24 +190,38 @@ def assert_no_invented_keys(actual: Any, documented: dict[str, list[str]], *, la
     ``documented`` maps a path (``""`` for the root, ``"line_items[]"`` for an element) to
     the list of key names the published documentation lists there.
 
-    Two deliberate asymmetries:
+    **Every object path the stub emits must be enumerated.** An earlier version skipped paths
+    the recording did not name, reasoning that a gap in the recording should not read as a
+    failure of the code. That was wrong, and adversarial review proved it: the recordings
+    enumerated only 7 of 14 object paths in the ``orders/paid`` payload and 7 of 36 in the
+    orders query, so an invented key planted at any unenumerated path — inside
+    ``lineItems.edges[].node``, inside ``context.document.location``, inside ``duties[]`` —
+    sailed through a fully green suite. The check advertised itself as catching invented
+    fields while covering a minority of the surface it was pointed at.
 
-    * A path in ``actual`` that ``documented`` does not name is **not** checked. The
-      recording only claims to have enumerated the paths it names, and treating a gap in
-      the recording as a failure of the code would push whoever hits it towards deleting
-      the check rather than extending the recording.
-    * A path in ``documented`` that is **absent** from ``actual`` is likewise not a failure
-      *here*. That is the forward direction's job (:func:`assert_conforms`), and folding it
-      in produces false alarms for any documented element shape whose array is legitimately
-      empty — ``userErrors: []`` on every successful mutation, for instance.
+    So an unenumerated path is now a failure, and the only way to satisfy it is to extend the
+    recording — which is exactly the work that makes the recording worth having. The
+    ``documented`` map is the claim "I enumerated the real key names here"; skipping
+    unenumerated paths let that claim go unmade for most of the payload while still reading
+    like coverage.
+
+    A path in ``documented`` that is **absent** from ``actual`` is still not a failure here:
+    that is the forward direction's job (:func:`assert_conforms`), and folding it in would
+    fire on any documented element shape whose array is legitimately empty — ``userErrors:
+    []`` on every successful mutation, for instance.
     """
     emitted = collect_keys(actual)
     problems: list[str] = []
-    for path, allowed in documented.items():
-        keys = emitted.get(path)
-        if keys is None:
+    for path, keys in sorted(emitted.items()):
+        if path not in documented:
+            problems.append(
+                f"{path or '<root>'}: path is NOT enumerated in documented_keys, so the "
+                f"recording makes no claim about the keys present here "
+                f"({', '.join(sorted(keys))}). Extend the recording rather than narrowing "
+                f"this check."
+            )
             continue
-        invented = sorted(keys - set(allowed))
+        invented = sorted(keys - set(documented[path]))
         if invented:
             problems.append(f"{path or '<root>'}: undocumented key(s) {', '.join(invented)}")
     if problems:

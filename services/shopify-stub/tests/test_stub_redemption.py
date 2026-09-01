@@ -25,6 +25,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from shopify_stub.testing import SEED_VARIANT, StubClient
 
 VARIANT_ID = int(SEED_VARIANT["variant_id"])
@@ -345,3 +346,49 @@ async def test_a_code_that_expires_between_cart_and_payment_is_not_honoured(
 
     assert completed["discount_code"] is None
     assert completed["total_price"] == "100.00"
+
+
+@pytest.mark.parametrize(
+    ("percentage", "quantity"),
+    [
+        (0.12345, 1),  # 12.345 -> the half-way case the two roundings disagreed on
+        (0.005, 1),  # 0.50 exactly
+        (0.33333, 3),  # a repeating fraction over a multi-unit line
+        (0.075, 1),  # 7.50
+        (0.1, 7),  # a round rate over an odd quantity
+        (0.999, 1),  # nearly the whole line
+    ],
+)
+async def test_the_cart_quote_equals_the_amount_the_order_charges(
+    stub: StubClient, percentage: float, quantity: int
+) -> None:
+    """A shopper must be charged exactly the total the cart quoted them.
+
+    This is a REGRESSION TEST for a real defect. The cart route quantized the discount with
+    Python's default ``ROUND_HALF_EVEN`` while order creation used ``ROUND_HALF_UP``, so a
+    12.345% discount on a 100.00 line quoted 87.66 and charged 87.65. Every other test in
+    this file used round percentages (10%, 25%) whose two roundings agree, so the whole suite
+    was green over a live money bug.
+
+    The parametrised rates are deliberately awkward for that reason: a rate whose discount
+    lands exactly on a half-cent is the only kind that can expose a rounding disagreement,
+    and a test suite made entirely of round numbers cannot.
+    """
+    code = f"PSX-RND{int(percentage * 100000):05d}"[:12].ljust(12, "0")
+    created = await stub.create_code(code, percentage=percentage, ends_at=_future(24))
+    assert created.json()["data"]["discountCodeBasicCreate"]["userErrors"] == []
+
+    response = await stub.visit_cart(VARIANT_ID, quantity=quantity, code=code)
+    assert response.status_code == 303
+    cart = response.json()
+    assert cart["discount_code"] == code
+
+    completed = (await stub.complete(cart["token"])).json()
+    assert completed["total_price"] == cart["total_price"], (
+        f"quoted {cart['total_price']} but charged {completed['total_price']}"
+    )
+
+    # And the GraphQL view of the same order must agree with both.
+    (node,) = [edge["node"] for edge in (await stub.orders()).json()["data"]["orders"]["edges"]]
+    assert node["totalPriceSet"]["shopMoney"]["amount"] == cart["total_price"]
+    assert node["totalDiscountsSet"]["shopMoney"]["amount"] == cart["total_discount"]

@@ -34,8 +34,9 @@ import base64
 import secrets
 import uuid
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
+from shopify_stub.codes import discount_amount_for
 from shopify_stub.state import (
     Checkout,
     Fulfillment,
@@ -127,12 +128,10 @@ def create_order_from_checkout(
             applied_code = None
             applied = None
         else:
-            if applied.percentage is not None:
-                discount_amount = (subtotal * Decimal(str(applied.percentage))).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
-                )
-            elif applied.fixed_amount is not None:
-                discount_amount = min(Decimal(applied.fixed_amount), subtotal)
+            # The SAME function the cart quote used. See discount_amount_for's docstring for
+            # why this is not inlined: the two used to round differently and the shopper was
+            # charged a different number from the one they were quoted.
+            discount_amount = discount_amount_for(applied, subtotal)
             applied.usage_count += 1
     order = Order(
         id=state.next_order_id(),

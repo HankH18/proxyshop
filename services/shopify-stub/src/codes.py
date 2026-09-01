@@ -22,6 +22,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 #: Crockford base32, uppercase. 32 symbols; ``I``, ``L``, ``O``, ``U`` are deliberately absent.
@@ -242,3 +243,38 @@ def utc_now() -> datetime:
     override it, without every module reaching for :func:`datetime.now` independently.
     """
     return datetime.now(UTC)
+
+
+def discount_amount_for(discount: DiscountCode | None, subtotal: Decimal) -> Decimal:
+    """What ``discount`` takes off a cart worth ``subtotal``.
+
+    **There is exactly one implementation of this arithmetic, and this is it.** It exists
+    because there were briefly two: the cart route quantized with Python's default
+    ``ROUND_HALF_EVEN`` while order creation used ``ROUND_HALF_UP``, so a 12.345% discount on
+    a 100.00 line quoted the shopper 87.66 in the cart and charged 87.65 on the order. Every
+    test used round numbers, so nothing caught it. A shopper being charged a different number
+    from the one they were quoted is the worst class of bug this stub could teach a consumer
+    to tolerate, and the fix is structural: both call sites now call this, so they cannot
+    drift apart again.
+
+    ``ROUND_HALF_UP`` matches :func:`shopify_stub.state.money`, which is what every amount is
+    finally rendered with, so the stored decimal and the wire string agree.
+
+    Args:
+        discount: the code being applied, or ``None`` for no discount.
+        subtotal: the cart or line subtotal.
+
+    Returns:
+        The amount to take off, never more than ``subtotal`` and never negative.
+    """
+    if discount is None or subtotal <= 0:
+        return Decimal("0")
+    if discount.percentage is not None:
+        amount = (subtotal * Decimal(str(discount.percentage))).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+    elif discount.fixed_amount is not None:
+        amount = Decimal(discount.fixed_amount)
+    else:
+        return Decimal("0")
+    return min(max(amount, Decimal("0")), subtotal)

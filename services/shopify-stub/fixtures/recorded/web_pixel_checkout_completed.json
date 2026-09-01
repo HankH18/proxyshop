@@ -19,11 +19,21 @@
   },
   "event": "checkout_completed",
   "standard_events": [
-    "page_viewed", "product_viewed", "product_added_to_cart", "product_removed_from_cart",
-    "collection_viewed", "search_submitted", "cart_viewed", "checkout_started",
-    "checkout_completed", "checkout_address_info_submitted",
-    "checkout_contact_info_submitted", "checkout_shipping_info_submitted",
-    "payment_info_submitted", "alert_displayed", "ui_extension_errored"
+    "page_viewed",
+    "product_viewed",
+    "product_added_to_cart",
+    "product_removed_from_cart",
+    "collection_viewed",
+    "search_submitted",
+    "cart_viewed",
+    "checkout_started",
+    "checkout_completed",
+    "checkout_address_info_submitted",
+    "checkout_contact_info_submitted",
+    "checkout_shipping_info_submitted",
+    "payment_info_submitted",
+    "alert_displayed",
+    "ui_extension_errored"
   ],
   "subscribe": "analytics.subscribe('checkout_completed', (event) => { ... })",
   "payload": {
@@ -43,16 +53,29 @@
     "data": {
       "checkout": {
         "token": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
-        "order": { "id": "5500000000001" },
+        "order": {
+          "id": "5500000000001"
+        },
         "currencyCode": "USD",
-        "subtotalPrice": { "amount": 100.0, "currencyCode": "USD" },
-        "totalPrice": { "amount": 90.0, "currencyCode": "USD" },
-        "discountsAmount": { "amount": 10.0, "currencyCode": "USD" },
+        "subtotalPrice": {
+          "amount": 100.0,
+          "currencyCode": "USD"
+        },
+        "totalPrice": {
+          "amount": 90.0,
+          "currencyCode": "USD"
+        },
+        "discountsAmount": {
+          "amount": 10.0,
+          "currencyCode": "USD"
+        },
         "discountApplications": [
           {
             "type": "DISCOUNT_CODE",
             "title": "PSX-7QK2ZB0M",
-            "value": { "percentage": 10.0 },
+            "value": {
+              "percentage": 10.0
+            },
             "allocationMethod": "ACROSS",
             "targetSelection": "ALL",
             "targetType": "LINE_ITEM"
@@ -67,7 +90,11 @@
     "checkoutToken": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
     "orderId": "gid://shopify/Order/5500000000001",
     "discountApplications": [
-      { "code": "PSX-7QK2ZB0M", "value": 10.0, "type": "code" }
+      {
+        "code": "PSX-7QK2ZB0M",
+        "value": 10.0,
+        "type": "code"
+      }
     ]
   },
   "degraded_collector_payload": {
@@ -78,19 +105,92 @@
     "discountApplications": null
   },
   "documented_keys": {
-    "": ["id", "name", "type", "seq", "timestamp", "clientId", "context", "data"],
-    "data": ["checkout"],
+    "": [
+      "id",
+      "name",
+      "type",
+      "seq",
+      "timestamp",
+      "clientId",
+      "context",
+      "data"
+    ],
+    "context": [
+      "document",
+      "navigator",
+      "window"
+    ],
+    "context.document": [
+      "location",
+      "referrer",
+      "title",
+      "characterSet"
+    ],
+    "context.document.location": [
+      "href",
+      "host",
+      "hostname",
+      "origin",
+      "pathname",
+      "protocol",
+      "search",
+      "hash",
+      "port"
+    ],
+    "data": [
+      "checkout"
+    ],
     "data.checkout": [
-      "token", "order", "currencyCode", "subtotalPrice", "totalPrice", "discountsAmount",
-      "discountApplications", "attributes", "billingAddress", "buyerAcceptsEmailMarketing",
-      "buyerAcceptsSmsMarketing", "delivery", "email", "lineItems", "localization",
-      "phone", "shippingAddress", "shippingLine", "smsMarketingPhone", "totalTax",
+      "token",
+      "order",
+      "currencyCode",
+      "subtotalPrice",
+      "totalPrice",
+      "discountsAmount",
+      "discountApplications",
+      "attributes",
+      "billingAddress",
+      "buyerAcceptsEmailMarketing",
+      "buyerAcceptsSmsMarketing",
+      "delivery",
+      "email",
+      "lineItems",
+      "localization",
+      "phone",
+      "shippingAddress",
+      "shippingLine",
+      "smsMarketingPhone",
+      "totalTax",
       "transactions"
     ],
     "data.checkout.discountApplications[]": [
-      "type", "title", "value", "allocationMethod", "targetSelection", "targetType"
+      "type",
+      "title",
+      "value",
+      "allocationMethod",
+      "targetSelection",
+      "targetType"
     ],
-    "data.checkout.totalPrice": ["amount", "currencyCode"],
-    "data.checkout.order": ["id", "customer"]
+    "data.checkout.discountApplications[].value": [
+      "percentage",
+      "amount",
+      "currencyCode"
+    ],
+    "data.checkout.discountsAmount": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.checkout.order": [
+      "id",
+      "customer"
+    ],
+    "data.checkout.subtotalPrice": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.checkout.totalPrice": [
+      "amount",
+      "currencyCode"
+    ]
   }
 }

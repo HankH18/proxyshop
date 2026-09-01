@@ -17,12 +17,19 @@
     ]
   },
   "operation": "webhookSubscriptionCreate",
-  "supported_topics": ["ORDERS_PAID", "ORDERS_FULFILLED", "REFUNDS_CREATE"],
+  "supported_topics": [
+    "ORDERS_PAID",
+    "ORDERS_FULFILLED",
+    "REFUNDS_CREATE"
+  ],
   "request": {
     "query": "mutation Subscribe($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) { webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) { webhookSubscription { id legacyResourceId topic uri format apiVersion { handle } createdAt updatedAt } userErrors { field message } } }",
     "variables": {
       "topic": "ORDERS_PAID",
-      "sub": { "uri": "https://merchant.example.com/webhooks/shopify/orders-paid", "format": "JSON" }
+      "sub": {
+        "uri": "https://merchant.example.com/webhooks/shopify/orders-paid",
+        "format": "JSON"
+      }
     }
   },
   "response": {
@@ -34,7 +41,9 @@
           "topic": "ORDERS_PAID",
           "uri": "https://merchant.example.com/webhooks/shopify/orders-paid",
           "format": "JSON",
-          "apiVersion": { "handle": "2026-07" },
+          "apiVersion": {
+            "handle": "2026-07"
+          },
           "includeFields": [],
           "createdAt": "2026-01-01T00:00:00Z",
           "updatedAt": "2026-01-01T00:00:00Z"
@@ -44,12 +53,56 @@
     }
   },
   "documented_keys": {
-    "data.webhookSubscriptionCreate": ["webhookSubscription", "userErrors"],
-    "data.webhookSubscriptionCreate.webhookSubscription": [
-      "id", "legacyResourceId", "topic", "uri", "format", "apiVersion", "includeFields",
-      "createdAt", "updatedAt", "filter", "metafieldNamespaces", "metafields", "name",
-      "callbackUrl", "endpoint"
+    "": [
+      "data",
+      "errors",
+      "extensions"
     ],
-    "data.webhookSubscriptionCreate.userErrors[]": ["field", "message"]
+    "data": [
+      "webhookSubscriptionCreate"
+    ],
+    "data.webhookSubscriptionCreate": [
+      "webhookSubscription",
+      "userErrors"
+    ],
+    "data.webhookSubscriptionCreate.userErrors[]": [
+      "field",
+      "message"
+    ],
+    "data.webhookSubscriptionCreate.webhookSubscription": [
+      "id",
+      "legacyResourceId",
+      "topic",
+      "uri",
+      "format",
+      "apiVersion",
+      "includeFields",
+      "createdAt",
+      "updatedAt",
+      "filter",
+      "metafieldNamespaces",
+      "metafields",
+      "name",
+      "callbackUrl",
+      "endpoint"
+    ],
+    "data.webhookSubscriptionCreate.webhookSubscription.apiVersion": [
+      "handle",
+      "displayName",
+      "supported"
+    ],
+    "extensions": [
+      "cost"
+    ],
+    "extensions.cost": [
+      "requestedQueryCost",
+      "actualQueryCost",
+      "throttleStatus"
+    ],
+    "extensions.cost.throttleStatus": [
+      "maximumAvailable",
+      "currentlyAvailable",
+      "restoreRate"
+    ]
   }
 }

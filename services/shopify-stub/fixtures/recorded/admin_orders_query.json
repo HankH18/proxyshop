@@ -19,9 +19,21 @@
   "operation": "orders",
   "request": {
     "query": "query RecentOrders($first: Int!, $after: String) { orders(first: $first, after: $after) { edges { cursor node { id name checkoutToken displayFinancialStatus totalPriceSet { shopMoney { amount currencyCode } } } } pageInfo { hasNextPage hasPreviousPage startCursor endCursor } } }",
-    "variables": { "first": 10, "after": null }
+    "variables": {
+      "first": 10,
+      "after": null
+    }
   },
-  "arguments": ["first", "last", "after", "before", "query", "reverse", "sortKey", "savedSearchId"],
+  "arguments": [
+    "first",
+    "last",
+    "after",
+    "before",
+    "query",
+    "reverse",
+    "sortKey",
+    "savedSearchId"
+  ],
   "response": {
     "data": {
       "orders": {
@@ -41,29 +53,64 @@
               "displayFulfillmentStatus": "UNFULFILLED",
               "currencyCode": "USD",
               "test": true,
-              "discountCodes": ["PSX-7QK2ZB0M"],
+              "discountCodes": [
+                "PSX-7QK2ZB0M"
+              ],
               "subtotalPriceSet": {
-                "shopMoney": { "amount": "100.00", "currencyCode": "USD" },
-                "presentmentMoney": { "amount": "100.00", "currencyCode": "USD" }
+                "shopMoney": {
+                  "amount": "100.00",
+                  "currencyCode": "USD"
+                },
+                "presentmentMoney": {
+                  "amount": "100.00",
+                  "currencyCode": "USD"
+                }
               },
               "totalDiscountsSet": {
-                "shopMoney": { "amount": "10.00", "currencyCode": "USD" },
-                "presentmentMoney": { "amount": "10.00", "currencyCode": "USD" }
+                "shopMoney": {
+                  "amount": "10.00",
+                  "currencyCode": "USD"
+                },
+                "presentmentMoney": {
+                  "amount": "10.00",
+                  "currencyCode": "USD"
+                }
               },
               "totalPriceSet": {
-                "shopMoney": { "amount": "90.00", "currencyCode": "USD" },
-                "presentmentMoney": { "amount": "90.00", "currencyCode": "USD" }
+                "shopMoney": {
+                  "amount": "90.00",
+                  "currencyCode": "USD"
+                },
+                "presentmentMoney": {
+                  "amount": "90.00",
+                  "currencyCode": "USD"
+                }
               },
               "currentTotalPriceSet": {
-                "shopMoney": { "amount": "90.00", "currencyCode": "USD" },
-                "presentmentMoney": { "amount": "90.00", "currencyCode": "USD" }
+                "shopMoney": {
+                  "amount": "90.00",
+                  "currencyCode": "USD"
+                },
+                "presentmentMoney": {
+                  "amount": "90.00",
+                  "currencyCode": "USD"
+                }
               },
               "totalRefundedSet": {
-                "shopMoney": { "amount": "0.00", "currencyCode": "USD" },
-                "presentmentMoney": { "amount": "0.00", "currencyCode": "USD" }
+                "shopMoney": {
+                  "amount": "0.00",
+                  "currencyCode": "USD"
+                },
+                "presentmentMoney": {
+                  "amount": "0.00",
+                  "currencyCode": "USD"
+                }
               },
               "customAttributes": [
-                { "key": "proxyshop_client_id", "value": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8" }
+                {
+                  "key": "proxyshop_client_id",
+                  "value": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
+                }
               ],
               "customer": null,
               "discountApplications": {
@@ -77,7 +124,9 @@
                       "index": 0,
                       "targetSelection": "ALL",
                       "targetType": "LINE_ITEM",
-                      "value": { "percentage": 10.0 }
+                      "value": {
+                        "percentage": 10.0
+                      }
                     }
                   }
                 ]
@@ -91,10 +140,18 @@
                       "title": "Trail Runner 42",
                       "quantity": 1,
                       "sku": "TR-42",
-                      "variant": { "id": "gid://shopify/ProductVariant/44352913" },
+                      "variant": {
+                        "id": "gid://shopify/ProductVariant/44352913"
+                      },
                       "originalTotalSet": {
-                        "shopMoney": { "amount": "100.00", "currencyCode": "USD" },
-                        "presentmentMoney": { "amount": "100.00", "currencyCode": "USD" }
+                        "shopMoney": {
+                          "amount": "100.00",
+                          "currencyCode": "USD"
+                        },
+                        "presentmentMoney": {
+                          "amount": "100.00",
+                          "currencyCode": "USD"
+                        }
                       }
                     }
                   }
@@ -124,21 +181,199 @@
     }
   },
   "documented_keys": {
-    "data.orders": ["edges", "pageInfo", "nodes"],
-    "data.orders.edges[]": ["cursor", "node"],
-    "data.orders.pageInfo": ["hasNextPage", "hasPreviousPage", "startCursor", "endCursor"],
-    "data.orders.edges[].node": [
-      "id", "legacyResourceId", "name", "checkoutToken", "cartToken", "createdAt",
-      "processedAt", "updatedAt", "displayFinancialStatus", "displayFulfillmentStatus",
-      "currencyCode", "test", "discountCodes", "subtotalPriceSet", "totalDiscountsSet",
-      "totalPriceSet", "currentTotalPriceSet", "totalRefundedSet", "customAttributes",
-      "customer", "discountApplications", "lineItems"
+    "": [
+      "data",
+      "errors",
+      "extensions"
     ],
-    "data.orders.edges[].node.discountApplications.edges[].node": [
-      "__typename", "allocationMethod", "code", "index", "targetSelection", "targetType",
+    "data": [
+      "orders"
+    ],
+    "data.orders": [
+      "edges",
+      "nodes",
+      "pageInfo"
+    ],
+    "data.orders.edges[]": [
+      "cursor",
+      "node"
+    ],
+    "data.orders.edges[].node": [
+      "id",
+      "legacyResourceId",
+      "name",
+      "checkoutToken",
+      "cartToken",
+      "createdAt",
+      "processedAt",
+      "updatedAt",
+      "displayFinancialStatus",
+      "displayFulfillmentStatus",
+      "currencyCode",
+      "test",
+      "discountCodes",
+      "subtotalPriceSet",
+      "totalDiscountsSet",
+      "totalPriceSet",
+      "currentTotalPriceSet",
+      "totalRefundedSet",
+      "customAttributes",
+      "customer",
+      "discountApplications",
+      "lineItems"
+    ],
+    "data.orders.edges[].node.currentTotalPriceSet": [
+      "shopMoney",
+      "presentmentMoney"
+    ],
+    "data.orders.edges[].node.currentTotalPriceSet.presentmentMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.currentTotalPriceSet.shopMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.customAttributes[]": [
+      "key",
       "value"
     ],
-    "data.orders.edges[].node.totalPriceSet": ["shopMoney", "presentmentMoney"],
-    "data.orders.edges[].node.totalPriceSet.shopMoney": ["amount", "currencyCode"]
+    "data.orders.edges[].node.discountApplications": [
+      "edges",
+      "nodes",
+      "pageInfo"
+    ],
+    "data.orders.edges[].node.discountApplications.edges[]": [
+      "cursor",
+      "node"
+    ],
+    "data.orders.edges[].node.discountApplications.edges[].node": [
+      "__typename",
+      "allocationMethod",
+      "code",
+      "index",
+      "targetSelection",
+      "targetType",
+      "value"
+    ],
+    "data.orders.edges[].node.discountApplications.edges[].node.value": [
+      "percentage",
+      "amount",
+      "currencyCode",
+      "__typename"
+    ],
+    "data.orders.edges[].node.lineItems": [
+      "edges",
+      "nodes",
+      "pageInfo"
+    ],
+    "data.orders.edges[].node.lineItems.edges[]": [
+      "cursor",
+      "node"
+    ],
+    "data.orders.edges[].node.lineItems.edges[].node": [
+      "id",
+      "title",
+      "name",
+      "quantity",
+      "currentQuantity",
+      "sku",
+      "vendor",
+      "variant",
+      "product",
+      "originalTotalSet",
+      "originalUnitPriceSet",
+      "discountedTotalSet",
+      "totalDiscountSet",
+      "taxLines",
+      "requiresShipping",
+      "isGiftCard"
+    ],
+    "data.orders.edges[].node.lineItems.edges[].node.originalTotalSet": [
+      "shopMoney",
+      "presentmentMoney"
+    ],
+    "data.orders.edges[].node.lineItems.edges[].node.originalTotalSet.presentmentMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.lineItems.edges[].node.originalTotalSet.shopMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.lineItems.edges[].node.variant": [
+      "id",
+      "title",
+      "sku",
+      "price",
+      "product"
+    ],
+    "data.orders.edges[].node.subtotalPriceSet": [
+      "shopMoney",
+      "presentmentMoney"
+    ],
+    "data.orders.edges[].node.subtotalPriceSet.presentmentMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.subtotalPriceSet.shopMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.totalDiscountsSet": [
+      "shopMoney",
+      "presentmentMoney"
+    ],
+    "data.orders.edges[].node.totalDiscountsSet.presentmentMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.totalDiscountsSet.shopMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.totalPriceSet": [
+      "shopMoney",
+      "presentmentMoney"
+    ],
+    "data.orders.edges[].node.totalPriceSet.presentmentMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.totalPriceSet.shopMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.totalRefundedSet": [
+      "shopMoney",
+      "presentmentMoney"
+    ],
+    "data.orders.edges[].node.totalRefundedSet.presentmentMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.edges[].node.totalRefundedSet.shopMoney": [
+      "amount",
+      "currencyCode"
+    ],
+    "data.orders.pageInfo": [
+      "hasNextPage",
+      "hasPreviousPage",
+      "startCursor",
+      "endCursor"
+    ],
+    "extensions": [
+      "cost"
+    ],
+    "extensions.cost": [
+      "requestedQueryCost",
+      "actualQueryCost",
+      "throttleStatus"
+    ],
+    "extensions.cost.throttleStatus": [
+      "maximumAvailable",
+      "currentlyAvailable",
+      "restoreRate"
+    ]
   }
 }

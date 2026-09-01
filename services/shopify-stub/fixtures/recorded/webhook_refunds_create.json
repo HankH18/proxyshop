@@ -14,7 +14,9 @@
     ]
   },
   "topic": "refunds/create",
-  "headers": { "X-Shopify-Topic": "refunds/create" },
+  "headers": {
+    "X-Shopify-Topic": "refunds/create"
+  },
   "payload": {
     "id": 8800000000001,
     "admin_graphql_api_id": "gid://shopify/Refund/8800000000001",
@@ -29,8 +31,14 @@
     "refund_shipping_lines": [],
     "return": null,
     "total_duties_set": {
-      "shop_money": { "amount": "0.00", "currency_code": "USD" },
-      "presentment_money": { "amount": "0.00", "currency_code": "USD" }
+      "shop_money": {
+        "amount": "0.00",
+        "currency_code": "USD"
+      },
+      "presentment_money": {
+        "amount": "0.00",
+        "currency_code": "USD"
+      }
     },
     "refund_line_items": [
       {
@@ -41,13 +49,25 @@
         "restock_type": "return",
         "subtotal": "100.00",
         "subtotal_set": {
-          "shop_money": { "amount": "100.00", "currency_code": "USD" },
-          "presentment_money": { "amount": "100.00", "currency_code": "USD" }
+          "shop_money": {
+            "amount": "100.00",
+            "currency_code": "USD"
+          },
+          "presentment_money": {
+            "amount": "100.00",
+            "currency_code": "USD"
+          }
         },
         "total_tax": "0.00",
         "total_tax_set": {
-          "shop_money": { "amount": "0.00", "currency_code": "USD" },
-          "presentment_money": { "amount": "0.00", "currency_code": "USD" }
+          "shop_money": {
+            "amount": "0.00",
+            "currency_code": "USD"
+          },
+          "presentment_money": {
+            "amount": "0.00",
+            "currency_code": "USD"
+          }
         }
       }
     ],
@@ -70,20 +90,95 @@
   },
   "documented_keys": {
     "": [
-      "id", "admin_graphql_api_id", "order_id", "created_at", "processed_at", "note",
-      "user_id", "restock", "duties", "total_duties_set", "refund_line_items",
-      "transactions", "order_adjustments", "refund_shipping_lines", "return"
+      "id",
+      "admin_graphql_api_id",
+      "order_id",
+      "created_at",
+      "processed_at",
+      "note",
+      "user_id",
+      "restock",
+      "duties",
+      "total_duties_set",
+      "refund_line_items",
+      "transactions",
+      "order_adjustments",
+      "refund_shipping_lines",
+      "return"
     ],
     "refund_line_items[]": [
-      "id", "line_item", "line_item_id", "location_id", "quantity", "restock_type",
-      "subtotal", "subtotal_set", "total_tax", "total_tax_set"
+      "id",
+      "line_item",
+      "line_item_id",
+      "location_id",
+      "quantity",
+      "restock_type",
+      "subtotal",
+      "subtotal_set",
+      "total_tax",
+      "total_tax_set"
+    ],
+    "refund_line_items[].subtotal_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "refund_line_items[].subtotal_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "refund_line_items[].subtotal_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "refund_line_items[].total_tax_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "refund_line_items[].total_tax_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "refund_line_items[].total_tax_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_duties_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "total_duties_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_duties_set.shop_money": [
+      "amount",
+      "currency_code"
     ],
     "transactions[]": [
-      "id", "order_id", "kind", "gateway", "status", "message", "created_at",
-      "processed_at", "test", "authorization", "currency", "amount", "parent_id",
-      "admin_graphql_api_id", "location_id", "user_id", "device_id", "receipt",
-      "error_code", "source_name", "payment_id", "amount_rounding",
-      "manual_payment_gateway", "total_unsettled_set"
+      "id",
+      "order_id",
+      "kind",
+      "gateway",
+      "status",
+      "message",
+      "created_at",
+      "processed_at",
+      "test",
+      "authorization",
+      "currency",
+      "amount",
+      "parent_id",
+      "admin_graphql_api_id",
+      "location_id",
+      "user_id",
+      "device_id",
+      "receipt",
+      "error_code",
+      "source_name",
+      "payment_id",
+      "amount_rounding",
+      "manual_payment_gateway",
+      "total_unsettled_set"
     ]
   }
 }

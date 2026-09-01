@@ -56,7 +56,7 @@ import httpx
 from fastapi import APIRouter, FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse
 from shopify_stub import graphql_admin
-from shopify_stub.codes import RejectionReason
+from shopify_stub.codes import RejectionReason, discount_amount_for
 from shopify_stub.orders import (
     create_order_from_checkout,
     fulfil_order,
@@ -286,17 +286,15 @@ def _evaluate_code(stub: Stub, candidate: str | None) -> tuple[str | None, Any]:
 
 
 def _preview_discount(stub: Stub, applied: str | None, subtotal: Decimal) -> Decimal:
-    """What the applied code takes off this cart, without redeeming it."""
+    """What the applied code takes off this cart, without redeeming it.
+
+    Delegates to :func:`shopify_stub.codes.discount_amount_for` rather than repeating the
+    arithmetic. The quote the shopper is shown here MUST equal the amount the order charges;
+    a second copy of this calculation is how those two drift apart.
+    """
     if applied is None:
         return Decimal("0")
-    discount = stub.state.find_code(applied)
-    if discount is None:
-        return Decimal("0")
-    if discount.percentage is not None:
-        return (subtotal * Decimal(str(discount.percentage))).quantize(Decimal("0.01"))
-    if discount.fixed_amount is not None:
-        return min(Decimal(discount.fixed_amount), subtotal)
-    return Decimal("0")
+    return discount_amount_for(stub.state.find_code(applied), subtotal)
 
 
 # ---------------------------------------------------------------------------------------

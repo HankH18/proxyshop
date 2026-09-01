@@ -50,16 +50,32 @@
     "total_price": "90.00",
     "current_total_price": "90.00",
     "total_price_set": {
-      "shop_money": { "amount": "90.00", "currency_code": "USD" },
-      "presentment_money": { "amount": "90.00", "currency_code": "USD" }
+      "shop_money": {
+        "amount": "90.00",
+        "currency_code": "USD"
+      },
+      "presentment_money": {
+        "amount": "90.00",
+        "currency_code": "USD"
+      }
     },
     "subtotal_price_set": {
-      "shop_money": { "amount": "100.00", "currency_code": "USD" },
-      "presentment_money": { "amount": "100.00", "currency_code": "USD" }
+      "shop_money": {
+        "amount": "100.00",
+        "currency_code": "USD"
+      },
+      "presentment_money": {
+        "amount": "100.00",
+        "currency_code": "USD"
+      }
     },
     "order_status_url": "https://proxyshop-demo.myshopify.com/orders/0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d/authenticate",
     "discount_codes": [
-      { "code": "PSX-7QK2ZB0M", "amount": "10.00", "type": "percentage" }
+      {
+        "code": "PSX-7QK2ZB0M",
+        "amount": "10.00",
+        "type": "percentage"
+      }
     ],
     "discount_applications": [
       {
@@ -73,7 +89,10 @@
       }
     ],
     "note_attributes": [
-      { "name": "proxyshop_client_id", "value": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8" }
+      {
+        "name": "proxyshop_client_id",
+        "value": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
+      }
     ],
     "line_items": [
       {
@@ -87,8 +106,14 @@
         "current_quantity": 1,
         "price": "100.00",
         "price_set": {
-          "shop_money": { "amount": "100.00", "currency_code": "USD" },
-          "presentment_money": { "amount": "100.00", "currency_code": "USD" }
+          "shop_money": {
+            "amount": "100.00",
+            "currency_code": "USD"
+          },
+          "presentment_money": {
+            "amount": "100.00",
+            "currency_code": "USD"
+          }
         },
         "sku": "TR-42",
         "total_discount": "10.00"
@@ -99,36 +124,158 @@
   },
   "documented_keys": {
     "": [
-      "id", "admin_graphql_api_id", "name", "order_number", "number", "token",
-      "checkout_token", "cart_token", "created_at", "processed_at", "updated_at",
-      "currency", "financial_status", "fulfillment_status", "test", "subtotal_price",
-      "total_discounts", "total_discounts_set", "total_price", "current_total_price",
-      "total_price_set", "subtotal_price_set", "current_total_price_set",
-      "current_total_discounts_set", "order_status_url", "note", "note_attributes",
-      "tags", "source_name", "presentment_currency", "taxes_included", "confirmed",
-      "closed_at", "cancelled_at", "landing_site", "referring_site", "browser_ip",
-      "client_details", "fulfillments", "shipping_lines", "billing_address",
-      "shipping_address", "payment_gateway_names", "total_tax", "total_line_items_price",
-      "contact_email", "email", "phone", "app_id", "location_id", "user_id",
-      "buyer_accepts_marketing", "estimated_taxes", "discount_codes",
-      "discount_applications", "line_items", "customer"
+      "id",
+      "admin_graphql_api_id",
+      "name",
+      "order_number",
+      "number",
+      "token",
+      "checkout_token",
+      "cart_token",
+      "created_at",
+      "processed_at",
+      "updated_at",
+      "currency",
+      "financial_status",
+      "fulfillment_status",
+      "test",
+      "subtotal_price",
+      "total_discounts",
+      "total_discounts_set",
+      "total_price",
+      "current_total_price",
+      "total_price_set",
+      "subtotal_price_set",
+      "current_total_price_set",
+      "current_total_discounts_set",
+      "order_status_url",
+      "note",
+      "note_attributes",
+      "tags",
+      "source_name",
+      "presentment_currency",
+      "taxes_included",
+      "confirmed",
+      "closed_at",
+      "cancelled_at",
+      "landing_site",
+      "referring_site",
+      "browser_ip",
+      "client_details",
+      "fulfillments",
+      "shipping_lines",
+      "billing_address",
+      "shipping_address",
+      "payment_gateway_names",
+      "total_tax",
+      "total_line_items_price",
+      "contact_email",
+      "email",
+      "phone",
+      "app_id",
+      "location_id",
+      "user_id",
+      "buyer_accepts_marketing",
+      "estimated_taxes",
+      "discount_codes",
+      "discount_applications",
+      "line_items",
+      "customer"
     ],
-    "discount_codes[]": ["code", "amount", "type"],
     "discount_applications[]": [
-      "target_type", "type", "value", "value_type", "allocation_method",
-      "target_selection", "code"
+      "target_type",
+      "type",
+      "value",
+      "value_type",
+      "allocation_method",
+      "target_selection",
+      "code"
     ],
-    "note_attributes[]": ["name", "value"],
+    "discount_codes[]": [
+      "code",
+      "amount",
+      "type"
+    ],
+    "fulfillments[]": [
+      "created_at",
+      "id",
+      "order_id",
+      "status",
+      "tracking_company",
+      "tracking_number",
+      "updated_at"
+    ],
     "line_items[]": [
-      "id", "admin_graphql_api_id", "variant_id", "product_id", "title", "name",
-      "quantity", "current_quantity", "price", "price_set", "sku", "total_discount",
-      "attributed_staffs", "fulfillable_quantity", "fulfillment_service",
-      "fulfillment_status", "gift_card", "grams", "product_exists", "properties",
-      "requires_shipping", "sales_line_item_group_id", "taxable", "total_discount_set",
-      "variant_inventory_management", "variant_title", "vendor", "tax_lines", "duties",
+      "id",
+      "admin_graphql_api_id",
+      "variant_id",
+      "product_id",
+      "title",
+      "name",
+      "quantity",
+      "current_quantity",
+      "price",
+      "price_set",
+      "sku",
+      "total_discount",
+      "attributed_staffs",
+      "fulfillable_quantity",
+      "fulfillment_service",
+      "fulfillment_status",
+      "gift_card",
+      "grams",
+      "product_exists",
+      "properties",
+      "requires_shipping",
+      "sales_line_item_group_id",
+      "taxable",
+      "total_discount_set",
+      "variant_inventory_management",
+      "variant_title",
+      "vendor",
+      "tax_lines",
+      "duties",
       "discount_allocations"
     ],
-    "total_price_set": ["shop_money", "presentment_money"],
-    "total_price_set.shop_money": ["amount", "currency_code"]
+    "line_items[].price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "line_items[].price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "line_items[].price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "note_attributes[]": [
+      "name",
+      "value"
+    ],
+    "subtotal_price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "subtotal_price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "subtotal_price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "total_price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ]
   }
 }
