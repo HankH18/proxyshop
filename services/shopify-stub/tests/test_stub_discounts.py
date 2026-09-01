@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from shopify_stub.testing import DISCOUNT_MUTATION, StubClient
+
 
 def _payload(response: Any) -> dict[str, Any]:
     body = response.json()
@@ -132,8 +132,9 @@ async def test_a_missing_access_token_is_a_401_with_a_string_errors_member(
 
 
 async def test_a_wrong_access_token_is_also_a_401(stub: StubClient) -> None:
-    response = await stub.graphql("query { orders(first: 1) { edges { cursor } } }",
-                                  token="shpat_wrong")
+    response = await stub.graphql(
+        "query { orders(first: 1) { edges { cursor } } }", token="shpat_wrong"
+    )
     assert response.status_code == 401
 
 
@@ -147,7 +148,7 @@ async def test_an_unimplemented_mutation_is_an_undefined_field_error(
     could ship a call to an operation nobody has ever exercised.
     """
     response = await stub.graphql(
-        "mutation { productCreate(input: {title: \"x\"}) { product { id } } }"
+        'mutation { productCreate(input: {title: "x"}) { product { id } } }'
     )
     assert response.status_code == 200
     body = response.json()

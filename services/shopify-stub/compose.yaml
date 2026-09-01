@@ -2,12 +2,40 @@
 # empty stub so the root file's `include:` list is static from day one and no worker ever
 # edits it (B6(ii)). Owner: T-013.
 #
-# The shopify-stub service. When filled it MUST carry `profiles: ["e2e"]` (it is only
-# used by the e2e tickets; unit tests build the stub in-process on port 0, D40) and publish
-# ${SHOPIFY_STUB_PORT:-8787}:8787 to match SHOPIFY_STUB_URL in .env.example.
+# The shopify-stub service. It carries `profiles: ["e2e"]` because it is only used by the
+# e2e tickets: unit tests build the stub in-process on port 0 (D41), which costs no
+# container RAM and gives each test its own discount-code table and pixel-drop-rate knob.
+# `make deps-up` starts postgres, neo4j and redis by name and therefore never starts this.
 #
-# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
-# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
-# only env-overridable ports (D40), and keep the service name unique across all nine
-# fragments.
-services: {}
+# ⚠️ NOT VERIFIED OFFLINE. `docker compose config` parses this fragment (that much was
+# checked), but the image has never been BUILT here: the build needs to pull a base image
+# and download wheels, and D3 forbids a verify that reaches the network. Whoever first runs
+# `docker compose --profile e2e up shopify-stub` should expect to debug the build, not the
+# service. Nothing in `pytest services/shopify-stub -q` depends on any of this.
+services:
+  shopify-stub:
+    build:
+      # Relative to THIS file's directory, so the context is the repo root and the stub's
+      # source is copied in as services/shopify-stub/src.
+      context: ../..
+      dockerfile: services/shopify-stub/Dockerfile
+    profiles: ["e2e"]
+    # D40: the published port is env-overridable so a second checkout can move it. 8787 is
+    # the default recorded in .env.example's SHOPIFY_STUB_URL.
+    ports:
+      - "${SHOPIFY_STUB_PORT:-8787}:8787"
+    environment:
+      # The host the stub claims to be, and the host its permalinks are validated against.
+      SHOPIFY_STUB_SHOP_DOMAIN: "${SHOPIFY_STUB_SHOP_DOMAIN:-proxyshop-demo.myshopify.com}"
+    # D10: memory is the binding constraint. The stub holds a few dictionaries and one
+    # uvicorn worker; 128 MiB is generous for that and keeps it a rounding error against
+    # the 3.125 GiB the datastore stack already commits.
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/healthz').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped

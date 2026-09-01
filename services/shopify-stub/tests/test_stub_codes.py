@@ -12,7 +12,6 @@ import inspect
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from shopify_stub import codes
 from shopify_stub.codes import (
     CODE_BODY_LENGTH,
     CODE_PREFIX,
@@ -147,13 +146,10 @@ def _code(**overrides: object) -> DiscountCode:
 def test_rejection_reasons_are_distinguishable() -> None:
     """Each invalid state reports its own reason, not a shared "invalid"."""
     assert _code().rejection(now=NOW) is None
-    assert (
-        _code().rejection(now=NOW - timedelta(seconds=1))
-        is RejectionReason.NOT_YET_ACTIVE
+    assert _code().rejection(now=NOW - timedelta(seconds=1)) is RejectionReason.NOT_YET_ACTIVE
+    assert _code().rejection(now=NOW + timedelta(hours=48)) is RejectionReason.EXPIRED, (
+        "expiry is exclusive: the code is dead at ends_at, not one second later"
     )
-    assert (
-        _code().rejection(now=NOW + timedelta(hours=48)) is RejectionReason.EXPIRED
-    ), "expiry is exclusive: the code is dead at ends_at, not one second later"
     assert _code(usage_count=1).rejection(now=NOW) is RejectionReason.USAGE_LIMIT_REACHED
     assert (
         _code().rejection(now=NOW, cart_has_order_discount=True)

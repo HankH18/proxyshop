@@ -80,9 +80,7 @@ async def test_an_unknown_code_is_silently_ignored(stub: StubClient) -> None:
 
 
 async def test_an_expired_code_is_silently_ignored(stub: StubClient) -> None:
-    await stub.create_code(
-        "PSX-EXPIRED1", starts_at=_past(72), ends_at=_past(1)
-    )
+    await stub.create_code("PSX-EXPIRED1", starts_at=_past(72), ends_at=_past(1))
     cart = await _cart(stub, "PSX-EXPIRED1")
     assert cart["discount_code"] is None
     assert cart["total_price"] == "100.00"

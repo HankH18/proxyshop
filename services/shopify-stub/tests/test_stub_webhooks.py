@@ -251,7 +251,9 @@ async def test_topics_are_isolated(stub: StubClient) -> None:
         assert len(refunds.requests) == 1
 
 
-async def test_an_unsupported_topic_is_refused(stub: StubClient, webhook_receiver: Receiver) -> None:
+async def test_an_unsupported_topic_is_refused(
+    stub: StubClient, webhook_receiver: Receiver
+) -> None:
     """Only the three topics. Subscribing ``checkouts/*`` would be a second observation path.
 
     C5 permits exactly one checkout-observation path (the web pixel), so the stub refuses to
@@ -274,9 +276,9 @@ async def test_a_duplicate_subscription_is_refused(
 ) -> None:
     """Two subscriptions on one (topic, address) would double-deliver every event."""
     _, url = webhook_receiver
-    assert (await stub.subscribe("ORDERS_PAID", url)).json()["data"][
-        "webhookSubscriptionCreate"
-    ]["userErrors"] == []
+    assert (await stub.subscribe("ORDERS_PAID", url)).json()["data"]["webhookSubscriptionCreate"][
+        "userErrors"
+    ] == []
     second = await stub.subscribe("ORDERS_PAID", url)
     (error,) = second.json()["data"]["webhookSubscriptionCreate"]["userErrors"]
     assert "already been taken" in error["message"]

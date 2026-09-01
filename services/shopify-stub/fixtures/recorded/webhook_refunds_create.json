@@ -1,0 +1,89 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/webhooks/latest (topic REFUNDS_CREATE)",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/admin-rest/latest/resources/refund"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21. The 15 top-level keys were parsed from the REFUNDS_CREATE sample in the webhook reference; the refund_line_items[] and transactions[] element key sets came from the same sample. Values are invented. No live capture (D3).",
+    "caveats": [
+      "total_refunded_set is ABSENT from both the webhook sample and the REST Refund resource, despite GraphQL's Refund type having totalRefundedSet. It is deliberately not here and the stub does not emit it.",
+      "order_adjustments IS present on refunds/create (as []) even though it is absent from orders/paid.",
+      "transactions[] carries admin_graphql_api_id in the webhook sample, which contradicts the REST Refund page. The webhook sample wins, since it is the surface this recording describes."
+    ]
+  },
+  "topic": "refunds/create",
+  "headers": { "X-Shopify-Topic": "refunds/create" },
+  "payload": {
+    "id": 8800000000001,
+    "admin_graphql_api_id": "gid://shopify/Refund/8800000000001",
+    "order_id": 5500000000001,
+    "created_at": "2026-01-03T00:00:00Z",
+    "processed_at": "2026-01-03T00:00:00Z",
+    "note": "damaged in transit",
+    "user_id": null,
+    "restock": true,
+    "duties": [],
+    "order_adjustments": [],
+    "refund_shipping_lines": [],
+    "return": null,
+    "total_duties_set": {
+      "shop_money": { "amount": "0.00", "currency_code": "USD" },
+      "presentment_money": { "amount": "0.00", "currency_code": "USD" }
+    },
+    "refund_line_items": [
+      {
+        "id": 8800000000001,
+        "line_item_id": 44352913,
+        "location_id": null,
+        "quantity": 1,
+        "restock_type": "return",
+        "subtotal": "100.00",
+        "subtotal_set": {
+          "shop_money": { "amount": "100.00", "currency_code": "USD" },
+          "presentment_money": { "amount": "100.00", "currency_code": "USD" }
+        },
+        "total_tax": "0.00",
+        "total_tax_set": {
+          "shop_money": { "amount": "0.00", "currency_code": "USD" },
+          "presentment_money": { "amount": "0.00", "currency_code": "USD" }
+        }
+      }
+    ],
+    "transactions": [
+      {
+        "id": 8800000000501,
+        "admin_graphql_api_id": "gid://shopify/OrderTransaction/8800000000501",
+        "order_id": 5500000000001,
+        "kind": "refund",
+        "gateway": "bogus",
+        "status": "success",
+        "message": null,
+        "amount": "90.00",
+        "currency": "USD",
+        "created_at": "2026-01-03T00:00:00Z",
+        "processed_at": "2026-01-03T00:00:00Z",
+        "test": true
+      }
+    ]
+  },
+  "documented_keys": {
+    "": [
+      "id", "admin_graphql_api_id", "order_id", "created_at", "processed_at", "note",
+      "user_id", "restock", "duties", "total_duties_set", "refund_line_items",
+      "transactions", "order_adjustments", "refund_shipping_lines", "return"
+    ],
+    "refund_line_items[]": [
+      "id", "line_item", "line_item_id", "location_id", "quantity", "restock_type",
+      "subtotal", "subtotal_set", "total_tax", "total_tax_set"
+    ],
+    "transactions[]": [
+      "id", "order_id", "kind", "gateway", "status", "message", "created_at",
+      "processed_at", "test", "authorization", "currency", "amount", "parent_id",
+      "admin_graphql_api_id", "location_id", "user_id", "device_id", "receipt",
+      "error_code", "source_name", "payment_id", "amount_rounding",
+      "manual_payment_gateway", "total_unsettled_set"
+    ]
+  }
+}

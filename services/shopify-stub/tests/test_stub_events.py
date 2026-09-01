@@ -85,6 +85,7 @@ async def test_the_same_seed_reproduces_the_same_drop_pattern(stub_server: str) 
 
     async def run() -> list[bool]:
         from shopify_stub.app import create_app
+
         from proxyshop_support.asgi_server import serve
 
         with serve(create_app()) as base_url:
@@ -93,8 +94,7 @@ async def test_the_same_seed_reproduces_the_same_drop_pattern(stub_server: str) 
                 await client.seed([SEED_VARIANT])
                 await client.configure(pixel_drop_rate=0.5, pixel_seed=99)
                 return [
-                    bool((await client.buy(VARIANT_ID))["pixel_event_emitted"])
-                    for _ in range(15)
+                    bool((await client.buy(VARIANT_ID))["pixel_event_emitted"]) for _ in range(15)
                 ]
 
     first = await run()
@@ -198,9 +198,7 @@ async def test_an_installed_pixel_posts_the_collector_payload(
     body = json.loads(request["body"])
     assert set(body) == {"clientId", "checkoutToken", "orderId", "discountApplications"}
     assert body["orderId"] == f"gid://shopify/Order/{result['order_id']}"
-    assert body["discountApplications"] == [
-        {"code": "PSX-COLLECT1", "value": 10.0, "type": "code"}
-    ]
+    assert body["discountApplications"] == [{"code": "PSX-COLLECT1", "value": 10.0, "type": "code"}]
 
 
 async def test_a_dropped_event_never_reaches_the_collector(
@@ -232,8 +230,15 @@ async def test_the_pixel_event_carries_no_customer_pii(stub: StubClient) -> None
     """The Web Pixels Checkout type has email/phone/addresses. The stub emits none."""
     await stub.buy(VARIANT_ID)
     raw = json.dumps(await stub.events())
-    for forbidden in ("email", "phone", "first_name", "last_name", "billingAddress",
-                      "shippingAddress", "customerId"):
+    for forbidden in (
+        "email",
+        "phone",
+        "first_name",
+        "last_name",
+        "billingAddress",
+        "shippingAddress",
+        "customerId",
+    ):
         assert forbidden not in raw, f"{forbidden} must never appear in a pixel event"
 
 

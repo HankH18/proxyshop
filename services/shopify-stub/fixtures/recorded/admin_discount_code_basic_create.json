@@ -1,0 +1,126 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/admin-graphql/latest/mutations/discountCodeBasicCreate",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/admin-graphql/latest/input-objects/DiscountCodeBasicInput",
+      "https://shopify.dev/docs/api/admin-graphql/latest/objects/DiscountCodeBasic",
+      "https://shopify.dev/docs/api/admin-graphql/latest/objects/DiscountUserError",
+      "https://shopify.dev/docs/api/usage/limits"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21 from the published documentation pages named above, fetched during this ticket's work. Field names, types and nullability were transcribed from those pages' schema tables; the example VALUES are invented (they describe nothing but themselves). No live API capture was performed and no Shopify credential exists in this environment (D3).",
+    "caveats": [
+      "The doc page's own 'Response' block starts at the mutation name with NO {\"data\": ...} wrapper and no extensions. The HTTP envelope below is therefore a COMPOSITE: the data member's contents come from the mutation page, the {\"data\": ...} wrapper is the GraphQL specification rather than a Shopify citation, and extensions.cost comes from the separate rate-limit page named in supporting_sources.",
+      "customerSelection is deprecated on DiscountCodeBasicInput (the docs' required-field list reads 'context (or deprecated customerSelection)') and is deliberately absent here.",
+      "usageLimit is deprecated on the DiscountCodeBasic OUTPUT type but not on the input. It is kept in the response shape because the system reads it back and because it is still served.",
+      "codesCount is a Count, which has TWO non-null fields (count, precision) — not the {count} object it is easy to assume."
+    ]
+  },
+  "operation": "discountCodeBasicCreate",
+  "notes": "percentage is a FRACTION in [0.00, 1.00] per the schema description 'Value must be between 0.00 - 1.00', not a 0-100 number.",
+  "request": {
+    "query": "mutation CreateOfferCode($basicCodeDiscount: DiscountCodeBasicInput!) { discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) { codeDiscountNode { id codeDiscount { ... on DiscountCodeBasic { title status codes(first: 1) { nodes { code } } codesCount { count precision } startsAt endsAt usageLimit asyncUsageCount appliesOncePerCustomer combinesWith { orderDiscounts productDiscounts shippingDiscounts } customerGets { value { ... on DiscountPercentage { percentage } } } } } } userErrors { field message code extraInfo } } }",
+    "variables": {
+      "basicCodeDiscount": {
+        "title": "ProxyShop offer 4f2c",
+        "code": "PSX-7QK2ZB0M",
+        "startsAt": "2026-01-01T00:00:00Z",
+        "endsAt": "2026-01-03T00:00:00Z",
+        "usageLimit": 1,
+        "appliesOncePerCustomer": true,
+        "combinesWith": {
+          "orderDiscounts": false,
+          "productDiscounts": false,
+          "shippingDiscounts": false
+        },
+        "customerGets": {
+          "value": { "percentage": 0.1 },
+          "items": { "all": true }
+        },
+        "tags": ["offer:4f2c9a10"]
+      }
+    }
+  },
+  "response": {
+    "data": {
+      "discountCodeBasicCreate": {
+        "codeDiscountNode": {
+          "id": "gid://shopify/DiscountCodeNode/1057856785",
+          "codeDiscount": {
+            "title": "ProxyShop offer 4f2c",
+            "status": "ACTIVE",
+            "codes": { "nodes": [{ "code": "PSX-7QK2ZB0M" }] },
+            "codesCount": { "count": 1, "precision": "EXACT" },
+            "startsAt": "2026-01-01T00:00:00Z",
+            "endsAt": "2026-01-03T00:00:00Z",
+            "usageLimit": 1,
+            "asyncUsageCount": 0,
+            "appliesOncePerCustomer": true,
+            "combinesWith": {
+              "orderDiscounts": false,
+              "productDiscounts": false,
+              "shippingDiscounts": false
+            },
+            "customerGets": {
+              "value": { "percentage": 0.1 },
+              "items": { "allItems": true }
+            }
+          }
+        },
+        "userErrors": []
+      }
+    },
+    "extensions": {
+      "cost": {
+        "requestedQueryCost": 11,
+        "actualQueryCost": 11,
+        "throttleStatus": {
+          "maximumAvailable": 2000.0,
+          "currentlyAvailable": 1989.0,
+          "restoreRate": 100.0
+        }
+      }
+    }
+  },
+  "user_error_response": {
+    "data": {
+      "discountCodeBasicCreate": {
+        "codeDiscountNode": null,
+        "userErrors": [
+          {
+            "field": ["basicCodeDiscount", "code"],
+            "message": "Discount code must be unique",
+            "code": "TAKEN",
+            "extraInfo": null
+          }
+        ]
+      }
+    }
+  },
+  "unauthenticated_response": {
+    "http_status": 401,
+    "body": {
+      "errors": "[API] Invalid API key or access token (unrecognized login or wrong password)"
+    }
+  },
+  "documented_keys": {
+    "": ["data", "extensions"],
+    "data.discountCodeBasicCreate": ["codeDiscountNode", "userErrors"],
+    "data.discountCodeBasicCreate.codeDiscountNode": ["id", "codeDiscount"],
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount": [
+      "__typename", "title", "status", "codes", "codesCount", "startsAt", "endsAt",
+      "usageLimit", "asyncUsageCount", "appliesOncePerCustomer", "combinesWith",
+      "customerGets", "context", "discountClasses", "shareableUrls", "shortSummary",
+      "summary", "totalSales", "hasTimelineComment", "minimumRequirement",
+      "recurringCycleLimit", "tags", "createdAt", "updatedAt"
+    ],
+    "data.discountCodeBasicCreate.codeDiscountNode.codeDiscount.combinesWith": [
+      "orderDiscounts", "productDiscounts", "shippingDiscounts",
+      "productDiscountsWithTagsOnSameCartLine"
+    ],
+    "data.discountCodeBasicCreate.userErrors[]": ["field", "message", "code", "extraInfo"],
+    "extensions.cost": ["requestedQueryCost", "actualQueryCost", "throttleStatus"],
+    "extensions.cost.throttleStatus": ["maximumAvailable", "currentlyAvailable", "restoreRate"]
+  }
+}

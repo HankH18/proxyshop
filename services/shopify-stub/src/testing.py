@@ -238,9 +238,7 @@ class StubClient:
     async def orders(
         self, first: int = 10, after: str | None = None, query: str | None = None
     ) -> httpx.Response:
-        return await self.graphql(
-            ORDERS_QUERY, {"first": first, "after": after, "query": query}
-        )
+        return await self.graphql(ORDERS_QUERY, {"first": first, "after": after, "query": query})
 
     async def subscribe(self, topic: str, uri: str) -> httpx.Response:
         return await self.graphql(SUBSCRIBE_MUTATION, {"topic": topic, "sub": {"uri": uri}})

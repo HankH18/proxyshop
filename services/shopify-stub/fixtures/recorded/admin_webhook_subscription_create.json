@@ -1,0 +1,55 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/admin-graphql/latest/mutations/webhookSubscriptionCreate",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/admin-graphql/latest/input-objects/WebhookSubscriptionInput",
+      "https://shopify.dev/docs/api/admin-graphql/latest/objects/WebhookSubscription",
+      "https://shopify.dev/docs/api/admin-graphql/latest/enums/WebhookSubscriptionTopic"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21. Argument names, the 8 WebhookSubscriptionInput fields, the WebhookSubscription object fields and the three topic enum spellings were each confirmed on the pages above. Values are invented. No live capture (D3).",
+    "caveats": [
+      "NOTHING IN THIS REPO NAMES THIS MUTATION. The planning documents pin the three webhook TOPICS but never the operation that registers them. webhookSubscriptionCreate is the real mutation for the job and is the stub's choice; a consumer should know it was not handed down.",
+      "Use `uri`, NOT `callbackUrl`: callbackUrl is present on WebhookSubscriptionInput but DEPRECATED. The stub accepts both so an older consumer does not silently register nothing, and returns `uri`.",
+      "This mutation's userErrors type is plain UserError, which has ONLY field and message — no `code`. webPixelCreate's error type does have one. Do not copy a `code` key across.",
+      "The enum has 218 topic values. The stub accepts exactly three: ORDERS_PAID, ORDERS_FULFILLED, REFUNDS_CREATE. Subscribing a CHECKOUTS_* topic would create a second checkout-observation path, which SPEC C5 forbids."
+    ]
+  },
+  "operation": "webhookSubscriptionCreate",
+  "supported_topics": ["ORDERS_PAID", "ORDERS_FULFILLED", "REFUNDS_CREATE"],
+  "request": {
+    "query": "mutation Subscribe($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) { webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) { webhookSubscription { id legacyResourceId topic uri format apiVersion { handle } createdAt updatedAt } userErrors { field message } } }",
+    "variables": {
+      "topic": "ORDERS_PAID",
+      "sub": { "uri": "https://merchant.example.com/webhooks/shopify/orders-paid", "format": "JSON" }
+    }
+  },
+  "response": {
+    "data": {
+      "webhookSubscriptionCreate": {
+        "webhookSubscription": {
+          "id": "gid://shopify/WebhookSubscription/9900000000001",
+          "legacyResourceId": "9900000000001",
+          "topic": "ORDERS_PAID",
+          "uri": "https://merchant.example.com/webhooks/shopify/orders-paid",
+          "format": "JSON",
+          "apiVersion": { "handle": "2026-07" },
+          "includeFields": [],
+          "createdAt": "2026-01-01T00:00:00Z",
+          "updatedAt": "2026-01-01T00:00:00Z"
+        },
+        "userErrors": []
+      }
+    }
+  },
+  "documented_keys": {
+    "data.webhookSubscriptionCreate": ["webhookSubscription", "userErrors"],
+    "data.webhookSubscriptionCreate.webhookSubscription": [
+      "id", "legacyResourceId", "topic", "uri", "format", "apiVersion", "includeFields",
+      "createdAt", "updatedAt", "filter", "metafieldNamespaces", "metafields", "name",
+      "callbackUrl", "endpoint"
+    ],
+    "data.webhookSubscriptionCreate.userErrors[]": ["field", "message"]
+  }
+}

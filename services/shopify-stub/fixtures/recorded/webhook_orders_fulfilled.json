@@ -1,0 +1,46 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/webhooks/latest (topic ORDERS_FULFILLED)",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/admin-rest/latest/resources/order (the abbreviated fulfillment element shape)"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21. The ORDERS_FULFILLED sample's top-level key set was diffed against ORDERS_PAID and found IDENTICAL — zero keys differ — so this recording reuses that key set and differs only in the fulfilment-bearing members. Values are invented. No live capture (D3).",
+    "caveats": [
+      "Shopify's own ORDERS_FULFILLED sample is not actually fulfilled: it shows fulfillment_status: null and fulfillments: []. So the published page gives NO element shape for a fulfilled order's fulfillments array.",
+      "The seven-key fulfillment element below (created_at, id, order_id, status, tracking_company, tracking_number, updated_at) is the abbreviated form printed on the REST Order resource page. The standalone REST Fulfillment resource carries a much larger set, and which one a real webhook embeds is NOT DOCUMENTED. The stub emits exactly these seven rather than guessing at the larger shape.",
+      "Everything in webhook_orders_paid.json's caveats applies here too; the top-level shape is the same object."
+    ]
+  },
+  "topic": "orders/fulfilled",
+  "headers": { "X-Shopify-Topic": "orders/fulfilled" },
+  "payload": {
+    "id": 5500000000001,
+    "admin_graphql_api_id": "gid://shopify/Order/5500000000001",
+    "name": "#1001",
+    "checkout_token": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
+    "financial_status": "paid",
+    "fulfillment_status": "fulfilled",
+    "currency": "USD",
+    "total_price": "90.00",
+    "fulfillments": [
+      {
+        "created_at": "2026-01-02T00:00:00Z",
+        "id": 7700000000001,
+        "order_id": 5500000000001,
+        "status": "success",
+        "tracking_company": "USPS",
+        "tracking_number": "1Z1234512345123456",
+        "updated_at": "2026-01-02T00:00:00Z"
+      }
+    ],
+    "customer": null
+  },
+  "documented_keys": {
+    "fulfillments[]": [
+      "created_at", "id", "order_id", "status", "tracking_company", "tracking_number",
+      "updated_at"
+    ]
+  }
+}

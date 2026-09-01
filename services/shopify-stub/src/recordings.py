@@ -88,9 +88,7 @@ def validate_provenance(data: Any, path: Path) -> None:
     provenance = data.get("$provenance")
     if not isinstance(provenance, dict):
         raise RecordingError(f"{path.name}: missing the $provenance header (D21)")
-    missing = [
-        field for field in REQUIRED_PROVENANCE_FIELDS if not provenance.get(field)
-    ]
+    missing = [field for field in REQUIRED_PROVENANCE_FIELDS if not provenance.get(field)]
     if missing:
         raise RecordingError(
             f"{path.name}: $provenance is missing {', '.join(missing)} (D21 requires the "
@@ -186,31 +184,33 @@ def collect_keys(value: Any, path: str = "") -> dict[str, set[str]]:
     return found
 
 
-def assert_no_invented_keys(
-    actual: Any, documented: dict[str, list[str]], *, label: str
-) -> None:
+def assert_no_invented_keys(actual: Any, documented: dict[str, list[str]], *, label: str) -> None:
     """Raise unless every key the stub emits is documented for its path.
 
     ``documented`` maps a path (``""`` for the root, ``"line_items[]"`` for an element) to
-    the list of key names the published documentation lists there. A path absent from
-    ``documented`` is **not** checked — the recording only claims to have enumerated the
-    paths it names, and pretending otherwise would turn a gap in the recording into a
-    failure of the code.
+    the list of key names the published documentation lists there.
+
+    Two deliberate asymmetries:
+
+    * A path in ``actual`` that ``documented`` does not name is **not** checked. The
+      recording only claims to have enumerated the paths it names, and treating a gap in
+      the recording as a failure of the code would push whoever hits it towards deleting
+      the check rather than extending the recording.
+    * A path in ``documented`` that is **absent** from ``actual`` is likewise not a failure
+      *here*. That is the forward direction's job (:func:`assert_conforms`), and folding it
+      in produces false alarms for any documented element shape whose array is legitimately
+      empty — ``userErrors: []`` on every successful mutation, for instance.
     """
     emitted = collect_keys(actual)
     problems: list[str] = []
     for path, allowed in documented.items():
         keys = emitted.get(path)
         if keys is None:
-            problems.append(f"{path or '<root>'}: path not present in the response")
             continue
         invented = sorted(keys - set(allowed))
         if invented:
-            problems.append(
-                f"{path or '<root>'}: undocumented key(s) {', '.join(invented)}"
-            )
+            problems.append(f"{path or '<root>'}: undocumented key(s) {', '.join(invented)}")
     if problems:
         raise AssertionError(
-            f"{label} emits keys the recording does not document:\n  "
-            + "\n  ".join(problems)
+            f"{label} emits keys the recording does not document:\n  " + "\n  ".join(problems)
         )

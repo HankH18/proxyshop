@@ -391,30 +391,39 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
         the seeder that drives this runs from ``make demo-seed`` and must be safe to run
         twice, so a variant whose payload is byte-identical to what is already stored counts
         as *unchanged* rather than being rewritten.
+
+        The seed is **all-or-nothing**. Parsing every variant before storing any of them
+        matters more here than it looks: a seed that half-applied and then 400'd would leave
+        the store in a state no rerun reproduces — the first N variants present, the rest
+        absent — and the whole value of a seeded demo is that it is reproducible.
         """
         variants = payload.get("variants")
         if not isinstance(variants, list):
             return JSONResponse(
                 status_code=400, content={"errors": "body must carry a 'variants' list"}
             )
-        created = unchanged = updated = 0
+        parsed: list[Variant] = []
         for raw in variants:
             if not isinstance(raw, dict):
                 return JSONResponse(
                     status_code=400, content={"errors": "each variant must be an object"}
                 )
             try:
-                variant = Variant(
-                    variant_id=int(raw["variant_id"]),
-                    product_id=int(raw["product_id"]),
-                    title=str(raw["title"]),
-                    price=Decimal(str(raw["price"])),
-                    currency=str(raw.get("currency", "USD")),
-                    sku=str(raw.get("sku", "")),
-                    available=bool(raw.get("available", True)),
+                parsed.append(
+                    Variant(
+                        variant_id=int(raw["variant_id"]),
+                        product_id=int(raw["product_id"]),
+                        title=str(raw["title"]),
+                        price=Decimal(str(raw["price"])),
+                        currency=str(raw.get("currency", "USD")),
+                        sku=str(raw.get("sku", "")),
+                        available=bool(raw.get("available", True)),
+                    )
                 )
             except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
                 return JSONResponse(status_code=400, content={"errors": f"invalid variant: {exc}"})
+        created = unchanged = updated = 0
+        for variant in parsed:
             existing = stub.state.variants.get(variant.variant_id)
             if existing is None:
                 created += 1

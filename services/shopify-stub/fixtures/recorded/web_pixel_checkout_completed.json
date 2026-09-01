@@ -1,0 +1,96 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/web-pixels-api/standard-events/checkout_completed",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/web-pixels-api (event envelope)",
+      "https://shopify.dev/docs/api/web-pixels-api/standard-events (the 15 standard events)"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21 from the standard-event page's type tables. The envelope members (id, name, timestamp, clientId, context, data, seq, type) and the data.checkout members below were transcribed from those tables. Values are invented. No live capture (D3).",
+    "caveats": [
+      "clientId is a TOP-LEVEL sibling of data, not nested inside it, and it is camelCase. This is the single easiest field on this event to misplace.",
+      "MoneyV2 here types `amount` as a NUMBER, unlike REST/webhook money which is a decimal string. A consumer that assumes one format across both surfaces breaks on whichever it did not test.",
+      "DiscountApplication in the Web Pixels API has NO `code` member. For a DISCOUNT_CODE application the documented carrier of the code is `title`. A fixture with a `code` key here would be invented.",
+      "data.checkout.order has exactly two fields (id, customer) and the docs print NO example value for order.id, so whether it is a GID or a numeric string is unknown. The stub emits the numeric string and this is flagged rather than asserted.",
+      "The inner shape of `context` (document.location.href) is NOT individually confirmed from a fetched page; `context` itself is a confirmed envelope member. Treat the inner path as this stub's plausible filling, not as documentation.",
+      "The real Checkout type also carries email, phone, billingAddress and shippingAddress. The stub emits none of them: SPEC C5 grants no protected-customer-data scopes."
+    ]
+  },
+  "event": "checkout_completed",
+  "standard_events": [
+    "page_viewed", "product_viewed", "product_added_to_cart", "product_removed_from_cart",
+    "collection_viewed", "search_submitted", "cart_viewed", "checkout_started",
+    "checkout_completed", "checkout_address_info_submitted",
+    "checkout_contact_info_submitted", "checkout_shipping_info_submitted",
+    "payment_info_submitted", "alert_displayed", "ui_extension_errored"
+  ],
+  "subscribe": "analytics.subscribe('checkout_completed', (event) => { ... })",
+  "payload": {
+    "id": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+    "name": "checkout_completed",
+    "type": "standard",
+    "seq": 0,
+    "timestamp": "2026-01-01T00:00:00Z",
+    "clientId": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+    "context": {
+      "document": {
+        "location": {
+          "href": "https://proxyshop-demo.myshopify.com/checkouts/0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d/thank_you"
+        }
+      }
+    },
+    "data": {
+      "checkout": {
+        "token": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
+        "order": { "id": "5500000000001" },
+        "currencyCode": "USD",
+        "subtotalPrice": { "amount": 100.0, "currencyCode": "USD" },
+        "totalPrice": { "amount": 90.0, "currencyCode": "USD" },
+        "discountsAmount": { "amount": 10.0, "currencyCode": "USD" },
+        "discountApplications": [
+          {
+            "type": "DISCOUNT_CODE",
+            "title": "PSX-7QK2ZB0M",
+            "value": { "percentage": 10.0 },
+            "allocationMethod": "ACROSS",
+            "targetSelection": "ALL",
+            "targetType": "LINE_ITEM"
+          }
+        ]
+      }
+    }
+  },
+  "collector_payload": {
+    "$note": "NOT a Shopify shape. This is the body the ProxyShop pixel extension POSTs to the merchant app's collector, fixed by DESIGN.md:39 as clientId + checkout token + order id + discountApplications. Its four key spellings are a published join-key contract inside this repo, so the stub emits exactly these four and nothing else.",
+    "clientId": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+    "checkoutToken": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
+    "orderId": "gid://shopify/Order/5500000000001",
+    "discountApplications": [
+      { "code": "PSX-7QK2ZB0M", "value": 10.0, "type": "code" }
+    ]
+  },
+  "degraded_collector_payload": {
+    "$note": "The documented non-firing case where the beacon leaves before the order exists: the event arrives, the join keys do not. A collector must record a visible gap for this, never a conversion.",
+    "clientId": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8",
+    "checkoutToken": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
+    "orderId": null,
+    "discountApplications": null
+  },
+  "documented_keys": {
+    "": ["id", "name", "type", "seq", "timestamp", "clientId", "context", "data"],
+    "data": ["checkout"],
+    "data.checkout": [
+      "token", "order", "currencyCode", "subtotalPrice", "totalPrice", "discountsAmount",
+      "discountApplications", "attributes", "billingAddress", "buyerAcceptsEmailMarketing",
+      "buyerAcceptsSmsMarketing", "delivery", "email", "lineItems", "localization",
+      "phone", "shippingAddress", "shippingLine", "smsMarketingPhone", "totalTax",
+      "transactions"
+    ],
+    "data.checkout.discountApplications[]": [
+      "type", "title", "value", "allocationMethod", "targetSelection", "targetType"
+    ],
+    "data.checkout.totalPrice": ["amount", "currencyCode"],
+    "data.checkout.order": ["id", "customer"]
+  }
+}

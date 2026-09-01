@@ -23,9 +23,10 @@ from collections.abc import AsyncIterator, Iterator
 
 import httpx
 import pytest
-from proxyshop_support.asgi_server import serve
 from shopify_stub.app import create_app
 from shopify_stub.testing import SEED_VARIANT, RecordingReceiver, StubClient
+
+from proxyshop_support.asgi_server import serve
 
 
 @pytest.fixture
