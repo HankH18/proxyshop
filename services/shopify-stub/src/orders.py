@@ -305,15 +305,17 @@ def order_webhook_payload(order: Order, *, shop_domain: str, state: StubState) -
             for item in order.line_items
         ],
         "fulfillments": [
+            # Exactly the seven keys the abbreviated fulfillment shape documents, and no
+            # eighth: the webhook reference's own `fulfillments` array is empty in every
+            # sample, so anything beyond those seven would be invention.
             {
+                "created_at": iso(fulfillment.created_at),
                 "id": fulfillment.id,
-                "admin_graphql_api_id": f"gid://shopify/Fulfillment/{fulfillment.id}",
                 "order_id": order.id,
                 "status": fulfillment.status,
-                "created_at": iso(fulfillment.created_at),
-                "updated_at": iso(fulfillment.created_at),
                 "tracking_company": fulfillment.tracking_company,
                 "tracking_number": fulfillment.tracking_number,
+                "updated_at": iso(fulfillment.created_at),
             }
             for fulfillment in order.fulfillments
         ],
@@ -440,8 +442,9 @@ def order_graphql_node(order: Order, state: StubState) -> dict[str, object]:
                         "cursor": cursor(f"discount:{order.id}"),
                         "node": {
                             "__typename": "DiscountCodeApplication",
-                            "code": order.discount_code,
                             "allocationMethod": "ACROSS",
+                            "code": order.discount_code,
+                            "index": 0,
                             "targetSelection": "ALL",
                             "targetType": "LINE_ITEM",
                             "value": discount_value,

@@ -363,7 +363,9 @@ def _discount_node(discount: DiscountCode) -> dict[str, Any]:
             "title": discount.title,
             "status": "ACTIVE",
             "codes": {"nodes": [{"code": discount.code}]},
-            "codesCount": {"count": 1},
+            # `codesCount` is a `Count`, which has TWO non-null fields. A fixture carrying
+            # only `count` is structurally wrong the moment a caller selects `precision`.
+            "codesCount": {"count": 1, "precision": "EXACT"},
             "startsAt": iso(discount.starts_at) if discount.starts_at else None,
             "endsAt": iso(discount.ends_at) if discount.ends_at else None,
             "usageLimit": discount.usage_limit,
@@ -488,7 +490,11 @@ def _resolve_web_pixel_create(
     return {
         "webPixel": {
             "id": f"gid://shopify/WebPixel/{pixel.id}",
-            "settings": parsed,
+            # Asymmetric on purpose: `WebPixelInput.settings` is the JSON scalar, and the
+            # documented example passes an OBJECT in variables while the response returns a
+            # SERIALIZED STRING. A stub that echoed the object back would let a consumer
+            # skip the JSON.parse it needs against the real API.
+            "settings": json.dumps(parsed, separators=(",", ":")),
         },
         "userErrors": [],
     }
@@ -517,20 +523,23 @@ def _resolve_webhook_subscription_create(
                         f"Topic {topic_raw!r} is not supported by this stub; supported "
                         f"topics are {', '.join(sorted(TOPIC_ENUM_TO_NAME))}"
                     ),
-                    "code": "INVALID",
                 }
             ],
         }
     subscription_input = arguments.get("webhookSubscription") or {}
-    callback_url = subscription_input.get("callbackUrl")
+    # `uri` is the current field; `callbackUrl` is deprecated but still accepted, because a
+    # consumer written against an older example must not silently register nothing.
+    callback_url = subscription_input.get("uri") or subscription_input.get("callbackUrl")
     if not isinstance(callback_url, str) or not callback_url:
         return {
             "webhookSubscription": None,
+            # `UserError` carries ONLY `field` and `message` — no `code`. The web-pixel
+            # mutation's error type does have one; copying `code` across is a real mistake
+            # this stub declines to teach.
             "userErrors": [
                 {
-                    "field": ["webhookSubscription", "callbackUrl"],
-                    "message": "Callback url can't be blank",
-                    "code": "BLANK",
+                    "field": ["webhookSubscription", "uri"],
+                    "message": "Uri can't be blank",
                 }
             ],
         }
@@ -546,9 +555,8 @@ def _resolve_webhook_subscription_create(
             "webhookSubscription": None,
             "userErrors": [
                 {
-                    "field": ["webhookSubscription", "callbackUrl"],
+                    "field": ["webhookSubscription", "uri"],
                     "message": "Address for this topic has already been taken",
-                    "code": "TAKEN",
                 }
             ],
         }
@@ -562,12 +570,14 @@ def _resolve_webhook_subscription_create(
     return {
         "webhookSubscription": {
             "id": f"gid://shopify/WebhookSubscription/{subscription.id}",
+            "legacyResourceId": str(subscription.id),
             "topic": str(topic_raw),
-            "endpoint": {
-                "__typename": "WebhookHttpEndpoint",
-                "callbackUrl": callback_url,
-            },
+            "uri": callback_url,
+            "format": subscription_input.get("format", "JSON"),
+            "apiVersion": {"handle": state.config.api_version},
+            "includeFields": subscription_input.get("includeFields", []),
             "createdAt": iso(now),
+            "updatedAt": iso(now),
         },
         "userErrors": [],
     }

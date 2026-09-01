@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -314,8 +315,13 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
 
         A typo'd knob name that returns 200 is how a test ends up asserting the *default*
         behaviour while believing it configured something.
+
+        The write is **all-or-nothing**: a candidate config is built, validated, and only
+        then swapped in. Mutating the live config field by field and validating afterwards
+        leaves a rejected value in place — so a caller that sent ``pixel_drop_rate: -0.1``,
+        saw its 400, and carried on would be running against a nonsense configuration it
+        was explicitly told had been refused.
         """
-        config = stub.state.config
         allowed = {
             "shop_domain",
             "api_version",
@@ -332,11 +338,10 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
                 status_code=400,
                 content={"errors": f"unknown config keys: {', '.join(unknown)}"},
             )
-        if "pixel_collector_url" in payload:
-            stub.state.pixel_collector_url = payload["pixel_collector_url"]
+        candidate = replace(stub.state.config)
         if "pixel_mode" in payload:
             try:
-                config.pixel_mode = PixelMode(payload["pixel_mode"])
+                candidate.pixel_mode = PixelMode(payload["pixel_mode"])
             except ValueError:
                 return JSONResponse(
                     status_code=400,
@@ -349,15 +354,23 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
                 )
         for key in ("shop_domain", "api_version", "access_token", "webhook_secret"):
             if key in payload:
-                setattr(config, key, payload[key])
+                setattr(candidate, key, payload[key])
         if "pixel_drop_rate" in payload:
-            config.pixel_drop_rate = float(payload["pixel_drop_rate"])
+            try:
+                candidate.pixel_drop_rate = float(payload["pixel_drop_rate"])
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    status_code=400, content={"errors": "pixel_drop_rate must be a number"}
+                )
         if "pixel_seed" in payload:
-            config.pixel_seed = payload["pixel_seed"]
+            candidate.pixel_seed = payload["pixel_seed"]
         try:
-            config.validate()
+            candidate.validate()
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"errors": str(exc)})
+        stub.state.config = candidate
+        if "pixel_collector_url" in payload:
+            stub.state.pixel_collector_url = payload["pixel_collector_url"]
         stub.emitter.reseed()
         return JSONResponse(status_code=200, content=await read_config())
 
@@ -415,6 +428,30 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
             status_code=200,
             content={"created": created, "unchanged": unchanged, "updated": updated},
         )
+
+    @router.get("/codes")
+    async def read_codes() -> dict[str, object]:
+        """The discount-code table, plus D22's ``offer_id`` index.
+
+        Shopify has no endpoint that answers "which code belongs to offer X" — the index is
+        the *app's* bookkeeping, not the platform's. It is exposed here so a test can prove
+        the code was stored under the offer id without also proving it was derived from it.
+        """
+        return {
+            "codes": {
+                code: {
+                    "code": discount.code,
+                    "offer_id": discount.offer_id,
+                    "usage_limit": discount.usage_limit,
+                    "usage_count": discount.usage_count,
+                    "starts_at": iso(discount.starts_at) if discount.starts_at else None,
+                    "ends_at": iso(discount.ends_at) if discount.ends_at else None,
+                    "combines_with": discount.combines_with.to_wire(),
+                }
+                for code, discount in stub.state.codes.items()
+            },
+            "by_offer": dict(stub.state.codes_by_offer),
+        }
 
     @router.get("/checkouts/{token}")
     async def read_checkout(token: str) -> Response:
