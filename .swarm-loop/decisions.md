@@ -246,11 +246,13 @@ is a guessable one.
 
 ## D23 — Checkout mode: `CHECKOUT_MODE ∈ {redirect, shopify_stub}`, default `redirect`
 
-SPEC amendment 3 and `DESIGN.md:84` both make the starting slice redirect/simulated. **Both modes
-always create the code via merchant `POST /codes`** and both emit an identical `LedgerEvent` kind
-sequence (C11 — `DESIGN.md:84` explicitly rejects divergent event schemas per mode). T-033's golden
-kind sequence is the shared reference that T-081, T-082, T-083 and T-084 all assert against; all of
-them run the default.
+SPEC amendment 3 and `DESIGN.md:84` both make the starting slice redirect/simulated. ~~**Both modes
+always create the code via merchant `POST /codes`**~~ — **that clause is SUPERSEDED by D45**: both
+modes create the code through the injected `CheckoutProvider` port, and only the Shopify adapter
+calls merchant `POST /codes`. The rest of this ruling stands unchanged — both modes emit an
+identical `LedgerEvent` kind sequence (C11 — `DESIGN.md:84` explicitly rejects divergent event
+schemas per mode). T-033's golden kind sequence is the shared reference that T-081, T-082, T-083
+and T-084 all assert against; all of them run the default.
 
 ## D24 — `LedgerEvent` kind enum, extended once in T-010
 
@@ -487,6 +489,214 @@ The Phase 7 push to that remote will therefore fail until someone creates the re
 is **not** verified and is not something an agent should resolve by creating a repository on Hank's
 account.
 
+## D45 — Checkout is reached through a `CheckoutProvider` port; Shopify is one adapter — supersedes one clause of D23 **[verified: the frozen `accept/4` takes an injected creator and never imports `apps/merchant`]**
+
+D23 ruled that both checkout modes create the code via merchant `POST /codes`. That clause — and
+only that clause — is what puts Shopify on the starting slice's critical path:
+`T-033.depends_on` carries `T-052` (discount-code creation), which depends on `T-050` (Shopify app
+install), so the simulated-checkout demo cannot be reached without the whole Shopify install lane.
+
+Measured here: the frozen suite already implements the seam the ticket graph denies. Four frozen
+tests call `accept(auction, bid_ref, code_creator, mode)` with the creator as the **third
+positional** — `test_e3_exchange.py:658, :682, :685, :704, :711`, passing `_RecordingCodeCreator`
+("in-process stand-in for the merchant `POST /codes` client", `:255`) — and `test_spec_criteria.py:1042,
+:1073` for the S8-3 blocker. `test_e3_exchange.py` contains **no reference to `apps/merchant` at
+all** (grepped). The port is already mandatory in the goal; only `tickets.json` disagreed.
+
+**Ruling:** `accept()` reaches checkout through an injected **`CheckoutProvider`** port.
+`SimulatedRedirectProvider` is the required starting implementation and mints the code locally; a
+Shopify adapter implements the same port and calls merchant `POST /codes`. New ticket **T-036** owns
+the port plus the simulated provider; `T-033.depends_on` becomes `["T-030","T-036"]`; `T-052` keeps
+the Shopify adapter and leaves the slice path.
+
+**What of D23 survives:** everything but the superseded clause. The mode vocabulary
+(`CHECKOUT_MODE ∈ {redirect, shopify_stub}`, default `redirect`) stands, and so does the C11
+guarantee that both modes emit an identical `LedgerEvent` kind sequence — that is what
+`test_e3_exchange.py:677` asserts, and it is indifferent to who mints the code.
+
+Re-pointing the edge costs no frozen byte. **Deferring** any Shopify ticket is a different ask and
+does need a `freeze --amend`: `goals.json` sets `e5_merchant_passing` target 10, and all ten E5
+tests hard-import T-050/T-051/T-052/T-053 product code. Do not conflate the two — re-ordering the
+graph is free, shrinking the build is user-awake.
+
+## D46 — Eligibility is a gate ABOVE the frozen function surface, at all three R12 points **[verified: frozen `accept/4` and `collect_bids/3` call sites counted]**
+
+`SPEC.md:25` (R12) requires fail-closed reads before **solicitation, ranking and checkout**. Only
+ranking has an owner: `T-032`'s objective carries the eligibility filter and
+`test_spec_criteria.py:928` makes it release blocker S8-1. `T-030` (solicitation) and `T-033`
+(checkout) mention eligibility nowhere — not in objective, not in acceptance, not in `depends_on`.
+
+**Ruling:** a versioned **`SellerEligibility`** interface answers "may this store participate",
+fails closed when the read is unavailable, and is consulted at all three gates:
+
+- **solicitation** — in the **roster builder**, which runs *above* `collect_bids`;
+- **ranking** — inside `rank()`, where it already is and already blocks release (S8-1);
+- **checkout** — in the **accept orchestration**, *above* `accept()`.
+
+`T-010` owns the port and its deterministic double — the same treatment D26 gives `TrustSnapshot` —
+while `T-062`/`T-064` own the live implementation. This does **not** reopen intake's decline of a
+`T-064 → T-032` edge: that decline was about depending on the trust *service*, and it stands.
+
+**The layering is not a style preference.** Measured here: four frozen tests call
+`accept(auction, bid_ref, creator, mode)` across seven call sites and **require it to succeed**
+(`test_e3_exchange.py:658, :682, :685, :704, :711`; `test_spec_criteria.py:1042, :1073`), and two
+call `collect_bids(roster, responses, now)` with three positionals (`test_e3_exchange.py:334, :386`)
+over roster records of `{store_id, tier, product_ref, list_price}` carrying no eligibility field. A
+gate *inside* either function that denied when no eligibility port was injected would turn every one
+of those red, S8-3 included. One layer up gives the identical guarantee at zero cost to the harness.
+**Do not add a required parameter to either frozen signature.**
+
+## D47 — Solicitation and bid submission are two endpoints; the signing primitives stay where they are **[verified: frozen import path, flat keyring, and the four absent envelope fields]**
+
+`DESIGN.md:65` defines store-agent `POST /bid` as `BidRequest → Bid|decline` — the exchange
+*solicits*. `DESIGN.md:31`, `:38` and `:95` use the same route as the inbound door through which an
+external Tier-2 seller *submits* a signed `Bid`, and `T-044`'s objective describes receipt, not
+answering a request. Two operations, one route definition: an executor reading `:65` and an executor
+reading T-044 build incompatible things.
+
+**Ruling:** split them.
+- **Solicitation (exchange → seller):** `POST /v1/bid-requests`, `BidRequest → Bid | Decline`.
+- **Submission (external seller → exchange):** `POST /v1/auctions/{auction_id}/bids`, signed
+  `Bid → AcceptedForVerification | Rejected`. Signature verification, replay protection and
+  auction/deadline validation are **exchange-boundary** duties.
+
+**Two frozen constraints bound the fix; honour both.** Measured here:
+
+1. `test_e4_store_agent.py:892` and `:926` import `receive_bid, sign_bid` from
+   `packages.store_agent.src.external`, and the keyring is a flat `{store_id: key}` mapping
+   (`:895`, `:928`). The **boundary** moves — the exchange route becomes the library's only public
+   caller — but the module path and the flat keyring do not. Physically relocating `receive_bid`
+   into `apps/exchange` voids the freeze, and a `key_id`-indexed keyring breaks it too. No worker
+   may "tidy" that module across the boundary.
+2. `signer_id`, `key_id`, `issued_at` and the nonce/idempotency key are **OPTIONAL** envelope
+   fields, validated when present. None of the four appears anywhere under `.swarm-loop/acceptance/`
+   (grepped), and the frozen external payload (`test_e4_store_agent.py:861-885`) carries none of
+   them — a receiver that required one would fail `:889` and `:923`.
+
+`app.seller_endpoints` holds the registered key per `store_id`, matching that flat shape. Note that
+wrong-key, garbage, absent and cross-payload-replayed signatures are *already* frozen rejections at
+`:923-960`; what the new nonce closes is same-payload temporal replay, which nothing asserts yet.
+
+## D48 — Product-fact claims map onto the five trust dimensions through a published table; the earlier decline is reversed in substance **[verified: the dimension vocabulary is closed by exactly two frozen assertions]**
+
+**The record first, because the reversal matters more than the outcome.** An earlier intake pass
+declined a sixth trust dimension, and D26 states the reason it gave: "`DESIGN.md:82` explicitly
+rejects two trust *systems*". That answered a different question than the one asked. A dimension
+*within* the single Beta framework is not a second trust system, and `DESIGN.md:82` does not forbid
+one. The decline was too quick, and the gap it left is real — product-fact claims (ingredients,
+compatibility, nutrition, specifications) had no route into trust at all. It is revisited here and
+**reversed in substance**.
+
+What the decline was right about by accident is the *cost*. Measured here, the suite is asymmetric:
+
+- **Snapshot fields are open.** Every frozen `dims` traversal iterates the known five and ignores
+  extras — `test_e6_trust.py:505`, `:638`, `:940`. There is **no** `assert set(dims) == DIMS`
+  anywhere in the suite (grepped).
+- **The dimension vocabulary is closed, by exactly two assertions, and they bind.**
+  `test_e6_trust.py:70` pins `DIMS` and `:265` asserts `dim in DIMS`; `test_e8_proofs.py:69` pins
+  `TRUST_DIMENSIONS` and `:356` asserts `dim in TRUST_DIMENSIONS`. Both govern
+  `fixtures/manifest.json → dishonest_store.behaviours[].dim` — the only route from a contradicted
+  claim to a Beta. A sixth dimension that actually carried verification outcomes would have to amend
+  both.
+
+**Ruling, in two halves because they cost differently:**
+
+- **Metadata half — adopt in full; it is free.** `TrustSnapshot` gains `confidence`,
+  `effective_sample_size`, `score_version`, `snapshot_version` and `computed_through_event`.
+  `confidence` and `score_version` are already in D26's shape and already asserted by the frozen
+  replay test; the other three appear nowhere under `.swarm-loop/acceptance/` (grepped) and are
+  unasserted, permitted additions.
+- **Dimension half — a published `claim_type → dimension` mapping table, NOT a sixth dimension.**
+  Product-fact claims map explicitly onto an existing integrity dimension through a table published
+  in DESIGN and instantiated in T-080's manifest — D18's table, now required to be complete rather
+  than illustrative. Offer-fact claims (price, discount, delivery) keep their current dimensions.
+  The table also states how `unsupported` and `ambiguous` outcomes move **confidence** rather than
+  score.
+
+A genuinely named `catalog_claim_accuracy` dimension remains available as a **deliberate, logged
+amendment** if Hank later judges it worth voiding every cycle's scores. It is not being smuggled in
+under a mapping table, and this ruling does not claim the table is as expressive as a dimension
+would be — only that it closes the gap without an amend.
+
+## D49 — The trust-replay obligation lives on the scoring ticket **[verified: the frozen replay test is stricter than either ticket's text]**
+
+`T-060` replays with `non_goals: ["No scoring"]`. `T-062` is the only scoring ticket, and its refs
+are `["R12","S2","DESIGN#decisions--rationale"]` — no `R15`, no `S3`, and none of its three
+acceptance criteria mentions replay. R15/S3 promise bit-for-bit replay and no ticket owns it.
+
+**Ruling:** `T-062` owns it. It gains `R15` and `S3` in `refs` and an acceptance criterion requiring
+that rebuilding every observation and trust snapshot from an empty projection — using recorded event
+timestamps and a versioned scoring configuration — reproduces every served snapshot bit-for-bit.
+`T-060`'s replay criterion is reworded to **"event-stream hash"** so it cannot be read as the
+trust-score assertion; the frozen T-060 tests already assert exactly that narrower property.
+
+**The ticket is being raised to the goal, not the reverse.** Measured here,
+`test_e6_trust.py:477` (`test_replay_reproduces_served_trust_scores_bit_for_bit`) already compares
+`score`, `confidence` and `score_version` between served and replayed snapshots, then every one of
+the five dimensions' `alpha`, `beta` **and `decayed_at`** (`:500-508`). Decay determinism is pinned
+to each observation's recorded as-of time and never to a wall clock — that is D17, and this test is
+what makes D17 non-negotiable rather than advisory.
+
+Settle the ownership collision in the same pass: the frozen import is
+`from apps.trust.src.ledger import replay`, and `apps/trust/src/ledger/**` is T-011's exclusive
+scope, so T-062 is currently forbidden to write the module its own frozen test imports. Keep the
+scoring in T-062-owned files and re-export `replay` from T-011's `apps/trust/src/ledger/__init__.py`
+— one line, no scoring in it. The frozen import path does not move.
+
+## D50 — One rank formula, and its weights are reachable from the section workers actually read **[verified: both formulas sit in the one DESIGN section T-032 refs; `RankingWeights` has no owning ticket]**
+
+D12 already ruled `DESIGN.md:85` (five-term) authoritative and `DESIGN.md:87` (three-term
+`w_f*fit + w_v*offer_value + w_t*trust`) superseded. **That ruling was not enough, for a mechanical
+reason.** `EXECUTION.md` rule 1 restricts a worker to "its contract + SPEC/DESIGN sections it Refs +
+files in its scope". `T-032.refs` includes `DESIGN#decisions--rationale`, which is the section
+spanning `DESIGN.md:81-96` and therefore contains **both** formulas, two bullets apart — and
+`decisions.md` is not in that reading set. A T-032 worker obeying rule 1 literally reads both
+formulas and never reads D12. A ruling an agent cannot reach is not a ruling.
+
+**Ruling:** delete `DESIGN.md:87`'s formula, or annotate it inline as superseded by `:85`; and fold
+D13's concrete weights, normalization, missing-value behaviour and penalty bound into `:85` itself,
+so the numbers are visible from the section the ticket refs. `fit` and `value` survive only as D29
+shortlist slot names — a different concept from `:87`'s formula terms, and not a reason to keep it.
+
+No frozen byte is at risk. The five weight symbols `w_m`, `w_e`, `w_t`, `w_v`, `w_d` appear nowhere
+under `.swarm-loop/acceptance/` (grepped), and the frozen candidate record carries exactly the
+five-term feature names — `intent_match`, `price_value`, `delivery_fit`, `verified_claim_ratio`,
+`policy_penalties` (`test_e3_exchange.py:154-158`) — while `fit` and `offer_value` are not candidate
+fields at all. The suite is already shaped for `:85`.
+
+**And the orphan:** D13 says `RankingWeights` "is defined in `packages/contracts`", but grepping
+`tickets.json`, `SPEC.md`, `DESIGN.md`, `TASKS.md` and `EXECUTION.md` for `RankingWeights` returns
+nothing — its only occurrence in the repo is `decisions.md:160`, D13 itself. No ticket owns it.
+Give it to **`T-010`**, which owns `packages/contracts`.
+
+## D51 — R10 is about *eligible* stores, and fallbacks are subject to the same claim rules **[verified: no frozen contradiction — `collect_bids` and `rank` are different stages]**
+
+`SPEC.md:23` (R10) reads "Tier-0 stores are always represented at list price", which an executor can
+read as licence to skip the eligibility filter, sitting alongside S8-1's absolute requirement that a
+blacklisted seller never surfaces. Separately, the exchange synthesizes a list-price fallback for a
+silent store without passing it through bid validation, so its catalog facts could reach ranking
+unverified.
+
+**Ruling:** R10 reads "every **eligible** Tier-0/Tier-1 store selected for the auction roster
+receives either a timely bid or a catalog-derived fallback." Tier-2 externals are not solicited at
+all — they submit through the signed door (D28, D47). Fallback facts are subject to the same
+verification and hard-constraint rules as bid claims: **a fallback cannot satisfy a hard constraint
+on unverified catalog data.** T-030's acceptance 1 says "6 ranked entries"; `collect_bids` produces
+*collected* entries, and that word is wrong twice over — the stage is wrong, and it reads as a
+promise that all six survive ranking, which the eligibility filters may legitimately break.
+
+**There is no frozen contradiction here, and it must not be reported as one.** Measured here,
+`collect_bids` is imported from `apps.exchange.src.auction` (`test_e3_exchange.py:310, :356`) and
+`rank` from `apps.exchange.src.ranking` (`:404` onward, and `test_spec_criteria.py:932` for S8-1) —
+different functions, different stages, disjoint inputs; `collect_bids` receives no trust snapshot
+and structurally cannot filter on one. The frozen R10 test's own docstring already says every
+"**rostered**" store, and its roster (`:312-319`) is six records of
+`{store_id, tier, product_ref, list_price}` with no eligibility field and no blacklisted member. An
+upstream eligibility filter is invisible to both frozen T-030 tests. This is a wording fix that
+moves SPEC toward what the frozen suite already says — the rare case where the frozen artifact is
+the more correct of the two.
+
+
 ---
 
 _Rulings the intake report states outside its §2 are **not** restated here and are **not** given D
@@ -495,4 +705,4 @@ files, frozen after T-000 closes), the narrowed per-ticket file-ownership map (�
 and the scheduling constraints SC-1 … SC-5 (§5, lines 602-634). They bind the orchestrator and the
 scheduler rather than settling a contested reading of the doc set, they are too large to quote into
 a task packet, and §3.1/§4 are superseded on the layout point by D42 above. Read them from the
-intake report; the packet-level rulings are D1–D44 in this file._
+intake report; the packet-level rulings are D1–D51 in this file._

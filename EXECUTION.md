@@ -8,9 +8,18 @@
    top-level `make verify`. No model judgment substitutes for a passing
    check.
 3. Parallelize only tickets marked parallel_safe. Everything else
-   serializes in dependency order.
-4. On failure: revert to the ticket's starting state before retrying —
-   do not iterate on top of a failed attempt.
+   serializes in dependency order. The marker means eligible for
+   concurrent dispatch, not scope-disjoint: co-dispatched tickets do
+   share scope globs. Ownership is the narrowed per-file set the ticket
+   actually writes — never write a file another in-flight ticket owns.
+4. On failure: do not iterate on top of a failed attempt. Discard only
+   the files this ticket owns, confirming the path diff first; no
+   repo-wide revert (the git-guard blocks them). Recreate the worktree
+   from its base rather than resetting it in place. Git reverts no
+   datastore state — the worker's Postgres database, the single shared
+   Neo4j database, and the Redis logical DB are where cross-worker
+   contamination lives, and they reset only through the project's own
+   fixtures.
 5. On discovered reality (the plan is wrong): stop, rewrite the un-started
    tail of the graph with the strongest available model, then resume.
    Never push through a stale plan. Protocol-schema changes route through

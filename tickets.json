@@ -16,7 +16,7 @@
       "acceptance": [
         "1. `make verify` exits 0 on fresh clone with services up",
         "2. compose brings up postgres+neo4j+redis healthchecked",
-        "3. package layout matches DESIGN (packages/protocol, packages/store-agent, apps/{buyer,merchant,exchange,trust}, services/{ingest,shopify-stub,sim}, pixel/)"
+        "3. package layout matches DESIGN (packages/contracts, packages/store-agent, apps/{buyer,merchant,exchange,trust}, services/{ingest,shopify-stub,sim}, pixel/)"
       ],
       "verify": "make verify",
       "scope": [
@@ -31,7 +31,7 @@
     {
       "id": "T-010",
       "title": "Contracts generate typed models and enforce the dual-path bid boundary",
-      "objective": "packages/contracts: JSON Schemas per DESIGN §Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint.",
+      "objective": "packages/contracts: JSON Schemas per DESIGN §Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint. Also owns the two shared policy contracts D13 and D45 place in this package: the versioned RankingWeights object the single published rank formula reads its weights, normalization bounds and penalty caps from, and the SellerEligibility port — the port type plus a deterministic double that the solicitation, ranking and checkout gates consult. This package owns the port and the double only; the live blacklist lookup stays in E6.",
       "refs": [
         "R8",
         "R18",
@@ -43,7 +43,8 @@
       "acceptance": [
         "1. Schema→codegen produces importable py+ts types for all pinned objects incl. VerificationResult",
         "2. Hosted-path bid with a seller_asserted claim rejects; external-path bid with the same claim admits flagged-for-verification; expired/blacklisted reject on both",
-        "3. Round-trip serialization passes in both languages; every cross-domain endpoint has a checked-in OpenAPI example + contract test"
+        "3. Round-trip serialization passes in both languages; every cross-domain endpoint has a checked-in OpenAPI example + contract test",
+        "4. RankingWeights and SellerEligibility are generated, versioned contract types importable in py+ts; the SellerEligibility double is deterministic and can be driven into an unavailable-read state, so every consumer can test fail-closed behavior without the trust service running"
       ],
       "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
       "scope": [
@@ -307,15 +308,17 @@
     {
       "id": "T-030",
       "title": "Auctions fan out, time out, and always represent every store",
-      "objective": "Auction state machine in Redis; POST /auctions; parallel BidRequest fan-out with hard timeout; list-price fallback bids for Tier-0 and non-responding stores (R10).",
+      "objective": "Auction state machine in Redis; POST /auctions; parallel BidRequest fan-out with hard timeout; list-price fallback bids for Tier-0 and non-responding stores (R10). Roster construction consults SellerEligibility before any BidRequest is sent: an ineligible seller never enters the roster, and an unavailable eligibility read excludes rather than admits. The gate sits in the roster builder, above collect_bids — collect_bids keeps its (roster, responses, now) parameters and is handed an already-eligible roster.",
       "refs": [
         "R10",
+        "R12",
         "DESIGN#service-apis-pinned-routes"
       ],
       "acceptance": [
         "1. Auction with 3 responsive + 1 silent + 2 Tier-0 stores yields 6 ranked entries, silent one at list price",
         "2. Timeout enforced (frozen clock); late bids rejected",
-        "3. State machine transitions logged to ledger via trust API stub"
+        "3. State machine transitions logged to ledger via trust API stub",
+        "4. Solicitation gate (R12, fail-closed): the roster builder consults SellerEligibility before fan-out — a blacklisted seller is absent from the roster, and an unavailable eligibility read excludes it rather than admitting it. The gate lives above collect_bids, which keeps its (roster, responses, now) parameters unchanged and never receives an eligibility argument"
       ],
       "verify": "pytest apps/exchange/tests/test_auction.py -q",
       "scope": [
@@ -393,16 +396,18 @@
     {
       "id": "T-033",
       "title": "Accepting an offer produces a validated code and permalink",
-      "objective": "Accept endpoint delegates to merchant /codes, returns permalink; records accepted event; handles code-creation failure with re-offer of next slot. Starting-slice mode: simulated/redirect checkout validates the URL against the registered seller domain and emits checkout_redirect + downstream LedgerEvent kinds identical to the Shopify path (C11); Shopify mode delegates to merchant /codes as designed.",
+      "objective": "Accept endpoint resolves a CheckoutProvider (T-036) by CHECKOUT_MODE and delegates code creation to it, returns the permalink the provider mints, records the accepted event, and handles code-creation failure with re-offer of the next slot. The starting slice runs SimulatedRedirectProvider — the checkout URL is validated against the registered seller domain and checkout_redirect plus the downstream LedgerEvent kinds are emitted identically to the Shopify path (C11); Shopify mode selects the T-052 adapter behind the same port.",
       "refs": [
         "R3",
-        "A5"
+        "A5",
+        "R12"
       ],
       "acceptance": [
-        "1. Accept → code+permalink via stub; ledger events emitted",
+        "1. Accept → code+permalink via the resolved provider; ledger events emitted",
         "2. Merchant failure path re-offers deterministically",
         "3. Double-accept on one auction rejected",
-        "4. Redirect mode: off-domain checkout_url is refused (release blocker test); emitted event kinds match the Shopify-mode golden sequence"
+        "4. Redirect mode: off-domain checkout_url is refused (release blocker test); emitted event kinds match the Shopify-mode golden sequence",
+        "5. Checkout gate (R12, fail-closed): the accept orchestration consults SellerEligibility above accept() — a blacklisted seller, or an eligibility read that is unavailable, refuses the accept and no code is created. accept() keeps its four positional parameters (auction, bid_id, code_creator, mode); any eligibility port reaching accept() is an optional keyword and its absence is not itself a denial"
       ],
       "verify": "pytest apps/exchange/tests/test_accept.py -q",
       "scope": [
@@ -411,7 +416,7 @@
       ],
       "depends_on": [
         "T-030",
-        "T-052"
+        "T-036"
       ],
       "non_goals": [
         "No checkout observation"
@@ -469,6 +474,36 @@
       ],
       "non_goals": [
         "No dashboard UI"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-036",
+      "title": "Checkout reaches the merchant through a provider port",
+      "objective": "apps/exchange/src/checkout: define CheckoutProvider — the single port every accept path goes through to turn a won offer into a discount code and a permalink — and ship SimulatedRedirectProvider as the required starting implementation, which needs no Shopify and no merchant app. Providers register under the CHECKOUT_MODE spellings accept() already resolves ('redirect' and the shopify_stub/shopify spellings); the port, not the provider, performs the registered-domain check, so no implementation can opt out of it, and every provider emits the identical ordered LedgerEvent kinds so nothing downstream can tell which one ran (C11). The Shopify path (T-052) is one adapter behind this port, not the route to a code.",
+      "refs": [
+        "R3",
+        "A5",
+        "C11",
+        "DESIGN#interfaces-contracts-between-tickets"
+      ],
+      "acceptance": [
+        "1. CheckoutProvider is one port with a registered provider per CHECKOUT_MODE spelling; resolving an unregistered mode raises rather than silently falling back, and a lint/grep test asserts no code-minting call site exists outside a provider",
+        "2. SimulatedRedirectProvider mints a single-use code and an on-domain permalink with no Shopify dependency; the same fixture offer run through the Shopify adapter yields the identical ordered LedgerEvent kinds (C11 parity), so provider swap is invisible downstream",
+        "3. The port validates the offer's checkout_url host against the registered seller domain (bid['store_domain']) by exact match BEFORE any provider is asked to mint — rival domain, suffix spoof, glued-suffix spoof, userinfo spoof and subdomain are each refused with no code created (D22); an on-domain offer completes, so a surface that refuses everything cannot satisfy this criterion",
+        "4. Provider selection is the mode argument accept() already receives: accept(auction, bid_id, code_creator, mode) keeps its four positional parameters and its injected code creator, and registering a further provider adds no parameter to it"
+      ],
+      "verify": "pytest apps/exchange/tests/test_checkout_provider.py -q",
+      "scope": [
+        "apps/exchange/src/checkout/**",
+        "apps/exchange/tests/**"
+      ],
+      "depends_on": [
+        "T-010"
+      ],
+      "non_goals": [
+        "No Shopify GraphQL calls — the Shopify adapter is T-052",
+        "No accept orchestration, no re-offer logic (T-033 owns those)"
       ],
       "parallel_safe": true
     },
@@ -691,7 +726,7 @@
     {
       "id": "T-052",
       "title": "Winning offers become single-use validated codes and permalinks",
-      "objective": "/codes: discountCodeBasicCreate usageLimit:1 + expiry, validity + combinesWith pre-check, unique code per accepted offer, permalink construction; duplicate redemption surfaces as offer-integrity event (A5).",
+      "objective": "The Shopify adapter behind T-036's CheckoutProvider port — one implementation of it, not the only route to a code. /codes: discountCodeBasicCreate usageLimit:1 + expiry, validity + combinesWith pre-check, unique code per accepted offer, permalink construction; duplicate redemption surfaces as offer-integrity event (A5).",
       "refs": [
         "R3",
         "A5",
@@ -700,7 +735,8 @@
       "acceptance": [
         "1. Code created per offer; permalink applies it in stub redemption",
         "2. Conflicting combinesWith detected pre-redirect (offer re-priced or rejected)",
-        "3. Duplicate use emits integrity LedgerEvent, not an exception"
+        "3. Duplicate use emits integrity LedgerEvent, not an exception",
+        "4. It is reachable only as a CheckoutProvider implementation: it satisfies T-036's port contract unmodified, and substituting SimulatedRedirectProvider for it changes no caller and no emitted LedgerEvent kind (C11)"
       ],
       "verify": "pytest apps/merchant/svc/tests/test_codes.py -q",
       "scope": [
@@ -708,6 +744,7 @@
         "apps/merchant/svc/tests/**"
       ],
       "depends_on": [
+        "T-036",
         "T-050"
       ],
       "non_goals": [
@@ -784,7 +821,7 @@
       "acceptance": [
         "1. Duplicate event_id is a no-op",
         "2. Chain verification detects tampering fixture",
-        "3. Replay reproduces served snapshot hashes on fixture stream"
+        "3. Replay of the fixture stream reproduces the event-stream hash exactly (this is the event-stream hash only; recomputing served trust snapshots from genesis is T-062's replay criterion, not this one)"
       ],
       "verify": "pytest apps/trust/tests/test_events.py -q",
       "scope": [
@@ -833,12 +870,15 @@
       "refs": [
         "R12",
         "S2",
-        "DESIGN#decisions--rationale"
+        "DESIGN#decisions--rationale",
+        "R15",
+        "S3"
       ],
       "acceptance": [
         "1. Golden trajectories (verification-only, outcomes-only, mixed) match human-approved fixture manifest expectations",
         "2. Decay + confidence property tests; conversion influence cap holds",
-        "3. Blacklist: identity-bound persistence, expiry/appeal states, and fail-closed read behavior (unavailable state blocks checkout) all tested"
+        "3. Blacklist: identity-bound persistence, expiry/appeal states, and fail-closed read behavior (unavailable state blocks checkout) all tested",
+        "4. Bit-for-bit replay (R15, S3): recomputing every served TrustSnapshot from the genesis event stream reproduces score, confidence, score_version and each dimension's alpha, beta and decayed_at exactly, with decay evaluated against the recorded as-of time rather than wall clock — canonical serialization, event hash, sequence and stream identity all pinned"
       ],
       "verify": "pytest apps/trust/tests/test_scoring.py -q",
       "scope": [
@@ -1063,7 +1103,8 @@
       "acceptance": [
         "1. Manifest + golden set committed with recorded human approval artifact",
         "2. Generator seeds N stores incl. the dishonest one into shopify-stub from SEED_CATEGORY config",
-        "3. `make demo-seed` idempotent against stub"
+        "3. `make demo-seed` idempotent against stub",
+        "4. The manifest instantiates the published claim_type → dimension mapping table: every claim_type the golden set uses maps to exactly one of the five published trust dimensions, and the table states the treatment of unsupported and ambiguous verification outcomes. The table is an additional key alongside the existing manifest keys at fixtures/manifest.json and introduces no sixth trust dimension"
       ],
       "verify": "pytest fixtures/tests/test_seed.py -q",
       "scope": [
@@ -1216,6 +1257,7 @@
         "docs/tests/**"
       ],
       "depends_on": [
+        "T-053",
         "T-082",
         "T-084"
       ],

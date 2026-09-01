@@ -10,10 +10,14 @@ graph LR
   EXC -->|BidRequest| SA[packages/store-agent<br/>hosted advocate runtime]
   SA -->|Bid| EXC
   EXC -->|Shortlist| BUY
-  BUY -->|OfferAccepted| MER[apps/merchant<br/>Shopify app + dashboard + onboarding]
+  BUY -->|OfferAccepted| EXC
+  EXC -->|accept, checkout handoff| CKP{{CheckoutProvider port}}
+  CKP -->|permalink| SIM[SimulatedRedirectProvider<br/>required starting implementation]
+  CKP -->|permalink| MER[apps/merchant<br/>Shopify adapter + dashboard + onboarding]
   MER -->|discount code + permalink| SHOP[(Shopify stores<br/>or local stub)]
   SHOP -->|pixel events + order webhooks| MER
-  MER -->|LedgerEvent| TRU[apps/trust<br/>ledger + scoring + blacklist]
+  SIM -->|LedgerEvent| TRU[apps/trust<br/>ledger + scoring + blacklist]
+  MER -->|LedgerEvent| TRU
   TRU -->|TrustSnapshot| EXC
   TRU -->|TrustEventPayload| SA
   ING[services/ingest<br/>catalog adapters + extraction] --> NEO[(Neo4j)]
@@ -35,14 +39,14 @@ Component responsibilities:
 - **pixel/** (TS): web pixel extension; subscribes standard events; POST `fetch(..., {keepalive:true})` to merchant app collector with clientId, checkout token, order id, discountApplications.
 - **services/shopify-stub** (Python): local implementation of every Shopify surface used (Admin GraphQL subset, webhook delivery, permalink+code redemption, pixel event emission). Fixture backbone (C9).
 - **services/sim** (Python): seeded buyer-traffic simulator driving intents, acceptances, purchases, returns, and the dishonest-store script from the fixture manifest.
-- **apps/seller-reference** (Python): unharnessed seller personas (value / specialist / aggressive) submitting free-text pitches with asserted claims through the external `POST /bid` door. They exist to exercise extraction+verification adversarially; they may tailor pitches but never redefine catalog facts.
+- **apps/seller-reference** (Python): unharnessed seller personas (value / specialist / aggressive) submitting free-text pitches with asserted claims through the external bid-submission door (`POST /v1/auctions/{auction_id}/bids`). They exist to exercise extraction+verification adversarially; they may tailor pitches but never redefine catalog facts.
 - **packages/verification** (Python): claim extractor (atomic typed claims with source spans; LLM behind strict schemas) + deterministic comparators (normalized boolean/string equality, numeric with per-field tolerance, price vs offer and fresh catalog, set containment, relationship existence) producing verified|contradicted|unsupported|ambiguous with evidence refs; idempotent per (pitch, verifier version, catalog snapshot).
 
 Merged repo layout (partner-reconciled names): `packages/{contracts,store-agent,verification,ranking,llm,observability}`, `apps/{buyer,exchange,trust,merchant,seller-reference}`, `services/{ingest,shopify-stub,sim}`, `pixel/`, `db/migrations`, `graph/`, `fixtures/`, `evals/`, `e2e/`. `packages/contracts` is the schema home (formerly "protocol"). Repo name: `proxyshop`.
 
 ## Interfaces (contracts between tickets)
 
-All cross-service schemas live in `packages/protocol` (JSON Schema source → generated Pydantic + TS types). Schema changes land only in E1-scoped tickets; all other tickets treat `packages/protocol` as read-only.
+All cross-service schemas live in `packages/contracts` (JSON Schema source → generated Pydantic + TS types). Schema changes land only in E1-scoped tickets; all other tickets treat `packages/contracts` as read-only.
 
 ### Core protocol objects (JSON Schema names)
 - `Intent` (partner schema adopted, extended) — `{intent_id, cluster_id, query, category, hard_constraints: [{field, op: enum[eq|lte|gte|in|contains], value, unit?}], preferences: [{field, direction: enum[maximize|minimize|prefer], weight}], ship_to, currency, budget_band, created_at, schema_version}`. Hard constraints are filters (R19).
@@ -56,16 +60,18 @@ All cross-service schemas live in `packages/protocol` (JSON Schema source → ge
 - `Shortlist` — `{auction_id, slots: [{slot: enum[fit|value|reliability|specialist], bid_ref, fit_score, trust_summary, provenance_labels}]}`
 - `LossReport` (aggregated, delayed) — `{store_id, window, by_cluster: [{cluster_id, lost: int, reasons: {fit: int, price: int, commitments: int, trust: int}, unmet_criteria: [str]}]}` — no amounts, no rival identities.
 - `LedgerEvent` — `{event_id, ts, kind: enum[bid_placed|shown|accepted|code_created|checkout_redirect|checkout_pixel|order_paid|order_fulfilled|refund|feedback|reconciled|claim_verified|policy_event], auction_id?, store_id?, order_ref?, payload}` — append-only, hash-chained (`prev_hash`).
-- `TrustSnapshot` — `{store_id, score: float, dims: {price_honored, discount_honored, shipped_on_time, not_returned, feedback_match}: {alpha, beta, decayed_at}, blacklisted: bool}`
+- `TrustSnapshot` — `{store_id, score: float, confidence: float, effective_sample_size: float, score_version, snapshot_version, computed_through_event, low_data: bool, dims: {price_honored, discount_honored, shipped_on_time, not_returned, feedback_match}: {alpha, beta, decayed_at}, blacklisted: bool}` — exactly five dimensions, never a sixth; verification outcomes layer onto these five through the claim-type mapping table below. `computed_through_event` is the last `LedgerEvent.event_id` folded in, which is what makes the S3 replay assertion checkable against a served snapshot.
 - `TrustEventPayload` — `{store_id, event: LedgerEvent, dim, delta, pseudonymous_context}` (R13)
 - `Envelope` (never crosses into exchange) — `{store_id, version, floors: [{product_ref?, min_price}], max_discount_pct, budget_cap, pursue_clusters: [..], standing_commitments: [Claim(provenance=owner_statement)], activation: enum[shadow|active|killed]}`
 
 ### Service APIs (pinned routes)
-- exchange: `POST /auctions` (Intent+profile→auction_id), `GET /auctions/{id}/shortlist`, `POST /auctions/{id}/accept {bid_ref}` → `{permalink_url}` (delegates code creation to merchant app), `POST /internal/outcomes` (from trust; bandit update).
-- store-agent runner: `POST /bid` (BidRequest→Bid|decline) — same route for hosted and external Tier-2 agents; external requests carry a registered signature.
+- exchange: `POST /auctions` (Intent+profile→auction_id), `GET /auctions/{id}/shortlist`, `POST /auctions/{id}/accept {bid_ref}` → `{permalink_url}` (reaches checkout through the injected `CheckoutProvider` port, never a hard-wired merchant call), `POST /v1/auctions/{auction_id}/bids` (external seller submits a signed `Bid` → `AcceptedForVerification | Rejected`), `POST /internal/outcomes` (from trust; bandit update).
+- store-agent runner: `POST /v1/bid-requests` (`BidRequest` → `Bid | Decline`) — **solicitation only**, exchange → seller; hosted Tier-1 and external Tier-2 agents answer the same shape. This is *not* the inbound door: an external seller submits a bid to the exchange's `POST /v1/auctions/{auction_id}/bids`.
 - merchant: `POST /codes {store_id, offer}` → `{code, permalink_url}` (creates `discountCodeBasicCreate` usageLimit:1, expiry ≤48h, validates combinesWith); `POST /webhooks/shopify/*`; `POST /pixel/collect`; `GET/PUT /stores/{id}/envelope`; `POST /stores/{id}/kill`.
 - trust: `POST /events` (LedgerEvent), `GET /stores/{id}/trust`, `GET /snapshot` (all stores, exchange consumption), `POST /feedback/{order_ref}`.
 - ingest: CLI + `POST /refresh/{store_id}`.
+
+**Exchange bid-submission boundary (R8/C10).** Signature verification against the sender's registered key, replay rejection, auction existence and `respond_by` validation, offer-expiry and blacklist checks all run at the exchange boundary, before an external bid is enqueued for extraction + verification. The signing primitives themselves do not move: `sign_bid` and `receive_bid` stay importable from `packages.store_agent.src.external`, over a flat `{store_id: key}` keyring. The envelope fields `signer_id`, `key_id`, `issued_at` and `nonce` are **optional** — a submission carrying none of them is still valid — but each is validated when present, and `nonce` is the replay/idempotency key.
 
 ### Tool hooks (store-agent internal contract)
 `get_product_fact(product_ref, key) -> Claim`, `get_live_state(product_ref) -> [Claim]` (pixel_feed), `get_owner_commitments(cluster_id) -> [Claim]`, `authorize_discount(product_ref, requested_pct) -> Claim|Denied` (envelope_rule; checks walls), `choose_policy_action(context) -> action` (learned_policy, logs policy version), `get_network_prior(cluster_id) -> prior`. The LLM cannot emit Offer/Claim fields except through these.
@@ -80,11 +86,27 @@ All cross-service schemas live in `packages/protocol` (JSON Schema source → ge
 
 ## Decisions & rationale (do not "improve" away)
 - Reconciliation (approved): trust = one observation framework — verification outcomes first (signal at zero transactions), transaction calibration layered on the same per-dimension Beta structure with observation-type weights (contradicted 2.0, severe policy 3.0, mismatch returns 1.5; verified + fulfilled positive); neutral prior ~Beta(2,2) with explicit low confidence. Rejected: two separate trust systems.
+- Claim-type → trust-dimension mapping (published here, instantiated in T-080's approved manifest, consumed read-only by T-062). Every verification outcome lands on one of the same five Betas; a sixth dimension is rejected, not deferred:
+
+  | `claim_type` | dimension | class |
+  | --- | --- | --- |
+  | `price`, `unit_price`, `total_price` | `price_honored` | offer-fact |
+  | `discount`, `promo_eligibility` | `discount_honored` | offer-fact |
+  | `delivery`, `shipping_speed`, `dispatch_window` | `shipped_on_time` | offer-fact |
+  | `return_policy`, `warranty` | `not_returned` | offer-fact (standing commitment) |
+  | `ingredients`, `compatibility`, `nutrition`, `specifications` | `feedback_match` | product-fact — a catalog-integrity claim is a claim about what the buyer will receive, so it scores on the described-as-delivered dimension |
+
+  Status handling: `verified` is a positive observation; `contradicted` is a negative observation at the published weight 2.0; `unsupported` is a negative observation at a fractional weight strictly below `contradicted`, whose dominant effect is to hold `confidence` down rather than to move `score`; `ambiguous` produces no dimension observation at all and lowers `confidence` only. Neither `unsupported` nor `ambiguous` ever satisfies a hard constraint or counts as verified evidence (R19).
 - Dual-path claims: harness guarantees hosted-agent claims; extraction+verification disciplines external ones. Rejected: blanket rejection of unprovenanced claims (would make verification vacuous and block Tier-2/personas).
 - Starting-slice checkout is redirect/simulated with `checkout_redirect` + downstream events identical to the Shopify path (C11); checkout URLs validate against the registered seller domain. Rejected: divergent event schemas per checkout mode.
-- Rank formula (single, published, jointly weighted): eligibility filters first (blacklist fail-closed, expiry, valid checkout domain, hard constraints per R19), then `rank_score = w_m*intent_match + w_e*verified_claim_ratio + w_t*trust + w_v*price_value + w_d*delivery_fit − policy_penalties`, features normalized to [0,1], stable tie-break (verified hard-fit count → trust → price → bid id), component map + human-readable explanation returned. Evidence freshness lives in verification confidence, not the formula. Bandit adjusts exposure/exploration only.
+- Rank formula (single, published, jointly weighted — **this is the only rank formula in the system**): eligibility filters first (blacklist fail-closed, expiry, valid checkout domain, hard constraints per R19), then `rank_score = w_m*intent_match + w_e*verified_claim_ratio + w_t*trust + w_v*price_value + w_d*delivery_fit − policy_penalties`, features normalized to [0,1], stable tie-break (verified hard-fit count → trust → price → bid id), component map + human-readable explanation returned. Evidence freshness lives in verification confidence, not the formula. Bandit adjusts exposure/exploration only.
+  - Weights are one versioned `RankingWeights` object in `packages/contracts`, loaded from env, fixed per environment and identical for every buyer: `w_m=0.35, w_e=0.20, w_t=0.20, w_v=0.15, w_d=0.10` (sum 1.0).
+  - `price_value = clamp((list_price − total_price)/list_price, 0, 1)`, against the bidding store's own list price.
+  - `delivery_fit` reads `Offer.delivery_estimate_days` against `Intent.ship_to`, and is **0.5 (neutral) when absent, never 0**.
+  - `policy_penalties` = Σ per-kind penalties over open `ledger.policy_events` for that store in the scoring window; initial catalogue: `severe_policy_violation = 0.30`.
+  - `Intent.preferences[].weight` feeds `intent_match` only; it never touches the published weights above. Two weighting layers, one score, and they never mix.
 - First-price sealed auction; losers receive only aggregated delayed LossReports. Second-price leaks the runner-up's price; real-time per-auction feedback invites tit-for-tat dynamics.
-- Ranking = published formula `rank_score = w_f*fit + w_v*offer_value + w_t*trust` with fixed public weights per environment; fit comes from retrieval+rerank but the combination is deterministic and fee/tier-blind (R11). Bandit adjusts exploration/exposure, not the formula weights.
+- Ranking inputs: `intent_match` comes from retrieval+rerank, but the combination is exactly the published formula above — deterministic, and fee-blind and tier-blind (R11). No per-store fee, tier or commercial term may enter it, and there is no second formula: any earlier three-term `fit + offer_value + trust` wording is superseded.
 - Store-loop learning: Thompson sampling over discount-depth buckets × commitment sets per cluster, initialized from network priors computed from pitch/value-prop outcomes only. Discount elasticity is never pooled across stores.
 - Cold start: with no learned policy, the deterministic default bid = list price, envelope standing commitments, intro discount rule if the envelope defines one. No LLM improvisation of price.
 - Trust math: per-dimension Beta(α,β) with exponential decay toward the prior; score = weighted product of dimension means; blacklist at published threshold; new-store prior α/β chosen so ~N clean episodes are needed to reach mid trust (fixture manifest defines N).
@@ -92,7 +114,7 @@ All cross-service schemas live in `packages/protocol` (JSON Schema source → ge
 - Embeddings: `EmbeddingProvider` interface; default local bge-m3-class (1024d); tests use `HashEmbedding` deterministic double; swapping providers = re-embed + rebuild index script (shipped).
 - LLM: per-role model IDs from env (`BUYER_MODEL`, `STORE_AGENT_MODEL` default sonnet-class; `INTERVIEW_MODEL` opus-class; `EXTRACT_MODEL` haiku-class); store-agent prompts structured static-context-first for prompt caching; tests use recorded/deterministic doubles.
 - Dev-store reality (A1): fixtures ingest via `signed_fetch` with storefront password; `catalog_mcp` adapter ships contract-tested against recorded mocks.
-- Non-Shopify future and Tier-2 are seams, not features: `CatalogAdapter` interface and signed external `POST /bid` exist; nothing else.
+- Non-Shopify future and Tier-2 are seams, not features: `CatalogAdapter` interface and the signed external bid-submission door (`POST /v1/auctions/{auction_id}/bids`) exist; nothing else.
 
 ## Verification strategy
 - `make verify` at repo root = ruff + mypy + eslint + tsc + pytest + vitest against stub services and doubles; offline (C9). Every ticket's verify maps onto a scoped subset; T-0 makes the empty pipeline green.

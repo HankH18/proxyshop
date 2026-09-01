@@ -146,4 +146,4 @@ graph TD
 - **T-084** The dishonest store ends below threshold and off the shortlist  ·  deps: T-062, T-083
 - **T-085** The demo is a runbook anyone on the team can execute ∥  ·  deps: T-082, T-084
 
-∥ = parallel_safe (scope disjoint from every other open ticket).
+∥ = parallel_safe (eligible for concurrent dispatch; ownership is per-file, not per-glob).
