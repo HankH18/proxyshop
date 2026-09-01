@@ -87,10 +87,47 @@ def test_minted_codes_do_not_repeat() -> None:
     """1000 draws from 32**8 symbols: a collision means the source is not random.
 
     The birthday probability of any collision here is about 4e-13, so a failure is a real
-    defect (a seeded RNG, a counter, a truncated hash) rather than bad luck.
+    defect (a seeded RNG, a truncated hash) rather than bad luck.
+
+    Uniqueness alone is NOT enough — see :func:`test_minted_codes_are_unpredictable`. A
+    counter passes this test perfectly.
     """
     minted = {mint_code() for _ in range(1000)}
     assert len(minted) == 1000
+
+
+def test_minted_codes_are_unpredictable() -> None:
+    """D22's real requirement: *randomly generated*, not merely distinct.
+
+    This test exists because uniqueness is the wrong property to check, and checking only
+    uniqueness is a trap I walked into: a plain counter (``PSX-00000001``, ``PSX-00000002``,
+    …) produces a thousand distinct, well-formed, Crockford-legal codes and satisfies both
+    ``test_minted_codes_match_the_pinned_shape`` and ``test_minted_codes_do_not_repeat``. It
+    is also perfectly guessable, which is the precise thing D22 forbids: "a derivable
+    single-use redeemable is a guessable one."
+
+    Two independent checks, either of which a counter, a timestamp, or a truncated hash of a
+    monotone input fails:
+
+    1. **Full alphabet coverage.** Over 500 draws (4000 symbols) every one of the 32
+       Crockford symbols must appear somewhere. A decimal counter emits only ``0``-``9`` and
+       a hex one only ``0``-``9A``-``F``, so both fail here. The chance a genuinely random
+       source misses a given symbol is ``(31/32)**4000`` ≈ 1e-55, so this cannot flake.
+    2. **No monotone ordering.** A counter emits an ascending sequence. The chance 200
+       random draws arrive already sorted is ``1/200!``.
+    """
+    draws = [mint_code() for _ in range(500)]
+    bodies = [code[len(CODE_PREFIX) :] for code in draws]
+
+    seen_symbols = set("".join(bodies))
+    missing = sorted(set(CROCKFORD_ALPHABET) - seen_symbols)
+    assert not missing, (
+        f"symbols {missing} never appeared in 4000 draws — the source is not uniform over "
+        f"the alphabet (a decimal or hex counter looks exactly like this)"
+    )
+
+    sample = draws[:200]
+    assert sample != sorted(sample), "a monotonically increasing code is a guessable one"
 
 
 def test_is_well_formed_rejects_near_misses() -> None:
