@@ -1,0 +1,16 @@
+{
+  "provenance": {
+    "source": "hand-authored from the store-agent envelope rules in DESIGN.md (§Store agent, §Decisions) and SPEC.md C4/R19",
+    "doc_version": "Anthropic Messages API, docs.claude.com/en/api/messages + the prompt-caching guide, as published 2026-02; model ids per .env.example",
+    "authored_by": "T-014 (packages/llm)",
+    "authored_at": "2026-02-14",
+    "capture": "none - D21 forbids live capture, and no ANTHROPIC_API_KEY exists in this repo (D3). Optional re-capture against real credentials belongs to T-085's runbook.",
+    "review": "committed on branch task/T-014 for human review (D21)",
+    "notes": "Prompt keys are whole assembled prompts: the static store context comes first and the per-request tail last, exactly as llm.prompting.assemble_prompt emits them, so a recording key equals the string a live call would have sent."
+  },
+  "recordings": {
+    "STORE CONTEXT\nstore: bean-cellar (store-1)\nenvelope v3: list price floor 18.00 USD; max discount 15%; free shipping over 40.00 USD\nstanding commitments: ships from Portland ME within 1 business day\n\nBUYER REQUEST\nquote a price for 2 bags of the Ethiopia Guji, buyer is new": "Offer: 2 x Ethiopia Guji at 19.55 USD each (11% off list 22.00), total 39.10 USD, shipping 4.95 USD. Within envelope v3: discount 11% <= 15% cap, unit price 19.55 >= floor 18.00. Ships from Portland ME within 1 business day.",
+    "STORE CONTEXT\nstore: bean-cellar (store-1)\nenvelope v3: list price floor 18.00 USD; max discount 15%; free shipping over 40.00 USD\nstanding commitments: ships from Portland ME within 1 business day\n\nBUYER REQUEST\nbuyer asks for 30% off if they order six bags": "Denied: a 30% discount exceeds the 15% cap in envelope v3, and 15.40 USD per bag would break the 18.00 USD floor. Counter-offer: 6 bags at 18.70 USD each (15% off list), total 112.20 USD with free shipping (order exceeds 40.00 USD).",
+    "STORE CONTEXT\nstore: bean-cellar (store-1)\nenvelope v3: list price floor 18.00 USD; max discount 15%; free shipping over 40.00 USD\nstanding commitments: ships from Portland ME within 1 business day\n\nBUYER REQUEST\ndoes the envelope let you promise next-day delivery to California?": "No. The envelope commits to dispatch within 1 business day from Portland ME; it makes no delivery-time commitment for California, so I cannot promise next-day delivery. I can commit only to same-envelope dispatch timing."
+  }
+}
