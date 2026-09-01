@@ -15,10 +15,23 @@ Fatal checks
    silently join that run.
 3. **D1 — the old schema package name is gone.** The schema package is
    ``packages/contracts``; the superseded name must not appear in the source tree.
+4. **No test directory is empty.** ``pytest`` exits 0 when *one* directory's tests are
+   deleted while others remain, and the root ``vitest`` run carries ``--passWithNoTests``
+   (D7), so a ticket can be merged with its tests removed and the gate stays green. Every
+   directory named ``tests/`` (and ``e2e/``) must contain at least one test file, and every
+   vitest project root declared in ``vitest.config.ts`` must contain at least one
+   ``*.test.ts``/``*.test.tsx``.
+5. **D39 — no raw Redis client outside the wrapper.** Application code that does
+   ``redis.Redis.from_url(os.environ["REDIS_URL"])`` writes *unprefixed* keys to a shared
+   logical DB, which the prefixed ``redis_client`` fixture cannot see and a sibling
+   worker's ``FLUSHDB`` will delete. Everything goes through
+   ``proxyshop_support.redis_client.worker_redis``. (``.importlinter`` forbids importing
+   ``redis`` from member *source* at all; this check additionally covers tests, scripts and
+   anything else import-linter's root packages do not span.)
 
 Non-fatal report
 ----------------
-4. Ticket verify paths that do not exist yet. This is a scaffold sanity check, printed and
+6. Ticket verify paths that do not exist yet. This is a scaffold sanity check, printed and
    never fatal: on a fresh scaffold nearly all of them are legitimately missing.
 
 Note on check 4 vs. the original specification: the intake specified "any ticket whose
@@ -177,6 +190,108 @@ def check_superseded_schema_dir(failures: list[str]) -> None:
 
 # ---------------------------------------------------------------------------- check 4
 
+#: Directories that must contain tests even though they are not named ``tests``.
+EXTRA_TEST_DIRS = ("e2e",)
+
+PY_TEST_RE = re.compile(r"^test_.*\.py$")
+TS_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx)$")
+
+
+def _is_test_file(name: str) -> bool:
+    return bool(PY_TEST_RE.match(name) or TS_TEST_RE.search(name))
+
+
+def check_no_empty_test_dirs(failures: list[str]) -> None:
+    """Every ``tests/`` directory (and ``e2e/``) holds at least one test file."""
+    by_dir: dict[str, list[str]] = {}
+    for path in source_files():
+        parts = Path(path).parts
+        for index, part in enumerate(parts[:-1]):
+            if part == "tests" or (index == 0 and part in EXTRA_TEST_DIRS):
+                by_dir.setdefault("/".join(parts[: index + 1]), []).append(parts[-1])
+    for directory, names in sorted(by_dir.items()):
+        if not any(_is_test_file(name) for name in names):
+            failures.append(
+                f"{directory}/ contains no test file (test_*.py or *.test.ts). An empty "
+                f"test directory is exit 0 for pytest and vitest alike, so a ticket whose "
+                f"tests were deleted would pass the gate. Delete the directory or restore "
+                f"its tests."
+            )
+
+
+VITEST_ROOT_RE = re.compile(r"""root:\s*["']\./([^"']+)["']""")
+
+
+def check_vitest_projects_have_tests(failures: list[str]) -> None:
+    """Every vitest project root declared in ``vitest.config.ts`` has a test file.
+
+    The root vitest run carries ``--passWithNoTests`` per D7, so vitest itself reports
+    success on a project with nothing to run. ``tsc`` only accidentally covers the case
+    where the *last* ``.ts`` file in a project disappears.
+    """
+    config = ROOT / "vitest.config.ts"
+    if not config.is_file():
+        failures.append("vitest.config.ts is missing; the TypeScript gate has no projects.")
+        return
+    roots = VITEST_ROOT_RE.findall(config.read_text())
+    if not roots:
+        failures.append("vitest.config.ts declares no project roots; nothing would run.")
+        return
+    tracked = source_files()
+    for project_root in sorted(set(roots)):
+        prefix = f"{project_root.rstrip('/')}/"
+        if not any(
+            path.startswith(prefix) and TS_TEST_RE.search(Path(path).name) for path in tracked
+        ):
+            failures.append(
+                f"vitest project root {project_root} contains no *.test.ts/tsx file. With "
+                f"--passWithNoTests (D7) that project would silently contribute zero tests."
+            )
+
+
+# ---------------------------------------------------------------------------- check 5
+
+#: Reaching redis-py at all, from anywhere but the wrapper, is the violation — a client can
+#: be built in too many shapes to enumerate (``redis.Redis(...)``, ``Redis.from_url(...)``,
+#: ``redis.asyncio.from_url(...)``, a bare ``ConnectionPool``), so the *import* is what is
+#: checked. ``redis.exceptions`` is exempt so ``except redis.exceptions.ConnectionError``
+#: stays available, matching the ``.importlinter`` contract's ``ignore_imports``.
+RAW_REDIS_PATTERNS = (
+    re.compile(r"^\s*import\s+redis(?!\.exceptions)\b", re.MULTILINE),
+    re.compile(r"^\s*from\s+redis(?!\.exceptions)(\.[\w.]+)?\s+import\s+", re.MULTILINE),
+    re.compile(r"(?<![\w.])(Redis|StrictRedis|ConnectionPool)\.from_url\s*\("),
+)
+
+#: Only the wrapper itself, and this checker, may name those constructions.
+REDIS_WRAPPER_ALLOWED = frozenset(
+    {"proxyshop_support/redis_client.py", "scripts/check_verify_contracts.py"}
+)
+
+
+def check_no_raw_redis_clients(failures: list[str]) -> None:
+    for path in source_files():
+        if path in REDIS_WRAPPER_ALLOWED or not path.endswith(".py"):
+            continue
+        try:
+            text = (ROOT / path).read_text(errors="ignore")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for pattern in RAW_REDIS_PATTERNS:
+            match = pattern.search(text)
+            if match:
+                line = text[: match.start()].count("\n") + 1
+                failures.append(
+                    f"D39: {path}:{line} builds a Redis client directly "
+                    f"({match.group(0).strip()!r}). A raw client writes UNPREFIXED keys to "
+                    f"a logical DB it shares with other workers — invisible to the "
+                    f"`redis_client` fixture and erased by any sibling's FLUSHDB. Use "
+                    f"`proxyshop_support.redis_client.worker_redis()`."
+                )
+                break
+
+
+# ---------------------------------------------------------------------------- check 6
+
 
 def _load_ticket_status() -> dict[str, str]:
     """Return ``{ticket_id: status}`` from whichever status store exists, or ``{}``.
@@ -263,6 +378,9 @@ def main() -> int:
     check_single_pytest_config(failures)
     check_pixel_path_filter(failures)
     check_superseded_schema_dir(failures)
+    check_no_empty_test_dirs(failures)
+    check_vitest_projects_have_tests(failures)
+    check_no_raw_redis_clients(failures)
     report_missing_verify_paths(_load_ticket_status(), failures)
 
     if failures:
@@ -270,7 +388,10 @@ def main() -> int:
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
-    print("  OK: pytest-config, test-path-filter and schema-package contracts all hold.")
+    print(
+        "  OK: pytest-config, test-path-filter, schema-package, non-empty-test-dir and "
+        "raw-Redis-client contracts all hold."
+    )
     return 0
 
 

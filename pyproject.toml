@@ -71,7 +71,7 @@ minversion = "8.2"
 addopts = "--import-mode=importlib --strict-markers --strict-config --timeout=300 -ra"
 consider_namespace_packages = true
 pythonpath = [".", ".pkgroot"]   # .pkgroot: flat-src import namespaces (R1b)
-testpaths = ["packages","apps","services","pixel","fixtures","e2e","docs"]
+testpaths = ["packages","apps","services","pixel","fixtures","e2e","docs","proxyshop_support"]
 norecursedirs = [".*", "node_modules", "dist", "build", ".venv", "*.egg-info", ".swarm-loop"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -86,6 +86,12 @@ markers = [
 target-version = "py312"
 line-length = 100
 extend-exclude = ["node_modules",".venv","dist","build",".swarm-loop",".pkgroot"]
+# Without this, `extend-exclude` is honoured only when ruff DISCOVERS a file by walking a
+# directory. Any explicitly-named path — `ruff check .swarm-loop/acceptance`, a pre-commit
+# hook passing filenames, an editor linting the open file — is linted anyway, which would
+# put ruff's opinions on the frozen acceptance suite. force-exclude makes the exclusion
+# apply to named paths too.
+force-exclude = true
 [tool.ruff.lint]
 select = ["E","F","I","UP","B","ASYNC"]
 ignore = ["E501"]
@@ -113,3 +119,9 @@ ignore_missing_imports = true          # workers cannot edit this file to add ov
 strict = false
 disallow_untyped_defs = false
 warn_unused_ignores = false
+# `disallow_untyped_defs = false` is deliberate — a worker may ship an unannotated helper.
+# But mypy's DEFAULT is to then skip that function's BODY entirely, so an unannotated
+# `def score(bid): total: int = "not a number"` type-checks clean and `make verify` is
+# green on a flat type error. Bodies are checked regardless of the signature; only the
+# signature stays optional.
+check_untyped_defs = true

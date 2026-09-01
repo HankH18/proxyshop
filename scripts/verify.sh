@@ -11,6 +11,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 export PATH="$ROOT/.venv/bin:$ROOT/node_modules/.bin:$PATH"
 
+# Load .env when there is one, so the DSNs/URLs in it actually reach the tests — nothing
+# used to read it. PROXYSHOP_WORKER is explicitly NOT taken from the file: .env.example
+# ships `PROXYSHOP_WORKER=1`, and a worktree that copied it would silently re-badge every
+# worker as worker 1 and undo every kind of isolation this repo has (D38).
+if [ -f "$ROOT/.env" ]; then
+  _keep_worker="${PROXYSHOP_WORKER:-}"
+  set -a; . "$ROOT/.env"; set +a
+  if [ -n "$_keep_worker" ]; then export PROXYSHOP_WORKER="$_keep_worker"; fi
+  unset _keep_worker
+fi
+
 # D38: every run is per-worker isolated. Fail here rather than 40 seconds later inside
 # pytest, and say exactly what to do about it.
 if [ -z "${PROXYSHOP_WORKER:-}" ]; then
@@ -29,9 +40,22 @@ PY
 
 STEP="${1:-all}"
 
-run_pytest() {                      # exit 5 (nothing collected) tolerated ONLY here
+# Collecting ZERO tests is a FAILURE here, not a warning.
+#
+# This used to map pytest's exit 5 to 0 "because the scaffold might be empty". It is not
+# empty any more, and the tolerance was a hole big enough to drive the whole gate through:
+# deleting every test_*.py in the repo left `make verify` at exit 0, reporting OK. pytest's
+# own exit 5 is the only signal that the suite vanished, so it is now fatal. Per-directory
+# emptiness — one lane's tests deleted while others remain — is exit 0 as far as pytest is
+# concerned; scripts/check_verify_contracts.py catches that separately.
+run_pytest() {
   set +e; pytest "$@"; rc=$?; set -e
-  if [ $rc -eq 5 ]; then echo "WARNING: pytest collected 0 tests in: $*" >&2; return 0; fi
+  if [ $rc -eq 5 ]; then
+    echo "FATAL: pytest collected 0 tests in: $*" >&2
+    echo "       An empty suite is not a passing suite. If a path is genuinely test-free," >&2
+    echo "       it does not belong in a verify command." >&2
+    return 1
+  fi
   return $rc
 }
 
