@@ -1,0 +1,13 @@
+cycle,metric_id,value,error,timestamp,source
+0,acceptance_pass_rate,3.88,96.12,2026-09-01T09:48:51,measure
+0,acceptance_collected,103.0,0.0,2026-09-01T09:48:51,measure
+0,build_succeeds,1.0,0.0,2026-09-01T09:48:51,measure
+0,spec_criteria_passing,4.0,4.0,2026-09-01T09:48:51,measure
+0,e1_foundation_passing,0.0,10.0,2026-09-01T09:48:51,measure
+0,e2_ingestion_passing,0.0,8.0,2026-09-01T09:48:51,measure
+0,e3_exchange_passing,0.0,18.0,2026-09-01T09:48:51,measure
+0,e4_store_agent_passing,0.0,14.0,2026-09-01T09:48:51,measure
+0,e5_merchant_passing,0.0,10.0,2026-09-01T09:48:51,measure
+0,e6_trust_passing,0.0,20.0,2026-09-01T09:48:51,measure
+0,e7_buyer_passing,0.0,9.0,2026-09-01T09:48:51,measure
+0,e8_proofs_passing,0.0,6.0,2026-09-01T09:48:51,measure

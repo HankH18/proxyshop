@@ -60,7 +60,15 @@ counts toward nothing and is a defect in the suite.
 `measure` treats a missing number as a failed measurement, which is correct: a broken
 measuring stick is a top-priority defect, not a skippable inconvenience.
 
-Modes: `--total`, `--count-passing [--epic Ex]`, `--pass-rate [--epic Ex]`, `--json`
-(diagnostics to stderr).
+Modes: `--total`, `--count-passing`, `--pass-rate`, `--json` (diagnostics to stderr).
+Filters, optional and combinable: `--epic Ex`, `--blocker S8-n`. A filter that selects
+**zero** tests is the "could not run" case — empty stdout, exit 1 — never a `0`, because
+a metric silently measuring an empty set reads as a perfect score.
+
+Every mode runs the suite. There is deliberately **no** mode that reads a previously
+written report: the report would have to live on disk, every worker has an unrestricted
+shell, and `check-branch` reads committed diffs — so it cannot see a file written
+straight into the primary tree. Hashing this directory into the report does not help,
+since workers may read these files and can therefore compute any hash they must match.
 
 Skipped is **not** passed. A goal you skipped is a goal you did not meet.

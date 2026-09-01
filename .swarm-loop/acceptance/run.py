@@ -13,11 +13,25 @@ The second case matters: a wrapper that turns a broken runner into a quiet 0 poi
 the regression with fake data. So we positively confirm pytest executed and produced a
 report before emitting any number.
 
-Modes:
+Modes (each runs the suite once; combine with the filters below):
   --total                 number of acceptance tests defined
-  --count-passing         number currently passing        (optionally --epic Ex)
-  --pass-rate             percent currently passing       (optionally --epic Ex)
+  --count-passing         number currently passing
+  --pass-rate             percent currently passing
   --json                  full per-test detail to stderr (diagnostics; no number)
+
+Filters (optional, combinable — an empty selection is a loud failure, never a 0):
+  --epic Ex               only tests marked @pytest.mark.epic("Ex")
+  --blocker S8-n          only tests marked @pytest.mark.blocker("S8-n")
+
+Deliberately ABSENT: any mode that reads a previously-written report instead of
+running the suite. It was built and then removed before the freeze. Reusing a report
+across metrics would save one suite run per metric, but the report has to live
+somewhere on disk, every worker has unrestricted shell, and `check-branch` inspects
+committed diffs — so it cannot see a report written straight into the primary tree.
+Binding the report to a hash of this directory does not close it either: workers are
+allowed to READ these files, so any hash they must match is a hash they can compute.
+A metric that reads a file a worker can write is not a frozen metric
+(references/goal-setting.md), so every number here is paid for with a real pytest run.
 
 Design rule for the tests themselves (see README.md in this directory): every test
 imports the code under test INSIDE the test function, never at module scope. At the
@@ -58,14 +72,32 @@ def run_pytest() -> list[dict]:
     env = dict(os.environ)
     env["ACCEPTANCE_REPORT"] = out_path
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    # Keep the frozen suite independent of the project's own pytest configuration:
-    # -p no:cacheprovider avoids writing into the repo, -o addopts= drops any inherited
-    # addopts that would change collection.
+    # Any installed distribution advertising a [pytest11] entry point autoloads into this
+    # run. Measured: a ten-line "worker-helper" plugin cut --total from 8 to 5 and an epic
+    # count from 3 to 1, at exit 0, while --pass-rate still printed 100.00. Neither
+    # -o addopts=, nor -p no:cacheprovider, nor --confcutdir stopped it. A worker reaches
+    # this with two lines in a member pyproject.toml it legitimately owns, and check-branch
+    # shows only an advisory '?' whose text is about ignore/omit/exclude, not entry points.
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    # Keep the frozen suite independent of the project's own pytest configuration.
+    # -o addopts= alone is NOT enough: it neutralizes one ini key, and the project's
+    # pyproject.toml is worker-owned. Each -o below closes a measured, count-preserving
+    # hole — the count companion never fires on any of them, so none is belt-and-braces:
+    #   pythonpath  — prepending a `_stub` dir shadows the real tree with a regular
+    #                 package, which terminates the namespace-package search; the epic
+    #                 then goes green against hand-written stubs with --total unchanged.
+    #   python_files / python_functions / python_classes — narrow the discovery patterns
+    #                 and the suite silently shrinks (this one the count DOES catch, but
+    #                 pinning it costs nothing and fails louder).
     cmd = [
         sys.executable, "-m", "pytest",
         str(ACCEPTANCE_DIR),
         "-p", "no:cacheprovider",
         "-o", "addopts=",
+        "-o", "pythonpath=",
+        "-o", "python_files=test_*.py",
+        "-o", "python_functions=test_*",
+        "-o", "python_classes=Test*",
         # Hermetic: never load the project's own root conftest.py into the frozen
         # suite. The product code is importable because T-000 installs every package
         # editable into the venv — the acceptance suite needs no sys.path help, and
@@ -107,10 +139,13 @@ def run_pytest() -> list[dict]:
     return records
 
 
-def select(records: list[dict], epic: str | None) -> list[dict]:
-    if epic is None:
-        return records
-    return [r for r in records if r.get("epic") == epic]
+def select(records: list[dict], epic: str | None, blocker: str | None = None) -> list[dict]:
+    out = records
+    if epic is not None:
+        out = [r for r in out if r.get("epic") == epic]
+    if blocker is not None:
+        out = [r for r in out if r.get("blocker") == blocker]
+    return out
 
 
 def main() -> None:
@@ -121,13 +156,29 @@ def main() -> None:
     mode.add_argument("--pass-rate", action="store_true")
     mode.add_argument("--json", action="store_true")
     ap.add_argument("--epic", choices=EPICS, default=None)
+    ap.add_argument("--blocker", default=None,
+                    help="only tests marked @pytest.mark.blocker(\"S8-n\")")
     args = ap.parse_args()
 
-    records = run_pytest()
-    subset = select(records, args.epic)
+    # An empty --blocker would match every UNMARKED test (conftest defaults the
+    # field to ""), silently turning a filtered metric into a whole-suite one.
+    if args.blocker is not None and not args.blocker.strip():
+        _fail("--blocker requires a non-empty id")
 
-    if args.epic is not None and not subset:
+    records = run_pytest()
+    subset = select(records, args.epic, args.blocker)
+
+    # Each filter is checked on its own BEFORE the combination, so a miswired
+    # marker is named exactly rather than hidden behind an empty intersection.
+    if args.epic is not None and not select(records, args.epic):
         _fail(f"no acceptance tests are marked epic={args.epic} — the suite is miswired")
+    if args.blocker is not None and not select(records, None, args.blocker):
+        _fail(f"no acceptance tests are marked blocker={args.blocker} — the suite is miswired")
+    if not subset:
+        _fail(
+            f"no acceptance tests match epic={args.epic} and blocker={args.blocker} "
+            "together — the metric selects an empty set"
+        )
 
     total = len(subset)
     passing = sum(1 for r in subset if r.get("outcome") == "passed")

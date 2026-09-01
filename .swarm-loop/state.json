@@ -9,10 +9,21 @@
   "push_remote": "when-clean",
   "stall_limit": 3,
   "stall_count": 0,
-  "head_history": [],
+  "head_history": [
+    {
+      "cycle": 0,
+      "head": "705cf34ad83bd201417b8ba94f06ef17a41817e3",
+      "changed": true,
+      "tracked_files": 232,
+      "codebase": "78458198bdc1f587c3c1e6c235a62c6f173ef100b7cad06c1b1cb9b4f4cfdb36"
+    }
+  ],
   "created": "2026-08-31T23:23:23",
   "protected_paths": [
     ".swarm-loop/acceptance",
-    ".swarm-loop/goals.json"
+    ".swarm-loop/goals.json",
+    "Makefile",
+    "scripts/verify.sh",
+    "scripts/check_verify_contracts.py"
   ]
 }

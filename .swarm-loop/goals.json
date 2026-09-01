@@ -1,5 +1,135 @@
 {
-  "frozen": false,
-  "frozen_at": null,
-  "metrics": []
+  "frozen": true,
+  "frozen_at": "2026-09-01T09:48:33",
+  "metrics": [
+    {
+      "id": "acceptance_pass_rate",
+      "name": "Acceptance test pass rate (%)",
+      "kind": "global",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --pass-rate",
+      "target": 100,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "acceptance_collected",
+      "name": "Acceptance tests collected (count)",
+      "kind": "global",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --total",
+      "target": 103,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "build_succeeds",
+      "name": "Root verify pipeline is green (0/1)",
+      "kind": "global",
+      "command": "if PROXYSHOP_WORKER=0 make verify >/dev/null 2>&1; then echo 1; else echo 0; fi",
+      "target": 1,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "spec_criteria_passing",
+      "name": "SPEC cross-cutting criteria + S8 release blockers passing",
+      "kind": "feature",
+      "feature_id": "SPEC",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic SPEC",
+      "target": 8,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e1_foundation_passing",
+      "name": "E1 Foundation criteria passing",
+      "kind": "feature",
+      "feature_id": "E1",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E1",
+      "target": 10,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e2_ingestion_passing",
+      "name": "E2 Ingestion criteria passing",
+      "kind": "feature",
+      "feature_id": "E2",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E2",
+      "target": 8,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e3_exchange_passing",
+      "name": "E3 Exchange criteria passing",
+      "kind": "feature",
+      "feature_id": "E3",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E3",
+      "target": 18,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e4_store_agent_passing",
+      "name": "E4 Store agent & sellers criteria passing",
+      "kind": "feature",
+      "feature_id": "E4",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E4",
+      "target": 14,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e5_merchant_passing",
+      "name": "E5 Merchant criteria passing",
+      "kind": "feature",
+      "feature_id": "E5",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E5",
+      "target": 10,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e6_trust_passing",
+      "name": "E6 Trust & verification criteria passing",
+      "kind": "feature",
+      "feature_id": "E6",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E6",
+      "target": 20,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e7_buyer_passing",
+      "name": "E7 Buyer criteria passing",
+      "kind": "feature",
+      "feature_id": "E7",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E7",
+      "target": 9,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    },
+    {
+      "id": "e8_proofs_passing",
+      "name": "E8 Fixtures & proofs criteria passing",
+      "kind": "feature",
+      "feature_id": "E8",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E8",
+      "target": 6,
+      "direction": "maximize",
+      "tolerance": 0,
+      "timeout": 2400
+    }
+  ]
 }
