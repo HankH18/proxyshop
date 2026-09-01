@@ -254,6 +254,29 @@ Use the explicit long option (not `-M0`) so a repo-level `diff.renames` setting 
 
 ### 7. `git-guard` is fully disarmed by a two-line command, and by any git op that is the first command in an `if`/`for`/`while` body
 
+> **[DISPUTED — DOES NOT REPRODUCE, cycle 1] Do not implement this fix.** Two independent
+> parties re-ran this against the live hook and every shape this entry names is **BLOCKED**.
+> Orchestrator's runs, from the primary checkout:
+> ```
+> git status \n git stash                                    exit=2 BLOCKED
+> cd /tmp \n git stash                                       exit=2 BLOCKED
+> set -e \n cd … \n npm run build \n git checkout -- .      exit=2 BLOCKED   (destructive LAST)
+> if true; then git stash; fi                                exit=2 BLOCKED   (#7's own if-body case)
+> for i in 1 2; do git reset --hard; done                    exit=2 BLOCKED   (#7's own for-body case)
+> ```
+> And it does **not** over-block, so the mechanism is genuinely discriminating rather than
+> crudely token-scanning: `echo "do not run git stash here"` and `grep -rn "git stash" docs/`
+> both return **exit 0**.
+>
+> `segments()` already handles newlines and compound-command bodies correctly. The proposed
+> patch (split on `\n`, force a `;` break per line) would solve a non-problem **and add
+> false-positive surface to a hot path** — a guard that starts blocking legitimate commands is
+> how agents learn to route around it.
+>
+> **The newline-shaped bypass that DOES exist is H-30 below.** Fix that instead.
+
+
+
 **Where:** `hooks/git-guard.py:100-102` (`is_operator`) and `:115-129` (`segments` — splits only on tokens made entirely of `;|&()<>`; shlex treats `\n` as plain whitespace, so a multi-line command collapses into **one** argv list); `:62` (`WRAPPERS`) and `:132-153` (`git_args_of` — `break`s at the first token that is neither an env-assignment nor a wrapper, so a segment starting with `then`/`do`/`else`/`{` yields `prog = "then"` and returns `None`).
 
 **Repro (mine, live hook, unmodified):**
@@ -505,6 +528,21 @@ prevent.
 **Proposed fix:** capture a structured `path` / `test` field at `escalate` time rather than
 parsing prose out of `subject` later. Minimal stopgap: match on `subject.split("::")[0]`.
 
+## THREE INDEPENDENT PATHS TO A FALSE "ALL TARGETS MET" — fix all three, not one
+
+`analyze` can report green against something it never verified by **three separate mechanisms**,
+each invisible to a reader of the other two. Fixing one does not close the class:
+
+1. **MUST FIX #1 above** — it scores a cycle with **no rows**, silently reusing a metric's last
+   good reading for a cycle in which it was never measured.
+2. **H-2 below** — it scores rows produced against a **tampered harness**, because neither
+   `measure` nor `analyze` ever calls `_verify_quiet`.
+3. **H-3 below** — it scores rows whose **`error` column is stale**, computed against a target
+   a later amendment moved.
+
+All three end in the same place: a durable artifact asserting a number nobody verified, and a
+`resume` that endorses it the next morning.
+
 ## H-2 — `measure` and `analyze` never check harness integrity [VERIFIED-HERE]
 
 **Where:** `swarmloop.py` — `_verify_quiet` is called at exactly two sites, `:1611` inside
@@ -665,6 +703,17 @@ and 16 GB of bootstrapped scratch worktrees** before the user stopped it.
 The finders were worth their cost (35 findings, several the builders missed). The refute wave
 was the waste: three independent skeptics per `low`-severity docstring complaint.
 
+**The scaling law is disk, not context.** A bootstrapped worktree costs ~1 GB here (`.venv`
+329 MB + `node_modules` 625 MB) because `bootstrap.sh` correctly refuses to share a root venv.
+An unbounded rung 2 therefore scales as **agents x 1 GB**: 11 scratch trees, 16 GB, and the
+teardown `rm -rf` timed out at 2 minutes. Across `SKILL.md` and all six references the strings
+`GB`, `du` and `df` appear **zero** times — there is no disk budget and no pre-flight check.
+
+**The highest-leverage fix is making "does this lens need to EXECUTE?" an explicit question.**
+Most auditing lenses can read a branch through `git show` and need no tree at all; only
+sabotage and integration lenses need a bootstrapped worktree. That alone would have cut 11
+scratch trees to two or three.
+
 **Rule for next time:** severity-gate refutation (3 skeptics for `critical`, 1 for `high`,
 orchestrator triage for `medium`/`low`), cap findings-per-lens, and **log what was dropped** —
 the authoring guidance warns against silent caps, and bounding nothing at all is the opposite
@@ -690,16 +739,74 @@ audited — it caught a test failing mid-write."
 and treat a completion notification as "may still be moving" until the worktree is clean and
 the tip is stable.
 
-## Peer-reported, not yet independently reproduced
+## H-27 — `git-guard` never reads the payload's `cwd`, so a worker can destructively check out its own files [VERIFIED-HERE]
 
-- **`git-guard` never reads `data.get("cwd")` from the PreToolUse payload** `[REPORTED]`, so
-  `is_commit_ish` and `os.path.lexists` resolve from the session's root rather than the
-  command's. A worker inside a worktree running `git checkout <file>` on a file that exists
-  only there resolves as "not a path" and is allowed. If true this is a real hole in the
-  isolation the whole wave depends on, and it is a one-line fix.
-- **The `PreToolUse` matcher is `"Bash"` only** `[REPORTED]`, so `Edit`/`Write` against a
-  frozen test is not hooked at all. Consistent with H-4, which observed `Edit` succeeding
-  where Bash was refused — though that block came from the classifier, not the guard.
+**Where:** `git-guard.py` `_main` (~:892-901) never reads `data.get("cwd")`; `is_commit_ish`
+and `os.path.lexists` (~:658) resolve against the **hook process's** cwd — the session root —
+not the directory the command actually runs in.
+
+**Differential, reproduced here.** The payload is byte-identical in all three runs and always
+declares `cwd` = the T-010 worktree. Target `packages/contracts/__init__.py` exists in that
+worktree and **not** in the primary checkout:
+
+```
+A. hook process cwd = PRIMARY   (file absent there)  -> exit 0   ALLOWED
+B. hook process cwd = WORKTREE  (file present)       -> exit 2   BLOCKED
+control: `git checkout conftest.py` (present in BOTH), from PRIMARY -> exit 2  BLOCKED
+```
+
+**A is what actually happens.** The control is the decisive part: a file present in both trees
+IS blocked from the primary, so the rule works and A's allow is a **failed classification**,
+not a missing rule — the operand reads as a ref rather than a pathspec because the file is not
+where the hook is looking.
+
+**Impact:** a worker inside its worktree can run a destructive pathspec checkout on **any file
+it created** — the majority of its own output on a task branch — and the guard waves it
+through. This is a hole in the isolation the entire wave design rests on.
+
+**Fix:** `os.chdir(data["cwd"])` (guarded) before evaluating, or thread cwd through `_git_run`
+and `lexists`. One line either way.
+
+## H-28 — the `PreToolUse` matcher is `"Bash"`-only, and the guard self-exempts too [VERIFIED-HERE]
+
+Registration in the repo's `.claude/settings.local.json` is `matcher='Bash'`, and the guard's
+own behaviour on a payload carrying `git stash`:
+
+```
+tool_name=Bash          exit=2  BLOCKED
+tool_name=Edit          exit=0  ALLOWED
+tool_name=Write         exit=0  ALLOWED
+tool_name=NotebookEdit  exit=0  ALLOWED
+```
+
+Belt **and** braces in the wrong direction: the matcher never routes a non-Bash tool to the
+guard, and the guard would pass it anyway (`:893`, `tool not in (None, "Bash")`).
+
+**This is a different layer from H-4.** H-4 is the auto-mode classifier blocking a Bash *write*
+into `.swarm-loop/acceptance/` while `Edit` on the same file succeeded. Same blind spot,
+opposite directions — which is why the pair is more informative than either alone:
+**protected-path enforcement against a non-Bash tool is entirely post-hoc via `verify`.**
+
+## H-29 — nothing pins a branch tip at collection, and three tips moved mid-wave [VERIFIED-HERE]
+
+`check-branch --branch <name>` resolves the ref **live**, so no record exists of which SHA a
+collection decision was made against. Three separate moves this wave:
+
+| branch | moved | caught by |
+|---|---|---|
+| T-011 | `edb1845` -> `50af7b1`, under an in-flight review | a commit count looking wrong |
+| T-011 | `50af7b1` -> `7a4d9e8`, under the orchestrator's collection | commit count |
+| T-013 | 7 -> 10 commits under collection, the new ones including the money-bug fix | commit count |
+
+Every one was caught by eyeballing a count, not by any mechanism.
+
+**Compounds directly with H-12:** unbounded verification dispatched at an unpinned ref is how
+agents get spent auditing a tree that no longer exists — exactly what happened to the T-013
+lenses.
+
+**Fix:** record the SHA at collection and have `check-branch` print and pin it; re-check the
+tip before dispatching verification; treat a completion notification as "may still be moving"
+until the worktree is clean and the tip is stable.
 
 ## Housekeeping
 
@@ -707,3 +814,249 @@ the tip is stable.
 It needs a curation pass — merge duplicates and promote anything durable and
 project-agnostic into this file or `LEARNED.md` — before it degrades the packets it is
 injected into.
+
+---
+
+# FOLDED FROM `learnings.md` — actionable harness, gate and measurement items
+
+`learnings.md` had accumulated 35 entries, over the ~30 ceiling `SKILL.md` sets, and had
+become a mixture of two different things: *how the swarm is run* (which is what that file is
+for) and *defects and design rules for the harness* (which belong here). The actionable half
+is below; `learnings.md` has been cleared of it and now holds process habits only.
+
+Each entry keeps the evidence that motivated it, because a rule without its incident gets
+re-litigated by the next reader.
+
+## H-15 — the frozen acceptance suite must be hermetic and lazily-importing
+
+Tests that import product code at **module scope** turn every unmet goal into a collection
+error, which the runner cannot distinguish from a broken measuring stick. Import **inside the
+test function**, and cut the frozen suite off from the project's root conftest
+(`--confcutdir`) so no worker's fixture can reach the goals.
+
+*Status: implemented in this run's suite. Recorded so a future harness build does not
+rediscover it — this is the property that makes an unbuilt feature read as a test failure
+rather than as a broken scorer.*
+
+## H-16 — smoke the metric runner against synthetic pass/fail/skip/missing cases before freezing
+
+Five minutes with four throwaway tests proved three things the regression depends on and none
+of which are visible by reading the code: **skipped is not passed**; a missing epic fails
+loudly with empty stdout rather than returning 0; and lazy-import failures count as ordinary
+test failures. Freeze locks the commands, so a runner whose failure modes were never exercised
+is locked in with them.
+
+## H-17 — add an explicit "two lanes that share a surface, in one process" step to the integration gate
+
+`make verify` self-deadlocked for **600 seconds** the moment two lanes each took a
+session-scoped `fcntl.flock` inside one process. Every individual ticket's verify passed; the
+defect existed only in the pair, and mid-run it detonates looking like a hang — the worst
+possible shape to diagnose.
+
+**No per-ticket gate can see this class.** Treat single-ticket green as saying nothing about
+it. Related and still live: the repo pins `--timeout=300` while the Neo4j flock's own timeout
+is 600s, so a contended lock surfaces as a confusing `pytest-timeout` at `neo4j_lock.py`
+instead of the legible `Neo4jLockTimeout` the lock was written to produce.
+
+## H-18 — record passed AND skipped beside every binary gate reading
+
+With the compose stack down, `make verify` is green at **95 passed / 15 skipped**, and all 15
+skipped are the `@pytest.mark.docker` datastore tests — exactly the layer the gate looks like
+it is proving, and where four of the eight T-000 defects lived. `build_succeeds` reads **1**
+either way. Skips are silent; the number is not.
+
+**Generalises H-8:** a gate's reading is uninterpretable without knowing what it did not run.
+Record passed/skipped/deselected beside every binary gate, and bring dependencies up before any
+measurement sweep.
+
+## H-19 — a shortcut in the measuring apparatus that is forgeable buys nothing; delete it
+
+Report-reuse (`--write-report` / `--from-report`) was built to amortize twelve metrics over one
+suite pass. Two independent verifiers then drove both the pass-rate metric and its companion
+count to target from a **one-line, worker-written JSON file** while `verify` still reported the
+harness intact throughout. Hashing the frozen directory into the report does not close it —
+workers can read that directory and compute any hash they must match.
+
+Measured cost of doing it honestly: the eleven acceptance-runner invocations take **9.2 s** and
+`make verify` takes **8 s**, so the full twelve-metric sweep is ~17 s. The shortcut bought
+nothing. Settled as D43; **do not re-propose it.**
+
+## H-20 — report harness hermeticity as PARTIAL and name the residual, never as sealed
+
+Three metric exploits were closed in the frozen runner (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`,
+`-o pythonpath=`, pinned discovery patterns). **The fourth is open and structural:** product
+code imported by the suite runs in the scorer's own process and can tamper with its in-process
+state. That is inherent to any in-process black-box suite and cannot be hardened away — only
+moved (subprocess-per-test) at a cost not paid.
+
+**A harness described as sealed stops being audited; one described as partial keeps being
+audited at exactly the seam that is still open.** Every cycle report must say PARTIAL.
+
+## H-21 — gate shared-conftest changes with a repo-wide collect, not the touched directory
+
+A **duplicate fixture name** killed an entire test directory at conftest-import time — taking
+already-merged tickets' tests with it. Shared conftest changes are integration changes. Gate
+them with `pytest --collect-only -q` across every test root, and treat any collection *error*
+as a veto, not just a count change.
+
+## H-22 — `uv sync --frozen` exits 0 against a changed manifest
+
+A dependency addition became a **silent no-op**: the command succeeded, the environment did not
+match the manifest, and nothing said so. Never take a package manager's exit code as proof the
+environment matches the manifest — **assert the effect** (the module imports; the version is the
+pinned one).
+
+*Fixed in this run's `scripts/bootstrap.sh`, which uses `--locked` (which fails loudly when the
+lock no longer matches the manifests) and then proves the venv did not escape the worktree.
+Recorded because `--frozen` is the more obvious flag and the next author will reach for it.*
+
+## H-23 — a gate exemption no tracked file exercises is not a gate
+
+`.importlinter`'s `** -> redis.exceptions` carve-out fixed a break that had blocked four
+downstream tickets — but **nothing in the repo imported `redis.exceptions`**, so reverting the
+fix to the broken single-star form still passed. The regression would have landed on whichever
+ticket first wrote the legal code.
+
+**Every rule with a deliberate carve-out needs a committed file that uses the carve-out.**
+*Closed this run: T-011 shipped `apps/trust/src/ledger/errors.py`, which legally imports
+`redis.exceptions`, plus a test narrowing a copy of `.importlinter` to the single-star form and
+asserting non-zero exit. Before that file existed the single-star config reported 0 broken.*
+
+## H-24 — quote the NEGATIVE half of a verified decision exactly, and re-derive the positive half
+
+D5 was verified live and still worded imprecisely. "Schema-level `USAGE` only" grants **name
+resolution, not row access**, so a ticket following it literally grants `USAGE` and then fails
+every read with `permission denied for table`. The part the decision actually proved — that
+`sealed` and `vault` are unreachable — is exact and load-bearing; the part it *summarised* is
+not.
+
+**A decision verified in one direction has not been verified in the other.** Pairs with H-10:
+between them, a `[verified]` tag needs both an executed artifact and a statement of which
+direction the execution actually covered. *T-011 reproduced this exactly — applying migrations
+0001-0003 without the object grants gives `InsufficientPrivilege: permission denied for table
+commerce_events`.*
+
+## H-25 — regenerate every DERIVED artifact as part of the amendment that invalidates it
+
+`public-surface.md` is generated by AST-parsing the frozen suite and its blocks are pasted into
+task packets as the naming contract. It was generated at 103 tests; amendment 1 took the suite
+to 120 and nothing regenerated it. Its T-010 block still described a **five-dimension**
+`TrustSnapshot` where the frozen payload asserts **six**.
+
+**The failure is silent and in the worst direction:** a worker following the stale block builds
+the right behaviour under the wrong name, its test keeps raising `ModuleNotFoundError` /
+`AttributeError`, and at baseline that is indistinguishable from "not built yet" — so the goal
+stays red for the rest of the run with nothing to point at.
+
+**Make regeneration of derived artifacts part of `freeze --amend`**, or the amendment silently
+poisons every packet written afterwards.
+
+## H-26 — a static text scan is weaker than a live observation, and the frozen one may be the static one
+
+The frozen S7 grant test skips any SQL statement not containing the token `exchange`, so
+`GRANT USAGE ON SCHEMA sealed TO PUBLIC` — which every role inherits — is never inspected, and
+the assertion still reads `granted_schemas == {"ledger","app"}`. A release blocker defeated by a
+grant the test does not look at.
+
+**Where a frozen test parses text to infer a runtime property, expect the inference to have a
+hole.** Its green is evidence about the parse, not about the system. Prefer the ticket's own
+live assertion as the real guarantee. *Ruled ESC-004, no amendment: `db/migrations/**` is one
+ticket's exclusive scope, its 0004 revokes from PUBLIC, and it shipped a live test observing
+real ACLs — strictly stronger than the static scan it substitutes for.*
+
+## Already recorded above — removed from `learnings.md` as duplicates
+
+| learnings entry | now lives at |
+|---|---|
+| Measure every ticket's declared verify command before dispatch | **H-7** |
+| Attribute frozen-test results per ticket, in the branch's own worktree | **H-6** |
+| `[verified]` must mean an executable artifact was executed | **H-10** |
+| A worker's shared-document finding describes its branch point | **H-13** |
+| Ask what the per-ticket gate deselects, not just what the suite skips | **H-8** |
+
+One entry was moved to `decisions.md` instead of here, being a project fact rather than a
+harness one: Neo4j rescales cosine as `(1 + cos) / 2`, so an orthogonal vector scores ≈ 0.5
+rather than 0.0 — now recorded in **D6** alongside the corrected index statement, where every
+retrieval consumer will read it.
+
+## H-30 — a single >20 KB token fails the guard open for the WHOLE command [VERIFIED-HERE]
+
+**Where:** `git-guard.py:903-905`, the oversized-token bailout.
+
+**Reproduced here:**
+```
+git status \n echo <20001 A's> \n git stash        ->  exit 0   ALLOWED
+```
+
+The oversized token does not need to be anywhere near the destructive op. **One long word
+anywhere in the command disarms the guard for every segment of it** — a base64 blob, minified
+JSON, a data URI, a long inline heredoc body, a pasted lockfile fragment. All are ordinary
+things an agent emits.
+
+This is the real version of what pre-dispatch MUST FIX #7 was reaching for, and it is
+strictly worse: #7's shapes are all caught, this one is not, and it is silent.
+
+**Same class, also confirmed:** `$'…'` ANSI-C quoting raises in `shlex` and fails open; and
+heredoc bodies are allowed **by design** (`bash <<'EOF' git reset --hard EOF` returns exit 0),
+because the loop's own dispatch writes packets by heredoc whose text quotes `git stash`.
+
+**Fix:** drop only the offending token or segment and evaluate the rest, rather than bailing
+on the entire command.
+
+## H-31 — `manifest.json` is an unauthenticated trust root [VERIFIED-HERE, framing narrowed]
+
+**Confirmed here:** the manifest hashes **16 named files**; `manifest.json` is **not among
+them**, and the object carries **no `protected_paths` key** at all. So the file that defines
+what "frozen" means is not itself covered by the mechanism it defines.
+
+The attack is one step: weaken a frozen test, recompute that one hash into the manifest, and
+`verify` reports "OK — frozen harness intact" indefinitely — no freeze-log line, `amendments`
+unchanged, and `resume` / `status` / `analyze` all endorsing a clean run. **Every
+anti-goalpost defence in this document sits downstream of this one file.**
+
+**Narrowing the peer's framing, because I could not confirm all of it:** `cmd_verify` (`:1280`)
+*does* reference `_commit_with_blob` at `:1337`, so some git anchoring exists in that path.
+What I did confirm is that **`_verify_quiet` — the integrity check `cmd_record` and
+`cmd_resume` actually call — contains zero occurrences of `_commit_with_blob`**. So the
+cheap/automatic path is unanchored even where the explicit one may not be. Someone
+implementing this should read both paths rather than trusting either of our summaries.
+
+**Trap for the implementer, flagged by the peer and worth repeating:** the freeze log's
+`goals.json` hash can never match the manifest's by construction, because `frozen_at` and
+`amendments` are stamped in *after* hashing. A naive reconciliation will report tamper on a
+clean tree.
+
+## H-32 — acceptance-suite MEMBERSHIP is not pinned, only file contents [VERIFIED-HERE]
+
+`manifest.json` hashes 16 **named** files, but `run.py` invokes pytest on
+`str(ACCEPTANCE_DIR)` — **the whole directory**. So the frozen set is closed under
+*modification* and wide open under *addition*.
+
+`acceptance_collected` is `direction: maximize` with target 120. Fifty trivially-green tests in
+a new `test_zz.py` marked `@pytest.mark.epic("E6")` would raise **three metrics at once**:
+`acceptance_collected` past 120, `e6_trust_passing` past 26, and `acceptance_pass_rate`.
+
+The suite's own guard (`test_spec_criteria.py:630`) asserts every test *carries* valid epic and
+ticket markers — it does not assert the **file belongs**. `check-branch` is the only defence
+and it sees branch commits only, so **an auditor or orchestrator working in the primary tree is
+entirely outside it**. That is not hypothetical: this run has had read-only agents in the
+primary tree throughout.
+
+**Fix:** hash the directory *listing* alongside the file contents, and have `verify` fail on an
+unrecognised member — which is what `[ADDED]` reporting already half-does for protected paths.
+
+---
+
+## Tag convention for this file
+
+- `[VERIFIED-HERE]` — reproduced in this repo, with the command and its output recorded.
+- `[REPORTED]` — a peer or worker reported it; not yet independently reproduced. Do not
+  implement from a `[REPORTED]` entry without reproducing it first.
+- `[DISPUTED]` — verified by one party, then **failed to reproduce** by a second. Both
+  reproductions stay in the file with their evidence. See pre-dispatch MUST FIX #7 for the
+  worked example: acting on it would have added false-positive surface to the guard while
+  leaving the real bypass (H-30) open.
+
+Keeping the provenance explicit is what let a disputed entry get caught before a fix shipped.
+Two parties disagreeing in the file, with both reproductions cited, is more useful to whoever
+does the harness work than either claim alone.
