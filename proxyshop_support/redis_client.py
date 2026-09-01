@@ -171,12 +171,24 @@ def worker_redis(url: str | None = None, *, worker: int | None = None) -> Worker
 
     Args:
         url: Redis URL. Defaults to ``$REDIS_URL``, then ``redis://localhost:6379``.
-            Any database component in the URL is overridden by the per-worker index.
+            Any database component in the URL is overridden by the per-worker index —
+            see the implementation note below; this is enforced, not assumed.
         worker: worker index. Defaults to ``$PROXYSHOP_WORKER``.
 
     Returns:
         A :class:`WorkerRedis` bound to logical DB ``worker`` with the ``w{worker}:``
         key prefix already applied. ``decode_responses`` is on, so commands return ``str``.
+
+    Implementation note — why the ``db`` is written *after* ``from_url``:
+        redis-py's ``ConnectionPool.from_url`` parses the URL into ``url_options`` and then
+        does ``kwargs.update(url_options)``, so **the URL wins over an explicit ``db=``
+        keyword**. Passing ``db=redis_db_index(worker)`` to ``from_url`` therefore does
+        nothing at all whenever ``$REDIS_URL`` carries a database component (and the
+        shipped one used to: ``redis://localhost:6379/1``), silently landing every worker
+        on the same logical DB — where ``redis_client``'s ``FLUSHDB`` wipes its siblings.
+        The pool's ``connection_kwargs`` are the single place a connection reads ``db``
+        from, and no connection has been created yet at this point, so overwriting the key
+        here is both authoritative and safe.
     """
     url = url or os.environ.get("REDIS_URL") or "redis://localhost:6379"
     # redis-py types `from_url` as returning the base `Redis`, but it is a classmethod and
@@ -185,12 +197,12 @@ def worker_redis(url: str | None = None, *, worker: int | None = None) -> Worker
         WorkerRedis,
         WorkerRedis.from_url(
             url,
-            db=redis_db_index(worker),
             decode_responses=True,
             socket_connect_timeout=2.0,
             socket_timeout=5.0,
         ),
     )
+    client.connection_pool.connection_kwargs["db"] = redis_db_index(worker)
     client._prefix = key_prefix(worker)
     return client
 
