@@ -611,34 +611,83 @@ def test_the_lookup_indexes_cover_the_predicates_the_candidate_query_filters_on(
 #: because the prohibition is about what the library is *able* to do, not about what today's
 #: call sites happen to pass.
 _FREE_TEXT_MATCH_PATTERNS = (
-    r"(?i)canonical_name\s*(=~|CONTAINS|STARTS\s+WITH|ENDS\s+WITH)",
-    r"(?i)\b(WHERE|AND|OR)\s+\w*\.?canonical_name\s*=",
+    # `p.canonical_name <op> …`, tolerating one closing paren so a folding wrapper
+    # (`toLower(p.canonical_name) = $q`) is caught rather than waved through.
+    r"(?i)\.canonical_name\s*\)?\s*(=~|=|<>|IN\b|CONTAINS|STARTS\s+WITH|ENDS\s+WITH)",
+    # Any string-folding function applied to the name — the usual smuggling route.
+    r"(?i)\b(toLower|toUpper|trim|replace|substring|left|right|split)\s*\(\s*\w*\.canonical_name",
+    # Inline map match: `(p:Product {canonical_name: …})`, `(v:Variant {name: …})`.
     r"(?i):Product\s*\{[^}]*canonical_name",
     r"(?i):Variant\s*\{[^}]*\bname\b",
+    # A full-text index over names would be the same prohibition by another route.
+    r"(?i)db\.index\.fulltext",
 )
+
+#: Name-matching Cypher this scan must reject. Kept as data so the *detector* is tested,
+#: not merely run: a regex tripwire that catches nothing is indistinguishable from a passing
+#: test, and the first version of this list quietly let four of these nine through.
+_FREE_TEXT_ATTACKS = (
+    "MATCH (p:Product) WHERE p.canonical_name CONTAINS $q RETURN p",
+    "MATCH (p:Product) WHERE p.canonical_name = $q RETURN p",
+    "MATCH (p:Product) WHERE p.canonical_name =~ $rx RETURN p",
+    "MATCH (p:Product) WHERE p.canonical_name IN $names RETURN p",
+    "MATCH (p:Product) WITH p WHERE p.canonical_name <> '' RETURN p",
+    "MATCH (p:Product) WHERE toLower(p.canonical_name) = $q RETURN p",
+    "MATCH (p:Product {canonical_name: $q}) RETURN p",
+    "MATCH (v:Variant {name: $q}) RETURN v",
+    "CALL db.index.fulltext.queryNodes('pname', $q) YIELD node RETURN node",
+)
+
+
+def _free_text_offenders(source: str, label: str) -> list[str]:
+    """Every free-text name match in ``source``, as ``label:line: matched-text``."""
+    found = []
+    for pattern in _FREE_TEXT_MATCH_PATTERNS:
+        for match in re.finditer(pattern, source):
+            found.append(
+                f"{label}:{source[: match.start()].count(chr(10)) + 1}: {match.group(0)!r}"
+            )
+    return found
+
+
+@pytest.mark.parametrize("attack", _FREE_TEXT_ATTACKS)
+def test_the_free_text_detector_actually_detects(attack: str) -> None:
+    """The tripwire is armed: every known way to match a product by name trips it.
+
+    Without this, ``test_no_graph_module_matches_products_by_free_text_name`` would pass
+    just as happily against a regex list that matches nothing at all.
+    """
+    assert _free_text_offenders(attack, "attack"), f"detector missed: {attack}"
 
 
 def test_no_graph_module_matches_products_by_free_text_name() -> None:
     """DESIGN: "never match products by free-text name alone."
 
-    Enforced by scanning the shipped Cypher rather than by convention. ``canonical_name`` is
-    fine to *return*; it is not fine to match on. If a future ticket adds a name lookup
-    "just for debugging", this fails in that ticket's gate.
+    ``canonical_name`` is fine to *return*; it is not fine to match on. If a future ticket
+    adds a name lookup "just for debugging", this fails in that ticket's gate.
+
+    Honest about what this is: a **tripwire over the shipped Cypher**, not a proof. A
+    determined author can still assemble a name query from string fragments at runtime, and
+    no static scan over source text will see that. The load-bearing guarantee is the one
+    below — the retrieval API has no parameter that could carry a name to match — and this
+    scan exists to catch the ordinary mistake before it reaches review.
     """
     offenders = []
     for path in sorted(GRAPH_SRC.glob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        for pattern in _FREE_TEXT_MATCH_PATTERNS:
-            for match in re.finditer(pattern, source):
-                line = source[: match.start()].count("\n") + 1
-                offenders.append(f"{path.name}:{line}: {match.group(0)!r}")
+        offenders += _free_text_offenders(path.read_text(encoding="utf-8"), path.name)
     assert not offenders, "free-text product matching is forbidden by DESIGN:\n" + "\n".join(
         offenders
     )
 
 
 def test_the_candidate_query_exposes_no_name_matching_parameter() -> None:
-    """There is no ``name=``/``name_contains=`` knob, so a caller cannot ask for one."""
+    """The real enforcement: a caller cannot *ask* for a name match.
+
+    ``query_text`` reaches the database only as an embedding vector, and every other
+    parameter is a structured facet resolved through a content-hashed ID. There is no knob
+    that carries a name through to Cypher, so name matching is not a discipline the callers
+    have to keep — it is not reachable.
+    """
     parameters = set(inspect.signature(candidate_products).parameters)
     assert parameters & {"name", "canonical_name", "name_contains", "text_match"} == set()
     assert "query_text" in parameters and "attribute_filters" in parameters
@@ -1258,6 +1307,101 @@ def test_the_query_filters_by_category_ingredient_and_brand(
         c.product_id
         for c in candidate_products(session, query_text=PROBE_A, brand="Northlight", limit=10)
     } == {"prod-serum-c", "prod-spf-daily"}
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+@pytest.mark.parametrize(
+    ("filter_kwargs", "expected"),
+    [
+        ({"value_bool": False}, {"prod-cream-night"}),
+        ({"value_bool": True}, {"prod-serum-c", "prod-spf-daily"}),
+        ({"equals_number": 0}, set()),
+        ({"min_number": 0}, set()),
+    ],
+)
+def test_a_falsy_filter_component_is_still_a_filter(
+    graph_seeded_catalog: dict[str, Any], filter_kwargs: dict[str, Any], expected: set[str]
+) -> None:
+    """``False``, ``0`` and ``""`` are *values*, not "unset" — the classic falsy-vs-None bug.
+
+    ``AttributeFilter.as_parameter`` distinguishes them with ``is None`` and the Cypher
+    guards are ``f.X IS NULL OR …``. Written with a truthiness test on either side,
+    ``value_bool=False`` would silently degrade into "no fragrance filter at all" and the
+    query would return the fragranced cream to a buyer who asked for fragrance-free —
+    a wrong answer that no error message would ever mention.
+    """
+    session = graph_seeded_catalog["session"]
+    key = "fragrance_free" if "value_bool" in filter_kwargs else "spf"
+    results = candidate_products(
+        session,
+        query_text=PROBE_A,
+        attribute_filters=[AttributeFilter(key, **filter_kwargs)],
+        limit=10,
+    )
+    returned = {c.product_id for c in results}
+    if key == "spf":
+        # Only prod-serum-c carries spf, and it carries 0.0 — so both `equals_number=0` and
+        # `min_number=0` must select exactly it. A truthiness bug would return all three.
+        assert returned == {"prod-serum-c"}
+    else:
+        assert returned == expected
+    assert returned != {"prod-serum-c", "prod-cream-night", "prod-spf-daily"}, (
+        "the filter was ignored — a falsy component was treated as unset"
+    )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_vector_path_recall_is_bounded_by_the_index_fetch_and_the_structured_path_is_not(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """A known, documented limit of post-filtering a vector top-k — pinned, not hidden.
+
+    ``db.index.vector.queryNodes`` takes a ``k``, not a predicate, so the structured filters
+    are applied *after* the index has already chosen its top ``limit * oversample`` rows. A
+    product that satisfies the filter but ranks below that cut is not returned. With the
+    default oversample of 8 this is invisible at realistic catalog sizes, and with a
+    deliberately tiny fetch it is provable.
+
+    The mitigation is in the library, not in a comment: a highly selective structured query
+    can be issued with **no vector at all**, and that path has no top-k bound. This test
+    asserts both halves so a future reader knows which tool to reach for.
+    """
+    seed_products(
+        graph_schema_session,
+        [
+            {
+                "product_id": f"bulk-{i:03d}",
+                "canonical_name": f"Bulk Product {i}",
+                "attributes": ([AttributeValue("rare", value_bool=True)] if i == 29 else []),
+            }
+            for i in range(30)
+        ],
+        source=graph_source,
+    )
+    reembed_products(graph_schema_session, HashEmbedding())
+    rare = [AttributeFilter("rare", value_bool=True)]
+
+    # The bound: a fetch of one row can return at most one row, whatever matches below it.
+    tiny = candidate_products(
+        graph_schema_session, query_text=PROBE_A, attribute_filters=rare, limit=1, oversample=1
+    )
+    assert len(tiny) <= 1
+
+    # The structured path has no top-k, so selectivity alone finds it, every time.
+    assert [
+        c.product_id
+        for c in candidate_products(graph_schema_session, attribute_filters=rare, limit=10)
+    ] == ["bulk-029"]
+
+    # And at this catalog size the default oversample already covers the whole catalog.
+    assert [
+        c.product_id
+        for c in candidate_products(
+            graph_schema_session, query_text=PROBE_A, attribute_filters=rare, limit=10
+        )
+    ] == ["bulk-029"]
 
 
 @pytest.mark.docker

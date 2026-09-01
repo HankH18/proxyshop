@@ -33,6 +33,16 @@ from .schema import VECTOR_INDEX_NAME
 #: How many rows to pull out of the vector index per requested result before the structured
 #: filters are applied. A product excluded by an attribute filter still occupies a slot in
 #: the index's top-k, so asking for exactly ``limit`` would under-fill any filtered query.
+#:
+#: KNOWN BOUND, stated rather than buried. ``db.index.vector.queryNodes`` takes a ``k``, not
+#: a predicate, so this library **post-filters** a vector top-k: a product that satisfies
+#: every structured filter but ranks below ``limit * oversample`` by cosine is not returned.
+#: Raising ``oversample`` widens the window at linear cost; the alternative — filter first,
+#: then rank — is not expressible against Neo4j's vector index at all. For a *highly
+#: selective* structured query (one rare attribute, one ingredient), call
+#: :func:`candidate_products` with **no vector**: the structured path is a plain ``MATCH``
+#: and has no top-k bound. Pinned by
+#: ``test_vector_path_recall_is_bounded_by_the_index_fetch_and_the_structured_path_is_not``.
 DEFAULT_OVERSAMPLE = 8
 
 #: Ceiling on the index fetch, so a large ``limit`` with a large oversample cannot turn a
