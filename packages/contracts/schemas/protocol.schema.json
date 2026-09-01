@@ -1,0 +1,703 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://proxyshop.dev/schemas/protocol.schema.json",
+  "title": "ProxyShopProtocol",
+  "description": "The single JSON Schema bundle for every cross-service protocol object in DESIGN §Interfaces.\n\nThis file is the SOURCE OF TRUTH. `packages/contracts/generated/python/protocol.py` and\n`packages/contracts/generated/ts/protocol.schema.d.ts` are both produced from it by\n`python -m contracts.codegen`; a checked-in drift test re-runs both generators and fails if the\ncommitted output no longer matches. Nothing hand-edits the generated files.\n\nEvery object closes its property set (`additionalProperties: false`). That is what makes R19\nmechanically true: a `weight` key on a hard constraint is a schema error rather than a field that\nrides silently through the exchange, and a seventh trust dimension cannot be smuggled into a\nsnapshot (D53).\n\nTimestamps are `string` + `format: date-time` on the wire and `str` in the generated Python, so\n`model_dump()` is JSON-native and no protocol object needs a coercion pass to be serialized.",
+  "$defs": {
+    "ProvenanceSource": {
+      "title": "ProvenanceSource",
+      "description": "DESIGN §Interfaces `Provenance.source`. Closed: an unknown source is a schema error.\n\nThe first six are HOOK provenances — a store-agent can only mint them by calling a tool hook\n(D40's hook→source table), which is what makes the hosted path checkable. `seller_asserted` is\nthe only source an external agent can assert freely, so it is the only non-hook source, and it\nis rejected outright on the hosted path (R8/S5).",
+      "type": "string",
+      "enum": [
+        "scraped",
+        "pixel_feed",
+        "owner_statement",
+        "envelope_rule",
+        "learned_policy",
+        "network",
+        "seller_asserted"
+      ]
+    },
+    "ConstraintOp": {
+      "title": "ConstraintOp",
+      "description": "R19: the comparison a hard constraint filters with. No regex — an eligibility filter has to be decidable against an attribute value, not against a pattern language.",
+      "type": "string",
+      "enum": ["eq", "lte", "gte", "in", "contains"]
+    },
+    "PreferenceDirection": {
+      "title": "PreferenceDirection",
+      "description": "R19: the direction a preference scores in.",
+      "type": "string",
+      "enum": ["maximize", "minimize", "prefer"]
+    },
+    "EnvelopeActivation": {
+      "title": "EnvelopeActivation",
+      "description": "DESIGN §Interfaces `Envelope.activation`.",
+      "type": "string",
+      "enum": ["shadow", "active", "killed"]
+    },
+    "ShortlistSlotName": {
+      "title": "ShortlistSlotName",
+      "description": "D29 shortlist slot names. These are slot LABELS, not rank-formula terms (D50).",
+      "type": "string",
+      "enum": ["fit", "value", "reliability", "specialist"]
+    },
+    "ClaimVerificationStatus": {
+      "title": "ClaimVerificationStatus",
+      "description": "R18 verification badge. Per D53 neither `unsupported` nor `ambiguous` ever satisfies a hard constraint or counts as verified evidence.",
+      "type": "string",
+      "enum": ["verified", "contradicted", "unsupported", "ambiguous"]
+    },
+    "LedgerEventKind": {
+      "title": "LedgerEventKind",
+      "description": "C11 / D24. The DESIGN §Interfaces enum, extended EXACTLY ONCE here with\n`auction_opened`, `auction_closed`, `offer_integrity`, `blacklisted`, `blacklist_expired`.\nThe redirect path and the Shopify checkout path emit the same kinds; neither invents one.",
+      "type": "string",
+      "enum": [
+        "bid_placed",
+        "shown",
+        "accepted",
+        "code_created",
+        "checkout_redirect",
+        "checkout_pixel",
+        "order_paid",
+        "order_fulfilled",
+        "refund",
+        "feedback",
+        "reconciled",
+        "claim_verified",
+        "policy_event",
+        "auction_opened",
+        "auction_closed",
+        "offer_integrity",
+        "blacklisted",
+        "blacklist_expired"
+      ]
+    },
+    "TrustDimension": {
+      "title": "TrustDimension",
+      "description": "D53: SIX dimensions inside ONE trust system. `catalog_claim_accuracy` carries product-fact\nverification outcomes, which have no honest home among the transaction dimensions — a false\ningredient claim is not a late delivery, and folding it into `feedback_match` would assert that\na buyer reported a mismatch when no buyer has bought anything yet.",
+      "type": "string",
+      "enum": [
+        "price_honored",
+        "discount_honored",
+        "shipped_on_time",
+        "not_returned",
+        "feedback_match",
+        "catalog_claim_accuracy"
+      ]
+    },
+    "ClaimType": {
+      "title": "ClaimType",
+      "description": "D53's typed, exhaustive claim-type vocabulary. The right-hand side of the claim_type→dimension\nmapping lives in `fixtures/manifest.json` (T-080) and is read from there, never inferred by the\ntrust engine — the engine is the thing being graded.",
+      "type": "string",
+      "enum": [
+        "price",
+        "unit_price",
+        "total_price",
+        "discount",
+        "promo_eligibility",
+        "delivery",
+        "shipping_speed",
+        "dispatch_window",
+        "return_policy",
+        "warranty",
+        "ingredients",
+        "compatibility",
+        "nutrition",
+        "specifications"
+      ]
+    },
+    "StoreTier": {
+      "title": "StoreTier",
+      "description": "D28. 0 = catalog-present, no agent, no envelope (always a synthesized list-price bid).\n1 = network-hosted store-agent. 2 = external self-hosted agent behind the signed door.\nSolicitation is tier-aware (R10); ranking is tier-blind (R11).",
+      "type": "integer",
+      "enum": [0, 1, 2]
+    },
+    "BidPath": {
+      "title": "BidPath",
+      "description": "R8/S5: which door a bid arrived through. The dual-path boundary reads exactly these two.",
+      "type": "string",
+      "enum": ["hosted", "external"]
+    },
+
+    "Provenance": {
+      "title": "Provenance",
+      "description": "DESIGN §Interfaces. Source ≡ Provenance: the Neo4j `Source` node carries the same enum in\n`source_class`.\n\n`authority_rank` has DEFINED semantics (D30): 1 is the most authoritative and larger is weaker,\nand `contracts.PROVENANCE_AUTHORITY_RANK` publishes the canonical rank per source so two hooks\ncannot pick different numbers for the same kind of evidence. It is validated as `>= 1` rather\nthan pinned to that table, because a hook may legitimately down-rank a stale observation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "ref", "observed_at", "authority_rank"],
+      "properties": {
+        "source": { "$ref": "#/$defs/ProvenanceSource" },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A pointer to the evidence: a snapshot URI, an envelope commitment path, a pitch span."
+        },
+        "observed_at": { "type": "string", "format": "date-time", "minLength": 1 },
+        "authority_rank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1 = most authoritative; larger is weaker. See contracts.PROVENANCE_AUTHORITY_RANK."
+        }
+      }
+    },
+
+    "ClaimSourceSpan": {
+      "title": "ClaimSourceSpan",
+      "description": "D25: where in a pitch a claim was extracted from, so `VerificationResult.claim_ref` points at something.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pitch_ref", "start", "end"],
+      "properties": {
+        "pitch_ref": { "type": "string" },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "Claim": {
+      "title": "Claim",
+      "description": "DESIGN §Interfaces `Claim`, extended once here per D25.\n\n`claim_id` is a content hash over `(pitch_ref, key, canonicalized value, claim_type)` — stable\nacross re-extraction, which is what makes T-065's idempotency criterion satisfiable. It is\nOPTIONAL on the wire because a hook-minted commitment has no pitch to hash against; compute it\nwith `contracts.claim_id(...)`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value", "provenance"],
+      "properties": {
+        "claim_id": { "type": ["string", "null"] },
+        "key": { "type": "string", "minLength": 1 },
+        "claim_type": {
+          "oneOf": [{ "$ref": "#/$defs/ClaimType" }, { "type": "null" }]
+        },
+        "value": {},
+        "unit": { "type": ["string", "null"] },
+        "source_span": {
+          "oneOf": [{ "$ref": "#/$defs/ClaimSourceSpan" }, { "type": "null" }]
+        },
+        "provenance": { "$ref": "#/$defs/Provenance" }
+      }
+    },
+
+    "Discount": {
+      "title": "Discount",
+      "description": "The discount an Offer carries. `provenance` is optional because the reconciliation path (T-061) compares an accepted offer's discount against a webhook's `discountApplications`, which carry no provenance of their own.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "type": "string", "minLength": 1 },
+        "value": { "type": "number" },
+        "provenance": {
+          "oneOf": [{ "$ref": "#/$defs/Provenance" }, { "type": "null" }]
+        }
+      }
+    },
+
+    "Offer": {
+      "title": "Offer",
+      "description": "DESIGN §Interfaces `Offer` — the PROTOCOL offer, i.e. the priced thing inside a Bid.\n\nD25 names three different objects \"Offer\": this one, the Neo4j `Offer` node (a store's observed\nlisting) and the `app.offers` row. They are distinct. The protocol object's own identifier is\n`bid_offer_id` so a reader never has to guess which one a bare `offer_id` meant.\n\n`expires_at` is what T-032's expiry filter reads, and what `validate_bid` rejects on.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_ref", "unit_price", "total_price"],
+      "properties": {
+        "bid_offer_id": { "type": ["string", "null"] },
+        "product_ref": { "type": "string", "minLength": 1 },
+        "variant_ref": {
+          "type": ["string", "null"],
+          "description": "Cart permalinks are variant-scoped (D25). Optional on the protocol object because the frozen hosted-bid shape predates it; required by the checkout path before a permalink can be minted."
+        },
+        "unit_price": { "type": "number" },
+        "currency": { "type": ["string", "null"] },
+        "discount": {
+          "oneOf": [{ "$ref": "#/$defs/Discount" }, { "type": "null" }]
+        },
+        "commitments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Claim" },
+          "default": []
+        },
+        "total_price": { "type": "number" },
+        "expires_at": { "type": ["string", "null"], "format": "date-time" },
+        "checkout_url": { "type": ["string", "null"] },
+        "delivery_estimate_days": { "type": ["number", "null"] }
+      }
+    },
+
+    "Bid": {
+      "title": "Bid",
+      "description": "DESIGN §Interfaces `Bid`.\n\nThis object is the SOLICITATION shape — what a Tier-1 hosted agent answers `POST /v1/bid-requests`\nwith. It deliberately carries NO signing envelope: a hosted agent never crosses the external\nboundary, so requiring `signer_id`/`key_id`/`issued_at`/`nonce` here would demand a key of an\nagent that has none. The external door's shape is `SignedBidSubmission` (D52).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["auction_id", "store_id", "offer", "claims", "agent_version", "schema_version"],
+      "properties": {
+        "auction_id": { "type": "string", "minLength": 1 },
+        "store_id": { "type": "string", "minLength": 1 },
+        "pitch_ref": { "type": ["string", "null"] },
+        "offer": { "$ref": "#/$defs/Offer" },
+        "claims": { "type": "array", "items": { "$ref": "#/$defs/Claim" } },
+        "message": {
+          "type": ["string", "null"],
+          "description": "Free text. External (Tier-2) agents may send it; it is never a source of claims."
+        },
+        "agent_version": { "type": "string", "minLength": 1 },
+        "signature": { "type": ["string", "null"] },
+        "schema_version": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "SigningEnvelope": {
+      "title": "SigningEnvelope",
+      "description": "D52 / DESIGN §Interfaces. ALL FIVE fields are required on every Bid submitted through the\nexternal door `POST /v1/auctions/{auction_id}/bids`. There is no legacy-tolerant production\npath and no optional-field mode: optionality would leave the public boundary unable to rotate\nkeys, check freshness, or protect against replay — the three reasons the door is signed at all.\n\n`signer_id` is the registered submitting identity (equal to `store_id` for a single-store\nseller, distinct when one seller submits for several). `key_id` selects one of that signer's\nlive keys, so the keyring is `{signer_id: {key_id: secret}}` and a lookup keyed on `key_id`\nalone is wrong. `nonce` is the replay/idempotency key, unique PER SIGNER, never globally.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signer_id", "key_id", "issued_at", "nonce", "schema_version"],
+      "properties": {
+        "signer_id": { "type": "string", "minLength": 1 },
+        "key_id": { "type": "string", "minLength": 1 },
+        "issued_at": { "type": "string", "format": "date-time", "minLength": 1 },
+        "nonce": { "type": "string", "minLength": 1 },
+        "schema_version": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "SignedBidSubmission": {
+      "title": "SignedBidSubmission",
+      "description": "The wire shape of `POST /v1/auctions/{auction_id}/bids`: a `Bid` with the `SigningEnvelope`\nflattened onto it. A submission missing ANY of the five envelope fields is Rejected at the\nexchange boundary with the same finality as a bad signature, before extraction and before\nverification (D52).\n\nThe property set is asserted to be exactly `Bid` ∪ `SigningEnvelope` by a checked-in test, so\nthis definition cannot drift away from the two it composes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "auction_id",
+        "store_id",
+        "offer",
+        "claims",
+        "agent_version",
+        "schema_version",
+        "signer_id",
+        "key_id",
+        "issued_at",
+        "nonce"
+      ],
+      "properties": {
+        "auction_id": { "type": "string", "minLength": 1 },
+        "store_id": { "type": "string", "minLength": 1 },
+        "pitch_ref": { "type": ["string", "null"] },
+        "offer": { "$ref": "#/$defs/Offer" },
+        "claims": { "type": "array", "items": { "$ref": "#/$defs/Claim" } },
+        "message": { "type": ["string", "null"] },
+        "agent_version": { "type": "string", "minLength": 1 },
+        "signature": { "type": ["string", "null"] },
+        "schema_version": { "type": "string", "minLength": 1 },
+        "signer_id": { "type": "string", "minLength": 1 },
+        "key_id": { "type": "string", "minLength": 1 },
+        "issued_at": { "type": "string", "format": "date-time", "minLength": 1 },
+        "nonce": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "HardConstraint": {
+      "title": "HardConstraint",
+      "description": "R19: a hard constraint is an eligibility FILTER — `field`/`op`/`value`, never weighted. The\nclosed property set is the enforcement: a `weight` key is a schema error, not a field the\nranker silently ignores while the buyer believes it was scored.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "op": { "$ref": "#/$defs/ConstraintOp" },
+        "value": {},
+        "unit": { "type": ["string", "null"] }
+      }
+    },
+
+    "Preference": {
+      "title": "Preference",
+      "description": "R19: a preference is a SCORE term — `field`/`direction`/`weight`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "direction", "weight"],
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "direction": { "$ref": "#/$defs/PreferenceDirection" },
+        "weight": { "type": "number" }
+      }
+    },
+
+    "Intent": {
+      "title": "Intent",
+      "description": "DESIGN §Interfaces `Intent` (partner schema adopted, extended).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent_id", "query", "hard_constraints", "preferences", "created_at", "schema_version"],
+      "properties": {
+        "intent_id": { "type": "string", "minLength": 1 },
+        "cluster_id": { "type": ["string", "null"] },
+        "query": { "type": "string" },
+        "category": { "type": ["string", "null"] },
+        "hard_constraints": { "type": "array", "items": { "$ref": "#/$defs/HardConstraint" } },
+        "preferences": { "type": "array", "items": { "$ref": "#/$defs/Preference" } },
+        "ship_to": { "type": ["string", "null"] },
+        "currency": { "type": ["string", "null"] },
+        "budget_band": { "type": ["string", "null"] },
+        "created_at": { "type": "string", "format": "date-time", "minLength": 1 },
+        "schema_version": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "ProfileBuckets": {
+      "title": "ProfileBuckets",
+      "description": "Coarse buckets only. No identity fields ever appear here (R13).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "budget_band": { "type": ["string", "null"] },
+        "category_affinity": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "frequency_tier": { "type": ["string", "null"] },
+        "region": { "type": ["string", "null"] },
+        "first_time": { "type": ["boolean", "null"] }
+      }
+    },
+
+    "BuyerProfile": {
+      "title": "BuyerProfile",
+      "description": "DESIGN §Interfaces `BuyerProfile` — no identity fields; the pseudonym rotates per session.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pseudonym", "buckets"],
+      "properties": {
+        "pseudonym": { "type": "string", "minLength": 1 },
+        "buckets": { "$ref": "#/$defs/ProfileBuckets" }
+      }
+    },
+
+    "BidRequest": {
+      "title": "BidRequest",
+      "description": "DESIGN §Interfaces `BidRequest` — the SOLICITATION body of `POST /v1/bid-requests`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["auction_id", "intent", "profile", "respond_by"],
+      "properties": {
+        "auction_id": { "type": "string", "minLength": 1 },
+        "intent": { "$ref": "#/$defs/Intent" },
+        "profile": { "$ref": "#/$defs/BuyerProfile" },
+        "respond_by": { "type": "string", "format": "date-time", "minLength": 1 }
+      }
+    },
+
+    "ClaimVerification": {
+      "title": "ClaimVerification",
+      "description": "One decided claim inside a VerificationResult.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim_ref", "status", "evidence_refs", "confidence"],
+      "properties": {
+        "claim_ref": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/ClaimVerificationStatus" },
+        "observed_value": {},
+        "evidence_refs": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+
+    "VerificationResult": {
+      "title": "VerificationResult",
+      "description": "DESIGN §Interfaces `VerificationResult`. Records the catalog snapshot and the verifier version at decision time, so a verdict is reproducible against what was actually seen.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pitch_ref", "catalog_snapshot", "claims", "verified_claim_ratio", "verifier_version"],
+      "properties": {
+        "pitch_ref": { "type": "string", "minLength": 1 },
+        "catalog_snapshot": { "type": "string", "minLength": 1 },
+        "claims": { "type": "array", "items": { "$ref": "#/$defs/ClaimVerification" } },
+        "verified_claim_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "verifier_version": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "ShortlistSlot": {
+      "title": "ShortlistSlot",
+      "description": "One shortlist slot. `provenance_labels` is an OPEN list of strings, not a closed enum: the\nexchange supplies the buyer-facing labels and the buyer app renders what it was given (D30).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot", "bid_ref", "fit_score", "trust_summary", "provenance_labels"],
+      "properties": {
+        "slot": { "$ref": "#/$defs/ShortlistSlotName" },
+        "bid_ref": { "type": "string", "minLength": 1 },
+        "fit_score": { "type": "number" },
+        "trust_summary": { "type": "object" },
+        "provenance_labels": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "Shortlist": {
+      "title": "Shortlist",
+      "description": "DESIGN §Interfaces `Shortlist`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["auction_id", "slots"],
+      "properties": {
+        "auction_id": { "type": "string", "minLength": 1 },
+        "slots": { "type": "array", "items": { "$ref": "#/$defs/ShortlistSlot" } }
+      }
+    },
+
+    "LossWindow": {
+      "title": "LossWindow",
+      "description": "The aggregation window. Epoch seconds or an RFC-3339 instant; the producer picks one and the reader is told which by the type.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": ["number", "string"] },
+        "end": { "type": ["number", "string"] }
+      }
+    },
+
+    "LossReasons": {
+      "title": "LossReasons",
+      "description": "Why bids in this cluster lost, by count. Closed: a new reason is a schema change, not a new dict key that the merchant UI silently drops.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fit": { "type": "integer", "minimum": 0, "default": 0 },
+        "price": { "type": "integer", "minimum": 0, "default": 0 },
+        "commitments": { "type": "integer", "minimum": 0, "default": 0 },
+        "trust": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+
+    "ClusterLoss": {
+      "title": "ClusterLoss",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cluster_id", "lost", "reasons", "unmet_criteria"],
+      "properties": {
+        "cluster_id": { "type": "string", "minLength": 1 },
+        "lost": { "type": "integer", "minimum": 0 },
+        "reasons": { "$ref": "#/$defs/LossReasons" },
+        "unmet_criteria": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "LossReport": {
+      "title": "LossReport",
+      "description": "DESIGN §Interfaces `LossReport` — aggregated and delayed. No amounts, no rival identities: the closed property set is what keeps a competitor's price out of a merchant's dashboard.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "window", "by_cluster"],
+      "properties": {
+        "store_id": { "type": "string", "minLength": 1 },
+        "window": { "$ref": "#/$defs/LossWindow" },
+        "by_cluster": { "type": "array", "items": { "$ref": "#/$defs/ClusterLoss" } }
+      }
+    },
+
+    "LedgerEvent": {
+      "title": "LedgerEvent",
+      "description": "DESIGN §Interfaces `LedgerEvent` — append-only, hash-chained (`prev_hash`).\n\n`payload` is an OPEN mapping on purpose. Every kind carries a different body — a reconciliation\ncompares `discountApplications` from a webhook against a protocol-shaped `discount`, a feedback\nevent carries `matched_pitch` — and a closed union here would reject bodies the ledger must\nrecord verbatim. The per-kind shapes are published as `contracts.LEDGER_PAYLOAD_SHAPES` and\nchecked with `contracts.validate_ledger_payload()` at the producing boundary, which is where a\nmalformed body can still be refused without making the ledger itself lossy.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "ts", "kind", "payload"],
+      "properties": {
+        "event_id": { "type": "string", "minLength": 1 },
+        "ts": { "type": "string", "format": "date-time", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/LedgerEventKind" },
+        "auction_id": { "type": ["string", "null"] },
+        "store_id": { "type": ["string", "null"] },
+        "order_ref": { "type": ["string", "null"] },
+        "prev_hash": { "type": ["string", "null"] },
+        "payload": { "type": "object" }
+      }
+    },
+
+    "TrustDimensionState": {
+      "title": "TrustDimensionState",
+      "description": "One Beta inside the single trust framework, plus the instant its decay was last evaluated at (D17: recomputation re-evaluates each observation at its RECORDED `decayed_at`).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alpha", "beta", "decayed_at"],
+      "properties": {
+        "alpha": { "type": "number", "minimum": 0 },
+        "beta": { "type": "number", "minimum": 0 },
+        "decayed_at": { "type": "string", "format": "date-time", "minLength": 1 }
+      }
+    },
+
+    "TrustDims": {
+      "title": "TrustDims",
+      "description": "D53: EXACTLY the six dimensions, all required, nothing else admitted. Omitting\n`catalog_claim_accuracy` is invalid and so is naming a seventh dimension — both are schema\nerrors rather than a silently partial snapshot that scores differently from the one that was\nserved.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "price_honored",
+        "discount_honored",
+        "shipped_on_time",
+        "not_returned",
+        "feedback_match",
+        "catalog_claim_accuracy"
+      ],
+      "properties": {
+        "price_honored": { "$ref": "#/$defs/TrustDimensionState" },
+        "discount_honored": { "$ref": "#/$defs/TrustDimensionState" },
+        "shipped_on_time": { "$ref": "#/$defs/TrustDimensionState" },
+        "not_returned": { "$ref": "#/$defs/TrustDimensionState" },
+        "feedback_match": { "$ref": "#/$defs/TrustDimensionState" },
+        "catalog_claim_accuracy": { "$ref": "#/$defs/TrustDimensionState" }
+      }
+    },
+
+    "TrustSnapshot": {
+      "title": "TrustSnapshot",
+      "description": "DESIGN §Interfaces `TrustSnapshot` — six dimensions inside ONE trust system (D53).\n\n`computed_through_event` is the last `LedgerEvent.event_id` folded in, which is what makes the\nS3 replay assertion checkable against a SERVED snapshot rather than against the trust engine's\nown opinion of where it had got to.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "score", "dims", "blacklisted"],
+      "properties": {
+        "store_id": { "type": "string", "minLength": 1 },
+        "score": { "type": "number" },
+        "confidence": { "type": ["number", "null"] },
+        "effective_sample_size": { "type": ["number", "null"] },
+        "score_version": { "type": ["string", "null"] },
+        "snapshot_version": { "type": ["string", "null"] },
+        "computed_through_event": { "type": ["string", "null"] },
+        "low_data": { "type": ["boolean", "null"] },
+        "dims": { "$ref": "#/$defs/TrustDims" },
+        "blacklisted": { "type": "boolean" }
+      }
+    },
+
+    "PseudonymousContext": {
+      "title": "PseudonymousContext",
+      "description": "R13: a trust event may carry the cluster and the rotating pseudonym, and nothing that identifies a person.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cluster_id": { "type": ["string", "null"] },
+        "pseudonym": { "type": ["string", "null"] }
+      }
+    },
+
+    "TrustEventPayload": {
+      "title": "TrustEventPayload",
+      "description": "DESIGN §Interfaces `TrustEventPayload` (R13).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "event", "dim", "delta", "pseudonymous_context"],
+      "properties": {
+        "store_id": { "type": "string", "minLength": 1 },
+        "event": { "$ref": "#/$defs/LedgerEvent" },
+        "dim": { "$ref": "#/$defs/TrustDimension" },
+        "delta": { "type": "number" },
+        "pseudonymous_context": { "$ref": "#/$defs/PseudonymousContext" }
+      }
+    },
+
+    "EnvelopeFloor": {
+      "title": "EnvelopeFloor",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_price"],
+      "properties": {
+        "product_ref": { "type": ["string", "null"] },
+        "min_price": { "type": "number", "minimum": 0 }
+      }
+    },
+
+    "Envelope": {
+      "title": "Envelope",
+      "description": "DESIGN §Interfaces `Envelope`. It NEVER crosses into the exchange (C3/S7): it is sealed state,\nand `.importlinter` forbids `exchange` from importing the modules that hold it. It is defined\nhere because the store-agent runtime and the merchant service must agree on its shape, not\nbecause the exchange may read one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "version", "floors", "max_discount_pct", "budget_cap", "pursue_clusters", "standing_commitments", "activation"],
+      "properties": {
+        "store_id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 0 },
+        "floors": { "type": "array", "items": { "$ref": "#/$defs/EnvelopeFloor" } },
+        "max_discount_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "budget_cap": { "type": "number", "minimum": 0 },
+        "pursue_clusters": { "type": "array", "items": { "type": "string" } },
+        "standing_commitments": { "type": "array", "items": { "$ref": "#/$defs/Claim" } },
+        "activation": { "$ref": "#/$defs/EnvelopeActivation" }
+      }
+    },
+
+    "Store": {
+      "title": "Store",
+      "description": "D28: the tier vocabulary is pinned here so solicitation (tier-aware, R10) and ranking (tier-blind, R11) read the same three values.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_id", "tier"],
+      "properties": {
+        "store_id": { "type": "string", "minLength": 1 },
+        "domain": { "type": ["string", "null"] },
+        "business_identity": { "type": ["string", "null"] },
+        "tier": { "$ref": "#/$defs/StoreTier" }
+      }
+    },
+
+    "NormalizationBounds": {
+      "title": "NormalizationBounds",
+      "description": "D12/D13: every feature the rank formula reads is normalized into [feature_min, feature_max].\n`delivery_fit` and `verified_claim_ratio` are 0.5 (NEUTRAL) when absent, never 0 — a missing\nvalue is not evidence of a bad one, and scoring it as 0 would silently punish every store the\nverifier has not reached yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_min", "feature_max", "delivery_fit_when_absent", "verified_claim_ratio_when_absent"],
+      "properties": {
+        "feature_min": { "type": "number", "default": 0.0 },
+        "feature_max": { "type": "number", "default": 1.0 },
+        "delivery_fit_when_absent": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+        "verified_claim_ratio_when_absent": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 }
+      }
+    },
+
+    "PenaltyCatalogue": {
+      "title": "PenaltyCatalogue",
+      "description": "D13: `policy_penalties = Σ per-kind penalties over open `ledger.policy_events` for that store in\nthe scoring window`. The catalogue is published here so the ranker cannot invent a penalty, and\n`max_total_penalty` bounds the sum — without a bound one policy event kind repeated enough\ntimes drives `rank_score` arbitrarily negative and the formula stops being a comparison.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["per_kind", "max_total_penalty"],
+      "properties": {
+        "per_kind": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0 },
+          "default": { "severe_policy_violation": 0.3 }
+        },
+        "max_total_penalty": { "type": "number", "minimum": 0, "default": 1.0 }
+      }
+    },
+
+    "RankingWeights": {
+      "title": "RankingWeights",
+      "description": "D13 + D50. The ONE published rank formula is DESIGN's five-term one:\n\n    rank_score = w_m*intent_match + w_e*verified_claim_ratio + w_t*trust\n               + w_v*price_value + w_d*delivery_fit − policy_penalties\n\nThe three-term `w_f*fit + w_v*offer_value + w_t*trust` found elsewhere in DESIGN is superseded\nprose (D12): it predates the reconciliation amendment and lacks the `verified_claim_ratio` term.\n\nThe five weights MUST sum to 1.0. That rule cannot be written in JSON Schema, so it is enforced\nin both generated languages by `RankingWeights` / `validateRankingWeights` and is asserted by\ntests in both. `version` makes a weight change a visible, comparable event rather than a silent\nre-scoring of history.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "w_m", "w_e", "w_t", "w_v", "w_d", "normalization", "penalties", "tie_breakers"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1, "default": "1.0.0" },
+        "w_m": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.35, "description": "intent_match" },
+        "w_e": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2, "description": "verified_claim_ratio" },
+        "w_t": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2, "description": "trust" },
+        "w_v": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.15, "description": "price_value" },
+        "w_d": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.1, "description": "delivery_fit" },
+        "normalization": { "$ref": "#/$defs/NormalizationBounds" },
+        "penalties": { "$ref": "#/$defs/PenaltyCatalogue" },
+        "tie_breakers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["verified_hard_fit_count", "trust", "price", "bid_id"],
+          "description": "D13's tie-break order, applied left to right."
+        }
+      }
+    },
+
+    "BidValidationResult": {
+      "title": "BidValidationResult",
+      "description": "What the dual-path boundary answers with. `reasons` is non-empty whenever `ok` is false — a\nrefusal that will not say why is indistinguishable from a bug, and the exchange has to log a\nreason code back to the seller.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok", "path", "reasons", "requires_verification", "unverified_claim_indexes"],
+      "properties": {
+        "ok": { "type": "boolean" },
+        "path": { "type": "string" },
+        "reasons": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "requires_verification": { "type": "boolean", "default": false },
+        "unverified_claim_indexes": { "type": "array", "items": { "type": "integer" }, "default": [] }
+      }
+    }
+  }
+}
