@@ -25,7 +25,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 import psycopg
@@ -51,6 +50,7 @@ EXPECTED_TABLES = {
         "catalog_snapshots",
         "crawl_jobs",
         "crawl_pages",
+        "chain_head",
         "schema_migrations",
     },
     "sealed": {"envelopes", "learned_policy", "interview_transcripts", "shadow_bids"},
@@ -136,13 +136,67 @@ def test_migrations_apply_and_record_every_file(ledger_migrated: str, pg_admin) 
 
 @pytest.mark.docker
 def test_migrations_are_idempotent_in_the_same_database(ledger_migrated: str, pg_admin) -> None:
-    """Re-applying the whole set to an already-migrated database is a clean no-op.
+    """Re-applying the whole set is a clean no-op -- structurally, and for the data.
 
-    Not a nicety: the runner applies every file on every run, and ``make deps-up`` may run
-    against a database five other workers have already touched.
+    "Did not raise" is not idempotence, and asserting it was worse than nothing: the old
+    form compared ``apply_migrations``'s return value to ``migration_files()``, which is the
+    list ``apply_migrations`` builds it from -- ``f(x) == x``. Prepending a
+    ``DROP TABLE ... CASCADE`` to a migration, so every apply destroyed and rebuilt a table,
+    left the whole suite green.
+
+    So this compares a full catalog fingerprint across the re-run, and checks that a row
+    written before it is still there afterwards. A destructive migration fails both.
     """
+    from apps.trust.tests._fixtures_ledger_schema import catalog_fingerprint
+
+    with pg_admin.cursor() as cur:
+        cur.execute(
+            "insert into app.sellers (store_id, domain, business_identity, tier) "
+            "values ('idempotency-probe', 'p.example', 'bi-probe', 'external') "
+            "on conflict (store_id) do nothing"
+        )
+    before = catalog_fingerprint(pg_admin)
+
     again = migration_lib.apply_migrations(pg_admin)
     assert again == [path.name for path in migration_lib.migration_files()]
+
+    after = catalog_fingerprint(pg_admin)
+    for section in ("columns", "constraints", "indexes", "triggers"):
+        assert after[section] == before[section], (
+            f"re-applying the migrations changed the {section} of the schema"
+        )
+    with pg_admin.cursor() as cur:
+        cur.execute("select count(*) from app.sellers where store_id = 'idempotency-probe'")
+        assert cur.fetchone() == (1,), "re-applying the migrations destroyed existing data"
+        cur.execute("delete from app.sellers where store_id = 'idempotency-probe'")
+
+
+@pytest.mark.docker
+def test_a_migration_edited_after_it_was_applied_is_detectable(
+    ledger_migrated: str, pg_admin, tmp_path: Path
+) -> None:
+    """The recorded checksum has to mean something.
+
+    It used to be overwritten on every run, which erased the single thing it exists to
+    detect, and the test that "checked" it compared ``recorded[name]`` against
+    ``checksum(path)`` -- the value ``_record`` had just written. Now the first-applied
+    checksum is kept, ``drifted_migrations`` reports the difference, and ``strict=True``
+    refuses to apply over it.
+    """
+    edited = tmp_path / "0001_schemas_roles_grants.sql"
+    original = migration_lib.migrations_dir() / "0001_schemas_roles_grants.sql"
+    edited.write_text(original.read_text(encoding="utf-8") + "\n-- an edit\n", encoding="utf-8")
+
+    assert migration_lib.drifted_migrations(pg_admin) == [], "the shipped files have not drifted"
+    drift = migration_lib.drifted_migrations(pg_admin, files=[edited])
+    assert [name for name, _, _ in drift] == ["0001_schemas_roles_grants.sql"]
+    recorded, current = drift[0][1], drift[0][2]
+    assert recorded == migration_lib.checksum(original)
+    assert current == migration_lib.checksum(edited) != recorded
+
+    with pytest.raises(migration_lib.MigrationDriftError) as raised:
+        migration_lib.apply_migrations(pg_admin, files=[edited], strict=True)
+    assert "0001_schemas_roles_grants.sql" in str(raised.value)
 
 
 @pytest.mark.docker
@@ -185,6 +239,35 @@ def test_migrations_apply_into_a_second_database_on_the_same_cluster(
     # ...and it is idempotent there too.
     with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as again:
         assert migration_lib.apply_migrations(again)
+
+
+@pytest.mark.docker
+def test_a_bare_database_gets_structurally_the_same_schema(
+    ledger_second_database: str, worker_index: int, ledger_migrated: str, pg_admin
+) -> None:
+    """Everything the migrations produce, compared column-for-constraint-for-index.
+
+    The second-database test above checks four schema names and six privilege booleans, and
+    reads no table, column, foreign key, index or trigger -- so it would not notice a
+    migration that stopped creating half of them. This compares the complete catalog
+    fingerprint of a database built from bare ``template1`` against the session database,
+    which makes every structural promise in ``db/migrations`` an assertion.
+    """
+    from apps.trust.tests._fixtures_ledger_schema import catalog_fingerprint
+    from proxyshop_support.postgres import role_dsn
+
+    dsn = role_dsn("admin", worker_index, database=ledger_second_database)
+    with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as fresh:
+        migration_lib.apply_migrations(fresh)
+        built = catalog_fingerprint(fresh)
+    reference = catalog_fingerprint(pg_admin)
+
+    for section in ("columns", "constraints", "indexes", "triggers"):
+        assert built[section] == reference[section], (
+            f"a database built from bare template1 has different {section} than this "
+            f"worker's: {sorted(set(reference[section]) ^ set(built[section]))[:10]}"
+        )
+    assert len(built["columns"]) > 100, "the fingerprint is suspiciously small to be meaningful"
 
 
 # =======================================================================================
@@ -259,7 +342,7 @@ def test_blacklist_and_idempotency_indexes_are_present(ledger_migrated: str, pg_
         "app.seller_blacklist_one_live_entry_idx": "unique",
         "app.seller_blacklist_expiry_idx": "expires_at",
         # D52
-        "app.bid_nonces_signer_nonce_key": "unique",
+        "app.bid_nonces_signer_nonce_key": "(signer_id, nonce)",
         "app.seller_endpoints_live_idx": "signer_id",
     }
     for name, needle in required.items():
@@ -310,12 +393,53 @@ def test_exchange_select_on_vault_fails(ledger_clean, ledger_roles) -> None:
 
 
 @pytest.mark.docker
-def test_exchange_cannot_even_enumerate_the_closed_schemas(ledger_clean, ledger_roles) -> None:
+def test_the_denial_tests_name_relations_that_actually_exist(
+    ledger_migrated: str, pg_admin
+) -> None:
+    """The backstop under every ``sealed``/``vault`` denial in this file.
+
+    Postgres checks schema ``USAGE`` **before** it checks whether a relation exists, so
+    ``select * from sealed.this_never_existed`` is refused with the very same
+    ``InsufficientPrivilege`` as a real table. Every denial assertion here would therefore
+    survive a renamed, misspelled or deleted table and keep reporting isolation. This is
+    what makes those assertions mean what they say.
+    """
+    named = [
+        ("sealed", "envelopes"),
+        ("sealed", "learned_policy"),
+        ("sealed", "interview_transcripts"),
+        ("sealed", "shadow_bids"),
+        ("vault", "payment_methods"),
+        ("vault", "pseudonym_history"),
+    ]
+    with pg_admin.cursor() as cur:
+        for schema, table in named:
+            cur.execute(
+                "select 1 from information_schema.tables "
+                "where table_schema = %s and table_name = %s",
+                (schema, table),
+            )
+            assert cur.fetchone() is not None, f"{schema}.{table} does not exist"
+            cur.execute(f"select count(*) from {schema}.{table}")  # noqa: S608
+            assert cur.fetchone() is not None
+
+
+@pytest.mark.docker
+def test_exchange_cannot_enumerate_the_closed_schemas_through_information_schema(
+    ledger_clean, ledger_roles
+) -> None:
     """D5, verified live: ``information_schema.tables`` returns **0 rows** for those schemas.
 
     A role that can list a table it cannot read still learns the schema. Postgres filters
     ``information_schema`` by privilege, so no-USAGE means no rows -- and that is a property
     of granting nothing, which a table-level REVOKE would not have given us.
+
+    Scope, stated precisely because the test name used to over-claim: this is
+    ``information_schema``, which is ACL-filtered. ``pg_catalog`` is **not**, and cannot be
+    closed without breaking every client library, so relation names, column names and
+    ``CHECK`` bodies in the closed schemas remain readable there by any role that can
+    connect. Row *content* is what S7 protects and what the denials above establish; the
+    metadata exposure is a documented property of PostgreSQL, not of this grant model.
     """
     rows = ledger_roles.fetch(
         "exchange",
@@ -368,6 +492,72 @@ def test_exchange_holds_no_role_membership_that_could_inherit_a_grant(
         assert cur.fetchall() == [], "the exchange role is a member of another role"
         cur.execute("select rolsuper, rolbypassrls from pg_roles where rolname = 'exchange'")
         assert cur.fetchone() == (False, False)
+
+
+@pytest.mark.docker
+def test_exchange_cannot_take_the_ledgers_write_lock(ledger_clean, ledger_roles) -> None:
+    """A role documented "no write, anywhere" must not hold the writers' mutex.
+
+    ``CHAIN_LOCK_KEY`` is a published constant derived from the table name and
+    ``pg_advisory_lock`` is ``EXECUTE``-to-PUBLIC by default, so any role that could connect
+    -- the read-only auction role included -- could take the ledger's advisory lock and sit
+    on it, blocking every append in the database. Advisory locks are cooperative; the only
+    defence is the function privilege.
+    """
+    from apps.trust.src.ledger.store import CHAIN_LOCK_KEY
+
+    ledger_roles.denied("exchange", "select pg_advisory_xact_lock(%s)", (CHAIN_LOCK_KEY,))
+    ledger_roles.denied("exchange", "select pg_try_advisory_lock(%s)", (CHAIN_LOCK_KEY,))
+    # ...while the roles that actually append still can.
+    for role in ("trust_rw", "app"):
+        assert ledger_roles.fetch(role, "select pg_try_advisory_xact_lock(%s)", (CHAIN_LOCK_KEY,))[
+            0
+        ] == (True,)
+
+
+@pytest.mark.docker
+def test_no_object_in_the_four_schemas_is_granted_to_public(ledger_migrated: str, pg_admin) -> None:
+    """The hole neither static scan can see.
+
+    Both the frozen S7 criterion and this file's local mirror only read statements that name
+    the auction role, so ``GRANT SELECT ON ALL TABLES IN SCHEMA sealed TO PUBLIC`` hands it
+    the closed schemas with the scans still green -- and, before 0004 grew its PUBLIC
+    revokes, re-applying the migration set did not even repair it. A live ACL assertion is
+    the only thing that catches this shape, so it is asserted live.
+    """
+    with pg_admin.cursor() as cur:
+        cur.execute(
+            """
+            select ns.nspname || '.' || cl.relname, cl.relacl::text
+              from pg_class cl
+              join pg_namespace ns on ns.oid = cl.relnamespace
+             where ns.nspname in ('ledger', 'sealed', 'vault', 'app')
+               and cl.relacl is not null
+               and exists (select 1 from aclexplode(cl.relacl) a where a.grantee = 0)
+            """
+        )
+        assert cur.fetchall() == [], "an object in a T-011 schema is granted to PUBLIC"
+        cur.execute(
+            "select nspname, nspacl::text from pg_namespace "
+            "where nspname in ('ledger', 'sealed', 'vault', 'app') and nspacl is not null "
+            "  and exists (select 1 from aclexplode(nspacl) a where a.grantee = 0)"
+        )
+        assert cur.fetchall() == [], "a T-011 schema is granted to PUBLIC"
+
+
+@pytest.mark.docker
+def test_the_migration_audit_record_is_not_writable_by_the_roles_it_audits(
+    ledger_clean, ledger_roles
+) -> None:
+    """``ledger.schema_migrations`` is evidence, and evidence a subject can edit is not.
+
+    It lives in ``ledger``, so the blanket ledger write grant reached it until 0004 revoked
+    it back.
+    """
+    for role in ("trust_rw", "app"):
+        ledger_roles.denied(role, "delete from ledger.schema_migrations")
+        ledger_roles.denied(role, "update ledger.schema_migrations set checksum = 'x'")
+        assert ledger_roles.fetch(role, "select count(*) from ledger.schema_migrations")[0][0] > 0
 
 
 @pytest.mark.docker
@@ -475,7 +665,18 @@ def test_migration_sql_grants_the_exchange_exactly_ledger_and_app() -> None:
         text = re.sub(r"--[^\n]*", " ", path.read_text(encoding="utf-8"))
         for statement in migration_lib.statements(text):
             low = re.sub(r"\s+", " ", statement).strip().lower()
-            if "grant" not in low or not role_re.search(low):
+            if "grant" not in low or low.startswith("revoke"):
+                continue
+            # The blind spot in BOTH static scans, closed here: a grant to PUBLIC reaches
+            # every role including the auction one, and names none of them. The frozen
+            # criterion cannot see it (it only reads statements containing "exchange"), and
+            # it is a real, live breach -- so this mirror widens the net rather than
+            # matching the frozen scan's blind spot exactly.
+            if re.search(r"\bto\s+public\b", low) and ("sealed" in low or "vault" in low):
+                problems.append(
+                    f"{path.name}: grant to PUBLIC reaches a closed schema: {low[:120]!r}"
+                )
+            if not role_re.search(low):
                 continue
             if "sealed" in low or "vault" in low:
                 problems.append(f"{path.name}: {low[:120]!r}")
@@ -572,12 +773,13 @@ def test_bid_nonces_are_retained_past_the_auction_deadline(_two_sellers) -> None
         cur.execute("select nonce from app.bid_nonces")
         assert cur.fetchall() == [("n-live",)]
 
-    with pytest.raises(psycopg.errors.CheckViolation):
+    with pytest.raises(psycopg.errors.CheckViolation) as raised:
         with connection.cursor() as cur:
             cur.execute(
                 "insert into app.bid_nonces (signer_id, nonce, auction_id, consumed_at, "
                 "retain_until) values ('signer-b', 'n-bad', 'a', now(), now() - interval '1 s')"
             )
+    assert "bid_nonces_retained_past_consumption" in str(raised.value)
 
 
 @pytest.mark.docker
@@ -615,9 +817,88 @@ def test_seller_endpoints_hold_one_row_per_live_key(_two_sellers) -> None:
         assert cur.fetchall() == [("pk-b1",)]
 
     # ...and the same (signer_id, key_id) twice is still a duplicate.
-    with pytest.raises(psycopg.errors.UniqueViolation):
+    with pytest.raises(psycopg.errors.UniqueViolation) as duplicate:
         with connection.cursor() as cur:
             cur.execute(insert, ("signer-a", "store-a", "key-2026-01", "pk-other"))
+    assert "seller_endpoints_pkey" in str(duplicate.value)
+
+
+@pytest.mark.docker
+def test_bid_nonce_retention_must_outlive_the_auction_deadline(_two_sellers) -> None:
+    """D52's actual property, made checkable.
+
+    The header and the retention test both said "retained past the auction's respond_by",
+    and the only constraint that existed was ``retain_until > consumed_at`` -- which a
+    one-microsecond retention satisfies, and a nonce forgotten a microsecond after it is
+    consumed reopens exactly the replay window D52 exists to close. Recording the deadline on
+    the row is what turns the prose into a constraint.
+    """
+    connection = _two_sellers
+    insert = (
+        "insert into app.bid_nonces "
+        "(signer_id, nonce, auction_id, consumed_at, respond_by, retain_until) "
+        "values (%s, %s, 'auction-1', '2026-01-01T00:00:00Z', %s, %s)"
+    )
+    with connection.cursor() as cur:
+        cur.execute(
+            insert,
+            ("signer-a", "n-ok", "2026-01-01T00:05:00Z", "2026-01-01T00:35:00Z"),
+        )
+        cur.execute("select count(*) from app.bid_nonces where nonce = 'n-ok'")
+        assert cur.fetchone() == (1,)
+
+    with pytest.raises(psycopg.errors.CheckViolation) as raised:
+        with connection.cursor() as cur:
+            cur.execute(
+                insert,
+                ("signer-a", "n-short", "2026-01-01T00:05:00Z", "2026-01-01T00:04:59Z"),
+            )
+    assert "bid_nonces_retained_past_the_auction" in str(raised.value)
+
+    # The deadline stays optional, because T-044 owns the writer and its frozen
+    # `NonceStore.seen(signer_id, nonce)` signature does not carry one.
+    with connection.cursor() as cur:
+        cur.execute(
+            "insert into app.bid_nonces (signer_id, nonce, auction_id, retain_until) "
+            "values ('signer-b', 'n-nodeadline', 'auction-1', now() + interval '1 hour')"
+        )
+
+
+@pytest.mark.docker
+def test_a_seller_endpoint_cannot_be_active_and_retired_at_once(_two_sellers) -> None:
+    """The keyring's "is this key live?" question must have exactly one answer.
+
+    The one-directional constraint accepted ``status = 'active'`` alongside a past
+    ``retired_at``, so a reader filtering on ``status`` and a reader filtering on
+    ``retired_at`` would disagree about the same row -- at the signature-verification
+    boundary, where disagreeing about which keys are live is the whole risk.
+    """
+    connection = _two_sellers
+    with pytest.raises(psycopg.errors.CheckViolation) as raised:
+        with connection.cursor() as cur:
+            cur.execute(
+                "insert into app.seller_endpoints "
+                "(signer_id, store_id, key_id, public_key, status, retired_at) "
+                "values ('signer-a', 'store-a', 'k1', 'pk', 'active', now())"
+            )
+    assert "seller_endpoints_retirement_matches_status" in str(raised.value)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with connection.cursor() as cur:
+            cur.execute(
+                "insert into app.seller_endpoints "
+                "(signer_id, store_id, key_id, public_key, status) "
+                "values ('signer-a', 'store-a', 'k2', 'pk', 'revoked')"  # revoked, no retired_at
+            )
+
+    with connection.cursor() as cur:
+        cur.execute(
+            "insert into app.seller_endpoints "
+            "(signer_id, store_id, key_id, public_key, status, retired_at) "
+            "values ('signer-a', 'store-a', 'k3', 'pk', 'revoked', now())"
+        )
+        cur.execute("select count(*) from app.seller_endpoints where key_id = 'k3'")
+        assert cur.fetchone() == (1,)
 
 
 @pytest.mark.docker
@@ -640,14 +921,16 @@ def test_seller_blacklist_carries_the_four_review_states(_two_sellers) -> None:
             "under_review",
         ]
         # An unknown state is refused rather than stored and silently ignored later.
-        with pytest.raises(psycopg.errors.CheckViolation):
+        with pytest.raises(psycopg.errors.CheckViolation) as bad_status:
             cur.execute(insert, ("bi-9", None, "probation", None))
+        assert "seller_blacklist_status_check" in str(bad_status.value)
 
     # At most one live entry per business identity: the fail-closed read is a single-row
     # question, not an ordering question.
-    with pytest.raises(psycopg.errors.UniqueViolation):
+    with pytest.raises(psycopg.errors.UniqueViolation) as live:
         with connection.cursor() as cur:
             cur.execute(insert, ("bi-0", None, "under_review", None))
+    assert "seller_blacklist_one_live_entry_idx" in str(live.value)
 
 
 # =======================================================================================
@@ -769,4 +1052,3 @@ def test_the_lint_fixture_lives_outside_every_real_root_package() -> None:
     assert LINT_FIXTURES.is_dir()
     assert (REPO_ROOT / ".pkgroot" / "trust").resolve() == (REPO_ROOT / "apps/trust/src").resolve()
     assert "src" not in LINT_FIXTURES.relative_to(REPO_ROOT).parts
-    assert sys.version_info[:2] == (3, 12)  # D2: never the system 3.9

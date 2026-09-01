@@ -127,10 +127,22 @@ CREATE TABLE IF NOT EXISTS app.seller_endpoints (
   retired_at timestamptz,
   CONSTRAINT seller_endpoints_pkey PRIMARY KEY (signer_id, key_id),
   CONSTRAINT seller_endpoints_status_check CHECK (status IN ('active', 'retired', 'revoked')),
-  CONSTRAINT seller_endpoints_retired_when_not_active CHECK (
-    status = 'active' OR retired_at IS NOT NULL
+  -- Symmetric on purpose. The one-directional form allowed `status = 'active'` alongside a
+  -- past `retired_at`, so the keyring's "is this key live?" question had two answers that
+  -- could disagree -- and the exchange boundary would have believed whichever it read.
+  CONSTRAINT seller_endpoints_retirement_matches_status CHECK (
+    (status = 'active') = (retired_at IS NULL)
   )
 );
+
+-- Idempotent repair for a database created by an earlier run of this file.
+ALTER TABLE app.seller_endpoints
+  DROP CONSTRAINT IF EXISTS seller_endpoints_retired_when_not_active;
+ALTER TABLE app.seller_endpoints
+  DROP CONSTRAINT IF EXISTS seller_endpoints_retirement_matches_status;
+ALTER TABLE app.seller_endpoints
+  ADD CONSTRAINT seller_endpoints_retirement_matches_status
+  CHECK ((status = 'active') = (retired_at IS NULL));
 
 CREATE INDEX IF NOT EXISTS seller_endpoints_store_idx ON app.seller_endpoints (store_id);
 -- The lookup the exchange boundary actually performs: this signer's LIVE keys.
@@ -150,9 +162,27 @@ CREATE TABLE IF NOT EXISTS app.bid_nonces (
   auction_id   text        NOT NULL,
   consumed_at  timestamptz NOT NULL DEFAULT now(),
   retain_until timestamptz NOT NULL,
+  -- The auction's own deadline, recorded on the row so D52's retention property is
+  -- CHECKABLE rather than merely asserted in prose. Without it the only constraint
+  -- expressible was `retain_until > consumed_at`, which a one-microsecond retention
+  -- satisfies -- and a nonce forgotten a microsecond after it is consumed reopens exactly
+  -- the replay window D52 exists to close. Nullable rather than NOT NULL because T-044 owns
+  -- the writer and its `NonceStore.seen()` signature is frozen without it; when the deadline
+  -- IS supplied the constraint below binds.
+  respond_by   timestamptz,
   CONSTRAINT bid_nonces_signer_nonce_key UNIQUE (signer_id, nonce),
-  CONSTRAINT bid_nonces_retained_past_consumption CHECK (retain_until > consumed_at)
+  CONSTRAINT bid_nonces_retained_past_consumption CHECK (retain_until > consumed_at),
+  CONSTRAINT bid_nonces_retained_past_the_auction CHECK (
+    respond_by IS NULL OR retain_until > respond_by
+  )
 );
+
+-- Idempotent repair for a database created by an earlier run of this file.
+ALTER TABLE app.bid_nonces ADD COLUMN IF NOT EXISTS respond_by timestamptz;
+ALTER TABLE app.bid_nonces DROP CONSTRAINT IF EXISTS bid_nonces_retained_past_the_auction;
+ALTER TABLE app.bid_nonces
+  ADD CONSTRAINT bid_nonces_retained_past_the_auction
+  CHECK (respond_by IS NULL OR retain_until > respond_by);
 
 -- purge_expired(as_of) scans by retain_until; seen(signer_id, nonce) uses the unique index.
 CREATE INDEX IF NOT EXISTS bid_nonces_retain_until_idx ON app.bid_nonces (retain_until);

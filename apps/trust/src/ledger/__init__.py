@@ -18,13 +18,21 @@ replay seam are one package with one rule.
 :func:`canonical_json`        RFC-8785 JCS, the exact bytes that get hashed.
 :func:`compute_event_hash`    ``sha256(prev_hash || canonical_json(event))`` (D16).
 :func:`seal_event`            stamp ``prev_hash`` / ``event_hash`` onto an event.
-:func:`verify_chain`          ``{ok, broken_at, reason, head_hash}`` over a stream.
-:func:`stream_hash`           the stream's identity -- the chain head.
+:func:`verify_chain`          ``{ok, broken_at, reason, head_hash, verified}``.
+:func:`chain_head`            the STORED head -- the last event's ``event_hash``.
+:func:`stream_hash`           the stream's identity, RECOMPUTED from every event.
 :func:`append_event`          the Postgres writer: locked tail, idempotent by event id.
 :func:`read_events`           the chain back out, in insertion order.
+:func:`verify_chain_in_db`    links **and** the stored anchor, so truncation is caught.
 :func:`replay`                ledger stream -> trust snapshots (delegates all scoring).
 :func:`apply_migrations`      apply ``db/migrations/*.sql`` to a database.
 ============================  =========================================================
+
+:func:`chain_head` and :func:`stream_hash` are not the same function and must not be used
+interchangeably. ``chain_head`` reads the last row's stored digest -- what the next append
+links behind. ``stream_hash`` recomputes the whole chain from genesis. Comparing a stored
+head against a stored head proves nothing, which is what "replay reproduces the stream
+hash" quietly meant until it was fixed.
 
 Cross-ticket notes
 ------------------
@@ -32,7 +40,8 @@ Cross-ticket notes
   must seal through :func:`seal_event` and take its head hash from :func:`chain_head`:
   :func:`verify_chain` checks a stream against the digests stored *on* its events, so an
   event store that keeps only a running head hash and does not stamp its events leaves the
-  verifier with nothing to check.
+  verifier with nothing to check. Nothing T-060 needs imports psycopg or redis -- see the
+  lazy-import note below, which exists to keep that true.
 * **T-062** (``apps/trust/src/scoring/**``) owns the trust maths. D49 puts the ``replay``
   entry point here and the arithmetic there; :mod:`.replay` is the seam and holds no
   scoring. It imports the scorer lazily, so this package is importable before T-062 lands.
@@ -42,10 +51,13 @@ Cross-ticket notes
 
 from __future__ import annotations
 
+from typing import Any
+
 from .canonical import (
     CHAIN_FIELDS,
     EVENT_FIELDS,
     GENESIS_HASH,
+    MAX_SAFE_INTEGER,
     CanonicalisationError,
     canonical_bytes,
     canonical_event,
@@ -53,31 +65,76 @@ from .canonical import (
     compute_event_hash,
     rfc3339_ms,
 )
-from .chain import chain_events, chain_head, seal_event, stream_hash, verify_chain
-from .errors import TRANSIENT_DATASTORE_ERRORS, LedgerError, is_transient_datastore_error
-from .migrations import applied_migrations, apply_migrations, migration_files, migrations_dir
-from .replay import observations_from_events, replay  # D49: the one-line re-export
-from .store import (
-    CHAIN_LOCK_KEY,
-    AppendResult,
-    append_event,
-    append_events,
-    chain_tail,
-    db_stream_hash,
-    head_hash,
-    read_events,
-    verify_chain_in_db,
+from .chain import (
+    ChainIntegrityError,
+    chain_events,
+    chain_head,
+    seal_event,
+    stream_hash,
+    verify_chain,
 )
+from .replay import observations_from_events, replay  # D49: the one-line re-export
+
+# --- Everything above is STANDARD LIBRARY ONLY, and that is a requirement --------------
+# `.errors` imports psycopg and redis (the latter deliberately, for the CF-2 carve-out
+# guard) and `.store` and `.migrations` import psycopg. Importing them here would have made
+# the canonicaliser, the sealer and the verifier unimportable without a database driver and
+# a Redis client installed -- which is exactly what T-060's in-memory event store needs to
+# do, and it needs neither. So the database-facing names load on first use instead (PEP
+# 562). `from apps.trust.src.ledger import verify_chain` costs nothing but the stdlib;
+# `from apps.trust.src.ledger import append_event` pulls in psycopg, at that moment.
+#
+# This does not weaken CF-2: import-linter builds its graph by parsing every module in the
+# package, not by importing the package, so the `trust.ledger.errors -> redis.exceptions`
+# edge the carve-out has to forgive is found either way.
+_LAZY: dict[str, str] = {
+    "TRANSIENT_DATASTORE_ERRORS": "errors",
+    "LedgerError": "errors",
+    "is_transient_datastore_error": "errors",
+    "MigrationDriftError": "migrations",
+    "applied_migrations": "migrations",
+    "apply_migrations": "migrations",
+    "drifted_migrations": "migrations",
+    "migration_files": "migrations",
+    "migrations_dir": "migrations",
+    "CHAIN_LOCK_KEY": "store",
+    "AppendResult": "store",
+    "append_event": "store",
+    "append_events": "store",
+    "chain_anchor": "store",
+    "chain_tail": "store",
+    "db_stream_hash": "store",
+    "head_hash": "store",
+    "read_events": "store",
+    "verify_chain_in_db": "store",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _LAZY.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(f".{module_name}", __name__), name)
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)
+
 
 __all__ = [
     "CHAIN_FIELDS",
     "CHAIN_LOCK_KEY",
     "EVENT_FIELDS",
     "GENESIS_HASH",
+    "MAX_SAFE_INTEGER",
     "TRANSIENT_DATASTORE_ERRORS",
     "AppendResult",
     "CanonicalisationError",
+    "ChainIntegrityError",
     "LedgerError",
+    "MigrationDriftError",
     "append_event",
     "append_events",
     "applied_migrations",
@@ -85,11 +142,13 @@ __all__ = [
     "canonical_bytes",
     "canonical_event",
     "canonical_json",
+    "chain_anchor",
     "chain_events",
     "chain_head",
     "chain_tail",
     "compute_event_hash",
     "db_stream_hash",
+    "drifted_migrations",
     "head_hash",
     "is_transient_datastore_error",
     "migration_files",

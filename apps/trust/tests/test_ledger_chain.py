@@ -30,7 +30,9 @@ import pytest
 
 from apps.trust.src.ledger import (
     GENESIS_HASH,
+    MAX_SAFE_INTEGER,
     CanonicalisationError,
+    ChainIntegrityError,
     LedgerError,
     append_event,
     canonical_event,
@@ -60,6 +62,18 @@ DIMS = (
     "feedback_match",
     "catalog_claim_accuracy",
 )
+
+
+def _admin_dsn(connection: Any) -> str:
+    """An admin DSN for the database ``connection`` is already on.
+
+    D41: no hard-coded ports anywhere in test code -- the DSN is derived from the worker
+    index and the live connection's own database name.
+    """
+    from proxyshop_support.postgres import role_dsn
+    from proxyshop_support.worker import worker_id
+
+    return role_dsn("admin", worker_id(), database=connection.info.dbname)
 
 
 def observation_event(index: int, store_id: str = "s-1", dim: str = "price_honored") -> dict:
@@ -92,15 +106,89 @@ def test_canonical_json_is_independent_of_insertion_order_and_a_json_round_trip(
     assert canonical_json(json.loads(json.dumps(first))) == canonical_json(first)
 
 
+#: ECMAScript ``String(x)`` for every value below, taken from ``node`` and pinned as
+#: literals. These are the *external* oracle: nothing here is computed by the module under
+#: test, so a change to the serialiser cannot quietly move the expectation with it.
+#:
+#: Every row from ``1e-7`` down was WRONG before this table existed. ``repr`` switches to
+#: exponential notation at ``1e-4`` and ECMAScript switches at ``1e-7``, so ``1e-5`` hashed
+#: as ``"1e-05"`` where RFC-8785 requires ``"0.00001"`` -- and any Go, Rust or JavaScript
+#: verifier would have reported tampering on an untouched event.
+ES6_NUMBER_FORMS = [
+    (1.0, "1"),
+    (-0.0, "0"),
+    (0.0, "0"),
+    (2.5, "2.5"),
+    (0.1, "0.1"),
+    (100.0, "100"),
+    (-2.5, "-2.5"),
+    (123456789.123, "123456789.123"),
+    (1e-3, "0.001"),
+    (1e-4, "0.0001"),  # repr() goes exponential here; ECMAScript does not
+    (1e-5, "0.00001"),
+    (1.5e-5, "0.000015"),
+    (1e-6, "0.000001"),
+    (1e-7, "1e-7"),  # ...and here is where ECMAScript finally does
+    (-2.5e-7, "-2.5e-7"),
+    (5e-324, "5e-324"),
+    (1e20, "100000000000000000000"),
+    (1e21, "1e+21"),
+    (1e23, "1e+23"),
+    (6.02214076e23, "6.02214076e+23"),
+    (1.7976931348623157e308, "1.7976931348623157e+308"),
+    (float(2**64), "18446744073709552000"),
+]
+
+
+@pytest.mark.parametrize(("value", "expected"), ES6_NUMBER_FORMS)
+def test_canonical_json_matches_ecmascript_number_to_string(value: float, expected: str) -> None:
+    """RFC-8785 §3.2.2.3: a JSON number is serialised by ECMAScript ``Number::toString``."""
+    assert canonical_json(value) == expected
+
+
 def test_canonical_json_uses_the_ecmascript_number_form() -> None:
-    """JCS §3.2.2.3. ``json.dumps`` writes ``1.0``; ECMAScript -- and therefore JCS -- writes ``1``."""
-    assert canonical_json(1.0) == "1"
-    assert canonical_json(-0.0) == "0"
-    assert canonical_json(2.5) == "2.5"
+    """The integral cases, and the contrast with ``json.dumps`` that motivates the module."""
     assert canonical_json(10) == "10"
     assert canonical_json(True) == "true"  # bool before int: `True == 1` in Python
     assert canonical_json({"n": 1.0}) == '{"n":1}'
     assert json.dumps(1.0) == "1.0", "the contrast this test exists for has gone away"
+    assert json.dumps(1e-5) == "1e-05", "repr()'s exponential threshold has moved"
+
+
+def test_integers_outside_the_safe_range_are_refused_rather_than_hashed_two_ways() -> None:
+    """A JSON number is a double (RFC-8785 §3.2.2.2), and ``10**23`` is not one.
+
+    ``10**23`` as a Python ``int`` renders as 24 digits; the same JSON text read back by any
+    parser -- or by Postgres ``jsonb`` -- becomes the float ``1e23`` and renders as
+    ``"1e+23"``. Two digests for one value. Refused loudly instead, because a ledger whose
+    hash depends on which parser last touched the payload is not a ledger.
+    """
+    assert canonical_json(MAX_SAFE_INTEGER) == "9007199254740992"
+    assert canonical_json(-MAX_SAFE_INTEGER) == "-9007199254740992"
+    for value in (MAX_SAFE_INTEGER + 1, 10**23, 2**200, -(10**30)):
+        with pytest.raises(CanonicalisationError) as raised:
+            canonical_json(value)
+        assert "safe-integer" in str(raised.value)
+
+
+def test_the_rfc_8785_worked_example_reproduces_byte_for_byte() -> None:
+    """The specification's own §3.2.4 sample: input on the left, RFC text on the right.
+
+    The strongest oracle available, because neither side of it comes from this codebase. It
+    exercises the exponential branch (``1e+30``, ``1e-27``), the shortest-round-trip branch
+    (``333333333.3333333``), trailing-zero removal (``4.50`` -> ``4.5``), the leading-zero
+    branch (``0.002``), control-character escaping, and non-ASCII passthrough at once.
+    """
+    sample = {
+        "numbers": [333333333.33333329, 1e30, 4.50, 2e-3, 0.000000000000000000000000001],
+        "string": '€$\nA\'B"\\\\"/',
+        "literals": [None, True, False],
+    }
+    assert canonical_json(sample) == (
+        '{"literals":[null,true,false],'
+        '"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27],'
+        '"string":"€$\\u000f\\nA\'B\\"\\\\\\\\\\"/"}'
+    )
 
 
 def test_canonical_json_sorts_by_utf16_code_unit_not_code_point() -> None:
@@ -142,14 +230,31 @@ def test_rfc3339_ms_normalises_every_spelling_of_one_instant() -> None:
     assert rfc3339_ms("2025-12-31T19:00:00-05:00") == expected
     assert rfc3339_ms(dt.datetime(2026, 1, 1, tzinfo=dt.UTC)) == expected
     assert rfc3339_ms(dt.datetime(2026, 1, 1)) == expected  # naive is read as UTC
-    # Sub-millisecond digits truncate, so a value that round-trips through timestamptz
-    # (microsecond precision) normalises to the same string it did going in.
-    assert rfc3339_ms("2026-01-01T00:00:00.123456Z") == "2026-01-01T00:00:00.123Z"
-    assert rfc3339_ms(dt.datetime(2026, 1, 1, 0, 0, 0, 123456, tzinfo=dt.UTC)) == (
-        "2026-01-01T00:00:00.123Z"
-    )
     with pytest.raises(CanonicalisationError):
         rfc3339_ms("yesterday")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # .123456 is useless as evidence -- truncation and rounding agree on it. Every value
+        # below is chosen so they DISAGREE, which is what makes this a test of the
+        # truncation the module says is load-bearing rather than of "some ms conversion".
+        ("2026-01-01T00:00:00.123900Z", "2026-01-01T00:00:00.123Z"),
+        ("2026-01-01T00:00:00.999999Z", "2026-01-01T00:00:00.999Z"),
+        ("2026-01-01T00:00:00.000999Z", "2026-01-01T00:00:00.000Z"),
+        ("2026-01-01T00:00:00.9995Z", "2026-01-01T00:00:00.999Z"),
+    ],
+)
+def test_sub_millisecond_digits_truncate_and_never_round(value: str, expected: str) -> None:
+    """Rounding ``.9999`` up to ``1.000`` would change the second, and with it the digest.
+
+    A value that has been through a ``timestamptz`` column must canonicalise to the string
+    it did on the way in, so the direction of the conversion is part of the hash contract.
+    """
+    assert rfc3339_ms(value) == expected
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    assert rfc3339_ms(parsed) == expected
 
 
 def test_canonical_event_drops_chain_fields_and_absent_optionals() -> None:
@@ -163,16 +268,83 @@ def test_canonical_event_drops_chain_fields_and_absent_optionals() -> None:
         canonical_event({"ts": AS_OF, "payload": {}})  # no event_id, no kind
 
 
+#: The golden event, its canonical form and its digest, all three pinned as **literals**.
+#:
+#: Without a literal on the right-hand side, every digest assertion in this file computes
+#: its expectation with the same two functions it is testing -- so a change to
+#: canonicalisation silently rewrites every hash in the system and the whole suite stays
+#: green. These constants are what make canonicalisation drift a failure. Regenerating them
+#: to match new behaviour is exactly the move they exist to prevent: if they go red, either
+#: the change is a breaking change to every stored chain, or it is a bug.
+#:
+#: ``rate`` is deliberately ``1e-5``: it renders ``0.00001`` under ECMAScript and ``1e-05``
+#: under ``repr``, so this constant also pins the fix for that.
+GOLDEN_EVENT = {
+    "event_id": "ev-golden",
+    "ts": "2026-01-01T00:00:00.000Z",
+    "kind": "order_paid",
+    "store_id": "s-1",
+    "order_ref": "o-1",
+    "payload": {"total_price": 120.5, "quantity": 3, "flag": True, "note": "café", "rate": 1e-5},
+}
+GOLDEN_CANONICAL = (
+    '{"event_id":"ev-golden","kind":"order_paid","order_ref":"o-1",'
+    '"payload":{"flag":true,"note":"café","quantity":3,"rate":0.00001,"total_price":120.5},'
+    '"store_id":"s-1","ts":"2026-01-01T00:00:00.000Z"}'
+)
+GOLDEN_DIGEST = "923fdbb87acce0fba37cfac3b9b6948381bee7b05fe67adc84a58e8851ddf9b3"
+GOLDEN_STREAM_HASH = "d3a701c0ee62d7a478e97e028198b7a39ab7f9a8ebdb464252c9fe50e8694591"
+
+
+def test_the_golden_event_canonicalises_and_hashes_to_its_pinned_constants() -> None:
+    """The one assertion in this file whose expected values are not recomputed.
+
+    ``hashlib`` is stdlib and the canonical string is a literal, so the middle line ties
+    :data:`GOLDEN_DIGEST` to :data:`GOLDEN_CANONICAL` without touching the module under
+    test at all.
+    """
+    import hashlib
+
+    assert canonical_json(canonical_event(GOLDEN_EVENT)) == GOLDEN_CANONICAL
+    assert (
+        hashlib.sha256(GENESIS_HASH.encode("ascii") + GOLDEN_CANONICAL.encode("utf-8")).hexdigest()
+        == GOLDEN_DIGEST
+    )
+    assert compute_event_hash(GENESIS_HASH, GOLDEN_EVENT) == GOLDEN_DIGEST
+
+
+def test_the_golden_stream_hash_is_pinned() -> None:
+    """A three-event chain's identity, as a literal. Catches drift in the fold, not just one hash."""
+    events = [
+        {"event_id": f"g-{i}", "ts": "2026-01-01T00:00:00.000Z", "kind": "shown", "payload": {}}
+        for i in range(3)
+    ]
+    assert stream_hash(chain_events(events)) == GOLDEN_STREAM_HASH
+    assert stream_hash(events) == GOLDEN_STREAM_HASH, (
+        "stream_hash must be recomputed from content, so sealing the events first cannot change it"
+    )
+
+
 def test_the_digest_is_sha256_of_prev_hash_concatenated_with_the_canonical_body() -> None:
-    """D16's formula, spelled out independently of the implementation."""
+    """D16's formula: the *structure*, over an arbitrary event.
+
+    The concatenation order and the prev-hash dependence are what this checks; the golden
+    constants above are what pin the canonical bytes.
+    """
     import hashlib
 
     event = observation_event(1)
-    expected = hashlib.sha256(
-        GENESIS_HASH.encode("ascii") + canonical_json(canonical_event(event)).encode("utf-8")
-    ).hexdigest()
-    assert compute_event_hash(GENESIS_HASH, event) == expected
-    assert len(expected) == 64
+    body = canonical_json(canonical_event(event))
+    assert (
+        compute_event_hash(GENESIS_HASH, event)
+        == hashlib.sha256(GENESIS_HASH.encode("ascii") + body.encode("utf-8")).hexdigest()
+    )
+    other = "a" * 64
+    assert (
+        compute_event_hash(other, event)
+        == hashlib.sha256(other.encode("ascii") + body.encode("utf-8")).hexdigest()
+    )
+    assert compute_event_hash(other, event) != compute_event_hash(GENESIS_HASH, event)
 
 
 # =======================================================================================
@@ -297,6 +469,54 @@ def test_stream_hash_commits_to_every_event_in_order() -> None:
     assert stream_hash(reordered) != baseline, "the stream hash must depend on order"
 
 
+def test_stream_hash_is_recomputed_from_content_not_read_off_the_last_row() -> None:
+    """Otherwise "replay reproduces the stream hash" compares a column to itself.
+
+    ``stream_hash`` used to return ``chain_head``, which reads the last event's stored
+    ``event_hash`` verbatim. Every side of the acceptance-3 assertion then came from the
+    same column, so it held against any self-consistent forgery -- rewrite the events AND
+    their digests and the "replay" still matched.
+
+    Recomputed, the digest depends on the events' *content*, so a forged stream whose stored
+    digests agree with each other still fails against a head recorded at write time.
+    """
+    sealed = chain_events(observation_event(i) for i in range(4))
+    genuine = stream_hash(sealed)
+
+    # A forgery: every event rewritten, then re-sealed so it is internally perfect.
+    forged = chain_events({**observation_event(i), "store_id": "s-impostor"} for i in range(4))
+    assert verify_chain(forged)["ok"] is True, "the forgery is internally self-consistent"
+    assert chain_head(forged) == forged[-1]["event_hash"]
+    assert stream_hash(forged) != genuine, (
+        "a wholesale-rewritten stream must not reproduce the original stream hash"
+    )
+
+    # And it ignores the stored digests entirely: corrupt them and the value is unchanged.
+    corrupted = copy.deepcopy(sealed)
+    for event in corrupted:
+        event["event_hash"] = "f" * 64
+        event["prev_hash"] = "e" * 64
+    assert stream_hash(corrupted) == genuine
+
+
+def test_chain_head_refuses_an_unsealed_tail_instead_of_silently_skipping_it() -> None:
+    """``chain_head`` is what T-060's ``append`` links the next event behind.
+
+    It used to skip any event carrying no ``event_hash``, so appending an unsealed event and
+    then asking for the head returned the head of the sealed prefix -- and the next append
+    linked behind the wrong event, in a store with no ``char(64) NOT NULL`` column to make
+    that impossible. T-060's frozen acceptance is "appending a new event must change
+    head_hash", which that silently broke.
+    """
+    sealed = chain_events(observation_event(i) for i in range(3))
+    assert chain_head(sealed) == sealed[-1]["event_hash"]
+    assert chain_head([]) == GENESIS_HASH
+
+    with pytest.raises(ChainIntegrityError) as raised:
+        chain_head([*sealed, observation_event(9)])
+    assert "never sealed" in str(raised.value)
+
+
 # =======================================================================================
 # The chain, in Postgres -- acceptance 3
 # =======================================================================================
@@ -349,7 +569,7 @@ def test_duplicate_event_id_is_a_no_op(ledger_clean) -> None:
             cur.execute(
                 "insert into ledger.commerce_events "
                 "(idempotency_key, kind, occurred_at, prev_hash, event_hash) "
-                "values ('ev-0', 'shown', now(), %s, %s)",
+                "values ('ev-0', 'shown', date_trunc('milliseconds', now()), %s, %s)",
                 (head_hash(connection), "f" * 64),
             )
     assert "idempotency_key" in str(raised.value)
@@ -372,7 +592,7 @@ def test_prev_hash_must_link_to_the_chain_tail(ledger_clean) -> None:
                 cur.execute(
                     "insert into ledger.commerce_events "
                     "(idempotency_key, kind, occurred_at, prev_hash, event_hash) "
-                    "values (%s, 'shown', now(), %s, %s)",
+                    "values (%s, 'shown', date_trunc('milliseconds', now()), %s, %s)",
                     (f"ev-bad-{bad_prev[:4]}", bad_prev, "b" * 64),
                 )
         assert "does not link to the chain tail" in str(raised.value)
@@ -385,7 +605,7 @@ def test_prev_hash_must_link_to_the_chain_tail(ledger_clean) -> None:
             cur.execute(
                 "insert into ledger.commerce_events "
                 "(idempotency_key, kind, occurred_at, prev_hash, event_hash) "
-                "values ('ev-bad-hex', 'shown', now(), %s, %s)",
+                "values ('ev-bad-hex', 'shown', date_trunc('milliseconds', now()), %s, %s)",
                 (head_hash(connection), "NOT A HASH".ljust(64, "z")),
             )
     assert "event_hash_hex" in str(check.value)
@@ -411,7 +631,7 @@ def test_the_chain_cannot_fork(ledger_clean) -> None:
             cur.execute(
                 "insert into ledger.commerce_events "
                 "(idempotency_key, kind, occurred_at, prev_hash, event_hash) "
-                "values ('ev-fork', 'shown', now(), %s, %s)",
+                "values ('ev-fork', 'shown', date_trunc('milliseconds', now()), %s, %s)",
                 (first.event["event_hash"], "d" * 64),
             )
     assert "does not link to the chain tail" in str(raised.value)
@@ -426,7 +646,7 @@ def test_the_chain_cannot_fork(ledger_clean) -> None:
                 cur.execute(
                     "insert into ledger.commerce_events "
                     "(idempotency_key, kind, occurred_at, prev_hash, event_hash) "
-                    "values ('ev-fork', 'shown', now(), %s, %s)",
+                    "values ('ev-fork', 'shown', date_trunc('milliseconds', now()), %s, %s)",
                     (first.event["event_hash"], "d" * 64),
                 )
         assert "prev_hash" in str(unique.value)
@@ -584,7 +804,8 @@ def test_the_writer_leaves_no_advisory_lock_behind(ledger_clean) -> None:
     append_event(connection, observation_event(0))
     with connection.cursor() as cur:
         cur.execute(
-            "select count(*) from pg_locks where locktype = 'advisory' and objid = %s",
+            "select count(*) from pg_locks where locktype = 'advisory' and objid = %s "
+            "  and database = (select oid from pg_database where datname = current_database())",
             (CHAIN_LOCK_KEY,),
         )
         assert cur.fetchone() == (0,)
@@ -673,16 +894,237 @@ def test_replay_hands_every_number_to_the_scorer_grouped_by_store(monkeypatch) -
     assert [row["dim"] for row in calls[0][0]] == ["price_honored", "feedback_match"]
 
 
-def test_replay_names_the_scoring_ticket_when_the_scorer_is_absent() -> None:
+def test_replay_names_the_scoring_ticket_when_the_scorer_is_absent(monkeypatch) -> None:
     """An unbuilt scorer must be a loud failure, never an empty mapping.
 
     ``{}`` compares equal to nothing and would read as a pass in whichever test asked for it.
+
+    The absence is forced by pointing the lookup at a module that will never exist, rather
+    than by relying on ``apps.trust.src.scoring`` being empty. Relying on that would have
+    made this test go red the day T-062 landed -- a test scheduled to fail on somebody
+    else's success is worse than no test.
     """
+    import importlib
+
+    replay_module = importlib.import_module("apps.trust.src.ledger.replay")
+
+    monkeypatch.setattr(replay_module, "SCORING_MODULES", ("trust.scoring_does_not_exist",))
     with pytest.raises(ModuleNotFoundError) as raised:
-        replay([observation_event(0)], as_of=AS_OF)
+        replay_module.replay([observation_event(0)], as_of=AS_OF)
     message = str(raised.value)
     assert "T-062" in message
     assert "score(observations" in message
+
+
+def test_replay_reports_a_scorer_that_exists_but_exports_no_score(monkeypatch) -> None:
+    """The half-built case: the module imports, the entry point is not there yet."""
+    import importlib
+
+    replay_module = importlib.import_module("apps.trust.src.ledger.replay")
+
+    stub = types.ModuleType("trust.scoring_half_built")
+    monkeypatch.setitem(sys.modules, "trust.scoring_half_built", stub)
+    monkeypatch.setattr(replay_module, "SCORING_MODULES", ("trust.scoring_half_built",))
+    with pytest.raises(ModuleNotFoundError) as raised:
+        replay_module.replay([observation_event(0)], as_of=AS_OF)
+    assert "exports no `score`" in str(raised.value)
+
+
+@pytest.mark.docker
+def test_tail_truncation_is_detected_by_the_stored_anchor(ledger_clean) -> None:
+    """The failure a hash chain cannot see on its own.
+
+    Delete the last events and the survivors verify **perfectly** -- a truncated chain's
+    digest is a valid chain digest, and there is nothing in the links to say how many there
+    should have been. ``ledger.chain_head`` is that something, and this is the test that
+    makes it load-bearing rather than decorative.
+    """
+    connection = ledger_clean
+    for index in range(6):
+        append_event(connection, observation_event(index))
+    intact = verify_chain_in_db(connection)
+    assert intact["ok"] is True and intact["anchor_ok"] is True
+    assert intact["anchor"]["length"] == 6
+    assert intact["recomputed"] == intact["anchor"]["head_hash"]
+
+    # Cut the tail off. DELETE is refused by the append-only trigger, which is the point --
+    # so the only way to stage this is to disable it, exactly as an attacker with owner
+    # rights would. Everything happens in a transaction that is always rolled back.
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as probe:
+        try:
+            with probe.cursor() as cur:
+                cur.execute(
+                    "alter table ledger.commerce_events disable trigger "
+                    "commerce_events_append_only_trigger"
+                )
+                cur.execute("delete from ledger.commerce_events where seq > 3")
+                cur.execute("select count(*) from ledger.commerce_events")
+                assert cur.fetchone() == (3,)
+
+                survivors = read_events(probe)
+                assert verify_chain(survivors)["ok"] is True, (
+                    "the surviving prefix is internally flawless -- that is the whole problem"
+                )
+                truncated = verify_chain_in_db(probe)
+                assert truncated["ok"] is False
+                assert truncated["reason"] == "truncated"
+                assert truncated["anchor_ok"] is False
+                assert truncated["anchor"]["length"] == 6
+        finally:
+            probe.rollback()
+
+    assert verify_chain_in_db(connection)["ok"] is True, "the rollback restored the chain"
+
+
+@pytest.mark.docker
+def test_truncate_resets_the_anchor_so_empty_table_means_empty_chain(ledger_clean) -> None:
+    """TRUNCATE is the sanctioned owner-only reset, and it takes the anchor with it."""
+    connection = ledger_clean
+    append_event(connection, observation_event(0))
+    from apps.trust.src.ledger import chain_anchor
+
+    assert chain_anchor(connection)["length"] == 1
+    with connection.cursor() as cur:
+        cur.execute("truncate table ledger.commerce_events restart identity cascade")
+    anchor = chain_anchor(connection)
+    assert (anchor["length"], anchor["head_hash"]) == (0, GENESIS_HASH)
+    assert verify_chain_in_db(connection)["ok"] is True
+
+
+@pytest.mark.docker
+def test_the_append_only_role_can_actually_append(ledger_clean, ledger_roles) -> None:
+    """``app`` holds SELECT+INSERT on the ledger and nothing else. That has to be enough.
+
+    It was not: the writer read the tail with ``SELECT ... FOR UPDATE``, which Postgres
+    gates on the **UPDATE** privilege. The one role the grant model documents as the
+    ledger's appender could not append, and the denial arrived as a bare
+    ``permission denied for table commerce_events`` naming neither ``FOR UPDATE`` nor the
+    privilege it wanted.
+    """
+    connection = ledger_roles.connection("app")
+    connection.autocommit = True
+    try:
+        result = append_event(connection, observation_event(0))
+        assert result.inserted is True
+        assert read_events(connection)[0]["event_id"] == "ev-0"
+        # ...and it still holds no UPDATE, so this is not a test that quietly widened a grant.
+        with connection.cursor() as cur:
+            cur.execute("select has_table_privilege('app', 'ledger.commerce_events', 'update')")
+            assert cur.fetchone() == (False,)
+    finally:
+        connection.autocommit = False
+
+
+@pytest.mark.docker
+def test_append_event_waits_for_the_chain_lock(ledger_clean) -> None:
+    """The advisory lock's actual purpose, exercised.
+
+    Deleting ``pg_advisory_xact_lock`` from the writer used to kill zero tests: the
+    "concurrency" test appended strictly sequentially, so the tail row already existed and
+    the row lock alone sufficed. Here a second connection holds the chain lock and the
+    writer must **block** on it -- which fails deterministically if the lock is not taken.
+    """
+    import threading
+
+    from apps.trust.src.ledger.store import CHAIN_LOCK_KEY
+
+    connection = ledger_clean
+    dsn = _admin_dsn(connection)
+    finished = threading.Event()
+    outcome: dict[str, Any] = {}
+
+    holder = psycopg.connect(dsn, connect_timeout=5)  # transactional: the lock persists
+    try:
+        with holder.cursor() as cur:
+            cur.execute("select pg_advisory_xact_lock(%s)", (CHAIN_LOCK_KEY,))
+
+        def worker() -> None:
+            try:
+                with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as writer:
+                    outcome["result"] = append_event(writer, observation_event(0))
+            except Exception as exc:  # pragma: no cover - reported through the assertion
+                outcome["error"] = exc
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        assert not finished.wait(2.0), (
+            "append_event completed while another session held the chain lock, so it never "
+            "took the lock -- concurrent appends are unserialised"
+        )
+        holder.rollback()  # release
+        assert finished.wait(20.0), "append_event never completed after the lock was released"
+        thread.join(timeout=5)
+    finally:
+        holder.close()
+
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["result"].inserted is True
+    assert verify_chain_in_db(connection)["ok"] is True
+
+
+@pytest.mark.docker
+def test_an_event_without_a_payload_is_writable(ledger_clean) -> None:
+    """``auction_opened`` and friends plausibly carry nothing.
+
+    This used to be refused, by the jsonb round-trip guard, with an error blaming floating
+    point: the hashed body omitted ``payload`` while the stored row carried the column
+    default ``{}``.
+    """
+    connection = ledger_clean
+    result = append_event(
+        connection, {"event_id": "ev-bare", "ts": AS_OF, "kind": "auction_opened"}
+    )
+    assert result.inserted is True
+    assert result.event["payload"] == {}
+    assert verify_chain_in_db(connection)["ok"] is True
+    # An explicit empty payload is the same event, so it is idempotent against the above.
+    again = append_event(
+        connection, {"event_id": "ev-bare", "ts": AS_OF, "kind": "auction_opened", "payload": {}}
+    )
+    assert again.inserted is False
+
+
+@pytest.mark.docker
+def test_reusing_an_event_id_for_different_content_is_refused(ledger_clean) -> None:
+    """Idempotency must not become silent data loss.
+
+    Matching on ``event_id`` alone and returning the stored row gave a success-shaped result
+    for a write that never happened, with nothing for the caller to notice.
+    """
+    connection = ledger_clean
+    append_event(connection, observation_event(0, store_id="s-1"))
+    with pytest.raises(LedgerError) as raised:
+        append_event(connection, observation_event(0, store_id="s-impostor"))
+    assert "DIFFERENT content" in str(raised.value)
+    assert len(read_events(connection)) == 1
+    assert read_events(connection)[0]["store_id"] == "s-1"
+
+
+@pytest.mark.docker
+def test_append_refuses_a_connection_with_an_open_transaction_unless_told_to_join(
+    ledger_clean,
+) -> None:
+    """``connection.transaction()`` opens a SAVEPOINT when a transaction is already running.
+
+    The chain lock is transaction-scoped, so joining silently would hold the single global
+    ledger lock until the *caller's* commit -- every other writer blocked, for a span the
+    ledger does not control. Opt-in, and named.
+    """
+    connection = ledger_clean
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as caller:
+        with caller.cursor() as cur:
+            cur.execute("select 1")  # a transaction is now open
+        with pytest.raises(LedgerError) as raised:
+            append_event(caller, observation_event(0))
+        assert "join_open_transaction" in str(raised.value)
+
+        result = append_event(caller, observation_event(0), join_open_transaction=True)
+        assert result.inserted is True
+        caller.rollback()  # ...and the append is part of the caller's transaction
+
+    assert read_events(connection) == [], "the append must roll back with its caller"
 
 
 def test_the_ledger_verifier_is_not_the_claim_verifier() -> None:

@@ -158,15 +158,38 @@ class LedgerRoleRunner:
             connection.rollback()
 
 
+#: The schemas T-011 owns end to end. Dropped and rebuilt once per session -- see below.
+OWNED_SCHEMAS = ("ledger", "sealed", "vault", "app")
+
+
 @pytest.fixture(scope="session")
 def ledger_migrated(pg_admin: Any) -> str:
-    """Apply ``db/migrations/*.sql`` to this worker's database, once per session.
+    """Rebuild T-011's four schemas from ``db/migrations/*.sql``, once per session.
 
-    Returns the space-separated list of filenames applied, which is only ever used in a
-    failure message; the value that matters is the side effect.
+    **Why it drops first.** Every migration is ``CREATE ... IF NOT EXISTS``, and
+    ``proxyshop_w<N>`` keeps its schema between runs -- so a fixture that only *applied* the
+    migrations was grading whatever the database happened to already contain. Measured: with
+    ``apply_migrations`` stubbed to execute nothing at all, 61 of 62 tests stayed green,
+    including every schema, foreign-key, index, grant and chain test. Three of this ticket's
+    own acceptance criteria could then be broken in the SQL with nothing turning red --
+    dropping the ``ledger.claims`` foreign key, making ``app.bid_nonces`` globally unique on
+    ``nonce`` instead of per signer, keying ``app.seller_endpoints`` on ``key_id`` alone --
+    each verified to kill zero tests. Those are exactly the properties the ticket exists to
+    establish.
+
+    Dropping first makes the schema in front of every test the schema *this checkout's SQL
+    produces*. The blast radius is this worker's own database and only the four schemas this
+    ticket owns; ``db/init/00-roles.sql`` and the cluster-global roles are untouched, and
+    ``DROP SCHEMA`` also clears the per-grantor ``pg_default_acl`` rows, so the default
+    privileges are freshly graded too.
+
+    Returns:
+        The space-separated filenames applied -- used only in failure messages.
     """
     from apps.trust.src.ledger import apply_migrations
 
+    with pg_admin.cursor() as cur:
+        cur.execute(f"drop schema if exists {', '.join(OWNED_SCHEMAS)} cascade")
     return " ".join(apply_migrations(pg_admin))
 
 
@@ -192,6 +215,51 @@ def ledger_roles(pg_role: Callable[[str], Any]) -> Iterator[LedgerRoleRunner]:
         yield runner
     finally:
         runner.reset()
+
+
+def catalog_fingerprint(connection: Any, schemas: Sequence[str] = OWNED_SCHEMAS) -> dict[str, Any]:
+    """A structural fingerprint of ``schemas``: tables, columns, constraints, indexes, triggers.
+
+    Everything the migrations are supposed to produce, read back out of the live catalog
+    rather than out of a hand-written model -- so a mutation to the SQL changes the
+    fingerprint, and an assertion on it is an assertion about the SQL.
+    """
+    names = tuple(schemas)
+    out: dict[str, Any] = {}
+    with connection.cursor() as cur:
+        cur.execute(
+            "select table_schema || '.' || table_name || '.' || column_name || ':' || "
+            "       data_type || case when is_nullable = 'NO' then '!' else '' end "
+            "  from information_schema.columns where table_schema = any(%s)",
+            (list(names),),
+        )
+        out["columns"] = sorted(row[0] for row in cur.fetchall())
+        cur.execute(
+            "select ns.nspname || '.' || cl.relname || '.' || c.conname || ':' || c.contype::text "
+            "       || ':' || pg_get_constraintdef(c.oid) "
+            "  from pg_constraint c "
+            "  join pg_class cl on cl.oid = c.conrelid "
+            "  join pg_namespace ns on ns.oid = cl.relnamespace "
+            " where ns.nspname = any(%s)",
+            (list(names),),
+        )
+        out["constraints"] = sorted(row[0] for row in cur.fetchall())
+        cur.execute(
+            "select schemaname || '.' || indexname || ':' || indexdef from pg_indexes "
+            " where schemaname = any(%s)",
+            (list(names),),
+        )
+        out["indexes"] = sorted(row[0] for row in cur.fetchall())
+        cur.execute(
+            "select ns.nspname || '.' || cl.relname || '.' || t.tgname "
+            "  from pg_trigger t "
+            "  join pg_class cl on cl.oid = t.tgrelid "
+            "  join pg_namespace ns on ns.oid = cl.relnamespace "
+            " where ns.nspname = any(%s) and not t.tgisinternal",
+            (list(names),),
+        )
+        out["triggers"] = sorted(row[0] for row in cur.fetchall())
+    return out
 
 
 @pytest.fixture

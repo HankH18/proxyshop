@@ -6,12 +6,14 @@ D16 in three obligations, and this module is where each of them is discharged:
    that order. Reads come back ``ORDER BY seq``, never by timestamp -- ``ts`` is the
    business instant and two events can legitimately share one.
 2. **The writer takes a lock on the chain tail.** :func:`append_event` takes a transaction-
-   scoped advisory lock keyed on the chain, *and* selects the tail ``FOR UPDATE``. Both,
-   for different reasons: the row lock is the tail lock D16 names, and the advisory lock
-   covers the case the row lock cannot -- an empty table, where there is no tail row to
-   lock and two concurrent writers would otherwise both compute ``prev_hash = GENESIS``.
-   The database refuses the loser either way (``commerce_events_prev_hash_key`` makes a
-   fork a unique violation), so the lock is what turns a crash into a wait.
+   scoped advisory lock keyed on the chain, and reads the tail under it. It deliberately
+   does **not** take a row lock as well: ``SELECT ... FOR UPDATE`` is gated on the UPDATE
+   privilege, which the append-only ``app`` role does not have and must not be given, so
+   the row lock made the ledger's own appender unable to append. The advisory lock is also
+   the only one that works on an empty table, where there is no tail row to lock and two
+   writers would otherwise both compute ``prev_hash = GENESIS``.
+   ``commerce_events_prev_hash_key`` is the backstop under both: the database refuses a
+   fork whether or not anybody took a lock, so the lock is what turns a crash into a wait.
 3. **``idempotency_key`` IS ``event_id``.** Re-appending an event already in the chain is a
    no-op that returns the row already there -- the stream length and the head hash do not
    move.
@@ -29,7 +31,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .canonical import GENESIS_HASH, canonical_event, compute_event_hash, rfc3339_ms
+from .canonical import (
+    GENESIS_HASH,
+    CanonicalisationError,
+    canonical_event,
+    canonical_json,
+    compute_event_hash,
+    rfc3339_ms,
+)
 from .chain import stream_hash, verify_chain
 from .errors import LedgerError
 
@@ -40,8 +49,11 @@ __all__ = [
     "CHAIN_LOCK_KEY",
     "AppendResult",
     "append_event",
+    "append_events",
+    "chain_anchor",
     "chain_tail",
     "db_stream_hash",
+    "head_hash",
     "read_events",
     "verify_chain_in_db",
 ]
@@ -133,30 +145,74 @@ def head_hash(connection: psycopg.Connection) -> str:
     return GENESIS_HASH if tail is None else str(tail["event_hash"])
 
 
-def append_event(connection: psycopg.Connection, event: Mapping[str, Any]) -> AppendResult:
+def append_event(
+    connection: psycopg.Connection,
+    event: Mapping[str, Any],
+    *,
+    join_open_transaction: bool = False,
+) -> AppendResult:
     """Append one ``LedgerEvent`` to the global chain.
 
     Args:
-        connection: a ``psycopg.Connection``. The whole append runs in one explicit
-            transaction, so it works on an autocommit connection as well as a transactional
-            one.
+        connection: a ``psycopg.Connection``. The append runs in its own transaction, so an
+            autocommit connection is the ordinary case.
         event: ``{event_id, ts, kind, auction_id?, store_id?, order_ref?, payload}``.
             ``event_id`` becomes ``idempotency_key`` (D16 -- there is no second identifier),
             and any ``prev_hash``/``event_hash`` already on it is ignored and recomputed.
+        join_open_transaction: acknowledge that the connection already has a transaction
+            open, and that the chain lock will therefore be held until **the caller**
+            commits. See below.
 
     Returns:
         An :class:`AppendResult`. ``inserted`` is ``False`` for an ``event_id`` already in
         the chain, and then ``event`` is the row that was already there.
 
     Raises:
-        LedgerError: the event is missing ``event_id``, ``ts`` or ``kind``.
+        LedgerError: the event is missing a required field; an ``event_id`` already in the
+            chain arrived carrying *different* content; the stored row does not hash to the
+            digest written; or the connection has a transaction open and
+            ``join_open_transaction`` was not passed.
         psycopg.errors.IntegrityError: the database refused the row -- an unknown ``kind``,
             or a ``prev_hash`` that does not link to the tail. Deliberately not caught: a
             rejected link means somebody wrote outside this function.
+
+    **Isolation level.** This is correct at ``READ COMMITTED`` (Postgres's default), where
+    the tail read after taking the lock sees the winner's committed row. Under
+    ``REPEATABLE READ`` or ``SERIALIZABLE`` the snapshot is pinned before the lock is taken,
+    so a concurrent append is invisible, the tail read is stale, and only
+    ``commerce_events_prev_hash_key`` catches it -- as a ``UniqueViolation`` that
+    :func:`~.errors.is_transient_datastore_error` classifies as NOT retryable, because in
+    every other context an integrity violation is a bug rather than a race. Append at
+    ``READ COMMITTED``.
+
+    **Why the open-transaction guard exists.** ``connection.transaction()`` opens a
+    SAVEPOINT, not a top-level transaction, when one is already in progress. The chain lock
+    below is ``pg_advisory_xact_lock`` -- scoped to the *transaction*, not the savepoint --
+    so on a pooled non-autocommit connection the first append would hold the single global
+    chain lock for the entire life of the caller's transaction, and every other writer in
+    the system would block behind it. That is sometimes exactly what you want (the append
+    is then atomic with the caller's other work) and sometimes a system-wide stall, and the
+    difference is a decision the caller has to make rather than one to discover in
+    production. So it is opt-in and named.
     """
     body = canonical_event(event)
     if "ts" not in body:
         raise LedgerError("LedgerEvent is missing required field 'ts'")
+
+    import psycopg as _psycopg
+
+    if (
+        connection.info.transaction_status != _psycopg.pq.TransactionStatus.IDLE
+        and not join_open_transaction
+    ):
+        raise LedgerError(
+            "append_event was handed a connection with a transaction already open. "
+            "`connection.transaction()` would open a SAVEPOINT inside it, while the chain's "
+            "advisory lock is transaction-scoped -- so the single global chain lock would be "
+            "held until YOUR commit, blocking every other ledger writer for that whole span. "
+            "Pass an autocommit connection, or pass join_open_transaction=True if appending "
+            "atomically with the rest of your transaction is what you actually want."
+        )
 
     with connection.transaction():
         with connection.cursor() as cur:
@@ -171,13 +227,40 @@ def append_event(connection: psycopg.Connection, event: Mapping[str, Any]) -> Ap
             cur.execute(f"{_SELECT} where idempotency_key = %s", (body["event_id"],))
             existing = cur.fetchone()
             if existing is not None:
+                stored_body = canonical_event(_row_to_event(existing))
+                if canonical_json(stored_body) != canonical_json(body):
+                    # Same id, different content. Returning `inserted=False` here would be a
+                    # success-shaped result for a write that was silently dropped -- the
+                    # worst possible failure mode for an append-only ledger, because the
+                    # caller has no way to notice.
+                    raise LedgerError(
+                        f"event_id {body['event_id']!r} is already in the chain with "
+                        f"DIFFERENT content, so this append would be silently lost. D16 "
+                        f"makes event_id the idempotency key, which means re-sending an id "
+                        f"must re-send the same event.\n"
+                        f"  stored:   {canonical_json(stored_body)[:300]}\n"
+                        f"  incoming: {canonical_json(body)[:300]}"
+                    )
                 return AppendResult(
                     event=_row_to_event(existing),
                     inserted=False,
                     head_hash=head_hash(connection),
                 )
 
-            tail = chain_tail(connection, for_update=True)
+            # The tail is read WITHOUT `FOR UPDATE`. A row lock here looked like belt and
+            # braces and was actually a privilege bug: `SELECT ... FOR UPDATE` is gated on
+            # the UPDATE privilege, and `app` -- the role 0004 gives SELECT+INSERT on the
+            # ledger precisely so it can append and nothing else -- holds no UPDATE. So the
+            # one role documented as the ledger's appender could not append, and the denial
+            # arrived as a bare `permission denied for table commerce_events` that named
+            # neither FOR UPDATE nor the privilege it wanted.
+            #
+            # Nothing is lost. The advisory lock above already serialises writers, and it
+            # covers the case a row lock cannot: an empty table has no tail row to lock.
+            # `commerce_events_prev_hash_key` is the backstop underneath both -- a second
+            # writer that somehow computed the same `prev_hash` is refused by the database,
+            # not merely by the convention that everyone took the lock.
+            tail = chain_tail(connection)
             prev = GENESIS_HASH if tail is None else str(tail["event_hash"])
             digest = compute_event_hash(prev, body)
 
@@ -213,12 +296,20 @@ def append_event(connection: psycopg.Connection, event: Mapping[str, Any]) -> Ap
             # would corrupt the chain silently and surface much later as a verification
             # failure with no tampering anywhere, so it is checked here, at the only moment
             # where the cause is still visible, and the transaction is rolled back.
-            if compute_event_hash(prev, stored) != digest:
+            try:
+                restored = compute_event_hash(prev, stored)
+            except CanonicalisationError as exc:
+                raise LedgerError(
+                    f"event {body['event_id']!r} does not survive a jsonb round trip: the "
+                    f"stored row cannot be canonicalised at all ({exc}). jsonb renders "
+                    f"numbers through `numeric`, so a float such as 1e23 comes back as a "
+                    f"24-digit integer outside the IEEE-754 safe range. Store it as a string."
+                ) from exc
+            if restored != digest:
                 raise LedgerError(
                     f"event {body['event_id']!r} does not survive a jsonb round trip: the "
                     f"stored row canonicalises differently from the value that was hashed. "
-                    f"Its payload holds a value jsonb renormalises (a float outside the "
-                    f"range jsonb reproduces exactly, most likely). Store it as a string."
+                    f"Its payload holds a value jsonb renormalises. Store it as a string."
                 )
     return AppendResult(event=stored, inserted=True, head_hash=str(stored["event_hash"]))
 
@@ -226,7 +317,14 @@ def append_event(connection: psycopg.Connection, event: Mapping[str, Any]) -> Ap
 def append_events(
     connection: psycopg.Connection, events: Sequence[Mapping[str, Any]]
 ) -> list[AppendResult]:
-    """Append a sequence, one transaction each, in order."""
+    """Append a sequence, in order, **one transaction each**.
+
+    Deliberately not atomic across the batch: a failure part-way leaves the events before it
+    committed. That is the right shape for an append-only ledger -- the events that happened
+    happened -- but it means a caller who needs all-or-nothing must open its own transaction
+    and pass ``join_open_transaction=True`` to :func:`append_event`, accepting that the chain
+    lock is then held for that whole span.
+    """
     return [append_event(connection, event) for event in events]
 
 
@@ -264,15 +362,55 @@ def read_events(
         return [_row_to_event(row) for row in cur.fetchall()]
 
 
-def verify_chain_in_db(connection: psycopg.Connection) -> dict[str, Any]:
-    """Read the whole chain and verify it. See :func:`~.chain.verify_chain` for the shape.
+def chain_anchor(connection: psycopg.Connection) -> dict[str, Any]:
+    """The stored commitment: ``{head_hash, length, last_seq, updated_at}``.
 
-    ``broken_at`` is the index into the stream, which for an untruncated chain read from
-    genesis is ``seq - 1``.
+    Maintained by an ``AFTER INSERT`` trigger on every row that lands, so it is accurate
+    even for a writer that never called this module.
     """
-    return verify_chain(read_events(connection))
+    with connection.cursor() as cur:
+        cur.execute(
+            "select head_hash, length, last_seq, updated_at from ledger.chain_head "
+            "where chain = 'commerce_events'"
+        )
+        row = cur.fetchone()
+    if row is None:  # pragma: no cover - the migration seeds the row
+        raise LedgerError("ledger.chain_head holds no row for the commerce_events chain")
+    return {"head_hash": row[0], "length": row[1], "last_seq": row[2], "updated_at": row[3]}
+
+
+def verify_chain_in_db(connection: psycopg.Connection) -> dict[str, Any]:
+    """Verify the stored chain against its own links **and** against the stored anchor.
+
+    :func:`~.chain.verify_chain` alone cannot detect truncation from the END of the stream:
+    delete the last forty of a hundred events and the remaining sixty verify perfectly,
+    because a truncated chain's digest is a perfectly valid chain digest and there is
+    nothing to check its length against. ``ledger.chain_head`` is that something.
+
+    Returns:
+        The :func:`~.chain.verify_chain` result plus ``anchor`` (the stored commitment),
+        ``recomputed`` (:func:`~.chain.stream_hash` over the rows) and ``anchor_ok``. ``ok``
+        is ``True`` only when the links verify **and** the recomputed head and the row count
+        both match the anchor -- so ``reason`` may be ``"truncated"`` for a stream that is
+        internally flawless.
+    """
+    events = read_events(connection)
+    result = verify_chain(events)
+    anchor = chain_anchor(connection)
+    recomputed = stream_hash(events)
+    anchor_ok = bool(
+        recomputed == str(anchor["head_hash"]) and len(events) == int(anchor["length"])
+    )
+    result["anchor"] = anchor
+    result["recomputed"] = recomputed
+    result["anchor_ok"] = anchor_ok
+    if result["ok"] and not anchor_ok:
+        result["ok"] = False
+        result["reason"] = "truncated"
+        result["broken_at"] = len(events)
+    return result
 
 
 def db_stream_hash(connection: psycopg.Connection) -> str:
-    """The stored chain's stream hash -- the value a replay must reproduce."""
+    """The stored chain's stream hash, **recomputed** from the rows (never read off one)."""
     return stream_hash(read_events(connection))

@@ -37,6 +37,7 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 #: The chain's genesis link. Sixty-four ``0`` characters -- a value no SHA-256 digest of any
@@ -150,21 +151,61 @@ def _serialise_string(value: str) -> str:
     return "".join(out)
 
 
+#: ECMAScript's safe-integer bound. An ``int`` larger than this is not exactly a double, so
+#: it has no ES6 -- and therefore no JCS -- rendering that round-trips.
+MAX_SAFE_INTEGER = 2**53
+
+
+def _es6_number(value: float) -> str:
+    """ECMAScript ``Number::toString`` (ECMA-262 §6.1.6.1.20), which is what JCS mandates.
+
+    ``repr`` is NOT this function and the difference is not cosmetic. Python switches to
+    exponential notation below ``1e-4``; ECMAScript switches below ``1e-7``. So ``1e-05``
+    is what ``repr`` gives and ``"0.00001"`` is what RFC-8785 requires, and a payload
+    holding ``{"rate": 1e-5}`` hashed the ``repr`` way makes every conforming Go, Rust or
+    JavaScript verifier report tampering where there is none -- the exact interoperability
+    failure D16 names as its reason for existing.
+
+    The algorithm below is the spec's, on the shortest round-tripping decimal digits
+    (``repr`` does give us those): with ``x = digits x 10**(n - k)`` where ``k`` is the digit
+    count, the four cases are integral, fractional, leading-zero, and exponential.
+    """
+    if value == 0:  # covers -0.0, which ECMAScript renders as "0"
+        return "0"
+    if value < 0:
+        return "-" + _es6_number(-value)
+
+    digits_tuple, exponent = Decimal(repr(value)).normalize().as_tuple()[1:]
+    digits = "".join(str(digit) for digit in digits_tuple)
+    k = len(digits)
+    n = k + int(exponent)
+
+    if k <= n <= 21:
+        return digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return f"{digits[:n]}.{digits[n:]}"
+    if -6 < n <= 0:
+        return f"0.{'0' * -n}{digits}"
+    mantissa = digits if k == 1 else f"{digits[0]}.{digits[1:]}"
+    power = n - 1
+    return f"{mantissa}e{'+' if power >= 0 else '-'}{abs(power)}"
+
+
 def _serialise_number(value: float | int) -> str:
-    """ECMAScript ``Number::toString`` for the values JSON can carry."""
+    """RFC-8785 §3.2.2.2: a JSON number is an IEEE-754 double, rendered by ES6."""
     if isinstance(value, int):
-        return str(value)
+        if -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER:
+            # Exactly a double, and ES6 renders an integral double as its digits.
+            return str(value)
+        raise CanonicalisationError(
+            f"{value} is outside the IEEE-754 safe-integer range, so it has no canonical "
+            f"JSON form: RFC-8785 defines a JSON number as a double, and this value would "
+            f"hash one way as a Python int and another way once any JSON parser (or "
+            f"Postgres `jsonb`) has read it back as a float. Carry it as a string."
+        )
     if math.isnan(value) or math.isinf(value):
         raise CanonicalisationError(f"{value!r} has no JSON representation")
-    if value == int(value) and abs(value) < 1e21:
-        # ES6 prints an integral double without a fractional part: 1.0 -> "1", -0.0 -> "0".
-        return str(int(value))
-    text = repr(value)  # shortest round-tripping form, as ES6 specifies
-    if "e" in text:
-        mantissa, _, exponent = text.partition("e")
-        sign = "+" if not exponent.startswith("-") else "-"
-        text = f"{mantissa}e{sign}{exponent.lstrip('+-').lstrip('0') or '0'}"
-    return text
+    return _es6_number(value)
 
 
 def _sort_key(name: str) -> tuple[int, ...]:
@@ -248,6 +289,13 @@ def canonical_event(event: Mapping[str, Any]) -> dict[str, Any]:
     missing = [name for name in ("event_id", "kind") if name not in body]
     if missing:
         raise CanonicalisationError(f"LedgerEvent is missing required field(s): {missing}")
+    # `payload` is a required LedgerEvent field (DESIGN §Interfaces) and the column has
+    # `DEFAULT '{}'`, so an event written without one comes back out of Postgres carrying
+    # `{}`. Defaulting it here is what makes those two the same event: without it the write
+    # hashed a body with no `payload` key while the stored row hashed one with an empty
+    # object, and the writer's own round-trip guard then rejected the append -- blaming
+    # float renormalisation, which had nothing to do with it.
+    body.setdefault("payload", {})
     return body
 
 

@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS ledger.commerce_events (
   CONSTRAINT commerce_events_event_hash_hex      CHECK (event_hash ~ '^[0-9a-f]{64}$'),
   CONSTRAINT commerce_events_not_self_linked     CHECK (prev_hash <> event_hash),
   CONSTRAINT commerce_events_payload_is_object   CHECK (jsonb_typeof(payload) = 'object'),
+  -- D16 pins timestamps at MILLISECOND precision, and the hash is taken over the
+  -- millisecond rendering. `timestamptz` stores microseconds, so a writer that skipped the
+  -- library could store .123456, whose canonical form is .123 -- and the row would no
+  -- longer hash to its own event_hash. Rejected rather than silently truncated: a value
+  -- the writer did not mean to round is a value it should be told about.
+  -- (`timezone('UTC', ...)` is IMMUTABLE, which `date_trunc` on a timestamptz is not, so
+  -- this is expressible as a CHECK at all.)
+  CONSTRAINT commerce_events_occurred_at_is_millisecond CHECK (
+    date_trunc('milliseconds', timezone('UTC', occurred_at)) = timezone('UTC', occurred_at)
+  ),
   -- C11 / D24: the frozen LedgerEvent kind vocabulary. Thirteen from DESIGN §Interfaces
   -- plus the five D24 added in T-010, and no others.
   CONSTRAINT commerce_events_kind_check CHECK (kind IN (
@@ -97,8 +107,17 @@ CREATE OR REPLACE TRIGGER commerce_events_chain_guard_trigger
   BEFORE INSERT ON ledger.commerce_events
   FOR EACH ROW EXECUTE FUNCTION ledger.commerce_events_chain_guard();
 
--- Append-only. TRUNCATE deliberately still works (it fires no row trigger), because that
--- is how a test resets the fixture; UPDATE and DELETE of a written row never do.
+-- Append-only: UPDATE and DELETE of a written row are refused outright.
+--
+-- TRUNCATE is deliberately NOT refused, and that is a decision rather than an oversight.
+-- Row-level triggers do not fire on TRUNCATE at all, so refusing it would need a separate
+-- statement-level trigger -- and TRUNCATE is how the test fixtures reset the chain between
+-- tests. What makes the exemption safe is who can use it: TRUNCATE is an owner-only
+-- privilege, and 0004 grants it to nobody. `trust_rw` holds SELECT/INSERT/UPDATE/DELETE,
+-- `app` holds SELECT/INSERT, `exchange` holds SELECT; none of them can truncate this table.
+-- Only the migration runner can, and when it does, the statement-level trigger below resets
+-- the anchor with it -- so a truncation is a visible RESET of the chain, never a silent
+-- edit to one.
 CREATE OR REPLACE FUNCTION ledger.reject_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $immutable$
 BEGIN
@@ -111,6 +130,73 @@ $immutable$;
 CREATE OR REPLACE TRIGGER commerce_events_append_only_trigger
   BEFORE UPDATE OR DELETE ON ledger.commerce_events
   FOR EACH ROW EXECUTE FUNCTION ledger.reject_mutation();
+
+-- ---------------------------------------------------------------------------------------
+-- chain_head -- the commitment that makes TAIL truncation detectable
+-- ---------------------------------------------------------------------------------------
+-- Without this table, a hash chain cannot detect its own tail being cut off. Delete the
+-- last 40 of 100 events and the remaining 60 still verify perfectly: the digest of a
+-- truncated chain is a valid chain digest, and there is nothing to compare its LENGTH
+-- against. `verify_chain` catches reordering, mid-stream deletion and content tampering --
+-- all of which break a link -- and cannot, even in principle, catch truncation from the
+-- end. Only a stored commitment can.
+--
+-- One row, forced by the primary key plus the CHECK on the discriminator. It is maintained
+-- by a trigger rather than by the writer, so a row inserted by psql or by some future
+-- service keeps it accurate too; a writer that could append without advancing the anchor
+-- would be a writer that could truncate without tripping it.
+CREATE TABLE IF NOT EXISTS ledger.chain_head (
+  chain      text        NOT NULL,
+  head_hash  char(64)    NOT NULL,
+  length     bigint      NOT NULL,
+  last_seq   bigint      NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT chain_head_pkey PRIMARY KEY (chain),
+  CONSTRAINT chain_head_is_the_only_chain CHECK (chain = 'commerce_events'),
+  CONSTRAINT chain_head_hex               CHECK (head_hash ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT chain_head_length_positive   CHECK (length >= 0)
+);
+
+INSERT INTO ledger.chain_head (chain, head_hash, length, last_seq)
+  VALUES ('commerce_events', repeat('0', 64), 0, 0)
+  ON CONFLICT (chain) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION ledger.commerce_events_advance_anchor() RETURNS trigger
+LANGUAGE plpgsql AS $anchor$
+BEGIN
+  UPDATE ledger.chain_head
+     SET head_hash  = NEW.event_hash,
+         length     = length + 1,
+         last_seq   = NEW.seq,
+         updated_at = now()
+   WHERE chain = 'commerce_events';
+  RETURN NULL;
+END;
+$anchor$;
+
+CREATE OR REPLACE TRIGGER commerce_events_advance_anchor_trigger
+  AFTER INSERT ON ledger.commerce_events
+  FOR EACH ROW EXECUTE FUNCTION ledger.commerce_events_advance_anchor();
+
+-- The sanctioned reset. TRUNCATE is owner-only (see above), and taking the anchor back to
+-- genesis with it is what keeps "the table is empty" and "the chain is empty" the same
+-- statement.
+CREATE OR REPLACE FUNCTION ledger.commerce_events_reset_anchor() RETURNS trigger
+LANGUAGE plpgsql AS $reset$
+BEGIN
+  UPDATE ledger.chain_head
+     SET head_hash  = repeat('0', 64),
+         length     = 0,
+         last_seq   = 0,
+         updated_at = now()
+   WHERE chain = 'commerce_events';
+  RETURN NULL;
+END;
+$reset$;
+
+CREATE OR REPLACE TRIGGER commerce_events_reset_anchor_trigger
+  AFTER TRUNCATE ON ledger.commerce_events
+  FOR EACH STATEMENT EXECUTE FUNCTION ledger.commerce_events_reset_anchor();
 
 -- ---------------------------------------------------------------------------------------
 -- catalog_snapshots -- what a verification decision was made against

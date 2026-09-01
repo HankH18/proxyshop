@@ -60,6 +60,11 @@ def observations_from_events(events: Iterable[Mapping[str, Any]]) -> list[dict[s
         the event, falling back to the payload; ``observed_at`` from the payload, falling
         back to the event's ``ts`` -- so an observation always carries the instant the
         scorer decays against.
+
+        An event naming a ``dim`` and a ``type`` but **no** ``store_id`` is skipped: a trust
+        observation is a statement about a store, and there is no honest store to attribute
+        it to. That is a silent drop, and the reason it is tolerable is that the writer's own
+        chain guard cannot produce such an event through any path this package owns.
     """
     observations: list[dict[str, Any]] = []
     for event in events:
@@ -92,6 +97,9 @@ def _load_score() -> Any:
         try:
             module = importlib.import_module(name)
         except ImportError as exc:
+            # Only ImportError. A scorer that exists and raises something else while
+            # importing is a broken scorer, and swallowing that into "T-062 has not landed
+            # yet" would send the reader to the wrong ticket.
             errors.append(f"{name}: {exc}")
             continue
         scorer = getattr(module, "score", None)
