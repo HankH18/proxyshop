@@ -437,6 +437,9 @@ def _protocol_payloads() -> dict:
                         "shipped_on_time",
                         "not_returned",
                         "feedback_match",
+                        # R12 amendment: product-fact verification is its own trust
+                        # dimension, not a transaction dimension wearing a disguise.
+                        "catalog_claim_accuracy",
                     )
                 },
                 "blacklisted": False,
@@ -447,6 +450,8 @@ def _protocol_payloads() -> dict:
                 "blacklisted": False,
                 "dims.price_honored.alpha": 2.0,
                 "dims.feedback_match.beta": 1.0,
+                "dims.catalog_claim_accuracy.alpha": 2.0,
+                "dims.catalog_claim_accuracy.beta": 1.0,
             },
         ),
         "TrustEventPayload": (

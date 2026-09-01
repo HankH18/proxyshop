@@ -11,6 +11,11 @@ do not quietly implement the other reading.
 Sections marked **[verified]** were established by running something on this machine, not by
 reading a document.
 
+Sections marked **[amendment 1]** record a deliberate, user-approved edit to the frozen
+acceptance suite. Each one names the earlier ruling it supersedes and states plainly why that
+ruling was wrong. A ruling superseded by an amendment is dead in the part the amendment names
+and alive everywhere else; each amendment says which part.
+
 ---
 
 ## D1 — The schema package is `packages/contracts`, never `packages/protocol`
@@ -546,7 +551,7 @@ gate *inside* either function that denied when no eligibility port was injected 
 of those red, S8-3 included. One layer up gives the identical guarantee at zero cost to the harness.
 **Do not add a required parameter to either frozen signature.**
 
-## D47 — Solicitation and bid submission are two endpoints; the signing primitives stay where they are **[verified: frozen import path, flat keyring, and the four absent envelope fields]**
+## D47 — Solicitation and bid submission are two endpoints **[endpoint split stands; constraints 1 and 2 below are SUPERSEDED by D52, amendment 1]**
 
 `DESIGN.md:65` defines store-agent `POST /bid` as `BidRequest → Bid|decline` — the exchange
 *solicits*. `DESIGN.md:31`, `:38` and `:95` use the same route as the inbound door through which an
@@ -560,7 +565,12 @@ reading T-044 build incompatible things.
   `Bid → AcceptedForVerification | Rejected`. Signature verification, replay protection and
   auction/deadline validation are **exchange-boundary** duties.
 
-**Two frozen constraints bound the fix; honour both.** Measured here:
+**~~Two frozen constraints bound the fix; honour both.~~ SUPERSEDED BY D52.** Both were measured
+correctly against the PRE-amendment suite, and both have since been amended away on purpose. The
+endpoint split above stands unchanged; constraints 1 and 2 below are historical. **Build to D52.**
+The keyring is now nested `{signer_id: {key_id: secret}}` and the envelope fields are REQUIRED.
+Recorded rather than deleted, because a ruling file that rewrites its own history is worse than one
+that shows the reversal. Original text:
 
 1. `test_e4_store_agent.py:892` and `:926` import `receive_bid, sign_bid` from
    `packages.store_agent.src.external`, and the keyring is a flat `{store_id: key}` mapping
@@ -697,6 +707,175 @@ moves SPEC toward what the frozen suite already says — the rare case where the
 the more correct of the two.
 
 
+## D52 — The external signing envelope is REQUIRED, and the keyring is indexed by `key_id` — this reverses half of D47 **[amendment 1]**
+
+D47 ruled `signer_id`, `key_id`, `issued_at` and the nonce **optional** envelope fields, and it
+named its reason outright: none of the four appears anywhere under `.swarm-loop/acceptance/`, and
+the frozen external payload (`test_e4_store_agent.py:861-885`) carries none of them, so "a receiver
+that required one would fail `:889` and `:923`."
+
+**That reason was the wrong kind of reason, and the record should say so.** A fixture that omits a
+field is evidence that the fixture was written before the field existed. It is not an argument that
+the public v1 network contract should accept submissions with no signer identity, no key selector,
+no issue time and no replay token. What D47 actually did was let a frozen test dictate a public
+security contract, and it bought that with the three properties the door is signed for in the first
+place: key rotation, freshness, and robust replay protection. Hank approved amending the fixture
+instead. The optionality is withdrawn.
+
+**Ruling — the four fields are required, and three further properties come with them:**
+
+1. **Required envelope.** A `Bid` submitted through `POST /v1/auctions/{auction_id}/bids` carries
+   `signer_id`, `key_id`, `issued_at`, `nonce` **and `schema_version`** — five required fields, not
+   four; the amended suite freezes `schema_version` alongside the other four because a signature
+   that does not bind the schema version can be replayed across a schema change. A submission
+   missing any one of them is `Rejected` at the exchange boundary, before extraction and before
+   verification, with the same finality as a bad signature. There is no legacy-tolerant production
+   path. A fixture adapter, if backward compatibility is ever genuinely needed, lives inside a test
+   and is never reachable from the route.
+2. **Canonical signing bytes.** `canonical_signing_bytes(payload)` covers `auction_id`, `signer_id`,
+   `store_id`, `issued_at`, `nonce`, `key_id`, `schema_version` and `payload_hash(payload)` — a
+   digest over the bid body — so a signature cannot be lifted onto a different auction, signer,
+   store, instant, key or payload. It is order-independent and survives a JSON round trip
+   unchanged. Both are **one** exported function each, called by `sign_bid` and `receive_bid`
+   alike; neither re-derives the bytes and no third caller re-implements them.
+3. **Nonce persistence outlasts the auction.** Consumption goes through an injected `NonceStore`
+   (`seen(signer_id, nonce)`, `purge_expired(as_of)`) durably backed by `app.bid_nonces`. A consumed
+   `(signer_id, nonce)` is still remembered at every moment before that auction's `respond_by` and
+   is forgotten only *after* it passes. Holding it in the Redis auction state would reopen
+   same-payload temporal replay the moment that state expires — precisely the window D47 identified
+   as still open and then left open. Uniqueness is **per signer**, never global. A submission
+   arriving after `respond_by` is refused outright, and `issued_at` is additionally checked against
+   a finite `freshness_window_seconds` in both directions, so a far-past or clock-skewed-future
+   issue time rejects.
+4. **The keyring is indexed by `key_id` under the signer.** Rotation is what `key_id` is for: a
+   signer may hold more than one live key, and a signature names which one it used. D47's flat
+   `{store_id: key}` mapping cannot express rotation and is superseded — the keyring is
+   `{signer_id: {key_id: secret}}`. Note the outer key: it is the **signer**, not the store, and a
+   lookup keyed on `key_id` alone is wrong, because two signers may legitimately use the same
+   `key_id` string. An unknown `(signer_id, key_id)` pair is a rejection, never a fallback to
+   another key of that signer.
+
+**What of D47 survives:** everything but the optionality and the keyring shape. The endpoint split
+stands — solicitation is `POST /v1/bid-requests` (exchange → seller, `BidRequest → Bid | Decline`),
+submission is `POST /v1/auctions/{auction_id}/bids` (external seller → exchange, signed
+`Bid → AcceptedForVerification | Rejected`). The module location stands: `sign_bid`, `receive_bid`
+and the canonicalizer remain importable from `packages.store_agent.src.external`, and physically
+relocating them into `apps/exchange` still voids the freeze. Signature verification, replay
+rejection, auction existence, `respond_by`, offer-expiry and blacklist checks remain
+**exchange-boundary** duties that run before an external bid is enqueued. `app.seller_endpoints`
+gains per-`key_id` rows; the consumed-nonce store is a new `app.*` table in T-011's migrations.
+
+## D53 — `catalog_claim_accuracy` is a sixth dimension in the ONE trust system — this reverses D48's dimension half **[amendment 1]**
+
+D48 declined the sixth dimension and installed a `claim_type → dimension` mapping table in its
+place. Read D48's own reasoning back: the dimension half was declined because "a sixth dimension
+that actually carried verification outcomes would have to amend both" frozen vocabulary assertions
+(`test_e6_trust.py:70` and `:265`; `test_e8_proofs.py:69` and `:356`). **That is a statement about
+what an amendment would cost, not a design argument** — and D48 half-admitted it, closing with the
+sixth dimension left "available as a deliberate, logged amendment". This is that amendment; Hank
+approved it.
+
+The substance was always on the other side. A false dairy-free claim is not `price_honored`, not
+`discount_honored`, not `shipped_on_time`, not `not_returned`, and calling it `feedback_match`
+asserts that a routed buyer reported a mismatch when no buyer has yet bought anything. D48's table
+routed every product-fact claim into a post-purchase satisfaction Beta, where catalog dishonesty
+became arithmetically indistinguishable from a late delivery — corrupting the meaning of both, and
+of the score built from them. A mapping table redistributes an existing vocabulary; it cannot supply
+a concept the vocabulary lacks.
+
+**Ruling:** trust has **six** dimensions and remains **one** trust system — one Beta framework, one
+decay rule, one score, one ledger. Two trust systems are still rejected (`DESIGN`'s reconciliation
+bullet); a sixth Beta inside the single framework was never what that bullet forbade.
+
+- `TrustSnapshot.dims` = `{price_honored, discount_honored, shipped_on_time, not_returned,
+  feedback_match, catalog_claim_accuracy}`, each `{alpha, beta, decayed_at}`. The same six are the
+  vocabulary governing `fixtures/manifest.json → dishonest_store.behaviours[].dim`.
+- **The mapping table survives; its right-hand side changes.** It is still required to be **typed
+  and exhaustive**. Offer-integrity claim types keep their natural transaction dimension —
+  `price`/`unit_price`/`total_price` → `price_honored`; `discount`/`promo_eligibility` →
+  `discount_honored`; `delivery`/`shipping_speed`/`dispatch_window` → `shipped_on_time`;
+  `return_policy`/`warranty` → `not_returned`. Product-fact claim types — `ingredients`,
+  `compatibility`, `nutrition`, `specifications` — route to `catalog_claim_accuracy` instead of
+  `feedback_match`. An unmapped `claim_type` raises at manifest load; it never silently defaults to
+  a dimension. That failure mode is the whole value of "exhaustive".
+- **Outcome treatment, as approved:** `verified` is a positive observation on the mapped dimension.
+  `contradicted` is a negative observation at the published weight 2.0. `unsupported` moves the mean
+  by a small published policy weight strictly below `contradicted`, and its dominant effect is to
+  hold `confidence` and coverage down rather than to move `score`. `ambiguous` produces **no** mean
+  movement at all and lowers coverage/confidence only. Neither `unsupported` nor `ambiguous` ever
+  satisfies a hard constraint or counts as verified evidence (R19), and `ambiguous` additionally
+  cannot satisfy a hard constraint by construction.
+- `feedback_match` is handed back its own meaning: the post-purchase, buyer-reported match between
+  what was pitched and what arrived (R14), cross-checked against return behaviour.
+- D18 and D26 are amended to the six-dimension vocabulary wherever they name five. D48's metadata
+  half — `confidence`, `effective_sample_size`, `score_version`, `snapshot_version`,
+  `computed_through_event` on `TrustSnapshot` — is untouched and still stands.
+
+**What this costs, stated plainly:** every trust score, served snapshot and manifest trajectory
+expressed over five dimensions is void, and the two frozen vocabulary assertions plus the manifest's
+`dim` values are amended with them. No product code exists yet, so the bill is the fixture edit and
+nothing else. It only ever gets larger.
+
+## D54 — Eligibility is a system guarantee at the public orchestration boundary, not a property of three pure functions **[amendment 1]**
+
+D46 put the three R12 gates one layer above the frozen function surface, and its layering argument
+was correct: `accept(auction, bid_ref, creator, mode)` and `collect_bids(roster, responses, now)`
+are called positionally by frozen tests that **require them to succeed**, so a gate inside either
+that denied on a missing eligibility port would turn seven call sites red, S8-3 included.
+
+What D46 did not say is what that left behind. Measured: ranking's gate is asserted and blocks
+release (S8-1, `test_spec_criteria.py:928`); **solicitation's and checkout's gates were asserted
+nowhere.** They existed in a ticket objective and in this file. An unasserted gate is a plan, not a
+guarantee, and R12's fail-closed promise covers three gates, not one.
+
+The positional tests are not evidence about the gates in either direction. They are **unit tests of
+pure functions** handed an already-eligible roster and an already-approved bid: they show those
+functions compute correctly on clean input and are structurally silent on whether anything upstream
+refuses dirty input — `collect_bids` receives no trust snapshot and its roster records carry no
+eligibility field at all. Inferring the system guarantee from a layer those tests bypass is exactly
+the inference this ruling forbids.
+
+**Ruling:** the versioned `SellerEligibility` gate is asserted **at the public orchestration
+boundary, by denial**, at all three R12 points. The boundary layer is
+`apps.exchange.src.orchestration` — the layer that decides *who gets asked* and *whether a checkout
+may proceed* — and the port is `apps.exchange.src.eligibility`:
+
+- **solicitation** — `solicit_bids(roster=, solicitor=, eligibility=, now=)` reads eligibility for
+  every rostered store before anything is asked. An ineligible store is never solicited and never
+  appears even as a list-price fallback entry; each denial is recorded in the result's `denied` list
+  with a reason naming the condition (`blacklist` / `unavailable`).
+- **ranking** — `rank()` excludes the ineligible candidate and records the exclusion reason (already
+  blocking, S8-1).
+- **checkout** — `accept_offer(auction=, bid_ref=, code_creator=, mode=, eligibility=)` **re-reads**
+  eligibility at accept time, so a store blacklisted after it bid gets no code and no permalink, and
+  the code creator is never called.
+
+**Fail-closed means three things, not one:** `BLACKLISTED` denies, `UNAVAILABLE` denies, and an
+eligibility read that *raises* denies exactly like `UNAVAILABLE`. The port is versioned —
+`SellerEligibility.interface_version` against the module constant
+`SELLER_ELIGIBILITY_INTERFACE_VERSION` — and a source speaking another version is refused at both
+boundary gates rather than trusted.
+
+Every one of the three carries a **positive control in the same test**: the identical input with an
+eligible seller and an available read must succeed, mint exactly one code, and carry the solicited
+prices intact through the orchestration layer. A surface that denies everything satisfies a denial
+assertion and is not a gate; a stub that returns nothing fails these tests.
+
+**D46's layering constraint is unchanged and still binds.** `collect_bids/3` and `accept/4` keep
+their positional signatures and gain **no required parameter**; any eligibility port reaching them
+is an optional keyword whose absence is not itself a denial. The denial happens in the callables
+above them, and those callables are now named in DESIGN §Interfaces rather than left to an
+executor's imagination.
+
+**Ownership is corrected here, and it is not `T-010`.** D46 gave the port to `packages/contracts` on
+the strength of D26's treatment of `TrustSnapshot`; the amended suite imports it from
+`apps.exchange.src.eligibility`, so `packages/contracts` is the wrong home and that half of D46 is
+superseded. `T-030` creates `apps/exchange/src/eligibility/**` and the `orchestration` package with
+`solicit_bids`; `T-033` adds `accept_offer` to that same package and must not modify `solicit_bids`
+— the two never run concurrently, since `T-033` depends on `T-030`. `T-032` owns the ranking gate
+and the versioned-interface assertion, which imports **both** boundary callables and therefore needs
+a `T-033` edge it did not have. `T-062`/`T-064` still own the live blacklist lookup behind the port.
+
 ---
 
 _Rulings the intake report states outside its §2 are **not** restated here and are **not** given D
@@ -705,4 +884,11 @@ files, frozen after T-000 closes), the narrowed per-ticket file-ownership map (�
 and the scheduling constraints SC-1 … SC-5 (§5, lines 602-634). They bind the orchestrator and the
 scheduler rather than settling a contested reading of the doc set, they are too large to quote into
 a task packet, and §3.1/§4 are superseded on the layout point by D42 above. Read them from the
-intake report; the packet-level rulings are D1–D51 in this file._
+intake report; the packet-level rulings are D1–D54 in this file._
+
+_**Amendment 1** to the frozen acceptance suite is D52, D53 and D54, approved by Hank on the
+strength of an external review. They supersede parts of D47, D48 and D46 respectively; each names
+the part. The runbook split that came out of the same review needed **no** amendment (the frozen
+S6 test globs every markdown file under `docs/demo/` and concatenates them before checking
+headings), so it is recorded where it belongs — `SPEC.md` §Success criteria and `tickets.json`
+T-085/T-087 — and carries no D number._

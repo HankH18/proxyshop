@@ -9,6 +9,12 @@ reference personas:
         provenance-tagged tool hook; envelope walls (floor / max discount) are hard;
         a claim assembled outside the hooks is refused at the boundary; external
         bids enter signed and are admitted as *unverified* rather than trusted.
+* C10 — the external door's signing envelope is REQUIRED, not decorative: `signer_id`,
+        `key_id`, `issued_at` and a `nonce` idempotency key ride on every submission,
+        are covered by deterministic canonical signing bytes, are checked for freshness,
+        select a key out of a rotating per-signer keyring, and are remembered against
+        replay until after the auction deadline. (Harness amendment 1: these four fields
+        were optional only because the original frozen fixture happened to omit them.)
 * R10 — the cold agent (no learned policy) emits a deterministic default bid at
         list price with the envelope's standing commitments and no improvisation.
 * R13 — an injected TrustEventPayload deterministically changes the next bid's
@@ -855,18 +861,66 @@ def test_an_injected_trust_event_changes_the_next_bid_rationale():
 # T-044 — the signed external door
 # ---------------------------------------------------------------------------
 
-EXTERNAL_KEY = "external-secret-key-0001"
+#
+# HARNESS AMENDMENT 1 (user-approved). The signing envelope below is REQUIRED, and the
+# keyring is indexed `{signer_id: {key_id: secret}}` so a signer can hold more than one
+# live key. Both reverse an earlier reading in which the *absence* of these fields from a
+# frozen fixture was taken as the public contract. `sign_bid` and `receive_bid` still live
+# in `packages.store_agent.src.external`; that placement is unchanged.
+
 EXTERNAL_STORE = "store-external-1"
+EXTERNAL_SIGNER = EXTERNAL_STORE
+EXTERNAL_KEY_ID = "key-2026-01"
+EXTERNAL_KEY = "external-secret-key-0001"
+EXTERNAL_KEY_ID_ROTATED = "key-2026-07"
+EXTERNAL_KEY_ROTATED = "external-secret-key-0002"
+
+# A second signer that reuses the FIRST signer's key_id string under a different secret,
+# so a lookup keyed on `key_id` alone cannot pass.
+EXTERNAL_SIGNER_2 = "store-external-2"
+EXTERNAL_KEY_ID_2 = EXTERNAL_KEY_ID
+EXTERNAL_KEY_2 = "external-secret-key-0003"
+
+ISSUED_AT = "2026-01-01T00:00:00Z"
+NOW = "2026-01-01T00:00:05Z"          # issued_at + 5s — inside any sane freshness window
+FAR_FUTURE = "2999-01-01T00:00:00Z"
+AUCTION_DEADLINE = "2026-01-01T00:05:00Z"
+BEFORE_DEADLINE = "2026-01-01T00:04:59Z"
+AFTER_DEADLINE = "2026-01-01T00:05:01Z"
+NONCE = "nonce-ext-0001"
+
+REQUIRED_SIGNING_FIELDS = ("signer_id", "key_id", "issued_at", "nonce", "schema_version")
 
 
-def _external_payload(store_id: str = EXTERNAL_STORE, expires_at: str = "2999-01-01T00:00:00Z") -> dict:
+def _keyring() -> dict:
+    """The amended keyring: two live keys for signer 1, one for signer 2."""
     return {
-        "auction_id": "auc-0100",
+        EXTERNAL_SIGNER: {
+            EXTERNAL_KEY_ID: EXTERNAL_KEY,
+            EXTERNAL_KEY_ID_ROTATED: EXTERNAL_KEY_ROTATED,
+        },
+        EXTERNAL_SIGNER_2: {EXTERNAL_KEY_ID_2: EXTERNAL_KEY_2},
+    }
+
+
+def _external_payload(
+    store_id: str = EXTERNAL_STORE,
+    expires_at: str = FAR_FUTURE,
+    *,
+    signer_id=None,
+    key_id: str = EXTERNAL_KEY_ID,
+    issued_at: str = ISSUED_AT,
+    nonce: str = NONCE,
+    auction_id: str = "auc-0100",
+    unit_price: float = 89.0,
+) -> dict:
+    return {
+        "auction_id": auction_id,
         "store_id": store_id,
         "offer": {
             "product_ref": "ext-prod-1",
-            "unit_price": 89.0,
-            "total_price": 89.0,
+            "unit_price": unit_price,
+            "total_price": unit_price,
             "discount": None,
             "commitments": [],
             "expires_at": expires_at,
@@ -881,7 +935,42 @@ def _external_payload(store_id: str = EXTERNAL_STORE, expires_at: str = "2999-01
         "message": "Warmest merino mid-layer on the market, guaranteed.",
         "agent_version": "ext-0.1.0",
         "schema_version": "1",
+        # --- required signing envelope (amendment 1) ---
+        "signer_id": store_id if signer_id is None else signer_id,
+        "key_id": key_id,
+        "issued_at": issued_at,
+        "nonce": nonce,
     }
+
+
+def _present(receive_bid, payload, signature, *, nonce_store, keyring=None, now=NOW,
+             auction_deadline=AUCTION_DEADLINE, **extra):
+    """Offer one bid at the door. Returns (accepted, plain_result, queue)."""
+    queue = _Recorder("queue")
+    kwargs = dict(
+        queue=queue,
+        nonce_store=nonce_store,
+        now=now,
+        auction_deadline=auction_deadline,
+    )
+    kwargs.update(extra)
+    ring = _keyring() if keyring is None else keyring
+    try:
+        result = receive_bid(payload, signature, ring, **kwargs)
+    except Exception:  # noqa: BLE001 - raising is a valid way to refuse
+        return False, None, queue
+    plain = _plain(result)
+    return _first_value(plain, "accepted") is True, plain, queue
+
+
+def _accepts(receive_bid, payload, signature, **kwargs) -> bool:
+    accepted, _plain_result, queue = _present(receive_bid, payload, signature, **kwargs)
+    return accepted and queue.count == 1
+
+
+def _rejects(receive_bid, payload, signature, **kwargs) -> bool:
+    accepted, _plain_result, queue = _present(receive_bid, payload, signature, **kwargs)
+    return (not accepted) and queue.count == 0
 
 
 @pytest.mark.epic("E4")
@@ -889,13 +978,20 @@ def _external_payload(store_id: str = EXTERNAL_STORE, expires_at: str = "2999-01
 def test_signed_external_bid_is_accepted_and_enqueued_for_verification():
     """R8/R18: a bid signed with a registered key is admitted as unverified and queued for verification."""
     _bootstrap_imports()
-    from packages.store_agent.src.external import receive_bid, sign_bid
+    from packages.store_agent.src.external import NonceStore, receive_bid, sign_bid
 
     payload = _external_payload()
-    keyring = {EXTERNAL_STORE: EXTERNAL_KEY}
     queue = _Recorder("verification_queue")
 
-    result = receive_bid(payload, sign_bid(payload, EXTERNAL_KEY), keyring, queue=queue)
+    result = receive_bid(
+        payload,
+        sign_bid(payload, EXTERNAL_KEY),
+        _keyring(),
+        queue=queue,
+        nonce_store=NonceStore(),
+        now=NOW,
+        auction_deadline=AUCTION_DEADLINE,
+    )
     plain = _plain(result)
 
     assert _first_value(plain, "accepted") is True, (
@@ -916,6 +1012,10 @@ def test_signed_external_bid_is_accepted_and_enqueued_for_verification():
         f"the queued work item must carry the seller_asserted claims to verify: "
         f"{_plain(queue.payloads())!r}"
     )
+    assert NONCE in _canon(queue.payloads()), (
+        "the queued work item must carry the submission's idempotency key (nonce) so "
+        f"extraction + verification stay idempotent: {_plain(queue.payloads())!r}"
+    )
 
 
 @pytest.mark.epic("E4")
@@ -923,31 +1023,25 @@ def test_signed_external_bid_is_accepted_and_enqueued_for_verification():
 def test_external_bid_with_a_bad_signature_is_rejected():
     """R8/C10: wrong, absent and replayed signatures — and expired or blacklisted bids — reject before enqueue."""
     _bootstrap_imports()
-    from packages.store_agent.src.external import receive_bid, sign_bid
+    from packages.store_agent.src.external import NonceStore, receive_bid, sign_bid
 
-    keyring = {EXTERNAL_STORE: EXTERNAL_KEY}
     good_payload = _external_payload()
     good_signature = sign_bid(good_payload, EXTERNAL_KEY)
 
     # Arm the test: the happy path must work, so a rejection below is a real
     # rejection rather than a TypeError from a mismatched call signature.
-    control_queue = _Recorder("control")
-    control = _plain(receive_bid(good_payload, good_signature, keyring, queue=control_queue))
-    assert _first_value(control, "accepted") is True, f"control bid must be accepted: {control!r}"
-    assert control_queue.count == 1
+    assert _accepts(receive_bid, good_payload, good_signature, nonce_store=NonceStore()), (
+        "control bid must be accepted and enqueued"
+    )
 
     def rejects(payload, signature, **kwargs) -> bool:
-        queue = _Recorder("queue")
-        try:
-            result = receive_bid(payload, signature, keyring, queue=queue, **kwargs)
-        except Exception:  # noqa: BLE001 - raising is a valid way to refuse
-            return queue.count == 0
-        return _first_value(_plain(result), "accepted") is not True and queue.count == 0
+        kwargs.setdefault("nonce_store", NonceStore())
+        return _rejects(receive_bid, payload, signature, **kwargs)
 
     assert rejects(good_payload, sign_bid(good_payload, "wrong-key")), "wrong key must reject"
     assert rejects(good_payload, "not-a-signature"), "a garbage signature must reject"
     assert rejects(good_payload, None), "an absent signature must reject"
-    assert rejects(good_payload, sign_bid(_external_payload("store-external-2"), EXTERNAL_KEY)), (
+    assert rejects(good_payload, sign_bid(_external_payload(EXTERNAL_SIGNER_2), EXTERNAL_KEY)), (
         "a signature replayed from a different payload must reject"
     )
 
@@ -957,6 +1051,294 @@ def test_external_bid_with_a_bad_signature_is_rejected():
     )
     assert rejects(good_payload, good_signature, blacklist=[EXTERNAL_STORE]), (
         "a blacklisted external store must reject before enqueue"
+    )
+
+    # An unregistered signer has no key to check against and must not be admitted.
+    stranger = _external_payload("store-external-9")
+    assert rejects(stranger, sign_bid(stranger, EXTERNAL_KEY)), (
+        "a bid from a signer absent from the keyring must reject"
+    )
+
+
+@pytest.mark.epic("E4")
+@pytest.mark.ticket("T-044")
+def test_canonical_signing_bytes_are_deterministic_and_cover_every_signed_field():
+    """C10: the signing input is a canonical form over auction, signer, issue time, nonce, key id,
+    schema version and a payload hash — and every one of those changes it."""
+    _bootstrap_imports()
+    from packages.store_agent.src.external import canonical_signing_bytes, payload_hash
+
+    payload = _external_payload()
+    base = canonical_signing_bytes(payload)
+    assert isinstance(base, (bytes, bytearray, str)) and len(base) > 0, (
+        f"canonical_signing_bytes must return non-empty bytes, got {base!r}"
+    )
+    text = base.decode("utf-8") if isinstance(base, (bytes, bytearray)) else str(base)
+
+    # Deterministic: same content, different dict insertion order, and a JSON round trip.
+    assert canonical_signing_bytes(payload) == base, "canonicalization must be deterministic"
+    reordered = dict(reversed(list(_external_payload().items())))
+    assert canonical_signing_bytes(reordered) == base, (
+        "canonicalization must not depend on mapping insertion order"
+    )
+    assert canonical_signing_bytes(json.loads(json.dumps(payload))) == base, (
+        "canonicalization must survive a JSON round trip unchanged"
+    )
+
+    # The payload hash is a real digest over the bid body, and it rides in the signed bytes.
+    digest = payload_hash(payload)
+    assert isinstance(digest, str) and len(digest) >= 32, (
+        f"payload_hash must be a digest string of at least 32 chars, got {digest!r}"
+    )
+    assert payload_hash(json.loads(json.dumps(payload))) == digest, "payload_hash must be stable"
+    assert digest != payload_hash(_external_payload(unit_price=88.0)), (
+        "payload_hash must change when the bid body changes — otherwise the signature "
+        "does not cover the offer"
+    )
+    assert digest in text, (
+        "the payload hash must appear in the canonical signing bytes so the signature "
+        f"covers the body: {text!r}"
+    )
+
+    # Every covered field is present verbatim...
+    for field in ("auction_id", "signer_id", "issued_at", "nonce", "key_id"):
+        assert str(payload[field]) in text, (
+            f"canonical signing bytes must cover {field!r}: {text!r}"
+        )
+
+    # ...and mutating ANY of them changes the signing input.
+    mutations = {
+        "auction_id": _external_payload(auction_id="auc-0999"),
+        "signer_id": _external_payload(signer_id=EXTERNAL_SIGNER_2),
+        "store_id": _external_payload(EXTERNAL_SIGNER_2, signer_id=EXTERNAL_SIGNER),
+        "issued_at": _external_payload(issued_at="2026-01-01T00:00:01Z"),
+        "nonce": _external_payload(nonce="nonce-ext-0002"),
+        "key_id": _external_payload(key_id=EXTERNAL_KEY_ID_ROTATED),
+        "offer.unit_price": _external_payload(unit_price=88.0),
+    }
+    for field, mutated in mutations.items():
+        assert canonical_signing_bytes(mutated) != base, (
+            f"changing {field} must change the canonical signing bytes — it is a covered field"
+        )
+    schema_v2 = dict(payload, schema_version="2")
+    assert canonical_signing_bytes(schema_v2) != base, (
+        "changing schema_version must change the canonical signing bytes"
+    )
+
+
+@pytest.mark.epic("E4")
+@pytest.mark.ticket("T-044")
+def test_external_bid_missing_any_required_signing_field_is_rejected():
+    """C10: signer_id, key_id, issued_at, nonce and schema_version are required, not optional."""
+    _bootstrap_imports()
+    from packages.store_agent.src.external import NonceStore, receive_bid, sign_bid
+
+    complete = _external_payload()
+    assert _accepts(
+        receive_bid, complete, sign_bid(complete, EXTERNAL_KEY), nonce_store=NonceStore()
+    ), "control: the complete envelope must be accepted, or the rejections below prove nothing"
+
+    for field in REQUIRED_SIGNING_FIELDS:
+        broken = _external_payload(nonce=f"nonce-missing-{field}")
+        del broken[field]
+        try:
+            signature = sign_bid(broken, EXTERNAL_KEY)
+        except Exception:  # noqa: BLE001 - refusing to sign an incomplete envelope is fine
+            signature = "unsignable"
+        assert _rejects(receive_bid, broken, signature, nonce_store=NonceStore()), (
+            f"an external bid missing required signing field {field!r} must be rejected "
+            "before enqueue — this field is no longer optional"
+        )
+
+
+@pytest.mark.epic("E4")
+@pytest.mark.ticket("T-044")
+def test_signing_metadata_is_covered_by_the_signature():
+    """C10: the envelope fields are inside the signed bytes — tampering with one after signing rejects."""
+    _bootstrap_imports()
+    from packages.store_agent.src.external import NonceStore, receive_bid, sign_bid
+
+    original = _external_payload()
+    signature = sign_bid(original, EXTERNAL_KEY)
+    assert _accepts(receive_bid, original, signature, nonce_store=NonceStore()), (
+        "control: the untampered bid must be accepted with its own signature"
+    )
+
+    tampered = {
+        # each of these keeps the bid otherwise valid: still fresh, still inside the
+        # deadline, still a registered signer — so only the signature can reject it.
+        "auction_id": _external_payload(auction_id="auc-0999"),
+        "issued_at": _external_payload(issued_at="2026-01-01T00:00:01Z"),
+        "nonce": _external_payload(nonce="nonce-ext-0002"),
+        "key_id": _external_payload(key_id=EXTERNAL_KEY_ID_ROTATED),
+        "signer_id": _external_payload(EXTERNAL_SIGNER_2, key_id=EXTERNAL_KEY_ID_2),
+        "offer.unit_price": _external_payload(unit_price=1.0),
+    }
+    for field, mutated in tampered.items():
+        assert _rejects(receive_bid, mutated, signature, nonce_store=NonceStore()), (
+            f"a bid whose {field} was changed after signing must reject — the field is signed"
+        )
+
+
+@pytest.mark.epic("E4")
+@pytest.mark.ticket("T-044")
+def test_replayed_nonce_is_rejected_and_consumption_persists_until_the_auction_deadline():
+    """C10: a nonce is single-use per signer, remembered until after the auction deadline."""
+    _bootstrap_imports()
+    from packages.store_agent.src.external import NonceStore, receive_bid, sign_bid
+
+    store = NonceStore()
+    payload = _external_payload()
+    signature = sign_bid(payload, EXTERNAL_KEY)
+
+    assert _accepts(receive_bid, payload, signature, nonce_store=store), (
+        "control: the first presentation of a fresh nonce must be accepted and enqueued"
+    )
+    assert store.seen(EXTERNAL_SIGNER, NONCE) is True, (
+        "an accepted submission must consume its nonce in the injected store"
+    )
+
+    assert _rejects(receive_bid, payload, signature, nonce_store=store), (
+        "the same nonce presented a second time must be rejected before enqueue (replay)"
+    )
+
+    # The store is not simply wedged shut: a new nonce from the same signer still passes...
+    second = _external_payload(nonce="nonce-ext-0002")
+    assert _accepts(receive_bid, second, sign_bid(second, EXTERNAL_KEY), nonce_store=store), (
+        "a different nonce from the same signer must still be accepted"
+    )
+    # ...and nonce uniqueness is scoped per signer, not global.
+    other_signer = _external_payload(EXTERNAL_SIGNER_2, key_id=EXTERNAL_KEY_ID_2)
+    assert _accepts(
+        receive_bid, other_signer, sign_bid(other_signer, EXTERNAL_KEY_2), nonce_store=store
+    ), "the same nonce string from a DIFFERENT signer must be accepted — scoping is per signer"
+
+    # Consumption persists until after the auction deadline.
+    store.purge_expired(BEFORE_DEADLINE)
+    assert store.seen(EXTERNAL_SIGNER, NONCE) is True, (
+        "a consumed nonce must still be remembered at any moment before the auction deadline"
+    )
+    store.purge_expired(AFTER_DEADLINE)
+    assert store.seen(EXTERNAL_SIGNER, NONCE) is False, (
+        "nonce retention ends only after the auction deadline has passed"
+    )
+
+    # A submission arriving after the auction deadline is refused outright.
+    late = _external_payload(nonce="nonce-ext-0003", issued_at=AUCTION_DEADLINE)
+    assert _rejects(
+        receive_bid,
+        late,
+        sign_bid(late, EXTERNAL_KEY),
+        nonce_store=NonceStore(),
+        now=AFTER_DEADLINE,
+        auction_deadline=AUCTION_DEADLINE,
+    ), "a bid submitted after the auction deadline must reject before enqueue"
+
+
+@pytest.mark.epic("E4")
+@pytest.mark.ticket("T-044")
+def test_keyring_supports_key_rotation_and_selects_the_key_by_key_id():
+    """C10: `{signer_id: {key_id: secret}}` — a signer holds several live keys and the
+    envelope's key_id chooses exactly one of them."""
+    _bootstrap_imports()
+    from packages.store_agent.src.external import NonceStore, receive_bid, sign_bid
+
+    old_key_bid = _external_payload(key_id=EXTERNAL_KEY_ID, nonce="nonce-rot-1")
+    new_key_bid = _external_payload(key_id=EXTERNAL_KEY_ID_ROTATED, nonce="nonce-rot-2")
+
+    # Both keys are live at once — that is what makes rotation possible without downtime.
+    assert _accepts(
+        receive_bid, old_key_bid, sign_bid(old_key_bid, EXTERNAL_KEY), nonce_store=NonceStore()
+    ), "the signer's first registered key must authenticate"
+    assert _accepts(
+        receive_bid,
+        new_key_bid,
+        sign_bid(new_key_bid, EXTERNAL_KEY_ROTATED),
+        nonce_store=NonceStore(),
+    ), "the signer's rotated key must authenticate too — the keyring holds more than one"
+
+    # The key_id selects the secret; the receiver must not try every key it holds.
+    assert _rejects(
+        receive_bid, new_key_bid, sign_bid(new_key_bid, EXTERNAL_KEY), nonce_store=NonceStore()
+    ), "a bid stamped key_id=rotated but signed with the OLD secret must reject"
+    assert _rejects(
+        receive_bid,
+        old_key_bid,
+        sign_bid(old_key_bid, EXTERNAL_KEY_ROTATED),
+        nonce_store=NonceStore(),
+    ), "a bid stamped key_id=old but signed with the ROTATED secret must reject"
+
+    unknown = _external_payload(key_id="key-not-registered", nonce="nonce-rot-3")
+    assert _rejects(
+        receive_bid, unknown, sign_bid(unknown, EXTERNAL_KEY), nonce_store=NonceStore()
+    ), "an unregistered key_id must reject even when the signature matches a live secret"
+
+    # key_id is scoped by signer: signer 2 reuses signer 1's key_id string with its own secret.
+    cross = _external_payload(EXTERNAL_SIGNER_2, key_id=EXTERNAL_KEY_ID_2, nonce="nonce-rot-4")
+    assert _rejects(
+        receive_bid, cross, sign_bid(cross, EXTERNAL_KEY), nonce_store=NonceStore()
+    ), "signer 2's key_id must not resolve to signer 1's secret"
+    assert _accepts(
+        receive_bid, cross, sign_bid(cross, EXTERNAL_KEY_2), nonce_store=NonceStore()
+    ), "signer 2's own secret for that key_id must authenticate"
+
+    # The pre-amendment flat `{store_id: secret}` keyring cannot express key selection and
+    # must not be honoured as a legacy shortcut on the public path.
+    assert _rejects(
+        receive_bid,
+        old_key_bid,
+        sign_bid(old_key_bid, EXTERNAL_KEY),
+        keyring={EXTERNAL_SIGNER: EXTERNAL_KEY},
+        nonce_store=NonceStore(),
+    ), "a flat {signer_id: secret} keyring must not authenticate — key_id selection is required"
+
+
+@pytest.mark.epic("E4")
+@pytest.mark.ticket("T-044")
+def test_issued_at_outside_the_freshness_window_is_rejected():
+    """C10: a correctly signed bid is still refused when its issue time is stale or future-dated."""
+    _bootstrap_imports()
+    from packages.store_agent.src.external import NonceStore, receive_bid, sign_bid
+
+    def present(payload, **kwargs):
+        kwargs.setdefault("nonce_store", NonceStore())
+        kwargs.setdefault("auction_deadline", FAR_FUTURE)
+        return _present(receive_bid, payload, sign_bid(payload, EXTERNAL_KEY), **kwargs)
+
+    fresh = _external_payload(nonce="nonce-fresh-1")
+    accepted, _result, queue = present(fresh, now=NOW)
+    assert accepted and queue.count == 1, (
+        "control: a bid issued 5 seconds ago must be accepted under the default window"
+    )
+
+    stale_accepted, _r, stale_queue = present(fresh, now="2026-01-31T00:00:00Z")
+    assert not stale_accepted and stale_queue.count == 0, (
+        "a bid issued 30 days before `now` must reject — the freshness window is finite"
+    )
+
+    future_accepted, _r2, future_queue = present(fresh, now="2025-12-31T00:00:00Z")
+    assert not future_accepted and future_queue.count == 0, (
+        "a bid issued a day in the FUTURE relative to `now` must reject — clock-skew tolerance "
+        "is bounded too"
+    )
+
+    # The window is enforced, not merely present: with an explicit 300s window, +120s is in
+    # and +600s is out.
+    inside_accepted, _r3, inside_queue = present(
+        _external_payload(nonce="nonce-fresh-2"),
+        now="2026-01-01T00:02:00Z",
+        freshness_window_seconds=300,
+    )
+    assert inside_accepted and inside_queue.count == 1, (
+        "an issued_at 120s before `now` must be accepted under a 300s freshness window"
+    )
+    outside_accepted, _r4, outside_queue = present(
+        _external_payload(nonce="nonce-fresh-3"),
+        now="2026-01-01T00:10:00Z",
+        freshness_window_seconds=300,
+    )
+    assert not outside_accepted and outside_queue.count == 0, (
+        "an issued_at 600s before `now` must reject under a 300s freshness window"
     )
 
 

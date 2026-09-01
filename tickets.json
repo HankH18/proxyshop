@@ -31,20 +31,24 @@
     {
       "id": "T-010",
       "title": "Contracts generate typed models and enforce the dual-path bid boundary",
-      "objective": "packages/contracts: JSON Schemas per DESIGN §Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint. Also owns the two shared policy contracts D13 and D45 place in this package: the versioned RankingWeights object the single published rank formula reads its weights, normalization bounds and penalty caps from, and the SellerEligibility port — the port type plus a deterministic double that the solicitation, ranking and checkout gates consult. This package owns the port and the double only; the live blacklist lookup stays in E6.",
+      "objective": "packages/contracts: JSON Schemas per DESIGN §Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint. Also owns the shared policy contract D13 places in this package: the versioned RankingWeights object the single published rank formula reads its weights, normalization bounds and penalty caps from. The SellerEligibility port is NOT here: amendment 1 (D54) places it in apps/exchange/src/eligibility, owned by T-030, because that is where the amended frozen suite imports it from. Amendment 1 adds two more contracts to this package. (a) The external SigningEnvelope: signer_id, key_id, issued_at, nonce and schema_version are REQUIRED on every Bid submitted through POST /v1/auctions/{auction_id}/bids, plus the single canonical-signing-bytes function over (auction_id, signer_id, store_id, issued_at, nonce, key_id, schema_version, payload_hash) that both signer and verifier call. No optional-field or legacy-tolerant variant exists on the production contract. (b) TrustSnapshot.dims is SIX dimensions - price_honored, discount_honored, shipped_on_time, not_returned, feedback_match, catalog_claim_accuracy - inside one trust system, per D53.",
       "refs": [
         "R8",
         "R18",
         "R19",
         "S5",
         "C10",
+        "R12",
+        "C11",
         "DESIGN#interfaces-contracts-between-tickets"
       ],
       "acceptance": [
         "1. Schema→codegen produces importable py+ts types for all pinned objects incl. VerificationResult",
         "2. Hosted-path bid with a seller_asserted claim rejects; external-path bid with the same claim admits flagged-for-verification; expired/blacklisted reject on both",
         "3. Round-trip serialization passes in both languages; every cross-domain endpoint has a checked-in OpenAPI example + contract test",
-        "4. RankingWeights and SellerEligibility are generated, versioned contract types importable in py+ts; the SellerEligibility double is deterministic and can be driven into an unavailable-read state, so every consumer can test fail-closed behavior without the trust service running"
+        "4. RankingWeights is a generated, versioned contract type importable in py+ts, carrying the five published weights, the normalization bounds and the penalty catalogue, and a weight set that does not sum to 1.0 is invalid",
+        "5. SigningEnvelope (D52): a Bid missing any one of signer_id/key_id/issued_at/nonce/schema_version fails schema validation in py+ts, and a Bid carrying all five validates - so a schema that rejects everything cannot satisfy this",
+        "6. TrustSnapshot carries exactly six dims incl. catalog_claim_accuracy (D53): a six-dim snapshot round-trips in py+ts, a snapshot omitting catalog_claim_accuracy is invalid, and a snapshot naming a seventh dimension is invalid."
       ],
       "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
       "scope": [
@@ -61,18 +65,21 @@
     {
       "id": "T-011",
       "title": "Postgres schemas enforce role isolation and hash-chained ledger",
-      "objective": "Create ledger/sealed/vault/app schemas with roles per DESIGN §Data models using the partner-reconciled table set (commerce_events with idempotency + prev_hash chain, claims, claim_verifications, verification_evidence_refs, trust_observations, trust_scores, policy_events, ranking_runs/candidates, catalog_snapshots, crawl tables, seller_blacklist with review states); replay library; grant tests prove exchange role cannot read sealed.* (S7).",
+      "objective": "Create ledger/sealed/vault/app schemas with roles per DESIGN §Data models using the partner-reconciled table set (commerce_events with idempotency + prev_hash chain, claims, claim_verifications, verification_evidence_refs, trust_observations, trust_scores, policy_events, ranking_runs/candidates, catalog_snapshots, crawl tables, seller_blacklist with review states); replay library; grant tests prove exchange role cannot read sealed.* (S7). Amendment 1 (D52) adds two app.* structures: app.seller_endpoints holds one row per live key (signer_id, store_id, key_id, public_key, status) so a signer's keys can rotate and key_id is unique only within a signer, and app.bid_nonces (signer_id, nonce, auction_id, consumed_at, retain_until) is the durable store behind the NonceStore port, UNIQUE on (signer_id, nonce), retained past the auction's respond_by.",
       "refs": [
         "C3",
         "R15",
         "S3",
         "S7",
+        "C10",
+        "R8",
         "DESIGN#data-models"
       ],
       "acceptance": [
         "1. Migrations apply cleanly; all FKs + blacklist/idempotency indexes present",
         "2. Grant test: exchange role SELECT on sealed.* fails",
-        "3. commerce_events enforces idempotency_key uniqueness and valid prev_hash; replay reproduces stream hash"
+        "3. commerce_events enforces idempotency_key uniqueness and valid prev_hash; replay reproduces stream hash",
+        "4. Replay store (D52): app.bid_nonces rejects a duplicate (signer_id, nonce) via the uniqueness constraint while accepting the same nonce string under a different signer_id, and app.seller_endpoints holds two live rows for one signer_id under different key_id values plus a row where a DIFFERENT signer_id reuses one of those key_id strings - so a schema keyed on key_id alone, or one key per store, fails this criterion"
       ],
       "verify": "pytest apps/trust/tests/test_schema_grants.py apps/trust/tests/test_ledger_chain.py -q",
       "scope": [
@@ -308,21 +315,24 @@
     {
       "id": "T-030",
       "title": "Auctions fan out, time out, and always represent every store",
-      "objective": "Auction state machine in Redis; POST /auctions; parallel BidRequest fan-out with hard timeout; list-price fallback bids for Tier-0 and non-responding stores (R10). Roster construction consults SellerEligibility before any BidRequest is sent: an ineligible seller never enters the roster, and an unavailable eligibility read excludes rather than admits. The gate sits in the roster builder, above collect_bids — collect_bids keeps its (roster, responses, now) parameters and is handed an already-eligible roster.",
+      "objective": "Auction state machine in Redis; POST /auctions; parallel BidRequest fan-out with hard timeout; list-price fallback bids for Tier-0 and non-responding stores (R10). Also creates apps/exchange/src/eligibility (the versioned SellerEligibility port: base class with interface_version and check(store_id) -> EligibilityDecision{store_id, status, reason}, the statuses ELIGIBLE/BLACKLISTED/UNAVAILABLE, and SELLER_ELIGIBILITY_INTERFACE_VERSION) and the apps/exchange/src/orchestration package with the R12 solicitation gate solicit_bids(roster=, solicitor=, eligibility=, now=) -> {solicited, entries, denied}. solicit_bids reads eligibility for every rostered store before any store is asked. The gate sits above collect_bids — collect_bids keeps its (roster, responses, now) parameters and is handed an already-eligible roster.",
       "refs": [
         "R10",
         "R12",
+        "S8",
         "DESIGN#service-apis-pinned-routes"
       ],
       "acceptance": [
         "1. Auction with 3 responsive + 1 silent + 2 Tier-0 stores yields 6 ranked entries, silent one at list price",
         "2. Timeout enforced (frozen clock); late bids rejected",
         "3. State machine transitions logged to ledger via trust API stub",
-        "4. Solicitation gate (R12, fail-closed): the roster builder consults SellerEligibility before fan-out — a blacklisted seller is absent from the roster, and an unavailable eligibility read excludes it rather than admitting it. The gate lives above collect_bids, which keeps its (roster, responses, now) parameters unchanged and never receives an eligibility argument"
+        "4. Solicitation gate (R12/D54, fail-closed, at the public orchestration boundary, by DENIAL): solicit_bids consults SellerEligibility for every rostered store before fan-out. A BLACKLISTED store, an UNAVAILABLE store and a store whose eligibility read RAISES are each never handed to the solicitor and never appear even as a list-price fallback entry, and each is recorded in the result's denied list with a reason naming its condition. Positive control in the same test: eligible stores ARE solicited in roster order, appear as non-fallback entries, and their solicited prices survive the orchestration layer - so an orchestration that solicits nobody fails here. collect_bids keeps its (roster, responses, now) parameters unchanged and never receives an eligibility argument"
       ],
       "verify": "pytest apps/exchange/tests/test_auction.py -q",
       "scope": [
         "apps/exchange/src/auction/**",
+        "apps/exchange/src/eligibility/**",
+        "apps/exchange/src/orchestration/**",
         "apps/exchange/tests/**"
       ],
       "depends_on": [
@@ -330,7 +340,8 @@
         "T-013"
       ],
       "non_goals": [
-        "No ranking; no bandit"
+        "No ranking; no bandit",
+        "No accept_offer - T-033 adds it to the same orchestration package and must not modify solicit_bids; the two never run concurrently (T-033 depends on T-030)"
       ],
       "parallel_safe": false
     },
@@ -365,19 +376,22 @@
     {
       "id": "T-032",
       "title": "Shortlists rank by the single published formula behind eligibility filters",
-      "objective": "Eligibility filters (blacklist fail-closed, offer expiry, checkout-domain validity, hard constraints requiring verified facts per R19), then published rank_score per DESIGN §Decisions with [0,1]-normalized features, policy penalties, stable tie-breaking, component map + human-readable explanation; slotting ≤4 with graceful collapse; provenance + verification-warning labels.",
+      "objective": "Eligibility filters (blacklist fail-closed, offer expiry, checkout-domain validity, hard constraints requiring verified facts per R19), then published rank_score per DESIGN §Decisions with [0,1]-normalized features, policy penalties, stable tie-breaking, component map + human-readable explanation; slotting ≤4 with graceful collapse; provenance + verification-warning labels. The eligibility filter is the R12 ranking gate (D54): rank() consults SellerEligibility and excludes the ineligible candidate with a recorded exclusion reason, fail-closed on an unavailable read. Trust inputs are the six-dimension TrustSnapshot (D53); ranking reads the snapshot's score/confidence and never re-derives dimensions.",
       "refs": [
         "R2",
         "R11",
         "R19",
         "A6",
+        "R12",
+        "S8",
         "DESIGN#decisions--rationale",
         "DESIGN#interfaces-contracts-between-tickets"
       ],
       "acceptance": [
         "1. Golden tests: fixed inputs → exact eligibility set, ranking, slots, explanations",
         "2. Blindness test: tier/fee fields cannot alter score; contradicted hard constraint never wins regardless of other components (release blocker test)",
-        "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1–3 stores"
+        "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1–3 stores",
+        "4. Ranking gate + versioned interface (R12/D54, fail-closed, by DENIAL with a positive control): a BLACKLISTED candidate is excluded before any score is computed with its exclusion_reasons entry recorded, an UNAVAILABLE read and a raising read each exclude rather than admit, and the same candidate with an ELIGIBLE verdict IS ranked and CAN win - so a ranker that excludes everything fails. SELLER_ELIGIBILITY_INTERFACE_VERSION is a non-empty string, the three statuses are distinct, and BOTH boundary gates (solicit_bids and accept_offer) refuse an eligibility source whose interface_version is not the published one while accepting one that is"
       ],
       "verify": "pytest apps/exchange/tests/test_ranking.py -q",
       "scope": [
@@ -386,6 +400,7 @@
       ],
       "depends_on": [
         "T-031",
+        "T-033",
         "T-065"
       ],
       "non_goals": [
@@ -400,18 +415,21 @@
       "refs": [
         "R3",
         "A5",
-        "R12"
+        "R12",
+        "S8",
+        "C11"
       ],
       "acceptance": [
         "1. Accept → code+permalink via the resolved provider; ledger events emitted",
         "2. Merchant failure path re-offers deterministically",
         "3. Double-accept on one auction rejected",
         "4. Redirect mode: off-domain checkout_url is refused (release blocker test); emitted event kinds match the Shopify-mode golden sequence",
-        "5. Checkout gate (R12, fail-closed): the accept orchestration consults SellerEligibility above accept() — a blacklisted seller, or an eligibility read that is unavailable, refuses the accept and no code is created. accept() keeps its four positional parameters (auction, bid_id, code_creator, mode); any eligibility port reaching accept() is an optional keyword and its absence is not itself a denial"
+        "5. Checkout gate (R12/D54, fail-closed, at the public orchestration boundary, by DENIAL): accept_offer(auction=, bid_ref=, code_creator=, mode=, eligibility=) in apps/exchange/src/orchestration RE-READS eligibility at accept time, so a store blacklisted after it bid is refused - no code created (assert the code creator was never called), no permalink, and a denial_reason recorded; an UNAVAILABLE read and a read that RAISES each refuse identically. Positive control in the same test: an ELIGIBLE store with an available read is accepted, mints exactly one code, and returns an on-domain permalink containing that code. accept() keeps its four positional parameters (auction, bid_id, code_creator, mode) and gains no required parameter"
       ],
       "verify": "pytest apps/exchange/tests/test_accept.py -q",
       "scope": [
         "apps/exchange/src/accept/**",
+        "apps/exchange/src/orchestration/**",
         "apps/exchange/tests/**"
       ],
       "depends_on": [
@@ -419,7 +437,8 @@
         "T-036"
       ],
       "non_goals": [
-        "No checkout observation"
+        "No checkout observation",
+        "No edits to solicit_bids or apps/exchange/src/eligibility/** - T-030 owns both; this ticket only adds accept_offer to the orchestration package"
       ],
       "parallel_safe": false
     },
@@ -617,16 +636,22 @@
     },
     {
       "id": "T-044",
-      "title": "External bids enter signed and route to verification, not rejection",
-      "objective": "Signature registration + verification on POST /bid for non-hosted agents; schema validation admits seller_asserted claims and free-text message, marks the bid unverified, and enqueues extraction+verification; hosted path unchanged.",
+      "title": "External bids enter signed with a required envelope and route to verification, not rejection",
+      "objective": "Signature registration + verification on the external submission door POST /v1/auctions/{auction_id}/bids for non-hosted agents; schema validation admits seller_asserted claims and free-text message, marks the bid unverified, and enqueues extraction+verification carrying the submission's nonce as its idempotency key; hosted solicitation path (POST /v1/bid-requests) unchanged. Amendment 1 (D52) makes the signing envelope REQUIRED, not optional: signer_id, key_id, issued_at, nonce and schema_version are all mandatory and a submission missing any one is Rejected before enqueue. Public surface, all in packages/store_agent/src/external (the module does not move; the exchange route is its only public caller): sign_bid(payload, key); receive_bid(payload, signature, keyring, *, queue, nonce_store, now, auction_deadline, freshness_window_seconds); canonical_signing_bytes(payload) covering auction_id, signer_id, store_id, issued_at, nonce, key_id, schema_version and payload_hash(payload), order-independent and stable across a JSON round trip; NonceStore with seen(signer_id, nonce) and purge_expired(as_of). The keyring is {signer_id: {key_id: secret}} backed by app.seller_endpoints so keys rotate; an unknown (signer_id, key_id) pair rejects rather than falling back to another key of that signer, and a lookup keyed on key_id alone is wrong because two signers may reuse a key_id string.",
       "refs": [
         "R8",
+        "C10",
+        "R12",
         "DESIGN#service-apis-pinned-routes"
       ],
       "acceptance": [
-        "1. Registered-key signed external bid accepted and enqueued for verification; bad signature rejected",
+        "1. Registered-key signed external bid carrying a complete envelope is accepted, marked unverified, and enqueued exactly once with the nonce as the queued item's idempotency key; a bad signature rejects and enqueues nothing. The positive case must pass, so a receiver that rejects everything fails this criterion",
         "2. Hosted bid with non-hook provenance still rejects (regression)",
-        "3. Expired/blacklisted external bids reject before enqueue"
+        "3. Expired/blacklisted external bids reject before enqueue",
+        "4. Required envelope (D52): five submissions, each omitting exactly one of signer_id, key_id, issued_at, nonce, schema_version, are each rejected before enqueue; the otherwise-identical submission carrying all five is accepted",
+        "5. Canonical bytes and coverage (D52): canonical_signing_bytes is deterministic, independent of mapping insertion order and stable across a JSON round trip; payload_hash is a digest of at least 32 chars that changes when the offer body changes and appears inside the canonical bytes; mutating any of auction_id, signer_id, store_id, issued_at, nonce, key_id, schema_version or the offer body changes the bytes; and tampering with any of them after signing rejects at the door",
+        "6. Key rotation (D52): a signer with two live key_id rows verifies under either; a signature naming an unregistered key_id for a known signer rejects with no fallback to that signer's other key; and a second signer reusing the first signer's key_id string under a different secret does not verify - so a lookup keyed on key_id alone fails",
+        "7. Replay and freshness (D52): resubmitting an accepted payload rejects; a different nonce from the same signer is still accepted and the same nonce from a DIFFERENT signer is accepted (scoping is per signer); NonceStore.seen stays True after purge_expired at any moment before the auction deadline and becomes False only after it passes; a submission arriving after the auction deadline rejects; and an issued_at outside freshness_window_seconds rejects in both directions, far-past and clock-skewed-future"
       ],
       "verify": "pytest packages/store-agent/tests/test_external_bids.py -q",
       "scope": [
@@ -634,6 +659,8 @@
         "packages/store-agent/tests/**"
       ],
       "depends_on": [
+        "T-010",
+        "T-011",
         "T-041"
       ],
       "non_goals": [
@@ -866,19 +893,21 @@
     {
       "id": "T-062",
       "title": "Trust merges verification and outcome observations against the approved manifest",
-      "objective": "Merged observation framework: per-dimension Beta with observation-type weights (contradicted 2.0, severe policy 3.0, mismatch returns 1.5; verified claims + fulfilled purchases positive; capped conversion influence), time decay, neutral low-confidence prior ~Beta(2,2), score + confidence + score_version; published threshold; blacklist bound to business identity with review/appeal/expiry states and fail-closed reads.",
+      "objective": "Merged observation framework over SIX dimensions (price_honored, discount_honored, shipped_on_time, not_returned, feedback_match, catalog_claim_accuracy) inside ONE trust system (D53): per-dimension Beta with observation-type weights (contradicted 2.0, severe policy 3.0, mismatch returns 1.5; verified claims + fulfilled purchases positive; capped conversion influence), time decay against recorded as-of time, neutral low-confidence prior ~Beta(2,2), score + confidence + score_version; published threshold; blacklist bound to business identity with review/appeal/expiry states and fail-closed reads. Each verification outcome routes to exactly one dimension through T-080's typed, exhaustive claim_type mapping - offer-integrity claim types to their transaction dimension, product-fact claim types to catalog_claim_accuracy - consumed read-only here.",
       "refs": [
         "R12",
         "S2",
-        "DESIGN#decisions--rationale",
         "R15",
-        "S3"
+        "S3",
+        "DESIGN#decisions--rationale"
       ],
       "acceptance": [
         "1. Golden trajectories (verification-only, outcomes-only, mixed) match human-approved fixture manifest expectations",
         "2. Decay + confidence property tests; conversion influence cap holds",
         "3. Blacklist: identity-bound persistence, expiry/appeal states, and fail-closed read behavior (unavailable state blocks checkout) all tested",
-        "4. Bit-for-bit replay (R15, S3): recomputing every served TrustSnapshot from the genesis event stream reproduces score, confidence, score_version and each dimension's alpha, beta and decayed_at exactly, with decay evaluated against the recorded as-of time rather than wall clock — canonical serialization, event hash, sequence and stream identity all pinned"
+        "4. Bit-for-bit replay (R15, S3): recomputing every served TrustSnapshot from the genesis event stream reproduces score, confidence, score_version and each dimension's alpha, beta and decayed_at exactly, with decay evaluated against the recorded as-of time rather than wall clock — canonical serialization, event hash, sequence and stream identity all pinned",
+        "5. Six dimensions, one system (D53): a contradicted product-fact claim (ingredients / compatibility / nutrition / specifications) moves catalog_claim_accuracy and leaves feedback_match untouched, while a contradicted price claim moves price_honored and leaves catalog_claim_accuracy untouched; the served snapshot exposes all six dims and no seventh",
+        "6. Outcome treatment (D53): on the mapped dimension, verified moves the mean up; contradicted moves it down at weight 2.0; unsupported moves it down by the published fractional weight strictly less than contradicted's and its dominant effect is on confidence/coverage; ambiguous produces ZERO mean movement and lowers coverage/confidence only. Asserted as an ordering over four runs from one fixture state, so a no-op implementation fails"
       ],
       "verify": "pytest apps/trust/tests/test_scoring.py -q",
       "scope": [
@@ -925,13 +954,13 @@
     {
       "id": "T-064",
       "title": "Exchange consumes one snapshot shape for trust and exploration",
-      "objective": "TrustSnapshot API incl. blacklist + low-data flags for the exploration slice; versioned; exchange client.",
+      "objective": "TrustSnapshot API incl. blacklist + low-data flags for the exploration slice; versioned; exchange client. The served shape carries all six dimensions incl. catalog_claim_accuracy (D53) and is the only trust shape the exchange consumes.",
       "refs": [
         "R12",
         "DESIGN#service-apis-pinned-routes"
       ],
       "acceptance": [
-        "1. Snapshot schema golden test",
+        "1. Snapshot schema golden test: the served snapshot carries exactly the six dims incl. catalog_claim_accuracy, each with alpha/beta/decayed_at; a five-dim snapshot fails the golden",
         "2. Blacklisted store flagged; low-data store flagged until manifest N episodes",
         "3. Exchange client caches + refreshes on version bump"
       ],
@@ -951,7 +980,7 @@
     {
       "id": "T-065",
       "title": "A golden pitch yields all four verification statuses with evidence",
-      "objective": "packages/verification + trust-service wiring: atomic typed claim extraction with source spans (LLM behind strict schemas, doubles in tests), seller/SKU/variant resolution (ambiguous on failure), unit/type canonicalization, deterministic comparators per DESIGN, statuses verified|contradicted|unsupported|ambiguous with evidence refs + confidence, idempotent per (pitch, verifier version, catalog snapshot), re-verify only on snapshot/verifier change; results persist to ledger tables and emit trust_observations + claim_verified events.",
+      "objective": "packages/verification + trust-service wiring: atomic typed claim extraction with source spans (LLM behind strict schemas, doubles in tests), seller/SKU/variant resolution (ambiguous on failure), unit/type canonicalization, deterministic comparators per DESIGN, statuses verified|contradicted|unsupported|ambiguous with evidence refs + confidence, idempotent per (pitch, verifier version, catalog snapshot), re-verify only on snapshot/verifier change; results persist to ledger tables and emit trust_observations + claim_verified events. Every persisted VerificationResult claim carries the typed claim_type that T-080's exhaustive mapping routes to a trust dimension; an extracted claim whose claim_type is absent from the mapping raises rather than defaulting (D53).",
       "refs": [
         "R18",
         "R19",
@@ -961,7 +990,8 @@
       "acceptance": [
         "1. Golden pitch fixture (true + false + unsupported + ambiguous claims) returns the four distinct statuses with evidence refs (S8, external ground truth: approved golden set)",
         "2. Idempotency: re-running same (pitch, versions) writes nothing; snapshot bump re-verifies",
-        "3. Comparator unit tests: boolean/string normalization, numeric tolerance, price vs offer+catalog, set containment, relationship existence; injection strings in pitch text never execute (C10 test)"
+        "3. Comparator unit tests: boolean/string normalization, numeric tolerance, price vs offer+catalog, set containment, relationship existence; injection strings in pitch text never execute (C10 test)",
+        "4. Typed routing (D53): each claim in the golden result carries a claim_type present in the manifest mapping, a product-fact claim_type routes to catalog_claim_accuracy and an offer-integrity claim_type routes to its transaction dimension, and an unmapped claim_type raises instead of silently defaulting"
       ],
       "verify": "pytest packages/verification apps/trust/tests/test_verification.py -q",
       "scope": [
@@ -1104,7 +1134,9 @@
         "1. Manifest + golden set committed with recorded human approval artifact",
         "2. Generator seeds N stores incl. the dishonest one into shopify-stub from SEED_CATEGORY config",
         "3. `make demo-seed` idempotent against stub",
-        "4. The manifest instantiates the published claim_type → dimension mapping table: every claim_type the golden set uses maps to exactly one of the five published trust dimensions, and the table states the treatment of unsupported and ambiguous verification outcomes. The table is an additional key alongside the existing manifest keys at fixtures/manifest.json and introduces no sixth trust dimension"
+        "4. The manifest instantiates the published claim_type -> dimension mapping table (D53): every claim_type the golden set uses maps to exactly one of the SIX published trust dimensions, product-fact claim types (ingredients, compatibility, nutrition, specifications) map to catalog_claim_accuracy and offer-integrity claim types to their transaction dimension, the table states the treatment of verified/contradicted/unsupported/ambiguous outcomes, and loading a manifest containing an unmapped claim_type RAISES rather than defaulting. Every dishonest_store.behaviours[].dim value is one of the six. The table is an additional key alongside the existing manifest keys at fixtures/manifest.json",
+        "The manifest carries the mapping under the exact key `claim_type_dimensions` (that spelling is what the frozen tests read), and at least one `dishonest_store.behaviours[].dim` is `catalog_claim_accuracy`.",
+        "The golden set contains at least one product-fact claim with status `verified` AND at least one with status `contradicted` — a set that is all-true or all-false does not exercise the sixth trust dimension in both directions."
       ],
       "verify": "pytest fixtures/tests/test_seed.py -q",
       "scope": [
@@ -1239,30 +1271,30 @@
     },
     {
       "id": "T-085",
-      "title": "The demo is a runbook anyone on the team can execute",
-      "objective": "Demo procedure doc: dev-store provisioning (app install, password config, Bogus Gateway), `make e2e-live` runbook, and the two demo beats (live auction; interview→bidding onboarding). Lint-checked structure with required sections and command presence.",
+      "title": "The starting-slice demo is a runbook anyone on the team can execute",
+      "objective": "docs/demo/starting-slice.md: the offline starting-path demo procedure - compose bring-up against services/shopify-stub, `make demo-seed`, and the live-auction demo beat end to end through SimulatedRedirectProvider (intent -> pitches -> verification -> eligibility -> ranking -> acceptance -> simulated redirect -> canonical LedgerEvent kinds -> reconciliation -> trust projection). Requires no Shopify dev store, no app install and no merchant onboarding. Also owns docs/tests/test_runbook.py, the structure lint both runbooks are checked by. The Shopify/onboarding extension runbook is T-087; this ticket does not write it, and the S6 union lint (headings for provisioning + auction + interview, the T-053 reference, the live-LLM flag, `make e2e-live`) is only satisfied once T-087 also lands.",
       "refs": [
         "S1",
         "S6",
         "SPEC#adversarial-review-resolved"
       ],
       "acceptance": [
-        "1. Runbook lints: required sections + referenced make targets exist",
-        "2. Interview beat references T-053 transcript flow with a live-LLM variant flagged",
-        "3. No timeline content (lint rule)"
+        "1. docs/demo/starting-slice.md lints: it carries a heading for the live-auction demo beat, and every `make <target>` it names is defined in the repo root Makefile",
+        "2. The starting-slice runbook reaches checkout end to end with CHECKOUT_MODE=redirect and names no Shopify app install, dev-store provisioning or onboarding interview step - a reader can execute it with no Shopify account",
+        "3. docs/tests/test_runbook.py checks the UNION of every markdown file under docs/demo/ for the required section headings and make-target existence, matching the frozen S6 lint, and fails when a referenced make target is undefined",
+        "4. No timeline content (lint rule)"
       ],
       "verify": "pytest docs/tests/test_runbook.py -q",
       "scope": [
-        "docs/demo/**",
+        "docs/demo/starting-slice.md",
         "docs/tests/**"
       ],
       "depends_on": [
-        "T-053",
-        "T-082",
-        "T-084"
+        "T-082"
       ],
       "non_goals": [
-        "No CI wiring of live runs"
+        "No CI wiring of live runs",
+        "No Shopify provisioning, onboarding-interview or dishonest-store beats - T-087 owns those and the docs/demo/ file that holds them"
       ],
       "parallel_safe": true
     },
@@ -1295,6 +1327,38 @@
         "The manual demo run on a fresh dev store — that is T-085's runbook.",
         "New product code: this ticket asserts the join between T-053's onboarding and T-043's shadow mode; a gap it finds is a defect report against those tickets, not a fix here."
       ]
+    },
+    {
+      "id": "T-087",
+      "title": "The Shopify and onboarding extension runbook covers the beats off the starting path",
+      "objective": "docs/demo/shopify-onboarding-extension.md: the extension-lane demo procedure - dev-store provisioning (app install, storefront password, Bogus Gateway), the `make e2e-live` procedure against seeded dev stores, the interview -> bidding onboarding beat, and the dishonest-store trust beat. Split out of T-085 so merchant onboarding and Shopify sit off the starting path's completion target while remaining fully documented. Together with docs/demo/starting-slice.md this file completes the S6 union lint that docs/tests/test_runbook.py (T-085) enforces.",
+      "refs": [
+        "S2",
+        "S6",
+        "C9",
+        "SPEC#adversarial-review-resolved"
+      ],
+      "acceptance": [
+        "1. Headings exist for dev-store provisioning and for the interview -> bidding onboarding beat; the union of docs/demo/*.md now carries headings for provisioning, auction and interview, and docs/tests/test_runbook.py passes on that union",
+        "2. The interview beat references the T-053 transcript flow and flags the live-LLM variant",
+        "3. The runbook documents `make e2e-live` and every other `make <target>` it names is defined in the repo root Makefile; it states that live dev-store runs are demo procedure and never a ticket verify (C9)",
+        "4. The dishonest-store beat walks the T-084 episode run and its blacklist outcome",
+        "5. No timeline content (lint rule)"
+      ],
+      "verify": "pytest docs/tests/test_runbook.py -q",
+      "scope": [
+        "docs/demo/shopify-onboarding-extension.md"
+      ],
+      "depends_on": [
+        "T-053",
+        "T-084",
+        "T-085"
+      ],
+      "non_goals": [
+        "No CI wiring of live runs",
+        "No edits to docs/demo/starting-slice.md or docs/tests/** - T-085 owns both"
+      ],
+      "parallel_safe": true
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
   "frozen": true,
-  "frozen_at": "2026-09-01T09:48:33",
+  "frozen_at": "2026-09-01T13:28:50",
   "metrics": [
     {
       "id": "acceptance_pass_rate",
@@ -17,7 +17,7 @@
       "name": "Acceptance tests collected (count)",
       "kind": "global",
       "command": ".venv/bin/python .swarm-loop/acceptance/run.py --total",
-      "target": 103,
+      "target": 120,
       "direction": "maximize",
       "tolerance": 0,
       "timeout": 2400
@@ -71,7 +71,7 @@
       "kind": "feature",
       "feature_id": "E3",
       "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E3",
-      "target": 18,
+      "target": 21,
       "direction": "maximize",
       "tolerance": 0,
       "timeout": 2400
@@ -82,7 +82,7 @@
       "kind": "feature",
       "feature_id": "E4",
       "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E4",
-      "target": 14,
+      "target": 20,
       "direction": "maximize",
       "tolerance": 0,
       "timeout": 2400
@@ -104,7 +104,7 @@
       "kind": "feature",
       "feature_id": "E6",
       "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E6",
-      "target": 20,
+      "target": 26,
       "direction": "maximize",
       "tolerance": 0,
       "timeout": 2400
@@ -126,10 +126,13 @@
       "kind": "feature",
       "feature_id": "E8",
       "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E8",
-      "target": 6,
+      "target": 8,
       "direction": "maximize",
       "tolerance": 0,
       "timeout": 2400
     }
-  ]
+  ],
+  "amendments": 1,
+  "last_amended_at": "2026-09-01T13:28:50",
+  "last_amend_reason": "Amendment 1, user-approved after an external review. Three frozen incidentals were distorting the architecture and are corrected: (1) external signing/replay fields become REQUIRED with a key_id-indexed keyring, canonical signing bytes and nonce persistence \u2014 they had been made optional only to preserve a fixture that omitted them, i.e. a test dictating a public security contract; (2) catalog_claim_accuracy becomes a real sixth trust dimension in the one trust system, replacing a mapping table that relocated product-fact semantics into transaction dimensions; (3) eligibility gains denial tests at the public orchestration boundary, since the pure positional functions bypassed the layer where the guarantee lives. Suite 103 -> 120 tests; zero of the 17 new tests pass at cycle 0; all sabotages caught; no existing test weakened or renamed. Breaking contract change recorded: receive_bid's keyring goes flat {signer_id: secret} -> nested {signer_id: {key_id: secret}} with new required kwargs."
 }

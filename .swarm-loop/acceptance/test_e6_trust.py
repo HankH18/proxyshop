@@ -14,6 +14,16 @@ Covers the SPEC surface that E6 owns:
   the human-approved manifest falling below the published blacklist threshold inside the
   manifest's episode budget, and a blacklist bound to *business identity* whose reads fail
   closed.
+* **R12 (six dimensions)** — one trust system with **six** dimensions. The five transaction
+  dimensions grade offer-integrity promises; `catalog_claim_accuracy` grades product-fact
+  claims (ingredients, compatibility, nutrition, specifications), which have no honest home
+  among the five — a false dairy-free claim is not `price_honored`, not `shipped_on_time`
+  and not `not_returned`. Verification outcomes reach it through a **typed, exhaustive**
+  `claim_type → dimension` table published in the human-approved manifest and consumed
+  read-only by the engine; an unmapped claim type is a loud error, never a silent default.
+  Outcome treatment: `verified` is positive evidence, `contradicted` is weighted negative
+  evidence, and `unsupported`/`ambiguous` move **coverage and confidence** rather than the
+  dimension mean.
 * **R13 / R5** — the trust-event push carries the full pseudonymous payload to the affected
   store and no buyer identity.
 * **R14** — only network-routed buyers may leave feedback, and positive feedback
@@ -31,13 +41,14 @@ Exactly two documents, at exactly these paths, no globbing and no second copy:
 
 * ``fixtures/manifest.json`` — one object with ``seed_category``, ``seed``,
   ``blacklist_threshold``, ``episode_budget``, ``new_store_prior_n``,
+  ``claim_type_dimensions {claim_type: dimension}``,
   ``dishonest_store {store_id, behaviours[{kind, dim, type}]}``,
   ``expected_trust_trajectory[{episode, score, tolerance}]``,
   ``golden_set {path, sha256, count}`` and ``approval {approver, approved_at, artifact,
   content_hash}``.
 * ``fixtures/golden/golden_set.json`` — one object with ``pitches[]``, each
-  ``{pitch_id, text, gates[], catalog_snapshot, claims[{claim_ref, text, key, value,
-  expected_status}]}``.
+  ``{pitch_id, text, gates[], catalog_snapshot, claims[{claim_ref, text, key, claim_type,
+  value, expected_status}]}``.
 
 The golden label key is ``expected_status`` everywhere — never ``status``, which is what the
 *verifier* produces and must stay visibly distinct from what the human approved.
@@ -67,7 +78,45 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 # clock. Never compared against `datetime.now()`.
 AS_OF = "2026-01-01T00:00:00Z"
 
-DIMS = ("price_honored", "discount_honored", "shipped_on_time", "not_returned", "feedback_match")
+#: The five dimensions that grade an *offer-integrity promise* — something the store said it
+#: would do, graded by what the transaction record shows it did.
+TRANSACTION_DIMS = (
+    "price_honored",
+    "discount_honored",
+    "shipped_on_time",
+    "not_returned",
+    "feedback_match",
+)
+
+#: The sixth dimension, and the only one that grades a *product fact*: whether what the
+#: pitch said about the goods matches the catalog. It is a dimension of the SAME Beta
+#: framework, not a second trust system — it decays, updates and serves identically.
+CATALOG_DIM = "catalog_claim_accuracy"
+
+#: The complete trust vocabulary. Six, and exactly six.
+DIMS = TRANSACTION_DIMS + (CATALOG_DIM,)
+
+#: The published `claim_type → dimension` table, offer-fact half: a promise about the deal
+#: keeps the transaction dimension it has always had.
+OFFER_FACT_CLAIM_DIMENSIONS = {
+    "price": "price_honored",
+    "unit_price": "price_honored",
+    "total_price": "price_honored",
+    "discount": "discount_honored",
+    "promo_eligibility": "discount_honored",
+    "delivery": "shipped_on_time",
+    "shipping_speed": "shipped_on_time",
+    "dispatch_window": "shipped_on_time",
+    "return_policy": "not_returned",
+    "warranty": "not_returned",
+}
+
+#: The product-fact half: every one of these lands on `catalog_claim_accuracy`, and none of
+#: them may land on a transaction dimension.
+PRODUCT_FACT_CLAIM_TYPES = ("ingredients", "compatibility", "nutrition", "specifications")
+
+#: The published claim-type vocabulary the mapping must cover exhaustively.
+PUBLISHED_CLAIM_TYPES = tuple(OFFER_FACT_CLAIM_DIMENSIONS) + PRODUCT_FACT_CLAIM_TYPES
 
 # Injection payloads that must be treated as inert text (C10). The approved golden set adds
 # its own; these are always exercised so the criterion is testable before T-080 lands.
@@ -158,6 +207,33 @@ def _obs_event(event_id: str, store_id: str, dim: str, otype: str, kind: str = "
         store_id=store_id,
         payload={"dim": dim, "type": otype, "observed_at": AS_OF},
     )
+
+
+def _dim(snapshot, dim: str):
+    """One dimension's Beta record off a served or replayed snapshot."""
+    return _get(_get(snapshot, "dims"), dim)
+
+
+def _ab(snapshot, dim: str) -> tuple:
+    """(alpha, beta) for one dimension."""
+    entry = _dim(snapshot, dim)
+    return float(_get(entry, "alpha")), float(_get(entry, "beta"))
+
+
+def _mean(snapshot, dim: str) -> float:
+    """The Beta mean of one dimension — what "moves the mean" means in this file."""
+    alpha, beta = _ab(snapshot, dim)
+    assert alpha + beta > 0.0, f"{dim} carries a degenerate Beta({alpha}, {beta})"
+    return alpha / (alpha + beta)
+
+
+def _coverage(snapshot, dim: str) -> float:
+    """The share of that dimension's observations that actually decided something.
+
+    `verified` and `contradicted` decide; `unsupported` and `ambiguous` do not, and their
+    effect is to lower this number (and with it confidence) rather than the mean.
+    """
+    return float(_get(_dim(snapshot, dim), "coverage"))
 
 
 # --- human-approved ground truth (T-080), read never authored -----------------------
@@ -263,9 +339,23 @@ def _behaviour_obs(store_id: str, behaviour) -> dict:
     dim = str(_field(behaviour, "dim", where))
     otype = str(_field(behaviour, "type", where))
     assert dim in DIMS, (
-        f"{where}.dim must be one of the five trust dimensions {list(DIMS)}, got {dim!r}"
+        f"{where}.dim must be one of the six trust dimensions {list(DIMS)}, got {dim!r}"
     )
     return _obs(store_id, dim, otype)
+
+
+def _manifest_claim_type_dimensions() -> dict:
+    """The approved `claim_type → dimension` table (T-080 manifest, D18 as amended).
+
+    Ground truth for routing a verification outcome into trust. It lives in the manifest —
+    the document a human approved — precisely so the trust engine cannot decide for itself
+    which dimension a contradicted claim should penalise.
+    """
+    table = _field(_manifest(), "claim_type_dimensions", "manifest")
+    assert isinstance(table, Mapping) and table, (
+        "manifest.claim_type_dimensions must be a non-empty {claim_type: dimension} object"
+    )
+    return {str(k): str(v) for k, v in table.items()}
 
 
 def _golden_set() -> list:
@@ -788,6 +878,240 @@ def test_blacklist_is_identity_bound_and_reads_fail_closed():
 
 
 # ===================================================================================
+# T-062 — `catalog_claim_accuracy`, the sixth dimension of the one trust system (R12/R18)
+#
+# Product-fact claims used to be mapped into transaction dimensions because this suite's
+# vocabulary had exactly five names. That was the test dictating the semantics: a false
+# ingredient claim is not a price that was dishonoured and not a parcel that shipped late.
+# The vocabulary is six now, and these tests exist to keep the sixth honest — a genuine
+# dimension of the same Beta framework, fed through a typed table, not an alias.
+# ===================================================================================
+@pytest.mark.epic("E6")
+@pytest.mark.ticket("T-062")
+def test_catalog_claim_accuracy_is_a_first_class_sixth_trust_dimension():
+    """R12: six dimensions in one framework, and a catalog observation moves only its own."""
+    from apps.trust.src.scoring import TRUST_DIMENSIONS as PRODUCT_DIMS
+    from apps.trust.src.scoring import score
+
+    published = tuple(PRODUCT_DIMS)
+    assert set(published) == set(DIMS), (
+        "the engine's published trust vocabulary must be exactly the six dimensions "
+        f"{list(DIMS)}, got {list(published)}"
+    )
+    assert len(set(published)) == 6, f"the vocabulary must hold six distinct names: {published}"
+
+    prior = score([], as_of=AS_OF)
+    # The sixth dimension is served through the identical record as the other five — same
+    # fields, same prior. One system, not a bolted-on side channel.
+    for field in ("alpha", "beta", "decayed_at"):
+        _get(_dim(prior, CATALOG_DIM), field)
+    assert _ab(prior, CATALOG_DIM) == (2.0, 2.0), (
+        f"{CATALOG_DIM} does not start at the neutral Beta(2,2) prior the other five use"
+    )
+
+    verified = score([_obs("s-1", CATALOG_DIM, "verified") for _ in range(6)], as_of=AS_OF)
+    contradicted = score(
+        [_obs("s-1", CATALOG_DIM, "contradicted") for _ in range(6)], as_of=AS_OF
+    )
+
+    assert float(_get(verified, "score")) > float(_get(prior, "score")), (
+        "verified product-fact claims did not raise the served trust score"
+    )
+    assert float(_get(contradicted, "score")) < float(_get(prior, "score")), (
+        "contradicted product-fact claims did not lower the served trust score"
+    )
+    assert _ab(verified, CATALOG_DIM)[0] > 2.0, "verified claims added no positive evidence"
+    assert _ab(contradicted, CATALOG_DIM)[1] > 2.0, "contradicted claims added no negative evidence"
+
+    # The point of the amendment: a product-fact outcome must NOT leak into a promise
+    # dimension. If `catalog_claim_accuracy` were an alias for `feedback_match` (or for any
+    # of the five), one of these equalities would break.
+    for snapshot, what in ((verified, "verified"), (contradicted, "contradicted")):
+        for dim in TRANSACTION_DIMS:
+            assert _ab(snapshot, dim) == _ab(prior, dim), (
+                f"a {what} product-fact claim moved the transaction dimension {dim!r} "
+                f"(prior={_ab(prior, dim)}, after={_ab(snapshot, dim)}) — product facts and "
+                "offer-integrity promises are different dimensions of the same framework"
+            )
+
+
+@pytest.mark.epic("E6")
+@pytest.mark.ticket("T-062")
+def test_verified_and_contradicted_catalog_claims_are_weighted_beta_evidence():
+    """R12: `verified` is positive evidence; `contradicted` is negative at the published 2.0."""
+    from apps.trust.src.scoring import OBSERVATION_WEIGHTS, score
+
+    prior = score([], as_of=AS_OF)
+    prior_alpha, prior_beta = _ab(prior, CATALOG_DIM)
+
+    verified = score([_obs("s-1", CATALOG_DIM, "verified")], as_of=AS_OF)
+    contradicted = score([_obs("s-1", CATALOG_DIM, "contradicted")], as_of=AS_OF)
+    v_alpha, v_beta = _ab(verified, CATALOG_DIM)
+    c_alpha, c_beta = _ab(contradicted, CATALOG_DIM)
+
+    assert v_alpha > prior_alpha, "a verified product-fact claim added no positive evidence"
+    assert v_beta == prior_beta, "a verified product-fact claim added negative evidence too"
+
+    assert c_alpha == prior_alpha, "a contradicted product-fact claim added positive evidence"
+    assert c_beta - prior_beta == float(OBSERVATION_WEIGHTS["contradicted"]) == 2.0, (
+        "a contradicted product-fact claim must apply the SAME published weight of 2.0 the "
+        "transaction dimensions use — one framework, one weight table "
+        f"(prior beta={prior_beta}, after={c_beta})"
+    )
+
+    assert _mean(contradicted, CATALOG_DIM) < _mean(prior, CATALOG_DIM) < _mean(verified, CATALOG_DIM), (
+        "the two decided outcomes must move the catalog-claim mean in opposite directions "
+        f"(contradicted={_mean(contradicted, CATALOG_DIM)}, prior={_mean(prior, CATALOG_DIM)}, "
+        f"verified={_mean(verified, CATALOG_DIM)})"
+    )
+
+
+@pytest.mark.epic("E6")
+@pytest.mark.ticket("T-062")
+def test_unsupported_and_ambiguous_catalog_claims_move_coverage_not_the_mean():
+    """R12/R19: undecided outcomes reduce coverage and confidence instead of the mean."""
+    from apps.trust.src.scoring import OBSERVATION_WEIGHTS, score
+    from packages.verification import satisfies_hard_constraint
+
+    n = 6
+
+    def _run(otype):
+        return score([_obs("s-1", CATALOG_DIM, otype) for _ in range(n)], as_of=AS_OF)
+
+    prior = score([], as_of=AS_OF)
+    verified, contradicted = _run("verified"), _run("contradicted")
+    unsupported, ambiguous = _run("unsupported"), _run("ambiguous")
+
+    # Every dimension publishes its coverage — this is one framework, so the field is not
+    # special-cased onto the new dimension.
+    for snapshot in (prior, verified, unsupported, ambiguous):
+        for dim in DIMS:
+            coverage = _coverage(snapshot, dim)
+            assert 0.0 <= coverage <= 1.0, f"{dim} coverage {coverage} is not a share in [0,1]"
+
+    # `ambiguous`: no mean movement at all, and it carries no evidential weight.
+    assert float(OBSERVATION_WEIGHTS["ambiguous"]) == 0.0, (
+        "an ambiguous outcome must carry zero observation weight — it decides nothing"
+    )
+    assert _ab(ambiguous, CATALOG_DIM) == _ab(prior, CATALOG_DIM), (
+        f"{n} ambiguous claims moved the catalog-claim Beta from {_ab(prior, CATALOG_DIM)} to "
+        f"{_ab(ambiguous, CATALOG_DIM)} — ambiguity is not evidence"
+    )
+
+    # `unsupported`: no positive evidence, and at most a small published negative.
+    unsupported_weight = float(OBSERVATION_WEIGHTS["unsupported"])
+    assert 0.0 <= unsupported_weight < 1.0, (
+        "the unsupported weight must be a SMALL policy-defined negative, well below the "
+        f"contradicted weight of 2.0, got {unsupported_weight}"
+    )
+    assert _ab(unsupported, CATALOG_DIM)[0] == _ab(prior, CATALOG_DIM)[0], (
+        "an unsupported claim added positive evidence"
+    )
+    assert _ab(unsupported, CATALOG_DIM)[1] - _ab(prior, CATALOG_DIM)[1] <= unsupported_weight * n, (
+        "an unsupported claim moved the catalog-claim mean by more than its published weight"
+    )
+    assert _mean(unsupported, CATALOG_DIM) <= _mean(prior, CATALOG_DIM), (
+        "an unsupported claim must never move the mean upward"
+    )
+    assert (_mean(prior, CATALOG_DIM) - _mean(unsupported, CATALOG_DIM)) < (
+        _mean(prior, CATALOG_DIM) - _mean(contradicted, CATALOG_DIM)
+    ), "an unsupported claim moved the mean as far as a contradicted one"
+
+    # Where the undecided outcomes DO land: coverage, and through it confidence.
+    assert _coverage(verified, CATALOG_DIM) > _coverage(unsupported, CATALOG_DIM), (
+        "unsupported claims did not reduce catalog-claim coverage relative to decided ones"
+    )
+    assert _coverage(verified, CATALOG_DIM) > _coverage(ambiguous, CATALOG_DIM), (
+        "ambiguous claims did not reduce catalog-claim coverage relative to decided ones"
+    )
+    assert float(_get(verified, "confidence")) > float(_get(prior, "confidence")), (
+        "decided catalog-claim evidence did not raise confidence, so the comparisons below "
+        "would be vacuous"
+    )
+    assert float(_get(unsupported, "confidence")) < float(_get(verified, "confidence")), (
+        "unsupported claims bought the same confidence as verified ones"
+    )
+    assert float(_get(ambiguous, "confidence")) < float(_get(verified, "confidence")), (
+        "ambiguous claims bought the same confidence as verified ones"
+    )
+
+    # ...and the other half of the treatment: neither may ever stand in for a fact.
+    assert satisfies_hard_constraint("verified") is True
+    assert satisfies_hard_constraint("unsupported") is False
+    assert satisfies_hard_constraint("ambiguous") is False, (
+        "an ambiguous product-fact claim satisfied a hard constraint (R19 forbids it)"
+    )
+
+
+@pytest.mark.epic("E6")
+@pytest.mark.ticket("T-062")
+def test_claim_type_to_trust_dimension_mapping_is_typed_and_exhaustive():
+    """R12/D18: every claim type maps to exactly one dimension; an unmapped type is loud."""
+    from apps.trust.src.scoring import CLAIM_TYPE_DIMENSIONS, UnmappedClaimType, claim_dimension
+
+    assert issubclass(UnmappedClaimType, Exception), (
+        "UnmappedClaimType must be an exception type the caller can catch"
+    )
+    table = dict(CLAIM_TYPE_DIMENSIONS)
+    assert table, "CLAIM_TYPE_DIMENSIONS is empty — nothing can be routed into trust"
+    for claim_type, dim in sorted(table.items()):
+        assert dim in DIMS, (
+            f"CLAIM_TYPE_DIMENSIONS[{claim_type!r}] = {dim!r} is not one of the six trust "
+            f"dimensions {list(DIMS)}"
+        )
+
+    missing = [t for t in PUBLISHED_CLAIM_TYPES if t not in table]
+    assert not missing, (
+        "the claim-type mapping must be EXHAUSTIVE over the published claim-type vocabulary; "
+        f"unmapped: {missing}"
+    )
+
+    # Offer-integrity promises keep the transaction dimensions they have always had...
+    for claim_type, dim in sorted(OFFER_FACT_CLAIM_DIMENSIONS.items()):
+        assert claim_dimension(claim_type) == dim, (
+            f"offer-fact claim type {claim_type!r} must keep its transaction dimension {dim!r}, "
+            f"got {claim_dimension(claim_type)!r}"
+        )
+
+    # ...and product facts land on the dimension that actually means what they say.
+    for claim_type in PRODUCT_FACT_CLAIM_TYPES:
+        landed = claim_dimension(claim_type)
+        assert landed == CATALOG_DIM, (
+            f"product-fact claim type {claim_type!r} maps to {landed!r}; a claim about what "
+            f"the goods ARE belongs on {CATALOG_DIM!r}"
+        )
+        assert landed not in TRANSACTION_DIMS, (
+            f"product-fact claim type {claim_type!r} was mapped into a transaction dimension"
+        )
+
+    # An unmapped claim type is an error, never a silent default onto some dimension.
+    for unknown in ("no_such_claim_type_zz", ""):
+        with pytest.raises(UnmappedClaimType):
+            claim_dimension(unknown)
+
+
+@pytest.mark.epic("E6")
+@pytest.mark.ticket("T-062")
+def test_the_claim_type_mapping_the_engine_uses_is_the_approved_manifest_table():
+    """S2/D18: the engine consumes the approved table read-only; it does not author it."""
+    from apps.trust.src.scoring import claim_dimension
+
+    approved = _manifest_claim_type_dimensions()
+    for claim_type, dim in sorted(approved.items()):
+        assert dim in DIMS, (
+            f"manifest.claim_type_dimensions[{claim_type!r}] = {dim!r} is not a trust dimension"
+        )
+        assert claim_dimension(claim_type) == dim, (
+            f"the engine routes {claim_type!r} to {claim_dimension(claim_type)!r} but the "
+            f"human-approved manifest says {dim!r} — the manifest is ground truth (D18)"
+        )
+    assert CATALOG_DIM in set(approved.values()), (
+        f"the approved mapping routes nothing to {CATALOG_DIM!r}, so the sixth dimension is "
+        "unreachable from claim verification and the comparison above is vacuous"
+    )
+
+
+# ===================================================================================
 # T-063 — trust-event push and buyer feedback (R13, R14, R5)
 # ===================================================================================
 class _RecordingSink:
@@ -1132,3 +1456,58 @@ def test_comparators_normalize_units_and_apply_numeric_tolerance():
     assert produced["c-outside"] == "contradicted", (
         f"a value outside the published per-field tolerance ({tol}) was not contradicted"
     )
+
+
+@pytest.mark.epic("E6")
+@pytest.mark.ticket("T-065")
+def test_verification_results_are_typed_and_route_into_the_catalog_claim_dimension():
+    """R18/R12: a verified/contradicted product fact reaches `catalog_claim_accuracy`.
+
+    The end-to-end route, because the dimension is decorative without it: the verifier
+    decides a product-fact claim, the result carries the `claim_type` that types it, the
+    published table turns that into a dimension, and the score moves there and nowhere else.
+    """
+    from apps.trust.src.scoring import claim_dimension, score
+    from packages.verification import verify
+
+    snapshot = _catalog("snap-routing")
+    pitch = _pitch(
+        "pitch-routing",
+        [
+            {"claim_ref": "c-true-fact", "key": "ingredients", "claim_type": "ingredients",
+             "op": "contains", "value": "aloe"},
+            {"claim_ref": "c-false-fact", "key": "ingredients", "claim_type": "ingredients",
+             "op": "contains", "value": "lanolin"},
+        ],
+    )
+
+    result = verify(pitch, snapshot, "v1")
+    produced = _statuses(result)
+    assert produced["c-true-fact"] == "verified", "a true product fact was not verified"
+    assert produced["c-false-fact"] == "contradicted", "a false product fact was not contradicted"
+
+    observations = []
+    for claim in _get(result, "claims"):
+        ref = str(_claim_ref(_plain(claim)))
+        claim_type = str(_get(claim, "claim_type"))
+        assert claim_type == "ingredients", (
+            f"the verification result for {ref!r} does not carry the claim_type that routes "
+            f"it into trust (got {claim_type!r}) — an untyped outcome cannot reach a dimension"
+        )
+        assert claim_dimension(claim_type) == CATALOG_DIM
+        observations.append(_obs("s-1", claim_dimension(claim_type), str(_get(claim, "status"))))
+
+    assert len(observations) == 2
+    prior = score([], as_of=AS_OF)
+    routed = score(observations, as_of=AS_OF)
+
+    assert _ab(routed, CATALOG_DIM)[0] > _ab(prior, CATALOG_DIM)[0], (
+        "the verified product fact left no positive evidence on the catalog dimension"
+    )
+    assert _ab(routed, CATALOG_DIM)[1] > _ab(prior, CATALOG_DIM)[1], (
+        "the contradicted product fact left no negative evidence on the catalog dimension"
+    )
+    for dim in TRANSACTION_DIMS:
+        assert _ab(routed, dim) == _ab(prior, dim), (
+            f"a verified product-fact claim landed on the transaction dimension {dim!r}"
+        )

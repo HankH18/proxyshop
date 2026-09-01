@@ -903,3 +903,381 @@ def test_loss_reports_carry_reason_categories_and_no_amounts():
         if isinstance(value, str):
             for needle in forbidden_text:
                 assert needle not in value, f"loss report leaks {needle!r} at {key!r}"
+
+
+# =====================================================================================
+# AMENDMENT 1 — R12 eligibility gates at the PUBLIC ORCHESTRATION boundary.
+#
+# `collect_bids(roster, responses, now)` and `accept(auction, bid_ref, creator, mode)`
+# above are pure low-level functions and stay exactly as they are. R12's fail-closed
+# eligibility gates do not belong inside them — they belong in the layer that decides
+# *who gets asked* and *whether a checkout may proceed*. That layer is
+# `apps.exchange.src.orchestration`, and these tests are the only thing that exercises
+# it, so the guarantee is tested where the guarantee actually lives.
+#
+# The eligibility source is a versioned `SellerEligibility` interface: the exchange
+# publishes the interface version it speaks, and refuses to consult a source that
+# speaks another one.
+# =====================================================================================
+def _roster_entry(store_id, list_price, tier=1):
+    return {
+        "store_id": store_id,
+        "tier": tier,
+        "product_ref": "product-1",
+        "list_price": list_price,
+    }
+
+
+def _eligibility_source(base, decision_cls, version, statuses, raising=()):
+    """Build a `SellerEligibility` implementation over a fixed status table.
+
+    `base` and `decision_cls` are handed in by the caller so that no product import
+    happens outside a test body. `raising` names stores whose eligibility read blows
+    up — an unreadable eligibility source must deny, exactly like an UNAVAILABLE one.
+    """
+    table = dict(statuses)
+    exploding = set(raising)
+
+    class _Source(base):
+        interface_version = version
+
+        def __init__(self):
+            self.checked = []
+
+        def check(self, store_id):
+            self.checked.append(store_id)
+            if store_id in exploding:
+                raise RuntimeError(f"eligibility backend unreachable for {store_id}")
+            status = table[store_id]
+            return decision_cls(
+                store_id=store_id,
+                status=status,
+                reason=f"acceptance-fixture:{status}",
+            )
+
+    return _Source()
+
+
+class _RecordingSolicitor:
+    """In-process stand-in for the exchange's outbound `POST /v1/bid-requests` client.
+
+    Records every store it was asked to solicit. A store that never reaches this object
+    was never solicited — which is the whole point of the pre-solicitation gate.
+    """
+
+    def __init__(self, prices, *, silent=()):
+        self.prices = dict(prices)
+        self.silent = set(silent)
+        self.asked = []
+
+    def solicit(self, store):
+        store_id = _field(store, "store_id")
+        self.asked.append(store_id)
+        if store_id in self.silent:
+            return None
+        price = self.prices[store_id]
+        return {
+            "store_id": store_id,
+            "received_at": T_NOW - 1.0,
+            "bid": {
+                "auction_id": "auction-1",
+                "store_id": store_id,
+                "offer": {
+                    "product_ref": "product-1",
+                    "unit_price": price,
+                    "total_price": price,
+                },
+                "claims": _default_claims(),
+            },
+        }
+
+    __call__ = solicit
+
+
+@pytest.mark.epic("E3")
+@pytest.mark.ticket("T-030")
+def test_solicitation_gate_denies_ineligible_stores_before_any_store_is_asked():
+    """R12 gate 1: eligibility is read for every rostered store before solicitation; a
+    blacklisted store is never asked, and an unreadable eligibility answer denies."""
+    from apps.exchange.src.eligibility import (
+        BLACKLISTED,
+        ELIGIBLE,
+        SELLER_ELIGIBILITY_INTERFACE_VERSION,
+        UNAVAILABLE,
+        EligibilityDecision,
+        SellerEligibility,
+    )
+    from apps.exchange.src.orchestration import solicit_bids
+
+    roster = [
+        _roster_entry("store-ok1", 120.0),
+        _roster_entry("store-black", 130.0),
+        _roster_entry("store-ok2", 140.0),
+        _roster_entry("store-unknown", 150.0),
+        _roster_entry("store-boom", 160.0, tier=0),
+    ]
+    source = _eligibility_source(
+        SellerEligibility,
+        EligibilityDecision,
+        SELLER_ELIGIBILITY_INTERFACE_VERSION,
+        {
+            "store-ok1": ELIGIBLE,
+            "store-ok2": ELIGIBLE,
+            "store-black": BLACKLISTED,
+            "store-unknown": UNAVAILABLE,
+            # Says ELIGIBLE, but the read itself raises: it must still be denied.
+            "store-boom": ELIGIBLE,
+        },
+        raising=("store-boom",),
+    )
+    solicitor = _RecordingSolicitor({"store-ok1": 80.0, "store-ok2": 85.0})
+
+    result = solicit_bids(roster=roster, solicitor=solicitor, eligibility=source, now=T_NOW)
+
+    assert sorted(source.checked) == sorted(r["store_id"] for r in roster), (
+        "R12 requires the eligibility interface to be consulted for every rostered "
+        f"store before solicitation; it saw {source.checked}"
+    )
+
+    # --- the gate: three stores are never asked, two are. -----------------------------
+    assert solicitor.asked == ["store-ok1", "store-ok2"], (
+        "only eligible stores may be solicited, in roster order; the solicitor was "
+        f"asked for {solicitor.asked}"
+    )
+    assert list(_field(result, "solicited")) == ["store-ok1", "store-ok2"]
+
+    entries = list(_field(result, "entries"))
+    by_store = {_field(e, "store_id"): e for e in entries}
+    assert sorted(by_store) == ["store-ok1", "store-ok2"], (
+        "an ineligible store must not even appear as a list-price fallback entry; "
+        f"got entries for {sorted(by_store)}"
+    )
+
+    # --- positive control: an orchestration that solicits nobody fails right here. -----
+    for store_id, price in (("store-ok1", 80.0), ("store-ok2", 85.0)):
+        assert _field(by_store[store_id], "fallback") is False, (
+            f"{store_id} responded to its solicitation; it is not a fallback"
+        )
+        assert _unit_price(by_store[store_id]) == price, (
+            f"{store_id}'s solicited bid price did not survive the orchestration layer"
+        )
+
+    # --- every denial is recorded, and names why. --------------------------------------
+    denied = {_field(d, "store_id"): d for d in _field(result, "denied")}
+    assert sorted(denied) == ["store-black", "store-boom", "store-unknown"], (
+        f"expected a recorded denial per skipped store, got {sorted(denied)}"
+    )
+    for store_id, token in (
+        ("store-black", "blacklist"),
+        ("store-unknown", "unavailable"),
+        ("store-boom", "unavailable"),
+    ):
+        reason = _strings(_field(denied[store_id], "reason"))
+        assert reason, f"{store_id} was denied with no reason"
+        assert token in reason, (
+            f"{store_id}'s denial reason {reason!r} does not name the {token!r} condition"
+        )
+
+
+@pytest.mark.epic("E3")
+@pytest.mark.ticket("T-033")
+def test_accept_gate_refuses_a_bid_whose_store_became_ineligible_after_bidding():
+    """R12 gate 3: eligibility is re-read at accept time; a store blacklisted after it
+    bid gets no code and no permalink, and an unreadable answer refuses."""
+    from apps.exchange.src.eligibility import (
+        BLACKLISTED,
+        ELIGIBLE,
+        SELLER_ELIGIBILITY_INTERFACE_VERSION,
+        UNAVAILABLE,
+        EligibilityDecision,
+        SellerEligibility,
+    )
+    from apps.exchange.src.orchestration import accept_offer
+
+    def source(statuses, raising=()):
+        return _eligibility_source(
+            SellerEligibility,
+            EligibilityDecision,
+            SELLER_ELIGIBILITY_INTERFACE_VERSION,
+            statuses,
+            raising=raising,
+        )
+
+    all_ok = {"store-a": ELIGIBLE, "store-b": ELIGIBLE}
+
+    # --- positive control: an orchestration that refuses every accept fails here. ------
+    clean = source(all_ok)
+    creator = _RecordingCodeCreator()
+    outcome = accept_offer(
+        auction=_auction(),
+        bid_ref="bid-a",
+        code_creator=creator,
+        mode="shopify",
+        eligibility=clean,
+    )
+    assert _field(outcome, "accepted") is True, "an eligible store's accept must go through"
+    permalink = _field(outcome, "permalink_url")
+    assert isinstance(permalink, str) and creator.code in permalink
+    assert urlsplit(permalink).hostname == "store-a.example.com"
+    assert len(creator.calls) == 1, f"expected exactly one code creation, got {creator.calls}"
+    assert _field(outcome, "denial_reason") is None
+    assert "store-a" in clean.checked, "accept did not consult the eligibility interface"
+
+    # --- the gate: blacklisted-after-bidding, and an unavailable read, both refuse. -----
+    for status, token in ((BLACKLISTED, "blacklist"), (UNAVAILABLE, "unavailable")):
+        refuser = _RecordingCodeCreator()
+        refused = accept_offer(
+            auction=_auction(),
+            bid_ref="bid-a",
+            code_creator=refuser,
+            mode="shopify",
+            eligibility=source({**all_ok, "store-a": status}),
+        )
+        assert _field(refused, "accepted") is False, f"{status} must refuse the accept"
+        assert _field(refused, "permalink_url") is None, (
+            f"{status} store was handed a checkout permalink"
+        )
+        assert refuser.calls == [], (
+            f"{status} store had a discount code created for it: {refuser.calls}"
+        )
+        reason = _strings(_field(refused, "denial_reason"))
+        assert token in reason, f"refusal reason {reason!r} does not name {token!r}"
+
+    # An eligibility read that blows up refuses too — fail closed, never open.
+    boom_creator = _RecordingCodeCreator()
+    boomed = accept_offer(
+        auction=_auction(),
+        bid_ref="bid-a",
+        code_creator=boom_creator,
+        mode="shopify",
+        eligibility=source(all_ok, raising=("store-a",)),
+    )
+    assert _field(boomed, "accepted") is False, "an unreadable eligibility read must refuse"
+    assert _field(boomed, "permalink_url") is None
+    assert boom_creator.calls == []
+
+    # --- and the gate is per store, not a blanket refusal. -----------------------------
+    sibling = _RecordingCodeCreator(domain="store-b.example.com")
+    still_fine = accept_offer(
+        auction=_auction(),
+        bid_ref="bid-b",
+        code_creator=sibling,
+        mode="shopify",
+        eligibility=source({**all_ok, "store-a": BLACKLISTED}),
+    )
+    assert _field(still_fine, "accepted") is True, (
+        "banning store-a must not refuse store-b's accept — a blanket refusal is not a gate"
+    )
+    assert len(sibling.calls) == 1
+
+
+@pytest.mark.epic("E3")
+@pytest.mark.ticket("T-032")
+def test_both_eligibility_gates_require_a_versioned_seller_eligibility_interface():
+    """R12: the seller-eligibility interface is versioned, and both gates fail closed
+    against a source speaking a version the exchange does not."""
+    from apps.exchange.src.eligibility import (
+        BLACKLISTED,
+        ELIGIBLE,
+        SELLER_ELIGIBILITY_INTERFACE_VERSION,
+        UNAVAILABLE,
+        EligibilityDecision,
+        SellerEligibility,
+    )
+    from apps.exchange.src.orchestration import accept_offer, solicit_bids
+
+    assert isinstance(SELLER_ELIGIBILITY_INTERFACE_VERSION, str), (
+        "the seller-eligibility interface must publish the version it speaks"
+    )
+    assert SELLER_ELIGIBILITY_INTERFACE_VERSION.strip()
+    statuses = {ELIGIBLE, BLACKLISTED, UNAVAILABLE}
+    assert len(statuses) == 3, f"the three eligibility statuses must be distinct: {statuses}"
+
+    decision = EligibilityDecision(store_id="store-ok1", status=ELIGIBLE, reason="fixture")
+    assert _field(decision, "store_id") == "store-ok1"
+    assert _field(decision, "status") == ELIGIBLE
+
+    roster = [_roster_entry("store-ok1", 120.0), _roster_entry("store-ok2", 140.0)]
+    table = {"store-ok1": ELIGIBLE, "store-ok2": ELIGIBLE}
+    prices = {"store-ok1": 80.0, "store-ok2": 85.0}
+
+    def source(version):
+        return _eligibility_source(
+            SellerEligibility, EligibilityDecision, version, table
+        )
+
+    # --- positive control: the published version is accepted at both gates. ------------
+    good_solicitor = _RecordingSolicitor(prices)
+    good = solicit_bids(
+        roster=roster,
+        solicitor=good_solicitor,
+        eligibility=source(SELLER_ELIGIBILITY_INTERFACE_VERSION),
+        now=T_NOW,
+    )
+    assert good_solicitor.asked == ["store-ok1", "store-ok2"], (
+        "a source speaking the published interface version must be consulted, not refused"
+    )
+    assert list(_field(good, "solicited")) == ["store-ok1", "store-ok2"]
+
+    good_creator = _RecordingCodeCreator()
+    good_accept = accept_offer(
+        auction=_auction(),
+        bid_ref="bid-a",
+        code_creator=good_creator,
+        mode="shopify",
+        eligibility=_eligibility_source(
+            SellerEligibility,
+            EligibilityDecision,
+            SELLER_ELIGIBILITY_INTERFACE_VERSION,
+            {"store-a": ELIGIBLE, "store-b": ELIGIBLE},
+        ),
+    )
+    assert _field(good_accept, "accepted") is True
+    assert len(good_creator.calls) == 1
+
+    # --- a source speaking another version is not trusted at either gate. --------------
+    stale = "0.0.0-not-the-published-interface"
+    assert stale != SELLER_ELIGIBILITY_INTERFACE_VERSION
+
+    bad_solicitor = _RecordingSolicitor(prices)
+    try:
+        bad = solicit_bids(
+            roster=roster, solicitor=bad_solicitor, eligibility=source(stale), now=T_NOW
+        )
+    except Exception:  # refusing outright is a perfectly good fail-closed
+        pass
+    else:
+        assert list(_field(bad, "solicited")) == [], (
+            "an unsupported eligibility interface version must solicit nobody"
+        )
+        assert list(_field(bad, "entries")) == []
+    assert bad_solicitor.asked == [], (
+        "stores were solicited against an eligibility source speaking an unsupported "
+        f"interface version: {bad_solicitor.asked}"
+    )
+
+    bad_creator = _RecordingCodeCreator()
+    try:
+        bad_accept = accept_offer(
+            auction=_auction(),
+            bid_ref="bid-a",
+            code_creator=bad_creator,
+            mode="shopify",
+            eligibility=_eligibility_source(
+                SellerEligibility,
+                EligibilityDecision,
+                stale,
+                {"store-a": ELIGIBLE, "store-b": ELIGIBLE},
+            ),
+        )
+    except Exception:
+        pass
+    else:
+        assert _field(bad_accept, "accepted") is False, (
+            "an unsupported eligibility interface version must refuse the accept"
+        )
+        assert _field(bad_accept, "permalink_url") is None
+    assert bad_creator.calls == [], (
+        "a discount code was created against an eligibility source speaking an "
+        f"unsupported interface version: {bad_creator.calls}"
+    )

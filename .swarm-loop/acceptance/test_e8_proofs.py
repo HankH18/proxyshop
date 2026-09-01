@@ -29,13 +29,20 @@ same table). Exactly two documents, at exactly these paths, no globbing and no s
 
 * ``fixtures/manifest.json`` — one object with ``seed_category``, ``seed``,
   ``blacklist_threshold``, ``episode_budget``, ``new_store_prior_n``,
+  ``claim_type_dimensions {claim_type: dimension}``,
   ``dishonest_store {store_id, behaviours[{kind, dim, type}]}``,
   ``expected_trust_trajectory[{episode, score, tolerance}]``,
   ``golden_set {path, sha256, count}`` and ``approval {approver, approved_at, artifact,
   content_hash}``.
 * ``fixtures/golden/golden_set.json`` — one object with ``pitches[]``, each
-  ``{pitch_id, text, gates[], catalog_snapshot, claims[{claim_ref, text, key, value,
-  expected_status}]}``.
+  ``{pitch_id, text, gates[], catalog_snapshot, claims[{claim_ref, text, key, claim_type,
+  value, expected_status}]}``.
+
+``claim_type_dimensions`` is the **typed, exhaustive** `claim_type → trust dimension` table
+(D18 as amended): product-fact claim types land on ``catalog_claim_accuracy``, the sixth
+trust dimension, and offer-integrity claim types keep their transaction dimension. It lives
+in the approved manifest, not in the trust engine's config, for the same reason the
+dishonest script does — otherwise the engine grades itself.
 
 The golden label key is ``expected_status`` everywhere — never ``status``, which is what the
 *verifier* produces and must stay visibly distinct from what the human approved.
@@ -65,10 +72,40 @@ GOLDEN_SET_REL = "fixtures/golden/golden_set.json"
 #: The four verification statuses R18 freezes. Nothing else may appear as a label.
 VERIFICATION_STATUSES = frozenset({"verified", "contradicted", "unsupported", "ambiguous"})
 
-#: The five trust dimensions every manifest behaviour must name (DESIGN §Trust math).
-TRUST_DIMENSIONS = frozenset(
+#: The sixth trust dimension: the one that grades a *product fact* (is the thing what the
+#: pitch said it is) rather than an offer-integrity promise. A false ingredient claim is not
+#: `price_honored`, `shipped_on_time` or `not_returned`, and mapping it into one of those
+#: corrupts the meaning of that dimension's score.
+CATALOG_DIM = "catalog_claim_accuracy"
+
+#: The five dimensions that grade an offer-integrity promise.
+TRANSACTION_DIMENSIONS = frozenset(
     {"price_honored", "discount_honored", "shipped_on_time", "not_returned", "feedback_match"}
 )
+
+#: The six trust dimensions every manifest behaviour must name (DESIGN §Trust math). One
+#: trust system, six dimensions — not two systems.
+TRUST_DIMENSIONS = TRANSACTION_DIMENSIONS | {CATALOG_DIM}
+
+#: The published `claim_type → dimension` table, offer-fact half.
+OFFER_FACT_CLAIM_DIMENSIONS = {
+    "price": "price_honored",
+    "unit_price": "price_honored",
+    "total_price": "price_honored",
+    "discount": "discount_honored",
+    "promo_eligibility": "discount_honored",
+    "delivery": "shipped_on_time",
+    "shipping_speed": "shipped_on_time",
+    "dispatch_window": "shipped_on_time",
+    "return_policy": "not_returned",
+    "warranty": "not_returned",
+}
+
+#: The product-fact half — every one of these lands on `catalog_claim_accuracy`.
+PRODUCT_FACT_CLAIM_TYPES = ("ingredients", "compatibility", "nutrition", "specifications")
+
+#: The published claim-type vocabulary the approved mapping must cover exhaustively.
+PUBLISHED_CLAIM_TYPES = tuple(OFFER_FACT_CLAIM_DIMENSIONS) + PRODUCT_FACT_CLAIM_TYPES
 
 #: The eleven eval gates DESIGN §Verification strategy enumerates. The key is the canonical
 #: gate id the golden set should use; the value set lists the spellings this suite accepts,
@@ -216,6 +253,21 @@ def _golden_set_pitches(manifest: dict) -> list:
     return pitches
 
 
+def _claim_type_dimensions(manifest: dict) -> dict:
+    """The approved `claim_type → trust dimension` table (D18 as amended).
+
+    Read from the manifest, never from the trust engine: the engine is the thing being
+    graded, so it cannot also be the document that says which dimension a contradicted
+    ingredient claim ought to have penalised.
+    """
+    table = _require(manifest, "claim_type_dimensions", dict, "manifest")
+    assert table, (
+        "manifest.claim_type_dimensions must be a non-empty {claim_type: dimension} table — "
+        "without it no verification outcome has a typed route into trust (D18)"
+    )
+    return table
+
+
 def _markdown_under(directory: pathlib.Path):
     if not directory.is_dir():
         return []
@@ -354,7 +406,7 @@ def test_manifest_defines_the_dishonest_store_behaviours_and_the_episode_budget(
         dim = _nonempty_str(behaviour, "dim", where)
         _nonempty_str(behaviour, "type", where)
         assert dim in TRUST_DIMENSIONS, (
-            f"{where}.dim must be one of the five trust dimensions "
+            f"{where}.dim must be one of the six trust dimensions "
             f"{sorted(TRUST_DIMENSIONS)}, got {dim!r}"
         )
 
@@ -638,4 +690,114 @@ def test_demo_runbook_has_the_required_sections_and_its_make_targets_exist():
     assert not missing, (
         "T-085 acceptance 1: the runbook references make targets that the Makefile does not "
         f"define: {missing} (defined: {sorted(defined)})"
+    )
+
+
+# ------------------------------------------------------------------------------------
+# 7 — R12 / D18: the approved manifest publishes the typed, exhaustive claim-type table
+#     (extends test 2 — same document, the half that routes verification into trust)
+# ------------------------------------------------------------------------------------
+@pytest.mark.epic("E8")
+@pytest.mark.ticket("T-080")
+def test_manifest_publishes_a_typed_exhaustive_claim_type_to_dimension_table():
+    """R12 / D18 — every published claim type maps to one of the six dimensions, by hand.
+
+    The table is ground truth for routing, so it is approved with the rest of the manifest
+    rather than inferred by the trust engine at runtime. `test_e6_trust.py` grades the engine
+    against exactly this table; here we only check that the approved document is complete and
+    that product facts are not being smuggled back into promise dimensions.
+    """
+    manifest = _manifest()
+    table = _claim_type_dimensions(manifest)
+
+    for claim_type in sorted(table):
+        where = f"manifest.claim_type_dimensions[{claim_type!r}]"
+        assert isinstance(claim_type, str) and claim_type.strip(), (
+            f"{where}: claim types must be non-empty strings"
+        )
+        dimension = table[claim_type]
+        assert isinstance(dimension, str) and dimension in TRUST_DIMENSIONS, (
+            f"{where} = {dimension!r} is not one of the six trust dimensions "
+            f"{sorted(TRUST_DIMENSIONS)}"
+        )
+
+    missing = [t for t in PUBLISHED_CLAIM_TYPES if t not in table]
+    assert not missing, (
+        "the approved mapping must be EXHAUSTIVE over the published claim-type vocabulary — "
+        f"a type with no dimension has no route into trust at all. Unmapped: {missing}"
+    )
+
+    for claim_type in PRODUCT_FACT_CLAIM_TYPES:
+        assert table[claim_type] == CATALOG_DIM, (
+            f"product-fact claim type {claim_type!r} is mapped to {table[claim_type]!r}. A "
+            f"claim about what the goods ARE belongs on {CATALOG_DIM!r}; mapping it into a "
+            "transaction dimension corrupts that dimension's meaning."
+        )
+
+    for claim_type, dimension in sorted(OFFER_FACT_CLAIM_DIMENSIONS.items()):
+        assert table[claim_type] == dimension, (
+            f"offer-integrity claim type {claim_type!r} must keep its transaction dimension "
+            f"{dimension!r}, got {table[claim_type]!r}"
+        )
+
+    # ...and the scripted dishonest store must actually exercise the new dimension, or the
+    # trust engine is never graded on catalog honesty by the one scenario A3 rests on.
+    store = _require(manifest, "dishonest_store", dict, "manifest")
+    behaviours = _require(store, "behaviours", list, "manifest.dishonest_store")
+    scripted_dims = {
+        str(b.get("dim")) for b in behaviours if isinstance(b, dict) and "dim" in b
+    }
+    assert CATALOG_DIM in scripted_dims, (
+        f"no scripted dishonest behaviour lands on {CATALOG_DIM!r} (dims scripted: "
+        f"{sorted(scripted_dims)}). S2's dishonest store must lie about the goods, not only "
+        "about the deal — otherwise the sixth dimension is never exercised end to end."
+    )
+
+
+# ------------------------------------------------------------------------------------
+# 8 — S8 / R12: the golden claims are typed, and include a false product fact
+#     (extends test 3 — same document, the half that makes an outcome routable)
+# ------------------------------------------------------------------------------------
+@pytest.mark.epic("E8")
+@pytest.mark.ticket("T-080")
+def test_golden_claims_are_typed_and_cover_true_and_false_product_facts():
+    """S8 / R12 — every approved claim carries a mapped `claim_type`, product facts included.
+
+    A verification outcome can only reach a trust dimension if the claim it decided is typed.
+    Requiring the type on the *approved* side (rather than trusting whatever the verifier
+    emits) keeps the routing graded against ground truth like everything else in this file.
+    """
+    manifest = _manifest()
+    table = _claim_type_dimensions(manifest)
+    golden = _golden_set_pitches(manifest)
+
+    typed = 0
+    product_fact_statuses = {}
+    for i, pitch in enumerate(golden):
+        where = f"{GOLDEN_SET_REL}#pitches[{i}]"
+        for j, claim in enumerate(_require(pitch, "claims", list, where)):
+            cwhere = f"{where}.claims[{j}]"
+            claim_type = _nonempty_str(claim, "claim_type", cwhere)
+            assert claim_type in table, (
+                f"{cwhere}.claim_type = {claim_type!r} is not in the approved "
+                "manifest.claim_type_dimensions table, so this claim's outcome has no "
+                f"typed route into trust (mapped types: {sorted(table)})"
+            )
+            typed += 1
+            status = _nonempty_str(claim, "expected_status", cwhere).strip().lower()
+            if table[claim_type] == CATALOG_DIM:
+                product_fact_statuses.setdefault(status, []).append(
+                    f"{pitch.get('pitch_id')}#{claim.get('claim_ref')}"
+                )
+
+    assert typed > 0, f"{GOLDEN_SET_REL} labelled no claims at all"
+    assert product_fact_statuses.get("contradicted"), (
+        "the approved golden set contains no FALSE product-fact claim — the case the sixth "
+        f"dimension exists for (a claim about the goods that the catalog contradicts). "
+        f"Product-fact claims found by status: "
+        f"{ {k: len(v) for k, v in product_fact_statuses.items()} }"
+    )
+    assert product_fact_statuses.get("verified"), (
+        "the approved golden set contains no TRUE product-fact claim, so a verifier that "
+        f"contradicted every product fact would still be graded green on {CATALOG_DIM!r}"
     )

@@ -1,14 +1,15 @@
 {
   "cycle": 0,
   "max_cycles": 102,
-  "generated": "2026-09-01T10:06:32",
+  "generated": "2026-09-01T13:30:04",
   "all_targets_met": false,
   "stale_metrics": [],
   "manual_records": [],
   "manual_records_trusted": false,
-  "goal_amendments": 0,
-  "last_amended_at": null,
-  "last_amend_reason": null,
+  "escalated_metrics": [],
+  "goal_amendments": 1,
+  "last_amended_at": "2026-09-01T13:28:50",
+  "last_amend_reason": "Amendment 1, user-approved after an external review. Three frozen incidentals were distorting the architecture and are corrected: (1) external signing/replay fields become REQUIRED with a key_id-indexed keyring, canonical signing bytes and nonce persistence \u2014 they had been made optional only to preserve a fixture that omitted them, i.e. a test dictating a public security contract; (2) catalog_claim_accuracy becomes a real sixth trust dimension in the one trust system, replacing a mapping table that relocated product-fact semantics into transaction dimensions; (3) eligibility gains denial tests at the public orchestration boundary, since the pure positional functions bypassed the layer where the guarantee lives. Suite 103 -> 120 tests; zero of the 17 new tests pass at cycle 0; all sabotages caught; no existing test weakened or renamed. Breaking contract change recorded: receive_bid's keyring goes flat {signer_id: secret} -> nested {signer_id: {key_id: secret}} with new required kwargs.",
   "metrics": [
     {
       "id": "acceptance_pass_rate",
@@ -16,8 +17,8 @@
       "direction": "maximize",
       "target": 100,
       "latest_cycle": 0,
-      "latest_value": 3.88,
-      "latest_error": 96.12,
+      "latest_value": 3.33,
+      "latest_error": 96.67,
       "latest_source": "measure",
       "n_points": 1,
       "error_slope_per_cycle": null,
@@ -27,8 +28,8 @@
       "history": [
         {
           "cycle": 0,
-          "value": 3.88,
-          "error": 96.12,
+          "value": 3.33,
+          "error": 96.67,
           "source": "measure"
         }
       ]
@@ -36,6 +37,52 @@
     {
       "id": "e6_trust_passing",
       "name": "E6 Trust & verification criteria passing",
+      "direction": "maximize",
+      "target": 26,
+      "latest_cycle": 0,
+      "latest_value": 0.0,
+      "latest_error": 26.0,
+      "latest_source": "measure",
+      "n_points": 1,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "insufficient_data",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure"
+        }
+      ]
+    },
+    {
+      "id": "e3_exchange_passing",
+      "name": "E3 Exchange criteria passing",
+      "direction": "maximize",
+      "target": 21,
+      "latest_cycle": 0,
+      "latest_value": 0.0,
+      "latest_error": 21.0,
+      "latest_source": "measure",
+      "n_points": 1,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "insufficient_data",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure"
+        }
+      ]
+    },
+    {
+      "id": "e4_store_agent_passing",
+      "name": "E4 Store agent & sellers criteria passing",
       "direction": "maximize",
       "target": 20,
       "latest_cycle": 0,
@@ -52,52 +99,6 @@
           "cycle": 0,
           "value": 0.0,
           "error": 20.0,
-          "source": "measure"
-        }
-      ]
-    },
-    {
-      "id": "e3_exchange_passing",
-      "name": "E3 Exchange criteria passing",
-      "direction": "maximize",
-      "target": 18,
-      "latest_cycle": 0,
-      "latest_value": 0.0,
-      "latest_error": 18.0,
-      "latest_source": "measure",
-      "n_points": 1,
-      "error_slope_per_cycle": null,
-      "r2": null,
-      "projected_error_at_final_cycle": null,
-      "verdict": "insufficient_data",
-      "history": [
-        {
-          "cycle": 0,
-          "value": 0.0,
-          "error": 18.0,
-          "source": "measure"
-        }
-      ]
-    },
-    {
-      "id": "e4_store_agent_passing",
-      "name": "E4 Store agent & sellers criteria passing",
-      "direction": "maximize",
-      "target": 14,
-      "latest_cycle": 0,
-      "latest_value": 0.0,
-      "latest_error": 14.0,
-      "latest_source": "measure",
-      "n_points": 1,
-      "error_slope_per_cycle": null,
-      "r2": null,
-      "projected_error_at_final_cycle": null,
-      "verdict": "insufficient_data",
-      "history": [
-        {
-          "cycle": 0,
-          "value": 0.0,
-          "error": 14.0,
           "source": "measure"
         }
       ]
@@ -198,10 +199,10 @@
       "id": "e8_proofs_passing",
       "name": "E8 Fixtures & proofs criteria passing",
       "direction": "maximize",
-      "target": 6,
+      "target": 8,
       "latest_cycle": 0,
       "latest_value": 0.0,
-      "latest_error": 6.0,
+      "latest_error": 8.0,
       "latest_source": "measure",
       "n_points": 1,
       "error_slope_per_cycle": null,
@@ -212,7 +213,7 @@
         {
           "cycle": 0,
           "value": 0.0,
-          "error": 6.0,
+          "error": 8.0,
           "source": "measure"
         }
       ]
@@ -244,9 +245,9 @@
       "id": "acceptance_collected",
       "name": "Acceptance tests collected (count)",
       "direction": "maximize",
-      "target": 103,
+      "target": 120,
       "latest_cycle": 0,
-      "latest_value": 103.0,
+      "latest_value": 120.0,
       "latest_error": 0.0,
       "latest_source": "measure",
       "n_points": 1,
@@ -257,7 +258,7 @@
       "history": [
         {
           "cycle": 0,
-          "value": 103.0,
+          "value": 120.0,
           "error": 0.0,
           "source": "measure"
         }
