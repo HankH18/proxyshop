@@ -25,15 +25,23 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: Directories that must carry a fixture-loading conftest.
-MEMBER_ROOTS = ("apps", "packages", "services")
+#: Roots searched for ``tests/`` directories that must carry a fixture-loading conftest.
+#: ``fixtures`` and ``docs`` have no such directory yet — T-080 and T-085 create them — and
+#: are listed so those tickets are told to add the conftest instead of silently shipping a
+#: directory where ``_fixtures_*.py`` does nothing.
+MEMBER_ROOTS = ("apps", "packages", "services", "fixtures", "docs")
+
+CONFTEST_TEMPLATE = (
+    "from proxyshop_support.fixture_loader import load_sibling_fixtures\n\n"
+    "globals().update(load_sibling_fixtures(__file__))"
+)
 
 
 def _conftests() -> list[Path]:
     found = [REPO_ROOT / "e2e" / "conftest.py"]
     for root in MEMBER_ROOTS:
         found.extend(sorted((REPO_ROOT / root).rglob("tests/conftest.py")))
-    return found
+    return [path for path in found if path.is_file()]
 
 
 def _test_directories() -> list[Path]:
@@ -81,6 +89,7 @@ def test_every_test_directory_loads_sibling_fixture_files(directory: Path) -> No
     assert conftest.is_file(), (
         f"{relative}/ has tests but no conftest.py, so the `_fixtures_*.py` mechanism every "
         f"ticket is told to use does not work there — a worker's fixtures would simply not "
-        f"be found."
+        f"be found. Create {relative}/conftest.py containing exactly:\n\n"
+        f"{CONFTEST_TEMPLATE}\n"
     )
     assert "load_sibling_fixtures(__file__)" in conftest.read_text(), relative
