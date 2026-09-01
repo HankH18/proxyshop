@@ -26,7 +26,7 @@ every refusal comes back as `ok=False` with at least one machine-readable reason
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
@@ -49,9 +49,7 @@ HOOK_PROVENANCE_SOURCES: frozenset[str] = frozenset(
 )
 
 #: The only source no hook produces — an assertion the seller made in free text.
-NON_HOOK_PROVENANCE_SOURCES: frozenset[str] = frozenset(
-    {ProvenanceSource.seller_asserted.value}
-)
+NON_HOOK_PROVENANCE_SOURCES: frozenset[str] = frozenset({ProvenanceSource.seller_asserted.value})
 
 #: The two doors. `validate_bid` refuses anything else rather than guessing.
 HOSTED_PATH = "hosted"
@@ -102,12 +100,12 @@ def parse_timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+            return datetime.fromtimestamp(float(value), tz=UTC)
         except (OverflowError, OSError, ValueError):
             return None
     if not isinstance(value, str) or not value.strip():
@@ -119,7 +117,7 @@ def parse_timestamp(value: Any) -> datetime | None:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _claim_provenance_reasons(claims: Any, path: str) -> tuple[list[str], list[int]]:
@@ -208,7 +206,7 @@ def validate_bid(
         when `ok` is false), `requires_verification`, and `unverified_claim_indexes` so the
         verification queue does not have to re-derive which claims to look at.
     """
-    evaluated_at = parse_timestamp(now) or datetime.now(timezone.utc)
+    evaluated_at = parse_timestamp(now) or datetime.now(UTC)
 
     if path not in BID_PATHS:
         return BidValidationResult(
@@ -227,7 +225,8 @@ def validate_bid(
         Bid.model_validate(_as_plain(bid))
     except ValidationError as exc:
         reasons.append(
-            f"{REASON_SCHEMA_INVALID}:" + ";".join(
+            f"{REASON_SCHEMA_INVALID}:"
+            + ";".join(
                 ".".join(str(part) for part in error["loc"]) or "<root>"
                 for error in exc.errors()[:8]
             )

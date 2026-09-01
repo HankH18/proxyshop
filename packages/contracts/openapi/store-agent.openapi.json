@@ -1,0 +1,107 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ProxyShop store-agent runner",
+    "version": "1.0.0",
+    "description": "SOLICITATION ONLY: exchange → seller. This is not the inbound door. An external seller submits a bid to the exchange's POST /v1/auctions/{auction_id}/bids instead, and only that route carries a SigningEnvelope. Hosted Tier-1 and external Tier-2 agents answer the same shape here."
+  },
+  "x-domain": "store-agent",
+  "paths": {
+    "/v1/bid-requests": {
+      "post": {
+        "operationId": "answerBidRequest",
+        "summary": "Answer a solicitation with a Bid or a Decline.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/BidRequest" },
+              "example": {
+                "auction_id": "auc-0001",
+                "intent": {
+                  "intent_id": "int-0001",
+                  "cluster_id": "cluster-serum",
+                  "query": "gentle vitamin C serum for sensitive skin",
+                  "category": "skincare",
+                  "hard_constraints": [{ "field": "fragrance_free", "op": "eq", "value": true }],
+                  "preferences": [{ "field": "price", "direction": "minimize", "weight": 0.6 }],
+                  "ship_to": "US-CA",
+                  "currency": "USD",
+                  "budget_band": "40-80",
+                  "created_at": "2026-01-01T00:00:00Z",
+                  "schema_version": "1.0.0"
+                },
+                "profile": {
+                  "pseudonym": "psn-0001",
+                  "buckets": {
+                    "budget_band": "40-80",
+                    "category_affinity": ["skincare"],
+                    "frequency_tier": "occasional",
+                    "region": "US-CA",
+                    "first_time": false
+                  }
+                },
+                "respond_by": "2026-01-01T00:00:30Z"
+              },
+              "x-example-schema": "BidRequest"
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A Bid. Every claim carries hook provenance — a hosted agent cannot mint any other kind.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Bid" },
+                "example": {
+                  "auction_id": "auc-0001",
+                  "store_id": "store-1",
+                  "offer": {
+                    "product_ref": "prod-1",
+                    "variant_ref": "44352913",
+                    "unit_price": 49.0,
+                    "currency": "USD",
+                    "discount": {
+                      "type": "percentage",
+                      "value": 10.0,
+                      "provenance": {
+                        "source": "envelope_rule",
+                        "ref": "envelope:store-1:v3#max_discount_pct",
+                        "observed_at": "2026-01-01T00:00:00Z",
+                        "authority_rank": 1
+                      }
+                    },
+                    "commitments": [],
+                    "total_price": 44.1,
+                    "expires_at": "2026-01-03T00:00:00Z",
+                    "checkout_url": "https://store-one.example.com/cart/44352913:1"
+                  },
+                  "claims": [
+                    {
+                      "key": "free_returns",
+                      "value": "30 days",
+                      "provenance": {
+                        "source": "owner_statement",
+                        "ref": "envelope:store-1:v3#commitment-2",
+                        "observed_at": "2026-01-01T00:00:00Z",
+                        "authority_rank": 1
+                      }
+                    }
+                  ],
+                  "message": null,
+                  "agent_version": "store-agent/1.0.0",
+                  "signature": null,
+                  "schema_version": "1.0.0"
+                },
+                "x-example-schema": "Bid"
+              }
+            }
+          },
+          "204": {
+            "description": "Decline. A silent or Tier-0 store is represented by a synthesized list-price fallback upstream, not by an empty bid here."
+          }
+        }
+      }
+    }
+  }
+}

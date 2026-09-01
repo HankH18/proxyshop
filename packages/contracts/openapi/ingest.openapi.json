@@ -1,0 +1,66 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ProxyShop ingest service",
+    "version": "1.0.0",
+    "description": "Catalog refresh. Every material fact it writes is SUPPORTED_BY a Source node, and Source ≡ Provenance: the graph's `source_class` carries the same closed enum this package pins, so a fact's evidence survives the trip from a crawl into a bid."
+  },
+  "x-domain": "ingest",
+  "paths": {
+    "/refresh/{store_id}": {
+      "post": {
+        "operationId": "refreshStoreCatalog",
+        "summary": "Re-crawl and re-extract one store's catalog and policy pages.",
+        "parameters": [
+          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "force": { "type": "boolean", "default": false },
+                  "sections": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "example": { "force": false, "sections": ["products", "policies"] }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The crawl job that was queued, and the provenance every fact from it will carry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["store_id", "job_id", "provenance"],
+                  "properties": {
+                    "store_id": { "type": "string" },
+                    "job_id": { "type": "string" },
+                    "provenance": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Provenance" }
+                  }
+                },
+                "example": {
+                  "store_id": "store-1",
+                  "job_id": "crawl-0001",
+                  "provenance": {
+                    "source": "scraped",
+                    "ref": "snapshot://store-one.example.com/policies/shipping@sha256:0f1e2d3c",
+                    "observed_at": "2026-01-01T00:00:00Z",
+                    "authority_rank": 4
+                  }
+                },
+                "x-example-schema": "Provenance"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

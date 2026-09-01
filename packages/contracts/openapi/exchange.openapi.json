@@ -1,0 +1,313 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ProxyShop exchange",
+    "version": "1.0.0",
+    "description": "The pinned exchange routes of DESIGN §Interfaces. Every request and response body carries a checked-in example, and `tests/test_openapi_contracts.py` / `tests/openapi.test.ts` validate each example against the protocol schema it names. That is what makes these examples a contract rather than documentation: an example that stops matching the schema fails the build in both languages."
+  },
+  "x-domain": "exchange",
+  "paths": {
+    "/auctions": {
+      "post": {
+        "operationId": "openAuction",
+        "summary": "Open an auction from an Intent and a BuyerProfile.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["intent", "profile"],
+                "properties": {
+                  "intent": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Intent" },
+                  "profile": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/BuyerProfile" }
+                }
+              },
+              "example": {
+                "intent": {
+                  "intent_id": "int-0001",
+                  "cluster_id": "cluster-serum",
+                  "query": "gentle vitamin C serum for sensitive skin",
+                  "category": "skincare",
+                  "hard_constraints": [{ "field": "fragrance_free", "op": "eq", "value": true }],
+                  "preferences": [{ "field": "price", "direction": "minimize", "weight": 0.6 }],
+                  "ship_to": "US-CA",
+                  "currency": "USD",
+                  "budget_band": "40-80",
+                  "created_at": "2026-01-01T00:00:00Z",
+                  "schema_version": "1.0.0"
+                },
+                "profile": {
+                  "pseudonym": "psn-0001",
+                  "buckets": {
+                    "budget_band": "40-80",
+                    "category_affinity": ["skincare"],
+                    "frequency_tier": "occasional",
+                    "region": "US-CA",
+                    "first_time": false
+                  }
+                }
+              },
+              "x-example-schemas": { "intent": "Intent", "profile": "BuyerProfile" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The auction was opened.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["auction_id", "respond_by"],
+                  "properties": {
+                    "auction_id": { "type": "string" },
+                    "respond_by": { "type": "string", "format": "date-time" }
+                  }
+                },
+                "example": { "auction_id": "auc-0001", "respond_by": "2026-01-01T00:00:30Z" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auctions/{auction_id}/shortlist": {
+      "get": {
+        "operationId": "getShortlist",
+        "summary": "The ranked shortlist for an auction.",
+        "parameters": [
+          { "name": "auction_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The shortlist.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Shortlist" },
+                "example": {
+                  "auction_id": "auc-0001",
+                  "slots": [
+                    {
+                      "slot": "fit",
+                      "bid_ref": "bid-0001",
+                      "fit_score": 0.82,
+                      "trust_summary": { "score": 0.62, "confidence": 0.4 },
+                      "provenance_labels": ["store-confirmed"]
+                    },
+                    {
+                      "slot": "value",
+                      "bid_ref": "bid-0002",
+                      "fit_score": 0.71,
+                      "trust_summary": { "score": 0.55, "confidence": 0.3 },
+                      "provenance_labels": ["from their website"]
+                    }
+                  ]
+                },
+                "x-example-schema": "Shortlist"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auctions/{auction_id}/accept": {
+      "post": {
+        "operationId": "acceptBid",
+        "summary": "Accept one shortlisted bid and receive the exchange-minted permalink.",
+        "description": "Reaches checkout through the injected CheckoutProvider port, never a hard-wired merchant call. Eligibility is RE-READ here (R12/D54), so a store blacklisted after it bid gets no code and no permalink.",
+        "parameters": [
+          { "name": "auction_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["bid_ref"],
+                "properties": { "bid_ref": { "type": "string" } }
+              },
+              "example": { "bid_ref": "bid-0001" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted; the buyer follows this permalink and never mints its own.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["permalink_url"],
+                  "properties": {
+                    "permalink_url": { "type": "string" },
+                    "code": { "type": ["string", "null"] }
+                  }
+                },
+                "example": {
+                  "permalink_url": "https://store-one.example.com/cart/44352913:1?discount=PS-ABC123",
+                  "code": "PS-ABC123"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Denied at the checkout eligibility gate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["accepted", "denial_reason"],
+                  "properties": {
+                    "accepted": { "type": "boolean" },
+                    "denial_reason": { "type": "string" }
+                  }
+                },
+                "example": { "accepted": false, "denial_reason": "blacklist" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auctions/{auction_id}/bids": {
+      "post": {
+        "operationId": "submitExternalBid",
+        "summary": "The signed external door: a Tier-2 seller submits a Bid.",
+        "description": "D52: the SigningEnvelope is REQUIRED. A submission missing any one of signer_id, key_id, issued_at, nonce or schema_version is Rejected before extraction and before verification, with the same finality as a bad signature. There is no legacy-tolerant path.",
+        "parameters": [
+          { "name": "auction_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          {
+            "name": "X-ProxyShop-Signature",
+            "in": "header",
+            "required": true,
+            "description": "Signature over canonical_signing_bytes(payload).",
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/SignedBidSubmission" },
+              "example": {
+                "auction_id": "auc-0100",
+                "store_id": "store-external-1",
+                "offer": {
+                  "product_ref": "ext-prod-1",
+                  "variant_ref": "44352913",
+                  "unit_price": 89.0,
+                  "currency": "USD",
+                  "discount": null,
+                  "commitments": [],
+                  "total_price": 89.0,
+                  "expires_at": "2999-01-01T00:00:00Z",
+                  "checkout_url": "https://store-external-1.example.com/cart/44352913:1"
+                },
+                "claims": [
+                  {
+                    "key": "material",
+                    "value": "merino wool",
+                    "provenance": {
+                      "source": "seller_asserted",
+                      "ref": "pitch:ext-1#material",
+                      "observed_at": "2026-01-01T00:00:00Z",
+                      "authority_rank": 5
+                    }
+                  }
+                ],
+                "message": "Warmest merino mid-layer on the market.",
+                "agent_version": "ext-0.1.0",
+                "schema_version": "1.0.0",
+                "signer_id": "store-external-1",
+                "key_id": "key-2026-01",
+                "issued_at": "2026-01-01T00:00:00Z",
+                "nonce": "nonce-ext-0001"
+              },
+              "x-example-schema": "SignedBidSubmission"
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "AcceptedForVerification. Admitted is not trusted: the seller_asserted claims are queued for verification (R18).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["accepted", "verification_status"],
+                  "properties": {
+                    "accepted": { "type": "boolean" },
+                    "verification_status": { "type": "string" },
+                    "bid_ref": { "type": ["string", "null"] }
+                  }
+                },
+                "example": {
+                  "accepted": true,
+                  "verification_status": "pending_verification",
+                  "bid_ref": "bid-ext-0001"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Rejected. Each rejection is final — never a downgrade to admitted-unverified.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/BidValidationResult" },
+                "example": {
+                  "ok": false,
+                  "path": "external",
+                  "reasons": ["missing required signing field: nonce"],
+                  "requires_verification": false,
+                  "unverified_claim_indexes": []
+                },
+                "x-example-schema": "BidValidationResult"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/outcomes": {
+      "post": {
+        "operationId": "recordOutcome",
+        "summary": "Trust reports an outcome back to the exchange for the bandit update.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustEventPayload" },
+              "example": {
+                "store_id": "store-1",
+                "event": {
+                  "event_id": "ev-0001",
+                  "ts": "2026-01-01T00:00:00Z",
+                  "kind": "feedback",
+                  "auction_id": "auc-0001",
+                  "store_id": "store-1",
+                  "order_ref": "ord-0001",
+                  "payload": { "matched_pitch": false, "reason": "ships_within missed" }
+                },
+                "dim": "shipped_on_time",
+                "delta": -0.35,
+                "pseudonymous_context": { "cluster_id": "cluster-serum", "pseudonym": "psn-0001" }
+              },
+              "x-example-schema": "TrustEventPayload"
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Recorded." }
+        }
+      }
+    }
+  }
+}

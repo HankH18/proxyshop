@@ -12,6 +12,8 @@
   "include": [
     "src/**/*.ts",
     "tests/**/*.ts",
-    "generated/ts/**/*.ts"
+    "generated/ts/**/*.ts",
+    "schemas/**/*.json",
+    "openapi/**/*.json"
   ]
 }

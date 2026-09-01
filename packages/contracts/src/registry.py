@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -45,15 +45,17 @@ def schema_for(name: str) -> dict[str, Any]:
         raise KeyError(
             f"{name!r} is not a protocol object; the bundle defines {list(sorted(defs))}"
         )
+    # Deliberately no `$id`: every subschema would otherwise be a distinct registration under the
+    # same bundle id, and a second validator compiling the same object would collide with the
+    # first. The `$ref` is local, so the schema resolves with no registry at all.
     return {
         "$schema": bundle["$schema"],
-        "$id": f"{PROTOCOL_SCHEMA_ID}#/$defs/{name}",
         "$ref": f"#/$defs/{name}",
         "$defs": defs,
     }
 
 
-@lru_cache(maxsize=None)
+@cache
 def _validator(name: str) -> Any:
     from jsonschema import Draft202012Validator
 

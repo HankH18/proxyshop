@@ -45,7 +45,10 @@ def canonicalize_value(value: Any) -> Any:
     if isinstance(value, str):
         return value.strip().casefold()
     if isinstance(value, Mapping):
-        return {str(k): canonicalize_value(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+        return {
+            str(k): canonicalize_value(v)
+            for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+        }
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [canonicalize_value(item) for item in value]
     return value
@@ -80,11 +83,14 @@ def claim_id_for(claim: Any, *, pitch_ref: str | None = None) -> str:
     if isinstance(claim, Mapping):
         read = claim.get
     else:
+
         def read(name: str, default: Any = None) -> Any:  # type: ignore[misc]
             return getattr(claim, name, default)
 
     span = read("source_span") or {}
-    span_ref = span.get("pitch_ref") if isinstance(span, Mapping) else getattr(span, "pitch_ref", None)
+    span_ref = (
+        span.get("pitch_ref") if isinstance(span, Mapping) else getattr(span, "pitch_ref", None)
+    )
     return claim_id(
         pitch_ref=pitch_ref if pitch_ref is not None else span_ref,
         key=str(read("key") or ""),
@@ -93,4 +99,10 @@ def claim_id_for(claim: Any, *, pitch_ref: str | None = None) -> str:
     )
 
 
-__all__ = ["CLAIM_ID_ALGORITHM", "CLAIM_ID_PREFIX", "canonicalize_value", "claim_id", "claim_id_for"]
+__all__ = [
+    "CLAIM_ID_ALGORITHM",
+    "CLAIM_ID_PREFIX",
+    "canonicalize_value",
+    "claim_id",
+    "claim_id_for",
+]

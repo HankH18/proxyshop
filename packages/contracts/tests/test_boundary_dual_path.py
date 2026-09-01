@@ -1,0 +1,279 @@
+"""The dual-path bid boundary — every cell of the R8/R18/S5 table, and the fail-closed edges.
+
+Every rejection here has a POSITIVE CONTROL beside it: the identical bid, changed only in the one
+respect under test, must be admitted. A boundary that rejected everything would satisfy every
+rejection assertion in this file and be worthless, so each one is paired.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from packages.contracts import (
+    EXTERNAL_PATH,
+    HOOK_PROVENANCE_SOURCES,
+    HOSTED_PATH,
+    NON_HOOK_PROVENANCE_SOURCES,
+    parse_timestamp,
+    validate_bid,
+)
+from packages.contracts.tests._fixtures_protocol import (
+    ASSERTED_PROVENANCE,
+    HOOK_PROVENANCE,
+    LONG_EXPIRED,
+    NOT_EXPIRED,
+    make_bid,
+    make_claim,
+    make_offer,
+    make_snapshot_table,
+)
+
+NOW = "2026-06-01T00:00:00Z"
+BOTH_PATHS = (HOSTED_PATH, EXTERNAL_PATH)
+
+
+_DEFAULT = object()
+
+
+def check(bid, path, snapshot=_DEFAULT, now=NOW):
+    # A sentinel, not `None`: `None` is itself a case under test (an unavailable snapshot read),
+    # and a `None`-means-default helper would quietly turn that test into the happy path.
+    table = make_snapshot_table() if snapshot is _DEFAULT else snapshot
+    return validate_bid(bid, path=path, trust_snapshot=table, now=now)
+
+
+# --- R8 / R18: the path-sensitive half ----------------------------------------------------
+
+
+def test_hosted_bid_with_a_seller_asserted_claim_is_rejected() -> None:
+    result = check(make_bid(claims=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))]), HOSTED_PATH)
+    assert result.ok is False
+    assert result.reasons, "a rejection must say why"
+    assert any("hosted_non_hook_provenance" in reason for reason in result.reasons)
+
+    control = check(make_bid(claims=[make_claim("spf", 30, dict(HOOK_PROVENANCE))]), HOSTED_PATH)
+    assert control.ok is True, control.reasons
+
+
+def test_external_bid_with_the_same_claim_is_admitted_and_flagged() -> None:
+    result = check(
+        make_bid(claims=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))]), EXTERNAL_PATH
+    )
+    assert result.ok is True, result.reasons
+    assert result.requires_verification is True
+    assert result.unverified_claim_indexes == [0], (
+        "the verification queue must be told WHICH claim to look at, not just that one exists"
+    )
+
+    control = check(make_bid(claims=[make_claim("spf", 30, dict(HOOK_PROVENANCE))]), EXTERNAL_PATH)
+    assert control.ok is True, control.reasons
+    assert control.requires_verification is False, (
+        "the flag must track the claim's provenance, not the path alone"
+    )
+
+
+def test_only_the_flagged_claims_are_reported_for_verification() -> None:
+    bid = make_bid(
+        claims=[
+            make_claim("free_returns", "30 days", dict(HOOK_PROVENANCE)),
+            make_claim("spf", 30, dict(ASSERTED_PROVENANCE)),
+            make_claim("vegan", True, dict(HOOK_PROVENANCE)),
+            make_claim("material", "merino", dict(ASSERTED_PROVENANCE)),
+        ]
+    )
+    result = check(bid, EXTERNAL_PATH)
+    assert result.ok is True, result.reasons
+    assert result.unverified_claim_indexes == [1, 3]
+
+
+@pytest.mark.parametrize("source", sorted(HOOK_PROVENANCE_SOURCES))
+def test_every_hook_provenance_source_is_admitted_on_both_paths(source: str) -> None:
+    """R8 rejects NON-HOOK provenance, not "anything that is not owner_statement"."""
+    bid = make_bid(claims=[make_claim("spf", 30, {**HOOK_PROVENANCE, "source": source})])
+    for path in BOTH_PATHS:
+        result = check(bid, path)
+        assert result.ok is True, (path, source, result.reasons)
+        assert result.requires_verification is False
+
+
+@pytest.mark.parametrize("source", sorted(NON_HOOK_PROVENANCE_SOURCES))
+def test_every_non_hook_source_splits_the_two_paths(source: str) -> None:
+    bid = make_bid(claims=[make_claim("spf", 30, {**ASSERTED_PROVENANCE, "source": source})])
+    assert check(bid, HOSTED_PATH).ok is False
+    external = check(bid, EXTERNAL_PATH)
+    assert external.ok is True and external.requires_verification is True
+
+
+# --- S5: the path-insensitive half --------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_claim_with_no_provenance_key_is_rejected(path: str) -> None:
+    result = check(make_bid(claims=[make_claim("spf", 30, None)]), path)
+    assert result.ok is False
+    assert result.reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_claim_with_an_empty_provenance_source_is_rejected(path: str) -> None:
+    result = check(
+        make_bid(claims=[make_claim("spf", 30, {**HOOK_PROVENANCE, "source": ""})]), path
+    )
+    assert result.ok is False
+    assert result.reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_unknown_provenance_source_is_rejected(path: str) -> None:
+    """A source outside the closed enum is not a new kind of evidence; it is a malformed bid."""
+    bid = make_bid(claims=[make_claim("spf", 30, {**HOOK_PROVENANCE, "source": "vibes"})])
+    assert check(bid, path).ok is False
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_expired_offer_is_rejected(path: str) -> None:
+    expired = make_bid(offer=make_offer(expires_at=LONG_EXPIRED))
+    result = check(expired, path)
+    assert result.ok is False
+    assert any("offer_expired" in reason for reason in result.reasons)
+
+    live = make_bid(offer=make_offer(expires_at=NOT_EXPIRED))
+    assert check(live, path).ok is True
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_offer_expiring_exactly_now_is_rejected(path: str) -> None:
+    """The boundary is closed at `now`: an offer whose last valid instant has arrived is over."""
+    assert check(make_bid(offer=make_offer(expires_at=NOW)), path).ok is False
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_offer_with_no_expiry_fails_closed(path: str) -> None:
+    """An offer with no stated expiry is one nobody can price the risk of — deny, do not assume."""
+    result = check(make_bid(offer=make_offer(expires_at=None)), path)
+    assert result.ok is False
+    assert any("offer_expiry_missing" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_blacklisted_store_is_rejected(path: str) -> None:
+    result = check(make_bid(store_id="store-bad"), path)
+    assert result.ok is False
+    assert any("store_blacklisted" in reason for reason in result.reasons)
+    assert check(make_bid(store_id="store-1"), path).ok is True
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_store_absent_from_the_snapshot_fails_closed(path: str) -> None:
+    """R12: an UNAVAILABLE eligibility read denies exactly like a positive blacklist hit."""
+    result = check(make_bid(store_id="store-unknown"), path)
+    assert result.ok is False
+    assert any("trust_snapshot_unavailable" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_unusable_trust_snapshot_fails_closed(path: str) -> None:
+    for snapshot in ({}, None, "not-a-snapshot"):
+        assert check(make_bid(), path, snapshot=snapshot).ok is False
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_schema_invalid_bid_is_rejected(path: str) -> None:
+    bid = make_bid()
+    del bid["agent_version"]
+    result = check(bid, path)
+    assert result.ok is False
+    assert any("schema_invalid" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_bid_with_a_smuggled_field_is_rejected(path: str) -> None:
+    assert check({**make_bid(), "network_fee": 0.0}, path).ok is False
+
+
+# --- the boundary's own contract ----------------------------------------------------------
+
+
+def test_an_unknown_path_is_refused_rather_than_guessed_at() -> None:
+    for path in ("HOSTED", "internal", "", "hosted "):
+        result = validate_bid(make_bid(), path=path, trust_snapshot=make_snapshot_table(), now=NOW)
+        assert result.ok is False
+        assert any("unknown_path" in reason for reason in result.reasons)
+
+
+def test_the_boundary_never_raises_on_malformed_input() -> None:
+    """A boundary that threw would make "reject" and "crash" indistinguishable to the caller."""
+    for bid in (None, "not-a-bid", 42, [], {"claims": "not-a-list"}):
+        result = validate_bid(bid, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW)
+        assert result.ok is False
+        assert result.reasons
+
+
+def test_a_rejected_bid_is_never_flagged_for_verification() -> None:
+    """Rejected is not "admitted pending verification": there is nothing left to verify."""
+    rejected = check(
+        make_bid(
+            claims=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))],
+            store_id="store-bad",
+        ),
+        EXTERNAL_PATH,
+    )
+    assert rejected.ok is False
+    assert rejected.requires_verification is False
+    assert rejected.unverified_claim_indexes == []
+
+
+def test_an_admitted_bid_carries_no_reasons() -> None:
+    result = check(make_bid(), HOSTED_PATH)
+    assert result.ok is True
+    assert list(result.reasons) == []
+
+
+def test_the_result_is_serializable_for_the_rejection_the_seller_sees() -> None:
+    dumped = check(make_bid(store_id="store-bad"), EXTERNAL_PATH).model_dump()
+    assert dumped["ok"] is False
+    assert dumped["path"] == EXTERNAL_PATH
+    assert isinstance(dumped["reasons"], list) and dumped["reasons"]
+
+
+def test_validate_bid_accepts_a_model_as_well_as_a_mapping() -> None:
+    from packages.contracts import Bid
+
+    model = Bid.model_validate(make_bid())
+    assert (
+        validate_bid(model, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW).ok
+        is True
+    )
+
+
+# --- timestamp handling -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00+00:00",
+        "2026-01-01T00:00:00",
+        1767225600.0,
+    ],
+)
+def test_parse_timestamp_reads_every_spelling_the_system_produces(value) -> None:
+    assert parse_timestamp(value) is not None
+
+
+def test_parse_timestamp_treats_a_naive_instant_as_utc() -> None:
+    """Otherwise expiry would depend on the host's timezone, which is not a property a contract has."""
+    assert parse_timestamp("2026-01-01T00:00:00") == parse_timestamp("2026-01-01T00:00:00Z")
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "not-a-date", True, {}])
+def test_parse_timestamp_refuses_what_it_cannot_read(value) -> None:
+    assert parse_timestamp(value) is None
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_unparseable_expiry_fails_closed(path: str) -> None:
+    result = check(make_bid(offer=make_offer(expires_at="soon")), path)
+    assert result.ok is False
+    assert any("offer_expiry" in reason for reason in result.reasons)

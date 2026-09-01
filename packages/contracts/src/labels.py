@@ -110,9 +110,7 @@ def canonical_authority_rank(provenance: Any) -> int:
     try:
         return PROVENANCE_AUTHORITY_RANK[source]
     except KeyError:
-        raise KeyError(
-            f"no authority rank is published for provenance source {source!r}"
-        ) from None
+        raise KeyError(f"no authority rank is published for provenance source {source!r}") from None
 
 
 __all__ = [

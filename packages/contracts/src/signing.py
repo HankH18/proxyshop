@@ -61,16 +61,37 @@ _NON_BODY_KEYS: frozenset[str] = frozenset(
 PAYLOAD_HASH_ALGORITHM = "sha256"
 
 
+def _jcs_numbers(value: Any) -> Any:
+    """Normalize integral floats to ints, recursively.
+
+    RFC 8785 §3.2.2.3 defines canonical number serialization as ECMAScript's, where `89.0` and
+    `89` are the same number and print the same. Python's `json.dumps` disagrees — it writes
+    `89.0` — so without this pass a bid signed by a Node seller could not be verified by the
+    Python exchange, and the two `canonical_signing_bytes` implementations would silently be two
+    protocols. `bool` is excluded explicitly: it is an `int` subclass and must stay `true`/`false`.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    if isinstance(value, Mapping):
+        return {key: _jcs_numbers(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jcs_numbers(item) for item in value]
+    return value
+
+
 def canonical_json(value: Any) -> str:
     """RFC-8785-style canonical JSON: sorted keys, no insignificant whitespace, UTF-8 text.
 
     Deterministic for a given *content*, which is the only property the signature needs:
-    reordering a mapping or round-tripping the payload through JSON must not change the bytes.
-    Scoped to signing — the ledger's hash chain has its own canonicalizer in
-    `apps/trust/src/ledger` (D16) and neither borrows the other's.
+    reordering a mapping, round-tripping the payload through JSON, or writing `89` where the
+    other side wrote `89.0` must not change the bytes. Scoped to signing — the ledger's hash
+    chain has its own canonicalizer in `apps/trust/src/ledger` (D16) and neither borrows the
+    other's.
     """
     return json.dumps(
-        value,
+        _jcs_numbers(value),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -111,9 +132,7 @@ def canonical_signing_bytes(payload: Mapping[str, Any]) -> bytes:
     submission that cannot legally exist is better than producing bytes nobody can verify.
     """
     if not isinstance(payload, Mapping):
-        raise TypeError(
-            f"canonical_signing_bytes expects a mapping, got {type(payload).__name__}"
-        )
+        raise TypeError(f"canonical_signing_bytes expects a mapping, got {type(payload).__name__}")
 
     missing = missing_signing_fields(payload)
     if missing:

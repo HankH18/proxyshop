@@ -1,0 +1,199 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ProxyShop trust service",
+    "version": "1.0.0",
+    "description": "The append-only ledger and the served trust snapshots. Six dimensions inside ONE trust system (D53); `computed_through_event` is the last LedgerEvent folded in, which is what makes the S3 replay assertion checkable against a SERVED snapshot rather than against the engine's own opinion."
+  },
+  "x-domain": "trust",
+  "paths": {
+    "/events": {
+      "post": {
+        "operationId": "appendLedgerEvent",
+        "summary": "Append one LedgerEvent to the hash-chained ledger.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/LedgerEvent" },
+              "example": {
+                "event_id": "ev-0003",
+                "ts": "2026-01-01T00:20:00Z",
+                "kind": "claim_verified",
+                "store_id": "store-1",
+                "order_ref": null,
+                "payload": {
+                  "claim_ref": "claim-0001",
+                  "status": "contradicted",
+                  "dim": "catalog_claim_accuracy"
+                }
+              },
+              "x-example-schema": "LedgerEvent"
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Appended, with its position in the chain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["event_id", "prev_hash", "event_hash"],
+                  "properties": {
+                    "event_id": { "type": "string" },
+                    "prev_hash": { "type": ["string", "null"] },
+                    "event_hash": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "event_id": "ev-0003",
+                  "prev_hash": "sha256:0f1e2d3c",
+                  "event_hash": "sha256:4b5a6978"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stores/{store_id}/trust": {
+      "get": {
+        "operationId": "getStoreTrust",
+        "summary": "The served TrustSnapshot for one store.",
+        "parameters": [
+          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snapshot, with all six dimensions (D53).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustSnapshot" },
+                "example": {
+                  "store_id": "store-1",
+                  "score": 0.62,
+                  "confidence": 0.4,
+                  "effective_sample_size": 12.5,
+                  "score_version": "1.0.0",
+                  "snapshot_version": "1.0.0",
+                  "computed_through_event": "ev-0003",
+                  "low_data": false,
+                  "dims": {
+                    "price_honored": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                    "discount_honored": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                    "shipped_on_time": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                    "not_returned": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                    "feedback_match": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                    "catalog_claim_accuracy": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" }
+                  },
+                  "blacklisted": false
+                },
+                "x-example-schema": "TrustSnapshot"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/snapshot": {
+      "get": {
+        "operationId": "getAllTrustSnapshots",
+        "summary": "Every store's snapshot, for exchange consumption.",
+        "description": "This is exactly the mapping `validate_bid(..., trust_snapshot=...)` reads. A store with no row here is treated as an UNAVAILABLE eligibility read and denied (R12, fail-closed) — never admitted on the grounds that no blacklist entry was found.",
+        "responses": {
+          "200": {
+            "description": "store_id -> TrustSnapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustSnapshot" }
+                },
+                "example": {
+                  "store-1": {
+                    "store_id": "store-1",
+                    "score": 0.62,
+                    "dims": {
+                      "price_honored": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "discount_honored": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "shipped_on_time": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "not_returned": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "feedback_match": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "catalog_claim_accuracy": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" }
+                    },
+                    "blacklisted": false
+                  },
+                  "store-bad": {
+                    "store_id": "store-bad",
+                    "score": 0.05,
+                    "dims": {
+                      "price_honored": { "alpha": 1.0, "beta": 6.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "discount_honored": { "alpha": 1.0, "beta": 4.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "shipped_on_time": { "alpha": 1.0, "beta": 5.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "not_returned": { "alpha": 1.0, "beta": 3.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "feedback_match": { "alpha": 1.0, "beta": 5.0, "decayed_at": "2026-01-01T00:00:00Z" },
+                      "catalog_claim_accuracy": { "alpha": 1.0, "beta": 8.0, "decayed_at": "2026-01-01T00:00:00Z" }
+                    },
+                    "blacklisted": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/feedback/{order_ref}": {
+      "post": {
+        "operationId": "submitFeedback",
+        "summary": "Post-purchase buyer feedback (R14), pseudonymous.",
+        "parameters": [
+          { "name": "order_ref", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["matched_pitch"],
+                "properties": {
+                  "matched_pitch": { "type": "boolean" },
+                  "reason": { "type": ["string", "null"] },
+                  "pseudonymous_context": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/PseudonymousContext" }
+                }
+              },
+              "example": {
+                "matched_pitch": false,
+                "reason": "ships_within missed",
+                "pseudonymous_context": { "cluster_id": "cluster-serum", "pseudonym": "psn-0001" }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; folded into feedback_match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["event_id", "dim"],
+                  "properties": {
+                    "event_id": { "type": "string" },
+                    "dim": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustDimension" }
+                  }
+                },
+                "example": { "event_id": "ev-0004", "dim": "feedback_match" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

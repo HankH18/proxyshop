@@ -7,5 +7,5 @@ directory, which is what makes `contracts.generated.protocol` importable under t
 layout (D42) while the artifact itself stays in the `generated/python` path the ticket scope
 names.
 
-Do not hand-edit anything here: `tests/test_codegen_drift.py` regenerates and diffs.
+Do not hand-edit anything here: `tests/test_schema_bundle.py` regenerates and diffs.
 """

@@ -14,7 +14,7 @@ Run it with::
     ./.venv/bin/python -m contracts.codegen            # rewrite both artifacts in place
     ./.venv/bin/python -m contracts.codegen --check    # exit 1 if either is stale
 
-Both artifacts are COMMITTED, and `tests/test_codegen_drift.py` runs the `--check` path, so a
+Both artifacts are COMMITTED, and `tests/test_schema_bundle.py` runs the `--check` path, so a
 schema edit that is not followed by a regeneration fails the build rather than leaving the
 generated types quietly describing a protocol that no longer exists. Nothing hand-edits either
 generated file.
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import os
 import subprocess
 import sys
 import tempfile
@@ -57,7 +58,7 @@ _PYTHON_HEADER = """\
 # Source:    packages/contracts/schemas/protocol.schema.json
 # Generator: python -m contracts.codegen   (datamodel-code-generator, pydantic v2)
 #
-# `tests/test_codegen_drift.py` re-runs the generator and fails if this file no longer matches
+# `tests/test_schema_bundle.py` re-runs the generator and fails if this file no longer matches
 # the schema, so editing it by hand is a defect the suite catches rather than a shortcut.
 # ruff: noqa
 """
@@ -79,6 +80,11 @@ def _datamodel_codegen_argv(output: Path) -> list[str]:
         "--target-python-version",
         "3.12",
         "--use-subclass-enum",
+        # `Field(min_length=1)` rather than `constr(min_length=1)`. A `con*` call inside an
+        # annotation is not a valid type to mypy — it fails with "Cannot use a function call in a
+        # type annotation" on every constrained field, so the generated module would be
+        # untypecheckable and `make types` would be red on code nobody wrote by hand.
+        "--field-constraints",
         "--type-mappings",
         "string+date-time=string",
         "--use-schema-description",
@@ -87,9 +93,12 @@ def _datamodel_codegen_argv(output: Path) -> list[str]:
         "--disable-timestamp",
         "--custom-file-header",
         _PYTHON_HEADER,
+        # Ruff, not black+isort: `make lint` runs `ruff format --check .` over the whole repo,
+        # including this generated file. Formatting it with a different formatter would leave the
+        # repo one `ruff format` away from a codegen-drift failure that nobody caused.
         "--formatters",
-        "black",
-        "isort",
+        "ruff-check",
+        "ruff-format",
     ]
 
 
@@ -113,8 +122,14 @@ def _json2ts_argv(output: Path) -> list[str]:
 
 
 def _run(argv: Sequence[str], *, cwd: Path) -> None:
+    # The generators shell out to `ruff` and `npx`. Putting the running interpreter's own bin
+    # directory first means the venv's ruff is found even when the caller's PATH has no venv on
+    # it — otherwise the drift test would ERROR rather than pass or fail, depending only on how
+    # pytest happened to be invoked.
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).resolve().parent), env.get("PATH", "")])
     result = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        list(argv), cwd=str(cwd), capture_output=True, text=True
+        list(argv), cwd=str(cwd), capture_output=True, text=True, env=env
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -146,8 +161,12 @@ def _diff(label: str, committed: Path, fresh: Path) -> list[str]:
     new = fresh.read_text(encoding="utf-8").splitlines(keepends=True)
     if old == new:
         return []
-    delta = list(difflib.unified_diff(old, new, fromfile=f"committed {label}", tofile=f"regenerated {label}"))
-    return [f"{label} is stale — run `python -m contracts.codegen`:"] + [line.rstrip("\n") for line in delta[:60]]
+    delta = list(
+        difflib.unified_diff(old, new, fromfile=f"committed {label}", tofile=f"regenerated {label}")
+    )
+    return [f"{label} is stale — run `python -m contracts.codegen`:"] + [
+        line.rstrip("\n") for line in delta[:60]
+    ]
 
 
 def check(*, python: bool = True, typescript: bool = True) -> list[str]:

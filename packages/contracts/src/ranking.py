@@ -102,6 +102,17 @@ class RankingWeights(_RankingWeightsSchema):
             )
         return self
 
+    @model_validator(mode="after")
+    def _penalties_are_non_negative(self) -> RankingWeights:
+        """A negative penalty is a bonus wearing a penalty's name, and would let a store improve
+        its rank by accumulating policy events."""
+        negative = {
+            kind: value for kind, value in self.penalties.per_kind.items() if float(value) < 0
+        }
+        if negative:
+            raise ValueError(f"policy-event penalties must be non-negative; got {negative}")
+        return self
+
     @property
     def weights(self) -> dict[str, float]:
         """`{symbol: weight}` for the five published weights."""
@@ -110,7 +121,9 @@ class RankingWeights(_RankingWeightsSchema):
     @property
     def feature_weights(self) -> dict[str, float]:
         """`{feature_name: weight}` — the formula written out against the candidate record."""
-        return dict(zip(RANK_FEATURES, (float(getattr(self, f)) for f in WEIGHT_FIELDS), strict=True))
+        return dict(
+            zip(RANK_FEATURES, (float(getattr(self, f)) for f in WEIGHT_FIELDS), strict=True)
+        )
 
     def penalty_for(self, policy_event_kind: str) -> float:
         """The published penalty for one policy-event kind. 0.0 for a kind with no entry."""

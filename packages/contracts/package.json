@@ -4,7 +4,7 @@
   "type": "module",
   "version": "0.0.0",
   "scripts": {
-    "codegen": "json2ts -i schemas -o generated/ts"
+    "codegen": "json2ts -i schemas/protocol.schema.json -o generated/ts/protocol.schema.d.ts --unreachableDefinitions --additionalProperties false --no-style.singleQuote"
   },
   "dependencies": {
     "ajv": "8.20.0",

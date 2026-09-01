@@ -464,6 +464,7 @@
 
     "ClusterLoss": {
       "title": "ClusterLoss",
+      "description": "One cluster's losses inside a LossReport: how many bids were lost, why, and which buyer criteria this store failed to meet. Counts and criteria only — naming the rival that won would turn a seller feedback loop into a price-intelligence feed.",
       "type": "object",
       "additionalProperties": false,
       "required": ["cluster_id", "lost", "reasons", "unmet_criteria"],
@@ -590,6 +591,7 @@
 
     "EnvelopeFloor": {
       "title": "EnvelopeFloor",
+      "description": "A price the store-agent may never bid below. `product_ref` is optional: an entry without one is the store-wide floor, which is what makes a single rule expressible without enumerating the catalogue.",
       "type": "object",
       "additionalProperties": false,
       "required": ["min_price"],
@@ -654,7 +656,8 @@
       "properties": {
         "per_kind": {
           "type": "object",
-          "additionalProperties": { "type": "number", "minimum": 0 },
+          "description": "policy-event kind -> penalty. Values are non-negative; the bound is enforced by RankingWeights in both languages rather than by `minimum` here, because a per-value constraint makes the generated Python a wrapper model instead of a plain float map.",
+          "additionalProperties": { "type": "number" },
           "default": { "severe_policy_violation": 0.3 }
         },
         "max_total_penalty": { "type": "number", "minimum": 0, "default": 1.0 }

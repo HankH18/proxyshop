@@ -3,7 +3,7 @@
 # Source:    packages/contracts/schemas/protocol.schema.json
 # Generator: python -m contracts.codegen   (datamodel-code-generator, pydantic v2)
 #
-# `tests/test_codegen_drift.py` re-runs the generator and fails if this file no longer matches
+# `tests/test_schema_bundle.py` re-runs the generator and fails if this file no longer matches
 # the schema, so editing it by hand is a defect the suite catches rather than a shortcut.
 # ruff: noqa
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import IntEnum, StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, confloat, conint, constr
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 
 class ProxyShopProtocol(RootModel[Any]):
@@ -210,12 +210,12 @@ class Provenance(BaseModel):
         extra="forbid",
     )
     source: ProvenanceSource
-    ref: constr(min_length=1)
+    ref: str = Field(..., min_length=1)
     """
     A pointer to the evidence: a snapshot URI, an envelope commitment path, a pitch span.
     """
-    observed_at: constr(min_length=1)
-    authority_rank: conint(ge=1)
+    observed_at: str = Field(..., min_length=1)
+    authority_rank: int = Field(..., ge=1)
     """
     1 = most authoritative; larger is weaker. See contracts.PROVENANCE_AUTHORITY_RANK.
     """
@@ -230,8 +230,8 @@ class ClaimSourceSpan(BaseModel):
         extra="forbid",
     )
     pitch_ref: str
-    start: conint(ge=0)
-    end: conint(ge=0)
+    start: int = Field(..., ge=0)
+    end: int = Field(..., ge=0)
 
 
 class Claim(BaseModel):
@@ -248,7 +248,7 @@ class Claim(BaseModel):
         extra="forbid",
     )
     claim_id: str | None = None
-    key: constr(min_length=1)
+    key: str = Field(..., min_length=1)
     claim_type: ClaimType | None = None
     value: Any
     unit: str | None = None
@@ -264,7 +264,7 @@ class Discount(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    type: constr(min_length=1)
+    type: str = Field(..., min_length=1)
     value: float
     provenance: Provenance | None = None
 
@@ -284,7 +284,7 @@ class Offer(BaseModel):
         extra="forbid",
     )
     bid_offer_id: str | None = None
-    product_ref: constr(min_length=1)
+    product_ref: str = Field(..., min_length=1)
     variant_ref: str | None = None
     """
     Cart permalinks are variant-scoped (D25). Optional on the protocol object because the frozen hosted-bid shape predates it; required by the checkout path before a permalink can be minted.
@@ -312,8 +312,8 @@ class Bid(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    auction_id: constr(min_length=1)
-    store_id: constr(min_length=1)
+    auction_id: str = Field(..., min_length=1)
+    store_id: str = Field(..., min_length=1)
     pitch_ref: str | None = None
     offer: Offer
     claims: list[Claim]
@@ -321,9 +321,9 @@ class Bid(BaseModel):
     """
     Free text. External (Tier-2) agents may send it; it is never a source of claims.
     """
-    agent_version: constr(min_length=1)
+    agent_version: str = Field(..., min_length=1)
     signature: str | None = None
-    schema_version: constr(min_length=1)
+    schema_version: str = Field(..., min_length=1)
 
 
 class SigningEnvelope(BaseModel):
@@ -342,11 +342,11 @@ class SigningEnvelope(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    signer_id: constr(min_length=1)
-    key_id: constr(min_length=1)
-    issued_at: constr(min_length=1)
-    nonce: constr(min_length=1)
-    schema_version: constr(min_length=1)
+    signer_id: str = Field(..., min_length=1)
+    key_id: str = Field(..., min_length=1)
+    issued_at: str = Field(..., min_length=1)
+    nonce: str = Field(..., min_length=1)
+    schema_version: str = Field(..., min_length=1)
 
 
 class SignedBidSubmission(BaseModel):
@@ -363,19 +363,19 @@ class SignedBidSubmission(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    auction_id: constr(min_length=1)
-    store_id: constr(min_length=1)
+    auction_id: str = Field(..., min_length=1)
+    store_id: str = Field(..., min_length=1)
     pitch_ref: str | None = None
     offer: Offer
     claims: list[Claim]
     message: str | None = None
-    agent_version: constr(min_length=1)
+    agent_version: str = Field(..., min_length=1)
     signature: str | None = None
-    schema_version: constr(min_length=1)
-    signer_id: constr(min_length=1)
-    key_id: constr(min_length=1)
-    issued_at: constr(min_length=1)
-    nonce: constr(min_length=1)
+    schema_version: str = Field(..., min_length=1)
+    signer_id: str = Field(..., min_length=1)
+    key_id: str = Field(..., min_length=1)
+    issued_at: str = Field(..., min_length=1)
+    nonce: str = Field(..., min_length=1)
 
 
 class HardConstraint(BaseModel):
@@ -388,7 +388,7 @@ class HardConstraint(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    field: constr(min_length=1)
+    field: str = Field(..., min_length=1)
     op: ConstraintOp
     value: Any
     unit: str | None = None
@@ -402,7 +402,7 @@ class Preference(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    field: constr(min_length=1)
+    field: str = Field(..., min_length=1)
     direction: PreferenceDirection
     weight: float
 
@@ -415,7 +415,7 @@ class Intent(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    intent_id: constr(min_length=1)
+    intent_id: str = Field(..., min_length=1)
     cluster_id: str | None = None
     query: str
     category: str | None = None
@@ -424,8 +424,8 @@ class Intent(BaseModel):
     ship_to: str | None = None
     currency: str | None = None
     budget_band: str | None = None
-    created_at: constr(min_length=1)
-    schema_version: constr(min_length=1)
+    created_at: str = Field(..., min_length=1)
+    schema_version: str = Field(..., min_length=1)
 
 
 class ProfileBuckets(BaseModel):
@@ -451,7 +451,7 @@ class BuyerProfile(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    pseudonym: constr(min_length=1)
+    pseudonym: str = Field(..., min_length=1)
     buckets: ProfileBuckets
 
 
@@ -463,10 +463,10 @@ class BidRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    auction_id: constr(min_length=1)
+    auction_id: str = Field(..., min_length=1)
     intent: Intent
     profile: BuyerProfile
-    respond_by: constr(min_length=1)
+    respond_by: str = Field(..., min_length=1)
 
 
 class ClaimVerification(BaseModel):
@@ -477,11 +477,11 @@ class ClaimVerification(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    claim_ref: constr(min_length=1)
+    claim_ref: str = Field(..., min_length=1)
     status: ClaimVerificationStatus
     observed_value: Any | None = None
     evidence_refs: list[str]
-    confidence: confloat(ge=0.0, le=1.0)
+    confidence: float = Field(..., ge=0.0, le=1.0)
 
 
 class VerificationResult(BaseModel):
@@ -492,11 +492,11 @@ class VerificationResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    pitch_ref: constr(min_length=1)
-    catalog_snapshot: constr(min_length=1)
+    pitch_ref: str = Field(..., min_length=1)
+    catalog_snapshot: str = Field(..., min_length=1)
     claims: list[ClaimVerification]
-    verified_claim_ratio: confloat(ge=0.0, le=1.0)
-    verifier_version: constr(min_length=1)
+    verified_claim_ratio: float = Field(..., ge=0.0, le=1.0)
+    verifier_version: str = Field(..., min_length=1)
 
 
 class ShortlistSlot(BaseModel):
@@ -509,7 +509,7 @@ class ShortlistSlot(BaseModel):
         extra="forbid",
     )
     slot: ShortlistSlotName
-    bid_ref: constr(min_length=1)
+    bid_ref: str = Field(..., min_length=1)
     fit_score: float
     trust_summary: dict[str, Any]
     provenance_labels: list[str]
@@ -523,7 +523,7 @@ class Shortlist(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    auction_id: constr(min_length=1)
+    auction_id: str = Field(..., min_length=1)
     slots: list[ShortlistSlot]
 
 
@@ -547,18 +547,22 @@ class LossReasons(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    fit: conint(ge=0) | None = 0
-    price: conint(ge=0) | None = 0
-    commitments: conint(ge=0) | None = 0
-    trust: conint(ge=0) | None = 0
+    fit: int | None = Field(0, ge=0)
+    price: int | None = Field(0, ge=0)
+    commitments: int | None = Field(0, ge=0)
+    trust: int | None = Field(0, ge=0)
 
 
 class ClusterLoss(BaseModel):
+    """
+    One cluster's losses inside a LossReport: how many bids were lost, why, and which buyer criteria this store failed to meet. Counts and criteria only — naming the rival that won would turn a seller feedback loop into a price-intelligence feed.
+    """
+
     model_config = ConfigDict(
         extra="forbid",
     )
-    cluster_id: constr(min_length=1)
-    lost: conint(ge=0)
+    cluster_id: str = Field(..., min_length=1)
+    lost: int = Field(..., ge=0)
     reasons: LossReasons
     unmet_criteria: list[str]
 
@@ -571,7 +575,7 @@ class LossReport(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    store_id: constr(min_length=1)
+    store_id: str = Field(..., min_length=1)
     window: LossWindow
     by_cluster: list[ClusterLoss]
 
@@ -591,8 +595,8 @@ class LedgerEvent(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    event_id: constr(min_length=1)
-    ts: constr(min_length=1)
+    event_id: str = Field(..., min_length=1)
+    ts: str = Field(..., min_length=1)
     kind: LedgerEventKind
     auction_id: str | None = None
     store_id: str | None = None
@@ -609,9 +613,9 @@ class TrustDimensionState(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    alpha: confloat(ge=0.0)
-    beta: confloat(ge=0.0)
-    decayed_at: constr(min_length=1)
+    alpha: float = Field(..., ge=0.0)
+    beta: float = Field(..., ge=0.0)
+    decayed_at: str = Field(..., min_length=1)
 
 
 class TrustDims(BaseModel):
@@ -645,7 +649,7 @@ class TrustSnapshot(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    store_id: constr(min_length=1)
+    store_id: str = Field(..., min_length=1)
     score: float
     confidence: float | None = None
     effective_sample_size: float | None = None
@@ -677,7 +681,7 @@ class TrustEventPayload(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    store_id: constr(min_length=1)
+    store_id: str = Field(..., min_length=1)
     event: LedgerEvent
     dim: TrustDimension
     delta: float
@@ -685,11 +689,15 @@ class TrustEventPayload(BaseModel):
 
 
 class EnvelopeFloor(BaseModel):
+    """
+    A price the store-agent may never bid below. `product_ref` is optional: an entry without one is the store-wide floor, which is what makes a single rule expressible without enumerating the catalogue.
+    """
+
     model_config = ConfigDict(
         extra="forbid",
     )
     product_ref: str | None = None
-    min_price: confloat(ge=0.0)
+    min_price: float = Field(..., ge=0.0)
 
 
 class Envelope(BaseModel):
@@ -703,11 +711,11 @@ class Envelope(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    store_id: constr(min_length=1)
-    version: conint(ge=0)
+    store_id: str = Field(..., min_length=1)
+    version: int = Field(..., ge=0)
     floors: list[EnvelopeFloor]
-    max_discount_pct: confloat(ge=0.0, le=100.0)
-    budget_cap: confloat(ge=0.0)
+    max_discount_pct: float = Field(..., ge=0.0, le=100.0)
+    budget_cap: float = Field(..., ge=0.0)
     pursue_clusters: list[str]
     standing_commitments: list[Claim]
     activation: EnvelopeActivation
@@ -721,7 +729,7 @@ class Store(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    store_id: constr(min_length=1)
+    store_id: str = Field(..., min_length=1)
     domain: str | None = None
     business_identity: str | None = None
     tier: StoreTier
@@ -740,8 +748,8 @@ class NormalizationBounds(BaseModel):
     )
     feature_min: float
     feature_max: float
-    delivery_fit_when_absent: confloat(ge=0.0, le=1.0)
-    verified_claim_ratio_when_absent: confloat(ge=0.0, le=1.0)
+    delivery_fit_when_absent: float = Field(..., ge=0.0, le=1.0)
+    verified_claim_ratio_when_absent: float = Field(..., ge=0.0, le=1.0)
 
 
 class PenaltyCatalogue(BaseModel):
@@ -755,8 +763,11 @@ class PenaltyCatalogue(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    per_kind: dict[str, confloat(ge=0.0)]
-    max_total_penalty: confloat(ge=0.0)
+    per_kind: dict[str, float]
+    """
+    policy-event kind -> penalty. Values are non-negative; the bound is enforced by RankingWeights in both languages rather than by `minimum` here, because a per-value constraint makes the generated Python a wrapper model instead of a plain float map.
+    """
+    max_total_penalty: float = Field(..., ge=0.0)
 
 
 class RankingWeights(BaseModel):
@@ -778,24 +789,24 @@ class RankingWeights(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    version: constr(min_length=1)
-    w_m: confloat(ge=0.0, le=1.0)
+    version: str = Field(..., min_length=1)
+    w_m: float = Field(..., ge=0.0, le=1.0)
     """
     intent_match
     """
-    w_e: confloat(ge=0.0, le=1.0)
+    w_e: float = Field(..., ge=0.0, le=1.0)
     """
     verified_claim_ratio
     """
-    w_t: confloat(ge=0.0, le=1.0)
+    w_t: float = Field(..., ge=0.0, le=1.0)
     """
     trust
     """
-    w_v: confloat(ge=0.0, le=1.0)
+    w_v: float = Field(..., ge=0.0, le=1.0)
     """
     price_value
     """
-    w_d: confloat(ge=0.0, le=1.0)
+    w_d: float = Field(..., ge=0.0, le=1.0)
     """
     delivery_fit
     """
