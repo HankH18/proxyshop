@@ -111,6 +111,16 @@ class StubConfig:
         pixel_seed: seed for the drop-rate RNG. Set it and the drop pattern is exactly
             reproducible, which is what lets a test assert an exact count instead of a
             statistical band.
+        has_active_automatic_discount: whether the shop has an order-level **automatic**
+            discount running. This is the condition that makes a code *conflicting* rather
+            than merely invalid: a code whose ``combinesWith.orderDiscounts`` is ``false``
+            cannot be applied on top of one, and Shopify drops it rather than erroring.
+
+            The stub models this discount's **combinability effect only**, not its money.
+            Nothing in this system reads an automatic discount's value — the offer's price
+            is what it compares against — and modelling the allocation would mean inventing
+            a second ``discount_applications`` entry whose shape no consumer needs. That
+            narrowing is deliberate and is stated here rather than left to be discovered.
     """
 
     shop_domain: str = DEFAULT_SHOP_DOMAIN
@@ -120,6 +130,7 @@ class StubConfig:
     pixel_drop_rate: float = 0.0
     pixel_mode: PixelMode = PixelMode.ON
     pixel_seed: int | None = None
+    has_active_automatic_discount: bool = False
 
     def validate(self) -> None:
         """Raise :class:`ValueError` on a nonsensical configuration."""

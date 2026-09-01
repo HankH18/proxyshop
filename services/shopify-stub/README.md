@@ -92,6 +92,24 @@ for it rather than count a conversion.
 Set `pixel_seed` and the drop pattern is exactly reproducible, so a test can assert an exact
 emitted count instead of a statistical band.
 
+## Invalid vs conflicting codes
+
+Acceptance criterion 2 covers two different silent no-ops, and the stub keeps them apart.
+
+*Invalid* is a property of the **code**: unknown, expired, not yet active, or out of uses.
+*Conflicting* is a property of the **cart**: a code whose `combinesWith.orderDiscounts` is
+false, meeting a shop that already has an order-level automatic discount running. Set
+`has_active_automatic_discount: true` on `/_stub/config` to create that condition.
+
+Neither produces an error. Both produce a cart identical to one where no code was supplied,
+and the reason is visible only through `GET /_stub/checkouts/{token}`
+(`unknown_code`, `expired`, `not_yet_active`, `usage_limit_reached`,
+`conflicts_with_existing_discount`).
+
+The stub models an automatic discount's **combinability effect only, not its money**.
+Nothing in this system reads an automatic discount's value, and modelling the allocation
+would mean inventing a second `discount_applications` entry whose shape no consumer needs.
+
 ## Join keys
 
 The ledger pins the pixel↔webhook join keys as

@@ -204,3 +204,77 @@ async def test_completing_a_checkout_twice_is_refused(stub: StubClient) -> None:
 
 async def test_completing_an_unknown_checkout_is_a_404(stub: StubClient) -> None:
     assert (await stub.complete("deadbeef")).status_code == 404
+
+
+async def test_a_conflicting_code_is_silently_ignored(stub: StubClient) -> None:
+    """The "conflicting" half of acceptance 2, over HTTP rather than in a unit.
+
+    A shop with an order-level automatic discount running cannot also apply a code whose
+    ``combinesWith.orderDiscounts`` is false. Shopify drops the code; it does not error.
+    This is the case T-052 has to detect *before* redirecting a buyer, so the stub has to
+    make it reachable rather than only representable.
+    """
+    await stub.create_code(
+        "PSX-NOCOMBIN",
+        ends_at=_future(24),
+        combines_with={
+            "orderDiscounts": False,
+            "productDiscounts": False,
+            "shippingDiscounts": False,
+        },
+    )
+    reference = await _cart(stub, None)
+
+    await stub.configure(has_active_automatic_discount=True)
+    cart = await _cart(stub, "PSX-NOCOMBIN")
+    assert cart["discount_code"] is None
+    assert cart["total_price"] == reference["total_price"]
+    assert set(cart) == set(reference), "a conflict must not add an error member either"
+
+    detail = (await stub.checkout(cart["token"])).json()
+    assert detail["rejection_reason"] == "conflicts_with_existing_discount"
+
+
+async def test_a_combining_code_still_applies_against_an_automatic_discount(
+    stub: StubClient,
+) -> None:
+    """The negative control for the conflict test.
+
+    Without it, an implementation that dropped *every* code whenever an automatic discount
+    was running would pass the test above. The combinability flag has to be what decides.
+    """
+    await stub.create_code(
+        "PSX-COMBINES",
+        ends_at=_future(24),
+        combines_with={
+            "orderDiscounts": True,
+            "productDiscounts": True,
+            "shippingDiscounts": True,
+        },
+    )
+    await stub.configure(has_active_automatic_discount=True)
+    cart = await _cart(stub, "PSX-COMBINES")
+    assert cart["discount_code"] == "PSX-COMBINES"
+    assert cart["total_price"] == "90.00"
+
+
+async def test_a_non_combining_code_applies_when_no_automatic_discount_runs(
+    stub: StubClient,
+) -> None:
+    """The other negative control: the conflict must depend on the SHOP's state.
+
+    A non-combining code is perfectly valid on a shop with no automatic discount, and an
+    implementation that rejected it unconditionally would pass both tests above.
+    """
+    await stub.create_code(
+        "PSX-NOCOMBIN",
+        ends_at=_future(24),
+        combines_with={
+            "orderDiscounts": False,
+            "productDiscounts": False,
+            "shippingDiscounts": False,
+        },
+    )
+    assert (await stub.config())["has_active_automatic_discount"] is False
+    cart = await _cart(stub, "PSX-NOCOMBIN")
+    assert cart["discount_code"] == "PSX-NOCOMBIN"

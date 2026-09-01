@@ -262,14 +262,24 @@ def _shopify_router(stub: Stub) -> APIRouter:
 
 
 def _evaluate_code(stub: Stub, candidate: str | None) -> tuple[str | None, Any]:
-    """Decide whether ``candidate`` applies, and record why not when it does not."""
+    """Decide whether ``candidate`` applies, and record why not when it does not.
+
+    Both halves of acceptance 2's "invalid/conflicting" split are decided here. *Invalid* is
+    a property of the code (unknown, expired, not yet active, used up); *conflicting* is a
+    property of the **cart** — a non-combining code meeting a shop that already has an
+    order-level automatic discount running. Neither produces an error; both produce
+    ``(None, reason)`` and a cart that looks exactly like one where no code was supplied.
+    """
     if candidate in (None, ""):
         return None, None
     state = stub.state
     discount = state.find_code(candidate)
     if discount is None:
         return None, RejectionReason.UNKNOWN_CODE
-    rejection = discount.rejection(now=state.now())
+    rejection = discount.rejection(
+        now=state.now(),
+        cart_has_order_discount=state.config.has_active_automatic_discount,
+    )
     if rejection is not None:
         return None, rejection
     return discount.code, None
@@ -307,6 +317,7 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
             "pixel_mode": config.pixel_mode.value,
             "pixel_seed": config.pixel_seed,
             "pixel_collector_url": stub.state.pixel_collector_url,
+            "has_active_automatic_discount": config.has_active_automatic_discount,
         }
 
     @router.put("/config")
@@ -331,6 +342,7 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
             "pixel_mode",
             "pixel_seed",
             "pixel_collector_url",
+            "has_active_automatic_discount",
         }
         unknown = sorted(set(payload) - allowed)
         if unknown:
@@ -364,6 +376,8 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
                 )
         if "pixel_seed" in payload:
             candidate.pixel_seed = payload["pixel_seed"]
+        if "has_active_automatic_discount" in payload:
+            candidate.has_active_automatic_discount = bool(payload["has_active_automatic_discount"])
         try:
             candidate.validate()
         except ValueError as exc:
