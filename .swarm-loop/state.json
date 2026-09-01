@@ -1,0 +1,18 @@
+{
+  "project": "proxyshop",
+  "max_cycles": 102,
+  "audit_loops": 3,
+  "audit_loops_completed": 0,
+  "clean_audit": false,
+  "current_cycle": 0,
+  "autonomy": "approve-cycle-1",
+  "push_remote": "when-clean",
+  "stall_limit": 3,
+  "stall_count": 0,
+  "head_history": [],
+  "created": "2026-08-31T23:23:23",
+  "protected_paths": [
+    ".swarm-loop/acceptance",
+    ".swarm-loop/goals.json"
+  ]
+}
