@@ -112,8 +112,8 @@ def _json2ts_argv(output: Path) -> list[str]:
         "-o",
         str(output),
         # Without this, json2ts emits ONLY the root type: every protocol object lives under
-        # `$defs` and nothing in the bundle's root references them, so all 45 types would be
-        # silently dropped and the TypeScript half of the contract would be an empty file.
+        # `$defs` and nothing in the bundle's root references them, so all 46 types would be
+        # silently dropped and the TypeScript half of the contract would carry only the bundle root.
         "--unreachableDefinitions",
         "--additionalProperties",
         "false",

@@ -6,7 +6,7 @@
  * from `packages/contracts/schemas/protocol.schema.json`, so a TypeScript consumer and a Python
  * consumer accept and reject exactly the same payloads.
  *
- * Ajv is compiled ONCE per schema name and cached: compiling a 45-definition bundle per call
+ * Ajv is compiled ONCE per schema name and cached: compiling a 46-definition bundle per call
  * would make validation cost more than the work it guards.
  */
 // The draft 2020-12 build, NOT the default `ajv` entry point. The default export is the draft-07
