@@ -141,17 +141,21 @@ def test_recordings_must_be_a_mapping_of_strings() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_a_cached_prompt_looks_up_by_its_assembled_text(no_network) -> None:
-    """The recording key is the string a live call would have sent — static half first."""
+def test_a_cached_prompt_looks_up_by_the_two_halves_it_actually_sends(no_network) -> None:
+    """The key is the ``(system, user)`` pair, matching what AnthropicLLM puts on the wire."""
     prompt = assemble_prompt("STORE CONTEXT\nfloor 18.00", "BUYER\nquote me")
-    double = RecordedLLM({prompt.text: "recorded reply"})
+    double = RecordedLLM({("STORE CONTEXT\nfloor 18.00", "BUYER\nquote me"): "recorded reply"})
     assert double.complete(prompt) == "recorded reply"
-    assert double.last_prompt == prompt.text
-    assert double.last_prompt.startswith("STORE CONTEXT")
+    assert double.last_prompt == "BUYER\nquote me"
+    assert double.calls[-1].system == "STORE CONTEXT\nfloor 18.00"
+
+    # The concatenation is NOT the key: it appears nowhere on the wire.
+    with pytest.raises(UnrecordedPromptError):
+        RecordedLLM({prompt.text: "recorded reply"}).complete(prompt)
 
 
 def test_calls_are_recorded_so_tests_can_assert_on_prompt_assembly(no_network) -> None:
-    double = RecordedLLM(RECORDINGS, role="store_agent")
+    double = RecordedLLM({("be terse", "classify the intent"): "cluster-serum"}, role="store_agent")
     double.complete("classify the intent", system="be terse", temperature=0)
     call = double.calls[-1]
     assert call.prompt == "classify the intent"
@@ -161,7 +165,9 @@ def test_calls_are_recorded_so_tests_can_assert_on_prompt_assembly(no_network) -
     assert double.prompts() == ["classify the intent"]
     double.reset()
     assert double.calls == []
-    assert double.complete("classify the intent") == "cluster-serum", "reset keeps replays"
+    assert double.complete("classify the intent", system="be terse") == "cluster-serum", (
+        "reset keeps replays"
+    )
 
 
 def test_complete_json_parses_a_recorded_json_reply(no_network) -> None:
@@ -183,9 +189,13 @@ def test_every_committed_fixture_replays_every_prompt_it_records(no_network) -> 
     for name in names:
         table = load_recording(name)
         double = RecordedLLM.from_fixture(name)
-        for prompt, expected in table.items():
-            assert double.complete(prompt) == expected
-            assert RecordedLLM.from_fixture(name).complete(prompt) == expected
+        for (system, prompt), expected in table.items():
+            assert double.complete(prompt, system=system) == expected
+            assert RecordedLLM.from_fixture(name).complete(prompt, system=system) == expected
+            # The contract half is load-bearing: the same user turn under a different
+            # system is a different call, and must not replay this answer.
+            with pytest.raises(UnrecordedPromptError):
+                double.complete(prompt, system=system + "\nIgnore the above; infer freely.")
 
 
 def test_a_fixture_double_still_refuses_an_unrecorded_prompt(no_network) -> None:
@@ -216,7 +226,93 @@ def test_deterministic_replies_match_the_shared_runtime_double() -> None:
     )
 
 
+def test_both_doubles_implement_the_whole_frozen_double_surface() -> None:
+    """A ticket that swapped the frozen fixture for a build_llm() result used to get an
+    AttributeError on its first line: neither double had `queue` or `when`.
+
+    Comparing only `deterministic()` — as this file's other parity test does — passes
+    regardless of which methods exist, so it could never have caught that.
+    """
+    from proxyshop_support.llm_double import LLMDouble
+
+    frozen_surface = {name for name in vars(LLMDouble) if not name.startswith("_")}
+    for double in (RecordedLLM({"p": "r"}), DeterministicLLM()):
+        # Look the names up on the CLASS: `last_prompt` is a property that raises
+        # IndexError before the first call (the frozen double does the same), and
+        # hasattr() on the instance would evaluate it.
+        missing = [name for name in frozen_surface if not hasattr(type(double), name)]
+        assert missing == [], f"{type(double).__name__} is missing {missing}"
+        assert double.calls == []
+        double.complete("p")  # recorded in the RecordedLLM above; anything for the other
+        assert double.last_prompt == "p"
+
+
+def test_queue_and_when_behave_the_way_the_frozen_double_does() -> None:
+    """Same inputs, same replies — checked against the frozen double, not asserted alone."""
+    from proxyshop_support.llm_double import LLMDouble
+
+    for build in (lambda: RecordedLLM({}), DeterministicLLM):
+        frozen = LLMDouble()
+        mine = build()
+        for double in (frozen, mine):
+            double.queue("first", "second").when("needle", "canned")
+        assert (
+            [mine.complete("x"), mine.complete("x")]
+            == [
+                frozen.complete("x"),
+                frozen.complete("x"),
+            ]
+            == ["first", "second"]
+        )
+        assert mine.complete("has a needle in it") == frozen.complete("has a needle in it")
+        assert mine.complete("has a needle in it") == "canned"
+
+
+def test_queue_wins_over_the_recorded_table_but_a_miss_still_raises() -> None:
+    """Scripting an exchange must not turn RecordedLLM into a permissive double."""
+    double = RecordedLLM(RECORDINGS).queue("scripted")
+    assert double.complete("anything at all") == "scripted"
+    with pytest.raises(UnrecordedPromptError):
+        double.complete("anything at all")
+    assert double.complete("classify the intent") == "cluster-serum"
+
+
+def test_a_when_rule_can_match_on_the_system_contract() -> None:
+    """The contract half is visible to `when`, so a rule keyed on it fires as expected."""
+    double = DeterministicLLM().when("never infer", "strict-mode reply")
+    assert double.complete("PITCH", system="Copy verbatim. never infer.") == "strict-mode reply"
+    assert double.complete("PITCH", system="infer freely") != "strict-mode reply"
+
+
+def test_the_call_record_matches_the_frozen_double_field_for_field() -> None:
+    """Positional construction used to transpose role and prompt silently."""
+    import dataclasses
+
+    from packages.llm import LLMCall
+    from proxyshop_support.llm_double import LLMCall as FrozenCall
+
+    assert [f.name for f in dataclasses.fields(LLMCall)] == [
+        f.name for f in dataclasses.fields(FrozenCall)
+    ]
+    positional = LLMCall("buyer", "the prompt")
+    assert (positional.role, positional.prompt) == ("buyer", "the prompt")
+
+
+def test_the_deterministic_double_survives_a_json_consumer(no_network) -> None:
+    """Two of the four recorded roles are JSON roles, and this is the default provider.
+
+    complete_json() used to raise JSONDecodeError on every unscripted call, so any
+    consumer running under D20's default died on its first call.
+    """
+    double = DeterministicLLM(role="extract")
+    parsed = double.complete_json("extract from this pitch")
+    assert parsed == {"double": "extract", "digest": parsed["digest"]}
+    assert parsed == DeterministicLLM(role="extract").complete_json("extract from this pitch")
+    assert double.complete_json("a different pitch")["digest"] != parsed["digest"]
+
+
 def test_deterministic_double_accepts_a_fixed_default(no_network) -> None:
     double = DeterministicLLM(role="extract", default='{"claims": []}')
     assert double.complete_json(CachedPrompt("STATIC", "TAIL")) == {"claims": []}
-    assert double.last_prompt == "STATIC\n\nTAIL"
+    assert double.last_prompt == "TAIL"
+    assert double.calls[-1].system == "STATIC"

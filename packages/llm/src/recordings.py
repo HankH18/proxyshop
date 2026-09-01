@@ -13,8 +13,20 @@ File shape::
         "source": "...", "doc_version": "...", "authored_by": "...",
         "authored_at": "...", "capture": "..."
       },
-      "recordings": {"<exact prompt text>": "<reply>"}
+      "system": "<the system contract every recording below was authored against>",
+      "recordings": {"<exact user turn>": "<reply>"}
     }
+
+The ``system`` key is what makes a recording honest. A request carries two halves — the
+system blocks and the user turn — and the system half is the prompt *contract*: "copy
+values verbatim; never infer", the envelope rules, the tool list. It is what decides the
+answer against a live model, so a fixture that folds it into the prompt string (or omits
+it) lets an inverted contract keep replaying the old reviewed reply. Each file therefore
+records one contract and the exchanges authored against it, and
+:class:`llm.doubles.RecordedLLM` keys on the pair.
+
+``system`` is optional and defaults to ``""``, which means "this fixture was authored for
+calls with no system contract at all".
 
 Read one with :func:`load_recording` (by stem) or build a double straight from it with
 :meth:`llm.doubles.RecordedLLM.from_fixture`.
@@ -56,14 +68,16 @@ def recording_path(name: str) -> Path:
     return RECORDINGS_DIR / f"{name}.json"
 
 
-def load_recording_file(path: Path | str) -> tuple[dict[str, str], dict[str, Any]]:
+def load_recording_file(path: Path | str) -> tuple[dict[tuple[str, str], str], dict[str, Any]]:
     """Load and validate one recorded-fixture file.
 
     Args:
         path: the ``.json`` file.
 
     Returns:
-        ``(recordings, provenance)`` — an exact prompt→reply mapping, and the header.
+        ``(recordings, provenance)`` — a mapping keyed by the ``(system, prompt)`` pair a
+        request actually carries, and the header. Every key in one file shares that
+        file's ``system`` value.
 
     Raises:
         RecordingError: the file is missing, is not JSON, has no ``provenance`` header
@@ -99,9 +113,17 @@ def load_recording_file(path: Path | str) -> tuple[dict[str, str], dict[str, Any
             f"{file_path} provenance header is missing: {', '.join(missing)} (D21)"
         )
 
+    system = document.get("system", "")
+    if not isinstance(system, str):
+        raise RecordingError(
+            f"{file_path} `system` must be a string (the contract these recordings were "
+            f"authored against), got {type(system).__name__}"
+        )
+
     recordings = document.get("recordings")
     if not isinstance(recordings, dict) or not recordings:
         raise RecordingError(f"{file_path} must carry a non-empty `recordings` object")
+    keyed: dict[tuple[str, str], str] = {}
     for prompt, reply in recordings.items():
         if not isinstance(prompt, str) or not prompt.strip():
             raise RecordingError(f"{file_path} has a blank prompt key")
@@ -109,11 +131,12 @@ def load_recording_file(path: Path | str) -> tuple[dict[str, str], dict[str, Any
             raise RecordingError(
                 f"{file_path} recording for {prompt[:60]!r} is {type(reply).__name__}, not a string"
             )
-    return dict(recordings), dict(provenance)
+        keyed[(system, prompt)] = reply
+    return keyed, dict(provenance)
 
 
-def load_recording(name: str) -> dict[str, str]:
-    """The prompt→reply table of the recorded fixture ``name`` (its filename stem).
+def load_recording(name: str) -> dict[tuple[str, str], str]:
+    """The ``(system, prompt)``→reply table of the fixture ``name`` (its filename stem).
 
     Raises:
         RecordingError: if there is no such fixture, or it fails validation. The message
@@ -135,22 +158,29 @@ def load_provenance(name: str) -> dict[str, Any]:
     return provenance
 
 
-def load_all_recordings() -> dict[str, str]:
+def load_system_contract(name: str) -> str:
+    """The system contract the recorded fixture ``name`` was authored against."""
+    document = json.loads(recording_path(name).read_text(encoding="utf-8"))
+    system = document.get("system", "")
+    return system if isinstance(system, str) else ""
+
+
+def load_all_recordings() -> dict[tuple[str, str], str]:
     """Every committed recording, merged into one table.
 
     Raises:
         RecordingError: on a duplicate prompt across two files — two different reviewed
             answers to the same prompt is an ambiguity, not a merge.
     """
-    merged: dict[str, str] = {}
-    origins: dict[str, str] = {}
+    merged: dict[tuple[str, str], str] = {}
+    origins: dict[tuple[str, str], str] = {}
     for name in available_recordings():
-        for prompt, reply in load_recording(name).items():
-            if prompt in merged and merged[prompt] != reply:
+        for key, reply in load_recording(name).items():
+            if key in merged and merged[key] != reply:
                 raise RecordingError(
-                    f"prompt {prompt[:60]!r} is recorded differently in "
-                    f"{origins[prompt]!r} and {name!r}"
+                    f"prompt {key[1][:60]!r} is recorded differently under the same "
+                    f"system contract in {origins[key]!r} and {name!r}"
                 )
-            merged[prompt] = reply
-            origins[prompt] = name
+            merged[key] = reply
+            origins[key] = name
     return merged

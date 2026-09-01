@@ -20,6 +20,7 @@ from packages.llm import (
     load_provenance,
     load_recording,
     load_recording_file,
+    load_system_contract,
 )
 
 GOOD_PROVENANCE = {field: f"value for {field}" for field in REQUIRED_PROVENANCE_FIELDS}
@@ -58,14 +59,24 @@ def test_every_fixture_loads_and_carries_a_full_provenance_header(name: str) -> 
     )
     recordings = load_recording(name)
     assert recordings and all(isinstance(v, str) and v for v in recordings.values())
+    assert all(isinstance(k, tuple) and len(k) == 2 for k in recordings)
 
 
 @pytest.mark.parametrize("name", available_recordings())
-def test_fixture_prompts_look_like_assembled_prompts(name: str) -> None:
-    """A recording key is the exact string a live call would have sent."""
-    for prompt in load_recording(name):
-        assert len(prompt) > 40, f"{name}: {prompt!r} is too short to be a real prompt"
+def test_every_recording_carries_the_contract_it_was_authored_against(name: str) -> None:
+    """A key is the ``(system, user)`` pair a request actually carries — both halves.
+
+    A fixture that folds the contract into the prompt string, or drops it, is what lets an
+    inverted contract keep replaying the old reviewed answer.
+    """
+    contract = load_system_contract(name)
+    assert len(contract) > 40, f"{name}: system contract {contract!r} is too thin to be one"
+    for system, prompt in load_recording(name):
+        assert system == contract, f"{name}: recordings must share one system contract"
+        label = prompt.split("\n", 1)[0]
+        assert label.isupper(), f"{name}: {prompt!r} does not open with a section label"
         assert "\n" in prompt, f"{name}: {prompt!r} has no sections"
+        assert prompt not in contract, f"{name}: the user turn leaked into the contract"
 
 
 def test_all_fixtures_merge_without_a_conflicting_answer() -> None:

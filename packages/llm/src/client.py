@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
 from llm.config import (
+    MAX_TOKENS_ENV_VAR,
     PROVIDER_ANTHROPIC,
     PROVIDER_DOUBLE,
     SUPPORTED_PROVIDERS,
@@ -31,9 +32,28 @@ from llm.config import (
     resolve_provider,
     resolve_timeout,
 )
+from llm.config import model_env_var as _validate_role
 from llm.doubles import DeterministicLLM, RecordedLLM
-from llm.errors import MissingApiKeyError, ProviderNotConfiguredError
+from llm.errors import (
+    EmptyReplyError,
+    MissingApiKeyError,
+    ModelOverrideError,
+    ProviderNotConfiguredError,
+    TruncatedReplyError,
+)
 from llm.prompting import CachedPrompt
+
+#: Request fields this wrapper owns; a per-call keyword may not overwrite them.
+#:
+#: ``model`` is the one that matters: C4 makes model ids config rather than code, and a
+#: ``complete(prompt, model="...")`` keyword walks past both :mod:`llm.config` and the
+#: frozen AST scan — the scan can only see literals in this package, never a value a
+#: caller passes in. ``messages`` and ``system`` are here because overwriting them would
+#: silently discard the cache boundary this module just built.
+RESERVED_REQUEST_FIELDS: frozenset[str] = frozenset({"model", "messages", "system"})
+
+#: ``stop_reason`` values that mean "there is no usable reply here".
+TRUNCATED_STOP_REASON = "max_tokens"
 
 
 @runtime_checkable
@@ -161,18 +181,26 @@ class AnthropicLLM:
             max_tokens: per-call override.
             **kwargs: passed through to ``messages.create``.
         """
-        cached = prompt if isinstance(prompt, CachedPrompt) else None
-        if cached is None:
+        reserved = RESERVED_REQUEST_FIELDS & set(kwargs)
+        if reserved:
+            raise ModelOverrideError(
+                f"{', '.join(sorted(reserved))} cannot be passed as a per-call keyword: "
+                f"this wrapper owns those fields. The model comes from "
+                f"{self.role!r}'s environment variable (C4 — model ids are config, not "
+                f"code), and messages/system carry the cache boundary. Configure the "
+                f"env var, or construct AnthropicLLM(role, model=...) deliberately."
+            )
+
+        if isinstance(prompt, CachedPrompt):
+            cached = prompt
+            # The per-call system goes AFTER the store context, as a second block. In
+            # front of it, any varying system text (a turn counter, a timestamp) would
+            # push the stable envelope off byte zero and the prefix could never be a
+            # cache hit again — see CachedPrompt.to_system_blocks.
+            system_blocks = cached.to_system_blocks(extra=system)
+        else:
             cached = CachedPrompt(static_context=system or "", dynamic_tail=str(prompt))
             system_blocks = cached.to_system_blocks() if system else []
-        else:
-            if system:
-                cached = CachedPrompt(
-                    static_context=f"{system}{cached.separator}{cached.static_context}",
-                    dynamic_tail=cached.dynamic_tail,
-                    separator=cached.separator,
-                )
-            system_blocks = cached.to_system_blocks()
 
         request: dict[str, Any] = {
             "model": self._model,
@@ -183,7 +211,44 @@ class AnthropicLLM:
             request["system"] = system_blocks
         request.update(kwargs)
         response = self._ensure_client().messages.create(**request)
-        return response_text(response)
+        return self._reply_text(response, request["max_tokens"])
+
+    def _reply_text(self, response: Any, max_tokens: int) -> str:
+        """Extract the reply, refusing to hand back a fragment or an empty string.
+
+        Two 200-response shapes have no usable reply, and both used to come back as a
+        plain string with no exception:
+
+        * ``stop_reason == "max_tokens"`` — the model was cut off mid-reply. For the
+          extraction role this is a truncated JSON document, and the consumer sees a
+          ``JSONDecodeError`` at a random column that names nothing.
+        * a ``refusal`` or ``tool_use`` stop with no text block at all — a store agent
+          would answer a buyer with ``""``. The store-agent fixtures advertise three
+          provenance tools, so ``tool_use`` is reachable, and this wrapper does not run
+          tool loops.
+        """
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason is None and isinstance(response, Mapping):
+            stop_reason = response.get("stop_reason")
+        text = response_text(response)
+
+        if stop_reason == TRUNCATED_STOP_REASON:
+            raise TruncatedReplyError(
+                f"the model stopped at max_tokens={max_tokens}, so this reply is a "
+                f"fragment ({len(text)} chars) and must not be parsed or shown. Raise "
+                f"{MAX_TOKENS_ENV_VAR}, pass max_tokens=..., or ask for less. The "
+                f"partial text is on the exception's `.partial`.",
+                text,
+            )
+        if not text:
+            raise EmptyReplyError(
+                f"the response carried no text block (stop_reason={stop_reason!r}), so "
+                f"there is nothing to return. A `refusal` stop needs a prompt change; a "
+                f"`tool_use` stop needs a tool loop, which this wrapper deliberately does "
+                f"not implement (T-041 owns the advocate runtime).",
+                stop_reason if isinstance(stop_reason, str) else None,
+            )
+        return text
 
     def __repr__(self) -> str:
         built = "built" if self._client is not None else "not built"
@@ -194,7 +259,7 @@ def build_llm(
     role: str,
     *,
     provider: str | None = None,
-    recordings: Mapping[str, str] | None = None,
+    recordings: Mapping[Any, str] | None = None,
     env: Mapping[str, str] | None = None,
     **kwargs: Any,
 ) -> LLMClient:
@@ -205,12 +270,20 @@ def build_llm(
         provider: overrides ``LLM_PROVIDER``.
         recordings: when the double is selected, replay this table strictly
             (:class:`~llm.doubles.RecordedLLM`) instead of answering deterministically.
+            Keys may be prompt strings, ``(system, prompt)`` pairs, or ``CachedPrompt``s.
         env: environment mapping to resolve from.
         **kwargs: forwarded to :class:`AnthropicLLM` when the live provider is selected.
 
     Raises:
+        UnknownRoleError: if ``role`` is not one of :data:`llm.config.KNOWN_ROLES` —
+            on every provider path, including the offline double.
         ProviderNotConfiguredError: for an unimplemented provider name.
     """
+    # Validate the role on EVERY path. It used to be checked only where the live client
+    # resolved a model, so `build_llm("store-agent")` — the hyphenated directory name —
+    # worked offline and raised only under LLM_PROVIDER=anthropic. Every test in this
+    # repo runs offline (D3), so the typo would have reached production unexercised.
+    _validate_role(role)
     name = provider if provider is not None else resolve_provider(env)
     if name == PROVIDER_DOUBLE:
         if recordings is not None:

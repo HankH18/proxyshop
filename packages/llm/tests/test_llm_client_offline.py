@@ -29,11 +29,17 @@ from pathlib import Path
 import pytest
 
 from packages.llm import (
+    MAX_TOKENS_ENV_VAR,
+    RESERVED_REQUEST_FIELDS,
     AnthropicLLM,
     DeterministicLLM,
+    EmptyReplyError,
     MissingApiKeyError,
+    ModelOverrideError,
     ProviderNotConfiguredError,
     RecordedLLM,
+    TruncatedReplyError,
+    UnknownRoleError,
     assemble_prompt,
     build_llm,
     response_text,
@@ -156,13 +162,16 @@ def test_reimporting_the_package_with_broken_sockets_still_works(no_network) -> 
 # --------------------------------------------------------------------------------------
 
 
-def _fake_sdk(recorder: dict) -> types.ModuleType:
+def _fake_sdk(
+    recorder: dict, *, stop_reason: str = "end_turn", text: str = "fake reply"
+) -> types.ModuleType:
     """A stand-in `anthropic` module that records what it was asked to do."""
 
     class _Messages:
         def create(self, **kwargs):
             recorder["request"] = kwargs
-            return {"content": [{"type": "text", "text": "fake reply"}]}
+            content = [{"type": "text", "text": text}] if text else []
+            return {"content": content, "stop_reason": stop_reason}
 
     class _Anthropic:
         def __init__(self, **kwargs):
@@ -230,6 +239,86 @@ def test_a_bare_string_prompt_sends_no_system_block_at_all(no_network) -> None:
     assert recorder["request"]["messages"][0]["content"][0]["text"] == "just this"
 
 
+# --------------------------------------------------------------------------------------
+# what the wrapper owns, and what a 200 with no usable reply does
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["model", "messages"])
+def test_a_per_call_keyword_cannot_overwrite_a_field_the_wrapper_owns(no_network, field) -> None:
+    """C4 again: `complete(prompt, model=...)` walks past config AND the frozen AST scan.
+
+    The scan can only see string literals inside this package; a model id a caller passes
+    in is invisible to it, so the guard has to be here.
+    """
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    client = AnthropicLLM("buyer", model="env-resolved", client=fake)
+    with pytest.raises(ModelOverrideError) as excinfo:
+        client.complete("hi", **{field: "smuggled"})
+    assert field in str(excinfo.value)
+    assert recorder == {"constructor": {}} or "request" not in recorder, (
+        "the request must not have been sent at all"
+    )
+    assert client.complete("hi") == "fake reply"
+    assert recorder["request"]["model"] == "env-resolved"
+
+
+def test_system_cannot_reach_the_request_as_a_raw_keyword(no_network) -> None:
+    """`system` is a named parameter, so it is composed — never passed through blind."""
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    AnthropicLLM("buyer", model="m", client=fake).complete("hi", system="be terse")
+    assert recorder["request"]["system"] == [
+        {"type": "text", "text": "be terse", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert "system" in RESERVED_REQUEST_FIELDS
+
+
+def test_a_reply_cut_off_at_max_tokens_raises_instead_of_returning_a_fragment(
+    no_network,
+) -> None:
+    """DEFAULT_MAX_TOKENS against extraction-shaped work truncates JSON mid-document.
+
+    Returning the fragment gives the consumer a JSONDecodeError at a column that names
+    nothing; this names max_tokens, the env var, and hands back the partial text.
+    """
+    recorder: dict = {}
+    fake = _fake_sdk(recorder, stop_reason="max_tokens", text='{"claims": [{"key": "roa')
+    monkey = fake.Anthropic()  # type: ignore[attr-defined]
+    with pytest.raises(TruncatedReplyError) as excinfo:
+        AnthropicLLM("extract", model="m", client=monkey).complete("pitch", max_tokens=16)
+    message = str(excinfo.value)
+    assert "max_tokens=16" in message
+    assert MAX_TOKENS_ENV_VAR in message
+    assert excinfo.value.partial == '{"claims": [{"key": "roa'
+
+
+@pytest.mark.parametrize("stop_reason", ["refusal", "tool_use"])
+def test_a_200_with_no_text_block_raises_instead_of_returning_an_empty_string(
+    no_network, stop_reason
+) -> None:
+    """A store agent answering a buyer with "" and no exception is the failure here.
+
+    The store-agent fixtures advertise three provenance tools, so `tool_use` is reachable
+    and this wrapper deliberately runs no tool loop.
+    """
+    recorder: dict = {}
+    fake = _fake_sdk(recorder, stop_reason=stop_reason, text="")
+    with pytest.raises(EmptyReplyError) as excinfo:
+        AnthropicLLM("store_agent", model="m", client=fake.Anthropic()).complete("hi")  # type: ignore[attr-defined]
+    assert excinfo.value.stop_reason == stop_reason
+    assert stop_reason in str(excinfo.value)
+
+
+def test_a_normal_reply_is_unaffected_by_the_stop_reason_checks(no_network) -> None:
+    recorder: dict = {}
+    fake = _fake_sdk(recorder, stop_reason="end_turn", text="a real answer")
+    assert AnthropicLLM("buyer", model="m", client=fake.Anthropic()).complete("hi") == (  # type: ignore[attr-defined]
+        "a real answer"
+    )
+
+
 def test_response_text_reads_objects_and_dicts_and_ignores_non_text_blocks() -> None:
     class _Block:
         def __init__(self, type_: str, text: str) -> None:
@@ -254,6 +343,27 @@ def test_build_llm_defaults_to_the_double(monkeypatch, no_network) -> None:
     client = build_llm("buyer")
     assert isinstance(client, DeterministicLLM)
     assert client.complete("anything").startswith("double:buyer:")
+
+
+@pytest.mark.parametrize("bad_role", ["store-agent", "storeagent", "Buyer", ""])
+def test_build_llm_validates_the_role_on_the_OFFLINE_path_too(
+    monkeypatch, no_network, bad_role
+) -> None:
+    """`store-agent` is the directory name, and it used to work offline.
+
+    Validation lived only where the live client resolved a model, so the typo raised
+    exclusively under LLM_PROVIDER=anthropic — and every test in this repo runs offline
+    (D3), which means the headline feature was never exercised through the seam consumers
+    actually use.
+    """
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    with pytest.raises(UnknownRoleError) as excinfo:
+        build_llm(bad_role)
+    assert "store_agent" in str(excinfo.value)
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    with pytest.raises(UnknownRoleError):
+        build_llm(bad_role)
 
 
 def test_build_llm_uses_recordings_when_it_is_given_them(monkeypatch, no_network) -> None:

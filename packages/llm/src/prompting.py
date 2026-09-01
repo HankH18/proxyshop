@@ -114,21 +114,35 @@ class CachedPrompt:
             separator=self.separator,
         )
 
-    def to_system_blocks(self, *, cache: bool = True) -> list[dict[str, Any]]:
+    def to_system_blocks(
+        self, *, cache: bool = True, extra: str | None = None
+    ) -> list[dict[str, Any]]:
         """The static context as Anthropic ``system`` blocks, cache breakpoint attached.
 
         Args:
-            cache: attach ``cache_control`` to the final static block. Off is for
+            cache: attach ``cache_control`` to the store-context block. Off is for
                 one-shot calls where a cache write would never be read back.
+            extra: per-call system text. It is appended as a **second, uncached block
+                after** the store context — never merged in front of it.
 
-        The block carries :attr:`static_context` alone — the trailing separator that
+        Why ``extra`` cannot go first: prefix caching matches from byte zero, so a
+        per-call system that varies at all — a turn counter, a timestamp, a request id —
+        would push the stable store envelope behind bytes that change every call, and it
+        could never be a cache hit again. Same information, same answers, no cache: the
+        exact failure this module exists to prevent, in the one function that composes
+        the two halves.
+
+        The first block carries :attr:`static_context` alone — the trailing separator that
         :attr:`cacheable_prefix` includes is a feature of the assembled string, not of
         the wire format.
         """
         block: dict[str, Any] = {"type": "text", "text": self.static_context}
         if cache:
             block["cache_control"] = dict(CACHE_CONTROL)
-        return [block]
+        blocks = [block]
+        if extra:
+            blocks.append({"type": "text", "text": extra})
+        return blocks
 
     def to_messages(self) -> list[dict[str, Any]]:
         """The dynamic tail as the Anthropic ``messages`` list (a single user turn).
@@ -146,6 +160,33 @@ class CachedPrompt:
 
     def __str__(self) -> str:
         return self.text
+
+
+def wire_key(prompt: object, system: str | None = None) -> tuple[str, str]:
+    """The ``(system_text, user_text)`` pair a request actually carries.
+
+    This is the canonical identity of a call, and it is what the doubles key on. The two
+    halves travel separately — the system blocks and the user turn — so keying on the two
+    of them concatenated (which is what :attr:`CachedPrompt.text` is) makes a double blind
+    to the system half: an inverted system contract would replay the identical recorded
+    answer while a live model returned something else entirely.
+
+    Args:
+        prompt: a :class:`CachedPrompt` (its two halves are used as they are sent) or a
+            plain string (the whole user turn).
+        system: per-call system text, appended after a ``CachedPrompt``'s static context
+            in the same order :meth:`CachedPrompt.to_system_blocks` emits it.
+
+    Returns:
+        ``(system_text, user_text)``. Several system blocks are joined with
+        :data:`SECTION_SEPARATOR` — a canonicalization for lookup, not a claim about the
+        wire format, which keeps them as separate blocks.
+    """
+    if isinstance(prompt, CachedPrompt):
+        blocks = prompt.to_system_blocks(cache=False, extra=system)
+        return (SECTION_SEPARATOR.join(block["text"] for block in blocks), prompt.dynamic_tail)
+    text = prompt if isinstance(prompt, str) else str(prompt)
+    return (system or "", text)
 
 
 def assemble_prompt(

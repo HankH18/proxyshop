@@ -21,7 +21,13 @@ Importing this package touches no network and does not import the ``anthropic`` 
 
 from __future__ import annotations
 
-from llm.client import AnthropicLLM, LLMClient, build_llm, response_text
+from llm.client import (
+    RESERVED_REQUEST_FIELDS,
+    AnthropicLLM,
+    LLMClient,
+    build_llm,
+    response_text,
+)
 from llm.config import (
     API_KEY_ENV_VAR,
     DEFAULT_BUYER_MODEL,
@@ -52,17 +58,32 @@ from llm.config import (
     resolve_provider,
     resolve_timeout,
 )
-from llm.doubles import DeterministicLLM, LLMCall, RecordedLLM, prompt_text
+from llm.doubles import (
+    DeterministicLLM,
+    LLMCall,
+    RecordedLLM,
+    normalize_recording_key,
+    prompt_text,
+)
 from llm.errors import (
+    EmptyReplyError,
     LLMError,
     MissingApiKeyError,
+    ModelOverrideError,
     PromptAssemblyError,
     ProviderNotConfiguredError,
     RecordingError,
+    TruncatedReplyError,
     UnknownRoleError,
     UnrecordedPromptError,
 )
-from llm.prompting import CACHE_CONTROL, SECTION_SEPARATOR, CachedPrompt, assemble_prompt
+from llm.prompting import (
+    CACHE_CONTROL,
+    SECTION_SEPARATOR,
+    CachedPrompt,
+    assemble_prompt,
+    wire_key,
+)
 from llm.recordings import (
     RECORDINGS_DIR,
     REQUIRED_PROVENANCE_FIELDS,
@@ -71,6 +92,7 @@ from llm.recordings import (
     load_provenance,
     load_recording,
     load_recording_file,
+    load_system_contract,
     recording_path,
 )
 
@@ -90,6 +112,7 @@ __all__ = [
     "PROVIDER_ANTHROPIC",
     "PROVIDER_DOUBLE",
     "PROVIDER_ENV_VAR",
+    "RESERVED_REQUEST_FIELDS",
     "RECORDINGS_DIR",
     "REQUIRED_PROVENANCE_FIELDS",
     "ROLE_BUYER",
@@ -103,14 +126,17 @@ __all__ = [
     "AnthropicLLM",
     "CachedPrompt",
     "DeterministicLLM",
+    "EmptyReplyError",
     "LLMCall",
     "LLMClient",
     "LLMError",
     "MissingApiKeyError",
+    "ModelOverrideError",
     "PromptAssemblyError",
     "ProviderNotConfiguredError",
     "RecordedLLM",
     "RecordingError",
+    "TruncatedReplyError",
     "UnknownRoleError",
     "UnrecordedPromptError",
     "assemble_prompt",
@@ -120,8 +146,10 @@ __all__ = [
     "load_all_recordings",
     "load_provenance",
     "load_recording",
+    "load_system_contract",
     "load_recording_file",
     "model_env_var",
+    "normalize_recording_key",
     "prompt_text",
     "recording_path",
     "resolve_api_key",
@@ -130,4 +158,5 @@ __all__ = [
     "resolve_provider",
     "resolve_timeout",
     "response_text",
+    "wire_key",
 ]

@@ -6,11 +6,12 @@
     "authored_at": "2026-02-14",
     "capture": "none - hand-authored under D21 (no live capture anywhere in this repo)",
     "review": "committed on branch task/T-014 for human review (D21)",
-    "notes": "Turn-by-turn: the static interview contract is the cacheable prefix and only the transcript tail changes between turns, which is the shape T-053 is expected to send."
+    "notes": "`system` is the interview contract that goes in the system block and stays byte-identical across turns, so it is the cacheable prefix; each key is that turn's transcript, which is the only thing that changes. This is the shape T-053 is expected to send."
   },
+  "system": "INTERVIEW CONTRACT\nYou are interviewing a merchant to build a pricing envelope. Ask exactly one question per turn. Never invent a commitment the merchant did not state.",
   "recordings": {
-    "INTERVIEW CONTRACT\nYou are interviewing a merchant to build a pricing envelope. Ask exactly one question per turn. Never invent a commitment the merchant did not state.\n\nTRANSCRIPT\n(empty)": "What is the lowest price you are willing to accept for your best-selling product, including any discount you would ever authorize?",
-    "INTERVIEW CONTRACT\nYou are interviewing a merchant to build a pricing envelope. Ask exactly one question per turn. Never invent a commitment the merchant did not state.\n\nTRANSCRIPT\nagent: What is the lowest price you are willing to accept for your best-selling product, including any discount you would ever authorize?\nmerchant: I list the Guji at 22 and I will not go under 18.": "Understood: a floor of 18.00 USD on the Guji. What is the largest percentage discount you want me to be able to offer without asking you first?",
-    "INTERVIEW CONTRACT\nYou are interviewing a merchant to build a pricing envelope. Ask exactly one question per turn. Never invent a commitment the merchant did not state.\n\nTRANSCRIPT\nagent: What is the largest percentage discount you want me to be able to offer without asking you first?\nmerchant: 15% at most, and free shipping over 40 dollars.": "Recorded: a 15% maximum discount and free shipping above 40.00 USD. What delivery commitment can you make - where do you ship from, and how quickly do orders leave?"
+    "TRANSCRIPT\n(empty)": "What is the lowest price you are willing to accept for your best-selling product, including any discount you would ever authorize?",
+    "TRANSCRIPT\nagent: What is the lowest price you are willing to accept for your best-selling product, including any discount you would ever authorize?\nmerchant: I list the Guji at 22 and I will not go under 18.": "Understood: a floor of 18.00 USD on the Guji. What is the largest percentage discount you want me to be able to offer without asking you first?",
+    "TRANSCRIPT\nagent: What is the largest percentage discount you want me to be able to offer without asking you first?\nmerchant: 15% at most, and free shipping over 40 dollars.": "Recorded: a 15% maximum discount and free shipping above 40.00 USD. What delivery commitment can you make - where do you ship from, and how quickly do orders leave?"
   }
 }

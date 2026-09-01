@@ -17,6 +17,9 @@ Error                                   Also inherits                   Raised b
 :class:`PromptAssemblyError`            ``ValueError``                  ``llm.prompting``
 :class:`RecordingError`                 ``ValueError``                  ``llm.recordings``
 :class:`UnrecordedPromptError`          ``KeyError``                    ``llm.doubles``
+:class:`ModelOverrideError`             ``TypeError``                   ``llm.client``
+:class:`TruncatedReplyError`            ``RuntimeError``                ``llm.client``
+:class:`EmptyReplyError`                ``RuntimeError``                ``llm.client``
 ======================================  ==============================  ================
 
 :class:`UnrecordedPromptError` is the important one. The recorded double NEVER falls back
@@ -82,6 +85,46 @@ class ProviderNotConfiguredError(LLMError, ValueError):
 
 class MissingApiKeyError(LLMError, RuntimeError):
     """The live provider was selected but no API key is available (D3: none exists here)."""
+
+
+class ModelOverrideError(LLMError, TypeError):
+    """A per-call keyword tried to overwrite a field the wrapper owns.
+
+    ``model`` is the important one: C4 says model ids are config, not code, and the whole
+    of :mod:`llm.config` plus a frozen AST scan exist to keep them out of call sites. A
+    ``complete(prompt, model="...")`` keyword would walk straight past both — the scan
+    cannot see a value that never appears as a literal in this package.
+    """
+
+
+class TruncatedReplyError(LLMError, RuntimeError):
+    """The model hit ``max_tokens`` mid-reply, so the text is a fragment.
+
+    Silently returning it is how a JSON extraction turns into a ``JSONDecodeError`` at a
+    random column that names nothing. The partial text is on :attr:`partial`.
+    """
+
+    def __init__(self, message: str, partial: str = "") -> None:
+        super().__init__(message)
+        self.partial = partial
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        return (self.__class__, (self.args[0], self.partial))
+
+
+class EmptyReplyError(LLMError, RuntimeError):
+    """A 200 response carrying no text block at all.
+
+    A ``refusal`` or a ``tool_use`` stop reason does exactly this. Returning ``""`` would
+    have a store agent answer a buyer with an empty string and no exception.
+    """
+
+    def __init__(self, message: str, stop_reason: str | None = None) -> None:
+        super().__init__(message)
+        self.stop_reason = stop_reason
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        return (self.__class__, (self.args[0], self.stop_reason))
 
 
 class PromptAssemblyError(LLMError, ValueError):

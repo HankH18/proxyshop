@@ -6,10 +6,11 @@
     "authored_at": "2026-02-14",
     "capture": "none - hand-authored under D21; verification is offline (D3)",
     "review": "committed on branch task/T-014 for human review (D21)",
-    "notes": "Replies are JSON strings for RecordedLLM.complete_json(). The constraint/preference split mirrors R19; packages/contracts owns the authoritative Intent schema and T-071 owns the clarifier."
+    "notes": "`system` is the intent contract that goes in the system block; each key is the buyer's utterance as the user turn. Replies are JSON strings for RecordedLLM.complete_json(). The constraint/preference split mirrors R19; packages/contracts owns the authoritative Intent schema and T-071 owns the clarifier."
   },
+  "system": "INTENT CONTRACT\nSplit the request into hard constraints (field/op/value, filters) and preferences (field/direction/weight, scores). Ask a clarifying question only when a constraint is unusable.",
   "recordings": {
-    "INTENT CONTRACT\nSplit the request into hard constraints (field/op/value, filters) and preferences (field/direction/weight, scores). Ask a clarifying question only when a constraint is unusable.\n\nBUYER\nI want a light roast under $20, and I'd rather it be recently roasted.": "{\"constraints\": [{\"field\": \"roast_level\", \"op\": \"eq\", \"value\": \"light\"}, {\"field\": \"price_usd\", \"op\": \"lt\", \"value\": 20}], \"preferences\": [{\"field\": \"days_since_roast\", \"direction\": \"min\", \"weight\": 1.0}], \"clarifying_question\": null}",
-    "INTENT CONTRACT\nSplit the request into hard constraints (field/op/value, filters) and preferences (field/direction/weight, scores). Ask a clarifying question only when a constraint is unusable.\n\nBUYER\nsomething good for espresso, cheap": "{\"constraints\": [{\"field\": \"brew_method\", \"op\": \"eq\", \"value\": \"espresso\"}], \"preferences\": [{\"field\": \"price_usd\", \"direction\": \"min\", \"weight\": 1.0}], \"clarifying_question\": \"What is the most you would want to spend per 12 oz bag?\"}"
+    "BUYER\nI want a light roast under $20, and I'd rather it be recently roasted.": "{\"constraints\": [{\"field\": \"roast_level\", \"op\": \"eq\", \"value\": \"light\"}, {\"field\": \"price_usd\", \"op\": \"lt\", \"value\": 20}], \"preferences\": [{\"field\": \"days_since_roast\", \"direction\": \"min\", \"weight\": 1.0}], \"clarifying_question\": null}",
+    "BUYER\nsomething good for espresso, cheap": "{\"constraints\": [{\"field\": \"brew_method\", \"op\": \"eq\", \"value\": \"espresso\"}], \"preferences\": [{\"field\": \"price_usd\", \"direction\": \"min\", \"weight\": 1.0}], \"clarifying_question\": \"What is the most you would want to spend per 12 oz bag?\"}"
   }
 }
