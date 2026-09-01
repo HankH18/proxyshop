@@ -100,10 +100,12 @@ def verify_chain(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             ``prev_hash`` / ``event_hash`` fields :func:`seal_event` writes.
 
     Returns:
-        ``{"ok": bool, "broken_at": int | None, "reason": str | None, "head_hash": str}``.
-        ``broken_at`` is the **index of the first event that does not verify** and is
-        ``None`` for a clean stream. ``head_hash`` is the head as far as verification got,
-        which is the whole stream's head when ``ok``.
+        ``{"ok", "broken_at", "reason", "head_hash", "verified"}`` -- **the same five keys
+        on every outcome**, so a caller never has to know which branch it is on before
+        reading one. ``broken_at`` is the index of the first event that does not verify and
+        is ``None`` for a clean stream; ``head_hash`` is the head as far as verification
+        got, which is the whole stream's head when ``ok``; ``verified`` is how many events
+        checked out before it stopped.
 
     Three ways a stream breaks, all reported at the offending index:
 
@@ -113,31 +115,32 @@ def verify_chain(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
       ``event_hash``: the stream has been reordered, spliced or truncated in the middle.
     * ``tampered`` -- the event's content no longer hashes to its stored ``event_hash``.
     """
+
+    def broken(index: int, reason: str, head: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "broken_at": index,
+            "reason": reason,
+            "head_hash": head,
+            "verified": index,
+        }
+
     prev = GENESIS_HASH
     index = -1
     for index, event in enumerate(events):
         stored_hash = event.get("event_hash")
         if not stored_hash:
-            return {
-                "ok": False,
-                "broken_at": index,
-                "reason": "unsealed",
-                "head_hash": prev,
-            }
+            return broken(index, "unsealed", prev)
         stored_prev = event.get("prev_hash")
         if stored_prev is not None and str(stored_prev) != prev:
-            return {
-                "ok": False,
-                "broken_at": index,
-                "reason": "broken_link",
-                "head_hash": prev,
-            }
+            return broken(index, "broken_link", prev)
         if compute_event_hash(prev, event) != str(stored_hash):
-            return {
-                "ok": False,
-                "broken_at": index,
-                "reason": "tampered",
-                "head_hash": prev,
-            }
+            return broken(index, "tampered", prev)
         prev = str(stored_hash)
-    return {"ok": True, "broken_at": None, "reason": None, "head_hash": prev, "length": index + 1}
+    return {
+        "ok": True,
+        "broken_at": None,
+        "reason": None,
+        "head_hash": prev,
+        "verified": index + 1,
+    }

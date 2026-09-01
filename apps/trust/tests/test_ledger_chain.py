@@ -232,6 +232,7 @@ def test_verify_chain_detects_a_reordered_or_truncated_stream() -> None:
         "broken_at": 1,
         "reason": "broken_link",
         "head_hash": sealed[0]["event_hash"],
+        "verified": 1,
     }
 
     dropped = sealed[:2] + sealed[3:]
@@ -254,8 +255,32 @@ def test_verify_chain_refuses_an_unsealed_stream_rather_than_passing_it() -> Non
         "broken_at": 0,
         "reason": "unsealed",
         "head_hash": GENESIS_HASH,
+        "verified": 0,
     }
-    assert verify_chain([])["ok"] is True  # ...but an empty stream is intact
+    assert verify_chain([]) == {
+        "ok": True,  # ...but an empty stream is intact
+        "broken_at": None,
+        "reason": None,
+        "head_hash": GENESIS_HASH,
+        "verified": 0,
+    }
+
+
+def test_verify_chain_returns_the_same_keys_whatever_the_outcome() -> None:
+    """A result whose key set depends on the answer makes every caller branch first.
+
+    T-060 and T-062 both read this dict; ``result["verified"]`` must not raise ``KeyError``
+    precisely when the chain is broken.
+    """
+    sealed = chain_events(observation_event(i) for i in range(3))
+    tampered = copy.deepcopy(sealed)
+    tampered[1]["store_id"] = "s-other"
+    expected = {"ok", "broken_at", "reason", "head_hash", "verified"}
+    assert set(verify_chain(sealed)) == expected
+    assert set(verify_chain(tampered)) == expected
+    assert set(verify_chain([])) == expected
+    assert set(verify_chain([observation_event(0)])) == expected
+    assert verify_chain(tampered)["verified"] == 1
 
 
 def test_stream_hash_commits_to_every_event_in_order() -> None:
