@@ -69,10 +69,32 @@ only, and never on `sealed` or `vault`.
 
 ## D6 — Neo4j vector index parameters are fixed and proven **[verified]**
 
-`CREATE VECTOR INDEX product_embedding FOR (p:Product) ON (p.embedding) OPTIONS
-{indexConfig: {'vector.dimensions': 1024, 'vector.similarity_function': 'cosine'}}` works on
-neo4j:5.26.30 Community, and `db.index.vector.queryNodes` returns correct cosine scores for a
-1024-dim vector. Use exactly these parameters (DESIGN C2: 1024 dims, cosine).
+**CORRECTED at cycle 1 — the statement this ruling shipped did not parse.** T-012 reported it
+and the orchestrator reproduced it live against neo4j:5.26.30 Community: the single-quoted
+form raises `Neo.ClientError.Statement.SyntaxError: Invalid input ''vector.dimensions'':
+expected an identifier or '}'` at column 109. Cypher map keys must be identifiers or
+**backtick**-quoted; `'…'` makes them string literals, which is not legal in a map key
+position. Every *parameter* this ruling fixes was and remains correct — only the quoting was
+wrong. Six other tickets copy this statement, so it is repaired at the source rather than
+worked around in one of them.
+
+Use exactly this, verified to parse and to read back `1024` / `COSINE`:
+
+```cypher
+CREATE VECTOR INDEX product_embedding IF NOT EXISTS FOR (p:Product) ON (p.embedding)
+OPTIONS {indexConfig: {`vector.dimensions`: 1024, `vector.similarity_function`: 'cosine'}}
+```
+
+Note `'cosine'` on the right-hand side is a string **value** and is correctly single-quoted;
+only the two dotted **keys** take backticks. `db.index.vector.queryNodes` returns correct
+cosine scores for a 1024-dim vector (DESIGN C2: 1024 dims, cosine). `IF NOT EXISTS` is
+required so a re-entrant session never errors — do not "fix" a re-run error by dropping the
+index.
+
+Also measured while verifying this, and load-bearing for every retrieval consumer: **Neo4j
+rescales cosine as `(1 + cos) / 2`**. An exact match scores ≈ 1.0 and an orthogonal vector
+scores ≈ 0.5, *not* 0.0. Reading a raw 0.5 as "half similar" rather than "unrelated" would
+inflate every downstream retrieval score; convert before interpreting.
 
 ## D7 — `npx vitest run <path>` is a path FILTER and isolates correctly; only the root verify passes with no tests **[verified]**
 
