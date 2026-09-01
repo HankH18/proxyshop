@@ -108,15 +108,32 @@ def create_order_from_checkout(
     )
     subtotal = line.line_total
     discount_amount = Decimal("0")
-    applied = state.find_code(checkout.applied_code)
+    applied_code = checkout.applied_code
+    applied = state.find_code(applied_code)
     if applied is not None:
-        if applied.percentage is not None:
-            discount_amount = (subtotal * Decimal(str(applied.percentage))).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-        elif applied.fixed_amount is not None:
-            discount_amount = min(Decimal(applied.fixed_amount), subtotal)
-        applied.usage_count += 1
+        # RE-VALIDATE AT PAYMENT, not just when the cart was built. Two carts can be opened
+        # with the same `usageLimit: 1` code before either is completed — both see a usage
+        # count of zero and both apply it — so validating only at the cart would let a
+        # single-use code be redeemed twice. Shopify re-checks the discount when the payment
+        # is taken, and the second order simply comes through at full price. That is what
+        # makes A5's "duplicate use is an offer-integrity event, not a crash" observable: the
+        # system sees an order whose discount was not honoured, rather than a missing order.
+        rejection = applied.rejection(
+            now=moment,
+            cart_has_order_discount=state.config.has_active_automatic_discount,
+        )
+        if rejection is not None:
+            checkout.rejection = rejection
+            applied_code = None
+            applied = None
+        else:
+            if applied.percentage is not None:
+                discount_amount = (subtotal * Decimal(str(applied.percentage))).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            elif applied.fixed_amount is not None:
+                discount_amount = min(Decimal(applied.fixed_amount), subtotal)
+            applied.usage_count += 1
     order = Order(
         id=state.next_order_id(),
         order_number=state.next_order_number(),
@@ -128,7 +145,7 @@ def create_order_from_checkout(
         updated_at=moment,
         currency=variant.currency,
         line_items=[line],
-        discount_code=checkout.applied_code,
+        discount_code=applied_code,
         discount_amount=discount_amount,
     )
     state.orders[order.id] = order

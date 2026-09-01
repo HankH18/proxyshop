@@ -278,3 +278,70 @@ async def test_a_non_combining_code_applies_when_no_automatic_discount_runs(
     assert (await stub.config())["has_active_automatic_discount"] is False
     cart = await _cart(stub, "PSX-NOCOMBIN")
     assert cart["discount_code"] == "PSX-NOCOMBIN"
+
+
+async def test_a_single_use_code_cannot_be_redeemed_twice_from_two_open_carts(
+    stub: StubClient,
+) -> None:
+    """The race A5 names: two carts opened before either is completed.
+
+    Both carts see a usage count of zero and both apply the code, so validating only at the
+    cart would let a ``usageLimit: 1`` code be redeemed twice. Shopify re-checks the discount
+    when payment is taken, and the second order comes through at FULL PRICE — which is what
+    makes the duplicate observable downstream as an order whose discount was not honoured,
+    rather than as a missing order or an exception.
+    """
+    await stub.create_code("PSX-RACE0001", percentage=0.10, ends_at=_future(24))
+
+    first = await _cart(stub, "PSX-RACE0001")
+    second = await _cart(stub, "PSX-RACE0001")
+    assert first["discount_code"] == "PSX-RACE0001"
+    assert second["discount_code"] == "PSX-RACE0001", (
+        "both carts legitimately apply the code: neither has been paid for yet"
+    )
+
+    winner = (await stub.complete(first["token"])).json()
+    assert winner["discount_code"] == "PSX-RACE0001"
+    assert winner["total_price"] == "90.00"
+
+    loser = (await stub.complete(second["token"])).json()
+    assert loser["discount_code"] is None, "the second redemption must not be honoured"
+    assert loser["total_price"] == "100.00", "and the shopper pays full price"
+
+    codes = (await stub.codes())["codes"]
+    assert codes["PSX-RACE0001"]["usage_count"] == 1, (
+        "usage_count must never exceed usageLimit; a count of 2 means the single-use "
+        "guarantee is not enforced anywhere"
+    )
+
+    detail = (await stub.checkout(second["token"])).json()
+    assert detail["rejection_reason"] == "usage_limit_reached"
+
+
+async def test_a_code_that_expires_between_cart_and_payment_is_not_honoured(
+    stub: StubClient,
+) -> None:
+    """The other re-validation case, and the reason it is a re-check and not a cache.
+
+    A cart built while the code was live must not carry that discount into an order paid
+    after it expired.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import time_machine
+
+    start = datetime(2026, 6, 1, tzinfo=UTC)
+    with time_machine.travel(start, tick=False) as traveller:
+        await stub.create_code(
+            "PSX-EXPIRING",
+            starts_at=start.isoformat().replace("+00:00", "Z"),
+            ends_at=(start + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        )
+        cart = await _cart(stub, "PSX-EXPIRING")
+        assert cart["discount_code"] == "PSX-EXPIRING"
+
+        traveller.shift(timedelta(hours=2))
+        completed = (await stub.complete(cart["token"])).json()
+
+    assert completed["discount_code"] is None
+    assert completed["total_price"] == "100.00"
