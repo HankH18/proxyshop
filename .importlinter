@@ -1,0 +1,67 @@
+# Import-linter contracts (D34). A STANDALONE file on purpose: S7's architectural contracts
+# grow as sealed modules land, and extending this file must never be a root-manifest edit.
+# T-011 owns the violating fixture that proves the contract fires, and extends
+# `forbidden_modules` below as new sealed module names appear. Measured on this repo:
+# import-linter 2.14 tolerates a forbidden module that does not exist yet (the contract is
+# simply vacuous until it does), so `trust.ledger.sealed` is listed ahead of T-011.
+#
+# Root packages are the flat-src import namespaces provided by the tracked `.pkgroot/`
+# symlinks (see any member pyproject.toml). `lint-imports` must therefore run with
+# `.pkgroot` on sys.path; scripts/verify.sh does that.
+#
+# NOTE ON SYNTAX: these lists are newline-separated. A single space-separated line is
+# parsed character-by-character by import-linter and fails with
+# "Could not find package 'e' in your Python path."
+
+[importlinter]
+root_packages =
+    exchange
+    trust
+    store_agent
+    merchant_svc
+    buyer_svc
+    ingest
+    contracts
+    llm
+    claim_verification
+    redis
+
+[importlinter:contract:c3-exchange-cannot-read-envelopes]
+name = C3/S7: exchange must never import sealed-state or envelope modules
+type = forbidden
+source_modules =
+    exchange
+forbidden_modules =
+    store_agent.modes
+    merchant_svc.envelope
+    merchant_svc.onboarding
+    trust.ledger.sealed
+
+[importlinter:contract:d39-no-raw-redis-clients]
+# D39: Redis isolation is a per-worker logical DB index PLUS a `w{N}:` key prefix, and both
+# live in proxyshop_support.redis_client.worker_redis(). Any member module that imports
+# `redis` for itself bypasses both: it writes UNPREFIXED keys into a logical database it
+# shares with every other worker, where the `redis_client` fixture cannot see them and any
+# sibling's FLUSHDB deletes them. That failure is a non-reproducible mid-run wipe of another
+# worker's state, which is exactly what D39 exists to prevent, so it is forbidden
+# mechanically rather than by convention. `redis.exceptions` stays importable so
+# `except redis.exceptions.ConnectionError` remains available.
+#
+# scripts/check_verify_contracts.py carries the companion check for the places import-linter
+# cannot see (tests, scripts, fixtures) — this contract only spans the root packages above.
+name = D39: only proxyshop_support may construct a Redis client
+type = forbidden
+source_modules =
+    exchange
+    trust
+    store_agent
+    merchant_svc
+    buyer_svc
+    ingest
+    contracts
+    llm
+    claim_verification
+forbidden_modules =
+    redis
+ignore_imports =
+    ** -> redis.exceptions

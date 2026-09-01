@@ -1,0 +1,63 @@
+# ProxyShop datastore stack. Orchestrator-owned (T-000), frozen (B6(ii)): the nine
+# `include:` fragments below are pre-created empty stubs inside their owners' scope globs,
+# so a service ticket fills its own fragment and no ticket ever edits this file.
+#
+# Ports (D9/D40) — every one verified free on this host at scaffold time, and every one
+# env-overridable so a second checkout can move the whole block:
+#   5432 postgres, 6379 redis, 7474 neo4j http, 7687 neo4j bolt.
+# Memory (D10) — measured headroom at scaffold time was ~4.85 GiB (7.75 GiB Docker VM,
+# ~2.90 GiB committed by 14 pre-existing containers). Capped footprint below: 3.125 GiB.
+name: proxyshop        # MANDATORY: without it a worktree named T-012 spawns its own stack
+include:
+  - services/shopify-stub/compose.yaml
+  - services/ingest/compose.yaml
+  - services/sim/compose.yaml
+  - apps/exchange/compose.yaml
+  - apps/trust/compose.yaml
+  - apps/merchant/compose.yaml
+  - apps/buyer/compose.yaml
+  - apps/seller-reference/compose.yaml
+  - packages/store-agent/compose.yaml
+services:
+  postgres:
+    image: postgres:16-alpine        # already cached locally; arm64 native
+    pull_policy: missing
+    command: ["postgres","-c","shared_buffers=256MB","-c","max_connections=200",
+              "-c","fsync=off","-c","synchronous_commit=off","-c","full_page_writes=off"]
+    environment: { POSTGRES_USER: proxyshop, POSTGRES_PASSWORD: proxyshop_dev_pw,
+                   POSTGRES_DB: proxyshop_template }
+    ports: ["${PG_PORT:-5432}:5432"]
+    volumes: [ "pgdata:/var/lib/postgresql/data",
+               "./db/init:/docker-entrypoint-initdb.d:ro" ]   # 00-roles.sql runs ONCE (D38)
+    healthcheck: { test: ["CMD-SHELL","pg_isready -U proxyshop -d proxyshop_template"],
+                   interval: 5s, timeout: 5s, retries: 12, start_period: 20s }
+    stop_grace_period: 30s
+    mem_limit: 768m
+  neo4j:
+    image: neo4j:5.26-community      # 5.26.30 verified for D6's 1024-d cosine index
+    pull_policy: missing
+    environment:
+      NEO4J_AUTH: neo4j/proxyshop_dev_pw            # 5.x rejects passwords under 8 chars
+      NEO4J_server_memory_heap_max__size: 1g        # cap the ceiling…
+      NEO4J_server_memory_pagecache_size: 512m      # …but do NOT set heap_initial:
+                                                    # the image runs -XX:+AlwaysPreTouch, so a 1G
+                                                    # initial heap turns a lazy ceiling into a hard
+                                                    # ~1.5G RSS (measured idle default: ~450 MiB)
+      NEO4J_db_tx__log_rotation_retention__policy: "100M size"
+    ports: ["${NEO4J_HTTP_PORT:-7474}:7474","${NEO4J_BOLT_PORT:-7687}:7687"]
+    volumes: [ "neo4jdata:/data" ]
+    healthcheck: { test: ["CMD-SHELL","wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"],
+                   interval: 5s, timeout: 5s, retries: 20, start_period: 20s }
+    stop_grace_period: 30s          # REQUIRED: every container on this host is created with
+                                    # StopTimeout=1, which SIGKILLs Neo4j mid-checkpoint
+    mem_limit: 2g
+  redis:
+    image: redis:7-alpine
+    pull_policy: missing
+    command: ["redis-server","--save","","--appendonly","no",
+              "--maxmemory","256mb","--maxmemory-policy","noeviction","--databases","16"]
+    ports: ["${REDIS_PORT:-6379}:6379"]
+    healthcheck: { test: ["CMD","redis-cli","ping"], interval: 5s, timeout: 3s, retries: 10 }
+    stop_grace_period: 30s
+    mem_limit: 384m
+volumes: { pgdata: , neo4jdata: }

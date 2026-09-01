@@ -12,6 +12,8 @@ venv/
 *.egg-info/
 .coverage
 htmlcov/
+# hypothesis writes per-worker example DBs into the rootdir
+.hypothesis/
 
 # Node
 node_modules/
@@ -20,6 +22,12 @@ dist/
 build/
 *.tsbuildinfo
 .vitest/
+# vitest/istanbul output dir (the Python `.coverage` file is above)
+coverage/
+# react-router v7 typegen; eslint + vitest already treat it as generated
+**/.react-router/
+.eslintcache
+.turbo/
 
 # Secrets / local env
 .env
