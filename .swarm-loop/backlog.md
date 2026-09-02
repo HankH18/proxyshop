@@ -483,3 +483,41 @@ depth still 10 but now ending at T-087, T-085 down to depth 7, T-080 gating 16, 
 (163 open). All independently re-derived from `tickets.json` for this file.
 
 The remainder of intake §9-B is still declined — see `reports/cycle-0.md` §6.
+
+
+---
+
+## Wave-1 defect tickets — minted from verification, cycle 2
+
+Twelve tickets seeded into `tickets.json` (authoritative) from the wave-1 adjudications and the
+rung-2 integration verification. **None breaks the build** — `verify.sh all` exits 0 at
+`48679ae` with 1420 tests passing. All are defects in freshly-merged foundational code that the
+34+ downstream tickets will build on. Severity is the verifier's, re-judged by the orchestrator.
+
+| id | severity | title | depends_on | verify |
+|---|---|---|---|---|
+| **T-100** | HIGH | Shopify stub never emits an off-domain checkout Location | T-013 | `pytest services/shopify-stub -q` |
+| **T-101** | HIGH | A partial re-embed is never certified as complete | T-012 | `pytest services/ingest -q` |
+| **T-102** | HIGH | The chain_head guard trigger's DELETE arm is graded by a test | T-011 | `pytest apps/trust/tests/test_ledger_chain.py -q` |
+| **T-103** | HIGH | The TypeScript signer refuses integers the wire cannot state | T-010 | `npx vitest run packages/contracts` |
+| **T-104** | MED-HIGH | The prompt cache key cannot collide on separator text | T-014 | `pytest packages/llm -q` |
+| **T-105** | MEDIUM | Money arithmetic is asserted absolutely, not against itself | T-013 | `pytest services/shopify-stub -q` |
+| **T-106** | MEDIUM (BLOCKED) | One JCS canonicalizer, or a conformance gate that both must pass | T-010, T-011 | `pytest e2e -q && pytest apps/trust -q` |
+| **T-107** | MEDIUM | claim_id is computed with JCS, not json.dumps | T-010 | `pytest packages/contracts -q` |
+| **T-108** | MEDIUM | The two envelope gates agree on whitespace | T-010 | `pytest packages/contracts -q && npx vitest run packages/contracts` |
+| **T-109** | HIGH | A datastore blip cannot silently empty the security gate | T-000 | `pytest apps/trust -q && pytest proxyshop_support -q` |
+| **T-110** | MEDIUM | Role passwords have one source of truth | T-011 | `pytest apps/trust/tests/test_schema_grants.py -q` |
+| **T-111** | MEDIUM | Provisioning fails loudly when the flat namespaces are dead | T-000 | `./scripts/bootstrap.sh && ./scripts/verify.sh check` |
+
+**T-106 is BLOCKED on a user ruling** and must not be worked until it lands: unifying the two
+RFC-8785 canonicalizers requires amending D16, which says verbatim *"Nothing outside
+`apps/trust/src/ledger/**` (T-011) defines its own hashing"* — that sentence forbids the
+recommended placement. The two implementations currently AGREE byte-for-byte (verified over
+~1.5M inputs after both adopted the RFC 3.1 predicate `float(v) == v`), so nothing is broken
+today; what is missing is a gate that keeps them agreeing.
+
+Blast radius, for scheduling: T-100/T-105 share `services/shopify-stub/**` and must serialize
+against each other. T-102/T-106 share `apps/trust/**`. T-103/T-107/T-108 share
+`packages/contracts/**`. T-101 (`services/ingest/**`), T-104 (`packages/llm/**`),
+T-109 (`conftest.py`, `proxyshop_support/**`), T-110 (`db/init/**`) and T-111
+(`scripts/bootstrap.sh`) are disjoint from everything else and from each other.

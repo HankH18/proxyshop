@@ -54,6 +54,7 @@ export {
   isSignedBidSubmission,
   keyringSecret,
   missingSigningFields,
+  parseSignableJson,
   payloadHash,
   signingEnvelopeErrors,
 } from "./signing.js";

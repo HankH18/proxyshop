@@ -31,7 +31,7 @@
     {
       "id": "T-010",
       "title": "Contracts generate typed models and enforce the dual-path bid boundary",
-      "objective": "packages/contracts: JSON Schemas per DESIGN §Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint. Also owns the shared policy contract D13 places in this package: the versioned RankingWeights object the single published rank formula reads its weights, normalization bounds and penalty caps from. The SellerEligibility port is NOT here: amendment 1 (D54) places it in apps/exchange/src/eligibility, owned by T-030, because that is where the amended frozen suite imports it from. Amendment 1 adds two more contracts to this package. (a) The external SigningEnvelope: signer_id, key_id, issued_at, nonce and schema_version are REQUIRED on every Bid submitted through POST /v1/auctions/{auction_id}/bids, plus the single canonical-signing-bytes function over (auction_id, signer_id, store_id, issued_at, nonce, key_id, schema_version, payload_hash) that both signer and verifier call. No optional-field or legacy-tolerant variant exists on the production contract. (b) TrustSnapshot.dims is SIX dimensions - price_honored, discount_honored, shipped_on_time, not_returned, feedback_match, catalog_claim_accuracy - inside one trust system, per D53.",
+      "objective": "packages/contracts: JSON Schemas per DESIGN \u00a7Interfaces (partner-reconciled Intent with hard_constraints/preferences, Bid with optional message + seller_asserted provenance, VerificationResult), codegen to Pydantic + TS, and boundary validation: hosted bids reject on any non-hook provenance; external bids admit seller_asserted claims flagged for verification; expired/blacklisted/invalid reject on every path. OpenAPI examples + consumer contract tests for every cross-domain endpoint. Also owns the shared policy contract D13 places in this package: the versioned RankingWeights object the single published rank formula reads its weights, normalization bounds and penalty caps from. The SellerEligibility port is NOT here: amendment 1 (D54) places it in apps/exchange/src/eligibility, owned by T-030, because that is where the amended frozen suite imports it from. Amendment 1 adds two more contracts to this package. (a) The external SigningEnvelope: signer_id, key_id, issued_at, nonce and schema_version are REQUIRED on every Bid submitted through POST /v1/auctions/{auction_id}/bids, plus the single canonical-signing-bytes function over (auction_id, signer_id, store_id, issued_at, nonce, key_id, schema_version, payload_hash) that both signer and verifier call. No optional-field or legacy-tolerant variant exists on the production contract. (b) TrustSnapshot.dims is SIX dimensions - price_honored, discount_honored, shipped_on_time, not_returned, feedback_match, catalog_claim_accuracy - inside one trust system, per D53.",
       "refs": [
         "R8",
         "R18",
@@ -43,7 +43,7 @@
         "DESIGN#interfaces-contracts-between-tickets"
       ],
       "acceptance": [
-        "1. Schema→codegen produces importable py+ts types for all pinned objects incl. VerificationResult",
+        "1. Schema\u2192codegen produces importable py+ts types for all pinned objects incl. VerificationResult",
         "2. Hosted-path bid with a seller_asserted claim rejects; external-path bid with the same claim admits flagged-for-verification; expired/blacklisted reject on both",
         "3. Round-trip serialization passes in both languages; every cross-domain endpoint has a checked-in OpenAPI example + contract test",
         "4. RankingWeights is a generated, versioned contract type importable in py+ts, carrying the five published weights, the normalization bounds and the penalty catalogue, and a weight set that does not sum to 1.0 is invalid",
@@ -65,7 +65,7 @@
     {
       "id": "T-011",
       "title": "Postgres schemas enforce role isolation and hash-chained ledger",
-      "objective": "Create ledger/sealed/vault/app schemas with roles per DESIGN §Data models using the partner-reconciled table set (commerce_events with idempotency + prev_hash chain, claims, claim_verifications, verification_evidence_refs, trust_observations, trust_scores, policy_events, ranking_runs/candidates, catalog_snapshots, crawl tables, seller_blacklist with review states); replay library; grant tests prove exchange role cannot read sealed.* (S7). Amendment 1 (D52) adds two app.* structures: app.seller_endpoints holds one row per live key (signer_id, store_id, key_id, public_key, status) so a signer's keys can rotate and key_id is unique only within a signer, and app.bid_nonces (signer_id, nonce, auction_id, consumed_at, retain_until) is the durable store behind the NonceStore port, UNIQUE on (signer_id, nonce), retained past the auction's respond_by.",
+      "objective": "Create ledger/sealed/vault/app schemas with roles per DESIGN \u00a7Data models using the partner-reconciled table set (commerce_events with idempotency + prev_hash chain, claims, claim_verifications, verification_evidence_refs, trust_observations, trust_scores, policy_events, ranking_runs/candidates, catalog_snapshots, crawl tables, seller_blacklist with review states); replay library; grant tests prove exchange role cannot read sealed.* (S7). Amendment 1 (D52) adds two app.* structures: app.seller_endpoints holds one row per live key (signer_id, store_id, key_id, public_key, status) so a signer's keys can rotate and key_id is unique only within a signer, and app.bid_nonces (signer_id, nonce, auction_id, consumed_at, retain_until) is the durable store behind the NonceStore port, UNIQUE on (signer_id, nonce), retained past the auction's respond_by.",
       "refs": [
         "C3",
         "R15",
@@ -159,7 +159,7 @@
         "DESIGN#decisions--rationale"
       ],
       "acceptance": [
-        "1. Role→model resolution from env with documented defaults",
+        "1. Role\u2192model resolution from env with documented defaults",
         "2. Prompt assembly puts store context before dynamic tail (cache boundary test)",
         "3. Double replays recorded fixtures deterministically; no network in tests"
       ],
@@ -241,7 +241,7 @@
         "DESIGN#data-models"
       ],
       "acceptance": [
-        "1. On the approved ER fixture set, precision ≥ configured floor and GTIN matches always link",
+        "1. On the approved ER fixture set, precision \u2265 configured floor and GTIN matches always link",
         "2. Edges carry confidence; below-threshold pairs are not linked"
       ],
       "verify": "pytest services/ingest/tests/test_entity_resolution.py -q",
@@ -262,7 +262,7 @@
     {
       "id": "T-023",
       "title": "Catalog MCP adapter passes recorded-contract tests",
-      "objective": "catalog_mcp CatalogAdapter implementing the production-primary read path against recorded mocks (dev stores are not in Global Catalog — A1).",
+      "objective": "catalog_mcp CatalogAdapter implementing the production-primary read path against recorded mocks (dev stores are not in Global Catalog \u2014 A1).",
       "refs": [
         "C6",
         "A1"
@@ -315,7 +315,7 @@
     {
       "id": "T-030",
       "title": "Auctions fan out, time out, and always represent every store",
-      "objective": "Auction state machine in Redis; POST /auctions; parallel BidRequest fan-out with hard timeout; list-price fallback bids for Tier-0 and non-responding stores (R10). Also creates apps/exchange/src/eligibility (the versioned SellerEligibility port: base class with interface_version and check(store_id) -> EligibilityDecision{store_id, status, reason}, the statuses ELIGIBLE/BLACKLISTED/UNAVAILABLE, and SELLER_ELIGIBILITY_INTERFACE_VERSION) and the apps/exchange/src/orchestration package with the R12 solicitation gate solicit_bids(roster=, solicitor=, eligibility=, now=) -> {solicited, entries, denied}. solicit_bids reads eligibility for every rostered store before any store is asked. The gate sits above collect_bids — collect_bids keeps its (roster, responses, now) parameters and is handed an already-eligible roster.",
+      "objective": "Auction state machine in Redis; POST /auctions; parallel BidRequest fan-out with hard timeout; list-price fallback bids for Tier-0 and non-responding stores (R10). Also creates apps/exchange/src/eligibility (the versioned SellerEligibility port: base class with interface_version and check(store_id) -> EligibilityDecision{store_id, status, reason}, the statuses ELIGIBLE/BLACKLISTED/UNAVAILABLE, and SELLER_ELIGIBILITY_INTERFACE_VERSION) and the apps/exchange/src/orchestration package with the R12 solicitation gate solicit_bids(roster=, solicitor=, eligibility=, now=) -> {solicited, entries, denied}. solicit_bids reads eligibility for every rostered store before any store is asked. The gate sits above collect_bids \u2014 collect_bids keeps its (roster, responses, now) parameters and is handed an already-eligible roster.",
       "refs": [
         "R10",
         "R12",
@@ -376,7 +376,7 @@
     {
       "id": "T-032",
       "title": "Shortlists rank by the single published formula behind eligibility filters",
-      "objective": "Eligibility filters (blacklist fail-closed, offer expiry, checkout-domain validity, hard constraints requiring verified facts per R19), then published rank_score per DESIGN §Decisions with [0,1]-normalized features, policy penalties, stable tie-breaking, component map + human-readable explanation; slotting ≤4 with graceful collapse; provenance + verification-warning labels. The eligibility filter is the R12 ranking gate (D54): rank() consults SellerEligibility and excludes the ineligible candidate with a recorded exclusion reason, fail-closed on an unavailable read. Trust inputs are the six-dimension TrustSnapshot (D53); ranking reads the snapshot's score/confidence and never re-derives dimensions.",
+      "objective": "Eligibility filters (blacklist fail-closed, offer expiry, checkout-domain validity, hard constraints requiring verified facts per R19), then published rank_score per DESIGN \u00a7Decisions with [0,1]-normalized features, policy penalties, stable tie-breaking, component map + human-readable explanation; slotting \u22644 with graceful collapse; provenance + verification-warning labels. The eligibility filter is the R12 ranking gate (D54): rank() consults SellerEligibility and excludes the ineligible candidate with a recorded exclusion reason, fail-closed on an unavailable read. Trust inputs are the six-dimension TrustSnapshot (D53); ranking reads the snapshot's score/confidence and never re-derives dimensions.",
       "refs": [
         "R2",
         "R11",
@@ -388,9 +388,9 @@
         "DESIGN#interfaces-contracts-between-tickets"
       ],
       "acceptance": [
-        "1. Golden tests: fixed inputs → exact eligibility set, ranking, slots, explanations",
+        "1. Golden tests: fixed inputs \u2192 exact eligibility set, ranking, slots, explanations",
         "2. Blindness test: tier/fee fields cannot alter score; contradicted hard constraint never wins regardless of other components (release blocker test)",
-        "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1–3 stores",
+        "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1\u20133 stores",
         "4. Ranking gate + versioned interface (R12/D54, fail-closed, by DENIAL with a positive control): a BLACKLISTED candidate is excluded before any score is computed with its exclusion_reasons entry recorded, an UNAVAILABLE read and a raising read each exclude rather than admit, and the same candidate with an ELIGIBLE verdict IS ranked and CAN win - so a ranker that excludes everything fails. SELLER_ELIGIBILITY_INTERFACE_VERSION is a non-empty string, the three statuses are distinct, and BOTH boundary gates (solicit_bids and accept_offer) refuse an eligibility source whose interface_version is not the published one while accepting one that is"
       ],
       "verify": "pytest apps/exchange/tests/test_ranking.py -q",
@@ -411,7 +411,7 @@
     {
       "id": "T-033",
       "title": "Accepting an offer produces a validated code and permalink",
-      "objective": "Accept endpoint resolves a CheckoutProvider (T-036) by CHECKOUT_MODE and delegates code creation to it, returns the permalink the provider mints, records the accepted event, and handles code-creation failure with re-offer of the next slot. The starting slice runs SimulatedRedirectProvider — the checkout URL is validated against the registered seller domain and checkout_redirect plus the downstream LedgerEvent kinds are emitted identically to the Shopify path (C11); Shopify mode selects the T-052 adapter behind the same port.",
+      "objective": "Accept endpoint resolves a CheckoutProvider (T-036) by CHECKOUT_MODE and delegates code creation to it, returns the permalink the provider mints, records the accepted event, and handles code-creation failure with re-offer of the next slot. The starting slice runs SimulatedRedirectProvider \u2014 the checkout URL is validated against the registered seller domain and checkout_redirect plus the downstream LedgerEvent kinds are emitted identically to the Shopify path (C11); Shopify mode selects the T-052 adapter behind the same port.",
       "refs": [
         "R3",
         "A5",
@@ -420,7 +420,7 @@
         "C11"
       ],
       "acceptance": [
-        "1. Accept → code+permalink via the resolved provider; ledger events emitted",
+        "1. Accept \u2192 code+permalink via the resolved provider; ledger events emitted",
         "2. Merchant failure path re-offers deterministically",
         "3. Double-accept on one auction rejected",
         "4. Redirect mode: off-domain checkout_url is refused (release blocker test); emitted event kinds match the Shopify-mode golden sequence",
@@ -445,7 +445,7 @@
     {
       "id": "T-034",
       "title": "Exchange bandit shifts exposure with outcomes and honors exploration",
-      "objective": "Contextual Thompson sampling over cluster×store adjusting exposure/exploration (not formula weights); guaranteed exploration slice for low-data stores from trust snapshot.",
+      "objective": "Contextual Thompson sampling over cluster\u00d7store adjusting exposure/exploration (not formula weights); guaranteed exploration slice for low-data stores from trust snapshot.",
       "refs": [
         "R12",
         "R16",
@@ -499,7 +499,7 @@
     {
       "id": "T-036",
       "title": "Checkout reaches the merchant through a provider port",
-      "objective": "apps/exchange/src/checkout: define CheckoutProvider — the single port every accept path goes through to turn a won offer into a discount code and a permalink — and ship SimulatedRedirectProvider as the required starting implementation, which needs no Shopify and no merchant app. Providers register under the CHECKOUT_MODE spellings accept() already resolves ('redirect' and the shopify_stub/shopify spellings); the port, not the provider, performs the registered-domain check, so no implementation can opt out of it, and every provider emits the identical ordered LedgerEvent kinds so nothing downstream can tell which one ran (C11). The Shopify path (T-052) is one adapter behind this port, not the route to a code.",
+      "objective": "apps/exchange/src/checkout: define CheckoutProvider \u2014 the single port every accept path goes through to turn a won offer into a discount code and a permalink \u2014 and ship SimulatedRedirectProvider as the required starting implementation, which needs no Shopify and no merchant app. Providers register under the CHECKOUT_MODE spellings accept() already resolves ('redirect' and the shopify_stub/shopify spellings); the port, not the provider, performs the registered-domain check, so no implementation can opt out of it, and every provider emits the identical ordered LedgerEvent kinds so nothing downstream can tell which one ran (C11). The Shopify path (T-052) is one adapter behind this port, not the route to a code.",
       "refs": [
         "R3",
         "A5",
@@ -509,7 +509,7 @@
       "acceptance": [
         "1. CheckoutProvider is one port with a registered provider per CHECKOUT_MODE spelling; resolving an unregistered mode raises rather than silently falling back, and a lint/grep test asserts no code-minting call site exists outside a provider",
         "2. SimulatedRedirectProvider mints a single-use code and an on-domain permalink with no Shopify dependency; the same fixture offer run through the Shopify adapter yields the identical ordered LedgerEvent kinds (C11 parity), so provider swap is invisible downstream",
-        "3. The port validates the offer's checkout_url host against the registered seller domain (bid['store_domain']) by exact match BEFORE any provider is asked to mint — rival domain, suffix spoof, glued-suffix spoof, userinfo spoof and subdomain are each refused with no code created (D22); an on-domain offer completes, so a surface that refuses everything cannot satisfy this criterion",
+        "3. The port validates the offer's checkout_url host against the registered seller domain (bid['store_domain']) by exact match BEFORE any provider is asked to mint \u2014 rival domain, suffix spoof, glued-suffix spoof, userinfo spoof and subdomain are each refused with no code created (D22); an on-domain offer completes, so a surface that refuses everything cannot satisfy this criterion",
         "4. Provider selection is the mode argument accept() already receives: accept(auction, bid_id, code_creator, mode) keeps its four positional parameters and its injected code creator, and registering a further provider adds no parameter to it"
       ],
       "verify": "pytest apps/exchange/tests/test_checkout_provider.py -q",
@@ -521,7 +521,7 @@
         "T-010"
       ],
       "non_goals": [
-        "No Shopify GraphQL calls — the Shopify adapter is T-052",
+        "No Shopify GraphQL calls \u2014 the Shopify adapter is T-052",
         "No accept orchestration, no re-offer logic (T-033 owns those)"
       ],
       "parallel_safe": true
@@ -529,7 +529,7 @@
     {
       "id": "T-040",
       "title": "Tool hooks are the only way facts and discounts enter a bid",
-      "objective": "Implement the six hooks per DESIGN §Tool hooks with Provenance on every return; authorize_discount enforces envelope walls; agent-side assembly cannot construct Claims directly (lint + runtime guard).",
+      "objective": "Implement the six hooks per DESIGN \u00a7Tool hooks with Provenance on every return; authorize_discount enforces envelope walls; agent-side assembly cannot construct Claims directly (lint + runtime guard).",
       "refs": [
         "R8",
         "DESIGN#tool-hooks-store-agent-internal-contract"
@@ -557,7 +557,7 @@
     {
       "id": "T-041",
       "title": "Advocate runtime bids within walls and defaults deterministically cold",
-      "objective": "BidRequest→Bid|decline: cache-layout context assembly, hook-only claim emission, deterministic cold-start bid (list price + standing commitments + intro rule only).",
+      "objective": "BidRequest\u2192Bid|decline: cache-layout context assembly, hook-only claim emission, deterministic cold-start bid (list price + standing commitments + intro rule only).",
       "refs": [
         "R8",
         "R10",
@@ -585,7 +585,7 @@
     {
       "id": "T-042",
       "title": "Store loop learns from its own outcomes only",
-      "objective": "Per-store Thompson sampling over discount-depth buckets × commitment sets per cluster; network-prior intake; prior builder consumes pitch/value-prop outcomes only.",
+      "objective": "Per-store Thompson sampling over discount-depth buckets \u00d7 commitment sets per cluster; network-prior intake; prior builder consumes pitch/value-prop outcomes only.",
       "refs": [
         "R17",
         "DESIGN#decisions--rationale"
@@ -753,7 +753,7 @@
     {
       "id": "T-052",
       "title": "Winning offers become single-use validated codes and permalinks",
-      "objective": "The Shopify adapter behind T-036's CheckoutProvider port — one implementation of it, not the only route to a code. /codes: discountCodeBasicCreate usageLimit:1 + expiry, validity + combinesWith pre-check, unique code per accepted offer, permalink construction; duplicate redemption surfaces as offer-integrity event (A5).",
+      "objective": "The Shopify adapter behind T-036's CheckoutProvider port \u2014 one implementation of it, not the only route to a code. /codes: discountCodeBasicCreate usageLimit:1 + expiry, validity + combinesWith pre-check, unique code per accepted offer, permalink construction; duplicate redemption surfaces as offer-integrity event (A5).",
       "refs": [
         "R3",
         "A5",
@@ -789,7 +789,7 @@
         "DESIGN#data-models"
       ],
       "acceptance": [
-        "1. Transcript fixture → exact expected Envelope version (golden)",
+        "1. Transcript fixture \u2192 exact expected Envelope version (golden)",
         "2. No activation without recorded approval artifact",
         "3. Envelope edits create new versions; old versions immutable"
       ],
@@ -819,7 +819,7 @@
       "acceptance": [
         "1. Each pane renders from fixture APIs (component tests)",
         "2. Kill switch flips agent mode via API and is reflected in bid submission tests",
-        "3. Loss-report pane displays categories only — render test asserts absence of amount fields"
+        "3. Loss-report pane displays categories only \u2014 render test asserts absence of amount fields"
       ],
       "verify": "npx vitest run apps/merchant/app/dashboard",
       "scope": [
@@ -866,13 +866,13 @@
     {
       "id": "T-061",
       "title": "Webhook truth reconciles lossy pixel signals",
-      "objective": "Reconciliation: match checkout_pixel↔order_paid by join keys; emit reconciled events; derive price_honored/discount_honored comparisons from webhook data only.",
+      "objective": "Reconciliation: match checkout_pixel\u2194order_paid by join keys; emit reconciled events; derive price_honored/discount_honored comparisons from webhook data only.",
       "refs": [
         "R4",
         "DESIGN#decisions--rationale"
       ],
       "acceptance": [
-        "1. Matched pair → reconciled event with integrity comparisons",
+        "1. Matched pair \u2192 reconciled event with integrity comparisons",
         "2. Webhook-only order (pixel dropped) reconciles cleanly",
         "3. Price/discount mismatch fixture yields integrity deltas sourced from webhook fields"
       ],
@@ -905,7 +905,7 @@
         "1. Golden trajectories (verification-only, outcomes-only, mixed) match human-approved fixture manifest expectations",
         "2. Decay + confidence property tests; conversion influence cap holds",
         "3. Blacklist: identity-bound persistence, expiry/appeal states, and fail-closed read behavior (unavailable state blocks checkout) all tested",
-        "4. Bit-for-bit replay (R15, S3): recomputing every served TrustSnapshot from the genesis event stream reproduces score, confidence, score_version and each dimension's alpha, beta and decayed_at exactly, with decay evaluated against the recorded as-of time rather than wall clock — canonical serialization, event hash, sequence and stream identity all pinned",
+        "4. Bit-for-bit replay (R15, S3): recomputing every served TrustSnapshot from the genesis event stream reproduces score, confidence, score_version and each dimension's alpha, beta and decayed_at exactly, with decay evaluated against the recorded as-of time rather than wall clock \u2014 canonical serialization, event hash, sequence and stream identity all pinned",
         "5. Six dimensions, one system (D53): a contradicted product-fact claim (ingredients / compatibility / nutrition / specifications) moves catalog_claim_accuracy and leaves feedback_match untouched, while a contradicted price claim moves price_honored and leaves catalog_claim_accuracy untouched; the served snapshot exposes all six dims and no seventh",
         "6. Outcome treatment (D53): on the mapped dimension, verified moves the mean up; contradicted moves it down at weight 2.0; unsupported moves it down by the published fractional weight strictly less than contradicted's and its dominant effect is on confidence/coverage; ambiguous produces ZERO mean movement and lowers coverage/confidence only. Asserted as an ordering over four runs from one fixture state, so a no-op implementation fails"
       ],
@@ -1014,7 +1014,7 @@
     {
       "id": "T-070",
       "title": "Buyers authenticate lightly and stores never see who they are",
-      "objective": "Chat shell, magic-link auth, vault mapping email↔pseudonym history, per-session pseudonym rotation; only vault role reads mappings.",
+      "objective": "Chat shell, magic-link auth, vault mapping email\u2194pseudonym history, per-session pseudonym rotation; only vault role reads mappings.",
       "refs": [
         "R5",
         "DESIGN#data-models"
@@ -1046,7 +1046,7 @@
         "R5"
       ],
       "acceptance": [
-        "1. Scripted dialogues (fixtures) yield expected Intents within ≤3 questions",
+        "1. Scripted dialogues (fixtures) yield expected Intents within \u22643 questions",
         "2. Confirmation required before auction creation",
         "3. Bucket builder outputs only DESIGN profile fields; k-floor honored at configured value"
       ],
@@ -1069,7 +1069,7 @@
     {
       "id": "T-072",
       "title": "Shortlists render with provenance and accept hands off cleanly",
-      "objective": "Shortlist UI: slots, trust indicator, provenance labels ('store-confirmed' vs 'from their website'); accept → exchange accept → redirect to permalink.",
+      "objective": "Shortlist UI: slots, trust indicator, provenance labels ('store-confirmed' vs 'from their website'); accept \u2192 exchange accept \u2192 redirect to permalink.",
       "refs": [
         "R2",
         "R3"
@@ -1124,7 +1124,7 @@
     {
       "id": "T-080",
       "title": "The approved manifest and seed generator define ground truth",
-      "objective": "Fixture manifest: dishonest-store behaviors, new-store prior N, seeds, expected trust trajectories — submitted for human approval (approval artifact committed). Parameterized SEED_CATEGORY catalog generator + `make demo-seed` provisioning stub or live stores. Manifest also defines the golden intent/pitch set (incl. persona scripts, contradiction/stale/variant/unit/injection/claim-splitting cases) used by verification and eval gates.",
+      "objective": "Fixture manifest: dishonest-store behaviors, new-store prior N, seeds, expected trust trajectories \u2014 submitted for human approval (approval artifact committed). Parameterized SEED_CATEGORY catalog generator + `make demo-seed` provisioning stub or live stores. Manifest also defines the golden intent/pitch set (incl. persona scripts, contradiction/stale/variant/unit/injection/claim-splitting cases) used by verification and eval gates.",
       "refs": [
         "S2",
         "C9",
@@ -1136,7 +1136,7 @@
         "3. `make demo-seed` idempotent against stub",
         "4. The manifest instantiates the published claim_type -> dimension mapping table (D53): every claim_type the golden set uses maps to exactly one of the SIX published trust dimensions, product-fact claim types (ingredients, compatibility, nutrition, specifications) map to catalog_claim_accuracy and offer-integrity claim types to their transaction dimension, the table states the treatment of verified/contradicted/unsupported/ambiguous outcomes, and loading a manifest containing an unmapped claim_type RAISES rather than defaulting. Every dishonest_store.behaviours[].dim value is one of the six. The table is an additional key alongside the existing manifest keys at fixtures/manifest.json",
         "The manifest carries the mapping under the exact key `claim_type_dimensions` (that spelling is what the frozen tests read), and at least one `dishonest_store.behaviours[].dim` is `catalog_claim_accuracy`.",
-        "The golden set contains at least one product-fact claim with status `verified` AND at least one with status `contradicted` — a set that is all-true or all-false does not exercise the sixth trust dimension in both directions."
+        "The golden set contains at least one product-fact claim with status `verified` AND at least one with status `contradicted` \u2014 a set that is all-true or all-false does not exercise the sixth trust dimension in both directions."
       ],
       "verify": "pytest fixtures/tests/test_seed.py -q",
       "scope": [
@@ -1162,7 +1162,7 @@
     {
       "id": "T-081",
       "title": "Simulated buyers exercise the whole network from one seed",
-      "objective": "services/sim: seeded traffic generator driving intents→auctions→acceptances→stub purchases/returns; dishonest-store script executes manifest behaviors.",
+      "objective": "services/sim: seeded traffic generator driving intents\u2192auctions\u2192acceptances\u2192stub purchases/returns; dishonest-store script executes manifest behaviors.",
       "refs": [
         "S1",
         "S4",
@@ -1190,7 +1190,7 @@
     {
       "id": "T-082",
       "title": "One scripted run proves the full S1 flow",
-      "objective": "E2E test: intent→clarify→bids→shortlist→accept→code→stub checkout→pixel+webhook→reconcile→ledger→trust update, all against compose.",
+      "objective": "E2E test: intent\u2192clarify\u2192bids\u2192shortlist\u2192accept\u2192code\u2192stub checkout\u2192pixel+webhook\u2192reconcile\u2192ledger\u2192trust update, all against compose.",
       "refs": [
         "S1"
       ],
@@ -1256,7 +1256,7 @@
       ],
       "acceptance": [
         "1. Trajectory within manifest tolerance bands",
-        "2. Blacklist event emitted at expected episode ±band",
+        "2. Blacklist event emitted at expected episode \u00b1band",
         "3. Post-blacklist auctions contain zero exposure for the store"
       ],
       "verify": "pytest e2e/test_dishonest.py -q",
@@ -1323,11 +1323,11 @@
       "acceptance": [
         "1. A mocked interview transcript yields an economic envelope carrying every R6 field: floors, max discount, budget cap, intents to pursue, and standing commitments.",
         "2. Activation is refused while the envelope carries no recorded written merchant approval, and succeeds once it does (R6).",
-        "3. Before activation the store agent is in shadow mode: for a live intent it logs a would-be bid WITH its reasoning, and the exchange receives nothing — asserted by the absence of any bid_placed LedgerEvent for that auction, not merely by an empty return value (R7).",
-        "4. After activation the same live intent produces a real submitted bid, and a bid_placed LedgerEvent appears for it — so the test fails if activation is a no-op in either direction."
+        "3. Before activation the store agent is in shadow mode: for a live intent it logs a would-be bid WITH its reasoning, and the exchange receives nothing \u2014 asserted by the absence of any bid_placed LedgerEvent for that auction, not merely by an empty return value (R7).",
+        "4. After activation the same live intent produces a real submitted bid, and a bid_placed LedgerEvent appears for it \u2014 so the test fails if activation is a no-op in either direction."
       ],
       "non_goals": [
-        "The manual demo run on a fresh dev store — that is T-085's runbook.",
+        "The manual demo run on a fresh dev store \u2014 that is T-085's runbook.",
         "New product code: this ticket asserts the join between T-053's onboarding and T-043's shadow mode; a gap it finds is a defect report against those tickets, not a fix here."
       ]
     },
@@ -1362,6 +1362,295 @@
         "No edits to docs/demo/starting-slice.md or docs/tests/** - T-085 owns both"
       ],
       "parallel_safe": true
+    },
+    {
+      "id": "T-100",
+      "title": "Shopify stub never emits an off-domain checkout Location",
+      "objective": "T-013 hardened build_permalink but not the three other places that interpolate shop_domain into a live https:// URL. PUT /_stub/config accepts 'good.example.com@attacker.tld' (StubConfig.validate at state.py:135-140 checks only non-emptiness) and GET /cart/... then answers 303 with location: https://good.example.com@attacker.tld/checkouts/<token>. Proven over real HTTP against uvicorn. Also fix _LABEL at permalink.py:30, which anchors with $ and so admits a trailing newline, making this a response-splitting primitive.",
+      "refs": [
+        "D22",
+        "S8-3",
+        "W2-01",
+        "W2-02"
+      ],
+      "acceptance": [
+        "1. StubConfig.__post_init__ calls _assert_bare_host and refuses every NON_BARE_HOSTS entry",
+        "2. app.py:306, orders.py:277 and telemetry.py:264 cannot emit a Location whose host differs from the configured bare domain",
+        "3. _LABEL anchors with \\A/\\Z; a host ending in LF is refused",
+        "4. test_stub_redemption.py:62 asserts the FULL redirect URL, not endswith('/checkouts/<token>')"
+      ],
+      "verify": "pytest services/shopify-stub -q",
+      "scope": "services/shopify-stub/**",
+      "depends_on": [
+        "T-013"
+      ],
+      "non_goals": [
+        "Do not change the discount or webhook logic"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-101",
+      "title": "A partial re-embed is never certified as complete",
+      "objective": "reembed.py:244,:258 stamps the EmbeddingRun marker state='complete' even when report.complete is False because products were skipped. _check_vector_path then certifies vectors still in the previous provider's space, the stale product ranks first, and products_missing_embeddings/products_missing_status/provenance_violations all report health.",
+      "refs": [
+        "W2-03",
+        "D-embeddings"
+      ],
+      "acceptance": [
+        "1. A reembed pass with a non-empty skipped list leaves state=RUNNING, never complete",
+        "2. Alternatively the skipped product's p.embedding is REMOVED so products_missing_embeddings sees it",
+        "3. A test drives a partial pass and asserts at least one detector reports the inconsistency"
+      ],
+      "verify": "pytest services/ingest -q",
+      "scope": "services/ingest/**",
+      "depends_on": [
+        "T-012"
+      ],
+      "non_goals": [
+        "Do not change the provider-mismatch check itself, which is correct"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-102",
+      "title": "The chain_head guard trigger's DELETE arm is graded by a test",
+      "objective": "db/migrations/0002_ledger_tables.sql:287. Sabotaging BEFORE INSERT OR UPDATE OR DELETE to BEFORE INSERT OR UPDATE leaves pg_trigger.on_delete=False, an owner DELETE FROM ledger.chain_head succeeds (rowcount=1), and pytest apps/trust -q still reports 138 passed. 0002:189 names this arm as the whole of attack (C). test_ledger_chain.py:1321 exercises only the GRANT layer, which fires first; :1398 and :1466 explicitly DISABLE TRIGGER. The code is correct; nothing grades it.",
+      "refs": [
+        "D16",
+        "W2-04"
+      ],
+      "acceptance": [
+        "1. An owner-connection test asserts DELETE FROM ledger.chain_head raises the trigger's own message",
+        "2. A test asserts the DELETE bit of pg_trigger.tgtype for chain_head_guard_trigger",
+        "3. Re-applying the original sabotage turns at least one new test RED"
+      ],
+      "verify": "pytest apps/trust/tests/test_ledger_chain.py -q",
+      "scope": "apps/trust/**",
+      "depends_on": [
+        "T-011"
+      ],
+      "non_goals": [
+        "Do not weaken the grant layer"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-103",
+      "title": "The TypeScript signer refuses integers the wire cannot state",
+      "objective": "packages/contracts/src/ts/signing.ts:122,:68. assertDoubleRepresentable guards only bigint, which JSON.parse never produces: parsing a payload whose quantity is 2**53+1 yields 2**53 before any guard runs, and the TS peer then signs the coerced value and emits a payload_hash over it. Both Python implementations refuse. Per RFC 8785 3.1 the Python behaviour is correct, so a Node seller currently signs a number the submission does not state.",
+      "refs": [
+        "D52",
+        "RFC8785#3.1",
+        "W2-05"
+      ],
+      "acceptance": [
+        "1. Parsing is done with a reviver (or a raw-text scan) that rejects any integer literal failing a round-trip check, before canonicalization",
+        "2. 2**53+1, 2**64+1 and 10**23 are refused with the same error type the Python side raises",
+        "3. A vitest case covers each; none existed before"
+      ],
+      "verify": "npx vitest run packages/contracts",
+      "scope": "packages/contracts/**",
+      "depends_on": [
+        "T-010"
+      ],
+      "non_goals": [
+        "Do not unify the two canonicalizers; that needs the D16 amendment in T-106"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-104",
+      "title": "The prompt cache key cannot collide on separator text",
+      "objective": "packages/llm/src/prompting.py:57 sets SYSTEM_BLOCK_SEPARATOR to NUL on the stated ground that NUL cannot appear in prompt text from a JSON fixture. JSON permits an escaped NUL and recordings.py:116 does not reject it, so the W1-24 collision is live one character over: a two-block call and a one-block call whose static text embeds the separator produce the same key but different wire payloads, and the two-block call replays the one-block recording.",
+      "refs": [
+        "W2-06",
+        "W1-24"
+      ],
+      "acceptance": [
+        "1. wire_key returns the block texts as a tuple rather than a joined string, so no separator exists to collide on",
+        "2. A test constructs the colliding pair and asserts the keys differ and the recording does not cross-replay",
+        "3. The client and the double still compose identically on every prompt shape"
+      ],
+      "verify": "pytest packages/llm -q",
+      "scope": "packages/llm/**",
+      "depends_on": [
+        "T-014"
+      ],
+      "non_goals": [
+        "Do not reintroduce a delimiter-based join"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-105",
+      "title": "Money arithmetic is asserted absolutely, not against itself",
+      "objective": "test_stub_redemption.py:397,:403 compare three values all derived from discount_amount_for, so neutering codes.py:273-275 from ROUND_HALF_UP to ROUND_HALF_EVEN ships 212 passed; replacing the webhook header values with constants also ships green. Every literal money assertion uses 10%/25%, where both roundings agree. The fixed_amount branch (codes.py:276-277) and the clamp (:280) have no test at all.",
+      "refs": [
+        "D22",
+        "W2-07"
+      ],
+      "acceptance": [
+        "1. An absolute assertion pins 0.12345 x 100.00 to total_discount == '12.35'",
+        "2. discount_amount_for has direct unit tests covering percentage, fixed_amount and the clamp",
+        "3. Webhook tests assert header VALUES, not presence",
+        "4. Re-applying either sabotage turns a test RED"
+      ],
+      "verify": "pytest services/shopify-stub -q",
+      "scope": "services/shopify-stub/**",
+      "depends_on": [
+        "T-013"
+      ],
+      "non_goals": [
+        "Do not change the rounding mode; ROUND_HALF_UP is correct"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-106",
+      "title": "One JCS canonicalizer, or a conformance gate that both must pass",
+      "objective": "T-010 and T-011 each wrote an RFC-8785 canonicalizer. They now agree byte-for-byte after both adopted float(v)==v, verified over ~1.5M inputs, but nothing in the repo tests both together and D16 says nothing outside apps/trust/src/ledger defines its own hashing while D52 says there is exactly one signing implementation. Also apps/trust/src/ledger has the dual-spelling problem T-014 solved with _bind_submodules: trust.ledger.canonical is not apps.trust.src.ledger.canonical, so a cross-spelling except CanonicalisationError fails to catch. BLOCKED on a user ruling: unifying requires amending D16, which forbids the recommended placement.",
+      "refs": [
+        "D16",
+        "D52",
+        "W2-08",
+        "N-12",
+        "N-14"
+      ],
+      "acceptance": [
+        "1. A shared conformance test drives canonicalization_corpus.json plus the RFC 3.2.4 sample through BOTH Python implementations and the TypeScript twin",
+        "2. It lives where both are importable without path tricks and runs in the ordinary suite",
+        "3. apps/trust/src/ledger binds its two spellings to one set of module objects",
+        "4. Either D16 is amended to name one implementation, or the escalation records why two stand"
+      ],
+      "verify": "pytest e2e -q && pytest apps/trust -q",
+      "scope": "e2e/**, apps/trust/**",
+      "depends_on": [
+        "T-010",
+        "T-011"
+      ],
+      "non_goals": [
+        "Do not delete either implementation before the D16 ruling"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-107",
+      "title": "claim_id is computed with JCS, not json.dumps",
+      "objective": "packages/contracts/src/claims.py:63-85 hashes json.dumps(material, sort_keys=True, separators=(',',':'), ensure_ascii=False). sort_keys orders by code point, not UTF-16 code unit, and numbers use repr: {'rate': 1e-5} serialises '{\"rate\":1e-05}' where JCS gives '{\"rate\":0.00001}', and an emoji/U+FFFF key pair orders the other way round. Any JS peer computing a claim id disagrees on both. This is a fourth independent hashing definition in a system whose decisions say there should be one.",
+      "refs": [
+        "D16",
+        "D52",
+        "N-11"
+      ],
+      "acceptance": [
+        "1. claim_id derives its bytes from the shared canonical_json rather than json.dumps",
+        "2. A test pins the two divergent cases above against the JCS rendering",
+        "3. The change is called out as re-identifying every existing claim, so it lands before any consumer stores one"
+      ],
+      "verify": "pytest packages/contracts -q",
+      "scope": "packages/contracts/**",
+      "depends_on": [
+        "T-010"
+      ],
+      "non_goals": [
+        "Do not attempt a migration of existing ids; nothing has stored one yet"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-108",
+      "title": "The two envelope gates agree on whitespace",
+      "objective": "SigningEnvelope spells its rule min_length=1, so a whitespace-only value passes pydantic, while missing_signing_fields strips and calls it missing. The asymmetry currently points the safe way because canonical_signing_bytes sits on the strict gate, and it is pinned by test_the_two_envelope_gates_agree_with_each_other, but the two spellings should converge. Closing it edits schemas/protocol.schema.json and regenerates both codegen artifacts.",
+      "refs": [
+        "D52",
+        "N-18"
+      ],
+      "acceptance": [
+        "1. The schema and missing_signing_fields agree on whitespace-only values",
+        "2. Both generated artifacts are regenerated and the drift check passes",
+        "3. The existing agreement test still passes"
+      ],
+      "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
+      "scope": "packages/contracts/**",
+      "depends_on": [
+        "T-010"
+      ],
+      "non_goals": [
+        "Do not relax either gate; converge on the strict one"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-109",
+      "title": "A datastore blip cannot silently empty the security gate",
+      "objective": "conftest.py:105-121 and proxyshop_support/reachability.py:36-46,64-70: skip_reason() probes Postgres, Neo4j AND Redis, and if any one fails every @pytest.mark.docker test skips. That is 47 of T-011's 110 gate cases, including 100% of its acceptance criteria 1, 2 and 4. A one-second Redis blip turns the S7 role-isolation gate into a canonicalisation-only suite reporting 63 passed, 47 skipped at exit 0. verify.sh:105 makes -m 'not docker' the normal path for make check.",
+      "refs": [
+        "D37",
+        "D38",
+        "N-01"
+      ],
+      "acceptance": [
+        "1. Reachability is per-service; a Postgres fixture skips only on Postgres being unreachable",
+        "2. A test asserts that a simulated single-service outage does not skip tests belonging to the other two",
+        "3. The skip message names which service was unreachable"
+      ],
+      "verify": "pytest apps/trust -q && pytest proxyshop_support -q",
+      "scope": "conftest.py, proxyshop_support/**",
+      "depends_on": [
+        "T-000"
+      ],
+      "non_goals": [
+        "Do not remove the docker marker or the skip mechanism itself"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-110",
+      "title": "Role passwords have one source of truth",
+      "objective": "T-011 made db/migrations/0001 source the role password from $PROXYSHOP_ROLE_PASSWORD at CREATE time, but db/init/00-roles.sql:28,34,40,46 still ALTER ROLE ... PASSWORD 'x' unconditionally on its else-branch for all four LOGIN roles, so setting the env var today produces two sources of truth and the literal wins on every fresh volume.",
+      "refs": [
+        "D5",
+        "N-17"
+      ],
+      "acceptance": [
+        "1. db/init/00-roles.sql reads the same env var with the same dev-only default",
+        "2. A test asserts a non-default env value survives a fresh-volume init",
+        "3. No password literal remains in a checked-in file except as a documented dev default"
+      ],
+      "verify": "pytest apps/trust/tests/test_schema_grants.py -q",
+      "scope": "db/init/**",
+      "depends_on": [
+        "T-011"
+      ],
+      "non_goals": [
+        "Do not change the role set or the grants"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-111",
+      "title": "Provisioning fails loudly when the flat namespaces are dead",
+      "objective": "scripts/bootstrap.sh:26-33 un-hides the uv-written _proxyshop.pth (macOS UF_HIDDEN, which site.addpackage silently skips) but ends in '|| true', and its namespace assertion at :48-51 ends in '|| echo WARNING >&2'. Neither can fail the provisioning. This reached a measurement: the primary tree's .pth was dark, acceptance_pass_rate read 5.00 instead of 13.33 and build_succeeds fell 1 to 0, with no product cause. The step that provides the guarantee and the step that consumes it both assume and neither checks.",
+      "refs": [
+        "D42",
+        "N-21",
+        "N-22"
+      ],
+      "acceptance": [
+        "1. bootstrap.sh exits non-zero when the flat namespaces do not import from an unrelated cwd",
+        "2. The chflags step reports failure rather than swallowing it",
+        "3. A note records that the measurement tree needs the same provisioning as every worktree"
+      ],
+      "verify": "./scripts/bootstrap.sh && ./scripts/verify.sh check",
+      "scope": "scripts/bootstrap.sh",
+      "depends_on": [
+        "T-000"
+      ],
+      "non_goals": [
+        "Do not change what bootstrap installs, only how loudly it fails"
+      ],
+      "parallel_safe": false
     }
   ]
 }

@@ -337,16 +337,25 @@ class SigningEnvelope(BaseModel):
     seller, distinct when one seller submits for several). `key_id` selects one of that signer's
     live keys, so the keyring is `{signer_id: {key_id: secret}}` and a lookup keyed on `key_id`
     alone is wrong. `nonce` is the replay/idempotency key, unique PER SIGNER, never globally.
+
+    The five envelope fields are non-blank BY PATTERN, not merely by length. `minLength: 1`
+    alone admits `"   "`, which `contracts.signing.missing_signing_fields` strips and calls
+    MISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,
+    so the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no
+    schema should admit one. The class is spelled `[^\\s\\u001c-\\u001f]` rather than `\\S`
+    because Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as
+    whitespace: `\\S` alone would leave those four characters disagreeing with the very
+    function this pattern exists to match.
     """
 
     model_config = ConfigDict(
         extra="forbid",
     )
-    signer_id: str = Field(..., min_length=1)
-    key_id: str = Field(..., min_length=1)
-    issued_at: str = Field(..., min_length=1)
-    nonce: str = Field(..., min_length=1)
-    schema_version: str = Field(..., min_length=1)
+    signer_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    key_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    issued_at: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    nonce: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    schema_version: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
 
 
 class SignedBidSubmission(BaseModel):
@@ -358,6 +367,15 @@ class SignedBidSubmission(BaseModel):
 
     The property set is asserted to be exactly `Bid` ∪ `SigningEnvelope` by a checked-in test, so
     this definition cannot drift away from the two it composes.
+
+    The five envelope fields are non-blank BY PATTERN, not merely by length. `minLength: 1`
+    alone admits `"   "`, which `contracts.signing.missing_signing_fields` strips and calls
+    MISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,
+    so the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no
+    schema should admit one. The class is spelled `[^\\s\\u001c-\\u001f]` rather than `\\S`
+    because Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as
+    whitespace: `\\S` alone would leave those four characters disagreeing with the very
+    function this pattern exists to match.
     """
 
     model_config = ConfigDict(
@@ -371,11 +389,11 @@ class SignedBidSubmission(BaseModel):
     message: str | None = None
     agent_version: str = Field(..., min_length=1)
     signature: str | None = None
-    schema_version: str = Field(..., min_length=1)
-    signer_id: str = Field(..., min_length=1)
-    key_id: str = Field(..., min_length=1)
-    issued_at: str = Field(..., min_length=1)
-    nonce: str = Field(..., min_length=1)
+    schema_version: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    signer_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    key_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    issued_at: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    nonce: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
 
 
 class HardConstraint(BaseModel):

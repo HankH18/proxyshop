@@ -8,12 +8,14 @@ must.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pathlib
 
 import pytest
 
 from contracts.claims import canonicalize_value
-from packages.contracts import claim_id, claim_id_for
+from packages.contracts import canonical_json, claim_id, claim_id_for
 
 
 def base(**overrides):
@@ -180,3 +182,100 @@ def test_a_value_that_cannot_be_canonicalized_is_refused_rather_than_stringified
     would silently differ on the next run — the exact failure this module exists to prevent."""
     with pytest.raises(TypeError):
         claim_id(pitch_ref="p", key="k", value=object())
+
+
+# --- T-107: the bytes are RFC 8785, not `json.dumps(sort_keys=True)` -------------------------
+
+
+def hashed_material(value: object) -> dict[str, object]:
+    """The exact mapping `claim_id` hashes for `base(value=...)`.
+
+    Reconstructed rather than inspected, so the assertions below are about the SERIALIZATION and
+    would not quietly pass if `claim_id` stopped hashing this material at all.
+    """
+    return {
+        "pitch_ref": "pitch:p-1",
+        "key": "free_returns",
+        "value": canonicalize_value(value),
+        "claim_type": "return_policy",
+    }
+
+
+def id_over(text: str) -> str:
+    return f"claim:sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+
+def dumps_rendering(material: dict[str, object]) -> str:
+    """What this module used to hash: `json.dumps(sort_keys=True, separators=(",", ":"))`."""
+    return json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+#: `(value, JCS rendering, json.dumps rendering)` for the two ways the two serializations
+#: disagree. Both are reachable from a real claim value — `Claim.value` is unconstrained — and a
+#: JS peer computing a claim id produces the JCS column in both rows.
+JCS_DIVERGENCES: list[tuple[object, str, str]] = [
+    (
+        # `json.dumps` writes numbers with `repr`; ECMAScript — and so RFC 8785 §3.2.2.3, and so
+        # every JS peer — writes `0.00001`.
+        {"rate": 1e-5},
+        '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",'
+        '"value":{"rate":0.00001}}',
+        '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",'
+        '"value":{"rate":1e-05}}',
+    ),
+    (
+        # `sort_keys` orders by CODE POINT (U+1F600 > U+FFFF); RFC 8785 §3.2.3 orders by UTF-16
+        # CODE UNIT, where the emoji's leading surrogate D83D sorts BELOW FFFF. The two put the
+        # same two keys in opposite orders.
+        {"\U0001f600": 1, "￿": 2},
+        '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",'
+        '"value":{"\U0001f600":1,"￿":2}}',
+        '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",'
+        '"value":{"￿":2,"\U0001f600":1}}',
+    ),
+]
+
+
+@pytest.mark.parametrize(("value", "jcs", "dumps"), JCS_DIVERGENCES)
+def test_the_id_is_the_jcs_rendering_and_not_the_json_dumps_one(
+    value: object, jcs: str, dumps: str
+) -> None:
+    """The two serializations really do differ here, and `claim_id` follows the JCS one.
+
+    Pinning both sides matters: an assertion that only said "the id equals the JCS hash" would
+    also pass if the two renderings happened to agree, which is exactly the case that proves
+    nothing."""
+    material = hashed_material(value)
+    assert canonical_json(material) == jcs
+    assert dumps_rendering(material) == dumps
+    assert jcs != dumps, "this case no longer distinguishes the two serializations"
+
+    assert base(value=value) == id_over(jcs)
+    assert base(value=value) != id_over(dumps)
+
+
+def test_a_claim_id_is_reproducible_from_the_canonical_bytes_alone() -> None:
+    """The whole point of moving to JCS: a peer that can produce RFC 8785 bytes can produce the
+    id, without reimplementing anything of this module but the material's four keys."""
+    for value, jcs, _ in JCS_DIVERGENCES:
+        assert base(value=value) == id_over(jcs)
+
+
+def test_an_integer_no_double_can_state_has_no_claim_id() -> None:
+    """RFC 8785 §3.1 arrives with the canonicalizer, and that is the right answer: a JS peer
+    reading `9007199254740993` off the wire holds `9007199254740992`, so the two could not agree
+    on an id for it. Refusing is the only honest option."""
+    with pytest.raises(TypeError):
+        base(value=2**53 + 1)
+    with pytest.raises(ValueError):
+        base(value={"quantity": 10**23})
+    # The control: an integer that IS an exact double still hashes.
+    assert base(value=2**53).startswith("claim:sha256:")
+    assert base(value=10**16).startswith("claim:sha256:")
+
+
+def test_a_lone_surrogate_in_a_claim_value_is_refused_rather_than_hashed() -> None:
+    """`Claim.value` is unconstrained, so a lone surrogate is trivially reachable. Hashing one
+    meant `.encode("utf-8")` raising `UnicodeEncodeError` — a 500 where a refusal belongs."""
+    with pytest.raises(TypeError):
+        base(value="\ud800")

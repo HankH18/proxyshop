@@ -18,9 +18,11 @@ import {
   isSignedBidSubmission,
   keyringSecret,
   missingSigningFields,
+  parseSignableJson,
   payloadHash,
   signingEnvelopeErrors,
 } from "../src/ts/signing.js";
+import type {Payload} from "../src/ts/signing.js";
 import {isValid} from "../src/ts/schemas.js";
 import {makeBid, makeOffer, makeSubmission} from "./fixtures.js";
 
@@ -482,3 +484,230 @@ describe("RFC 8785 §3.2.2.2 — lone surrogates", () => {
     }
   });
 });
+
+// --- T-103: RFC 8785 §3.1 at the door JavaScript actually loses precision at -------------
+
+/**
+ * Integer literals that have NO exact double, paired with what `JSON.parse` silently delivers
+ * instead. Written as wire text, never as JS literals: the whole defect is that the literal form
+ * is already the wrong number by the time it is a value, so a test written with literals could
+ * not state the input it means.
+ *
+ * The Python peer refuses all of these inside `canonical_json`
+ * (`tests/test_signing_envelope.py`), and refused them while TypeScript signed the coercion —
+ * which is a Node seller signing a quantity its own submission does not state.
+ */
+const NON_DOUBLE_INTEGER_WIRE: ReadonlyArray<readonly [string, string]> = [
+  ["9007199254740993", "9007199254740992"], // 2**53 + 1
+  ["18446744073709551617", "18446744073709552000"], // 2**64 + 1
+  ["100000000000000000000000", "1e+23"], // 10**23
+  ["-9007199254740993", "-9007199254740992"],
+  ["123456789012345678901234567890", "1.2345678901234568e+29"],
+];
+
+/** Integers that ARE exact doubles and must keep parsing. Without these the rule could be
+ * satisfied by refusing every large integer, which would break real bids. */
+const EXACT_DOUBLE_INTEGER_WIRE: readonly string[] = [
+  "0",
+  "-0",
+  "1",
+  "-42",
+  "9007199254740992", // 2**53 — outside the safe-integer range and still exact
+  "18446744073709551616", // 2**64
+  "10000000000000000", // 10**16, which a safe-integer bound wrongly rejects
+];
+
+describe("RFC 8785 §3.1 — parsing refuses integers the wire cannot state", () => {
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses the integer literal %s", (literal) => {
+    expect(() => parseSignableJson(`{"quantity":${literal}}`)).toThrow(CanonicalisationError);
+    expect(() => parseSignableJson(`{"quantity":${literal}}`)).toThrow(/IEEE-754 double/);
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)(
+    "would otherwise have signed %s as %s",
+    (literal, coerced) => {
+      // The defect, pinned as the reason the guard exists: plain `JSON.parse` hands back a
+      // DIFFERENT number and `canonicalJson` writes it into the signed bytes without complaint.
+      const parsed = JSON.parse(`{"quantity":${literal}}`) as {quantity: number};
+      expect(canonicalJson(parsed)).toBe(`{"quantity":${coerced}}`);
+      expect(String(parsed.quantity)).not.toBe(literal);
+    },
+  );
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s nested anywhere in the payload", (literal) => {
+    expect(() => parseSignableJson(`[{"offer":{"quantity":${literal}}}]`)).toThrow(
+      CanonicalisationError,
+    );
+    expect(() => parseSignableJson(`[1,[2,[${literal}]]]`)).toThrow(CanonicalisationError);
+    expect(() => parseSignableJson(literal)).toThrow(CanonicalisationError);
+  });
+
+  it.each(EXACT_DOUBLE_INTEGER_WIRE)("still parses the exact double %s", (literal) => {
+    const parsed = parseSignableJson(`{"quantity":${literal}}`) as {quantity: number};
+    expect(parsed.quantity).toBe(Number(literal));
+  });
+
+  it("does not mistake digits inside strings for numbers", () => {
+    // The scan walks raw text, so it has to know where strings end — including a string whose
+    // last character is an escaped quote, and one holding an escaped backslash.
+    const wire =
+      '{"note":"9007199254740993","escaped":"a\\"9007199254740993","tail":"b\\\\","n":1}';
+    expect(parseSignableJson(wire)).toEqual({
+      note: "9007199254740993",
+      escaped: 'a"9007199254740993',
+      tail: "b\\",
+      n: 1,
+    });
+  });
+
+  it("leaves fractional and exponential literals to the float rules both sides share", () => {
+    // `json.loads` gives Python a `float` for these too, so there is nothing to disagree about:
+    // 0.1 is the same double in both languages, and `1e400` is Infinity in both.
+    expect(parseSignableJson('{"a":0.1,"b":1e-5,"c":1.5e300}')).toEqual({
+      a: 0.1,
+      b: 1e-5,
+      c: 1.5e300,
+    });
+    expect(canonicalJson(parseSignableJson('{"b":1e-5}'))).toBe('{"b":0.00001}');
+  });
+
+  it("refuses an integer too large for a double at all", () => {
+    expect(() => parseSignableJson(`{"n":${"9".repeat(400)}}`)).toThrow(CanonicalisationError);
+  });
+
+  it("still reports malformed JSON as a SyntaxError, not a canonicalisation failure", () => {
+    // A parse failure is not a signing failure, and collapsing the two would tell a caller the
+    // wrong thing about a truncated request body.
+    expect(() => parseSignableJson('{"a":')).toThrow(SyntaxError);
+    expect(() => parseSignableJson('{"a":')).not.toThrow(CanonicalisationError);
+  });
+
+  it("refuses a non-string argument rather than parsing its coercion", () => {
+    expect(() => parseSignableJson(42 as never)).toThrow(CanonicalisationError);
+  });
+
+  it("round-trips a real submission unchanged", () => {
+    // The positive control: the guard must not change what a legal submission parses to, or the
+    // canonical bytes would move and every existing signature with them.
+    const payload = makeSubmission();
+    const wire = JSON.stringify(payload);
+    expect(canonicalSigningBytes(parseSignableJson(wire) as Payload)).toEqual(
+      canonicalSigningBytes(payload),
+    );
+    expect(decode(canonicalSigningBytes(parseSignableJson(wire) as Payload))).toBe(
+      EXPECTED_CANONICAL_BYTES,
+    );
+  });
+
+  it("keeps the coerced quantity out of the payload hash entirely", () => {
+    // The end-to-end consequence. Without the guard `payloadHash` digests 9007199254740992 and
+    // the signature covers a quantity the seller never wrote.
+    const wire = JSON.stringify({...makeSubmission(), quantity: 0}).replace(
+      '"quantity":0',
+      '"quantity":9007199254740993',
+    );
+    expect(() => parseSignableJson(wire)).toThrow(CanonicalisationError);
+  });
+});
+
+// --- T-107: the same canonicalizer now defines `claim_id` ---------------------------------
+
+describe("a JS peer and the Python `claim_id` render the same material identically", () => {
+  /** Byte-for-byte the strings `tests/test_claim_identity.py::JCS_DIVERGENCES` pins. Those are
+   * the two cases where `json.dumps(sort_keys=True)` — what `claim_id` used to hash — differs
+   * from RFC 8785, so this is where a JS peer used to compute a different id for the same
+   * claim. Pinning the same literals in both suites is what makes that one definition. */
+  it.each([
+    [
+      {claim_type: "return_policy", key: "free_returns", pitch_ref: "pitch:p-1", value: {rate: 1e-5}},
+      '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",' +
+        '"value":{"rate":0.00001}}',
+    ],
+    [
+      {
+        claim_type: "return_policy",
+        key: "free_returns",
+        pitch_ref: "pitch:p-1",
+        value: {"\u{1F600}": 1, "￿": 2},
+      },
+      '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",' +
+        '"value":{"\u{1F600}":1,"￿":2}}',
+    ],
+  ])("renders claim material %#", (material, expected) => {
+    expect(canonicalJson(material)).toBe(expected);
+    // The rendering `claim_id` used to hash, for contrast: `JSON.stringify` with sorted keys is
+    // the JS spelling of `sort_keys=True`, and it disagrees on both rows.
+    expect(JSON.stringify(material, Object.keys(material).sort())).not.toBe(expected);
+  });
+});
+
+// --- T-108: the schema gate and `missingSigningFields` agree on whitespace -----------------
+
+/**
+ * Every whitespace-only spelling the envelope's `pattern` excludes, written by code point so no
+ * raw control character lands in this file. `String.prototype.trim()` is NOT this set — it keeps
+ * U+001C-U+001F, which Python's `str.strip()` removes and the schema's class excludes — so a
+ * `trim()`-based check disagreed with the very schema Ajv compiles from the same bundle.
+ */
+const WHITESPACE_ONLY: readonly string[] = [
+  0x20, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0xa0, 0x1680, 0x2000, 0x2003, 0x2028,
+  0x2029, 0x202f, 0x205f, 0x3000,
+]
+  .map((code) => String.fromCodePoint(code))
+  .concat(["   ", String.fromCodePoint(0x20, 0x09, 0x0a)]);
+
+describe("T-108 — both envelope gates refuse a whitespace-only value", () => {
+  it.each(
+    REQUIRED_SIGNING_FIELDS.flatMap((field) =>
+      WHITESPACE_ONLY.map((blank) => [field, blank] as const),
+    ),
+  )("refuses %s = %j", (field, blank) => {
+    const payload = makeSubmission({[field]: blank});
+    expect(missingSigningFields(payload)).toContain(field);
+    expect(isValid("SignedBidSubmission", payload)).toBe(false);
+    expect(isValid("SigningEnvelope", envelopeOf(payload))).toBe(false);
+    expect(() => canonicalSigningBytes(payload)).toThrow(/incomplete signing envelope/);
+  });
+
+  it.each([...REQUIRED_SIGNING_FIELDS])("still admits a real %s", (field) => {
+    // The control. A pattern that rejected everything would satisfy the cases above and refuse
+    // every legal submission — including the padded-but-non-empty spellings that stay valid.
+    const value = field === "issued_at" ? "2026-01-01T00:00:00Z" : " padded ";
+    const payload = makeSubmission({[field]: value});
+    expect(missingSigningFields(payload)).toEqual([]);
+    expect(isValid("SignedBidSubmission", payload)).toBe(true);
+    expect(isValid("SigningEnvelope", envelopeOf(payload))).toBe(true);
+    expect(canonicalSigningBytes(payload).length).toBeGreaterThan(0);
+  });
+
+  it("agrees with the compiled schema on every one of these, character by character", () => {
+    // The point of the ticket: two gates on one rule that disagree is ONE gate, and it is
+    // whichever one the caller happens to be standing on. `canonicalSigningBytes` stands on
+    // `missingSigningFields`; Ajv stands on the schema. They must not differ.
+    for (const blank of WHITESPACE_ONLY) {
+      const payload = makeSubmission({nonce: blank});
+      expect(missingSigningFields(payload).includes("nonce"), JSON.stringify(blank)).toBe(true);
+      expect(isValid("SignedBidSubmission", payload), JSON.stringify(blank)).toBe(false);
+    }
+  });
+
+  it("agrees with itself even where the two regex engines differ", () => {
+    // U+0085 (NEL) is Unicode White_Space, so Python's `str.strip()` and the rust-regex `\s`
+    // behind pydantic call it blank; JavaScript's `\s` and `trim()` do not. U+FEFF is the mirror
+    // image. What T-108 asks for is that the SCHEMA and `missingSigningFields` agree, and on this
+    // side they do — for both characters, whichever way the answer falls. The cross-language
+    // split lives in `str.strip()` vs `String.trim()` and is older than this ticket.
+    for (const code of [0x85, 0xfeff]) {
+      const blank = String.fromCodePoint(code);
+      const payload = makeSubmission({nonce: blank});
+      const functionSaysPresent = !missingSigningFields(payload).includes("nonce");
+      const schemaSaysPresent = isValid("SignedBidSubmission", payload);
+      expect(functionSaysPresent, `U+${code.toString(16).toUpperCase()}`).toBe(schemaSaysPresent);
+    }
+  });
+});
+
+/** The five envelope fields lifted out of a submission, as `SigningEnvelope` shaped. */
+function envelopeOf(payload: Payload): Payload {
+  return Object.fromEntries(REQUIRED_SIGNING_FIELDS.map((field) => [field, payload[field]]));
+}
