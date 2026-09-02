@@ -197,8 +197,15 @@ def refund_order(
         The recorded :class:`~shopify_stub.state.Refund`.
 
     Raises:
-        ValueError: the refund would exceed what remains refundable. Real Shopify rejects
-            that too, and silently clamping it would let a consumer's arithmetic bug pass.
+        ValueError: the amount is **not positive** (``"refund amount must be positive"``),
+            or it **exceeds what remains refundable**
+            (``"refund of … exceeds refundable remainder …"``). Both spellings are listed
+            because this clause used to name only the second while the code raised both,
+            and a caller reading it would have expected ``refund_order(..., amount=0)`` to
+            record a zero refund. Real Shopify rejects an over-refund too, and silently
+            clamping either case would let a consumer's arithmetic bug pass.
+            ``POST /_stub/orders/{id}/refund`` turns both into a **409**. Pinned by
+            ``test_stub_orders_query.test_every_refusal_in_refund_orders_raises_clause``.
     """
     moment = now or state.now()
     remaining = order.total_price - order.total_refunded
