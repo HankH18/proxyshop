@@ -25,11 +25,13 @@ conformance is unprovable here; this is one of the places that bites.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import secrets
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import quote, urlencode
 
 import httpx
@@ -61,6 +63,104 @@ class OAuthCallback:
 def new_state() -> str:
     """A fresh anti-forgery ``state`` nonce for an authorize redirect."""
     return secrets.token_urlsafe(24)
+
+
+#: How long an issued install state stays redeemable. Long enough for a merchant to read
+#: Shopify's grant screen, short enough that a leaked authorize URL is not a standing
+#: install ticket.
+INSTALL_STATE_TTL_SECONDS = 600
+
+#: Version tag on the signed state, so a future format change is a clean refusal of the old
+#: one rather than a silent misparse.
+_STATE_VERSION = "s1"
+
+
+class InstallStateRejected(OAuthCallbackRejected):
+    """The ``state`` on a callback was not one this app issued, or is no longer valid."""
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _unb64url(text: str) -> bytes:
+    padded = text + "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def issue_install_state(shop_domain: str, *, secret: str, now: datetime | None = None) -> str:
+    """Mint a ``state`` that carries its own shop and issue time, signed by the app secret.
+
+    The state used to be a bare nonce, with the shop it belonged to held in a process-local
+    ``{state: shop}`` map bounded at 256 entries and evicted FIFO. ``GET /install`` is
+    unauthenticated, so 256 anonymous requests flushed every merchant who was mid-install
+    and answered their callback ``unknown-state`` — a denial of service costing nothing to
+    mount. The same map also made the flow single-replica: an install started on one process
+    could not be finished on another.
+
+    Signing the state removes the shared slot rather than enlarging it. There is nothing to
+    evict, nothing to synchronise between replicas, and the shop binding is now *verified*
+    on the way back in rather than looked up.
+
+    Raises:
+        InvalidShopDomain: the shop is not a bare ``.myshopify.com`` host.
+        ValueError: ``secret`` is blank — an unsigned state is not a state.
+    """
+    shop = normalize_shop_domain(shop_domain)
+    if not secret:
+        raise ValueError("an install state cannot be issued without the app's client secret")
+    issued = int((now or datetime.now(UTC)).timestamp())
+    body = _b64url(f"{_STATE_VERSION}:{issued}:{secrets.token_urlsafe(16)}:{shop}".encode())
+    digest = hmac.new(signature_bytes(secret), signature_bytes(body), hashlib.sha256).digest()
+    return f"{body}.{_b64url(digest)}"
+
+
+def read_install_state(
+    state: str,
+    *,
+    secret: str,
+    now: datetime | None = None,
+    ttl_seconds: int = INSTALL_STATE_TTL_SECONDS,
+) -> str:
+    """Verify a ``state`` and return the shop it was issued for.
+
+    Every failure is the same exception on purpose: a forged state, a tampered one, an
+    expired one and a malformed one are all "not a state this app issued", and telling them
+    apart is a signal handed to whoever is guessing.
+
+    Raises:
+        InstallStateRejected: the state is not one this app issued, or has expired.
+    """
+    if not secret:
+        raise InstallStateRejected("no client secret is configured; no state can be verified")
+    body, _, supplied = str(state).partition(".")
+    if not body or not supplied:
+        raise InstallStateRejected("the callback state is not in the issued format")
+    expected = hmac.new(
+        signature_bytes(secret), signature_bytes(body), hashlib.sha256
+    ).digest()
+    if not secure_equals(_b64url(expected), supplied):
+        raise InstallStateRejected("the callback state did not verify")
+    try:
+        version, issued_text, _nonce, shop = _unb64url(body).decode("utf-8").split(":", 3)
+    except Exception as exc:  # noqa: BLE001 - an attacker-chosen input may not raise a 500
+        # A signed state cannot get here with a body this app did not write, so this is
+        # defensive rather than reachable; it stays a refusal because the alternative is a
+        # 500 on an attacker-chosen input.
+        raise InstallStateRejected("the callback state is unreadable") from exc
+    if version != _STATE_VERSION:
+        raise InstallStateRejected("the callback state is from an older format")
+    try:
+        issued = int(issued_text)
+    except ValueError as exc:
+        raise InstallStateRejected("the callback state carries no issue time") from exc
+    age = int((now or datetime.now(UTC)).timestamp()) - issued
+    if age < 0 or age > ttl_seconds:
+        raise InstallStateRejected(f"the callback state expired {age}s after it was issued")
+    try:
+        return normalize_shop_domain(shop)
+    except InvalidShopDomain as exc:
+        raise InstallStateRejected("the callback state names an unusable shop") from exc
 
 
 def authorize_url(
