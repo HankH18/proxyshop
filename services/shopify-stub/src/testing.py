@@ -366,3 +366,65 @@ __all__ = [
     "RecordingReceiver",
     "StubClient",
 ]
+
+
+class TruncatingReceiver:
+    """A receiver that answers normally once, then dies mid-response on every later request.
+
+    The delivery log documents ``status_code`` as "the **last** attempt's status, or
+    ``None`` when the last attempt raised before a response (a connection error, a
+    timeout)". :class:`RecordingReceiver` cannot produce that: every one of its answers is
+    a complete HTTP response, so ``status_code`` is never ``None`` and a delivery whose
+    first attempt got a status and whose last did not is unreachable — which is the one
+    case that separates "the last attempt's outcome" from "the last outcome there was".
+
+    So this receiver promises a ``Content-Length`` it does not send and lets the server cut
+    the connection, which reaches the client as ``httpx.RemoteProtocolError``. Verified
+    deterministic over repeated runs against ``proxyshop_support.asgi_server.serve``; the
+    truncated turns log an ASGI traceback on the server side, which is the receiver
+    working, not the stub failing.
+
+    Args:
+        first_status: the status answered to the first request. The default ``500`` makes
+            the first attempt a *recorded* failure, so a log that keeps the first attempt
+            and a log that keeps the last are two different values.
+    """
+
+    def __init__(self, first_status: int = 500) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.first_status = first_status
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        self.requests.append({"path": scope["path"], "body": body})
+        if len(self.requests) == 1:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.first_status,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b"{}"})
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-length", b"100")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"{}", "more_body": False})

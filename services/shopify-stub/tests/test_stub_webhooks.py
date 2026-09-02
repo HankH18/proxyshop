@@ -21,7 +21,12 @@ import json
 import uuid
 from datetime import UTC, datetime
 
-from shopify_stub.testing import SEED_VARIANT, RecordingReceiver, StubClient
+from shopify_stub.testing import (
+    SEED_VARIANT,
+    RecordingReceiver,
+    StubClient,
+    TruncatingReceiver,
+)
 from shopify_stub.webhooks import (
     HEADER_API_VERSION,
     HEADER_EVENT_ID,
@@ -536,3 +541,90 @@ async def test_a_second_subscriber_is_a_second_row(
     assert by_url[flaky_url]["attempts"] == 3
     assert len(good_receiver.requests) == 1
     assert len(flaky_receiver.requests) == 3
+
+
+# ---------------------------------------------------------------------------------------
+# T-129 (stub 2): "the LAST attempt's outcome", with a fixture that can tell last from first
+# ---------------------------------------------------------------------------------------
+#
+# The delivery-log fix (effe6b0) added a load-bearing claim to three docstrings —
+# `status_code` and `error` hold the LAST attempt's outcome, and "an earlier failure that a
+# later attempt recovered from leaves no trace here beyond `attempts` being greater than
+# one" — and shipped no fixture that can distinguish last from first:
+#
+#   * `webhook_receiver` answers 200 once, so there is one attempt;
+#   * `flaky_webhook_receiver` answers [500, 503, 200], and the loop breaks on success, so
+#     the last attempt is the accepted one by construction;
+#   * `dead_webhook_receiver` answers [500] * 50, so first, last, highest and lowest are
+#     all the same number.
+#
+# Reproduced: an implementation that records the FIRST failure of a delivery that never
+# succeeded passes all 498 tests in this package.
+#
+# The two receivers below make the failure path legible. `escalating_dead_webhook_receiver`
+# answers three different failing statuses; `truncating_webhook_receiver` answers one real
+# status and then cuts the connection, which is the only way `status_code` becomes None
+# while an earlier attempt had a status.
+
+
+async def test_a_failed_delivery_records_the_last_attempt_not_the_first(
+    stub: StubClient, escalating_dead_webhook_receiver: Receiver
+) -> None:
+    """`503, 500, 502`: four candidate answers, and only "the last" is 502."""
+    receiver, url = escalating_dead_webhook_receiver
+    await stub.subscribe("ORDERS_PAID", url)
+    result = await stub.buy(VARIANT_ID)
+
+    assert len(receiver.requests) == MAX_ATTEMPTS, "all three attempts really were made"
+
+    (delivery,) = result["webhook_deliveries"]
+    assert delivery["delivered"] is False
+    assert delivery["attempts"] == MAX_ATTEMPTS
+    assert delivery["status_code"] == 502, (
+        "the LAST attempt's status: 503 would be the first, 500 the second, "
+        "503 the highest and 500 the lowest"
+    )
+    assert delivery["error"] == "HTTP 502", "and `error` is that same attempt's"
+
+    # Read back over `/_stub/webhooks/deliveries` too: the claim is about what the log
+    # reports, not only about what the completion response happens to carry.
+    (row,) = await stub.deliveries()
+    assert row["status_code"] == 502
+    assert row["error"] == "HTTP 502"
+    assert row["attempts"] == MAX_ATTEMPTS
+    assert row["delivered"] is False
+
+
+async def test_a_status_from_an_earlier_attempt_does_not_survive_a_transport_failure(
+    stub: StubClient, truncating_webhook_receiver: tuple[TruncatingReceiver, str]
+) -> None:
+    """The clause the escalating fixture still cannot reach: ``status_code`` is ``None``.
+
+    `WebhookDelivery.status_code` is documented as "the **last** attempt's status, or
+    ``None`` when the last attempt raised before a response". Attempt 1 here answers a real
+    500; attempts 2 and 3 die mid-response. "The last attempt's status" is therefore
+    ``None`` and "the last status there was" is 500 — the two readings finally disagree,
+    and every other fixture in the package makes them identical.
+
+    `error` must name the transport failure rather than the 500, for the same reason.
+    """
+    receiver, url = truncating_webhook_receiver
+    await stub.subscribe("ORDERS_PAID", url)
+    result = await stub.buy(VARIANT_ID)
+
+    assert len(receiver.requests) == MAX_ATTEMPTS, "the truncated turns are still attempts"
+
+    (delivery,) = result["webhook_deliveries"]
+    assert delivery["delivered"] is False
+    assert delivery["attempts"] == MAX_ATTEMPTS
+    assert delivery["status_code"] is None, (
+        "the last attempt raised before a response, so there is no status; 500 here would "
+        "mean the log kept the last attempt that happened to produce one"
+    )
+    assert delivery["error"] is not None
+    assert not delivery["error"].startswith("HTTP "), (
+        f"the last attempt's failure was a transport error, not a status: {delivery['error']}"
+    )
+    assert "Error" in delivery["error"], (
+        f"`error` names the exception type for a transport failure: {delivery['error']}"
+    )
