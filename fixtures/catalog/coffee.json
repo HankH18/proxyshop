@@ -1,0 +1,94 @@
+{
+  "seed_category": "coffee",
+  "display_name": "Specialty coffee gear and beans",
+  "config_version": "1.0.0",
+  "currency": "USD",
+  "notes": [
+    "This is the SEED_CATEGORY config the parameterised generator reads (T-080 acceptance 2).",
+    "It is referenced by fixtures/manifest.json under `seed_catalog` with a sha256, so the",
+    "human approval that covers the manifest transitively covers these bytes: editing this",
+    "file after approval breaks manifest.approval.content_hash and the suite says so.",
+    "It carries NO store roster - stores live in the manifest, because which store is the",
+    "dishonest one is ground truth a human approves, not a catalog knob."
+  ],
+  "products_per_store": 4,
+  "product_families": [
+    {
+      "family": "whole_bean",
+      "canonical_names": [
+        "Altura Washed Single Origin",
+        "Harbour House Espresso Blend",
+        "Cold Brew Coarse Grind",
+        "Decaf Swiss Water Reserve"
+      ],
+      "price_band_cents": [1450, 2650],
+      "variants": [
+        {"suffix": "250 g", "grams": 250, "price_multiplier": 1.0},
+        {"suffix": "1 kg", "grams": 1000, "price_multiplier": 3.4}
+      ],
+      "attribute_template": {
+        "origin": {"choices": ["Colombia", "Ethiopia", "Guatemala", "Brazil"]},
+        "roast_level": {"choices": ["light", "medium", "medium-dark", "dark"]},
+        "process": {"choices": ["washed", "natural", "honey"]},
+        "ingredients": {"fixed": ["arabica coffee beans"]},
+        "caffeine_mg_per_serving": {"range": [95, 165], "unit": "mg"},
+        "certifications": {"choices": [["organic"], ["fair-trade"], ["organic", "fair-trade"], []]}
+      }
+    },
+    {
+      "family": "espresso_machine",
+      "canonical_names": [
+        "Bar-9 Single Boiler Espresso Machine",
+        "Duetto Heat Exchange Espresso Machine"
+      ],
+      "price_band_cents": [38900, 92500],
+      "variants": [
+        {"suffix": "stainless", "grams": 12500, "price_multiplier": 1.0},
+        {"suffix": "matte black", "grams": 12500, "price_multiplier": 1.06}
+      ],
+      "attribute_template": {
+        "boiler_type": {"choices": ["single boiler", "heat exchange"]},
+        "pump_pressure_bar": {"range": [9, 15], "unit": "bar"},
+        "water_tank_l": {"range": [1, 3], "unit": "L"},
+        "voltage": {"choices": ["120 V", "230 V"]},
+        "compatible_with": {"choices": [["portafilter-58mm"], ["portafilter-54mm"]]},
+        "warranty_months": {"range": [12, 36], "unit": "months"}
+      }
+    },
+    {
+      "family": "grinder",
+      "canonical_names": [
+        "Vector 64 Flat Burr Grinder",
+        "Pocket Hand Grinder Mk II"
+      ],
+      "price_band_cents": [7900, 44900],
+      "variants": [
+        {"suffix": "standard", "grams": 3200, "price_multiplier": 1.0}
+      ],
+      "attribute_template": {
+        "burr_material": {"choices": ["stainless steel", "hardened steel", "ceramic"]},
+        "burr_diameter_mm": {"range": [38, 83], "unit": "mm"},
+        "grind_settings": {"range": [24, 60], "unit": "steps"},
+        "compatible_with": {"choices": [["portafilter-58mm"], ["portafilter-54mm"], ["pour-over"]]},
+        "warranty_months": {"range": [12, 24], "unit": "months"}
+      }
+    },
+    {
+      "family": "accessory",
+      "canonical_names": [
+        "Walnut Tamper 58 mm",
+        "Stainless Milk Pitcher 600 ml"
+      ],
+      "price_band_cents": [1900, 6400],
+      "variants": [
+        {"suffix": "standard", "grams": 400, "price_multiplier": 1.0}
+      ],
+      "attribute_template": {
+        "material": {"choices": ["walnut", "stainless steel", "silicone"]},
+        "compatible_with": {"choices": [["portafilter-58mm"], ["portafilter-54mm"]]},
+        "dishwasher_safe": {"choices": [true, false]},
+        "warranty_months": {"range": [6, 24], "unit": "months"}
+      }
+    }
+  ]
+}
