@@ -2254,6 +2254,246 @@
         "T-050 lane adversarial verifier, 2026-09-02",
         "orchestrator-verified items marked inline"
       ]
+    },
+    {
+      "id": "T-135",
+      "title": "The exclusivity property is defeated by moving the payload one level down into the Offer. enforce_hook_provenance inspects only the flat iterable it is handed; nothing in the branch binds Offer.discount.value to a granted authorized_discount_pct claim, and Offer.commitments (typed list[Claim]) is walked by neither the guard nor contracts.boundary._claim_provenance_reasons, which iterates bid.claims alone. tools.py:18 asserts 'authorize_discount is the only way a discount reaches an offer' \u2014 no code enforces that.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/store-agent/src/hooks/provenance.py:395",
+      "defect": "The exclusivity property is defeated by moving the payload one level down into the Offer. enforce_hook_provenance inspects only the flat iterable it is handed; nothing in the branch binds Offer.discount.value to a granted authorized_discount_pct claim, and Offer.commitments (typed list[Claim]) is walked by neither the guard nor contracts.boundary._claim_provenance_reasons, which iterates bid.claims alone. tools.py:18 asserts 'authorize_discount is the only way a discount reaches an offer' \u2014 no code enforces that.",
+      "finding_id": "b31093db765b11056ce1f8bcbd67b288a94cfe35ff567716cbf4fb135fff3ba5",
+      "reproduction": "scratchpad probe3.py: hooks.authorize_discount('prod-cap', 25.0) returns Denied(over_max_discount_pct, limit 20.0). Build a Bid that passes contracts.Bid.model_validate with offer.discount={'type':'percentage','value':25.0,'provenance':None} and offer.commitments = genuine hook claims + one {'provenance':{'source':'seller_asserted',...}} claim, bid.claims = only the genuine claims. Result: enforce_hook_provenance(bid['claims'], hooks, product_ref='prod-cap') -> ADMITTED, and validate_bid(bid, path='hosted', trust_snapshot={'store-alpha':{...'blacklisted':False}}, now='2026-01-01T00:00:00Z') -> ok=True reasons=[]. CONTROL: the identical seller_asserted claim placed in bid.claims instead -> ok=False reasons=['hosted_non_hook_provenance:2:seller_asserted']."
+    },
+    {
+      "id": "T-136",
+      "title": "Every runtime capability the branch adds is unwired: ToolHooks and its six hooks, start_bid, would_authorize, Denied, HookCall, HookInputError, enforce_hook_provenance, ClaimScopeError, mint_claim, mint_provenance, claim_fingerprint, scoped_ref, claim_scope, claim_is_scoped_to. Zero production call sites \u2014 only the package's own re-exports, its unit tests, and the frozen acceptance suite. packages/store-agent/tests/test_hooks.py states the guard is 'the same function the hosted bid boundary calls'; no such boundary exists anywhere in the repo.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/tools.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/store-agent/src/hooks/tools.py:161",
+      "defect": "Every runtime capability the branch adds is unwired: ToolHooks and its six hooks, start_bid, would_authorize, Denied, HookCall, HookInputError, enforce_hook_provenance, ClaimScopeError, mint_claim, mint_provenance, claim_fingerprint, scoped_ref, claim_scope, claim_is_scoped_to. Zero production call sites \u2014 only the package's own re-exports, its unit tests, and the frozen acceptance suite. packages/store-agent/tests/test_hooks.py states the guard is 'the same function the hosted bid boundary calls'; no such boundary exists anywhere in the repo.",
+      "finding_id": "0191c9de8c2b4adb7710890267da6f9aca0161cfd695f317300b52135893cf02",
+      "reproduction": "codegraph explore \"who imports or calls ToolHooks, enforce_hook_provenance, mint_claim, hosted_claim_construction_offenders\" lists callers only in packages/store-agent/src/hooks/__init__.py and packages/store-agent/tests/test_hooks.py (+ .swarm-loop/acceptance/test_e4_store_agent.py). Repo-wide grep (excluding .venv/node_modules/__pycache__) confirms. Executed: `.venv/bin/python -c \"from store_agent.main import create_app, discover_router_modules; print(discover_router_modules()); print(create_app().state.mounted_routers)\"` -> [] and []. find packages/store-agent -name routes.py -> nothing. runtime/, modes/, learning/, external/ __init__.py are all 0 bytes."
+    },
+    {
+      "id": "T-137",
+      "title": "refresh_digests() re-pins approval.content_hash onto whatever the manifest body currently says while leaving approver / approved_at / artifact populated. This defeats the exact tamper-evidence property the frozen acceptance test claims for itself (test_e8_proofs.py:288-291: 'the manifest ... cannot drift after approval without this assertion turning red'). After a re-pin the approval block is fully populated and self-consistent, so the acceptance test goes green again and no reader can tell that a named human's approval now covers bytes they never saw. The CLI warns in prose that 'any approval recorded against the old pins is void', but nothing makes it void in the artifact; --yes skips the prompt entirely, and the library function has no prompt at all.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "fixtures/manifest/__init__.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "fixtures/manifest/__init__.py:383",
+      "defect": "refresh_digests() re-pins approval.content_hash onto whatever the manifest body currently says while leaving approver / approved_at / artifact populated. This defeats the exact tamper-evidence property the frozen acceptance test claims for itself (test_e8_proofs.py:288-291: 'the manifest ... cannot drift after approval without this assertion turning red'). After a re-pin the approval block is fully populated and self-consistent, so the acceptance test goes green again and no reader can tell that a named human's approval now covers bytes they never saw. The CLI warns in prose that 'any approval recorded against the old pins is void', but nothing makes it void in the artifact; --yes skips the prompt entirely, and the library function has no prompt at all.",
+      "finding_id": "49de220d5e6ca84e70814a65421c05aa882f02d8dc1bfa115595ab730caf5403",
+      "reproduction": "cp fixtures/manifest.json $SCRATCH/m2.json; then in .venv/bin/python: set m['approval'] = {status:'approved', approver:'Hank Holcomb', approved_at:'2026-09-02T12:00:00Z', artifact:'fixtures/approval/REQUEST-manifest-approval.md'} and write it back -> load_manifest(p) succeeds. Now mutate approved ground truth in validator-legal ways: m['half_life_days']=1; m['observation_weights']['contradicted']=0.1; m['personas']['aggressive']['scripted_claims'][0]['truthful']=True. Observed: recorded content_hash 87c49f8026f66b0f vs true body digest 840009167b15fcab -- drift is present and detectable. Then call refresh_digests(p): content_hash is re-pinned to 840009167b15fcab, approver still reads 'Hank Holcomb', and approval.content_hash == body_digest(after) is True. The contradicted-observation weight -- the single most load-bearing constant in SPEC A3's 'the trust engine catches the dishonest store' -- has gone 2.0 -> 0.1 under an intact human approval, with no artifact anywhere recording that it changed."
+    },
+    {
+      "id": "T-138",
+      "title": "build_buckets is a pure, deterministic function of the account with no k-anonymity floor, suppression, or generalisation of any kind, so a rotated pseudonym publishes a byte-identical bucket tuple and every rotation is re-linkable. The brief's premise that a floor exists and is measured against a 30-account fixture is false: no such code exists anywhere in the branch or the current tree.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/profile/__init__.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/src/profile/__init__.py:274",
+      "defect": "build_buckets is a pure, deterministic function of the account with no k-anonymity floor, suppression, or generalisation of any kind, so a rotated pseudonym publishes a byte-identical bucket tuple and every rotation is re-linkable. The brief's premise that a floor exists and is measured against a 30-account fixture is false: no such code exists anywhere in the branch or the current tree.",
+      "finding_id": "cd4a6c2838a528361e7dbcdd49ad0e2a2077d5c751a2bff688e2364d06af080d",
+      "reproduction": "PROXYSHOP_WORKER=17 .venv/bin/python over buyer_svc.build_buckets on 4000 generated accounts (60 categories, 60 weighted regions, 0-20 orders, seed 20260902): distinct classes 3698, min(class size)=1, median 1, max 9, UNIQUELY IDENTIFIED 3502/4000 = 87.5%, class size <5 = 97.9%. min(class size)=1 also at 30/12/6 category vocabularies and even with a single region (unique 604/4000). Over the real HTTP path: two logins of dana.reyes@example.com return distinct pseudonyms psn-a6d9df39\u2026 and psn-35a73275\u2026 with identical buckets {'budget_band':'100-250','category_affinity':['running-shoes','trail-gear'],'first_time':false,'frequency_tier':'regular','region':'US-OR'}; 5 rotations produce 1 distinct bucket set."
+    },
+    {
+      "id": "T-139",
+      "title": "identity_leaks holds every slug of the account's OWN order categories out of the searchable haystack (_incidental_bucket_values, line 383), account-wide rather than per-bucket. category_affinity is the one bucket with no vocabulary or length cap (coarsen_categories, line 215, caps count only at CATEGORY_LIMIT=3), so the buyer's name, street and postal code can be published verbatim into the store-facing profile while the R5 backstop reports clean. The hardening commit's claim that 'everything else is still matched in full' does not hold for this bucket.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/profile/__init__.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/src/profile/__init__.py:432",
+      "defect": "identity_leaks holds every slug of the account's OWN order categories out of the searchable haystack (_incidental_bucket_values, line 383), account-wide rather than per-bucket. category_affinity is the one bucket with no vocabulary or length cap (coarsen_categories, line 215, caps count only at CATEGORY_LIMIT=3), so the buyer's name, street and postal code can be published verbatim into the store-facing profile while the R5 backstop reports clean. The hardening commit's claim that 'everything else is still matched in full' does not hold for this bucket.",
+      "finding_id": "abcfa66ee367de1571b72ff73934ecd75d20d5b59dffa5bd4cdf4e47e813996e",
+      "reproduction": "account = {'email':'dana.reyes@example.com','first_name':'Dana','last_name':'Reyes','address':'44 Alder Way, Portland OR 97205','postal_code':'97205','region':'US-OR','orders':[{'total':120.0,'category':'gift for Dana Reyes, 44 Alder Way Portland 97205'},{'total':90.0,'category':'running shoes'}]}; build_profile(account,'psn-'+'ab'*16) does NOT raise and yields category_affinity=['gift-for-dana-reyes-44-alder-way-portland-97205','running-shoes']; identity_leaks(profile,account) -> []. Control with the same bucket string but an account whose orders are [{'category':'running shoes'}] -> ['97205','alder','dana','portland','reyes']."
+    },
+    {
+      "id": "T-140",
+      "title": "AccountDirectory has exactly one implementation and no production populator. build_auth_service() never passes accounts=, so production runs the empty default InMemoryAccountDirectory, and MagicLinkAuth.redeem (line 304) writes only {'email': email} (+orders: []). Every coarsener therefore runs on an empty account in production: GET /buyer/profile returns an identical, information-free profile for every buyer. The passing acceptance test injects a rich account dict straight into build_profile and is not evidence that any production path builds a real profile.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/auth/magic_link.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/src/auth/magic_link.py:193",
+      "defect": "AccountDirectory has exactly one implementation and no production populator. build_auth_service() never passes accounts=, so production runs the empty default InMemoryAccountDirectory, and MagicLinkAuth.redeem (line 304) writes only {'email': email} (+orders: []). Every coarsener therefore runs on an empty account in production: GET /buyer/profile returns an identical, information-free profile for every buyer. The passing acceptance test injects a rich account dict straight into build_profile and is not evidence that any production path builds a real profile.",
+      "finding_id": "81904f930f71eb17d542e3b914d8aff4abb9211c84824c54303c89441762dd4c",
+      "reproduction": "routes.set_auth_service(None); svc = routes.build_auth_service() -> accounts=InMemoryAccountDirectory (empty), vault store=InMemoryPseudonymStore, sessions=InMemorySessionStore. Log in three different addresses through POST /buyer/auth/magic-link + POST /buyer/auth/session + GET /buyer/profile: all three return {'budget_band':null,'category_affinity':[],'first_time':true,'frequency_tier':'none','region':null}; distinct bucket sets across 3 buyers = 1."
+    },
+    {
+      "id": "T-141",
+      "title": "The magic-link token is delivered to the default no-op `_drop` (line 166) in every deployment, and set_auth_service (routes.py:146) \u2014 the documented seam for installing a mail transport before the first request \u2014 has ZERO callers anywhere in the repository, including tests, which override the FastAPI dependency instead. No production code path can deliver a login link, so magic-link login cannot complete outside a test that injects deliver= itself.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/auth/magic_link.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/src/auth/magic_link.py:194",
+      "defect": "The magic-link token is delivered to the default no-op `_drop` (line 166) in every deployment, and set_auth_service (routes.py:146) \u2014 the documented seam for installing a mail transport before the first request \u2014 has ZERO callers anywhere in the repository, including tests, which override the FastAPI dependency instead. No production code path can deliver a login link, so magic-link login cannot complete outside a test that injects deliver= itself.",
+      "finding_id": "a1e986a7af5d9c64785c1850e28a301ccd4d67b56237aedc1cc18b3dd9bf7301",
+      "reproduction": "grep -rn 'set_auth_service|deliver=' --include=*.py apps packages services scripts e2e fixtures -> set_auth_service appears only in its own definition, __all__ and a docstring; every deliver= is in apps/buyer/svc/tests/test_auth_vault.py. routes.build_auth_service() returns a service whose deliver.__name__ == '_drop'. POST /buyer/auth/magic-link then returns 202 with the token discarded and no way for any caller to obtain it."
+    },
+    {
+      "id": "T-142",
+      "title": "publish_profile \u2014 the only writer of app.buyer_accounts, described as 'the store-visible working set' \u2014 has zero production call sites, and no code outside the buyer service consumes BuyerProfile or reads app.buyer_accounts. The R5 deliverable 'the BuyerProfile handed to stores' is never handed to a store: GET /buyer/profile requires an X-Buyer-Session header, which only the buyer holds. The hardening commit names publish_profile as dead code but its fix wires only PostgresPseudonymStore, leaving publish_profile dead.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/profile/__init__.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/src/profile/__init__.py:492",
+      "defect": "publish_profile \u2014 the only writer of app.buyer_accounts, described as 'the store-visible working set' \u2014 has zero production call sites, and no code outside the buyer service consumes BuyerProfile or reads app.buyer_accounts. The R5 deliverable 'the BuyerProfile handed to stores' is never handed to a store: GET /buyer/profile requires an X-Buyer-Session header, which only the buyer holds. The hardening commit names publish_profile as dead code but its fix wires only PostgresPseudonymStore, leaving publish_profile dead.",
+      "finding_id": "beaddb94fcb3a85224c9b9604a7e0ae380187f47f9e963111df5d971038acbab",
+      "reproduction": "codegraph explore 'publish_profile callers' -> 'publish_profile (apps/buyer/svc/src/profile/__init__.py:492) \u2014 1 caller; tests: apps/buyer/svc/tests/test_auth_vault.py'. grep -rn 'BuyerProfile|buyer_accounts' over apps/packages/db/services/e2e (excluding generated/): the only non-buyer hits are apps/trust/tests/* listing the table name in a schema-grant fixture."
+    },
+    {
+      "id": "T-143",
+      "title": "A replayer can relabel a signed delivery onto a topic of its choice AND destroy the genuine one. handle_delivery takes the topic from the UNSIGNED URL path when the X-Shopify-Topic header is absent (`topic = topic or wanted`), while WebhookInbox de-duplicates on the body digest alone (webhooks.py:223-238). The class docstring explicitly raises this exact threat -- 'one captured signed body replay as three distinct fresh events -- a paid order becoming a fabricated fulfilment and a fabricated refund' -- and claims the body-only key defeats it. It defeats the three-events variant only. The one-event-relabelled variant works, and it is worse than a duplicate: it consumes the identity, so the real delivery is swallowed.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/merchant/svc/src/install/webhooks.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/merchant/svc/src/install/webhooks.py:345",
+      "defect": "A replayer can relabel a signed delivery onto a topic of its choice AND destroy the genuine one. handle_delivery takes the topic from the UNSIGNED URL path when the X-Shopify-Topic header is absent (`topic = topic or wanted`), while WebhookInbox de-duplicates on the body digest alone (webhooks.py:223-238). The class docstring explicitly raises this exact threat -- 'one captured signed body replay as three distinct fresh events -- a paid order becoming a fabricated fulfilment and a fabricated refund' -- and claims the body-only key defeats it. It defeats the three-events variant only. The one-event-relabelled variant works, and it is worse than a duplicate: it consumes the identity, so the real delivery is swallowed.",
+      "finding_id": "29cb064c8971e527804fc9dcf4d131a63b639d229fd2c69f04df5ba07ce1cb41",
+      "reproduction": "With SHOPIFY_API_SECRET=shhh-secret against merchant_svc.main.create_app(): body=b'{\"id\":7001,\"checkout_token\":\"tok-7001\",\"total_price\":\"100.00\"}', sig=b64(HMAC-SHA256(secret,body)). (1) attacker POSTs body+sig to /webhooks/shopify/refunds/create with NO X-Shopify-Topic header -> 200 {\"status\":\"recorded\",\"topic\":\"refunds/create\"}. (2) the genuine Shopify delivery of the same bytes arrives at /webhooks/shopify/orders/paid with X-Shopify-Topic: orders/paid -> 200 {\"status\":\"duplicate\"}. Result: INBOX.events('orders/paid') == 0, INBOX.events('refunds/create') == 1. A paid order is now on file as a refund and the paid event is gone. Fix shape: require the signed-topic-consistent header (refuse a delivery with no X-Shopify-Topic) rather than defaulting to the unsigned path segment, and/or key the seen-set on (body_digest, topic) while still refusing the same digest under a second topic."
+    },
+    {
+      "id": "T-144",
+      "title": "merchant-svc has no deployable. The compose fragment this file's own header declares 'Owner: T-050' is still `services: {}`, and nothing anywhere in the repo starts merchant_svc.main:app. Every route, guard and signature check this branch adds therefore has zero production call site in the deployed system -- they exist only under pytest and vitest.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/merchant/compose.yaml"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/merchant/compose.yaml:11",
+      "defect": "merchant-svc has no deployable. The compose fragment this file's own header declares 'Owner: T-050' is still `services: {}`, and nothing anywhere in the repo starts merchant_svc.main:app. Every route, guard and signature check this branch adds therefore has zero production call site in the deployed system -- they exist only under pytest and vitest.",
+      "finding_id": "467736a4189a7ffc7e514cf62a211ed1b3afce78e4af3e1eb4437176a3a53629",
+      "reproduction": "`grep -rn 'merchant_svc|merchant-svc' Makefile scripts docker-compose.yml e2e db` -> no matches. `grep -n '^  [a-z-]*:' docker-compose.yml` -> only `postgres:` and `redis:`. `cat apps/merchant/compose.yaml` -> ends in `services: {}` while docker-compose.yml:17 includes it. Corroborated by the frozen SPEC slice: test_spec_criteria.py::test_compose_declares_healthchecked_postgres_neo4j_redis_and_separate_deployables is currently FAILING."
+    },
+    {
+      "id": "T-145",
+      "title": "R10's \"hard timeout\" is measured from the moment solicit_bids constructs its ArrivalClock, not from the auction's own deadline. ArrivalClock's origin is monotonic() at line 181 and its frame start is `now - window`, so the fan-out always gets a FULL `window` of real seconds no matter how much of the window the route already spent on machine.create/open, the ledger write and the per-store eligibility reads (routes.py:169-193 computes `deadline = opened_at + window` BEFORE all of that). Gate latency is therefore free time, and because collect_bids enforces the close on that same shifted stamp, a bid that lands after the auction's stored record.deadline is stamped on time and wins as a non-fallback bid. The route already has a `clock=` parameter it could anchor to opened_at and does not use it.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/orchestration/solicitation.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/orchestration/solicitation.py:181",
+      "defect": "R10's \"hard timeout\" is measured from the moment solicit_bids constructs its ArrivalClock, not from the auction's own deadline. ArrivalClock's origin is monotonic() at line 181 and its frame start is `now - window`, so the fan-out always gets a FULL `window` of real seconds no matter how much of the window the route already spent on machine.create/open, the ledger write and the per-store eligibility reads (routes.py:169-193 computes `deadline = opened_at + window` BEFORE all of that). Gate latency is therefore free time, and because collect_bids enforces the close on that same shifted stamp, a bid that lands after the auction's stored record.deadline is stamped on time and wins as a non-fallback bid. The route already has a `clock=` parameter it could anchor to opened_at and does not use it.",
+      "finding_id": "2da65f7350f9b8d9d01c49ed08b4336ca9d7b6ed203ec25fb54e3f2a67dd3bd8",
+      "reproduction": "PROXYSHOP_WORKER=15 .venv/bin/python: build create_app(); configure_auctions(app, solicitor=<answers 0.9s after being asked>, eligibility=<SellerEligibility whose check() sleeps 0.6s>); POST /auctions with a 2-store roster and bid_timeout_seconds=1.0. Observed: the request blocked 2.13s against a declared 1.0s hard window, and BOTH stores came back fallback=False at unit_price=1.0 \u2014 bids that landed ~2.1s after the auction opened were counted as on time against a deadline of opened_at+1.0. The frozen test test_bids_arriving_after_the_deadline_are_rejected passes anyway because it hands collect_bids its own hand-written received_at and never reaches this code."
+    },
+    {
+      "id": "T-146",
+      "title": "The hard timeout is bought by abandoning the ThreadPoolExecutor (`shutdown(wait=False, cancel_futures=True)` instead of a `with` block), but a fresh pool is created per request and the abandoned workers are non-daemon threads that survive the response. Threads accumulate without bound for as long as the stores hang, and concurrent.futures' atexit `_python_exit` joins every one of them, so a SIGTERM/graceful shutdown of the exchange blocks on the slowest hung store. sequential_fan_out (fanout.py:239-248) has the same shape. The module docstring reasons only about the abandoned RESULTS (\"appends to a list nobody reads again\") and never about the abandoned threads.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/auction/fanout.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/auction/fanout.py:293",
+      "defect": "The hard timeout is bought by abandoning the ThreadPoolExecutor (`shutdown(wait=False, cancel_futures=True)` instead of a `with` block), but a fresh pool is created per request and the abandoned workers are non-daemon threads that survive the response. Threads accumulate without bound for as long as the stores hang, and concurrent.futures' atexit `_python_exit` joins every one of them, so a SIGTERM/graceful shutdown of the exchange blocks on the slowest hung store. sequential_fan_out (fanout.py:239-248) has the same shape. The module docstring reasons only about the abandoned RESULTS (\"appends to a list nobody reads again\") and never about the abandoned threads.",
+      "finding_id": "11d58d35f8c0ee46c20851ec08b8fb6d166dd095b08826a8136c4db6da004ecf",
+      "reproduction": "PROXYSHOP_WORKER=15 .venv/bin/python: create_app() wired with a solicitor that sleeps 60s, a 6-store roster, bid_timeout_seconds=0.15, then POST /auctions five times, counting threading.enumerate() names starting 'bid-fanout' after each. Observed 6, 12, 18, 24, 30 live abandoned threads \u2014 exactly min(32, len(roster)) leaked per auction. Separately: `.venv/bin/python -c` creating a pool with two 8s tasks, wait(timeout=0.2), shutdown(wait=False, cancel_futures=True) prints 'main done' at 0.20s but /usr/bin/time reports real 8.19 \u2014 the interpreter cannot exit until the abandoned workers finish. A later repro using 600s sleeps was killed by its outer `timeout 120` for the same reason."
+    },
+    {
+      "id": "T-147",
+      "title": "T-036 \u2014 the whole second half of this lane \u2014 is unwired. Nothing outside apps/exchange/src/checkout/ ever resolves a provider or calls CheckoutProvider.checkout: the port, both providers, the registry, the domain guard, mint_code and the minting lint have zero production consumers. apps/exchange/src/accept/__init__.py, which T-036's own ticket says is the path that must go through the port, is a 0-byte file. And the frozen suite carries no @pytest.mark.ticket(\"T-036\") test at all, so T-036 contributes 0 of the epic's 3 passes \u2014 its 654-line unit-test file is the only thing that has ever executed it.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/checkout/registry.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/checkout/registry.py:61",
+      "defect": "T-036 \u2014 the whole second half of this lane \u2014 is unwired. Nothing outside apps/exchange/src/checkout/ ever resolves a provider or calls CheckoutProvider.checkout: the port, both providers, the registry, the domain guard, mint_code and the minting lint have zero production consumers. apps/exchange/src/accept/__init__.py, which T-036's own ticket says is the path that must go through the port, is a 0-byte file. And the frozen suite carries no @pytest.mark.ticket(\"T-036\") test at all, so T-036 contributes 0 of the epic's 3 passes \u2014 its 654-line unit-test file is the only thing that has ever executed it.",
+      "finding_id": "6ceae2ee1b39af81f779e1c23bce8ed52ea98fabb8cb9e60e885b52eb454675e",
+      "reproduction": "`codegraph explore \"who calls CheckoutProvider.checkout, resolve_provider ..., SimulatedRedirectProvider \u2014 production call sites outside the checkout package\"` returns callers only in apps/exchange/src/checkout/{__init__,registry,providers}.py plus apps/exchange/tests/test_checkout_provider.py. Corroborated by `grep -rn '<symbol>' --include='*.py' apps services libs packages contracts | grep -v /tests/`, whose only hits outside the package are the usage example in checkout/__init__.py's docstring. `wc -c apps/exchange/src/accept/__init__.py` -> 0. `grep -rn 'T-036' .swarm-loop/acceptance/` -> no matches."
+    },
+    {
+      "id": "T-148",
+      "title": "`configure_auctions` \u2014 the only way to give the exchange a real solicitor, a real eligibility source, a Redis-backed store or a real ledger sink \u2014 has no production caller anywhere in the repo. The service as it actually boots (`uvicorn exchange.main:app`) therefore runs on _eligibility()'s fail-closed default, StaticSellerEligibility() with no rows, whose answer for every store is UNAVAILABLE. The shipped exchange denies every store and represents none, which is the exact inverse of the R10 property the branch is claimed to deliver; it also silently runs on InMemoryAuctionStore and an InMemoryLedgerSink that is discarded per process, so the DESIGN-pinned `auction:{id}` Redis record with its 15-minute TTL and the ledger trail are never written by any deployment.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/auction/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/auction/routes.py:103",
+      "defect": "`configure_auctions` \u2014 the only way to give the exchange a real solicitor, a real eligibility source, a Redis-backed store or a real ledger sink \u2014 has no production caller anywhere in the repo. The service as it actually boots (`uvicorn exchange.main:app`) therefore runs on _eligibility()'s fail-closed default, StaticSellerEligibility() with no rows, whose answer for every store is UNAVAILABLE. The shipped exchange denies every store and represents none, which is the exact inverse of the R10 property the branch is claimed to deliver; it also silently runs on InMemoryAuctionStore and an InMemoryLedgerSink that is discarded per process, so the DESIGN-pinned `auction:{id}` Redis record with its 15-minute TTL and the ledger trail are never written by any deployment.",
+      "finding_id": "c2d3c196c797f608ead6d548c2be1c2634ee0d9c9ee7177bd8639798df161655",
+      "reproduction": "PROXYSHOP_WORKER=15 .venv/bin/python: `app = exchange.main.create_app()` with NO configure_auctions call (i.e. exactly what the ASGI entrypoint builds), then POST /auctions with a 2-store roster. Observed: status 201, entries: [], solicited: [], denied: [('store-a','unavailable'), ('store-b','unavailable')]. Zero stores represented. `grep -rn configure_auctions` over non-test source returns only routes.py:26 (docstring), :44 (__all__) and :103 (the def)."
+    },
+    {
+      "id": "T-149",
+      "title": "A connection failure never becomes a StoreUnavailable, so an unreachable or restarting Postgres returns HTTP 500 with an empty body after a 30-second block, instead of the 503 store_unavailable the module documents. `_connection()` obtains the connection OUTSIDE the try/except in `_append_on`, and `classify_write_error` (pg.py:91) only maps psycopg.errors raised by the INSERT itself. `psycopg_pool.PoolTimeout` and `psycopg.OperationalError` are not EventServiceError subclasses, so `routes._refuse` (routes.py:98) never sees them and the handler raises. Only the no-DSN path reaches StoreUnavailable. errors.py:83 promises '503 - nothing is wrong with the request' and routes.py:216 argues that /events/verify must always answer because 'a 5xx here would be indistinguishable from the verifier being down - which is precisely the state an attacker who had just tampered with the ledger would like it to be confused with'. A down database produces exactly that confusion. The 30 s block is psycopg_pool's default timeout, so with Starlette's 40-thread sync pool ~40 concurrent requests wedge the whole trust service. No test covers it: the only 503 assertion in the 87-test suite is the scorer-unavailable one at test_events.py:1174.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/src/events/pg.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/trust/src/events/pg.py:206",
+      "defect": "A connection failure never becomes a StoreUnavailable, so an unreachable or restarting Postgres returns HTTP 500 with an empty body after a 30-second block, instead of the 503 store_unavailable the module documents. `_connection()` obtains the connection OUTSIDE the try/except in `_append_on`, and `classify_write_error` (pg.py:91) only maps psycopg.errors raised by the INSERT itself. `psycopg_pool.PoolTimeout` and `psycopg.OperationalError` are not EventServiceError subclasses, so `routes._refuse` (routes.py:98) never sees them and the handler raises. Only the no-DSN path reaches StoreUnavailable. errors.py:83 promises '503 - nothing is wrong with the request' and routes.py:216 argues that /events/verify must always answer because 'a 5xx here would be indistinguishable from the verifier being down - which is precisely the state an attacker who had just tampered with the ledger would like it to be confused with'. A down database produces exactly that confusion. The 30 s block is psycopg_pool's default timeout, so with Starlette's 40-thread sync pool ~40 concurrent requests wedge the whole trust service. No test covers it: the only 503 assertion in the 87-test suite is the scorer-unavailable one at test_events.py:1174.",
+      "finding_id": "0c867e2649ce1cadb14594860ab99ffd009610b39645f49fb4b62f9ee39d8772",
+      "reproduction": "PROXYSHOP_WORKER=13 .venv/bin/python -c 'import os,sys,time; sys.path.insert(0,\".\"); sys.path.insert(0,\".pkgroot\"); import logging; logging.disable(logging.CRITICAL); from fastapi.testclient import TestClient; from trust.events import create_events_app, PostgresEventStore; app=create_events_app(PostgresEventStore(\"postgresql://nobody:nobody@127.0.0.1:1/nodb\")); c=TestClient(app, raise_server_exceptions=False); t=time.time(); r=c.post(\"/events\", json={\"event_id\":\"ev-x\",\"ts\":\"2026-01-01T00:00:00Z\",\"kind\":\"shown\",\"payload\":{}}); print(r.status_code, repr(r.text), round(time.time()-t,1))'  ->  prints `500 'Internal Server Error' 30.1`. GET /events/head on the same app: identical. Calling the store directly raises psycopg_pool.PoolTimeout, isinstance(exc, EventServiceError) is False. Expected per errors.py:83 and routes.py:100: 503 {\"error\":\"store_unavailable\"}."
+    },
+    {
+      "id": "T-150",
+      "title": "The ledger writer has zero producers. Nothing in the repository writes an event into it - not by import, not over HTTP. A repo-wide grep for `trust.events` / `apps.trust.src.events` / `/events` outside the package returns only the frozen acceptance suite, the branch's own tests, and `trust.main`'s router glob; codegraph agrees. The component that should be the first producer, the exchange auction state machine, emits into `InMemoryLedgerSink`, which its own module docstring (line 8) describes as 'the trust API stub' that 'the default service wiring use[s]'. So the once-only landing, hash chaining and replay this branch built grade an event stream that no part of ProxyShop ever produces. T-060's code is not defective; it is unfed, which is why E6 sits at 2/26 and the four remaining ticket families (T-061 reconcile, T-062 scoring, T-063 feedback, T-065 verification) all fail on ImportError against empty stubs rather than on ledger behaviour.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/auction/ledger.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/auction/ledger.py:54",
+      "defect": "The ledger writer has zero producers. Nothing in the repository writes an event into it - not by import, not over HTTP. A repo-wide grep for `trust.events` / `apps.trust.src.events` / `/events` outside the package returns only the frozen acceptance suite, the branch's own tests, and `trust.main`'s router glob; codegraph agrees. The component that should be the first producer, the exchange auction state machine, emits into `InMemoryLedgerSink`, which its own module docstring (line 8) describes as 'the trust API stub' that 'the default service wiring use[s]'. So the once-only landing, hash chaining and replay this branch built grade an event stream that no part of ProxyShop ever produces. T-060's code is not defective; it is unfed, which is why E6 sits at 2/26 and the four remaining ticket families (T-061 reconcile, T-062 scoring, T-063 feedback, T-065 verification) all fail on ImportError against empty stubs rather than on ledger behaviour.",
+      "finding_id": "f21e31a9067af7c22fbdd795d7c55e015d8db0a7a000795c1ae4c68f4d968fe1",
+      "reproduction": "grep -rn --include='*.py' --include='*.ts' -e 'trust\\.events' -e 'apps\\.trust\\.src\\.events' . | grep -v '/\\.venv/' | grep -v '^\\./apps/trust/' | grep -v '^\\./\\.swarm-loop/'  ->  no output. `codegraph explore \"create_events_app InMemoryEventStore router store_for default_store - every caller and call path\"` reports create_events_app: 2 callers, tests only; InMemoryEventStore: callers are the package itself plus tests plus the acceptance file. sed -n '1,12p;54,62p' apps/trust/src/auction/../../exchange/src/auction/ledger.py shows InMemoryLedgerSink is what the exchange actually emits into."
     }
   ]
 }
