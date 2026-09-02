@@ -27,6 +27,7 @@ byte-for-byte from its inputs (S4) and what lets the whole suite run offline.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -48,6 +49,11 @@ REASON_UNKNOWN_PRODUCT = "unknown_product"
 REASON_NEGATIVE_DISCOUNT = "negative_discount"
 REASON_OVER_MAX_DISCOUNT = "over_max_discount_pct"
 REASON_BELOW_PRICE_FLOOR = "below_price_floor"
+#: NaN, +inf, -inf. A wall is a pair of comparisons, and *every* comparison against NaN is
+#: False — so `pct < 0` and `pct > cap` both said "fine" and a NaN depth walked through both
+#: walls unchallenged. It failed later, in the canonical-JSON serializer, as a
+#: `CanonicalisationError` no caller is told to expect; a wall must refuse it, not a serializer.
+REASON_NON_FINITE_DISCOUNT = "non_finite_discount"
 
 #: The claim-type vocabulary (D53) a hook stamps for the catalog / envelope keys this system
 #: actually uses. A key that is not here is minted with `claim_type=None` rather than guessed:
@@ -159,6 +165,32 @@ def _sequence(value: Any) -> list[Any]:
     return list(value)
 
 
+class _Sealed(list):  # type: ignore[type-arg]
+    """A list that reads like a list and cannot be written through.
+
+    The audit trail is handed out as one of these. S5's criterion is "every claim in the bid
+    traces to a hook call", which is only checkable if the record of the calls is a record: a
+    party that can append to `call_log` or `emitted_claims` can write its own history, and the
+    party holding the facade is precisely the one the harness exists to constrain.
+
+    A `list` subclass rather than a `tuple` because the audit trail is compared against lists and
+    indexed like one all over the suite, and rather than a plain copy because a copy would drop a
+    write *silently* — a maintainer who appends here should hear about it, not find out later
+    that the record is short.
+    """
+
+    __slots__ = ()
+
+    def _sealed(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise TypeError(
+            "the hook audit trail is read-only: it records what the hooks actually did, and a "
+            "caller that could add to it could write its own history (S5)"
+        )
+
+    append = extend = insert = remove = pop = clear = sort = reverse = _sealed
+    __setitem__ = __delitem__ = __iadd__ = __imul__ = _sealed
+
+
 class _AdmissionLedger:
     """What the hooks emitted for the current bid, and which of it has been spent.
 
@@ -245,11 +277,6 @@ class ToolHooks:
         rather than a clock read, so two runs on identical inputs are byte-identical (S4).
     """
 
-    #: Every claim this facade has emitted, in emission order, across every bid (S5's audit
-    #: trail). Never reset — see :meth:`start_bid`.
-    emitted_claims: list[Claim]
-    #: One :class:`HookCall` per hook invocation, refusals included. Never reset.
-    call_log: list[HookCall]
     #: The bid currently open, as passed to :meth:`start_bid`. Empty before the first one.
     bid_ref: str
 
@@ -274,10 +301,25 @@ class ToolHooks:
         as_of = merged.get("as_of")
         self.as_of = str(as_of) if as_of else None
 
-        self.call_log = []
-        self.emitted_claims = []
+        self.__calls: list[HookCall] = []
+        self.__claims: list[Claim] = []
         self.__ledger = _AdmissionLedger()
         self.bid_ref = ""
+
+    @property
+    def emitted_claims(self) -> list[Claim]:
+        """Every claim this facade has emitted, in emission order, across every bid.
+
+        S5's audit trail, handed out sealed — see :class:`_Sealed`. Never reset, even by
+        :meth:`start_bid`: "what did this facade ever emit, and when" is the question an audit
+        asks, and scoping admission is not licence to forget.
+        """
+        return _Sealed(self.__claims)
+
+    @property
+    def call_log(self) -> list[HookCall]:
+        """One :class:`HookCall` per hook invocation, refusals included. Sealed, never reset."""
+        return _Sealed(self.__calls)
 
     @property
     def emitted_fingerprints(self) -> frozenset[str]:
@@ -383,7 +425,9 @@ class ToolHooks:
         """
         recorded = list(claims)
         for claim in recorded:
-            self.emitted_claims.append(claim)
+            # A deep copy: the audit trail must be a record of what the hooks did, and the
+            # object the hook returned belongs to the caller, who can edit it afterwards.
+            self.__claims.append(claim.model_copy(deep=True))
             self.__ledger.record(claim_fingerprint(claim))
         return recorded
 
@@ -395,7 +439,7 @@ class ToolHooks:
         claims: Iterable[Claim] = (),
         detail: str = "",
     ) -> None:
-        self.call_log.append(
+        self.__calls.append(
             HookCall(
                 hook=hook,
                 subject=subject,
@@ -602,6 +646,12 @@ class ToolHooks:
         listing = self.catalog.get(product_ref)
         if listing is None:
             return (REASON_UNKNOWN_PRODUCT, 0.0, self.envelope_ref("floors")), 0.0, 0.0, cap
+        if not math.isfinite(pct):
+            # Before the comparisons, because NaN answers False to all of them: `pct < 0.0` and
+            # `pct > cap` would both pass and the depth would be "authorized" by two walls that
+            # never actually compared anything.
+            rule = self.envelope_ref("max_discount_pct")
+            return (REASON_NON_FINITE_DISCOUNT, cap, rule), 0.0, 0.0, cap
         if pct < 0.0:
             rule = self.envelope_ref("max_discount_pct")
             return (REASON_NEGATIVE_DISCOUNT, 0.0, rule), 0.0, 0.0, cap
@@ -759,6 +809,7 @@ __all__ = [
     "COLD_START_POLICY_VERSION",
     "REASON_BELOW_PRICE_FLOOR",
     "REASON_NEGATIVE_DISCOUNT",
+    "REASON_NON_FINITE_DISCOUNT",
     "REASON_OVER_MAX_DISCOUNT",
     "REASON_UNKNOWN_PRODUCT",
     "WALL_TOLERANCE",
