@@ -763,9 +763,18 @@ def test_the_chain_cannot_fork(ledger_clean) -> None:
                 )
         assert "prev_hash" in str(unique.value)
     finally:
+        # ENABLE ALWAYS, not ENABLE. `ledger_clean` hands back the session-scoped autocommit
+        # admin connection, so this teardown is permanent for the rest of the run -- and
+        # plain `ENABLE TRIGGER` puts the trigger back at tgenabled = 'O', NOT at the 'A'
+        # the migration installed (T-114). Measured: with `enable trigger` here, the link
+        # check spent every test after this one skippable by
+        # `SET session_replication_role = 'replica'`, and
+        # `test_every_ledger_integrity_trigger_is_installed_enable_always` below is what
+        # caught it. Postgres has no "restore whatever it was" spelling; the state has to
+        # be named.
         with connection.cursor() as cur:
             cur.execute(
-                "alter table ledger.commerce_events enable trigger "
+                "alter table ledger.commerce_events enable always trigger "
                 "commerce_events_chain_guard_trigger"
             )
     assert verify_chain_in_db(connection)["ok"] is True
@@ -1666,16 +1675,76 @@ def _anchor_delete_is_refused_by_the_trigger(owner, statement: str) -> None:
         owner.rollback()
 
 
+def _anchor_delete_succeeds_once_the_arm_is_switched_off(owner, statement: str) -> None:
+    """The positive control: the SAME statement on the SAME connection, arm disabled.
+
+    T-118 (f). ``has_table_privilege`` being TRUE is a weaker fact than the prose next to it
+    used to claim. It says the privilege check will not be what refuses this statement --
+    and for a superuser it says that unconditionally, whatever the table's ACL holds -- but
+    it says nothing about what else might. A CHECK constraint, a foreign key, a rule or a
+    row-security policy would refuse this DELETE too, and a test that only ever sees the
+    statement fail cannot tell any of them apart from the trigger.
+
+    Disabling the arm and watching the identical statement succeed is what closes that gap:
+    with ``chain_head_guard_trigger`` off and nothing else changed, the DELETE removes the
+    anchor row. So the refusal next door is the trigger's, and the guard is load-bearing
+    rather than redundant with something else.
+
+    Everything is rolled back, including the ``ALTER TABLE``, so the arm is back on and the
+    anchor is back before the next assertion runs.
+    """
+    try:
+        with owner.cursor() as cur:
+            cur.execute("alter table ledger.chain_head disable trigger chain_head_guard_trigger")
+            try:
+                cur.execute(statement)
+            except psycopg.Error as exc:
+                raise AssertionError(
+                    f"{statement!r} was still refused with chain_head_guard_trigger DISABLED, "
+                    f"by {type(exc).__name__}: {exc}. Something other than that trigger is "
+                    f"stopping this statement, so the refusal asserted next door is not "
+                    f"evidence about the arm -- which is exactly what asserting "
+                    f"has_table_privilege alone could never tell you."
+                ) from exc
+            assert cur.rowcount == 1, (
+                f"{statement!r} matched {cur.rowcount} rows with chain_head_guard_trigger "
+                f"DISABLED. The refusal asserted elsewhere is then not evidence about the "
+                f"trigger -- something other than the guard is what stops this statement."
+            )
+            cur.execute("select count(*) from ledger.chain_head")
+            assert cur.fetchone() == (0,), "the anchor row survived a DELETE that reported 1 row"
+    finally:
+        owner.rollback()
+
+
 @pytest.mark.docker
 def test_the_anchor_guards_delete_arm_refuses_the_table_owner_as_well(ledger_clean) -> None:
-    """W2-04 acceptance 1: the arm fires for the one principal no grant can stop.
+    """W2-04 acceptance 1: the arm fires for the principal the grant layer cannot refuse.
 
     ``ledger_roles.denied(role, "delete from ledger.chain_head")`` above proves only that
     ``trust_rw`` and ``app`` lack the privilege -- Postgres refuses those before the trigger
     is ever consulted, so that assertion stays green with the DELETE arm deleted. The owner
-    is the principal that separates the two layers: ``has_table_privilege`` is asserted TRUE
-    here, so the trigger is the only thing standing between this statement and an anchorless
-    ledger.
+    is the principal that separates the two layers.
+
+    **What the precondition below is and is not** (T-118 (f)). This connection owns the
+    table and is a superuser, so ``has_table_privilege`` is TRUE *by ownership*, and a
+    superuser's ``has_table_privilege`` is TRUE for every table in the cluster whatever its
+    ACL says. It therefore establishes exactly one thing -- that the privilege check is not
+    what will refuse the statement -- and NOT the stronger claim the prose here used to
+    make, that the trigger is the only thing left in the way. The discriminator is the
+    positive control that follows it: with the arm switched off and nothing else changed,
+    the identical statement on the identical connection succeeds. That, plus the verbatim
+    message match inside :func:`_anchor_delete_is_refused_by_the_trigger`, is what makes
+    this a test of the trigger rather than of "something said no".
+
+    **What the arm does not stop** (T-114 acceptance 4). An owner who first turns the
+    trigger off. ``ALTER TABLE ... DISABLE TRIGGER`` is DDL: it takes an ACCESS EXCLUSIVE
+    lock and moves ``pg_trigger.tgenabled`` to ``'D'``, where the catalog test below sees
+    it. Until T-114 the arm also failed to stop an owner who merely set
+    ``session_replication_role = 'replica'`` -- a GUC, invisible to every catalog query
+    there is, needing no DDL and leaving no trace. The migration now installs every ledger
+    integrity trigger ``ENABLE ALWAYS``; ``test_a_replica_session_replication_role_cannot_
+    skip_the_ledger_integrity_triggers`` below drives that, and the catalog test pins it.
     """
     connection = ledger_clean
     for index in range(3):
@@ -1696,6 +1765,11 @@ def test_the_anchor_guards_delete_arm_refuses_the_table_owner_as_well(ledger_cle
                     "the trigger"
                 )
             owner.rollback()
+
+            # ...and the fact that actually discriminates the two layers (T-118 (f)).
+            _anchor_delete_succeeds_once_the_arm_is_switched_off(
+                owner, "delete from ledger.chain_head"
+            )
 
             _anchor_delete_is_refused_by_the_trigger(owner, "delete from ledger.chain_head")
             _anchor_delete_is_refused_by_the_trigger(
@@ -1783,9 +1857,20 @@ def test_pg_trigger_records_a_delete_arm_for_the_chain_head_guard(ledger_clean) 
     ), f"expected a BEFORE INSERT OR UPDATE OR DELETE ... FOR EACH ROW trigger, got {tgtype}"
     assert not tgtype & TRIGGER_TYPE_TRUNCATE
     assert not tgtype & TRIGGER_TYPE_INSTEAD
-    assert tgenabled == "O", (
-        f"chain_head_guard_trigger is {tgenabled!r}, not origin-enabled: a test that left it "
-        f"disabled has disarmed the anchor for everything that runs after it"
+    # T-114 acceptance 1. This was `== "O"`, which encoded "enabled, not left disabled by a
+    # test" but spelled it as the WEAKER of the two enabled states: 'O' fires in origin and
+    # local mode only, so `SET session_replication_role = 'replica'` -- one statement, no
+    # DDL, superuser-only and therefore available to exactly the principal this whole block
+    # exists to grade -- skipped the arm entirely and `DELETE FROM ledger.chain_head`
+    # succeeded with rowcount 1. The assertion that said "enabled" was the assertion that
+    # made the one-statement fix red. 'A' is ENABLE ALWAYS: strictly stronger, still fails
+    # on 'D' (the regression the original wording was after), and now the only state the
+    # migration produces.
+    assert tgenabled == "A", (
+        f"chain_head_guard_trigger is {tgenabled!r}, not ENABLE ALWAYS. 'D' means a test "
+        f"left the anchor disarmed for everything that runs after it; 'O' means a superuser "
+        f"can skip the arm with SET session_replication_role = 'replica' and delete the "
+        f"ledger's only truncation detector without touching the catalog at all."
     )
     assert "DELETE" in definition and "BEFORE" in definition, definition
 
@@ -1799,3 +1884,395 @@ def test_pg_trigger_records_a_delete_arm_for_the_chain_head_guard(ledger_clean) 
     assert {row[0] for row in arms} == {"INSERT", "UPDATE", "DELETE"}
     assert {row[1] for row in arms} == {"BEFORE"}
     assert {row[2] for row in arms} == {"ROW"}
+
+
+# =======================================================================================
+# T-114 -- the arms are not switchable off by a session GUC, and no DELETE shape escapes
+# =======================================================================================
+# Two holes in the block above, both measured in this tree (worker 22) before this section
+# existed.
+#
+# 1. `CREATE TRIGGER` installs a trigger at `pg_trigger.tgenabled = 'O'`, and 'O' does not
+#    mean "enabled" -- it means "fires in origin and local mode". A session in REPLICA mode
+#    skips every 'O' trigger on the table, and `session_replication_role` is a plain `SET`:
+#    no DDL, no lock, no catalog change, nothing for the catalog test above to see, and
+#    available to any superuser -- which is the table owner, the one principal the arm
+#    exists to stop. Verbatim, on a three-event chain:
+#
+#        SET session_replication_role = 'replica';
+#        DELETE FROM ledger.chain_head;      -- SUCCEEDED, rowcount = 1
+#
+#    and the same switch turns off the append-only arm, the prev_hash link check and the
+#    anchor advance with it. `ENABLE ALWAYS` (tgenabled = 'A') is the fix; these are the
+#    tests that grade it rather than the catalog row.
+#
+# 2. The two behavioural tests above drive `delete from ledger.chain_head` and its
+#    `where chain = 'commerce_events'` twin. Both are simple-protocol single-table DELETEs
+#    from one connection, so an exemption written INSIDE the DELETE branch --
+#    `IF current_setting('...') THEN RETURN OLD`, a ctid or subquery shape the author did
+#    not think of, a DELETE reached through a CTE or a plpgsql block -- would pass every
+#    assertion there is. The matrix below drives ten spellings of "remove the anchor row"
+#    in both replication roles; they differ in the ways such an exemption would plausibly
+#    key on, and all twenty must arrive at the same arm with the same message.
+
+#: The append-only arm's own words, and the link check's. Asserted verbatim for the same
+#: reason ``ANCHOR_DELETE_REFUSAL`` is: any other refusal is not this one.
+APPEND_ONLY_DELETE_REFUSAL = "ledger.commerce_events is append-only: DELETE is not permitted"
+APPEND_ONLY_UPDATE_REFUSAL = "ledger.commerce_events is append-only: UPDATE is not permitted"
+CHAIN_LINK_REFUSAL = "does not link to the chain tail"
+ANCHOR_LENGTH_REFUSAL = "advances by exactly one per appended event"
+
+#: Ten ways to say "delete the anchor row". Every one reaches the same FOR EACH ROW arm.
+ANCHOR_DELETE_SHAPES: tuple[tuple[str, str], tuple[str, str], ...] = (
+    ("bare", "delete from ledger.chain_head"),
+    ("by discriminator", "delete from ledger.chain_head where chain = 'commerce_events'"),
+    (
+        "by ctid",
+        "delete from ledger.chain_head where ctid = (select ctid from ledger.chain_head limit 1)",
+    ),
+    ("by a column no arm reads", "delete from ledger.chain_head where length >= 0"),
+    ("only", "delete from only ledger.chain_head"),
+    (
+        "aliased, with USING",
+        "delete from ledger.chain_head as ch "
+        "using (select 'commerce_events'::text as c) s where ch.chain = s.c",
+    ),
+    ("returning", "delete from ledger.chain_head returning chain, head_hash"),
+    (
+        "inside a data-modifying CTE",
+        "with gone as (delete from ledger.chain_head returning chain) select count(*) from gone",
+    ),
+    (
+        "by subquery on itself",
+        "delete from ledger.chain_head where chain in (select chain from ledger.chain_head)",
+    ),
+    ("inside a plpgsql block", "do $$ begin delete from ledger.chain_head; end $$"),
+)
+
+
+def _refused_by_a_ledger_trigger(
+    owner,
+    statement: str,
+    expected: str,
+    *,
+    params: tuple | None = None,
+    replication_role: str = "origin",
+    label: str = "",
+) -> None:
+    """Assert ``statement`` is refused by a ledger integrity trigger, verbatim.
+
+    ``replication_role`` is set inside the same transaction as the statement and read back
+    before the statement runs. Reading it back is not decoration: a ``SET`` that silently
+    did nothing would make every "still refused in replica mode" assertion here vacuous,
+    and a vacuous assertion about a bypass is worse than none.
+
+    Rolls back on every path, so a run in which the arm is missing and the statement
+    therefore SUCCEEDS still leaves the ledger where it was for the tests that follow.
+    """
+    where = f" [{label}]" if label else ""
+    rowcount: int | None = None
+    try:
+        with owner.cursor() as cur:
+            cur.execute(f"set local session_replication_role = '{replication_role}'")  # noqa: S608
+            cur.execute("show session_replication_role")
+            assert cur.fetchone() == (replication_role,), (
+                f"session_replication_role did not take{where}: this assertion would have "
+                f"proved nothing about the bypass it exists to close"
+            )
+            cur.execute(statement, params)
+            rowcount = cur.rowcount
+    except psycopg.errors.IntegrityConstraintViolation as exc:
+        assert expected in str(exc), (
+            f"{statement!r}{where} was refused in {replication_role} mode, but not by the "
+            f"arm this asserts ({expected!r}): {exc}"
+        )
+        assert exc.sqlstate == "23000", (
+            f"the arm raises USING ERRCODE = 'integrity_constraint_violation'; callers "
+            f"discriminate on that, and this arrived as {exc.sqlstate}{where}"
+        )
+    except psycopg.Error as exc:
+        raise AssertionError(
+            f"{statement!r}{where} failed with {type(exc).__name__} rather than the ledger "
+            f"arm that raises {expected!r}: {exc}. A refusal from somewhere else does not "
+            f"grade this arm."
+        ) from exc
+    else:
+        raise AssertionError(
+            f"{statement!r}{where} SUCCEEDED (rowcount={rowcount}) with "
+            f"session_replication_role = '{replication_role}'. The arm did not fire."
+        )
+    finally:
+        owner.rollback()
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize(("label", "statement"), ANCHOR_DELETE_SHAPES)
+def test_no_spelling_of_deleting_the_anchor_gets_past_the_guard(
+    ledger_clean, label: str, statement: str
+) -> None:
+    """T-114 acceptance 3: ten statement shapes, both replication roles, one arm.
+
+    The shapes are not decoration. A conditional exemption written inside the DELETE branch
+    -- the kind of edit that "fixes" an inconvenient failure -- survives a test that only
+    ever sends one statement. It does not survive a bare DELETE, a discriminator predicate,
+    a ctid lookup, a predicate on a column no arm reads, ONLY, an alias with USING,
+    RETURNING, a data-modifying CTE, a self-referencing subquery and a plpgsql block all
+    arriving at the same refusal with the same SQLSTATE.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as owner:
+        try:
+            for role in ("origin", "replica"):
+                _refused_by_a_ledger_trigger(
+                    owner,
+                    statement,
+                    ANCHOR_DELETE_REFUSAL,
+                    replication_role=role,
+                    label=f"{label} / {role}",
+                )
+        finally:
+            owner.rollback()
+
+    # The chain is untouched and still appendable: a guard that closed the hole by breaking
+    # the writer would not have closed anything.
+    assert chain_anchor_of(connection)["length"] == 3
+    assert verify_chain_in_db(connection)["ok"] is True
+
+
+@pytest.mark.docker
+def test_the_anchor_guard_refuses_a_parameterised_delete_too(ledger_clean) -> None:
+    """The extended query protocol is a different code path from the shapes above.
+
+    psycopg sends a literal statement over the simple protocol and a parameterised one over
+    Parse/Bind/Execute. Same arm either way -- asserted rather than assumed, because "it
+    only fires for literals" is exactly the sort of thing nobody would think to check.
+    """
+    connection = ledger_clean
+    append_event(connection, observation_event(0))
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as owner:
+        try:
+            for role in ("origin", "replica"):
+                _refused_by_a_ledger_trigger(
+                    owner,
+                    "delete from ledger.chain_head where chain = %s",
+                    ANCHOR_DELETE_REFUSAL,
+                    params=("commerce_events",),
+                    replication_role=role,
+                    label=f"parameterised / {role}",
+                )
+        finally:
+            owner.rollback()
+    assert chain_anchor_of(connection)["length"] == 1
+
+
+@pytest.mark.docker
+def test_a_replica_session_replication_role_cannot_skip_the_ledger_integrity_triggers(
+    ledger_clean,
+) -> None:
+    """T-114 acceptance 2: the GUC bypass, driven arm by arm.
+
+    ``session_replication_role = 'replica'`` was a complete disarm of the ledger's
+    integrity layer for anyone who could set it, and only a superuser can -- which is the
+    table owner, the principal every arm here exists to stop, and the principal no grant
+    reaches. Five triggers, five attacks, and the last one is a positive: the anchor
+    ADVANCE trigger has to keep firing in replica mode too, or an append in that mode
+    commits unanchored and the ledger loses the ability to detect its own truncated tail.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+    with connection.cursor() as cur:
+        cur.execute("select seq, event_hash from ledger.commerce_events order by seq desc limit 1")
+        tail_seq, tail_hash = cur.fetchone()
+
+    insert_event = (
+        "insert into ledger.commerce_events "
+        "  (idempotency_key, kind, store_id, occurred_at, payload, prev_hash, event_hash) "
+        "values (%s, 'claim_verified', 's-1', %s, %s::jsonb, %s, %s)"
+    )
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as owner:
+        try:
+            # (C) the anchor deleted outright -- the ledger's only truncation detector.
+            _refused_by_a_ledger_trigger(
+                owner,
+                "delete from ledger.chain_head",
+                ANCHOR_DELETE_REFUSAL,
+                replication_role="replica",
+                label="chain_head_guard / DELETE",
+            )
+            # (B) denial-of-integrity: a flawless ledger made to report itself truncated.
+            _refused_by_a_ledger_trigger(
+                owner,
+                "update ledger.chain_head set length = 99 where chain = 'commerce_events'",
+                ANCHOR_LENGTH_REFUSAL,
+                replication_role="replica",
+                label="chain_head_guard / UPDATE",
+            )
+            # The tail cut off row by row.
+            _refused_by_a_ledger_trigger(
+                owner,
+                "delete from ledger.commerce_events where seq > 1",
+                APPEND_ONLY_DELETE_REFUSAL,
+                replication_role="replica",
+                label="append_only / DELETE",
+            )
+            # A written event rewritten in place.
+            _refused_by_a_ledger_trigger(
+                owner,
+                "update ledger.commerce_events set payload = '{\"x\": 1}'::jsonb where seq = 1",
+                APPEND_ONLY_UPDATE_REFUSAL,
+                replication_role="replica",
+                label="append_only / UPDATE",
+            )
+            # A forked chain: an event whose prev_hash links to nothing.
+            _refused_by_a_ledger_trigger(
+                owner,
+                insert_event,
+                CHAIN_LINK_REFUSAL,
+                params=("ev-forked", AS_OF, "{}", "a" * 64, "b" * 64),
+                replication_role="replica",
+                label="chain_guard / INSERT",
+            )
+
+            # ...and the positive: a well-linked append in replica mode still advances the
+            # anchor. With the trigger at 'O' this INSERT succeeded and the anchor did not
+            # move -- an unanchored append, which is attack (C) reached from the other side.
+            with owner.cursor() as cur:
+                cur.execute("set local session_replication_role = 'replica'")
+                cur.execute("show session_replication_role")
+                assert cur.fetchone() == ("replica",)
+                cur.execute(
+                    insert_event + " returning seq",
+                    ("ev-replica", AS_OF, "{}", tail_hash, "f" * 64),
+                )
+                # Read the seq back rather than predicting it: `bigserial` is not
+                # transactional, so the refused INSERTs above consumed sequence values.
+                (new_seq,) = cur.fetchone()
+                assert new_seq > tail_seq
+                cur.execute(
+                    "select head_hash, length, last_seq from ledger.chain_head "
+                    " where chain = 'commerce_events'"
+                )
+                assert cur.fetchone() == ("f" * 64, 4, new_seq), (
+                    "an append made with session_replication_role = 'replica' did not move "
+                    "the anchor: commerce_events_advance_anchor_trigger was skipped, so the "
+                    "chain now has an event the anchor does not commit to and truncating "
+                    "back to it is undetectable"
+                )
+        finally:
+            owner.rollback()
+
+    assert chain_anchor_of(connection)["length"] == 3
+    assert verify_chain_in_db(connection)["ok"] is True
+
+
+@pytest.mark.docker
+def test_every_ledger_integrity_trigger_is_installed_enable_always(ledger_clean) -> None:
+    """T-114 acceptance 1 and 2, at the catalog, for all five arms rather than one.
+
+    The behavioural tests above drive the bypass; this one is the regression guard that
+    survives a refactor moving a refusal elsewhere. The trigger NAMES are pinned as a set
+    as well as their state, so a sixth trigger added later at the default ``'O'`` fails
+    here and has to be a decision rather than an oversight.
+    """
+    connection = ledger_clean
+    with connection.cursor() as cur:
+        cur.execute(
+            "select ns.nspname || '.' || cl.relname || '.' || t.tgname, t.tgenabled "
+            "  from pg_trigger t "
+            "  join pg_class cl on cl.oid = t.tgrelid "
+            "  join pg_namespace ns on ns.oid = cl.relnamespace "
+            " where ns.nspname = 'ledger' and not t.tgisinternal"
+        )
+        installed = dict(cur.fetchall())
+
+    assert set(installed) == {
+        "ledger.chain_head.chain_head_guard_trigger",
+        "ledger.commerce_events.commerce_events_advance_anchor_trigger",
+        "ledger.commerce_events.commerce_events_append_only_trigger",
+        "ledger.commerce_events.commerce_events_chain_guard_trigger",
+        "ledger.commerce_events.commerce_events_reset_anchor_trigger",
+    }, sorted(installed)
+
+    not_always = sorted(name for name, state in installed.items() if state != "A")
+    assert not_always == [], (
+        f"{not_always} are not ENABLE ALWAYS. tgenabled 'O' fires in origin and local mode "
+        f"only, so `SET session_replication_role = 'replica'` -- one statement, no DDL, no "
+        f"catalog change, superuser-only and therefore available to the table owner -- "
+        f"skips them. Measured with all five at 'O': DELETE FROM ledger.chain_head "
+        f"succeeded with rowcount 1."
+    )
+
+
+@pytest.mark.docker
+def test_the_anchor_guard_does_not_depend_on_who_is_connected_or_how(ledger_clean) -> None:
+    """The other half of "one fixed statement shape from ONE connection".
+
+    A conditional exemption does not have to key on the statement. ``current_user``,
+    ``application_name``, ``pg_backend_pid()``, ``inet_client_addr()`` and any
+    ``current_setting('...')`` are all in reach of a plpgsql trigger, and every test in this
+    block until now drove the arm from one admin connection with default session settings --
+    so an exemption written against connection-level state would have gone straight through
+    the whole file. Three connections, three identities, one arm.
+
+    The DELETE arm is unconditional. There is no legitimate delete of the anchor row from
+    any session, so there is nothing here that a session can say about itself that should
+    change the answer.
+    """
+    connection = ledger_clean
+    for index in range(2):
+        append_event(connection, observation_event(index))
+
+    dsn = _admin_dsn(connection)
+    identities = (
+        ("default", {}, ()),
+        ("named application", {"application_name": "proxyshop-t114-probe"}, ()),
+        (
+            "custom GUCs set",
+            {"application_name": "pg_dump"},
+            (
+                "set local proxyshop.maintenance = 'on'",
+                "set local statement_timeout = '30s'",
+                "set local search_path to ledger, public",
+            ),
+        ),
+    )
+
+    pids = set()
+    for label, kwargs, prelude in identities:
+        with psycopg.connect(dsn, connect_timeout=5, **kwargs) as owner:
+            try:
+                with owner.cursor() as cur:
+                    for statement in prelude:
+                        cur.execute(statement)
+                    cur.execute("select pg_backend_pid()")
+                    pids.add(cur.fetchone()[0])
+                    cur.execute(
+                        "select has_table_privilege(current_user, 'ledger.chain_head', 'DELETE')"
+                    )
+                    assert cur.fetchone() == (True,), label
+                    # The prelude has to survive into the statement's own transaction, so it
+                    # is re-run there rather than trusted to persist across the rollback.
+                    for statement in prelude:
+                        cur.execute(statement)
+                    try:
+                        cur.execute("delete from ledger.chain_head")
+                    except psycopg.errors.IntegrityConstraintViolation as exc:
+                        assert ANCHOR_DELETE_REFUSAL in str(exc), f"{label}: {exc}"
+                    else:
+                        raise AssertionError(
+                            f"[{label}] deleting the anchor SUCCEEDED "
+                            f"(rowcount={cur.rowcount}). The arm is conditional on something "
+                            f"about the session, which is not a distinction it is allowed to "
+                            f"make: there is no legitimate DELETE of this row."
+                        )
+            finally:
+                owner.rollback()
+
+    assert len(pids) == 3, f"the three probes shared a backend: {pids}"
+    assert chain_anchor_of(connection)["length"] == 2
+    assert verify_chain_in_db(connection)["ok"] is True

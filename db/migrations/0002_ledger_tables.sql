@@ -336,6 +336,48 @@ CREATE OR REPLACE TRIGGER commerce_events_reset_anchor_trigger
   FOR EACH STATEMENT EXECUTE FUNCTION ledger.commerce_events_reset_anchor();
 
 -- ---------------------------------------------------------------------------------------
+-- Every arm above fires in EVERY session_replication_role, not only in 'origin'
+-- ---------------------------------------------------------------------------------------
+-- `CREATE TRIGGER` installs a trigger with `pg_trigger.tgenabled = 'O'`, and 'O' means
+-- "fires in origin and local mode" -- it does NOT mean "enabled". A session in *replica*
+-- mode skips every 'O' trigger on the table, and `session_replication_role` is a plain
+-- `SET`: no DDL, no catalog change, nothing left behind, available to any superuser, which
+-- is what the migration runner, the admin DSN and any DBA session already are.
+--
+-- Measured in this tree (worker 22) with the five triggers left at 'O', on a chain with
+-- three events in it:
+--
+--     SET session_replication_role = 'replica';
+--     DELETE FROM ledger.chain_head;      -- SUCCEEDED, rowcount = 1
+--
+-- That is attack (C) above reached in one statement, and it is only the smallest of them:
+-- the same switch turns off the append-only arm, the prev_hash link check and the anchor
+-- advance at once, so the follow-up is to rewrite `commerce_events` row by row and leave
+-- behind a chain that still verifies against an anchor that was never updated.
+--
+-- All five are INTEGRITY triggers, not replication-aware ones. `session_replication_role`
+-- exists so that a subscription applying another node's already-validated changes does not
+-- re-run the origin's business logic; none of these five is business logic, this database
+-- is not a subscriber to anything, and there is no arrangement in which skipping them is
+-- correct. `ENABLE ALWAYS` (tgenabled = 'A') is the state that says exactly that, and it
+-- is what the catalog test in apps/trust/tests/test_ledger_chain.py pins.
+--
+-- What this does NOT claim: the table owner can still `ALTER TABLE ... DISABLE TRIGGER`.
+-- The difference that matters is that DISABLE is DDL -- it takes an ACCESS EXCLUSIVE lock
+-- and it moves `tgenabled` to 'D', where the catalog test sees it -- whereas a GUC is
+-- invisible to every catalog query there is.
+ALTER TABLE ledger.chain_head
+  ENABLE ALWAYS TRIGGER chain_head_guard_trigger;
+ALTER TABLE ledger.commerce_events
+  ENABLE ALWAYS TRIGGER commerce_events_chain_guard_trigger;
+ALTER TABLE ledger.commerce_events
+  ENABLE ALWAYS TRIGGER commerce_events_append_only_trigger;
+ALTER TABLE ledger.commerce_events
+  ENABLE ALWAYS TRIGGER commerce_events_advance_anchor_trigger;
+ALTER TABLE ledger.commerce_events
+  ENABLE ALWAYS TRIGGER commerce_events_reset_anchor_trigger;
+
+-- ---------------------------------------------------------------------------------------
 -- catalog_snapshots -- what a verification decision was made against
 -- ---------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ledger.catalog_snapshots (
