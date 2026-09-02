@@ -242,3 +242,65 @@ async def test_a_code_created_without_an_offer_tag_is_not_indexed(stub: StubClie
     index = (await stub.http.get("/_stub/codes")).json()
     assert index["by_offer"] == {}
     assert "PSX-NOOFFER1" in index["codes"]
+
+
+async def test_the_offer_index_agrees_with_the_code_table_for_a_lowercase_code(
+    stub: StubClient,
+) -> None:
+    """``codes[by_offer[offer_id]]`` must resolve, whatever case the code was created in.
+
+    ``state.codes`` is keyed by ``code.upper()``; the offer index used to store the code
+    exactly as created. Shopify's ``discountCodeBasicCreate`` does not police case — it
+    accepts ``psx-lower01`` and stores it as given — so the two structures disagreed
+    outright, ``codes`` holding ``PSX-LOWER01`` while ``by_offer`` held ``psx-lower01``, and
+    the obvious lookup raised ``KeyError``.
+    """
+    response = await stub.create_code("psx-lower01", offer_id="offer-lc")
+    assert response.json()["data"]["discountCodeBasicCreate"]["userErrors"] == []
+
+    index = (await stub.http.get("/_stub/codes")).json()
+    assert index["by_offer"]["offer-lc"] == "PSX-LOWER01"
+    assert index["codes"][index["by_offer"]["offer-lc"]]["code"] == "psx-lower01", (
+        "the index key is normalised; the stored code keeps the case it was created with, "
+        "exactly as Shopify does"
+    )
+    assert index["codes_by_offer"]["offer-lc"] == ["PSX-LOWER01"]
+
+
+async def test_a_second_mint_for_one_offer_does_not_erase_the_first(stub: StubClient) -> None:
+    """The offer index was last-write-wins, so a double mint hid a live redeemable code.
+
+    Both codes stay in ``codes`` and both stay redeemable, so an index that remembers only
+    the second one is the index disagreeing with the redemption table. A duplicate mint is
+    deliberately *not* refused here: the stub mirrors Shopify, which has no per-offer index
+    and therefore no rule to break. Whether one offer may hold two live codes is T-052's
+    concern — this makes it observable rather than silent.
+    """
+    await stub.create_code("PSX-FIRST001", offer_id="offer-9")
+    await stub.create_code("PSX-SECOND01", offer_id="offer-9")
+
+    index = (await stub.http.get("/_stub/codes")).json()
+    assert index["codes_by_offer"]["offer-9"] == ["PSX-FIRST001", "PSX-SECOND01"], (
+        "creation order, both codes; the first mint must not vanish"
+    )
+    assert index["by_offer"]["offer-9"] == "PSX-SECOND01", "the single view is the latest"
+    for code in index["codes_by_offer"]["offer-9"]:
+        assert code in index["codes"], "every indexed code must be a key of the code table"
+
+
+async def test_every_offer_index_key_resolves_in_the_code_table(stub: StubClient) -> None:
+    """The invariant, stated once over a mixed batch rather than per case."""
+    await stub.create_code("PSX-MIXED001", offer_id="offer-a")
+    await stub.create_code("psx-mixed002", offer_id="offer-a")
+    await stub.create_code("PSX-MIXED003", offer_id="offer-b")
+    await stub.create_code("PSX-NOOFFER2")
+
+    index = (await stub.http.get("/_stub/codes")).json()
+    assert set(index["by_offer"]) == set(index["codes_by_offer"]) == {"offer-a", "offer-b"}
+    for offer_id, minted in index["codes_by_offer"].items():
+        assert minted, f"{offer_id} is indexed with no codes"
+        assert index["by_offer"][offer_id] == minted[-1]
+        for code in minted:
+            assert code == code.upper(), "index keys are normalised"
+            assert index["codes"][code]["offer_id"] == offer_id
+    assert "PSX-NOOFFER2" not in {c for m in index["codes_by_offer"].values() for c in m}

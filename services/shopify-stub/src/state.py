@@ -354,8 +354,13 @@ class StubState:
         self.config.validate()
         self.codes: dict[str, DiscountCode] = {}
         """Keyed by the code string, upper-cased."""
-        self.codes_by_offer: dict[str, str] = {}
-        """D22: codes are *stored keyed by offer_id*. Maps ``offer_id`` -> code string."""
+        self.codes_by_offer: dict[str, list[str]] = {}
+        """D22: codes are *stored keyed by offer_id*. Maps ``offer_id`` -> **every** code
+        minted for it, upper-cased, in creation order.
+
+        A list rather than a single code because the previous single-code map was
+        last-write-wins: a second mint for one offer silently dropped the first code from the
+        index while it stayed live in :attr:`codes`. See :meth:`store_code`."""
         self.variants: dict[int, Variant] = {}
         self.checkouts: dict[str, Checkout] = {}
         self.orders: dict[int, Order] = {}
@@ -411,10 +416,35 @@ class StubState:
         return self.codes.get(candidate.strip().upper())
 
     def store_code(self, discount: DiscountCode) -> None:
-        """Store a code, and index it by ``offer_id`` when it carries one (D22)."""
+        """Store a code, and index it by ``offer_id`` when it carries one (D22).
+
+        Two things this used to get wrong, both in one line
+        (``self.codes_by_offer[offer_id] = discount.code``):
+
+        **The key was not normalised.** ``self.codes`` is keyed by ``code.upper()`` and the
+        index stored the code exactly as created, so a lowercase-created code left the two
+        structures disagreeing outright — ``codes`` holding ``PSX-LOWER01`` while the index
+        held ``psx-lower01``. A consumer doing the obvious ``codes[by_offer[offer_id]]``
+        against ``/_stub/codes`` got a ``KeyError``. Shopify accepts a lowercase code
+        (``discountCodeBasicCreate`` does not police case), so this is reachable, not
+        theoretical.
+
+        **It was last-write-wins.** Minting twice for one offer silently dropped the first
+        code from the index while leaving it live and redeemable in ``codes`` — the index
+        said one thing and the redemption table said another. The index is now a list, in
+        creation order, and appends.
+
+        A duplicate mint is deliberately **not** an error here. The stub exists to mirror
+        Shopify and make non-conformance *visible*; Shopify has no per-offer index at all, so
+        there is no platform rule to enforce. Whether an offer may hold two live codes is
+        T-052's business, and the list is what lets T-052's tests see that it happened.
+        """
         self.codes[discount.code.upper()] = discount
         if discount.offer_id:
-            self.codes_by_offer[discount.offer_id] = discount.code
+            minted = self.codes_by_offer.setdefault(discount.offer_id, [])
+            normalised = discount.code.upper()
+            if normalised not in minted:
+                minted.append(normalised)
 
     def subscriptions_for(self, topic: WebhookTopic) -> list[WebhookSubscription]:
         return [s for s in self.subscriptions.values() if s.topic == topic]

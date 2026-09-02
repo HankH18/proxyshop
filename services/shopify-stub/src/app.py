@@ -457,6 +457,20 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
         Shopify has no endpoint that answers "which code belongs to offer X" — the index is
         the *app's* bookkeeping, not the platform's. It is exposed here so a test can prove
         the code was stored under the offer id without also proving it was derived from it.
+
+        Two views of the same index, because they answer different questions:
+
+        ``by_offer``
+            ``offer_id`` -> the **most recently minted** code for it. Every key is a key of
+            ``codes``, so ``codes[by_offer[offer_id]]`` always resolves — which it did not
+            before: the index stored the code as created while ``codes`` is keyed upper-case,
+            so a lowercase-created code produced a ``KeyError`` on the obvious lookup.
+        ``codes_by_offer``
+            ``offer_id`` -> **every** code minted for it, in creation order. The single-code
+            view is last-write-wins by construction, so a second mint for one offer used to
+            vanish from the index while staying live and redeemable in ``codes``. Whether an
+            offer may hold two live codes is T-052's question; the stub's job is to let the
+            answer be observed rather than to hide it.
         """
         return {
             "codes": {
@@ -471,7 +485,12 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
                 }
                 for code, discount in stub.state.codes.items()
             },
-            "by_offer": dict(stub.state.codes_by_offer),
+            "by_offer": {
+                offer_id: minted[-1] for offer_id, minted in stub.state.codes_by_offer.items()
+            },
+            "codes_by_offer": {
+                offer_id: list(minted) for offer_id, minted in stub.state.codes_by_offer.items()
+            },
         }
 
     @router.get("/checkouts/{token}")
