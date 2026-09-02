@@ -2585,3 +2585,56 @@ def test_the_attribute_filter_canonicalisation_fold_is_load_bearing(
     }
     assert left_ids == expected, f"{left} returned {sorted(left_ids)}"
     assert right_ids == expected, f"{right} returned {sorted(right_ids)}"
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_measured_zero_score_is_distinguishable_from_no_measurement(
+    graph_seeded_catalog: dict[str, Any],
+) -> None:
+    """W1-35: ``0.0`` was both the structured-path sentinel and a real vector score.
+
+    A query vector antipodal to a product's embedding scores ``0.0`` on the vector path —
+    the same value ``_STRUCTURED_HEAD`` emitted as its "no similarity" sentinel — and
+    ``cosine_from_score`` maps both to ``-1.0``. (Measured here the antipodal score is
+    ``8.5e-05`` rather than a bit-exact ``0.0``: that is the index's float32 quantization,
+    the same ~1e-4 residue the exact-match test allows for, and it puts the two values well
+    inside any threshold a caller would write.) Nothing inside T-012 thresholds on it, so
+    this was never a live defect *here*; it is a contract hazard for the six downstream
+    tickets that read ``Candidate.score``, and it is far cheaper to close before they land
+    than after.
+
+    ``Candidate.scored`` distinguishes the two, and ``Candidate.cosine`` is ``None`` rather
+    than a number when nothing was compared, so a downstream threshold cannot read the
+    sentinel as "maximally dissimilar".
+    """
+    session = graph_seeded_catalog["session"]
+    row = read_products(session, limit=1)[0]
+    antipodal = [-component for component in HashEmbedding().embed(embedding_text(row))]
+
+    measured = candidate_products(session, embedding=antipodal, status=None, limit=10)
+    worst = next(c for c in measured if c.product_id == row["product_id"])
+    assert worst.scored is True
+    assert worst.score == pytest.approx(0.0, abs=QUANTIZATION_TOLERANCE), (
+        f"an antipodal vector must score ~0.0, got {worst.score}"
+    )
+    assert worst.cosine == pytest.approx(-1.0, abs=QUANTIZATION_TOLERANCE)
+
+    structured = candidate_products(
+        session,
+        attribute_filters=[AttributeFilter("fragrance_free", value_bool=True)],
+        status=None,
+        limit=10,
+    )
+    assert structured, "the structured path must still return rows"
+    assert all(c.scored is False for c in structured)
+    assert all(c.cosine is None for c in structured), (
+        "no similarity was measured, so there is no number to report"
+    )
+
+    # The two are now distinguishable even though the raw score field says the same thing.
+    assert worst.score == pytest.approx(structured[0].score, abs=QUANTIZATION_TOLERANCE)
+    assert cosine_from_score(worst.score) == pytest.approx(-1.0, abs=QUANTIZATION_TOLERANCE)
+    assert worst.scored != structured[0].scored
+    with pytest.raises(ValueError, match="no similarity was measured"):
+        cosine_from_score(structured[0].cosine)

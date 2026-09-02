@@ -138,7 +138,26 @@ class AttributeFilter:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One retrieved product."""
+    """One retrieved product.
+
+    WHY ``scored`` EXISTS, and why a downstream ticket should threshold on :attr:`cosine`
+    rather than on :attr:`score`. The structured-only path has no similarity to report and
+    used ``0.0`` as its sentinel — but ``0.0`` is also a perfectly real vector score: a
+    query vector antipodal to a product's embedding scores **exactly 0.0** on the vector
+    path (measured; ``cosine_from_score`` maps both to ``-1.0``). Nothing inside T-012
+    thresholds on it, so this was never a live defect here — but six downstream tickets read
+    ``Candidate.score``, and "the least similar possible match" and "no similarity was
+    measured" are not the same fact, so one of them would eventually read the sentinel as a
+    similarity. :attr:`scored` distinguishes them, and :attr:`cosine` is ``None`` rather than
+    a number when nothing was measured, so the ambiguity is not expressible in the accessor
+    a ranking actually consumes.
+
+    Attributes:
+        score: what ``db.index.vector.queryNodes`` reported, in ``[0, 1]``. Meaningless (and
+            ``0.0``) when :attr:`scored` is ``False``.
+        scored: whether a similarity was actually measured, i.e. whether this row came off
+            the vector path.
+    """
 
     product_id: str
     canonical_name: str
@@ -148,6 +167,19 @@ class Candidate:
     categories: list[str] = field(default_factory=list)
     attributes: list[dict[str, Any]] = field(default_factory=list)
     ingredients: list[str] = field(default_factory=list)
+    scored: bool = True
+
+    @property
+    def cosine(self) -> float | None:
+        """The raw cosine similarity, or ``None`` when none was measured.
+
+        Returns:
+            ``cosine_from_score(self.score)`` on the vector path; ``None`` on the structured
+            path, where no comparison happened. A caller that thresholds on this cannot
+            silently read the structured sentinel as "maximally dissimilar" — ``None``
+            raises on any comparison rather than quietly ranking last.
+        """
+        return None if not self.scored else cosine_from_score(self.score)
 
 
 #: Shared tail: collect each candidate's attribute/ingredient/category context once, then
@@ -209,9 +241,11 @@ YIELD node AS p, score
 WITH p, score
 """
 
-#: The structured-only path. ``score`` is 0.0 and the ordering falls back to ``product_id``,
-#: which keeps the result deterministic — a retrieval whose order depends on storage order
-#: is not reproducible, and every ranking assertion downstream would be flaky.
+#: The structured-only path. Nothing is compared here, so there is no similarity to report:
+#: the ``0.0`` below is a placeholder that ``_run`` pairs with ``scored=False``, and
+#: ``Candidate.cosine`` is ``None`` for every row it produces. The ordering falls back to
+#: ``product_id``, which keeps the result deterministic — a retrieval whose order depends on
+#: storage order is not reproducible, and every ranking assertion downstream would be flaky.
 _STRUCTURED_HEAD = """
 MATCH (p:Product)
 WITH p, 0.0 AS score
@@ -223,6 +257,7 @@ def _run(
     head: str,
     *,
     parameters: dict[str, Any],
+    scored: bool,
 ) -> list[Candidate]:
     """Execute a candidate query and materialise the rows.
 
@@ -230,6 +265,8 @@ def _run(
         session: an open ``neo4j.Session``.
         head: the retrieval head (vector or structured).
         parameters: the query parameters.
+        scored: whether ``head`` measured a similarity. Passed in rather than sniffed from
+            the score, because the whole point is that ``0.0`` does not distinguish them.
 
     Returns:
         The candidates, best score first.
@@ -245,6 +282,7 @@ def _run(
             categories=list(row["categories"]),
             attributes=[dict(attribute) for attribute in row["attributes"]],
             ingredients=list(row["ingredients"]),
+            scored=scored,
         )
         for row in rows
     ]
@@ -349,9 +387,11 @@ def candidate_products(
         **rescaled to ``[0, 1]`` as ``(1 + cosine) / 2``** — measured here: an exact
         self-query scores ``0.99997`` (the residue is the index's default float32
         quantization) and an unrelated 1024-d hash vector scores ``≈0.513``, i.e. cosine
-        ``≈0.027``. Use :func:`cosine_from_score` to recover the raw cosine. On the
-        structured path the score is ``0.0`` for every row and the order is by
-        ``product_id``.
+        ``≈0.027``. Use :attr:`Candidate.cosine` (or :func:`cosine_from_score`) to recover
+        the raw cosine. On the structured path nothing is compared, so ``scored`` is
+        ``False``, ``cosine`` is ``None``, the score field holds a meaningless ``0.0`` and
+        the order is by ``product_id`` — a retrieval whose order depends on storage order is
+        not reproducible, and every ranking assertion downstream would be flaky.
 
     Raises:
         UnretrievableQuery: no vector and no structured predicate was supplied.
@@ -411,13 +451,13 @@ def candidate_products(
         "limit": int(limit),
     }
     if vector is None:
-        return _run(session, _STRUCTURED_HEAD, parameters=parameters)
+        return _run(session, _STRUCTURED_HEAD, parameters=parameters, scored=False)
     parameters["embedding"] = vector
     parameters["fetch"] = min(max(limit * oversample, limit), MAX_INDEX_FETCH)
-    return _run(session, _VECTOR_HEAD, parameters=parameters)
+    return _run(session, _VECTOR_HEAD, parameters=parameters, scored=True)
 
 
-def cosine_from_score(score: float) -> float:
+def cosine_from_score(score: float | None) -> float:
     """Recover the raw cosine similarity from a ``queryNodes`` cosine score.
 
     Neo4j rescales cosine into ``[0, 1]`` so that every similarity function it supports
@@ -426,11 +466,23 @@ def cosine_from_score(score: float) -> float:
     inflate every retrieval component.
 
     Args:
-        score: a score from :func:`candidate_products` on the vector path.
+        score: a score from :func:`candidate_products` on the vector path. ``None`` — a
+            :attr:`Candidate.score` that was never measured — is refused rather than
+            mapped, because ``cosine_from_score(0.0)`` is ``-1.0`` and returning "maximally
+            dissimilar" for "not compared" is the exact confusion :attr:`Candidate.scored`
+            exists to prevent.
 
     Returns:
         The cosine similarity in ``[-1, 1]``.
+
+    Raises:
+        ValueError: ``score`` is ``None``.
     """
+    if score is None:
+        raise ValueError(
+            "no similarity was measured for this candidate (Candidate.scored is False, i.e. "
+            "it came off the structured path); there is no cosine to recover"
+        )
     return 2.0 * float(score) - 1.0
 
 
