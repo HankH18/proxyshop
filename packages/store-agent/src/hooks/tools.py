@@ -200,6 +200,10 @@ class _AdmissionLedger:
         self._spent[fingerprint] += 1
         return True
 
+    def remaining(self, fingerprint: str) -> int:
+        """How many emissions of `fingerprint` are still unspent."""
+        return max(0, self._emitted[fingerprint] - self._spent[fingerprint])
+
     @property
     def emitted(self) -> frozenset[str]:
         return frozenset(self._emitted)
@@ -303,6 +307,16 @@ class ToolHooks:
         harmless for being public: spending can only ever shrink what is admissible.
         """
         return self.__ledger.spend(str(fingerprint))
+
+    def remaining_authorizations(self, fingerprint: str) -> int:
+        """How many unspent authorizations of `fingerprint` this bid still holds.
+
+        Asked *before* anything is spent, because "exactly once" has to hold inside a single
+        boundary call as well as across two: a bid that lists one grant three times must be
+        refused, and a membership test of what has already been spent cannot see that — nothing
+        has been spent yet. The boundary counts what a call asks for and compares it with this.
+        """
+        return self.__ledger.remaining(str(fingerprint))
 
     def start_bid(self, bid_ref: str = "") -> None:
         """Open a new bid: nothing emitted for the previous one stays admissible.

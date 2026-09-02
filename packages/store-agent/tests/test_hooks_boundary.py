@@ -96,6 +96,10 @@ def _offer(product_ref: str, **overrides: Any) -> Offer:
     return Offer(**fields)
 
 
+def _pct(value: float) -> Discount:
+    return Discount(type="percentage", value=value)
+
+
 def _bid(offer: Offer, claims: list[Any]) -> Bid:
     return Bid(
         auction_id="auction-1",
@@ -581,6 +585,79 @@ def test_a_grant_is_spendable_exactly_once(hooks: ToolHooks) -> None:
     regranted = hooks.authorize_discount("prod-cap", 20.0)
     assert not isinstance(regranted, Denied)
     assert enforce_hook_provenance([regranted], hooks, product_ref="prod-cap") == [regranted]
+
+
+def test_one_grant_listed_twice_in_the_same_call_is_spent_once(hooks: ToolHooks) -> None:
+    """ "Exactly once" has to hold inside a single boundary call, not only across two.
+
+    A ledger that recorded spends and then checked membership sees nothing here: at the moment
+    the second copy is examined, nothing has been spent yet. The bid has simply asked to redeem
+    one authorization three times, and asking is what must be counted.
+    """
+    granted = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted, Denied)
+
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_hook_provenance([granted, granted, granted], hooks, product_ref="prod-cap")
+    assert len(raised.value.offenders) == 2, (
+        f"one authorization backs one of the three: {raised.value.offenders}"
+    )
+
+    # Three hook calls really do bank three, and the same claim set then passes: the wall counts
+    # authorizations rather than forbidding repetition.
+    for _ in range(2):
+        assert not isinstance(hooks.authorize_discount("prod-cap", 20.0), Denied)
+    assert enforce_hook_provenance([granted, granted, granted], hooks, product_ref="prod-cap")
+
+
+def test_one_grant_does_not_discount_every_offer_in_the_bid(hooks: ToolHooks) -> None:
+    """The same accounting, on the priced side: one authorization, one discount.
+
+    A `Bid` carries one `Offer` today, so this is reachable only through material that carries
+    several — which is exactly the kind of shape assumption the last defect was built on. The
+    boundary consumes a grant when it backs a discount rather than merely consulting it.
+    """
+    grant = hooks.authorize_discount("prod-cap", 15.0)
+    assert not isinstance(grant, Denied)
+
+    offers = [
+        _offer("prod-cap", unit_price=85.0, total_price=85.0, discount=_pct(15.0)) for _ in range(3)
+    ]
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_hook_provenance([grant, *offers], hooks, product_ref="prod-cap")
+    assert len(raised.value.offenders) == 2, (
+        f"the first offer is backed and the other two are not: {raised.value.offenders}"
+    )
+
+    # One grant per offer is what it takes.
+    for _ in range(2):
+        assert not isinstance(hooks.authorize_discount("prod-cap", 15.0), Denied)
+    assert enforce_hook_provenance([grant, grant, grant, *offers], hooks, product_ref="prod-cap")
+
+
+def test_a_rule_ref_that_could_not_be_read_back_is_refused_at_mint(
+    alpha: dict[str, Any],
+) -> None:
+    """A store whose id carries the separator would mint grants nothing could ever redeem.
+
+    The scope is everything after the first separator, which is what makes a `product_ref`
+    containing one unambiguous — and it means a *rule* ref containing one is not readable at all.
+    Left alone, every discount that store ever authorized would be refused at the boundary as
+    though it had been forged: a configuration mistake wearing a security refusal's clothes. It
+    fails at the mint instead, where whoever configured the store can see it.
+    """
+    with pytest.raises(ValueError, match="scoped ref|separates the rule"):
+        scoped_ref("envelope:store@alpha:v3#max_discount_pct", "prod-cap")
+
+    fixture = _load(ENVELOPE_FIXTURES / "store-alpha.approved.json")
+    fixture["envelope"]["store_id"] = "store@alpha"
+    hooks = ToolHooks(_context_from(fixture, store_id="store@alpha"))
+    with pytest.raises(ValueError):
+        hooks.authorize_discount("prod-cap", 15.0)
+
+    # The walls themselves are unaffected: a request the envelope refuses is still a denial,
+    # not a traceback.
+    assert isinstance(hooks.authorize_discount("prod-cap", 25.0), Denied)
 
 
 def test_a_refused_boundary_call_spends_nothing(hooks: ToolHooks) -> None:

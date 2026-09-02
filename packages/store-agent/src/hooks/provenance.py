@@ -193,7 +193,21 @@ def scoped_ref(rule_ref: str, product_ref: str) -> str:
     that checks one cannot drift apart. Built rather than parsed at the check site: comparing
     against a constructed ref means a product_ref containing the separator is still matched
     exactly, where splitting the string would guess.
+
+    The rule half may not itself contain the separator, and this raises rather than returning a
+    ref that cannot be read back. The scope is everything after the *first* separator — that is
+    what makes a `product_ref` containing one unambiguous — so a rule ref carrying one (a
+    `store_id` of ``store@alpha``, say) would mint grants that :func:`claim_is_scoped_to` can
+    never match, and every discount that store ever authorized would be refused at the boundary
+    as if it had been forged. Failing here puts that in front of whoever configured the store,
+    at the moment they configured it, instead of surfacing it later as a security refusal.
     """
+    if CLAIM_SCOPE_SEPARATOR in rule_ref:
+        raise ValueError(
+            f"rule ref {rule_ref!r} contains {CLAIM_SCOPE_SEPARATOR!r}, which is how a scoped "
+            "ref separates the rule from the product it was applied to; a grant built on it "
+            "could never be matched back to its product"
+        )
     return f"{rule_ref}{CLAIM_SCOPE_SEPARATOR}{product_ref}"
 
 
@@ -563,18 +577,13 @@ def _authorization_refusal(claim: Any, hooks: Any, product_ref: str | None) -> s
                 f"{str(product_ref)!r}: the envelope's price floors are per product, so the "
                 "walls cleared for one product were never checked for the other"
             )
-        spent = getattr(hooks, "spent_fingerprints", None)
-        if spent is None or not callable(getattr(hooks, "spend_authorization", None)):
+        if not callable(getattr(hooks, "spend_authorization", None)) or not callable(
+            getattr(hooks, "remaining_authorizations", None)
+        ):
             return (
-                f"{type(hooks).__name__} cannot record that an authorization was spent (no "
-                "`spent_fingerprints` / `spend_authorization`), so 'exactly once' is "
+                f"{type(hooks).__name__} cannot record or count that an authorization was spent "
+                "(no `spend_authorization` / `remaining_authorizations`), so 'exactly once' is "
                 "unenforceable here; refusing"
-            )
-        if claim_fingerprint(claim) in spent:
-            return (
-                f"claim {key!r} granted for {granted_for!r} was already spent in this bid: a "
-                "grant is one authorization, not a licence to discount every offer in the bid — "
-                "call the hook again for a second one"
             )
 
     recheck = getattr(hooks, "would_authorize", None)
@@ -614,7 +623,7 @@ def _authorization_refusal(claim: Any, hooks: Any, product_ref: str | None) -> s
 
 
 def _discount_refusal(
-    path: str, discount: Any, backing: list[float], product_ref: str | None
+    path: str, discount: Any, unspent: list[float], product_ref: str | None
 ) -> str | None:
     """Why an offer's `discount` is not authorized, or `None` when a grant in this bid backs it.
 
@@ -629,6 +638,11 @@ def _discount_refusal(
     refused rather than guessed at: an amount off cannot be compared with a percentage grant
     without re-deriving the price the bid is asserting, and a boundary that re-derived prices
     would be deciding what the offer means instead of checking it.
+
+    `unspent` is **consumed**: a matched depth is removed from it, so one grant backs one
+    discount. Otherwise "a grant is one authorization" would hold against a second *call* and
+    fail against a second *offer* in the same one — three offers at 15% would all cash the same
+    single 15% grant, and the exchange would see one authorization behind three discounts.
     """
     depth = _as_depth(_enum_value(_read(discount, "value")))
     kind = str(_enum_value(_read(discount, "type")) or "")
@@ -650,12 +664,21 @@ def _discount_refusal(
             f"the offer's discount at {path} is of type {kind!r}, which no tool hook can "
             f"authorize (hooks grant percentage depths: {sorted(PERCENTAGE_DISCOUNT_TYPES)})"
         )
-    if not any(abs(granted - depth) <= DISCOUNT_MATCH_TOLERANCE for granted in backing):
+    match = next(
+        (
+            index
+            for index, granted in enumerate(unspent)
+            if abs(granted - depth) <= DISCOUNT_MATCH_TOLERANCE
+        ),
+        None,
+    )
+    if match is None:
         return (
-            f"the offer at {path} takes {depth}% off {product_ref!r}, and no hook-emitted "
-            f"authorization in this bid grants that depth (granted here: {sorted(backing)}) — "
+            f"the offer at {path} takes {depth}% off {product_ref!r}, and no unspent hook-emitted "
+            f"authorization in this bid grants that depth (unspent here: {sorted(unspent)}) — "
             "R8: a discount enters a bid through authorize_discount() or not at all"
         )
+    unspent.pop(match)
     return None
 
 
@@ -709,8 +732,7 @@ def enforce_hook_provenance(
     presented, discounts = collect_claim_material(claims)
     offenders: list[tuple[int, str]] = []
     unhooked = 0
-    grants: list[Any] = []
-    authorized_depths: list[float] = []
+    grants: list[tuple[int, Any]] = []
     for index, claim in enumerate(presented):
         reason = _refusal(claim, ledger)
         if reason is not None:
@@ -722,13 +744,38 @@ def enforce_hook_provenance(
             offenders.append((index, reason))
             continue
         if _read(claim, "key") in PRODUCT_SCOPED_CLAIM_KEYS:
-            grants.append(claim)
-            depth = _as_depth(_enum_value(_read(claim, "value")))
-            if depth is not None:
-                authorized_depths.append(depth)
+            grants.append((index, claim))
 
+    # "Exactly once" inside this call as well as across two: a bid that lists one grant three
+    # times has asked to spend it three times, and nothing has been spent yet for a membership
+    # test to notice. So the asking is counted against what the facade still holds unspent.
+    spendable: list[Any] = []
+    asked: dict[str, int] = {}
+    remaining = getattr(hooks, "remaining_authorizations", None)
+    for index, claim in grants:
+        fingerprint = claim_fingerprint(claim)
+        asked[fingerprint] = asked.get(fingerprint, 0) + 1
+        held = int(remaining(fingerprint)) if callable(remaining) else 0
+        if asked[fingerprint] > held:
+            offenders.append(
+                (
+                    index,
+                    f"claim {_read(claim, 'key')!r} was already spent in this bid: it is "
+                    f"presented {asked[fingerprint]} time(s) against {held} unspent "
+                    "authorization(s). A grant is one authorization, not a licence to discount "
+                    "every offer in the bid — call the hook again for a second one",
+                )
+            )
+            continue
+        spendable.append(claim)
+
+    unspent_depths = [
+        depth
+        for claim in spendable
+        if (depth := _as_depth(_enum_value(_read(claim, "value")))) is not None
+    ]
     for offset, (path, discount) in enumerate(discounts):
-        reason = _discount_refusal(path, discount, authorized_depths, product_ref)
+        reason = _discount_refusal(path, discount, unspent_depths, product_ref)
         if reason is not None:
             offenders.append((len(presented) + offset, reason))
 
@@ -750,7 +797,7 @@ def enforce_hook_provenance(
 
     spend = getattr(hooks, "spend_authorization", None)
     if callable(spend):
-        for claim in grants:
+        for claim in spendable:
             spend(claim_fingerprint(claim))
     return presented
 
