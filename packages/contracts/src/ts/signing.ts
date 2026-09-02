@@ -2,10 +2,29 @@
  * The external signing envelope and the one canonical form the signature covers (D52), in
  * TypeScript.
  *
- * A peer of `contracts/signing.py`, byte for byte: `canonicalSigningBytes` here and
- * `canonical_signing_bytes` there must produce the SAME bytes for the same submission, or a bid
- * signed by a Node seller could not be verified by a Python exchange. `tests/signing.test.ts`
- * pins the exact bytes against a fixture the Python tests pin too.
+ * A peer of `contracts/signing.py`. The equivalence is stated in two halves, because it has two
+ * halves and stating it as one was how a real split hid inside it for a whole wave (T-129):
+ *
+ *   1. **Given the same VALUE**, `canonicalSigningBytes` here and `canonical_signing_bytes`
+ *      there produce the SAME bytes and refuse the same submissions — or a bid signed by a Node
+ *      seller could not be verified by a Python exchange.
+ *   2. **Given the same wire TEXT**, the two sides accept and refuse exactly the same integer
+ *      literals.
+ *
+ * `tests/signing.test.ts` pins the exact bytes against fixtures the Python tests pin too, and
+ * `e2e/test_jcs_conformance.py` grades BOTH halves across the language boundary — the value
+ * half over the whole conformance corpus, the text half over `SIGNING_TEXT_CASES`. Until T-125
+ * that file drove the renderers only, so the header could assert equivalence flatly while
+ * `canonicalSigningBytes` refused every exact double at or beyond 2**53 that Python signed.
+ *
+ * The two halves are separate because the SURFACE is not symmetric, and that asymmetry is real
+ * rather than an accident to be tidied away. Python's `int` is arbitrary precision, so
+ * `json.loads` hands `canonical_json` the integer the wire actually spelled and RFC 8785 §3.1's
+ * `float(v) == v` is a decidable question about the value. JavaScript has no integer type —
+ * `JSON.parse` has already rounded before any guard can run — so the same rule is decidable
+ * only on the literal. That is why `parseSignableJson` and the `…FromJson` doors exist here and
+ * have no Python peer: in Python, `json.loads` followed by the ordinary door already IS the
+ * text door.
  */
 import {createHash} from "node:crypto";
 
@@ -179,79 +198,32 @@ export function parseSignableJson(text: string): unknown {
 }
 
 /**
- * How the D52 signing doors treat an integer whose wire spelling is no longer recoverable.
+ * Why the signing doors carry no VALUE-domain integer guard, written down so it is not re-added.
  *
- * There is exactly one knob and it is an OPT-OUT, not an opt-in. That is the whole of T-113:
- * `parseSignableJson` existed, was correct, and nothing called it, so the default path was still
- * `JSON.parse` → `canonicalSigningBytes` and the defect was still fully reachable.
- */
-export interface SigningNumberOptions {
-  /**
-   * Sign an integer-valued `number` at or beyond 2**53 even though its wire spelling is gone.
-   *
-   * Off by default. Above 2**53 the gap between adjacent doubles is at least 2, so MANY integer
-   * literals collapse onto the same `number`: `9007199254740992` and `9007199254740993` are one
-   * value in JavaScript, `1e21` and `1000000000000000000001` are one value, and by the time the
-   * signer is handed a `number` there is no way to ask which one the submission actually said.
-   * The Python peer never has this problem — its `int` is arbitrary precision, so
-   * `float(v) == v` is a decidable question about the value it really received — which is
-   * exactly why it refuses `9007199254740993` and TypeScript used to sign `…992` instead.
-   *
-   * Turn it on ONLY when the number did not come off a wire: a quantity this process computed,
-   * a fixture, a re-signing of material already verified. If the value DID come off a wire, the
-   * honest fix is `canonicalSigningBytesFromJson` / `payloadHashFromJson`, which read the raw
-   * text and so can still tell `…992` from `…993`; they set this flag themselves precisely
-   * because they have already checked the literals.
-   *
-   * Cost of the default, stated plainly: `canonicalJson` still RENDERS these values, because it
-   * is the RFC-8785 renderer and `e2e/test_jcs_conformance.py` requires it to agree byte for
-   * byte with both Python implementations on exact large doubles. So a payload carrying `1e16`
-   * signed by a Python seller will not verify at a Node peer unless that peer passes this flag.
-   * That is a deliberate trade of availability for integrity, on the signing path only, and it
-   * fails closed: the Node side refuses, it never forges agreement.
-   */
-  allowUnsafeIntegers?: boolean;
-}
-
-/**
- * RFC 8785 §3.1 in the VALUE domain, which is the only domain the default path has left.
+ * T-113 added one: `payloadHash` and `canonicalSigningBytes` refused an integer-valued `number`
+ * at or beyond 2**53 by default, with `{allowUnsafeIntegers: true}` as the opt-out. Its
+ * reasoning was true — above 2**53 the gap between adjacent doubles is at least 2, so several
+ * wire literals collapse onto one value and the signer cannot know which was written — and the
+ * guard was still wrong, because the rule it approximates is a rule about VALUES. RFC 8785 §3.1
+ * asks whether the number is expressible as an IEEE-754 double, and every finite JavaScript
+ * `number` is one by construction. `10**16` satisfies `float(v) == v`, Python's
+ * `canonical_signing_bytes` signs it, `canonicalJson` renders it, the conformance gate requires
+ * that — and the guard refused it, so a Node seller could not sign a bid a Python exchange
+ * signs happily. That is the divergence class T-106's gate exists to close, re-opened in the
+ * one door the gate did not watch (T-125).
  *
- * `assertIntegerLiteralsAreDoubles` is strictly better — it reads the literal — but it needs the
- * raw text, and a caller who wrote `JSON.parse(body)` has already thrown that away. What
- * survives is this: an integer-valued double at or beyond 2**53 is AMBIGUOUS, because more than
- * one wire literal parses to it, so signing it covers a value the submission may not state.
- * Refusing is the only answer that cannot be wrong; `allowUnsafeIntegers` is how a caller who
- * knows the provenance says so out loud.
+ * There is nothing narrower to refuse, either. At `10**16` the gap is 2, so
+ * `10000000000000001` collapses onto the same value: the ambiguity IS the magnitude, and any
+ * value-domain test that refuses the ambiguity refuses the exact double along with it. A guard
+ * cannot be both correct about RFC 8785 §3.1 and suspicious of a large double.
+ *
+ * So the rule lives where the evidence still exists — `assertIntegerLiteralsAreDoubles`, on the
+ * raw text, reached through `parseSignableJson` — and `canonicalSigningBytesFromJson` /
+ * `payloadHashFromJson` are the doors a caller holding wire material must use. A caller that
+ * runs `JSON.parse` itself and then signs is signing whatever `JSON.parse` produced; that is a
+ * property of `JSON.parse`, and moving the refusal into the signing door never fixed it — it
+ * only broke the protocol for every exact double above 2**53.
  */
-function assertSignableNumbers(
-  value: unknown,
-  options: SigningNumberOptions,
-  path: string,
-): void {
-  if (options.allowUnsafeIntegers === true) return;
-  if (typeof value === "number") {
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new CanonicalisationError(
-        `cannot sign the integer ${String(value)} at ${path}: RFC 8785 §3.1 requires a signed ` +
-          "number to be the number the submission states, and at or beyond 2**53 several " +
-          "integer literals parse to this one double — JSON.parse would have delivered it for " +
-          `${String(value)} and for ${String(value + 1)} alike. Parse the wire text with ` +
-          "canonicalSigningBytesFromJson/payloadHashFromJson so the literal can be checked, or " +
-          "pass {allowUnsafeIntegers: true} if this number was not parsed from a wire.",
-      );
-    }
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => assertSignableNumbers(item, options, `${path}[${index}]`));
-    return;
-  }
-  if (typeof value === "object" && value !== null) {
-    for (const [key, item] of Object.entries(value as Payload)) {
-      assertSignableNumbers(item, options, `${path}.${key}`);
-    }
-  }
-}
 
 /**
  * RFC 8785 §3.2.2.2: a lone surrogate MUST terminate canonicalisation with an error.
@@ -332,11 +304,11 @@ export function canonicalJson(value: unknown): string {
 /**
  * A digest over the bid BODY — everything except the envelope and the signature itself.
  *
- * Refuses an ambiguous integer BY DEFAULT (see `SigningNumberOptions`). This is a signing door,
- * not the RFC-8785 renderer: `canonicalJson` still renders `1e16`, because the conformance gate
- * requires it to, and this refuses to digest it because a digest is what a signature covers.
+ * Digests exactly what `canonicalJson` renders and refuses exactly what it refuses, which is
+ * what makes this the peer of `contracts.signing.payload_hash`: the same body produces the same
+ * digest in both languages, including for an exact double above 2**53.
  */
-export function payloadHash(payload: Payload, options: SigningNumberOptions = {}): string {
+export function payloadHash(payload: Payload): string {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
     throw new CanonicalisationError("payloadHash expects an object");
   }
@@ -344,21 +316,24 @@ export function payloadHash(payload: Payload, options: SigningNumberOptions = {}
   for (const [key, value] of Object.entries(payload)) {
     if (!NON_BODY_KEYS.has(key)) body[key] = value;
   }
-  assertSignableNumbers(body, options, "payload");
   const digest = createHash(PAYLOAD_HASH_ALGORITHM).update(canonicalJson(body), "utf8").digest("hex");
   return `${PAYLOAD_HASH_ALGORITHM}:${digest}`;
 }
 
 /**
- * `payloadHash` from the raw wire text, which is the form that can still be checked exactly.
+ * `payloadHash` from the raw wire text, which is the form RFC 8785 §3.1 can still be decided on.
  *
- * The default door for anything that arrived over a network. It parses with the RFC 8785 §3.1
- * literal check, so `9007199254740993` is refused and `9007199254740992` — an exact double the
- * Python peer also accepts — is not. Because the literals have been checked, the value-domain
- * approximation is switched off: this path is strictly better informed than the value one.
+ * The door for anything that arrived over a network, and the only one that can tell
+ * `9007199254740993` (refused, named in the message) from `9007199254740992` (an exact double,
+ * digested — the Python peer digests it too). Its scope is the INTEGER literals: a fractional
+ * or exponential literal is left to the float rules both languages already share, because
+ * `json.loads` gives Python a `float` for those too. So `1e16` passes here on its spelling and
+ * `10000000000000000` passes on its round trip, and both reach the same double — which is why
+ * this door and `payloadHash` now agree on it rather than splitting, as they did while a
+ * value-domain guard was switched off here and on there.
  */
 export function payloadHashFromJson(text: string): string {
-  return payloadHash(parseSignableJson(text) as Payload, {allowUnsafeIntegers: true});
+  return payloadHash(parseSignableJson(text) as Payload);
 }
 
 /**
@@ -437,15 +412,13 @@ export function missingSigningFields(payload: unknown): string[] {
  * The exact bytes a submission's `signature` covers.
  *
  * Throws when the envelope is incomplete: producing signing input for a submission that cannot
- * legally exist would just move the failure somewhere nobody is looking. Throws too, BY DEFAULT
- * and with no opt-in, when any covered number is an integer the wire could have spelled more
- * than one way — see `SigningNumberOptions`. `canonicalSigningBytesFromJson` is the door for
- * material that arrived as text and can still be checked exactly.
+ * legally exist would just move the failure somewhere nobody is looking. Otherwise it accepts
+ * exactly what `contracts.signing.canonical_signing_bytes` accepts and emits the same bytes —
+ * `e2e/test_jcs_conformance.py` drives both doors over the same corpus to keep that true.
+ * `canonicalSigningBytesFromJson` is the door for material that arrived as text, where the RFC
+ * 8785 §3.1 literal rule is still decidable.
  */
-export function canonicalSigningBytes(
-  payload: Payload,
-  options: SigningNumberOptions = {},
-): Uint8Array {
+export function canonicalSigningBytes(payload: Payload): Uint8Array {
   const missing = missingSigningFields(payload);
   if (missing.length > 0) {
     throw new CanonicalisationError(
@@ -464,24 +437,31 @@ export function canonicalSigningBytes(
   }
   const covered: Payload = {};
   for (const field of SIGNED_FIELDS) covered[field] = payload[field];
-  // The covered fields are checked in their own right: `missingSigningFields` forces five of
-  // them to be strings, but `auction_id` and `store_id` are only checked non-empty, so a wire
-  // `{"auction_id": 9007199254740993}` would otherwise be signed as `…992` right here.
-  assertSignableNumbers(covered, options, "submission");
-  covered["payload_hash"] = payloadHash(payload, options);
+  // No number check on `covered`, and T-113's comment claiming one was needed here was wrong on
+  // its own terms — the claim, not just the guard (T-128). `NON_BODY_KEYS` is exactly
+  // {signer_id, key_id, issued_at, nonce, signature}, so `auction_id` and `store_id` are INSIDE
+  // the body `payloadHash` builds and walks, not outside it; and the four `SIGNED_FIELDS` that
+  // ARE outside the body — signer_id, key_id, issued_at, nonce — are four of the five
+  // `missingSigningFields` has already rejected the submission over unless they are non-blank
+  // STRINGS, which cannot hold a number at all. A check here could refuse nothing the body
+  // walk does not already reach, which is what deleting it proved: all 586 vitest cases stayed
+  // green. A guard that cannot refuse anything is not a guard.
+  covered["payload_hash"] = payloadHash(payload);
   return new TextEncoder().encode(canonicalJson(covered));
 }
 
 /**
- * `canonicalSigningBytes` from the raw wire text — the default door for anything off a network.
+ * `canonicalSigningBytes` from the raw wire text — the door for anything off a network.
  *
  * This is the function a Node seller signing a body, or a Node exchange verifying one, should
- * call. It is the whole answer to T-113: the RFC 8785 §3.1 literal check runs because the door
- * runs it, not because the caller remembered to. `9007199254740993` is refused here with the
- * literal named; `9007199254740992` — an exact double, which the Python peer signs — is not.
+ * call, and the one place TypeScript can still apply RFC 8785 §3.1: the literal check runs
+ * because the door runs it, not because the caller remembered to. `9007199254740993` is refused
+ * here with the literal named; `9007199254740992` and `10000000000000000` — exact doubles,
+ * which the Python peer signs — are not, and neither is refused by `canonicalSigningBytes`
+ * either, because a value-domain guard cannot tell those two classes apart (T-125).
  */
 export function canonicalSigningBytesFromJson(text: string): Uint8Array {
-  return canonicalSigningBytes(parseSignableJson(text) as Payload, {allowUnsafeIntegers: true});
+  return canonicalSigningBytes(parseSignableJson(text) as Payload);
 }
 
 /** Human-readable reasons a submission's envelope is unacceptable. Empty means acceptable. */
