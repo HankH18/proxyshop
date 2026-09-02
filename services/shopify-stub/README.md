@@ -1,0 +1,246 @@
+# shopify-stub
+
+A local implementation of **exactly the Shopify surface this system uses**, and nothing
+more. It exists because SPEC C9 requires ticket verification to run offline: no Shopify
+credential exists in this environment, and none is needed.
+
+Import namespace is `shopify_stub` (the directory keeps its hyphen on disk). The ASGI app is
+`shopify_stub.app:app` — that path and attribute are pinned by the root `conftest.py`'s
+`shopify_stub_url` fixture and must not move.
+
+```python
+from shopify_stub.app import create_app  # a fresh, isolated stub
+from shopify_stub.testing import StubClient  # a typed client for driving it
+```
+
+## What it implements
+
+### Shopify's own surface
+
+| Route | Method | Notes |
+|---|---|---|
+| `/admin/api/{version}/graphql.json` | POST | Four root fields; anything else is `undefinedField`. `{version}` must be the configured one (`2026-07`) — any other is a 404, as it is against Shopify |
+| `/cart/{variant_id}:{quantity}?discount={code}` | GET | Cart-permalink redemption |
+
+The four root fields are `discountCodeBasicCreate`, `orders`, `webPixelCreate` and
+`webhookSubscriptionCreate`. A fifth would be scope creep; asking for one gets Shopify's real
+`undefinedField` error rather than a plausible-looking success.
+
+Webhook delivery covers `orders/paid`, `orders/fulfilled` and `refunds/create`, signed with
+HMAC-SHA256 over the raw body and carrying the documented `X-Shopify-*` headers.
+
+### The control plane
+
+Everything under `/_stub` is **not Shopify**. The prefix exists so no consumer can mistake a
+test affordance for a real endpoint, and so that grepping for `_stub` finds every place
+something has coupled itself to the stub rather than to the API.
+
+| Route | Method | Notes |
+|---|---|---|
+| `/_stub/config` | GET/PUT | The knobs. An unknown key is a 400, never a silent no-op |
+| `/_stub/reset` | POST | Wipes data, keeps configuration |
+| `/_stub/seed` | POST | Idempotent catalog seeding → `{created, unchanged, updated}` |
+| `/_stub/codes` | GET | The code table plus D22's `offer_id` index: `by_offer` (latest code, always a key of `codes`) and `codes_by_offer` (every code, in creation order) |
+| `/_stub/checkouts/{token}` | GET | Introspection, including *why* a code was ignored |
+| `/_stub/checkouts/{token}/complete` | POST | Order + pixel event + `orders/paid` |
+| `/_stub/orders/{id}/fulfill` | POST | → `orders/fulfilled` |
+| `/_stub/orders/{id}/refund` | POST | → `refunds/create` |
+| `/_stub/events` | GET | Emitted pixel events |
+| `/_stub/events/suppressed` | GET | Events that did **not** fire, and why |
+| `/_stub/webhooks/deliveries` | GET | Every delivery attempt, successful or not |
+
+Plus `GET /healthz`.
+
+## The asymmetry: a lossy pixel and a truthful webhook
+
+This is the point of the whole service, and it is deliberate on both sides.
+
+**The pixel is a sample.** A real web pixel is a browser beacon, lost to content blockers,
+consent banners, tab closes and flaky networks — and when it is lost, nothing anywhere
+records that it was lost. The stub therefore has a drop-rate knob, and it keeps a
+suppression log that real Shopify has no counterpart for, so the loss is *testable* rather
+than merely real.
+
+**The webhook is the truth.** Shopify retries a failed delivery for up to 48 hours. The stub
+retries until the receiver accepts, records every attempt, and has **no loss knob at all**.
+Adding one would let a consumer's test pass while its production reconciliation was wrong,
+by making "the webhook never arrived" a normal state. It is not one.
+
+### The documented non-firing modes
+
+`pixel_mode` has three values, and the last two are the non-firing cases the ticket asks to
+be documented:
+
+| `pixel_mode` | `pixel_drop_rate` | Result |
+|---|---|---|
+| `on` | `0.0` | Every checkout emits a full event |
+| `on` | `0 < r ≤ 1` | Each event is independently dropped with probability `r` |
+| `partial` | any | Events emit with `orderId: null` and `discountApplications: null` |
+| `off` | any | **No** event is ever emitted, whatever the drop rate says |
+
+`off` and `drop_rate: 1.0` both emit nothing, and they are **not the same condition**. One
+is a pixel that is installed and losing everything; the other is a pixel that is not there —
+not installed, blocked, or consent denied. A reconciler that treats "absent" as "lossy"
+waits for an event that is never coming; one that treats "lossy" as "absent" stops
+reconciling a signal it still has. The stub keeps them apart in the suppression reason
+(`dropped` vs `not_firing`), which is the only place the difference is visible at all.
+
+`partial` is the third case: the beacon left before the order id and the discount allocation
+were known. The event exists; the join keys do not. A collector must record a visible gap
+for it rather than count a conversion.
+
+Set `pixel_seed` and the drop pattern is exactly reproducible, so a test can assert an exact
+emitted count instead of a statistical band.
+
+## Invalid vs conflicting codes
+
+Acceptance criterion 2 covers two different silent no-ops, and the stub keeps them apart.
+
+*Invalid* is a property of the **code**: unknown, expired, not yet active, or out of uses.
+*Conflicting* is a property of the **cart**: a code whose `combinesWith.orderDiscounts` is
+false, meeting a shop that already has an order-level automatic discount running. Set
+`has_active_automatic_discount: true` on `/_stub/config` to create that condition.
+
+Neither produces an error. Both produce a cart identical to one where no code was supplied,
+and the reason is visible only through `GET /_stub/checkouts/{token}`
+(`unknown_code`, `expired`, `not_yet_active`, `usage_limit_reached`,
+`conflicts_with_existing_discount`).
+
+The stub models an automatic discount's **combinability effect only, not its money**.
+Nothing in this system reads an automatic discount's value, and modelling the allocation
+would mean inventing a second `discount_applications` entry whose shape no consumer needs.
+
+## Join keys
+
+The ledger pins the pixel↔webhook join keys as
+`{checkout_token, order_ref, client_id, discount_code}`. Those are the *ledger event's*
+snake_case names; the two wire shapes differ, because the stub reproduces what Shopify
+actually sends rather than normalising them for the consumer's convenience:
+
+| Join key | Pixel collector payload | Order webhook |
+|---|---|---|
+| `checkout_token` | `checkoutToken` | `checkout_token` |
+| `order_ref` | `orderId` | `admin_graphql_api_id` / `id` |
+| `client_id` | `clientId` | `note_attributes[proxyshop_client_id]` |
+| `discount_code` | `discountApplications[].code` | `discount_codes[].code` |
+
+The `client_id` row is the one place the stub goes beyond Shopify: Shopify never puts a
+web-pixel client id on an order webhook. Carrying it through `note_attributes` is how a real
+app propagates its own correlation id through checkout, and without it the four pinned join
+keys are not all reachable from the two payloads. It is an **app-level convention, not a
+Shopify guarantee**.
+
+## Two divergences from real Shopify, both narrowing
+
+1. **No customer PII, anywhere.** Real `orders/paid` carries a full `customer` object with
+   `email`, `phone`, `first_name`, `last_name` and `default_address`; the Web Pixels
+   `Checkout` type carries `email`, `phone` and both addresses. The stub emits none of them
+   and sends `"customer": null`, the shape a guest checkout produces. SPEC C5 grants this app
+   no protected-customer-data scopes, so emitting PII it is not entitled to would let a
+   consumer build on a field that is absent in production.
+2. **A subset of the keys, never a superset.** Real `orders/paid` has 93 top-level keys; the
+   stub emits the ones this system reads. Every key it *does* emit is a documented real key,
+   and `tests/test_stub_recordings.py` checks that in both directions.
+
+## Recorded fixtures (D21)
+
+`fixtures/recorded/` holds hand-authored JSON derived from published Shopify documentation.
+No live capture was performed and no credential exists here. Every file carries a
+`$provenance` header naming the doc URLs, the API version (`2026-07`), and — this is the part
+that matters — a `caveats` list stating exactly what the cited pages did **not** confirm.
+
+The honest gaps, collected in one place:
+
+* **The permalink behaviour this stub is graded on is undocumented.** Neither shopify.dev nor
+  help.shopify.com says what a cart permalink does with a discount code that is invalid,
+  expired, exhausted or non-combinable. The silent no-op is mandated by this ticket's
+  acceptance criterion 2 and is consistent with the Storefront API modelling a non-applying
+  code as `CartDiscountCode.applicable: false` on an otherwise successful mutation — but that
+  is inference, not a quote. Verify it empirically if a dev store ever becomes available.
+* **`discount_applications` and `discount_codes` are both `[]` in every published `orders/*`
+  webhook sample.** Those two arrays are the entire discount surface this system reads, and
+  the page cited as their source shows them empty — so their element shapes come from the
+  REST Order resource page, not from the webhook reference.
+* `discount_applications[].value_type == "percentage"` is reasoned, not cited. The webhooks
+  page shows `"value_type": "percentage"` twice (both in *draft*-order payloads) and shows
+  `fixed_amount` zero times, so it confirms the value exists but says nothing about which one
+  an order carries.
+* `note_attributes` and `fulfillments` are `[]` in every published webhook sample, so their
+  element shapes come from the REST Order resource page instead.
+* `webhookSubscriptionCreate` is named nowhere in this repo's planning documents — only the
+  three topics are. The mutation is the stub's choice.
+* Which fields the "orders query subset" contains is specified nowhere. The subset is the
+  stub's design, chosen to mirror the webhook payload field for field.
+* Two recordings carry `api_version: "unversioned"` rather than `2026-07`: the Web Pixels API
+  pages and the cart-permalink guide have no version selector and no `api_version`
+  frontmatter, unlike every Admin GraphQL page.
+
+### Three headers were found FALSE and corrected
+
+An adversarial review checked the caveats against the pages they cite, and three of them
+asserted things those pages do not say. All three were re-verified independently and
+rewritten, and `test_no_recording_claims_a_correction_it_did_not_make` pins the corrections
+so they cannot silently regress:
+
+1. *"`usageLimit` is deprecated on the `DiscountCodeBasic` output type."* **False** — that
+   page's only deprecated fields are `customerSelection` and `discountClass`. The caveat
+   invented a deprecation and then justified a workaround for it.
+2. *"The official example strips the GID with `v.id.split('/').pop()`."* **False** — the
+   cart-permalink page contains no JavaScript at all; all 15 of its code fences are tagged
+   `text`, and `split`, `.pop()` and `gid://` occur zero times. Numeric variant ids are shown
+   by example only and never stated as a requirement.
+3. *"Only `fixed_amount` appears in the published `value_type` examples."* **Backwards** —
+   on the webhooks page `fixed_amount` appears zero times and `percentage` twice.
+
+A fourth, about this repo's own files, was corrected at the same time: `documented_keys`
+described itself as "the full confirmed set" of the sample's top-level keys while listing 57
+of 93. The recording now states exactly what it does and does not claim, and every one of
+those 57 names was mechanically checked to be a member of the real 93.
+
+## Declared limitations
+
+* **The selection set is not honoured, and that cuts both ways.** The stub returns the whole
+  documented node shape whatever fields were requested, so its response is a *superset* of a
+  narrowed real response, never a differently-shaped one. The other half of the same
+  limitation is easy to miss and matters just as much: because nothing reads the selection
+  set, an **unknown nested field is accepted**, not just an extra one returned. Asking for
+  `orders { edges { node { notAField } } }` succeeds here and is an `undefinedField` error
+  against Shopify. Only *root* fields are checked — that check is real, and it is the one
+  `graphql_admin`'s docstring is about. Catching a bogus nested field would need a
+  hand-written per-type allow-list, i.e. a schema in all but name, and there is no GraphQL
+  engine in this repo's dependency manifest.
+* **Single-variant, single-code permalinks only.** Shopify's format allows a comma in two
+  places — the variant path and the `discount` query parameter. D22 pins the single form and
+  the stub refuses **both** multi forms explicitly, with a 404 naming the reason, rather than
+  half-handling either. The query form used to be accepted silently and treated as one
+  nonexistent code, answering `303` with `total_discount: 0.00`; that is the wrong direction
+  to diverge in, because production would apply the codes where the stub applied nothing.
+* **`mint_code`, `is_well_formed` and `code_expiry` are a library for T-052, not stub-enforced
+  policy.** They implement D22's code shape (`PSX-` + 8 Crockford symbols) and its
+  `min(now + 48h, offer.expires_at)` expiry rule, and nothing in any shipped stub path calls
+  them. That is deliberate and not an oversight. `discountCodeBasicCreate` accepts an
+  arbitrary code string, a lowercase code, `usageLimit: null` and a 16-month `endsAt`,
+  because **real Shopify accepts all four** — a stub that rejected them would diverge from
+  the API it exists to mirror, and would teach T-052 that the platform enforces a rule the
+  platform does not have. D22 is the *app's* policy; these three functions are where a caller
+  gets it right, and the stub's job is to make a caller that gets it wrong visible rather
+  than impossible.
+* **No product→variant lookup** (D25). Permalinks are variant-scoped; variants arrive by
+  seeding.
+* **Webhook delivery is synchronous**, awaited inside the request that triggers it. Real
+  Shopify delivers asynchronously, but an async dispatcher would make every consumer test
+  race it and need a sleep, and a test that sleeps is flaky on a loaded machine. The
+  observable contract — the receiver got the signed payload before anything downstream
+  looked — is preserved.
+* **The retry budget is 3 attempts**, not Shopify's 19 over 48 hours. The shape is kept; the
+  duration is not.
+
+## Running it
+
+```bash
+# The tests (212 of them). PROXYSHOP_WORKER is mandatory: the root conftest fails without it.
+PROXYSHOP_WORKER=2 ./.venv/bin/python -m pytest services/shopify-stub -q
+
+# As a container — e2e profile only, and NOT verified offline (see compose.yaml).
+docker compose --profile e2e up shopify-stub
+```

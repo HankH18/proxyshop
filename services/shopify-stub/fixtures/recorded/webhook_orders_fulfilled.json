@@ -1,0 +1,200 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/webhooks/latest (topic `orders/fulfilled` — the page names topics in this slash form, never as a GraphQL-style constant)",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/admin-rest/latest/resources/order (the abbreviated fulfillment element shape)"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21. The ORDERS_FULFILLED sample's top-level key set was diffed against ORDERS_PAID and found IDENTICAL — zero keys differ — so this recording reuses that key set and differs only in the fulfilment-bearing members. Values are invented. No live capture (D3).",
+    "caveats": [
+      "Shopify's own ORDERS_FULFILLED sample is not actually fulfilled: it shows fulfillment_status: null and fulfillments: []. So the published page gives NO element shape for a fulfilled order's fulfillments array.",
+      "The seven-key fulfillment element below (created_at, id, order_id, status, tracking_company, tracking_number, updated_at) is the abbreviated form printed on the REST Order resource page. The standalone REST Fulfillment resource carries a much larger set, and which one a real webhook embeds is NOT DOCUMENTED. The stub emits exactly these seven rather than guessing at the larger shape.",
+      "Everything in webhook_orders_paid.json's caveats applies here too; the top-level shape is the same object.",
+      "documented_keys is INHERITED from webhook_orders_paid.json and then extended with the fulfillments[] element shape. That is not a shortcut: the two samples' top-level key sets were diffed and found identical, so maintaining a second hand-copied enumeration would only create an opportunity for the two to drift apart.",
+      "Also inherited from orders/paid, and true of every orders/* sample on the page: `discount_applications` and `discount_codes` are `[]` in the published sample, so their element shapes come from the REST Order resource page."
+    ]
+  },
+  "topic": "orders/fulfilled",
+  "headers": {
+    "X-Shopify-Topic": "orders/fulfilled"
+  },
+  "payload": {
+    "id": 5500000000001,
+    "admin_graphql_api_id": "gid://shopify/Order/5500000000001",
+    "name": "#1001",
+    "checkout_token": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
+    "financial_status": "paid",
+    "fulfillment_status": "fulfilled",
+    "currency": "USD",
+    "total_price": "90.00",
+    "fulfillments": [
+      {
+        "created_at": "2026-01-02T00:00:00Z",
+        "id": 7700000000001,
+        "order_id": 5500000000001,
+        "status": "success",
+        "tracking_company": "USPS",
+        "tracking_number": "1Z1234512345123456",
+        "updated_at": "2026-01-02T00:00:00Z"
+      }
+    ],
+    "customer": null
+  },
+  "documented_keys": {
+    "": [
+      "id",
+      "admin_graphql_api_id",
+      "name",
+      "order_number",
+      "number",
+      "token",
+      "checkout_token",
+      "cart_token",
+      "created_at",
+      "processed_at",
+      "updated_at",
+      "currency",
+      "financial_status",
+      "fulfillment_status",
+      "test",
+      "subtotal_price",
+      "total_discounts",
+      "total_discounts_set",
+      "total_price",
+      "current_total_price",
+      "total_price_set",
+      "subtotal_price_set",
+      "current_total_price_set",
+      "current_total_discounts_set",
+      "order_status_url",
+      "note",
+      "note_attributes",
+      "tags",
+      "source_name",
+      "presentment_currency",
+      "taxes_included",
+      "confirmed",
+      "closed_at",
+      "cancelled_at",
+      "landing_site",
+      "referring_site",
+      "browser_ip",
+      "client_details",
+      "fulfillments",
+      "shipping_lines",
+      "billing_address",
+      "shipping_address",
+      "payment_gateway_names",
+      "total_tax",
+      "total_line_items_price",
+      "contact_email",
+      "email",
+      "phone",
+      "app_id",
+      "location_id",
+      "user_id",
+      "buyer_accepts_marketing",
+      "estimated_taxes",
+      "discount_codes",
+      "discount_applications",
+      "line_items",
+      "customer"
+    ],
+    "discount_applications[]": [
+      "target_type",
+      "type",
+      "value",
+      "value_type",
+      "allocation_method",
+      "target_selection",
+      "code"
+    ],
+    "discount_codes[]": [
+      "code",
+      "amount",
+      "type"
+    ],
+    "fulfillments[]": [
+      "created_at",
+      "id",
+      "order_id",
+      "status",
+      "tracking_company",
+      "tracking_number",
+      "updated_at"
+    ],
+    "line_items[]": [
+      "id",
+      "admin_graphql_api_id",
+      "variant_id",
+      "product_id",
+      "title",
+      "name",
+      "quantity",
+      "current_quantity",
+      "price",
+      "price_set",
+      "sku",
+      "total_discount",
+      "attributed_staffs",
+      "fulfillable_quantity",
+      "fulfillment_service",
+      "fulfillment_status",
+      "gift_card",
+      "grams",
+      "product_exists",
+      "properties",
+      "requires_shipping",
+      "sales_line_item_group_id",
+      "taxable",
+      "total_discount_set",
+      "variant_inventory_management",
+      "variant_title",
+      "vendor",
+      "tax_lines",
+      "duties",
+      "discount_allocations"
+    ],
+    "line_items[].price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "line_items[].price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "line_items[].price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "note_attributes[]": [
+      "name",
+      "value"
+    ],
+    "subtotal_price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "subtotal_price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "subtotal_price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "total_price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ]
+  }
+}

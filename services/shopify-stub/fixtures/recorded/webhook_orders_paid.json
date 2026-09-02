@@ -1,0 +1,288 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/webhooks/latest (topic `orders/paid` — the page names it that way; the GraphQL-style constant ORDERS_PAID appears on it zero times). The canonical markdown at .../latest.md was parsed as JSON rather than read through a summarizer.",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/admin-rest/latest/resources/order (element shapes the webhook reference leaves empty)",
+      "https://shopify.dev/docs/apps/build/webhooks/delivery-structure (headers)",
+      "https://shopify.dev/docs/apps/build/webhooks/verify-deliveries (HMAC)"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21. The top-level KEY SET was confirmed key-by-key against the ORDERS_PAID sample in the webhook reference (93 top-level keys; every key listed in documented_keys below was individually confirmed present). Values are invented. No live capture; no Shopify credential exists here (D3).",
+    "caveats": [
+      "This recording's `payload` carries a SUBSET of the real sample's top-level keys — the ones this system reads. `documented_keys[\"\"]` lists 57 real key names, which is NOT the sample's full top-level key count; the earlier wording here claimed it was the \"full confirmed set\", and that was false and flattering, because it made a partial enumeration read as complete coverage of the invented-key check. Every name listed was individually confirmed present in the sample; names absent from the list are not thereby claimed to be absent from Shopify.",
+      "`customer` is present in the real payload as a full object with email, phone, first_name, last_name and default_address. It is null here and in the stub BY DESIGN: SPEC C5 says the app holds no protected-customer-data scopes. This is a deliberate divergence, not a transcription gap.",
+      "`note_attributes` IS present on the orders/paid sample, but its value there is `[]`, so the {name, value} element shape below comes from the REST Order resource page rather than from the webhook sample.",
+      "`fulfillments` is likewise [] in every webhook sample. The seven-key element shape below is the abbreviated form printed on the REST Order page. Whether a real webhook embeds that or the larger standalone Fulfillment shape is NOT documented.",
+      "CORRECTION (this header previously described the evidence backwards). It claimed only \"fixed_amount\" appears in the published examples. On the webhooks page the truth is the reverse: `fixed_amount` appears ZERO times anywhere on it, and '\"value_type\": \"percentage\"' appears twice — though both are in draft-order payloads, not in an order one. So the page supports `percentage` as a real value_type while confirming nothing about which value_type an ORDER carries. The stub emits `percentage` for a percentage discount; treat that as reasoned, not cited.",
+      "`checkout_id` does NOT appear anywhere in the webhook reference (0 occurrences) even though it is a real REST Order field. It is deliberately absent here.",
+      "IMPORTANT, and missed on the first pass: `discount_applications` and `discount_codes` are BOTH `[]` in the orders/paid sample — as they are in every orders/* sample on that page. So neither element shape below is transcribed from that sample; both come from the REST Order resource page. This matters because those two arrays are the entire discount surface this system reads, and the page cited as `source` shows them empty.",
+      "The sample has exactly 93 top-level keys (extracted and JSON-parsed twice, from the rendered HTML and from the canonical markdown, with identical results). Every one of the 57 names in documented_keys[\"\"] was checked to be a member of that set, and every key this stub emits is a member of it too."
+    ]
+  },
+  "topic": "orders/paid",
+  "headers": {
+    "X-Shopify-Topic": "orders/paid",
+    "X-Shopify-Hmac-Sha256": "<base64 HMAC-SHA256 of the raw body, keyed by the app client secret>",
+    "X-Shopify-Shop-Domain": "proxyshop-demo.myshopify.com",
+    "X-Shopify-API-Version": "2026-07",
+    "X-Shopify-Webhook-Id": "b54557e4-bdd9-4b37-8d4a-1e6a1a3f4c11",
+    "X-Shopify-Event-Id": "b54557e4-bdd9-4b37-8d4a-1e6a1a3f4c11",
+    "X-Shopify-Triggered-At": "2026-01-01T00:00:00Z"
+  },
+  "header_notes": "shopify.dev prints the HMAC header three ways across its own pages (X-Shopify-Hmac-Sha256, X-Shopify-Hmac-SHA256, x-shopify-hmac-sha256) and states that header names must be treated as case-insensitive. X-Shopify-Name is also real but optional and is not sent by the stub.",
+  "payload": {
+    "$may_be_empty": [
+      "discount_codes",
+      "discount_applications"
+    ],
+    "$may_be_empty_note": "Every OTHER array recorded here must arrive populated: an empty `line_items` or `note_attributes` on an orders/paid body is a defect, and the shape check now reports it. These two are the exceptions -- they are empty for an undiscounted order, and the published sample they were derived from has BOTH `[]`. Marking them here is what keeps the non-empty rule from false-positiving on a legitimate no-discount order.",
+    "id": 5500000000001,
+    "admin_graphql_api_id": "gid://shopify/Order/5500000000001",
+    "name": "#1001",
+    "order_number": 1001,
+    "number": 1,
+    "token": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
+    "checkout_token": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
+    "cart_token": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
+    "created_at": "2026-01-01T00:00:00Z",
+    "processed_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-01T00:00:00Z",
+    "currency": "USD",
+    "financial_status": "paid",
+    "fulfillment_status": null,
+    "test": true,
+    "subtotal_price": "100.00",
+    "total_discounts": "10.00",
+    "total_price": "90.00",
+    "current_total_price": "90.00",
+    "total_price_set": {
+      "shop_money": {
+        "amount": "90.00",
+        "currency_code": "USD"
+      },
+      "presentment_money": {
+        "amount": "90.00",
+        "currency_code": "USD"
+      }
+    },
+    "subtotal_price_set": {
+      "shop_money": {
+        "amount": "100.00",
+        "currency_code": "USD"
+      },
+      "presentment_money": {
+        "amount": "100.00",
+        "currency_code": "USD"
+      }
+    },
+    "order_status_url": "https://proxyshop-demo.myshopify.com/orders/0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d/authenticate",
+    "discount_codes": [
+      {
+        "code": "PSX-7QK2ZB0M",
+        "amount": "10.00",
+        "type": "percentage"
+      }
+    ],
+    "discount_applications": [
+      {
+        "target_type": "line_item",
+        "type": "discount_code",
+        "value": "10.0",
+        "value_type": "percentage",
+        "allocation_method": "across",
+        "target_selection": "all",
+        "code": "PSX-7QK2ZB0M"
+      }
+    ],
+    "note_attributes": [
+      {
+        "name": "proxyshop_client_id",
+        "value": "6f1a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
+      }
+    ],
+    "line_items": [
+      {
+        "id": 44352913,
+        "admin_graphql_api_id": "gid://shopify/LineItem/44352913",
+        "variant_id": 44352913,
+        "product_id": 8123456,
+        "title": "Trail Runner 42",
+        "name": "Trail Runner 42",
+        "quantity": 1,
+        "current_quantity": 1,
+        "price": "100.00",
+        "price_set": {
+          "shop_money": {
+            "amount": "100.00",
+            "currency_code": "USD"
+          },
+          "presentment_money": {
+            "amount": "100.00",
+            "currency_code": "USD"
+          }
+        },
+        "sku": "TR-42",
+        "total_discount": "10.00"
+      }
+    ],
+    "fulfillments": [],
+    "customer": null
+  },
+  "documented_keys": {
+    "": [
+      "id",
+      "admin_graphql_api_id",
+      "name",
+      "order_number",
+      "number",
+      "token",
+      "checkout_token",
+      "cart_token",
+      "created_at",
+      "processed_at",
+      "updated_at",
+      "currency",
+      "financial_status",
+      "fulfillment_status",
+      "test",
+      "subtotal_price",
+      "total_discounts",
+      "total_discounts_set",
+      "total_price",
+      "current_total_price",
+      "total_price_set",
+      "subtotal_price_set",
+      "current_total_price_set",
+      "current_total_discounts_set",
+      "order_status_url",
+      "note",
+      "note_attributes",
+      "tags",
+      "source_name",
+      "presentment_currency",
+      "taxes_included",
+      "confirmed",
+      "closed_at",
+      "cancelled_at",
+      "landing_site",
+      "referring_site",
+      "browser_ip",
+      "client_details",
+      "fulfillments",
+      "shipping_lines",
+      "billing_address",
+      "shipping_address",
+      "payment_gateway_names",
+      "total_tax",
+      "total_line_items_price",
+      "contact_email",
+      "email",
+      "phone",
+      "app_id",
+      "location_id",
+      "user_id",
+      "buyer_accepts_marketing",
+      "estimated_taxes",
+      "discount_codes",
+      "discount_applications",
+      "line_items",
+      "customer"
+    ],
+    "discount_applications[]": [
+      "target_type",
+      "type",
+      "value",
+      "value_type",
+      "allocation_method",
+      "target_selection",
+      "code"
+    ],
+    "discount_codes[]": [
+      "code",
+      "amount",
+      "type"
+    ],
+    "fulfillments[]": [
+      "created_at",
+      "id",
+      "order_id",
+      "status",
+      "tracking_company",
+      "tracking_number",
+      "updated_at"
+    ],
+    "line_items[]": [
+      "id",
+      "admin_graphql_api_id",
+      "variant_id",
+      "product_id",
+      "title",
+      "name",
+      "quantity",
+      "current_quantity",
+      "price",
+      "price_set",
+      "sku",
+      "total_discount",
+      "attributed_staffs",
+      "fulfillable_quantity",
+      "fulfillment_service",
+      "fulfillment_status",
+      "gift_card",
+      "grams",
+      "product_exists",
+      "properties",
+      "requires_shipping",
+      "sales_line_item_group_id",
+      "taxable",
+      "total_discount_set",
+      "variant_inventory_management",
+      "variant_title",
+      "vendor",
+      "tax_lines",
+      "duties",
+      "discount_allocations"
+    ],
+    "line_items[].price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "line_items[].price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "line_items[].price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "note_attributes[]": [
+      "name",
+      "value"
+    ],
+    "subtotal_price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "subtotal_price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "subtotal_price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_price_set": [
+      "shop_money",
+      "presentment_money"
+    ],
+    "total_price_set.presentment_money": [
+      "amount",
+      "currency_code"
+    ],
+    "total_price_set.shop_money": [
+      "amount",
+      "currency_code"
+    ]
+  }
+}

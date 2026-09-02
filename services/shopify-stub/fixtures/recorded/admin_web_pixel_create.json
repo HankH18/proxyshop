@@ -1,0 +1,93 @@
+{
+  "$provenance": {
+    "source": "https://shopify.dev/docs/api/admin-graphql/latest/mutations/webPixelCreate",
+    "supporting_sources": [
+      "https://shopify.dev/docs/api/admin-graphql/latest/input-objects/WebPixelInput",
+      "https://shopify.dev/docs/api/admin-graphql/latest/objects/ErrorsWebPixelUserError"
+    ],
+    "api_version": "2026-07",
+    "retrieved": "2026-09-01",
+    "derivation": "Hand-authored per D21 from the mutation and input-object pages. WebPixelInput's single field and the request/response asymmetry below were transcribed from the page's own example. Values are invented apart from that asymmetry. No live capture (D3).",
+    "caveats": [
+      "WebPixelInput has exactly ONE field: settings, typed with the JSON scalar.",
+      "THE ASYMMETRY IS REAL AND IS THE POINT: the documented example passes settings as an OBJECT in variables and receives it back as a SERIALIZED, ESCAPED JSON STRING. A stub that echoed the object back would let a consumer skip the JSON.parse it needs against the real API, so this recording keeps the two different.",
+      "The userErrors type here is ErrorsWebPixelUserError and it DOES have a `code` member. The webhook subscription mutation's UserError does NOT. Copying `code` across the two is a real mistake, so both recordings state it.",
+      "settings.collectorUrl is a ProxyShop convention, not a Shopify field — settings is a free-form JSON scalar and the stub reads collectorUrl out of it to know where to POST pixel events."
+    ]
+  },
+  "operation": "webPixelCreate",
+  "request": {
+    "query": "mutation InstallPixel($webPixel: WebPixelInput!) { webPixelCreate(webPixel: $webPixel) { webPixel { id settings } userErrors { field message code } } }",
+    "variables": {
+      "webPixel": {
+        "settings": {
+          "collectorUrl": "https://merchant.example.com/pixel/collect"
+        }
+      }
+    }
+  },
+  "response": {
+    "data": {
+      "webPixelCreate": {
+        "webPixel": {
+          "id": "gid://shopify/WebPixel/937414752",
+          "settings": "{\"collectorUrl\":\"https://merchant.example.com/pixel/collect\"}"
+        },
+        "userErrors": []
+      }
+    }
+  },
+  "user_error_response": {
+    "data": {
+      "webPixelCreate": {
+        "webPixel": null,
+        "userErrors": [
+          {
+            "field": [
+              "webPixel",
+              "settings"
+            ],
+            "message": "Settings can't be blank",
+            "code": "BLANK"
+          }
+        ]
+      }
+    }
+  },
+  "documented_keys": {
+    "": [
+      "data",
+      "errors",
+      "extensions"
+    ],
+    "data": [
+      "webPixelCreate"
+    ],
+    "data.webPixelCreate": [
+      "webPixel",
+      "userErrors"
+    ],
+    "data.webPixelCreate.userErrors[]": [
+      "field",
+      "message",
+      "code"
+    ],
+    "data.webPixelCreate.webPixel": [
+      "id",
+      "settings"
+    ],
+    "extensions": [
+      "cost"
+    ],
+    "extensions.cost": [
+      "requestedQueryCost",
+      "actualQueryCost",
+      "throttleStatus"
+    ],
+    "extensions.cost.throttleStatus": [
+      "maximumAvailable",
+      "currentlyAvailable",
+      "restoreRate"
+    ]
+  }
+}
