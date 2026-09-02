@@ -78,18 +78,44 @@ from typing import Any
 # again, which is the whole failure T-119 exists to prevent.
 #
 # The fix is an ELECTED PRIMARY. One spelling is nominated; the other does nothing at all
-# until the primary has finished executing, then adopts the primary's submodules into its
-# own namespace BEFORE its own eager imports can create duplicates. Python's per-module
-# import lock does the waiting: `importlib.import_module(primary)` on a module another
-# thread is mid-way through blocks until that execution completes.
+# until the primary has finished executing. Python's per-module import lock does the
+# waiting: `importlib.import_module(primary)` on a module another thread is mid-way through
+# blocks until that execution completes. By the time it returns, the primary's own
+# `_bind_submodules` (bottom of this file) has ALREADY published every submodule under BOTH
+# spellings, so the secondary's eager `from .canonical import (...)` is a `sys.modules`
+# cache hit and no second copy is ever built. The secondary needs to do nothing but wait.
 #
-# This is deadlock-free BY DIRECTION, and that is the load-bearing detail. Only the
-# secondary ever waits on the primary; the primary never waits on the secondary (its
-# `_bind_submodules` skips any spelling already in `sys.modules`), so there is no cycle for
-# `_ModuleLock` to detect -- and a detected cycle is not an error, it is a *partially
-# initialised module accepted silently*, i.e. this bug again. The only re-entrant case is
-# same-thread (the primary importing the secondary from its own bottom), where the primary
-# has already published every submodule before the call, so adoption still finds them.
+# An explicit "adopt the primary's submodules" loop used to follow that wait. It was dead:
+# instrumented in place and driven through every layout this package supports -- primary
+# first, secondary first, both raced from a barrier, repo-root-only under `-S`, and
+# `.pkgroot`-only under `-S` -- its `setdefault` inserted NOTHING in any of them, because
+# `_publish` had already put the same object under the same key. Every call reported
+# `already-present / same-object`. Removed rather than left to look load-bearing.
+#
+# WHO WAITS ON WHOM, precisely -- the earlier version of this comment overstated it. Only
+# the secondary ever waits on the primary, and the primary never waits on the secondary
+# (its `_bind_submodules` skips any spelling already in `sys.modules`), so the sequencing
+# hook adds no cycle of its own. That is NOT the same as "there is no cycle for
+# `_ModuleLock` to detect", which is what this used to say and which is false:
+#
+#     14 threads -- both package names plus every submodule under both -- 40 runs in this
+#     tree: 0 hangs, but an import failure in 40/40 (225 `_DeadlockError`, 13 `ImportError`,
+#     4 `KeyError`) and SPLIT SUBMODULES in 14/40.
+#
+# The cycle is CPython's, not this binding's, and it predates T-126: `import pkg.sub`
+# acquires the CHILD module lock and imports the parent while still holding it, and the
+# parent's own eager `from .canonical import ...` then waits on that child. Measured with
+# ONE spelling and no `apps.` name mentioned at all (`trust.ledger` raced against four of
+# its own submodules): 10 runs out of 10 raised `_DeadlockError`, hook present AND hook
+# disabled, identically. A detected cycle is not an error either -- `_lock_unlock_module`
+# swallows `_DeadlockError` and hands back a *partially initialised module*, which is how
+# the duplicates come back. So: do not first-import this package by dotted SUBMODULE name
+# from several threads at once. `apps/trust/tests/test_ledger_package_surface.py` grades
+# both halves -- the guarantee (8 threads on the two package names, clean 40/40) and the
+# boundary (the submodule race is detected rather than hung).
+#
+# The only re-entrant case is same-thread (the primary importing the secondary from its own
+# bottom), where the primary has already published every submodule before the call.
 _SPELLINGS: tuple[str, ...] = ("trust.ledger", "apps.trust.src.ledger")
 
 #: The spelling that is allowed to execute without waiting for anyone.
@@ -97,7 +123,12 @@ _PRIMARY_SPELLING = _SPELLINGS[0]
 
 
 def _sequence_behind_the_primary_spelling() -> None:
-    """Block until the primary spelling has executed, then adopt its submodules.
+    """Block until the primary spelling has finished executing. That is the whole job.
+
+    Waiting is sufficient on its own: the primary publishes every submodule under BOTH
+    spellings before it returns, so the eager imports below this call find them in
+    ``sys.modules`` and build no second copy. Nothing is adopted here (see the block above
+    -- the loop that used to do it was measured to insert nothing, in every layout).
 
     A no-op for the primary itself, and for a layout in which neither name applies. If the
     primary is not importable at all in this checkout (a consumer with only the repo root
@@ -110,10 +141,6 @@ def _sequence_behind_the_primary_spelling() -> None:
         importlib.import_module(_PRIMARY_SPELLING)
     except ImportError:
         return
-    for info in pkgutil.iter_modules(__path__):
-        module = sys.modules.get(f"{_PRIMARY_SPELLING}.{info.name}")
-        if module is not None:
-            sys.modules.setdefault(f"{__name__}.{info.name}", module)
 
 
 _sequence_behind_the_primary_spelling()
