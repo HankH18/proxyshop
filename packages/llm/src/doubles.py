@@ -56,7 +56,14 @@ from types import MappingProxyType
 from typing import Any
 
 from llm.errors import UnrecordedPromptError
-from llm.prompting import SECTION_SEPARATOR, CachedPrompt, wire_key
+from llm.prompting import (
+    SECTION_SEPARATOR,
+    CachedPrompt,
+    SystemKey,
+    canonical_system_key,
+    system_key_text,
+    wire_key,
+)
 from llm.recordings import load_recording
 
 #: How many near-miss prompts an :class:`UnrecordedPromptError` suggests.
@@ -99,23 +106,37 @@ def prompt_text(prompt: Any) -> str:
     return str(prompt)
 
 
-def normalize_recording_key(key: Any) -> tuple[str, str]:
+def normalize_recording_key(key: Any) -> tuple[SystemKey, str]:
     """Accept any spelling of a recording key and return the ``(system, prompt)`` pair.
 
     * ``"just the prompt"`` -> ``("", "just the prompt")`` — a recording with no system
       contract, which is what the frozen acceptance suite passes.
-    * ``("system text", "prompt text")`` -> itself.
+    * ``("system text", "prompt text")`` -> itself: one system block.
+    * ``(("envelope", "turn 3 of 9"), "prompt text")`` -> itself: **two** system blocks,
+      which is a different call from one block holding both texts, however they are
+      spelled. The system half is a :data:`llm.prompting.SystemKey`, so a recording can
+      name a multi-block call without any separator character being involved.
     * a :class:`llm.prompting.CachedPrompt` -> its two halves, as sent.
     """
     if isinstance(key, str):
         return ("", key)
     if isinstance(key, tuple):
-        if len(key) != 2 or not all(isinstance(half, str) for half in key):
+        if len(key) != 2 or not isinstance(key[1], str):
             raise TypeError(
-                f"a tuple recording key must be exactly (system, prompt) with two "
-                f"strings; got {key!r}"
+                f"a tuple recording key must be exactly (system, prompt) with a string "
+                f"prompt; got {key!r}"
             )
-        return (key[0], key[1])
+        system = key[0]
+        if not isinstance(system, str) and not (
+            isinstance(system, tuple) and all(isinstance(part, str) for part in system)
+        ):
+            # A tuple and not a list, because a recording key is a mapping key: a list is
+            # unhashable and could never have been written here in the first place.
+            raise TypeError(
+                f"the system half of a recording key must be a string (one block) or a "
+                f"tuple of strings (the blocks, in order); got {system!r}"
+            )
+        return (canonical_system_key(system), key[1])
     if isinstance(key, CachedPrompt):
         return wire_key(key)
     raise TypeError(
@@ -237,8 +258,9 @@ class RecordedLLM(_RecordingBase):
 
     Args:
         recordings: ``(system, prompt) -> reply``. Keys may be written as a plain prompt
-            string (meaning "no system contract"), as a ``(system, prompt)`` tuple, or as
-            a :class:`llm.prompting.CachedPrompt`. Copied and normalised on construction,
+            string (meaning "no system contract"), as a ``(system, prompt)`` tuple whose
+            system half is one block's text or a tuple of several blocks' texts, or as a
+            :class:`llm.prompting.CachedPrompt`. Copied and normalised on construction,
             so a later mutation of the caller's dict cannot change what this replays.
         role: optional role label, recorded on every call for assertions.
         name: optional label used in error messages (the fixture stem, usually).
@@ -270,7 +292,7 @@ class RecordedLLM(_RecordingBase):
             raise TypeError(
                 f"RecordedLLM takes a mapping of prompt -> reply, got {type(recordings).__name__}"
             )
-        table: dict[tuple[str, str], str] = {}
+        table: dict[tuple[SystemKey, str], str] = {}
         for key, reply in recordings.items():
             if not isinstance(reply, str):
                 raise TypeError(
@@ -287,7 +309,7 @@ class RecordedLLM(_RecordingBase):
         return cls(load_recording(name), role=role, name=name)
 
     @property
-    def recordings(self) -> Mapping[tuple[str, str], str]:
+    def recordings(self) -> Mapping[tuple[SystemKey, str], str]:
         """Read-only view of the recording table, keyed by ``(system, prompt)``."""
         return MappingProxyType(self._recordings)
 
@@ -317,7 +339,11 @@ class RecordedLLM(_RecordingBase):
                 to fall back to, by construction.
         """
         key = wire_key(prompt, system)
-        system_text, user_text = key
+        system_key, user_text = key
+        # The key is looked up as-is (a tuple of block texts once there is more than one);
+        # only the human-facing copies — the call record, `when` matching, the miss
+        # message — flatten it, and none of those is an identity.
+        system_text = system_key_text(system_key)
         self._record(
             role if role is not None else self.role, user_text, system_text or None, kwargs
         )
@@ -333,8 +359,9 @@ class RecordedLLM(_RecordingBase):
         """:meth:`complete`, parsed as JSON. Raises ``json.JSONDecodeError`` on garbage."""
         return json.loads(self.complete(prompt, **kwargs))
 
-    def _miss(self, key: tuple[str, str]) -> UnrecordedPromptError:
-        system_text, user_text = key
+    def _miss(self, key: tuple[SystemKey, str]) -> UnrecordedPromptError:
+        system_key, user_text = key
+        system_text = system_key_text(system_key)
         source = f" ({self.name})" if self.name else ""
 
         # Name the function that fixes the single most likely miss. `from_fixture(name)`
@@ -355,7 +382,7 @@ class RecordedLLM(_RecordingBase):
         # different system contract. That is a prompt-contract change, and saying so is
         # the difference between a two-second fix and an afternoon.
         same_prompt = [
-            recorded_system
+            system_key_text(recorded_system)
             for (recorded_system, recorded_prompt) in self._recordings
             if recorded_prompt == user_text
         ]
@@ -441,7 +468,8 @@ class DeterministicLLM(_RecordingBase):
         ignores the system half — changing the prompt contract changes the answer here
         too.
         """
-        system_text, user_text = wire_key(prompt, system)
+        system_key, user_text = wire_key(prompt, system)
+        system_text = system_key_text(system_key)
         effective_role = role if role is not None else self.role
         self._record(effective_role, user_text, system_text or None, kwargs)
         scripted = self._scripted(system_text, user_text)
@@ -449,10 +477,10 @@ class DeterministicLLM(_RecordingBase):
             return scripted
         if self._default is not None:
             return self._default
-        return self.deterministic(effective_role, self._digest_input(system_text, user_text))
+        return self.deterministic(effective_role, self._digest_input(system_key, user_text))
 
     @staticmethod
-    def _digest_input(system_text: str, user_text: str) -> str:
+    def _digest_input(system_key: SystemKey, user_text: str) -> str:
         """What the deterministic hash is taken over.
 
         With no system half this is the bare prompt, so :meth:`deterministic` agrees with
@@ -460,8 +488,20 @@ class DeterministicLLM(_RecordingBase):
         that passes one **diverges deliberately**: the frozen double drops the system half
         entirely, so inverting the prompt contract leaves its reply unchanged, and this
         package exists partly to stop exactly that.
+
+        Several system blocks are folded into a length-prefixed digest first, rather than
+        flattened with :func:`llm.prompting.system_key_text`. Flattening would hand back
+        the same reply for two different block structures whose texts happen to join to
+        one string — the collision :data:`llm.prompting.SystemKey` exists to remove — and
+        "changing the contract changes the answer" is this double's one claim.
         """
-        return f"{system_text}{SECTION_SEPARATOR}{user_text}" if system_text else user_text
+        if isinstance(system_key, tuple):
+            folded = hashlib.sha256()
+            for block in system_key:
+                folded.update(len(block).to_bytes(8, "big"))
+                folded.update(block.encode("utf-8"))
+            system_key = folded.hexdigest()
+        return f"{system_key}{SECTION_SEPARATOR}{user_text}" if system_key else user_text
 
     def complete_json(self, prompt: Any, **kwargs: Any) -> Any:
         """:meth:`complete`, parsed as JSON. Only the **unscripted** reply is rescued.

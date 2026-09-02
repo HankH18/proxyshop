@@ -10,17 +10,22 @@ and both were invisible in output.
 
 from __future__ import annotations
 
+import json
 import socket
 
 import pytest
 
 from packages.llm import (
-    SYSTEM_BLOCK_SEPARATOR,
     AnthropicLLM,
     CachedPrompt,
+    DeterministicLLM,
     RecordedLLM,
     UnrecordedPromptError,
     assemble_prompt,
+    canonical_system_key,
+    compose_request,
+    load_recording_file,
+    system_key_text,
     wire_key,
 )
 
@@ -108,17 +113,18 @@ def test_the_double_keys_on_exactly_what_the_client_sends(no_network) -> None:
 
     recorder = _Recorder()
     AnthropicLLM("buyer", model="m", client=recorder).complete(prompt, system=per_call)
-    # W1-24: this join used to be a literal "\n\n" (SECTION_SEPARATOR). The requirement
-    # asserted below — the key is the canonical join of exactly the blocks the client sent,
-    # paired with exactly the user turn it sent — is unchanged; only the separator moved.
-    # "\n\n" can occur inside a block's own text, so it made two genuinely different calls
-    # canonicalise to one key: CachedPrompt("A") + system="B" (two blocks) and
-    # CachedPrompt("A\n\nB") (one block) both became "A\n\nB", and RecordedLLM then replayed
-    # the reply reviewed for the other one. SYSTEM_BLOCK_SEPARATOR is NUL, which cannot.
-    sent_system = SYSTEM_BLOCK_SEPARATOR.join(block["text"] for block in recorder.last["system"])
+    # The requirement asserted below — the key is exactly the blocks the client sent,
+    # paired with exactly the user turn it sent — has never changed. Only the way a block
+    # LIST is spelled as one key has. It was "\n\n"-joined (W1-24: a blank line inside a
+    # block forged a boundary), then NUL-joined (T-104: JSON writes NUL as an escape, so a
+    # fixture could carry one), and is now the block texts themselves — no character at
+    # all, so nothing a block contains can forge a boundary. The tuple is written out here
+    # rather than computed by product code, so this stays an independent check.
+    sent_blocks = tuple(block["text"] for block in recorder.last["system"])
     sent_user = recorder.last["messages"][0]["content"][0]["text"]
+    assert sent_blocks == ("STORE CONTEXT\nfloor 18.00", "turn 3 of 9")
 
-    assert wire_key(prompt, per_call) == (sent_system, sent_user)
+    assert wire_key(prompt, per_call) == (sent_blocks, sent_user)
     double = RecordedLLM({wire_key(prompt, per_call): "recorded"})
     assert double.complete(prompt, system=per_call) == "recorded"
 
@@ -276,8 +282,21 @@ def test_every_prompt_shape_composes_the_same_way_for_the_client_and_the_double(
         "an empty system block list must be omitted from the request, never sent as []"
     )
 
+    # The system half of a key is the block list itself: "" for none, the text verbatim
+    # for one, the tuple of texts for several. Spelled out here rather than imported, so
+    # this is a check on the product and not a restatement of it. It replaces a
+    # `SEPARATOR.join(expected_blocks)` that encoded the same requirement — "the key is
+    # exactly the blocks the client sent" — back when a key flattened them into a string.
+    expected_system: object
+    if not expected_blocks:
+        expected_system = ""
+    elif len(expected_blocks) == 1:
+        expected_system = expected_blocks[0]
+    else:
+        expected_system = tuple(expected_blocks)
+
     key = wire_key(prompt, system)
-    assert key == (SYSTEM_BLOCK_SEPARATOR.join(expected_blocks), expected_user)
+    assert key == (expected_system, expected_user)
 
     double = RecordedLLM({key: "recorded"})
     assert double.complete(prompt, system=system) == "recorded", (
@@ -341,3 +360,233 @@ def test_a_separator_is_a_property_of_the_assembled_text_not_of_the_wire(no_netw
     first = recorder.last
     client.complete(custom)
     assert recorder.last == first
+
+
+# ======================================================================================
+# T-104 / W2-06: there is no separator, so there is no character to collide on
+# ======================================================================================
+
+#: Characters a "this one cannot appear in prompt text" argument has been made for, or
+#: could plausibly be made for next. Each is fed to
+#: :func:`test_no_character_can_be_the_system_block_separator` as the text a single system
+#: block embeds; under any delimiter-based key, the entry matching that key's delimiter
+#: collides and cross-replays. Under a key that is the block list, none of them can.
+CANDIDATE_SEPARATORS = [
+    pytest.param("\n\n", id="blank-line (the W1-24 separator)"),
+    pytest.param("\x00", id="NUL (the T-104 separator)"),
+    pytest.param("\x1e", id="ascii record separator"),
+    pytest.param("\x1f", id="ascii unit separator"),
+    pytest.param("␞", id="unicode symbol for record separator"),
+    pytest.param("￾", id="a noncharacter"),
+    pytest.param("|", id="a plain pipe"),
+    pytest.param("<<<SYSTEM-BLOCK>>>", id="a long improbable marker"),
+]
+
+
+@pytest.mark.parametrize("candidate", CANDIDATE_SEPARATORS)
+def test_no_character_can_be_the_system_block_separator(no_network, candidate) -> None:
+    """The generalisation of W1-24 and T-104, which were the same bug twice.
+
+    Both fixes picked a rarer character; both times the collision was still reachable,
+    because *every* join of a list of strings into one string is non-injective — the
+    argument "this character cannot appear in prompt text" is a claim about the corpus,
+    not about the encoding, and prompt text comes from JSON fixtures and templates that
+    can carry anything. ``"\\n\\n"`` fell to a blank line inside a block; NUL fell to
+    ``"\\u0000"`` in a fixture (T-104's objective).
+
+    So this test does not name the separator. It asserts the property that makes naming
+    one unnecessary: a request of ONE system block whose text embeds ``candidate`` is a
+    different call from a request of TWO blocks, whatever ``candidate`` is — different
+    bytes, different cache structure — and the double must not answer either with the
+    other's reviewed reply.
+    """
+    one_block = CachedPrompt("A" + candidate + "B", "q")
+    two_blocks = CachedPrompt("A", "q")
+
+    # These really are different requests, not two spellings of one.
+    assert compose_request(one_block)[0] != compose_request(two_blocks, "B")[0]
+    assert wire_key(one_block) != wire_key(two_blocks, "B")
+
+    # ...and neither recording reaches the other call, in either direction.
+    for recorded, recorded_key, other, other_system in (
+        ("the ONE-block reply", wire_key(one_block), two_blocks, "B"),
+        ("the TWO-block reply", wire_key(two_blocks, "B"), one_block, None),
+    ):
+        double = RecordedLLM({recorded_key: recorded})
+        with pytest.raises(UnrecordedPromptError):
+            double.complete(other, system=other_system)
+
+    # The recording that WAS made is still reachable, so this is not strictness by
+    # breaking the lookup.
+    assert RecordedLLM({wire_key(one_block): "reviewed"}).complete(one_block) == "reviewed"
+    assert (
+        RecordedLLM({wire_key(two_blocks, "B"): "reviewed"}).complete(two_blocks, system="B")
+        == "reviewed"
+    )
+
+
+def test_a_fixture_can_carry_a_nul_and_still_not_capture_a_two_block_call(
+    no_network, tmp_path
+) -> None:
+    """T-104's objective, end to end: JSON permits an escaped NUL and the loader takes it.
+
+    The NUL defence was "NUL cannot appear in prompt text that came from a JSON fixture".
+    It can: ``"\\u0000"`` is valid JSON, and :func:`llm.recordings.load_recording_file`
+    has no reason to reject it (nor should it — a contract's bytes are the author's
+    business). This is the whole live path: hand-authored file -> loader -> double ->
+    a two-block call that must NOT be answered by it.
+    """
+    fixture = tmp_path / "nul_contract.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "provenance": {
+                    "source": "https://docs.anthropic.com/",
+                    "doc_version": "2026-02",
+                    "authored_by": "test",
+                    "authored_at": "2026-02-14",
+                    "capture": "hand-authored for T-104",
+                },
+                "system": "A\x00B",
+                "recordings": {"q": "reviewed against the ONE-block contract"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert "\\u0000" in fixture.read_text(encoding="utf-8"), "JSON escapes it rather than refusing"
+
+    keyed, _ = load_recording_file(fixture)
+    assert list(keyed) == [("A\x00B", "q")], "one block whose text happens to contain a NUL"
+
+    double = RecordedLLM(keyed)
+    assert double.complete(CachedPrompt("A\x00B", "q")) == "reviewed against the ONE-block contract"
+    with pytest.raises(UnrecordedPromptError):
+        double.complete(CachedPrompt("A", "q"), system="B")
+
+
+def test_the_system_half_of_a_key_is_the_block_list_itself(no_network) -> None:
+    """Acceptance 1, stated as the shape: block texts as a tuple, never a joined string.
+
+    The two degenerate arities collapse to a plain ``str`` — that is what keeps the frozen
+    ``("", prompt)`` path and the obvious ``(system, prompt)`` fixture spelling intact —
+    and the collapse is injective only because a system block is never empty, which
+    :func:`test_a_system_block_is_never_empty_so_the_collapse_stays_injective` pins.
+    """
+    assert wire_key("q") == ("", "q")
+    assert wire_key(CachedPrompt("A", "q")) == ("A", "q")
+    assert wire_key(CachedPrompt("A", "q"), "B") == (("A", "B"), "q")
+
+    system_half = wire_key(CachedPrompt("A", "q"), "B")[0]
+    assert isinstance(system_half, tuple)
+    assert not isinstance(system_half, str), (
+        "a joined string is exactly what T-104 forbids: it is where a collision lives"
+    )
+
+
+def test_a_system_block_is_never_empty_so_the_collapse_stays_injective() -> None:
+    """The precondition for ``[]`` -> ``""`` and ``["X"]`` -> ``"X"`` being unambiguous.
+
+    If ``to_system_blocks`` could emit an empty block, a one-block call would key on
+    ``""`` — the zero-block key — and the collapse would reintroduce a collision at the
+    one arity nobody would think to test.
+    """
+    for prompt, extra in (
+        (CachedPrompt("", "q"), None),
+        (CachedPrompt("", "q"), ""),
+        (CachedPrompt("A", "q"), ""),
+        (CachedPrompt("A", "q"), "B"),
+    ):
+        blocks = prompt.to_system_blocks(extra=extra)
+        assert all(block["text"] for block in blocks), blocks
+
+
+def test_every_distinct_block_list_gets_a_distinct_key() -> None:
+    """Injectivity over a corpus built out of the very characters a join would use.
+
+    A delimiter-based key is a function from a list of strings to one string, so some two
+    of these lists must share a value under any such key; the tuple form has no collisions
+    by construction. Empty block texts are excluded because the composer never emits one.
+    """
+    pieces = ["A", "B", "A\x00B", "A\n\nB", "AB", "A|B", "\x00", "\n\n"]
+    lists = [[]] + [[x] for x in pieces] + [[x, y] for x in pieces for y in pieces]
+
+    keys = {}
+    for blocks in lists:
+        key = canonical_system_key(blocks)
+        assert key not in keys, f"{blocks!r} collides with {keys.get(key)!r} on {key!r}"
+        keys[key] = blocks
+    assert len(keys) == len(lists)
+
+
+def test_a_recording_key_can_name_a_multi_block_call_without_any_separator(no_network) -> None:
+    """A hand-written recording for a two-block call is spelled as the two block texts.
+
+    Before the tuple key there was no way to write one except by knowing the separator and
+    embedding it, which is the same thing as writing the colliding key.
+    """
+    two_blocks = CachedPrompt("STORE ENVELOPE", "quote me")
+    double = RecordedLLM({(("STORE ENVELOPE", "turn 3 of 9"), "quote me"): "reviewed"})
+    assert double.complete(two_blocks, system="turn 3 of 9") == "reviewed"
+
+    # A one-block key holding the joined text is a DIFFERENT call and must not answer it.
+    joined = RecordedLLM({("STORE ENVELOPE\n\nturn 3 of 9", "quote me"): "reviewed"})
+    with pytest.raises(UnrecordedPromptError):
+        joined.complete(two_blocks, system="turn 3 of 9")
+
+    # A one-element tuple is the same one block as the bare string, so both spellings of
+    # a single-block recording reach the same call.
+    assert (
+        RecordedLLM({(("STORE ENVELOPE",), "quote me"): "reviewed"}).complete(
+            two_blocks.with_dynamic("quote me")
+        )
+        == "reviewed"
+    )
+
+    # A non-string block is refused rather than silently stringified into a key that no
+    # composed call could ever reach.
+    with pytest.raises(TypeError):
+        RecordedLLM({((1, 2), "quote me"): "reviewed"})
+
+
+def test_the_recorded_call_and_the_miss_message_still_read_as_text(no_network) -> None:
+    """The key is structured; the human-facing copies of it are not, and must stay flat.
+
+    ``LLMCall.system`` is what a downstream ticket asserts on and what a log prints, so a
+    tuple leaking into it would break every such assertion. It is a rendering, never an
+    identity — which is why the two calls below record the same text and still key apart.
+    """
+    double = DeterministicLLM(role="store_agent")
+    double.complete(CachedPrompt("A", "q"), system="B")
+    assert double.calls[-1].system == "A\n\nB"
+    assert isinstance(double.calls[-1].system, str)
+
+    assert system_key_text("") == ""
+    assert system_key_text("A") == "A"
+    assert system_key_text(("A", "B")) == "A\n\nB"
+
+    # The miss message prints the same flat rendering rather than a tuple repr.
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        RecordedLLM({}).complete(CachedPrompt("A", "q"), system="B")
+    assert "'A\\n\\nB'" in str(excinfo.value)
+
+
+def test_the_deterministic_double_also_tells_the_block_structures_apart(no_network) -> None:
+    """Its one claim is "changing the contract changes the answer"; a join would break it.
+
+    The reply is a hash, so flattening the blocks first would hand a two-block call the
+    reply belonging to the one-block call whose text joins to the same string.
+    """
+    one_block = CachedPrompt("A\n\nB", "q")
+    two_blocks = CachedPrompt("A", "q")
+    assert DeterministicLLM().complete(one_block) != DeterministicLLM().complete(
+        two_blocks, system="B"
+    )
+
+    # ...and the no-system and single-block replies are unchanged, which is where the
+    # documented byte-for-byte parity with the frozen LLMDouble lives.
+    from proxyshop_support.llm_double import LLMDouble
+
+    assert DeterministicLLM().complete("a prompt") == LLMDouble().complete("a prompt")
+    assert DeterministicLLM().complete("q", system="A") == DeterministicLLM().complete(
+        CachedPrompt("A", "q")
+    )

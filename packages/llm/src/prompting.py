@@ -40,21 +40,32 @@ SECTION_SEPARATOR = "\n\n"
 #: The cache breakpoint Anthropic understands, attached to the last static block.
 CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 
-#: Joins several **system blocks** into the single string that is the system half of a
-#: lookup key (:func:`wire_key`). It is deliberately NUL rather than
-#: :data:`SECTION_SEPARATOR`: prompt text may legitimately contain a blank line, so joining
-#: blocks with ``"\n\n"`` made two genuinely different requests collide on one key —
-#: ``CachedPrompt("A") + system="B"`` (two blocks) and ``CachedPrompt("A\n\nB")`` (one
-#: block) both canonicalised to ``"A\n\nB"``, and :class:`llm.doubles.RecordedLLM` then
-#: handed back the reply reviewed for the *other* one. NUL cannot appear in prompt text
-#: that came from a JSON fixture or a template, so the join is unambiguous.
+#: The system half of a lookup key (:func:`wire_key`): the system **block texts**, kept
+#: apart rather than joined into one string.
 #:
-#: It never appears on the wire and it never appears in a single-block key: with zero
-#: blocks the system half is ``""`` (so a plain string prompt with no system keys on
-#: exactly ``("", prompt)``, which the frozen acceptance suite depends on) and with one
-#: block it is that block's text verbatim (so a fixture's ``(system, prompt)`` pair is
-#: written the obvious way).
-SYSTEM_BLOCK_SEPARATOR = "\x00"
+#: There is deliberately no separator constant here any more. Every join is a lossy
+#: encoding of a list of strings, so whichever character is chosen, a block whose own text
+#: contains it makes two genuinely different requests canonicalise to one key —
+#: ``CachedPrompt("A") + system="B"`` (two blocks, the second uncached) and
+#: ``CachedPrompt("A<sep>B")`` (one cached block) — and
+#: :class:`llm.doubles.RecordedLLM` then hands back the reply reviewed for the *other*
+#: one. ``"\n\n"`` fell to a blank line inside a block (W1-24). NUL fell too (W2-06 /
+#: T-104): JSON encodes it as the escape ``"\u0000"``, and
+#: :func:`llm.recordings.load_recording_file` has no reason to reject it, so a fixture or
+#: a template can carry one. A tuple has no such character; it *is* the block list.
+#:
+#: The two degenerate arities collapse to a plain ``str``, which costs nothing in
+#: injectivity and keeps the pinned spellings intact:
+#:
+#: * **zero blocks** -> ``""``, so a plain-string prompt with no system keys on exactly
+#:   ``("", prompt)`` — what the frozen acceptance suite passes;
+#: * **one block** -> that block's text verbatim, so a fixture's ``(system, prompt)`` pair
+#:   is written the obvious way;
+#: * **two or more** -> the tuple of their texts, in the order they are sent.
+#:
+#: That is injective because :meth:`CachedPrompt.to_system_blocks` never emits an empty
+#: block (so a one-block key is never ``""``) and no ``str`` ever equals a ``tuple``.
+type SystemKey = str | tuple[str, ...]
 
 
 def _join(value: str | Sequence[str], separator: str) -> str:
@@ -229,8 +240,48 @@ def compose_request(
     return blocks, cached.to_messages()
 
 
-def wire_key(prompt: object, system: str | None = None) -> tuple[str, str]:
-    """The ``(system_text, user_text)`` pair a request actually carries.
+def canonical_system_key(system: str | Sequence[str] | None) -> SystemKey:
+    """Canonicalise the system half of a lookup key. See :data:`SystemKey`.
+
+    Accepts every spelling of "the system blocks of a call" and returns the one form
+    :func:`wire_key` produces, so a hand-written recording key and a composed call key
+    agree without either side knowing how the other was spelled:
+
+    * ``None`` / ``""`` / ``()`` / ``[]`` -> ``""`` (no system blocks at all)
+    * ``"a contract"`` / ``("a contract",)`` -> ``"a contract"`` (one block)
+    * ``("envelope", "turn 3 of 9")`` -> ``("envelope", "turn 3 of 9")`` (two blocks)
+
+    A ``str`` is returned unchanged rather than wrapped: it is already one block's text,
+    and wrapping it would make ``("", prompt)`` — the key the frozen acceptance suite's
+    plain-string path composes to — unreachable.
+    """
+    if system is None:
+        return ""
+    if isinstance(system, str):
+        return system
+    texts = tuple(str(part) for part in system)
+    if not texts:
+        return ""
+    if len(texts) == 1:
+        return texts[0]
+    return texts
+
+
+def system_key_text(key: SystemKey) -> str:
+    """A :data:`SystemKey` rendered for humans: the blocks joined by their section break.
+
+    For logging, for :meth:`llm.doubles._RecordingBase.when` substring matching, and for
+    the ``system`` field of a recorded :class:`llm.doubles.LLMCall`. It is deliberately
+    **not** an identity: the join is lossy, which is the entire reason the key itself is a
+    tuple. Never compare two calls by this string.
+    """
+    if isinstance(key, str):
+        return key
+    return SECTION_SEPARATOR.join(key)
+
+
+def wire_key(prompt: object, system: str | None = None) -> tuple[SystemKey, str]:
+    """The ``(system_key, user_text)`` pair a request actually carries.
 
     This is the canonical identity of a call, and it is what the doubles key on. The two
     halves travel separately — the system blocks and the user turn — so keying on the two
@@ -249,15 +300,17 @@ def wire_key(prompt: object, system: str | None = None) -> tuple[str, str]:
             in the same order :meth:`CachedPrompt.to_system_blocks` emits it.
 
     Returns:
-        ``(system_text, user_text)``. Several system blocks are joined with
-        :data:`SYSTEM_BLOCK_SEPARATOR` — a canonicalization for lookup, not a claim about
-        the wire format, which keeps them as separate blocks. No block yields ``""`` and
-        one block yields its text verbatim, so a plain string with no system keys on
-        exactly ``("", prompt)``.
+        ``(system_key, user_text)``, where ``system_key`` is a :data:`SystemKey` — the
+        block **texts themselves**, as a tuple once there is more than one of them, never
+        a joined string. Two block lists are equal keys only if they are the same list, so
+        no character exists that a block's own text could contain to forge a collision;
+        that is the whole point, and it is what :func:`llm.prompting.system_key_text`
+        must not be used for. A plain string with no system still keys on exactly
+        ``("", prompt)``.
     """
     blocks, cached = _compose(prompt, system, cache=False)
     return (
-        SYSTEM_BLOCK_SEPARATOR.join(str(block["text"]) for block in blocks),
+        canonical_system_key([str(block["text"]) for block in blocks]),
         cached.dynamic_tail,
     )
 
