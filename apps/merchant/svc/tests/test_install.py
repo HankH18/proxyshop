@@ -47,6 +47,7 @@ from merchant_svc.install import (
     assert_scopes_allowed,
     assert_topics_allowed,
     authorize_url,
+    callback_signing_bytes,
     exchange_code,
     handle_delivery,
     install,
@@ -844,3 +845,203 @@ def test_a_sink_that_refuses_a_delivery_gets_the_retry_not_a_duplicate() -> None
         assert len(handed_on) == 1
     finally:
         set_webhook_sink(None)
+
+
+# ======================================================================================
+# Follow-up hardening — the identity is the signed body, and only the signed body
+# ======================================================================================
+def test_a_secret_that_cannot_be_utf8_encoded_is_still_a_refusal_not_a_crash() -> None:
+    """Guarding the attacker's digest is not enough if the *key* can still throw.
+
+    ``os.environ`` is decoded with ``surrogateescape``, so a single non-UTF-8 byte in
+    ``SHOPIFY_API_SECRET`` reaches this code as a lone surrogate — and a strict
+    ``secret.encode("utf-8")`` then raises ``UnicodeEncodeError`` on **every** delivery,
+    turning an operator's typo into a 500 for every anonymous webhook POST. The same is
+    true of the callback's canonical bytes, whose keys and values all came off the wire.
+
+    Rejected here and only here: nothing — this is a totality property. What it pins is
+    that no input reaches an exception. The admitted/refused pair is asserted underneath
+    it, so "never raises" cannot be satisfied by refusing everything.
+    """
+    poisoned = "\udcc3" + DEFAULT_WEBHOOK_SECRET
+    body = b'{"id":1,"checkout_token":"t"}'
+
+    assert isinstance(sign(body, poisoned), str)
+    assert verify(body, poisoned, sign(body, poisoned)) is True
+    assert verify(body, poisoned, sign(body, "a-different-secret")) is False
+
+    params = {"shop": SHOP, "code": "c", "state": "s", "\udcc3-key": "\udcff-value"}
+    assert isinstance(callback_signing_bytes(params), bytes)
+    params["hmac"] = sign_callback(params, poisoned)
+    assert verify_callback_hmac(params, poisoned) is True
+    assert verify_callback_hmac(dict(params, code="tampered"), poisoned) is False
+
+
+async def test_one_signed_body_cannot_become_three_events_by_changing_its_topic(
+    install_env: dict[str, str],
+    install_app_url: str,
+    install_inbox: WebhookInbox,
+) -> None:
+    """The topic is unsigned, so it cannot be part of what makes a delivery distinct.
+
+    Shopify's HMAC covers the body alone. Folding the topic into the de-duplication key
+    therefore left one captured ``orders/paid`` replayable as three "fresh" events — the
+    same signed purchase arriving again as a fabricated fulfilment and a fabricated
+    refund, each one counted, because the replayer simply changed a header and a URL.
+
+    Rejected here and only here: the same signed body under any of the three topics after
+    the first. Still admitted: a different signed body, and the first arrival itself.
+    """
+    body = json.dumps({"id": 5150, "checkout_token": "tok-topic"}).encode("utf-8")
+    signature = sign(body, DEFAULT_WEBHOOK_SECRET)
+
+    async with httpx.AsyncClient() as client:
+
+        async def post(topic: str) -> httpx.Response:
+            return await client.post(
+                f"{install_app_url}/webhooks/shopify/{topic}",
+                content=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Shopify-Topic": topic,
+                    "X-Shopify-Hmac-Sha256": signature,
+                    "X-Shopify-Shop-Domain": SHOP,
+                    "X-Shopify-Webhook-Id": f"w-{topic}",
+                },
+            )
+
+        first = await post("orders/paid")
+        assert first.status_code == 200
+        assert first.json()["duplicate"] is False
+
+        for topic in ("orders/fulfilled", "refunds/create"):
+            replay = await post(topic)
+            assert replay.status_code == 200
+            assert replay.json()["duplicate"] is True, f"replayed as a fresh {topic} event"
+
+    assert len(install_inbox.events()) == 1
+    assert install_inbox.events()[0].topic == "orders/paid"
+
+
+def test_a_new_body_arriving_under_an_already_seen_webhook_id_is_still_recorded() -> None:
+    """The webhook id must not be able to suppress a delivery it does not describe.
+
+    Keeping the unsigned id as a secondary de-duplication key cut both ways: it dropped a
+    *genuinely different* body that happened to arrive under an id already seen. Since the
+    id is chosen by the sender, that is a suppression primitive, not a safety net.
+
+    Rejected here and only here: a repeat of the same signed body. Still admitted: a new
+    signed body, whatever id it carries.
+    """
+    inbox = WebhookInbox()
+
+    def deliver(marker: str, webhook_id: str) -> WebhookDecision:
+        payload = json.dumps({"id": marker, "checkout_token": marker}).encode("utf-8")
+        return handle_delivery(
+            body=payload,
+            headers={
+                "X-Shopify-Topic": "orders/paid",
+                "X-Shopify-Hmac-Sha256": sign(payload, DEFAULT_WEBHOOK_SECRET),
+                "X-Shopify-Webhook-Id": webhook_id,
+                "X-Shopify-Shop-Domain": SHOP,
+            },
+            secret=DEFAULT_WEBHOOK_SECRET,
+            path_topic="orders/paid",
+            inbox=inbox,
+        )
+
+    assert deliver("order-1", "w-shared").duplicate is False
+    assert deliver("order-2", "w-shared").duplicate is False, "a real order was suppressed"
+    assert deliver("order-1", "w-shared").duplicate is True
+    assert len(inbox.events()) == 2
+
+
+def test_the_replay_window_retires_whole_deliveries_at_its_boundary() -> None:
+    """Eviction must never leave half a delivery behind.
+
+    With two keys per delivery the FIFO retired them one at a time, and they were inserted
+    adjacently — so the body key went first and the id key was stranded. A delivery still
+    well inside the window could then be replayed under a renamed id and accepted: the
+    exact attack the guard exists to stop, reappearing at the eviction boundary. One
+    identity per delivery is what makes eviction atomic.
+
+    Rejected here and only here: a replay of any delivery still inside the window, under
+    any id. Still admitted: a delivery whose identity the window has legitimately retired,
+    which is the stated bound rather than a hole.
+    """
+    # The replay window is never allowed to be smaller than the event ring, so the ring
+    # has to be the smaller of the two for this test to exercise the window's own bound.
+    inbox = WebhookInbox(capacity=2, seen_capacity=3)
+    assert inbox.seen_capacity == 3
+
+    def deliver(marker: str, webhook_id: str) -> WebhookDecision:
+        payload = json.dumps({"id": marker}).encode("utf-8")
+        return handle_delivery(
+            body=payload,
+            headers={
+                "X-Shopify-Topic": "orders/paid",
+                "X-Shopify-Hmac-Sha256": sign(payload, DEFAULT_WEBHOOK_SECRET),
+                "X-Shopify-Webhook-Id": webhook_id,
+            },
+            secret=DEFAULT_WEBHOOK_SECRET,
+            path_topic="orders/paid",
+            inbox=inbox,
+        )
+
+    assert deliver("o1", "w-1").duplicate is False
+    assert deliver("o2", "w-2").duplicate is False
+    # Two identities in a three-identity window: nothing may have been retired yet.
+    assert deliver("o1", "renamed").duplicate is True, "o1 was stranded before the boundary"
+
+    assert deliver("o3", "w-3").duplicate is False
+    assert deliver("o4", "w-4").duplicate is False  # crosses the boundary; o1 retires
+    assert deliver("o4", "renamed-again").duplicate is True, "the newest was retired instead"
+    assert deliver("o3", "renamed-too").duplicate is True
+    # The stated bound, asserted so the window is a window and not an unbounded promise.
+    assert deliver("o1", "w-1").duplicate is False
+
+
+def test_forgetting_a_delivery_this_inbox_never_recorded_disarms_nothing() -> None:
+    """``forget`` releases an identity only if it was the delivery that claimed it.
+
+    A delivery refused as a duplicate never added the identity it matched. Releasing it on
+    that delivery's behalf would hand the original's replay protection to whoever sent the
+    duplicate — a one-request disarm of the guard, from outside.
+
+    Rejected here and only here: every replay, before and after the stray ``forget``.
+    Still admitted: the retry of a delivery this inbox really did record and then release.
+    """
+    inbox = WebhookInbox()
+    body = json.dumps({"id": 424242, "checkout_token": "tok-forget"}).encode("utf-8")
+    headers = {
+        "X-Shopify-Topic": "orders/paid",
+        "X-Shopify-Hmac-Sha256": sign(body, DEFAULT_WEBHOOK_SECRET),
+        "X-Shopify-Webhook-Id": "w-1",
+        "X-Shopify-Shop-Domain": SHOP,
+    }
+
+    def deliver() -> WebhookDecision:
+        return handle_delivery(
+            body=body,
+            headers=headers,
+            secret=DEFAULT_WEBHOOK_SECRET,
+            path_topic="orders/paid",
+            inbox=inbox,
+        )
+
+    recorded = deliver()
+    assert recorded.duplicate is False
+    duplicate = deliver()
+    assert duplicate.duplicate is True
+
+    assert duplicate.event is not None
+    inbox.forget(duplicate.event)  # never recorded: must release nothing
+
+    assert deliver().duplicate is True, "a stray forget disarmed the replay guard"
+    assert len(inbox.events()) == 1
+
+    # Positive control: forgetting the delivery the inbox really did record does release it.
+    assert recorded.event is not None
+    inbox.forget(recorded.event)
+    assert inbox.events() == ()
+    assert deliver().duplicate is False

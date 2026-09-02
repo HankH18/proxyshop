@@ -13,10 +13,11 @@ single most common webhook-verification bug, and one that fails open. Everything
 works on ``bytes``.
 
 **Only the body is signed, so only the body may identify a delivery.** Every header on an
-inbound delivery is chosen by whoever made the request, including the webhook id a receiver
-is tempted to de-duplicate on. :class:`WebhookInbox` therefore keys its replay guard on
-:func:`delivery_digest` of the signed body, and holds those identities in a window it
-evicts on its own clock rather than in step with the event ring.
+inbound delivery is chosen by whoever made the request — the webhook id a receiver is
+tempted to de-duplicate on, the topic, and the shop domain alike. :class:`WebhookInbox`
+therefore keys its replay guard on :func:`delivery_digest` of the signed body and on
+nothing else, and holds those identities in a window it evicts on its own clock rather
+than in step with the event ring.
 
 Header casing is read case-insensitively on purpose: shopify.dev prints the HMAC header
 three different ways across its own pages, and HTTP/2 lower-cases header names anyway.
@@ -34,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from merchant_svc.install.signatures import secure_equals
+from merchant_svc.install.signatures import secure_equals, signature_bytes
 
 _log = logging.getLogger(__name__)
 
@@ -58,10 +59,11 @@ HEADER_TRIGGERED_AT = "X-Shopify-Triggered-At"
 #: How many delivered webhooks the default in-process sink keeps.
 INBOX_CAPACITY = 512
 
-#: How many delivery identities the replay guard remembers, evicted on its own clock. It is
-#: deliberately far larger than the event ring and deliberately **not** tied to it: a guard
-#: that forgets an identity the moment the ring rolls over is a guard an attacker empties by
-#: sending traffic, which is the one thing an attacker is always able to do.
+#: How many delivery identities the replay guard remembers, evicted on its own clock. One
+#: identity per delivery, so this is a count of deliveries. It is deliberately far larger
+#: than the event ring and deliberately **not** tied to it: a guard that forgets an identity
+#: the moment the ring rolls over is a guard an attacker empties by sending traffic, which
+#: is the one thing an attacker is always able to do.
 SEEN_CAPACITY = 65536
 
 
@@ -102,7 +104,7 @@ def assert_topics_allowed(topics: Iterable[str]) -> tuple[str, ...]:
 
 def sign(body: bytes, secret: str) -> str:
     """Base64 HMAC-SHA256 over the raw body bytes, keyed by the app's client secret."""
-    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+    digest = hmac.new(signature_bytes(secret), body, hashlib.sha256).digest()
     return base64.b64encode(digest).decode("ascii")
 
 
@@ -142,8 +144,9 @@ class ReceivedWebhook:
     api_version: str = ""
     triggered_at: str = ""
     #: :func:`delivery_digest` of the raw body this delivery was authenticated against.
-    #: The de-duplication identity that an attacker cannot vary without invalidating the
-    #: signature; empty only when a caller built the event by hand.
+    #: The whole de-duplication identity, and the only part of a delivery an attacker
+    #: cannot vary without invalidating the signature; empty only when a caller built the
+    #: event by hand rather than letting :func:`handle_delivery` authenticate it.
     body_digest: str = ""
 
     @property
@@ -170,71 +173,93 @@ class WebhookInbox:
     a receiver that double-counts a retried ``orders/paid`` reconciles one purchase as two.
     A repeat is acknowledged (2xx, so the retries stop) and recorded once.
 
-    **What a delivery is identified by, and why it is not the webhook id alone.**
-    ``X-Shopify-Webhook-Id`` is an unsigned header: Shopify's HMAC covers the body and
-    nothing else, so anyone replaying a captured delivery can put a fresh id on it — or
-    drop the header, which the id-only rule never de-duplicated at all — and be counted
-    again, once per replay. The identity that cannot be varied is
-    :func:`delivery_digest` of the signed body, scoped to the topic it arrived under; the
-    webhook id is kept alongside it so an honest retry that Shopify re-bodies still
-    de-duplicates.
+    **A delivery is identified by the signed body and by nothing else.** The identity is
+    :func:`delivery_digest` of the raw body — precisely the bytes the HMAC covers. Three
+    tempting additions are all refused, and the reason is the same each time:
+
+    * ``X-Shopify-Webhook-Id`` is an unsigned header, so a replayer renames it (or omits
+      it, which an id-only rule never de-duplicated at all) and is counted again per
+      replay. It is also not safe as a *secondary* key: a genuinely new body arriving
+      under an already-seen id would be dropped.
+    * ``X-Shopify-Topic`` and the route path are unsigned too, so folding the topic into
+      the key lets one captured signed body replay as three distinct "fresh" events — a
+      paid order becoming a fabricated fulfilment and a fabricated refund.
+    * ``X-Shopify-Shop-Domain`` is unsigned as well, and the app holds **one**
+      ``SHOPIFY_API_SECRET`` for every shop, so the signature cannot authenticate a shop
+      either. There is no trustworthy shop identity at this layer; scoping by it would let
+      any replayer mint unlimited fresh deliveries by varying that header.
+
+    The residual, stated rather than discovered: two *genuinely distinct* deliveries whose
+    bodies are byte-identical collapse into one. Real Shopify payloads carry globally
+    unique resource ids and timestamps, so this is not reachable in production; it is
+    reachable against ``services/shopify-stub`` when its per-instance counters restart at
+    fixed values under a frozen clock.
 
     **The replay window is bounded on its own clock.** The event ring is a display buffer
-    and rolls over at ``capacity``; the seen-set holds :data:`SEEN_CAPACITY` identities and
-    is evicted independently. Discarding an identity because the ring rolled over would
-    hand an attacker the eviction for free — traffic is the one resource an attacker
-    always has.
+    and rolls over at ``capacity``; the seen-set holds :data:`SEEN_CAPACITY` identities —
+    one per delivery, so the window really is that many deliveries — and is evicted
+    independently. Discarding an identity because the ring rolled over would hand an
+    attacker the eviction for free, and traffic is the one resource an attacker always has.
     """
 
     def __init__(
         self, capacity: int = INBOX_CAPACITY, *, seen_capacity: int = SEEN_CAPACITY
     ) -> None:
-        self.capacity = capacity
-        self.seen_capacity = max(seen_capacity, capacity)
+        # At least one: a zero-capacity ring would evict an event in the same call that
+        # recorded it, leaving an identity behind that :meth:`forget` could never reclaim.
+        self.capacity = max(1, capacity)
+        self.seen_capacity = max(seen_capacity, self.capacity)
         self._events: list[ReceivedWebhook] = []
-        #: Used as an insertion-ordered set: the value is never read.
+        #: Used as an insertion-ordered set: the value is never read. One entry per
+        #: delivery, so FIFO eviction retires whole deliveries and can never strand a
+        #: half-forgotten one that a replay would then slip past.
         self._seen: dict[str, None] = {}
 
     @staticmethod
-    def _identities(event: ReceivedWebhook) -> tuple[str, ...]:
-        """Every key ``event`` is de-duplicated under, most trustworthy first."""
-        keys: list[str] = []
-        if event.body_digest:
-            keys.append(f"body:{event.topic}:{event.body_digest}")
-        if event.webhook_id:
-            keys.append(f"id:{event.webhook_id}")
-        return tuple(keys)
-
-    def seen(self, event: ReceivedWebhook) -> bool:
-        """Whether an equivalent delivery was already recorded."""
-        return any(key in self._seen for key in self._identities(event))
+    def _identity(event: ReceivedWebhook) -> str:
+        """The one key ``event`` is de-duplicated under: its signed body, or nothing."""
+        return event.body_digest
 
     def record(self, event: ReceivedWebhook) -> bool:
-        """Append ``event``. ``False`` when an equivalent delivery was already recorded."""
-        keys = self._identities(event)
-        if any(key in self._seen for key in keys):
-            return False
-        for key in keys:
-            self._seen[key] = None
-        while len(self._seen) > self.seen_capacity:
-            self._seen.pop(next(iter(self._seen)))
+        """Append ``event``. ``False`` when an equivalent delivery was already recorded.
+
+        An event carrying no ``body_digest`` — one a caller built by hand rather than one
+        :func:`handle_delivery` authenticated — is recorded every time. There is nothing
+        trustworthy to de-duplicate it on, and inventing something from its headers is the
+        bug this class exists to avoid.
+        """
+        identity = self._identity(event)
+        if identity:
+            if identity in self._seen:
+                return False
+            self._seen[identity] = None
+            while len(self._seen) > self.seen_capacity:
+                self._seen.pop(next(iter(self._seen)))
         self._events.append(event)
         if len(self._events) > self.capacity:
             self._events.pop(0)
         return True
 
     def forget(self, event: ReceivedWebhook) -> None:
-        """Undo :meth:`record` for ``event``.
+        """Undo :meth:`record` for ``event``. A no-op unless this inbox recorded it.
 
         Used when the delivery could not be handed on after all, so the sender's retry is
         treated as the fresh delivery it is rather than swallowed as a duplicate.
+
+        Ownership is checked first, and that check is load-bearing: a delivery *refused*
+        as a duplicate never added the identity it matched, so releasing that identity on
+        its behalf would hand the original's replay protection to whoever sent the
+        duplicate.
         """
-        for key in self._identities(event):
-            self._seen.pop(key, None)
         for index in range(len(self._events) - 1, -1, -1):
             if self._events[index] is event:
                 del self._events[index]
                 break
+        else:
+            return
+        identity = self._identity(event)
+        if identity:
+            self._seen.pop(identity, None)
 
     def events(self, topic: str | None = None) -> tuple[ReceivedWebhook, ...]:
         """Everything recorded, optionally filtered to one topic, in arrival order."""

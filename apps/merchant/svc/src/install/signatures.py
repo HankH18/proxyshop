@@ -24,11 +24,17 @@ __all__ = ["secure_equals", "signature_bytes"]
 
 
 def signature_bytes(value: object) -> bytes:
-    """The comparable bytes of a signature-shaped value. Never raises.
+    """The bytes of any value that has to become bytes without raising. Never raises.
 
-    ``surrogatepass`` is what makes that promise true: a lone surrogate is the one thing a
-    plain ``utf-8`` encode refuses, and a value decoded from bytes by a lenient codec can
-    contain one.
+    Used for both sides of the comparison **and for the key and the canonical message**,
+    because a digest is only as total as its least total input: guarding the attacker's
+    signature while `secret.encode("utf-8")` can still throw just relocates the 500.
+
+    ``surrogatepass`` is what makes the promise true. A lone surrogate is the one thing a
+    plain ``utf-8`` encode refuses, and lone surrogates are exactly what a lenient decode
+    produces — including ``os.environ``, which CPython decodes with ``surrogateescape``, so
+    one non-UTF-8 byte in ``SHOPIFY_API_SECRET`` is enough to make every anonymous webhook
+    POST 500 if the secret is encoded strictly.
     """
     text = value if isinstance(value, str) else str(value)
     return text.encode("utf-8", "surrogatepass")

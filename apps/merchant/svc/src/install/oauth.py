@@ -35,7 +35,7 @@ from urllib.parse import quote, urlencode
 import httpx
 from merchant_svc.install.scopes import REQUIRED_SCOPES, assert_scopes_allowed
 from merchant_svc.install.shop import InvalidShopDomain, normalize_shop_domain
-from merchant_svc.install.signatures import secure_equals
+from merchant_svc.install.signatures import secure_equals, signature_bytes
 
 AUTHORIZE_PATH = "/admin/oauth/authorize"
 ACCESS_TOKEN_PATH = "/admin/oauth/access_token"
@@ -108,7 +108,9 @@ def callback_signing_bytes(params: Mapping[str, str]) -> bytes:
     pairs = sorted(
         (str(key), str(value)) for key, value in params.items() if key not in _HMAC_EXCLUDED
     )
-    return "&".join(f"{key}={value}" for key, value in pairs).encode("utf-8")
+    # signature_bytes, not .encode("utf-8"): every key and value here came off the wire,
+    # and one that cannot be encoded must produce a digest that fails to match, not a 500.
+    return signature_bytes("&".join(f"{key}={value}" for key, value in pairs))
 
 
 def verify_callback_hmac(params: Mapping[str, str], secret: str) -> bool:
@@ -123,7 +125,7 @@ def verify_callback_hmac(params: Mapping[str, str], secret: str) -> bool:
     if not supplied or not secret:
         return False
     expected = hmac.new(
-        secret.encode("utf-8"), callback_signing_bytes(params), hashlib.sha256
+        signature_bytes(secret), callback_signing_bytes(params), hashlib.sha256
     ).hexdigest()
     return secure_equals(expected, supplied)
 
@@ -136,7 +138,7 @@ def sign_callback(params: Mapping[str, str], secret: str) -> str:
     those bytes is the only way they cannot drift.
     """
     return hmac.new(
-        secret.encode("utf-8"), callback_signing_bytes(params), hashlib.sha256
+        signature_bytes(secret), callback_signing_bytes(params), hashlib.sha256
     ).hexdigest()
 
 
