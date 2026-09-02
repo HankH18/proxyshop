@@ -1590,3 +1590,212 @@ def test_verify_chain_keeps_the_frozen_call_signature_it_is_imported_under() -> 
     assert set(verify_chain([])) == five
     assert set(verify_chain(sealed, expected_length=9)) == five
     assert set(verify_chain(sealed, expected_head="f" * 64)) == five
+
+
+# =======================================================================================
+# T-102 (wave-2 finding W2-04) -- the DELETE arm of ``chain_head_guard_trigger``.
+#
+# 0002:189 names ``DELETE FROM ledger.chain_head`` as the whole of attack (C): the anchor
+# row goes, ``commerce_events_advance_anchor()`` matches zero rows, and appends keep
+# committing UNANCHORED. 0004 revokes DELETE from ``trust_rw`` and ``app``; the trigger is
+# the half of that defence which does not depend on a grant being right -- and nothing
+# graded it. The three tests above go past the arm on both sides: the role test at
+# ``test_the_anchor_is_not_rewritable_by_the_two_roles_that_append`` asserts a *privilege*
+# denial, which fires before any trigger can run, and the two tests that stage attack (C)
+# reach the anchor-less state through ``ALTER TABLE ... DISABLE TRIGGER``, which is the arm
+# switched off rather than exercised.
+#
+# Measured in this tree, worker 13: cutting ``BEFORE INSERT OR UPDATE OR DELETE`` down to
+# ``BEFORE INSERT OR UPDATE`` (0002:287) leaves ``pg_trigger.tgtype`` at 23 with the DELETE
+# bit clear, makes an owner ``DELETE FROM ledger.chain_head`` succeed with ``rowcount=1``,
+# and ``pytest apps/trust -q`` still reports ``138 passed``. Both tests below go red under
+# exactly that edit.
+# =======================================================================================
+
+#: ``pg_trigger.tgtype`` bits, from ``src/include/catalog/pg_trigger.h``. Postgres exposes
+#: no boolean column for "does this trigger have a DELETE arm" -- the arms live in this one
+#: bitmask, so the assertion has to be made at the bit.
+TRIGGER_TYPE_ROW = 1 << 0
+TRIGGER_TYPE_BEFORE = 1 << 1
+TRIGGER_TYPE_INSERT = 1 << 2
+TRIGGER_TYPE_DELETE = 1 << 3
+TRIGGER_TYPE_UPDATE = 1 << 4
+TRIGGER_TYPE_TRUNCATE = 1 << 5
+TRIGGER_TYPE_INSTEAD = 1 << 6
+
+#: The trigger's own words. Asserted verbatim so that a *grant* denial, a missing table, or
+#: any other refusal cannot be mistaken for this arm having fired.
+ANCHOR_DELETE_REFUSAL = (
+    "ledger.chain_head is the ledger's only truncation detector: DELETE is not permitted"
+)
+
+
+def _anchor_delete_is_refused_by_the_trigger(owner, statement: str) -> None:
+    """Assert ``statement`` is refused by ``chain_head_guard()``'s DELETE arm.
+
+    Never commits: the statement is rolled back on both paths, so a run in which the arm is
+    missing and the DELETE therefore *succeeds* still leaves the anchor row where it was for
+    the tests that follow.
+    """
+    rowcount: int | None = None
+    try:
+        with owner.cursor() as cur:
+            cur.execute(statement)
+            rowcount = cur.rowcount
+    except psycopg.errors.IntegrityConstraintViolation as exc:
+        assert ANCHOR_DELETE_REFUSAL in str(exc), (
+            f"{statement!r} was refused, but not by the anchor guard's DELETE arm: {exc}"
+        )
+        assert exc.sqlstate == "23000", (
+            "the arm raises USING ERRCODE = 'integrity_constraint_violation'; callers "
+            f"discriminate on that, and this arrived as {exc.sqlstate}"
+        )
+    except psycopg.Error as exc:
+        raise AssertionError(
+            f"{statement!r} failed with {type(exc).__name__} rather than the anchor guard's "
+            f"DELETE arm: {exc}. A refusal from somewhere else does not grade this arm."
+        ) from exc
+    else:
+        raise AssertionError(
+            f"{statement!r} SUCCEEDED (rowcount={rowcount}). "
+            f"Deleting the anchor is attack (C): the advance trigger then matches zero rows "
+            f"and every subsequent append commits with nothing able to detect a truncated "
+            f"tail. The BEFORE ... OR DELETE arm of chain_head_guard_trigger is gone."
+        )
+    finally:
+        owner.rollback()
+
+
+@pytest.mark.docker
+def test_the_anchor_guards_delete_arm_refuses_the_table_owner_as_well(ledger_clean) -> None:
+    """W2-04 acceptance 1: the arm fires for the one principal no grant can stop.
+
+    ``ledger_roles.denied(role, "delete from ledger.chain_head")`` above proves only that
+    ``trust_rw`` and ``app`` lack the privilege -- Postgres refuses those before the trigger
+    is ever consulted, so that assertion stays green with the DELETE arm deleted. The owner
+    is the principal that separates the two layers: ``has_table_privilege`` is asserted TRUE
+    here, so the trigger is the only thing standing between this statement and an anchorless
+    ledger.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as owner:
+        try:
+            with owner.cursor() as cur:
+                cur.execute(
+                    "select has_table_privilege(current_user, 'ledger.chain_head', 'DELETE'), "
+                    "       pg_has_role(current_user, (select relowner from pg_class "
+                    "                                   where oid = 'ledger.chain_head'::regclass), "
+                    "                   'USAGE')"
+                )
+                assert cur.fetchone() == (True, True), (
+                    "this connection must be able to DELETE as far as the grant layer is "
+                    "concerned, or the test below re-asserts the privilege check instead of "
+                    "the trigger"
+                )
+            owner.rollback()
+
+            _anchor_delete_is_refused_by_the_trigger(owner, "delete from ledger.chain_head")
+            _anchor_delete_is_refused_by_the_trigger(
+                owner, "delete from ledger.chain_head where chain = 'commerce_events'"
+            )
+            # A no-op DELETE touches no row, so the FOR EACH ROW arm never fires. Asserted so
+            # the arm is understood to be row-scoped rather than statement-scoped.
+            with owner.cursor() as cur:
+                cur.execute("delete from ledger.chain_head where chain = 'no_such_chain'")
+                assert cur.rowcount == 0
+        finally:
+            owner.rollback()
+
+    # The anchor is still there, still correct, and the writer still writes: a guard that
+    # closed the hole by breaking the append path would not have closed anything.
+    assert chain_anchor_of(connection)["length"] == 3
+    assert verify_chain_in_db(connection)["ok"] is True
+    append_event(connection, observation_event(3))
+    assert chain_anchor_of(connection)["length"] == 4
+    assert verify_chain_in_db(connection)["ok"] is True
+
+
+@pytest.mark.docker
+def test_the_anchor_guards_delete_arm_refuses_the_genesis_row_of_an_empty_chain(
+    ledger_clean,
+) -> None:
+    """The seed row is not deletable either, and "the chain is empty" is not an exception.
+
+    ``length = 0`` is the one state in which deleting the anchor looks harmless -- there is
+    nothing yet to truncate. It is not: the row is what the very next append's
+    ``UPDATE ... WHERE chain = 'commerce_events'`` has to find, and without it that append is
+    refused outright (see the attack-(C) test above). An arm narrowed to "refuse DELETE only
+    when the chain has rows" would leak exactly here.
+    """
+    connection = ledger_clean
+    assert chain_anchor_of(connection)["length"] == 0
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as owner:
+        try:
+            _anchor_delete_is_refused_by_the_trigger(owner, "delete from ledger.chain_head")
+        finally:
+            owner.rollback()
+
+    assert chain_anchor_of(connection)["head_hash"] == GENESIS_HASH
+    assert append_event(connection, observation_event(0)).inserted is True
+
+
+@pytest.mark.docker
+def test_pg_trigger_records_a_delete_arm_for_the_chain_head_guard(ledger_clean) -> None:
+    """W2-04 acceptance 2: the arm asserted in the catalog, not only in its behaviour.
+
+    The behavioural test above needs a live DELETE to be refused; this one reads the arm
+    straight out of ``pg_trigger``, so it stays a regression test even for a future refactor
+    that moves the refusal elsewhere but leaves the trigger declaration behind. The two
+    oracles are independent: ``tgtype`` is the bitmask the planner fires from, and
+    ``information_schema.triggers`` is a separate view over the same catalog row.
+    """
+    connection = ledger_clean
+    with connection.cursor() as cur:
+        cur.execute(
+            "select t.tgtype, t.tgenabled, pg_get_triggerdef(t.oid) "
+            "  from pg_trigger t "
+            "  join pg_class c on c.oid = t.tgrelid "
+            "  join pg_namespace n on n.oid = c.relnamespace "
+            " where n.nspname = 'ledger' and c.relname = 'chain_head' "
+            "   and t.tgname = 'chain_head_guard_trigger'"
+        )
+        rows = cur.fetchall()
+    assert len(rows) == 1, "chain_head_guard_trigger is not installed on ledger.chain_head"
+    tgtype, tgenabled, definition = rows[0]
+
+    assert tgtype & TRIGGER_TYPE_DELETE, (
+        f"pg_trigger.tgtype = {tgtype} for chain_head_guard_trigger: the DELETE bit "
+        f"({TRIGGER_TYPE_DELETE}) is CLEAR, so the guard is never consulted on a DELETE and "
+        f"the anchor -- the ledger's only truncation detector -- can simply be removed."
+    )
+    # ...and the other arms are still there, so this cannot be satisfied by widening the
+    # trigger into something that no longer guards INSERT or UPDATE.
+    assert tgtype == (
+        TRIGGER_TYPE_ROW
+        | TRIGGER_TYPE_BEFORE
+        | TRIGGER_TYPE_INSERT
+        | TRIGGER_TYPE_UPDATE
+        | TRIGGER_TYPE_DELETE
+    ), f"expected a BEFORE INSERT OR UPDATE OR DELETE ... FOR EACH ROW trigger, got {tgtype}"
+    assert not tgtype & TRIGGER_TYPE_TRUNCATE
+    assert not tgtype & TRIGGER_TYPE_INSTEAD
+    assert tgenabled == "O", (
+        f"chain_head_guard_trigger is {tgenabled!r}, not origin-enabled: a test that left it "
+        f"disabled has disarmed the anchor for everything that runs after it"
+    )
+    assert "DELETE" in definition and "BEFORE" in definition, definition
+
+    with connection.cursor() as cur:
+        cur.execute(
+            "select event_manipulation, action_timing, action_orientation "
+            "  from information_schema.triggers "
+            " where trigger_schema = 'ledger' and trigger_name = 'chain_head_guard_trigger'"
+        )
+        arms = cur.fetchall()
+    assert {row[0] for row in arms} == {"INSERT", "UPDATE", "DELETE"}
+    assert {row[1] for row in arms} == {"BEFORE"}
+    assert {row[2] for row in arms} == {"ROW"}
