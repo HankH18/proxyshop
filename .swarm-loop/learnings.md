@@ -314,3 +314,28 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   to be false. The lanes that did this volunteered corrections; a lane told only to "follow the
   brief" would have built against a stub with no storefront routes and reported the failure as its
   own.
+
+## The T-132 "REPAIR" guidance is mathematically wrong — do not follow it (cycle 9)
+
+`.swarm-loop/reports/T-132-amendment-design-REFUTED.json` tells the next author to assert,
+over a generated population:
+
+    min(class) >= K   AND   len(classes) <= len(pop)//K
+
+claiming the second half "kills the degenerate implementation that collapses everything
+into one class". It does not, and this was carried forward verbatim in a session handoff
+as "the key one".
+
+The second condition is IMPLIED BY the first: sizes sum to N and each is >= K, so
+N >= C*K, so C <= N/K. Always. And the degenerate implementation — one class holding all
+N buyers — passes BOTH: min(class) = N >= K, and len(classes) = 1 <= N//K. Measured, not
+argued: at N=4000, K=5 the collapse-everything implementation returns True for both.
+
+What actually catches the degenerate case is a LOWER bound on the class count
+(`len(classes) >= some floor`), plus a utility assertion that a stated fraction of buyers
+retain each facet. Anyone following the recorded guidance gets a test that cannot catch
+the failure it was written to catch.
+
+Found by the lane that was told to implement it, which is the point: a brief is a
+hypothesis, and the agent executing it is the one positioned to falsify it. Say so in
+every packet.

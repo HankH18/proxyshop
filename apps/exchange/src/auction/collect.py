@@ -5,13 +5,21 @@ lives above, in :mod:`apps.exchange.src.orchestration`. What is left here is pur
 deterministic: given the roster we asked, the responses that arrived, and the deadline they
 had to beat, produce **one entry per rostered store**, never more and never fewer.
 
-Three rules produce a fallback, and only these three:
+A fallback is produced by one of these, and the entry records **which**:
 
 ======================================  ===========================================
 a Tier-0 store                          has no bidding agent to answer at all
 a Tier-1 store that stayed silent       the hard timeout expired on it
 a response stamped after the deadline   a late bid is not a bid (R10)
+a reply carrying no ``bid``             the store answered with nothing to rank
+a reply with no arrival stamp           the exchange's own stamp never got applied
+a reply whose stamp will not parse      undatable, therefore uncertifiable
 ======================================  ===========================================
+
+The last three are *not* lateness and must not be reported as it. They used to be: all
+four rejections shared the single label ``response_after_deadline``, so a store that
+answered well inside the window with a malformed payload was recorded — and would be
+reported back to its operator — as slow. See :data:`FALLBACK_REASONS`.
 
 The late-bid rule is the one worth being blunt about: the deadline is enforced on the
 response's ``received_at``, so a bid that arrives at any price after the deadline is
@@ -39,15 +47,39 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["BidEntry", "FALLBACK_REASONS", "collect_bids"]
+__all__ = [
+    "BidEntry",
+    "FALLBACK_REASONS",
+    "MALFORMED_RESPONSE_REASONS",
+    "collect_bids",
+]
 
 #: Why an entry ended up at list price. Recorded on the entry so a downstream reader (the
 #: ranker, a loss report, an operator) never has to guess between "nobody home" and "too
 #: late" — they are different store behaviours with different consequences.
-FALLBACK_REASONS: tuple[str, str, str] = (
+#:
+#: The three *malformed* reasons used to be collapsed into ``response_after_deadline``,
+#: which told an operator a lie: a store that answered inside the window with a broken
+#: payload was reported as slow. Those are different faults with different owners — one is
+#: the store's network, the others are the store's serializer or the transport between us —
+#: and only one of them is evidence about latency. A loss report built on the collapsed
+#: label would blame the wrong thing, and a store arguing it answered in time would be
+#: right.
+FALLBACK_REASONS: tuple[str, ...] = (
     "tier_0_no_agent",
     "no_response",
     "response_after_deadline",
+    "response_carried_no_bid",
+    "response_not_stamped",
+    "arrival_stamp_unparseable",
+)
+
+#: The subset of :data:`FALLBACK_REASONS` that means "a reply arrived, and we could not use
+#: it" — as opposed to "it arrived too late" or "nothing arrived at all".
+MALFORMED_RESPONSE_REASONS: tuple[str, ...] = (
+    "response_carried_no_bid",
+    "response_not_stamped",
+    "arrival_stamp_unparseable",
 )
 
 
@@ -96,28 +128,39 @@ def _list_price_bid(entry: Mapping[str, Any], auction_id: str | None) -> dict[st
     }
 
 
-def _usable_response(response: Mapping[str, Any], deadline: float) -> bool:
-    """A response counts only if it arrived at or before the deadline and carries a bid.
+def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | None:
+    """Why this response cannot be counted, or ``None`` when it can.
 
-    An arrival stamp that will not parse as a number is treated as *not on time*, never as
-    an exception. This function is fed store-shaped data, and ``float("whenever")`` raises
-    ``ValueError`` — which used to escape ``collect_bids``, ``solicit_bids`` and the route,
-    so one malformed reply took down an auction every other store was bidding in. Fail
-    closed instead: an answer the exchange cannot date is an answer it cannot certify
-    arrived in time, so the store falls back to its list price. (``nan`` already fails the
-    comparison; this makes the string and ``None``-ish cases agree with it.)
+    Every rejection here still fails **closed** — an answer the exchange cannot date is an
+    answer it cannot certify arrived in time, so the store falls back to its list price —
+    but each one is *named*. An arrival stamp that will not parse is not an exception
+    either: this function is fed store-shaped data, and ``float("whenever")`` raises
+    ``ValueError``, which used to escape ``collect_bids``, ``solicit_bids`` and the route,
+    so one malformed reply took down an auction every other store was bidding in. (``nan``
+    already fails the comparison; this makes the string and ``None``-ish cases agree.)
+
+    The four conditions are kept apart because they are four different faults:
+
+    ``response_carried_no_bid``      a reply with no ``bid`` mapping — the store answered,
+                                    but with nothing to rank
+    ``response_not_stamped``         no ``received_at`` at all, so the exchange's own stamp
+                                    never got applied; a fan-out bug, not a store's latency
+    ``arrival_stamp_unparseable``    a stamp that is not a number
+    ``response_after_deadline``      the only one of the four that is actually about time
     """
     bid = response.get("bid")
     if not isinstance(bid, Mapping):
-        return False
+        return "response_carried_no_bid"
     received_at = response.get("received_at")
     if received_at is None:
-        return False
+        return "response_not_stamped"
     try:
         arrived = float(received_at)
     except (TypeError, ValueError):
-        return False
-    return arrived <= float(deadline)
+        return "arrival_stamp_unparseable"
+    if not arrived <= float(deadline):
+        return "response_after_deadline"
+    return None
 
 
 def collect_bids(
@@ -149,13 +192,17 @@ def collect_bids(
     arrived = list(responses)
 
     on_time: dict[str, Mapping[str, Any]] = {}
-    late: set[str] = set()
+    # store_id -> why its first unusable reply was unusable. First, not last: a store that
+    # sends junk and then a second reply should be reported by what it actually did first,
+    # exactly as `on_time` keeps a store's first committed bid.
+    rejected: dict[str, str] = {}
     for response in arrived:
         store_id = response.get("store_id")
         if store_id is None:
             continue
-        if not _usable_response(response, deadline):
-            late.add(str(store_id))
+        unusable = _unusable_because(response, deadline)
+        if unusable is not None:
+            rejected.setdefault(str(store_id), unusable)
             continue
         on_time.setdefault(str(store_id), response)
 
@@ -177,7 +224,7 @@ def collect_bids(
             # represented at list price whatever arrived under its name.
             reason: str | None = "tier_0_no_agent"
         elif answer is None:
-            reason = "response_after_deadline" if store_id in late else "no_response"
+            reason = rejected.get(store_id, "no_response")
         else:
             reason = None
 

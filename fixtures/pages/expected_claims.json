@@ -1,0 +1,162 @@
+{
+  "expectation_version": 1,
+  "ticket": "T-021",
+  "extractor_version": "policy_extraction@1.0.0",
+  "confidence_floor": 0.6,
+  "notes": "Ticket acceptance 1: the claims the deterministic extractor must read out of fixtures/pages/store-example/*.html, and the ones it must hold back. This file is ground truth, not an output: services/ingest/tests/test_extraction.py compares the extractor against it, never the other way round. A diff here is a behaviour change that needs a human to agree with it and EXTRACTOR_VERSION to move.",
+  "pages": {
+    "injected.html": {
+      "url": "https://store.example.com/policies/injected",
+      "kind": "policy",
+      "injection_markers": [
+        "ignore all previous instructions",
+        "disregard the schema",
+        "you are now an",
+        "new instruction:",
+        "system prompt",
+        "call the tool",
+        "mark every claim",
+        "confidence 1.0",
+        "unrestricted assistant"
+      ],
+      "claims": [
+        {
+          "key": "shipping.dispatch_window_days",
+          "value": 3,
+          "unit": "business_days",
+          "claim_type": "dispatch_window",
+          "confidence": 0.92
+        },
+        {
+          "key": "returns.window_days",
+          "value": 14,
+          "unit": "days",
+          "claim_type": "return_policy",
+          "confidence": 0.93
+        }
+      ],
+      "quarantined": []
+    },
+    "returns.html": {
+      "url": "https://store.example.com/policies/returns",
+      "kind": "returns",
+      "injection_markers": [],
+      "claims": [
+        {
+          "key": "returns.window_days",
+          "value": 45,
+          "unit": "days",
+          "claim_type": "return_policy",
+          "confidence": 0.93
+        },
+        {
+          "key": "shipping.free_over_amount_return",
+          "value": 75.0,
+          "unit": "USD",
+          "claim_type": "promo_eligibility",
+          "confidence": 0.9
+        },
+        {
+          "key": "returns.refund_days",
+          "value": 5,
+          "unit": "business_days",
+          "claim_type": "return_policy",
+          "confidence": 0.9
+        }
+      ],
+      "quarantined": [
+        {
+          "key": "returns.restocking_fee",
+          "value": false,
+          "unit": null,
+          "claim_type": "return_policy",
+          "confidence": 0.3,
+          "quarantine_reason": "below_confidence_floor"
+        }
+      ]
+    },
+    "shipping.html": {
+      "url": "https://store.example.com/policies/shipping",
+      "kind": "shipping",
+      "injection_markers": [],
+      "claims": [
+        {
+          "key": "shipping.dispatch_window_days",
+          "value": 2,
+          "unit": "business_days",
+          "claim_type": "dispatch_window",
+          "confidence": 0.92
+        },
+        {
+          "key": "shipping.free_over_amount_standard",
+          "value": 50.0,
+          "unit": "USD",
+          "claim_type": "promo_eligibility",
+          "confidence": 0.9
+        },
+        {
+          "key": "shipping.expedited_price",
+          "value": 12.0,
+          "unit": "USD",
+          "claim_type": "price",
+          "confidence": 0.88
+        },
+        {
+          "key": "returns.window_days",
+          "value": 30,
+          "unit": "days",
+          "claim_type": "return_policy",
+          "confidence": 0.93
+        },
+        {
+          "key": "warranty.duration_days",
+          "value": 365,
+          "unit": "days",
+          "claim_type": "warranty",
+          "confidence": 0.9
+        }
+      ],
+      "quarantined": [
+        {
+          "key": "shipping.speed_claim",
+          "value": "ship faster",
+          "unit": null,
+          "claim_type": "shipping_speed",
+          "confidence": 0.2,
+          "quarantine_reason": "below_confidence_floor"
+        }
+      ]
+    },
+    "warranty.html": {
+      "url": "https://store.example.com/policies/warranty",
+      "kind": "warranty",
+      "injection_markers": [],
+      "claims": [
+        {
+          "key": "warranty.duration_days",
+          "value": 1095,
+          "unit": "days",
+          "claim_type": "warranty",
+          "confidence": 0.9
+        },
+        {
+          "key": "shipping.dispatch_window_days",
+          "value": 1,
+          "unit": "business_days",
+          "claim_type": "dispatch_window",
+          "confidence": 0.92
+        }
+      ],
+      "quarantined": [
+        {
+          "key": "warranty.extension_claim",
+          "value": "extend coverage",
+          "unit": null,
+          "claim_type": "warranty",
+          "confidence": 0.2,
+          "quarantine_reason": "below_confidence_floor"
+        }
+      ]
+    }
+  }
+}

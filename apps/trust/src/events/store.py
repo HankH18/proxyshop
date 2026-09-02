@@ -287,18 +287,22 @@ class InMemoryEventStore:
         *,
         after_seq: int = 0,
         store_id: str | None = None,
+        event_id: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """The chain in insertion order, with the same filters as ``ledger.read_events``.
 
         A ``store_id``-filtered read is **not a chain** -- the links skip the events that
         were filtered out -- so it is for projection only, never for verification.
+        ``event_id`` selects the single event carrying that idempotency key, mirroring the
+        indexed lookup the Postgres store performs; :meth:`get` is the direct way to ask.
         """
         rows = [
             row
             for row in self.events
             if int(row.get("seq", 0)) > after_seq
             and (store_id is None or row.get("store_id") == store_id)
+            and (event_id is None or str(row.get("event_id")) == event_id)
         ]
         return rows if limit is None else rows[:limit]
 
@@ -357,6 +361,31 @@ class InMemoryEventStore:
                     length=len(self._events),
                 )
 
+            # `seq` is stamped AFTER sealing and is deliberately outside the hash (it is in
+            # `trust.ledger.CHAIN_FIELDS`, which `canonical_event` strips). That is the one
+            # mutable field the chain verifier cannot check, so the reason has to be stated
+            # rather than assumed:
+            #
+            # 1. **In Postgres it does not exist yet.** `ledger.commerce_events.seq` is a
+            #    `bigserial` the database assigns when the row lands, which is strictly
+            #    after `compute_event_hash` has run on the body being inserted. An event
+            #    cannot commit to a number that will not be chosen until after it is
+            #    sealed, and reserving one from the sequence first would hand out a
+            #    position that a rolled-back append then leaves as a permanent hole in the
+            #    chain -- a gap indistinguishable from a deleted event.
+            # 2. **Hashing it here would fork the hashing rule.** This store would seal a
+            #    `seq` it invented while Postgres sealed a `seq` the database invented, so
+            #    the two writers would produce different digests for the same event and D16's
+            #    "one hashing rule, two stores" would be false. `test_events.py`'s
+            #    `test_the_in_memory_and_postgres_writers_agree_on_the_stream_hash` is the
+            #    assertion that would break.
+            #
+            # What actually commits to an event's POSITION is `prev_hash`: every event names
+            # its predecessor's digest, so the order is sealed even though the label of the
+            # order is not. Renumbering `seq` in a way that changes what an `order by seq`
+            # read hands back therefore fails verification as `broken_link`; renumbering it
+            # in a way that preserves the order changes nothing a reader can observe about
+            # the chain. `test_events_hardening.py` pins both halves of that claim.
             sealed = seal_event(body, chain_head(self._events))
             sealed["seq"] = len(self._events) + 1
             self._events.append(sealed)

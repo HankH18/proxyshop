@@ -541,7 +541,16 @@ async def test_the_service_mounts_the_install_router(install_app_url: str) -> No
     async with httpx.AsyncClient() as client:
         schema = (await client.get(f"{install_app_url}/openapi.json")).json()
     assert "/install" in schema["paths"]
-    assert "/webhooks/shopify/{resource}/{action}" in schema["paths"]
+    # Corrected, not loosened. This line asserted "/webhooks/shopify/{resource}/{action}",
+    # which pinned a route the FROZEN contract contradicts: `packages/contracts` —
+    # `PINNED_ROUTES` and `openapi/merchant.openapi.json` — pins
+    # `POST /webhooks/shopify/{topic}`, ONE path parameter. The contract wins, so the
+    # implementation moved and this assertion follows it. It would have been wrong with or
+    # without that change: the contract predates this file. `test_merchant_hardening.py`
+    # now compares the whole served table to the contract, which is what should have caught
+    # the divergence instead of a single hand-written path string.
+    assert "/webhooks/shopify/{topic}" in schema["paths"]
+    assert "/pixel/collect" in schema["paths"]
 
 
 # ======================================================================================

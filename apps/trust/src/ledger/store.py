@@ -334,6 +334,7 @@ def read_events(
     *,
     after_seq: int = 0,
     store_id: str | None = None,
+    event_id: str | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Read the chain back in insertion order.
@@ -344,6 +345,12 @@ def read_events(
         store_id: restrict to one store. **A filtered read is not a chain** -- the links
             skip the events that were filtered out -- so pass this only for projection, and
             never to :func:`~.chain.verify_chain`.
+        event_id: restrict to the single event carrying this ``idempotency_key`` (D16: the
+            ``event_id`` *is* that key). This is the one filter that is a **lookup** rather
+            than a projection: ``commerce_events_idempotency_key_key`` is UNIQUE, so it
+            selects at most one row through an index. It exists because the alternative --
+            reading every row and filtering in Python -- made "fetch one event by id" cost
+            the whole ledger, which on an append-only table is a cost that only grows.
         limit: cap the number of rows.
 
     Returns:
@@ -351,6 +358,9 @@ def read_events(
     """
     clauses = ["seq > %s"]
     params: list[Any] = [after_seq]
+    if event_id is not None:
+        clauses.append("idempotency_key = %s")
+        params.append(event_id)
     if store_id is not None:
         clauses.append("store_id = %s")
         params.append(store_id)

@@ -137,6 +137,21 @@ def describe_break(
             f" It stores event_hash {stored_hash}, but its content hashes to "
             f"{broken['recomputed_event_hash']}."
         )
+    elif reason == "broken_link" and predecessor is None:
+        # Index 0 has no predecessor, and the sentence below must not invent one. Written
+        # with the generic wording it read "the event before it (index -1,
+        # event_id=None) hashes to 000...0" -- a negative index and a nameless event -- in
+        # precisely the case where the reader most needs to be told what is MISSING. A
+        # stream whose first event does not link to genesis is what "the front of the
+        # ledger was deleted" and "the read started part-way through" both look like, and
+        # neither is a claim about a predecessor.
+        detail += (
+            f" It is the FIRST event in this stream, so its prev_hash must be the genesis "
+            f"link {GENESIS_HASH}; it stores {row.get('prev_hash')} instead. There is no "
+            f"predecessor to compare it against: either the stream does not begin where "
+            f"the ledger begins -- events ahead of it were removed, or the read was "
+            f"filtered or started after seq 0 -- or this event's prev_hash was rewritten."
+        )
     elif reason == "broken_link":
         detail += (
             f" It stores prev_hash {row.get('prev_hash')}, but the event before it "

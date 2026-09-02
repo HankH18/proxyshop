@@ -195,3 +195,252 @@ def test_the_approval_tool_refuses_to_let_automation_self_approve() -> None:
         with pytest.raises(ApprovalRefused):
             check_approver(name)
     assert check_approver("  Ada Lovelace  ") == "Ada Lovelace"
+
+
+# ---------------------------------------------------------------------------------
+# The guards added after the T-080 audit. Each one must REFUSE something, or it is
+# decoration: a validator nobody has watched reject a bad document is an assertion
+# that the document happens to be good today.
+# ---------------------------------------------------------------------------------
+def _doctored() -> dict:
+    """A fresh, mutable copy of the committed manifest to break in one specific way."""
+    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def _staged_tree(tmp_path, manifest: dict | None = None):
+    """A minimal repo-shaped tree: `<root>/fixtures/{manifest.json,golden/,catalog/}`.
+
+    Referenced documents are repo-relative, so a manifest only means anything underneath a
+    root laid out this way. Staging one is how the resolution boundary gets tested without
+    touching this checkout.
+    """
+    from fixtures.manifest import GOLDEN_SET_REL, MANIFEST_REL
+
+    root = tmp_path / "staged"
+    for rel in (MANIFEST_REL, GOLDEN_SET_REL, MANIFEST["seed_catalog"]["path"]):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes((REPO_ROOT / rel).read_bytes())
+    if manifest is not None:
+        (root / MANIFEST_REL).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    return root / MANIFEST_REL
+
+
+def test_load_manifest_verifies_the_manifests_own_body_digest(tmp_path) -> None:
+    """`approval.content_hash` is the digest the other two hang off, and no runtime consumer
+    checked it.
+
+    `golden_set.sha256` and `seed_catalog.sha256` were both verified on load; the digest
+    covering the manifest's OWN body was not, so every program that read the manifest
+    trusted a `content_hash` its own code path had never compared against the document. The
+    acceptance suite checks it once; this makes every read check it, which is what a
+    consumer running outside the suite needs.
+    """
+    doctored = _doctored()
+    doctored["episode_budget"] = 99  # inside the body the digest covers
+    doctored["expected_trust_trajectory"] = MANIFEST["expected_trust_trajectory"]
+    path = _staged_tree(tmp_path, doctored)
+
+    with pytest.raises(DigestMismatchError, match="content_hash"):
+        load_manifest(path)
+
+    # ...and the same document loads once its digest is honestly re-pinned.
+    from fixtures.manifest import refresh_digests
+
+    refresh_digests(path)
+    assert load_manifest(path)["episode_budget"] == 99
+
+
+def test_load_manifest_resolves_referenced_documents_against_the_manifests_own_root(
+    tmp_path,
+) -> None:
+    """A foreign manifest must be graded against ITS documents, not against this repo's.
+
+    Referenced paths were resolved against `fixtures.REPO_ROOT`, so
+    `load_manifest('/somewhere/else/fixtures/manifest.json')` validated somebody else's
+    document — including whatever `approval` block it chose to carry — against THIS
+    repository's approved golden set and category config, and reported it sound.
+    """
+    path = _staged_tree(tmp_path)
+    golden = path.parent / "golden" / "golden_set.json"
+    golden.write_text('{"pitches": [{"pitch_id": "fabricated"}]}\n', encoding="utf-8")
+
+    with pytest.raises(DigestMismatchError, match="golden_set"):
+        load_manifest(path)
+
+    # The repo's own golden set was never consulted and is untouched.
+    assert file_digest(GOLDEN_SET_PATH) == MANIFEST["golden_set"]["sha256"]
+
+
+def test_load_manifest_refuses_a_manifest_that_has_no_root_to_resolve_against(tmp_path) -> None:
+    stray = tmp_path / "manifest.json"
+    stray.write_bytes(MANIFEST_PATH.read_bytes())
+    with pytest.raises(ManifestError, match="fixtures/manifest.json"):
+        load_manifest(stray)
+
+
+def test_a_behaviour_may_not_land_on_a_dimension_its_claim_type_does_not_route_to() -> None:
+    """D53 on the SCRIPTED side: `behaviours[].claim_type` was carried and never checked.
+
+    A behaviour could therefore name `ingredients` while declaring `dim: price_honored`, and
+    the simulator (which reads `kind`) and the trust engine (which reads `dim`) would
+    disagree about the same scripted lie while both truthfully saying "the manifest says so".
+    """
+    from fixtures.manifest import validate_manifest
+
+    doctored = _doctored()
+    for behaviour in doctored["dishonest_store"]["behaviours"]:
+        if behaviour["kind"] == "misrepresented_ingredients":
+            behaviour["dim"] = "price_honored"
+    with pytest.raises(ManifestError, match="routes it to"):
+        validate_manifest(doctored)
+
+
+def test_only_feedback_match_may_script_a_behaviour_with_no_claim_type() -> None:
+    from fixtures.manifest import UnmappedClaimTypeError, validate_manifest
+
+    doctored = _doctored()
+    for behaviour in doctored["dishonest_store"]["behaviours"]:
+        if behaviour["kind"] == "phantom_discount":
+            behaviour["claim_type"] = None
+    with pytest.raises(ManifestError, match="feedback_match"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    for behaviour in doctored["dishonest_store"]["behaviours"]:
+        if behaviour["kind"] == "phantom_discount":
+            behaviour["claim_type"] = "loyalty_points"
+    with pytest.raises(UnmappedClaimTypeError):
+        validate_manifest(doctored)
+
+
+def test_the_treatment_of_each_outcome_is_checked_not_merely_present() -> None:
+    """`claim_outcome_treatment` was validated for KEY PRESENCE only.
+
+    `{"ambiguous": {}}` satisfied that, while T-080 acceptance 4 is about what each outcome
+    DOES to trust — and the trust engine is graded against these numbers.
+    """
+    from fixtures.manifest import validate_manifest
+
+    doctored = _doctored()
+    doctored["claim_outcome_treatment"]["ambiguous"]["moves_mean"] = True
+    with pytest.raises(ManifestError, match="ambiguous"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["claim_outcome_treatment"]["unsupported"]["weight"] = 2.5
+    with pytest.raises(ManifestError, match="unsupported"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["claim_outcome_treatment"]["unsupported"]["satisfies_hard_constraint"] = True
+    with pytest.raises(ManifestError, match="hard constraint"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    del doctored["claim_outcome_treatment"]["contradicted"]["weight"]
+    with pytest.raises(ManifestError, match="weight"):
+        validate_manifest(doctored)
+
+
+def test_the_store_roster_is_validated_at_all() -> None:
+    """`stores` was entirely unvalidated, and the generator seeds from it."""
+    from fixtures.manifest import validate_manifest
+
+    doctored = _doctored()
+    doctored["stores"] = [s for s in doctored["stores"] if s["honest"] is False]
+    with pytest.raises(ManifestError, match="no honest store"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["stores"] = [
+        s for s in doctored["stores"] if s["store_id"] != doctored["dishonest_store"]["store_id"]
+    ]
+    with pytest.raises(ManifestError, match="not on manifest.stores"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    for store in doctored["stores"]:
+        if store["store_id"] == doctored["dishonest_store"]["store_id"]:
+            store["honest"] = True
+    with pytest.raises(ManifestError, match="flagged honest"):
+        validate_manifest(doctored)
+
+
+def test_the_persona_scripts_are_validated_at_all() -> None:
+    """`personas` was entirely unvalidated, and T-045 replays them verbatim."""
+    from fixtures.manifest import UnmappedClaimTypeError, validate_manifest
+
+    doctored = _doctored()
+    for claim in doctored["personas"]["aggressive"]["scripted_claims"]:
+        claim["truthful"] = True
+    with pytest.raises(ManifestError, match="asserts nothing false"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["personas"]["aggressive"]["scripted_claims"][0]["claim_type"] = "vibes"
+    with pytest.raises(UnmappedClaimTypeError):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["personas"]["honest"]["store_id"] = "store-that-does-not-exist"
+    with pytest.raises(ManifestError, match="not on the roster"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    del doctored["personas"]["honest"]
+    with pytest.raises(ManifestError, match="entirely truthful"):
+        validate_manifest(doctored)
+
+
+def test_the_fixture_intent_is_validated_at_all() -> None:
+    """`fixture_intent` was entirely unvalidated; every persona answers it."""
+    from fixtures.manifest import validate_manifest
+
+    doctored = _doctored()
+    doctored["fixture_intent"]["category"] = "tea"
+    with pytest.raises(ManifestError, match="seed_category"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    for constraint in doctored["fixture_intent"]["constraints"]:
+        constraint["hard"] = False
+    with pytest.raises(ManifestError, match="HARD constraint"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["fixture_intent"]["budget_cents"] = 0
+    with pytest.raises(ManifestError, match="budget_cents"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["fixture_intent"]["preferences"][0]["weight"] = 1.5
+    with pytest.raises(ManifestError, match="weight"):
+        validate_manifest(doctored)
+
+
+def test_a_half_written_approval_is_refused() -> None:
+    """An approval assembled field by field is how a fabricated one looks while it is being
+    written. Neither half-state is a coherent decision, so the loader refuses both.
+
+    This adds nothing to the human gate's authenticity — no offline check can — but it means
+    an agent that wrote a name into a pending manifest breaks the loader for every consumer,
+    not only the one test that reads the block.
+    """
+    from fixtures.manifest import validate_manifest
+
+    doctored = _doctored()
+    doctored["approval"]["approver"] = "Grace Hopper"
+    with pytest.raises(ManifestError, match="half-written approval|approver"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["approval"]["status"] = "approved"
+    with pytest.raises(ManifestError, match="approved"):
+        validate_manifest(doctored)
+
+    doctored = _doctored()
+    doctored["approval"]["status"] = "looks_fine_to_me"
+    with pytest.raises(ManifestError, match="status"):
+        validate_manifest(doctored)

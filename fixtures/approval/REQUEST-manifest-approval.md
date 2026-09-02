@@ -34,6 +34,14 @@ Re-pinning drifted digests is a separate, deliberate pair of commands:
 The second rewrites only the fenced digest block below — never this prose — so after running
 it, read this request again, and read `git diff` on it, before approving.
 
+**Re-pinning does not re-approve, and cannot.** `--refresh-digests` rewrites
+`fixtures/manifest.json` only. Your approval is recorded in *two* documents that have to
+agree — that file's `approval` block and the committed record it names,
+`fixtures/approval/manifest-approval.md`, which quotes the digest — so a re-pin leaves the
+record quoting the old digest and the acceptance suite goes red on exactly that
+disagreement. Re-issuing this request does not close it either: that rewrites the request,
+never the record. The only way back to green is for a human to approve again.
+
 ## What approving means
 
 You are declaring these five things to be **ground truth** — the answer key the trust
@@ -73,10 +81,15 @@ exactly one of the six dimensions; the four product-fact types (`ingredients`,
 offer-integrity types keep their transaction dimension; `feedback_match` takes no
 verification outcome at all. An unmapped claim type **raises** at load; it never defaults.
 
-**5. The golden pitch set** — 11 pitches, 27 labelled claims, one case for each of the eleven
+**5. The golden pitch set** — 13 pitches, 36 labelled claims, one case for each of the eleven
 DESIGN eval gates, all four verification statuses, one pitch carrying all four at once, and
-product-fact claims labelled both true and false. This is what `packages/verification` is
-scored against, so its labels decide whether the verifier is right or wrong.
+**each of the four product-fact claim types (`ingredients`, `compatibility`, `nutrition`,
+`specifications`) labelled both true and false.** That last part includes the manifest's own
+flagship catalog lie: `gp-012-misrepresented-ingredients` claims "100% single-origin arabica"
+for a product the snapshot records as an arabica/robusta blend, which is the scripted
+`misrepresented_ingredients` behaviour in row 5 of the table above. This is what
+`packages/verification` is scored against, so its labels decide whether the verifier is right
+or wrong.
 
 Plus the persona scripts (`aggressive`, `honest`) and the fixture intent.
 
@@ -86,8 +99,8 @@ These are the exact bytes. The approval command recomputes all three and refuses
 still match, so what you read here is what gets approved — nothing more:
 
 ```
-fixtures/manifest.json           87c49f8026f66b0f0f2fed55c65ce6cfce151b40921e00acaef03672cdd1bb43
-fixtures/golden/golden_set.json  dc94dbbb66ef70b08dec80da74be18ed7403a2766aab6285d8db0395baf09f60
+fixtures/manifest.json           130608ab82568409e6e0e2a2086bf6eccb3d535338f5a32fe9dccb72a9205ce6
+fixtures/golden/golden_set.json  0f8c092f0c9ce3935da2e6e6673ee0de50d7c6f9520f79665139b1dc89777012
 fixtures/catalog/coffee.json     4a94895f4209b30d2a96296072e44222245ee44c0fc7e556c700233258cb20d7
 ```
 
