@@ -1124,7 +1124,7 @@
     {
       "id": "T-080",
       "title": "The approved manifest and seed generator define ground truth",
-      "objective": "Fixture manifest: dishonest-store behaviors, new-store prior N, seeds, expected trust trajectories \u2014 submitted for human approval (approval artifact committed). Parameterized SEED_CATEGORY catalog generator + `make demo-seed` provisioning stub or live stores. Manifest also defines the golden intent/pitch set (incl. persona scripts, contradiction/stale/variant/unit/injection/claim-splitting cases) used by verification and eval gates.",
+      "objective": "Fixture manifest: dishonest-store behaviors, new-store prior N, seeds, expected trust trajectories \u2014 submitted for human approval (approval artifact committed). Parameterized SEED_CATEGORY catalog generator + `make demo-seed` provisioning stub or live stores. Manifest also defines the golden intent/pitch set (incl. persona scripts, contradiction/stale/variant/unit/injection/claim-splitting cases) used by verification and eval gates.\n\nUSER APPROVAL GRANTED (cycle 7). Hank approved the manifest gate explicitly in conversation: \"I approve.\" The human gate on T-080 is therefore SATISFIED \u2014 the seed manifest may be approved and committed, and the 16 tickets blocked behind T-080 are released. Recorded here because the approval must outlive the session that received it.",
       "refs": [
         "S2",
         "C9",
