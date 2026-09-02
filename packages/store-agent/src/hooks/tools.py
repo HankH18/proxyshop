@@ -27,6 +27,7 @@ byte-for-byte from its inputs (S4) and what lets the whole suite run offline.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -48,6 +49,11 @@ REASON_UNKNOWN_PRODUCT = "unknown_product"
 REASON_NEGATIVE_DISCOUNT = "negative_discount"
 REASON_OVER_MAX_DISCOUNT = "over_max_discount_pct"
 REASON_BELOW_PRICE_FLOOR = "below_price_floor"
+#: NaN, +inf, -inf. A wall is a pair of comparisons, and *every* comparison against NaN is
+#: False — so `pct < 0` and `pct > cap` both said "fine" and a NaN depth walked through both
+#: walls unchallenged. It failed later, in the canonical-JSON serializer, as a
+#: `CanonicalisationError` no caller is told to expect; a wall must refuse it, not a serializer.
+REASON_NON_FINITE_DISCOUNT = "non_finite_discount"
 
 #: The claim-type vocabulary (D53) a hook stamps for the catalog / envelope keys this system
 #: actually uses. A key that is not here is minted with `claim_type=None` rather than guessed:
@@ -419,7 +425,9 @@ class ToolHooks:
         """
         recorded = list(claims)
         for claim in recorded:
-            self.__claims.append(claim)
+            # A deep copy: the audit trail must be a record of what the hooks did, and the
+            # object the hook returned belongs to the caller, who can edit it afterwards.
+            self.__claims.append(claim.model_copy(deep=True))
             self.__ledger.record(claim_fingerprint(claim))
         return recorded
 
@@ -638,6 +646,12 @@ class ToolHooks:
         listing = self.catalog.get(product_ref)
         if listing is None:
             return (REASON_UNKNOWN_PRODUCT, 0.0, self.envelope_ref("floors")), 0.0, 0.0, cap
+        if not math.isfinite(pct):
+            # Before the comparisons, because NaN answers False to all of them: `pct < 0.0` and
+            # `pct > cap` would both pass and the depth would be "authorized" by two walls that
+            # never actually compared anything.
+            rule = self.envelope_ref("max_discount_pct")
+            return (REASON_NON_FINITE_DISCOUNT, cap, rule), 0.0, 0.0, cap
         if pct < 0.0:
             rule = self.envelope_ref("max_discount_pct")
             return (REASON_NEGATIVE_DISCOUNT, 0.0, rule), 0.0, 0.0, cap
@@ -795,6 +809,7 @@ __all__ = [
     "COLD_START_POLICY_VERSION",
     "REASON_BELOW_PRICE_FLOOR",
     "REASON_NEGATIVE_DISCOUNT",
+    "REASON_NON_FINITE_DISCOUNT",
     "REASON_OVER_MAX_DISCOUNT",
     "REASON_UNKNOWN_PRODUCT",
     "WALL_TOLERANCE",

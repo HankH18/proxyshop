@@ -71,8 +71,9 @@ byte-for-byte from its inputs (S4), and a `datetime.now()` anywhere in this path
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 from contracts import (
     HOOK_PROVENANCE_SOURCES,
@@ -123,6 +124,12 @@ NESTED_OBJECT_FIELDS: tuple[str, ...] = ("offer",)
 #: so it cannot be checked against the ledger directly; it is checked against the grant that
 #: authorizes it. See :func:`_discount_refusal`.
 DISCOUNT_FIELD = "discount"
+
+#: The field carrying the price a bid actually states, and the one naming what it is a price for.
+#: The envelope's floor is a wall on a *price*, and a boundary that checked only the discount
+#: depth would let an offer state any number it liked as long as the percentage looked legal.
+PRICE_FIELD = "unit_price"
+PRODUCT_FIELD = "product_ref"
 
 #: `Discount.type` values that mean "``value`` is a percentage depth", which is the only form a
 #: hook can authorize: :meth:`~store_agent.hooks.tools.ToolHooks.authorize_discount` reasons in
@@ -416,16 +423,38 @@ def _is_sequence(node: Any) -> bool:
 MAX_SWEEP_DEPTH = 12
 
 
+class ClaimMaterial(NamedTuple):
+    """Everything inside a bid that the boundary has an opinion about.
+
+    `claims` are checked against the ledger. `discounts` and `prices` are not claims and have no
+    ledger identity of their own; they are checked against the grants that authorize them.
+    `disguises` are nodes that are claim-shaped *and* carry offer material — see
+    :func:`_walk` for why that is a refusal rather than a shape to interpret.
+    """
+
+    claims: list[Any]
+    discounts: list[tuple[str, Any]]
+    prices: list[tuple[str, Any, Any]]
+    disguises: list[tuple[str, Any]]
+
+
 def _walk(
     node: Any,
     path: str,
-    claims: list[Any],
-    discounts: list[tuple[str, Any]],
+    found: ClaimMaterial,
     *,
     strict: bool = True,
     depth: int = 0,
 ) -> None:
-    """Collect every claim and every discount reachable in `node`, depth first.
+    """Collect every claim, discount and price reachable in `node`, depth first.
+
+    **A claim is a leaf, and being a leaf is a privilege that has to be earned.** A claim's
+    `value` is arbitrary data covered by its fingerprint, so descending into one would refuse
+    honest evidence — but `claim_fingerprint` covers exactly six fields, and a node carrying
+    those six *plus* an `offer`'s fields is not a claim that happens to have extra keys. It is an
+    offer wearing a genuine claim's identity, and its discount and commitments would ride in
+    unexamined behind a fingerprint that matches. That is the original defect with one more layer
+    of paint, so such a node is walked as a container AND recorded in `disguises` for refusal.
 
     `strict` says what to do with something that is neither a claim, a container nor a
     collection. Where the contract says claims live — the argument itself, `claims`,
@@ -436,42 +465,44 @@ def _walk(
     """
     if node is None or depth > MAX_SWEEP_DEPTH:
         return
-    if _is_claim_shaped(node):
-        # A claim is a leaf. Its `value` is arbitrary data covered by the fingerprint, so a
-        # claim-shaped dict buried inside one is not a second claim — it is part of what the
-        # ledger already vouches for, and descending would refuse honest evidence.
-        claims.append(node)
-        return
 
     fields = _structural_fields(node)
+    claim_shaped = _is_claim_shaped(node)
+    if claim_shaped and not fields:
+        found.claims.append(node)
+        return
+    if claim_shaped:
+        found.disguises.append((path, node))
+
     if fields:
         for field in CLAIM_BEARING_FIELDS:
             if field in fields:
-                _walk(_read(node, field), f"{path}.{field}", claims, discounts, depth=depth + 1)
+                _walk(_read(node, field), f"{path}.{field}", found, depth=depth + 1)
         for field in NESTED_OBJECT_FIELDS:
             if field in fields:
-                _walk(_read(node, field), f"{path}.{field}", claims, discounts, depth=depth + 1)
+                _walk(_read(node, field), f"{path}.{field}", found, depth=depth + 1)
         if DISCOUNT_FIELD in fields:
             discount = _read(node, DISCOUNT_FIELD)
             if discount is not None:
-                discounts.append((f"{path}.{DISCOUNT_FIELD}", discount))
-        _sweep(node, path, claims, discounts, depth)
+                found.discounts.append((f"{path}.{DISCOUNT_FIELD}", discount))
+        price = _read(node, PRICE_FIELD)
+        if price is not None:
+            found.prices.append((f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), price))
+        _sweep(node, path, found, depth)
         return
 
     if _is_sequence(node):
         for index, item in enumerate(node):
-            _walk(item, f"{path}[{index}]", claims, discounts, strict=strict, depth=depth + 1)
+            _walk(item, f"{path}[{index}]", found, strict=strict, depth=depth + 1)
         return
 
     if strict:
-        claims.append(node)
+        found.claims.append(node)
     elif isinstance(node, Mapping):
-        _sweep(node, path, claims, discounts, depth)
+        _sweep(node, path, found, depth)
 
 
-def _sweep(
-    node: Any, path: str, claims: list[Any], discounts: list[tuple[str, Any]], depth: int
-) -> None:
+def _sweep(node: Any, path: str, found: ClaimMaterial, depth: int) -> None:
     """Look for claims under keys the protocol does not define, and refuse to assume there are none.
 
     `Bid` and `Offer` forbid extra fields, so a bid built as a model cannot carry a claim
@@ -486,34 +517,39 @@ def _sweep(
     known = {*CLAIM_BEARING_FIELDS, *NESTED_OBJECT_FIELDS, DISCOUNT_FIELD}
     for name, value in node.items():
         if str(name) not in known:
-            _walk(value, f"{path}.{name}", claims, discounts, strict=False, depth=depth + 1)
+            _walk(value, f"{path}.{name}", found, strict=False, depth=depth + 1)
 
 
-def collect_claim_material(presented: Any) -> tuple[list[Any], list[tuple[str, Any]]]:
-    """Every claim and every discount inside `presented`: ``(claims, [(path, discount)])``.
+def collect_claim_material(presented: Any) -> ClaimMaterial:
+    """Everything inside `presented` the boundary has an opinion about. See :class:`ClaimMaterial`.
 
     The boundary's field of view. A flat list of claims collects to itself, which is what keeps
     the two-argument call the frozen suite makes working unchanged; a `Bid` collects to its own
-    claims *plus* its offer's commitments, with the offer's discount recorded separately because
-    it is not a claim and cannot be checked like one.
+    claims *plus* its offer's commitments, with the offer's discount and price recorded
+    separately because they are not claims and cannot be checked like one.
 
     Everything unrecognized is collected as a claim candidate rather than skipped. A structure
     this function did not understand must fail the boundary, not slip through it.
     """
-    claims: list[Any] = []
-    discounts: list[tuple[str, Any]] = []
-    _walk(presented, "", claims, discounts)
-    return claims, discounts
+    found = ClaimMaterial([], [], [], [])
+    _walk(presented, "", found)
+    return found
 
 
 def _as_depth(value: Any) -> float | None:
-    """A discount depth as a float, or `None` when the value is not a number at all."""
+    """A finite number as a float, or `None` when the value is not one.
+
+    Non-finite counts as "not a number": NaN answers False to every comparison, so a wall built
+    out of comparisons waves it through, and `inf` has no meaning as a percentage or a price.
+    Both must reach the refusal path that says so rather than the arithmetic that cannot.
+    """
     if isinstance(value, bool) or value is None:
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _claim_discount_depths(claim: Any) -> list[tuple[str, float | None]]:
@@ -665,8 +701,50 @@ def _authorization_refusal(claim: Any, hooks: Any, product_ref: str | None) -> s
     return None
 
 
+def _price_refusal(path: str, product_ref: Any, price: Any, hooks: Any) -> str | None:
+    """Why the price an offer *states* is not one the envelope allows, or `None`.
+
+    The floor is a wall on a price, and until now the boundary only ever checked the discount
+    *depth*. A bid could therefore carry an honest 20% grant and state a unit price of 1.00 on a
+    product whose approved floor is 10.00: every claim genuine, every percentage legal, and the
+    number the buyer actually pays never compared against the merchant's own limit. The depth is
+    a description of the price; the price is the thing.
+
+    Asked of the facade rather than recomputed here, through
+    :meth:`~store_agent.hooks.tools.ToolHooks.price_floor` — the same method
+    `authorize_discount` uses, so the two cannot come to different conclusions about what the
+    merchant approved. A facade that cannot answer is refused rather than trusted.
+    """
+    stated = _as_depth(price)
+    if stated is None:
+        return f"the offer at {path} states a price that is not a number: {price!r}"
+    if stated < 0.0:
+        return f"the offer at {path} states a negative price ({stated})"
+    if not product_ref:
+        return (
+            f"the offer at {path} states a price of {stated} without naming the product it is "
+            "for, so the floor that price must clear is unknowable; refusing"
+        )
+    floor_of = getattr(hooks, "price_floor", None)
+    if not callable(floor_of):
+        return (
+            f"{type(hooks).__name__} cannot report a price floor (no `price_floor`), so whether "
+            f"the {stated} at {path} clears the envelope is unknowable here; refusing"
+        )
+    floor = _as_depth(floor_of(str(product_ref)))
+    if floor is None:
+        return f"the envelope's floor for {str(product_ref)!r} is not a number; refusing"
+    if stated + DISCOUNT_MATCH_TOLERANCE < floor:
+        return (
+            f"the offer at {path} states {stated} for {str(product_ref)!r}, under the envelope's "
+            f"approved floor of {floor}: the floor is a wall on the price, and a legal discount "
+            "percentage is not a licence to state any price beneath it"
+        )
+    return None
+
+
 def _discount_refusal(
-    path: str, discount: Any, unspent: list[float], product_ref: str | None
+    path: str, discount: Any, unspent: list[tuple[float, str]], product_ref: str | None
 ) -> str | None:
     """Why an offer's `discount` is not authorized, or `None` when a grant in this bid backs it.
 
@@ -707,19 +785,22 @@ def _discount_refusal(
             f"the offer's discount at {path} is of type {kind!r}, which no tool hook can "
             f"authorize (hooks grant percentage depths: {sorted(PERCENTAGE_DISCOUNT_TYPES)})"
         )
+    cited = _claim_ref(discount)
     match = next(
         (
             index
-            for index, granted in enumerate(unspent)
-            if abs(granted - depth) <= DISCOUNT_MATCH_TOLERANCE
+            for index, (granted, ref) in enumerate(unspent)
+            if abs(granted - depth) <= DISCOUNT_MATCH_TOLERANCE and (not cited or ref == cited)
         ),
         None,
     )
     if match is None:
         return (
-            f"the offer at {path} takes {depth}% off {product_ref!r}, and no unspent hook-emitted "
-            f"authorization in this bid grants that depth (unspent here: {sorted(unspent)}) — "
-            "R8: a discount enters a bid through authorize_discount() or not at all"
+            f"the offer at {path} takes {depth}% off {product_ref!r}"
+            + (f" citing {cited!r}" if cited else "")
+            + f", and no unspent hook-emitted authorization in this bid grants that "
+            f"(unspent here: {sorted(unspent)}) — R8: a discount enters a bid through "
+            "authorize_discount() or not at all"
         )
     unspent.pop(match)
     return None
@@ -772,7 +853,8 @@ def enforce_hook_provenance(
             "nothing to check these claims against; refusing rather than admitting them"
         )
 
-    presented, discounts = collect_claim_material(claims)
+    found = collect_claim_material(claims)
+    presented, discounts = found.claims, found.discounts
     offenders: list[tuple[int, str]] = []
     unhooked = 0
     grants: list[tuple[int, Any]] = []
@@ -812,28 +894,41 @@ def enforce_hook_provenance(
             continue
         spendable.append(claim)
 
-    unspent_depths = [
-        depth
+    unspent_grants = [
+        (depth, _claim_ref(claim))
         for claim in spendable
         if (depth := _as_depth(_enum_value(_read(claim, "value")))) is not None
     ]
-    for offset, (path, discount) in enumerate(discounts):
-        reason = _discount_refusal(path, discount, unspent_depths, product_ref)
+    extras: list[str] = []
+    for path, discount in discounts:
+        reason = _discount_refusal(path, discount, unspent_grants, product_ref)
         if reason is not None:
-            offenders.append((len(presented) + offset, reason))
+            extras.append(reason)
+    for path, named, price in found.prices:
+        reason = _price_refusal(path, named if named is not None else product_ref, price, hooks)
+        if reason is not None:
+            extras.append(reason)
+    for path, node in found.disguises:
+        extras.append(
+            f"the node at {path or '<root>'} carries a claim's identity AND an offer's fields "
+            f"({sorted(_structural_fields(node))}): a claim fingerprint covers the claim, not an "
+            "offer wrapped around it, so this would ride a genuine claim's identity into the bid"
+        )
+    for offset, reason in enumerate(extras):
+        offenders.append((len(presented) + offset, reason))
 
     if offenders:
         detail = "; ".join(f"[{index}] {reason}" for index, reason in offenders)
         if unhooked == 0:
             raise ClaimScopeError(
-                f"{len(offenders)} of {len(presented) + len(discounts)} item(s) are hook-emitted "
+                f"{len(offenders)} of {len(presented) + len(extras)} item(s)are hook-emitted "
                 f"authorizations that were not granted for this bid, or discounts no "
                 f"authorization in it covers (R8: a discount clears the walls of the product it "
                 f"was checked against, and of no other) — {detail}",
                 offenders,
             )
         raise HookProvenanceError(
-            f"{len(offenders)} of {len(presented) + len(discounts)} item(s) did not come from a "
+            f"{len(offenders)} of {len(presented) + len(extras)} item(s)did not come from a "
             f"tool hook (R8: the hooks are the only way a fact enters a hosted bid) — {detail}",
             offenders,
         )
@@ -873,8 +968,11 @@ __all__ = [
     "DISCOUNT_VALUE_KEYS",
     "NESTED_OBJECT_FIELDS",
     "PERCENTAGE_DISCOUNT_TYPES",
+    "PRICE_FIELD",
+    "PRODUCT_FIELD",
     "PRODUCT_SCOPED_CLAIM_KEYS",
     "UNKNOWN_OBSERVED_AT",
+    "ClaimMaterial",
     "ClaimScopeError",
     "HookProvenanceError",
     "NotAClaimError",

@@ -20,8 +20,21 @@ as a format check:
    without limit;
 7. two import spellings resolving to two module objects, so `isinstance` is a coin toss.
 
-Every test here fails on the code as it stood before this file was written. That is the point:
-a boundary test that passes on the broken boundary is evidence of nothing.
+Section 8 holds what an independent adversarial auditor found *after* the first fix landed —
+including the same defect restored one layer up, and a wall on the discount depth that was never
+applied to the price.
+
+Almost every test here fails on the code as it stood before this file was written, which is the
+point: a boundary test that passes on the broken boundary is evidence of nothing. The exceptions
+are deliberate and named, so nobody mistakes them for evidence of the fix. They are non-regression
+guards — they assert that honest traffic still passes and that the widened rules did not simply
+start refusing everything:
+
+* `test_a_cold_policy_action_needs_no_product_because_it_carries_no_depth`
+* `test_the_widened_lint_still_ignores_code_that_builds_nothing`
+* `test_the_scope_wall_still_matches_a_product_ref_containing_the_separator`
+* `test_a_fact_stays_restatable_within_the_bid_it_was_read_in`
+* `test_the_two_spellings_the_lint_cannot_see_are_caught_at_runtime_instead` (pins a KNOWN gap)
 """
 
 from __future__ import annotations
@@ -255,8 +268,27 @@ def test_an_offer_discount_deeper_than_the_grant_that_backs_it_is_refused(
         _offer("prod-cap", discount=Discount(type="percentage", value=20.0)),
         [grant],
     )
-    with pytest.raises(HookProvenanceError):
+    with pytest.raises(HookProvenanceError) as raised:
         enforce_hook_provenance(bid, hooks, product_ref="prod-cap")
+
+    # `pytest.raises(HookProvenanceError)` alone would ALSO pass against a boundary that refused
+    # every bid it was handed, honest ones included — which is exactly what the old one did. So
+    # the refusal has to name the discount, and an honest bid has to pass the same call.
+    assert any(".offer.discount" in reason for _, reason in raised.value.offenders), (
+        f"the refusal must be about the offer's discount: {raised.value.offenders}"
+    )
+    honest_grant = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(honest_grant, Denied)
+    honest = _bid(
+        _offer(
+            "prod-cap",
+            unit_price=80.0,
+            total_price=80.0,
+            discount=Discount(type="percentage", value=20.0),
+        ),
+        [honest_grant],
+    )
+    assert enforce_hook_provenance(honest, hooks, product_ref="prod-cap") == [honest_grant]
 
 
 def test_a_claim_under_a_key_the_protocol_never_defined_is_still_checked(
@@ -876,6 +908,15 @@ def test_a_refused_boundary_call_spends_nothing(hooks: ToolHooks) -> None:
         "a call that was refused as a whole must leave the grant unspent"
     )
 
+    # "The grant survived" is trivially true of a boundary that never spends anything — which is
+    # what the old one was. The paired assertion is what makes this about atomicity: the call
+    # that succeeded DID spend it, so the earlier refusal is the reason it was still there.
+    assert claim_fingerprint(granted) in hooks.spent_fingerprints, (
+        "the successful call must have consumed the grant"
+    )
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance([granted], hooks, product_ref="prod-cap")
+
 
 def test_a_fact_stays_restatable_within_the_bid_it_was_read_in(hooks: ToolHooks) -> None:
     """The asymmetry is the point: a fact is true however often it is said, a grant is not."""
@@ -969,3 +1010,182 @@ def test_a_facade_built_through_one_spelling_is_refused_by_the_other_guard(
     with pytest.raises(HookProvenanceError):
         # This except clause is written against *this* module's exception type.
         long_spelling.enforce_hook_provenance([granted], built, product_ref="prod-floor")
+
+
+# ---------------------------------------------------------------------------------------------
+# 8. What an independent adversarial audit found after the first fix landed
+# ---------------------------------------------------------------------------------------------
+#
+# An auditor that did not write the fix attacked it. Everything below is one of its findings,
+# reproduced against the committed code before being closed. They share a shape worth naming: the
+# first fix taught the boundary a new place to look, and each attack went to a place it had *not*
+# been taught. That is the argument for checking structure rather than enumerating hiding places.
+
+
+def test_an_offer_wearing_a_genuine_claims_identity_is_refused(hooks: ToolHooks) -> None:
+    """The critical one: `claim_fingerprint` covers six fields, and a leaf can carry more.
+
+    Copy `key`, `value`, `claim_type`, `unit`, `source_span` and `provenance` off a genuine
+    hook-emitted claim onto an offer dict. The fingerprint matches — every covered field is
+    identical — so the node is claim-shaped, and a walker that treats a claim as a leaf returns
+    without ever seeing the 25% discount and the forged commitment hanging off it. That is the
+    original defect with one more layer of paint.
+    """
+    real = hooks.get_owner_commitments(CLUSTER)[0].model_dump()
+    disguised_offer = {
+        **real,
+        "product_ref": "prod-cap",
+        "unit_price": 75.0,
+        "total_price": 75.0,
+        "discount": {"type": "percentage", "value": 25.0},
+        "commitments": [
+            {"key": "free_returns", "value": "LIFETIME", "provenance": dict(real["provenance"])}
+        ],
+    }
+    assert isinstance(hooks.authorize_discount("prod-cap", 25.0), Denied), (
+        "25% must be past the cap, or the payload is not worth smuggling"
+    )
+
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_hook_provenance(
+            {"claims": [], "offer": disguised_offer}, hooks, product_ref="prod-cap"
+        )
+    reasons = " ".join(reason for _, reason in raised.value.offenders)
+    assert "LIFETIME" in reasons or "identity" in reasons, (
+        f"the payload behind the disguise must be what is named: {reasons}"
+    )
+
+
+def test_a_claim_may_not_carry_an_offers_fields(hooks: ToolHooks) -> None:
+    """The same root cause through the other door: bolt a discount onto a genuine claim."""
+    real = hooks.get_owner_commitments(CLUSTER)[0].model_dump()
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance(
+            [{**real, "discount": {"type": "percentage", "value": 25.0}}],
+            hooks,
+            product_ref="prod-cap",
+        )
+
+
+def test_the_price_a_bid_states_must_clear_the_envelope_floor(hooks: ToolHooks) -> None:
+    """The floor is a wall on a PRICE, and the boundary was only ever checking the depth.
+
+    Every claim here is genuine and the percentage is legal: an honest 20% grant on `prod-cap`,
+    whose approved floor is 10.00. The bid then states a unit price of 1.00. Nothing about the
+    discount is wrong; the number the buyer actually pays was simply never compared with the
+    merchant's own limit. This one needs no dict-shaped bid — it runs on the pydantic model.
+    """
+    grant = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(grant, Denied)
+    assert hooks.price_floor("prod-cap") == 10.0
+
+    from store_agent.hooks import enforce_bid_provenance
+
+    underpriced = _bid(
+        _offer("prod-cap", unit_price=1.0, total_price=1.0, discount=_pct(20.0)), [grant]
+    )
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_bid_provenance(underpriced, hooks)
+    assert "floor" in str(raised.value)
+
+    regrant = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(regrant, Denied)
+    honest = _bid(
+        _offer("prod-cap", unit_price=80.0, total_price=80.0, discount=_pct(20.0)), [regrant]
+    )
+    assert enforce_bid_provenance(honest, hooks) == [regrant]
+
+
+def test_a_nan_depth_does_not_walk_through_walls_made_of_comparisons(
+    alpha: dict[str, Any],
+) -> None:
+    """Every comparison against NaN is False, so `pct < 0` and `pct > cap` both said "fine".
+
+    It used to fail afterwards, inside the canonical-JSON serializer, as a `CanonicalisationError`
+    no caller is told to expect — and `would_authorize`, which the policy hook's new wall depends
+    on, answered True. A wall must refuse this, not a serializer.
+    """
+    hooks = ToolHooks(_context_from(alpha))
+    assert not hooks.would_authorize("prod-cap", float("nan"))
+
+    denied = hooks.authorize_discount("prod-cap", float("nan"))
+    assert isinstance(denied, Denied)
+    assert denied.reason == "non_finite_discount"
+    assert hooks.emitted_claims == [], "a non-finite request must mint nothing"
+
+    for value in (float("inf"), float("-inf")):
+        assert isinstance(hooks.authorize_discount("prod-cap", value), Denied)
+
+    # And the policy hook, whose wall is that same predicate, falls closed rather than raising.
+    learned = {"version": "v7", "actions": {CLUSTER: {"discount_pct": float("nan")}}}
+    walled = ToolHooks(_context_from(alpha, learned_policy=learned))
+    action = walled.choose_policy_action({"cluster_id": CLUSTER, "product_ref": "prod-cap"})
+    assert action.value["discount_pct"] == 0.0
+
+
+def test_a_discount_citing_a_ref_no_grant_carries_is_refused(hooks: ToolHooks) -> None:
+    """`Discount.provenance` is optional, and was being blessed without being read.
+
+    A downstream consumer that reads `offer.discount.provenance` is reading a citation. If the
+    boundary admits an offer whose discount cites a rule no grant in the bid was minted under,
+    it has vouched for a citation it never looked at.
+    """
+    grant = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(grant, Denied)
+    fabricated = {
+        "source": "owner_statement",
+        "ref": "envelope:store-alpha:v99#owner_personally_approved",
+        "observed_at": "2026-01-01T00:00:00Z",
+        "authority_rank": 1,
+    }
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance(
+            {
+                "claims": [grant],
+                "offer": {
+                    "product_ref": "prod-cap",
+                    "unit_price": 80.0,
+                    "discount": {"type": "percentage", "value": 20.0, "provenance": fabricated},
+                },
+            },
+            hooks,
+            product_ref="prod-cap",
+        )
+
+    # Citing the grant's own ref is what a discount is entitled to say.
+    assert enforce_hook_provenance(
+        {
+            "claims": [grant],
+            "offer": {
+                "product_ref": "prod-cap",
+                "unit_price": 80.0,
+                "discount": {
+                    "type": "percentage",
+                    "value": 20.0,
+                    "provenance": grant.provenance.model_dump(),
+                },
+            },
+        },
+        hooks,
+        product_ref="prod-cap",
+    )
+
+
+def test_the_audit_trail_records_what_was_emitted_not_what_the_caller_did_next(
+    hooks: ToolHooks,
+) -> None:
+    """Sealing the list was not enough: its elements were the caller's own mutable models.
+
+    `Claim` is not frozen, so the object a hook returned can be edited afterwards and the trail
+    would read the edit as though the hook had said it. The ledger was never fooled — the
+    fingerprint was taken at emission — but S5's record was.
+    """
+    returned = hooks.get_owner_commitments(CLUSTER)[0]
+    assert hooks.emitted_claims[0].value == "30 days"
+
+    returned.value = "LIFETIME, no questions asked"
+    assert hooks.emitted_claims[0].value == "30 days", (
+        "the trail must record what the hook emitted, not what the caller did to it afterwards"
+    )
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance([returned], hooks)
