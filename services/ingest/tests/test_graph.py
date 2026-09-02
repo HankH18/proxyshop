@@ -3135,6 +3135,76 @@ def test_one_unembeddable_product_degrades_itself_not_the_catalog_vector_path(
 
 @pytest.mark.docker
 @pytest.mark.graph
+def test_the_incomplete_reembed_remediation_actually_terminates(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """T-118 (c): the ``EmbeddingRunIncomplete`` message used to name a no-op loop.
+
+    The old text told the operator to "re-run ``python -m ingest.graph.reembed`` **to
+    completion** before querying it". In a catalog holding one product with no embeddable
+    text, no re-run can reach completion: every pass skips the same product, every pass
+    leaves the marker open, and the operator's remediation returns them to the state they
+    started in. That is not a slow fix, it is a fixed point.
+
+    So the remediation is followed here literally — the same provider, the whole pass — and
+    the refusal has to be gone afterwards even though the unembeddable product is still
+    unembeddable. Before the fix this test's second ``candidate_products`` call raised the
+    same exception as the first, which is the loop.
+    """
+    from ingest.graph import EMBEDDING_RUN_DEGRADED, EmbeddingRunIncomplete, embedding_run
+
+    session = graph_schema_session
+    for product_id in ("p-alpha", "p-beta", "p-gamma"):
+        upsert_product(
+            session,
+            Product(product_id, f"Gentle Vitamin C Serum {product_id}"),
+            source=graph_source,
+        )
+    assert reembed_products(session, HashEmbedding()).complete
+
+    # p-gamma loses its name permanently, and then a pass dies half-way through re-embedding
+    # into a second space. Two spaces in the index AND a product that can never be embedded.
+    session.run("MATCH (p:Product {product_id: 'p-gamma'}) SET p.canonical_name = ''").consume()
+    with pytest.raises(ConnectionError):
+        reembed_products(session, _DiesPartWayThrough(fail_after=1), batch_size=1)
+
+    with pytest.raises(EmbeddingRunIncomplete) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=_DiesPartWayThrough(), limit=10)
+    message = str(refused.value)
+
+    # The message has to describe an exit that exists. Naming only "completion" describes an
+    # exit this catalog cannot reach.
+    assert "python -m ingest.graph.reembed" in message, "the remediation must be a command"
+    assert EMBEDDING_RUN_DEGRADED in message, (
+        "the message must admit the terminal state a catalog with an unembeddable product "
+        f"actually reaches, or the remediation it names never terminates: {message}"
+    )
+    assert "products_missing_embeddings" in message, (
+        "and it must point at the finite list of catalog rows to fix, not at another re-embed"
+    )
+
+    # Now follow it. Same provider, one whole pass — no catalog edit, p-gamma still nameless.
+    repaired = reembed_products(session, _DiesPartWayThrough(fail_after=99))
+    assert repaired.skipped == ["p-gamma"] and repaired.complete is False
+
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED
+    assert run.skipped == ("p-gamma",), "and it names the row an operator has to fix"
+
+    ranked = [
+        c.product_id
+        for c in candidate_products(
+            session, query_text=PROBE_A, provider=_DiesPartWayThrough(fail_after=99), limit=10
+        )
+    ]
+    assert set(ranked) == {"p-alpha", "p-beta"}, (
+        f"one pass had to clear the refusal, or the remediation is a loop; ranked {ranked}"
+    )
+    assert products_missing_embeddings(session) == ["p-gamma"]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
 def test_a_degraded_pass_still_refuses_a_query_from_another_provider(
     graph_schema_session: Any, graph_source: Source
 ) -> None:

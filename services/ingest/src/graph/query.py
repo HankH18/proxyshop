@@ -36,7 +36,12 @@ from .model import (
     ingredient_id,
     slug,
 )
-from .schema import VECTOR_INDEX_NAME, embedding_run
+from .schema import (
+    EMBEDDING_RUN_COMPLETE,
+    EMBEDDING_RUN_DEGRADED,
+    VECTOR_INDEX_NAME,
+    embedding_run,
+)
 
 #: How many rows to pull out of the vector index per requested result before the structured
 #: filters are applied. A product excluded by an attribute filter still occupies a slot in
@@ -391,8 +396,13 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded as "
             f"{run.state!r}: it started writing and never reached its end, so the index "
             f"holds vectors from more than one pass and every cosine across them is noise. "
-            f"Re-run `python -m ingest.graph.reembed --provider {run.provider}` before "
-            f"querying it."
+            f"Re-run `python -m ingest.graph.reembed --provider {run.provider}`. That "
+            f"remediation terminates: the pass rewrites every product into one space and "
+            f"always records an end state — {EMBEDDING_RUN_COMPLETE!r} when it embedded them "
+            f"all, or {EMBEDDING_RUN_DEGRADED!r} listing the products it could not embed, "
+            f"and both are queryable. Products with no embeddable text no longer hold this "
+            f"refusal open; `products_missing_embeddings(session)` names that finite set, "
+            f"and fixing them is a catalog edit, not another re-embed."
         )
     if run.provider != provider_name:
         raise EmbeddingProviderMismatch(
