@@ -24,7 +24,12 @@ from collections.abc import AsyncIterator, Iterator
 import httpx
 import pytest
 from shopify_stub.app import create_app
-from shopify_stub.testing import SEED_VARIANT, RecordingReceiver, StubClient
+from shopify_stub.testing import (
+    SEED_VARIANT,
+    RecordingReceiver,
+    StubClient,
+    TruncatingReceiver,
+)
 
 from proxyshop_support.asgi_server import serve
 
@@ -76,3 +81,36 @@ def collector_receiver() -> Iterator[tuple[RecordingReceiver, str]]:
     receiver = RecordingReceiver()
     with serve(receiver) as base_url:
         yield receiver, f"{base_url}/collect"
+
+
+@pytest.fixture
+def escalating_dead_webhook_receiver() -> Iterator[tuple[RecordingReceiver, str]]:
+    """A receiver that rejects every delivery with a **different** status each time.
+
+    ``dead_webhook_receiver`` answers ``500`` to all three attempts, which makes the first
+    attempt's outcome and the last attempt's outcome the same value — so it cannot tell
+    apart an implementation that records the last attempt from one that records the first,
+    and neither can the always-``200`` and ``[500, 503, 200]`` receivers, where the
+    successful attempt IS the last one. ``WebhookDelivery``'s docstring says
+    ``status_code`` and ``error`` hold the **last** attempt's outcome; this is the fixture
+    that can hold it to that.
+
+    ``503, 500, 502`` is deliberately not monotonic, so "the last" is also distinguishable
+    from "the highest" and "the lowest".
+    """
+    receiver = RecordingReceiver(status_sequence=[503, 500, 502])
+    with serve(receiver) as base_url:
+        yield receiver, f"{base_url}/webhooks/shopify"
+
+
+@pytest.fixture
+def truncating_webhook_receiver() -> Iterator[tuple[TruncatingReceiver, str]]:
+    """A receiver whose first attempt answers ``500`` and whose later ones cut the wire.
+
+    The only fixture under which ``status_code`` is ``None`` while an *earlier* attempt
+    produced a real status — the case that tells "the last attempt's outcome" apart from
+    "the last outcome there was". See :class:`shopify_stub.testing.TruncatingReceiver`.
+    """
+    receiver = TruncatingReceiver(first_status=500)
+    with serve(receiver) as base_url:
+        yield receiver, f"{base_url}/webhooks/shopify"

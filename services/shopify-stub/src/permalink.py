@@ -50,13 +50,28 @@ _LABEL = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 #: The deny-list this replaces, ``[\x00-\x20\x7f]``, enumerated "the control characters we
 #: thought of" and missed the whole C1 block — the mistake ``_LABEL`` exists to avoid
 #: repeating, made one line below it. ``U+0085`` NEL is a control character by every
-#: definition (Unicode category ``Cc``), and it passed straight through into a ``Location``
-#: header, where Starlette's latin-1 header encoding put a bare ``0x85`` byte on the wire.
-#: ``U+2028``, ``U+2029`` and every other character above ``U+00FF`` were worse: they passed
-#: the guard and then died inside the ASGI server with ``UnicodeEncodeError`` — a 500 raised
-#: three layers away from the call that caused it, which is the precise failure mode
-#: :func:`store_url` says raising here is meant to replace. See
+#: definition (Unicode category ``Cc``) and that deny-list did not match it. See
 #: ``test_stub_domain_guard.test_a_c1_control_slipped_the_old_deny_list``.
+#:
+#: The gap was **latent, not exploited**, and the sentence that used to stand here — that
+#: ``U+0085`` "passed straight through into a ``Location`` header" — was not true of this
+#: service on the day it was written. Nothing a client sends reaches a ``path``: all four
+#: call sites interpolate a ``uuid4().hex`` token or a validated digit run and nothing else
+#: (pinned by ``test_no_caller_supplied_value_reaches_a_store_url_path``), and the other
+#: half of the URL, ``shop_domain``, is refused by ``_LABEL`` well before it arrives here.
+#:
+#: What is measured, and is why the hole is worth closing anyway, is the *consequence* a
+#: caller-reachable path would have had. Starlette encodes header values latin-1, so a
+#: ``U+0085`` in the cart route's 303 ``Location`` becomes a bare ``0x85`` byte on the wire
+#: — observed end to end against uvicorn. ``U+2028``, ``U+2029`` and everything else above
+#: ``U+00FF`` are worse: latin-1 cannot encode them at all, so they raise
+#: ``UnicodeEncodeError`` inside ``starlette.responses.Response.__init__`` — a 500 from the
+#: response constructor rather than from the call that built the bad string, which is the
+#: failure mode :func:`store_url` says raising here is meant to replace. Both outcomes
+#: belong to the way ``app.py`` emits that header, a raw ``headers={"Location": …}``;
+#: Starlette's ``RedirectResponse`` percent-encodes instead and would do neither. All three
+#: facts are pinned by
+#: ``test_stub_domain_guard.test_what_a_bad_byte_does_to_a_location_header``.
 _FORBIDDEN_IN_PATH = re.compile(r"[^\x21-\x7e]")
 
 #: RFC 1035's limit on a fully-qualified name.

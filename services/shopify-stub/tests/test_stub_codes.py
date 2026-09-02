@@ -9,6 +9,7 @@ invisible in any end-to-end test: a derived code redeems perfectly.
 from __future__ import annotations
 
 import inspect
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -281,4 +282,54 @@ def test_the_default_random_source_is_actually_consulted(monkeypatch: pytest.Mon
     assert len(calls) == CODE_BODY_LENGTH, (
         "every symbol must come from the injected source; a body built any other way is a "
         "body the seeded-PRNG sabotage would have produced unnoticed"
+    )
+
+
+# ---------------------------------------------------------------------------------------
+# T-129 (adversarial): code_expiry's Raises clause named one of the two arguments
+# ---------------------------------------------------------------------------------------
+#
+# The same defect class as T-118 (d): a Raises clause narrower than what the function
+# raises. `code_expiry` refuses a naive `now` AND a naive `offer_expires_at`, with two
+# different messages, and `test_expiry_refuses_naive_datetimes` above has pinned both
+# since the module was written — but the clause said only "``now`` is naive", so a reader
+# passing an aware `now` and a naive offer expiry had no warning in the docstring.
+
+#: The argument names ``code_expiry``'s Raises clause blames.
+_BLAMED_ARGUMENT = re.compile(r"``(now|offer_expires_at)``")
+
+
+def _arguments_code_expiry_refuses_naive() -> set[str]:
+    """Which arguments actually raise when naive. Measured, not read."""
+    naive = datetime(2026, 1, 1)  # noqa: DTZ001
+    aware = datetime(2026, 1, 1, tzinfo=UTC)
+    refused = set()
+    for name, call in (
+        ("now", {"now": naive, "offer_expires_at": aware}),
+        ("offer_expires_at", {"now": aware, "offer_expires_at": naive}),
+    ):
+        try:
+            code_expiry(**call)
+        except ValueError:
+            refused.add(name)
+    return refused
+
+
+def test_the_expiry_raises_clause_names_every_argument_that_raises() -> None:
+    """The documented set of refusals against the enforced one.
+
+    Both directions: an argument that raises and is not named is a docstring that under-
+    promises (the defect), and an argument named but not raising is one that over-promises.
+    """
+    doc = code_expiry.__doc__ or ""
+    assert "Raises:" in doc, "code_expiry documents its refusals in a Raises clause"
+    clause = doc.split("Raises:", 1)[1]
+    documented = set(_BLAMED_ARGUMENT.findall(clause))
+    enforced = _arguments_code_expiry_refuses_naive()
+    assert enforced == {"now", "offer_expires_at"}, (
+        f"both arguments must refuse a naive datetime; measured {sorted(enforced)}"
+    )
+    assert documented == enforced, (
+        f"code_expiry's Raises clause names {sorted(documented)} but the function refuses "
+        f"{sorted(enforced)}"
     )
