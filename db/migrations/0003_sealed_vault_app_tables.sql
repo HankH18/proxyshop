@@ -21,6 +21,21 @@
 --     that state expires.
 
 -- ---------------------------------------------------------------------------------------
+-- Bounded waits, first statement in the file.
+--
+-- The runner executes each migration inside ONE transaction and holds every lock it takes
+-- until end-of-file, so one blocked statement stalls the whole file -- and with no
+-- `lock_timeout` set anywhere in this repo, "stalls" meant FOREVER rather than for a bounded
+-- interval. That is the shape of failure this project has already lost real time to, so it
+-- is bounded here rather than diagnosed again. `SET LOCAL` scopes both settings to this
+-- file's transaction and restores whatever the session had on COMMIT, so a migration can
+-- never leave a timeout behind on a pooled connection. Applying a file by hand: wrap it in
+-- BEGIN/COMMIT, or psql warns that SET LOCAL outside a transaction block does nothing.
+-- ---------------------------------------------------------------------------------------
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '60s';
+
+-- ---------------------------------------------------------------------------------------
 -- sealed.* -- seller strategy. Never legible to the auction.
 -- ---------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS sealed.envelopes (
@@ -136,13 +151,45 @@ CREATE TABLE IF NOT EXISTS app.seller_endpoints (
 );
 
 -- Idempotent repair for a database created by an earlier run of this file.
+--
+-- The old form of this block was DROP CONSTRAINT IF EXISTS + a bare ADD CONSTRAINT ...
+-- CHECK, unconditionally, on EVERY run. `ADD CONSTRAINT ... CHECK` without `NOT VALID`
+-- validates immediately: a full sequential scan of the table under ACCESS EXCLUSIVE, held
+-- (because the runner wraps the file in one transaction) until end-of-file. Re-running the
+-- migrations therefore re-locked and re-scanned a table that had not changed. Now: the
+-- legacy name is still dropped (it is a catalog lookup, not a scan), the current constraint
+-- is added only when absent, added NOT VALID so the ADD itself takes no scan, and validated
+-- in a separate statement that takes only SHARE UPDATE EXCLUSIVE. A database that already
+-- has the validated constraint does none of the three.
 ALTER TABLE app.seller_endpoints
   DROP CONSTRAINT IF EXISTS seller_endpoints_retired_when_not_active;
-ALTER TABLE app.seller_endpoints
-  DROP CONSTRAINT IF EXISTS seller_endpoints_retirement_matches_status;
-ALTER TABLE app.seller_endpoints
-  ADD CONSTRAINT seller_endpoints_retirement_matches_status
-  CHECK ((status = 'active') = (retired_at IS NULL));
+
+DO $endpoints_constraint$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'app' AND t.relname = 'seller_endpoints'
+       AND c.conname = 'seller_endpoints_retirement_matches_status'
+  ) THEN
+    ALTER TABLE app.seller_endpoints
+      ADD CONSTRAINT seller_endpoints_retirement_matches_status
+      CHECK ((status = 'active') = (retired_at IS NULL)) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'app' AND t.relname = 'seller_endpoints'
+       AND c.conname = 'seller_endpoints_retirement_matches_status'
+       AND NOT c.convalidated
+  ) THEN
+    ALTER TABLE app.seller_endpoints
+      VALIDATE CONSTRAINT seller_endpoints_retirement_matches_status;
+  END IF;
+END
+$endpoints_constraint$;
 
 CREATE INDEX IF NOT EXISTS seller_endpoints_store_idx ON app.seller_endpoints (store_id);
 -- The lookup the exchange boundary actually performs: this signer's LIVE keys.
@@ -177,12 +224,37 @@ CREATE TABLE IF NOT EXISTS app.bid_nonces (
   )
 );
 
--- Idempotent repair for a database created by an earlier run of this file.
+-- Idempotent repair for a database created by an earlier run of this file. Guarded the same
+-- way as seller_endpoints above, and the stakes are higher here: `app.bid_nonces` grows with
+-- every signed bid the system ever receives, so an unconditional revalidating ADD CONSTRAINT
+-- is a full scan under ACCESS EXCLUSIVE whose cost rises for the life of the deployment.
 ALTER TABLE app.bid_nonces ADD COLUMN IF NOT EXISTS respond_by timestamptz;
-ALTER TABLE app.bid_nonces DROP CONSTRAINT IF EXISTS bid_nonces_retained_past_the_auction;
-ALTER TABLE app.bid_nonces
-  ADD CONSTRAINT bid_nonces_retained_past_the_auction
-  CHECK (respond_by IS NULL OR retain_until > respond_by);
+
+DO $nonce_constraint$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'app' AND t.relname = 'bid_nonces'
+       AND c.conname = 'bid_nonces_retained_past_the_auction'
+  ) THEN
+    ALTER TABLE app.bid_nonces
+      ADD CONSTRAINT bid_nonces_retained_past_the_auction
+      CHECK (respond_by IS NULL OR retain_until > respond_by) NOT VALID;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'app' AND t.relname = 'bid_nonces'
+       AND c.conname = 'bid_nonces_retained_past_the_auction'
+       AND NOT c.convalidated
+  ) THEN
+    ALTER TABLE app.bid_nonces VALIDATE CONSTRAINT bid_nonces_retained_past_the_auction;
+  END IF;
+END
+$nonce_constraint$;
 
 -- purge_expired(as_of) scans by retain_until; seen(signer_id, nonce) uses the unique index.
 CREATE INDEX IF NOT EXISTS bid_nonces_retain_until_idx ON app.bid_nonces (retain_until);

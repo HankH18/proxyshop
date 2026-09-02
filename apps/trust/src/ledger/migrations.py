@@ -38,6 +38,25 @@ MIGRATIONS_RELATIVE_PATH = "db/migrations"
 #: Bookkeeping only. Created by ``0001_schemas_roles_grants.sql``.
 SCHEMA_MIGRATIONS_TABLE = "ledger.schema_migrations"
 
+#: Dev-only password for the four least-privilege roles, applied by ``0001`` at CREATE time
+#: only. The default is the historical literal, so a checkout with no environment behaves
+#: exactly as it did. The roles are cluster-global and shared by every worker, so nothing
+#: here ever *resets* a password: a migration that did would cut another worker's live
+#: connections. ``db/init/00-roles.sql`` (T-000, frozen, not this ticket's file) still sets
+#: them unconditionally on a fresh volume.
+ROLE_PASSWORD_ENV = "PROXYSHOP_ROLE_PASSWORD"
+
+#: ``0001`` reads the password through this custom GUC, set per file below.
+ROLE_PASSWORD_SETTING = "proxyshop.role_password"
+
+#: Serialises concurrent migration runs **against one database**. ``CREATE SCHEMA/TABLE/
+#: INDEX IF NOT EXISTS`` are not race-safe: two runners can both pass the existence check
+#: and one then fails with ``duplicate_object``. Advisory locks carry the database OID in
+#: their lock tag, so this does NOT serialise across ``proxyshop_w<n>`` databases -- the
+#: cluster-global ``CREATE ROLE`` race is handled inside ``0001`` by catching
+#: ``unique_violation`` as well as ``duplicate_object``.
+MIGRATION_LOCK_KEY = 0x70726F78796D6967 & 0x7FFFFFFF
+
 
 class MigrationDriftError(RuntimeError):
     """A migration file changed after this database had already applied it."""
@@ -128,31 +147,62 @@ def apply_migrations(
                 "intended and the migrations are still idempotent."
             )
     applied: list[str] = []
-    for path in paths:
-        sql = path.read_text(encoding="utf-8")
-        with connection.transaction():
-            with connection.cursor() as cur:
-                cur.execute(sql)  # type: ignore[arg-type]
-        _record(connection, path)
-        applied.append(path.name)
+    password = os.environ.get(ROLE_PASSWORD_ENV) or ""
+    # Session-scoped, because each file below runs in its own transaction and a
+    # transaction-scoped lock would be released between them -- leaving exactly the gap a
+    # second runner could enter through. Taken and released in transactions of their own so
+    # a non-autocommit caller's file transactions stay top-level rather than becoming
+    # savepoints under an open one.
+    with connection.transaction(), connection.cursor() as cur:
+        cur.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+    try:
+        for path in paths:
+            sql = path.read_text(encoding="utf-8")
+            with connection.transaction():
+                with connection.cursor() as cur:
+                    # Transaction-local, in the same transaction the file runs in, so 0001
+                    # can read it and it is discarded on COMMIT rather than left on the
+                    # session. `set_config(..., is_local => true)` rather than `SET LOCAL`
+                    # because `SET` takes no query parameters and this value must never be
+                    # interpolated into SQL.
+                    cur.execute(
+                        "select set_config(%s, %s, true)",
+                        (ROLE_PASSWORD_SETTING, password),
+                    )
+                    cur.execute(sql)  # type: ignore[arg-type]
+                _record(connection, path)
+            applied.append(path.name)
+    finally:
+        try:
+            with connection.transaction(), connection.cursor() as cur:
+                cur.execute("select pg_advisory_unlock(%s)", (MIGRATION_LOCK_KEY,))
+        except Exception:  # noqa: BLE001 - a dead connection has already dropped the lock
+            pass
     return applied
 
 
 def _record(connection: psycopg.Connection, path: Path) -> None:
-    """Note that ``path`` was applied.
+    """Note that ``path`` was applied. **Called inside the migration's own transaction.**
 
     ``checksum`` is written **once** and never updated. It used to be overwritten on every
     run, which erased the one thing it exists to detect: a migration edited after it had
     already been applied somewhere. Only ``applied_at`` moves.
+
+    It also used to open a **second** transaction of its own, so the file was committed and
+    the record was not, with a window between them. A crash in that window left the file
+    applied and unrecorded -- and because the checksum is deliberately never overwritten,
+    the next run would record whatever the file said *then* as its first-applied value.
+    An edit made in the gap would be baked in as the baseline, permanently blinding the
+    drift detection that exists to catch it. Recording in the same transaction closes it:
+    either both land or neither does.
     """
-    with connection.transaction():
-        with connection.cursor() as cur:
-            cur.execute(
-                f"insert into {SCHEMA_MIGRATIONS_TABLE} (filename, checksum) "
-                f"values (%s, %s) "
-                f"on conflict (filename) do update set applied_at = now()",  # noqa: S608
-                (path.name, checksum(path)),
-            )
+    with connection.cursor() as cur:
+        cur.execute(
+            f"insert into {SCHEMA_MIGRATIONS_TABLE} (filename, checksum) "
+            f"values (%s, %s) "
+            f"on conflict (filename) do update set applied_at = now()",  # noqa: S608
+            (path.name, checksum(path)),
+        )
 
 
 def applied_migrations(connection: psycopg.Connection) -> list[tuple[str, str]]:
@@ -175,10 +225,25 @@ def drifted_migrations(
     Returns:
         ``[(filename, recorded_checksum, current_checksum), ...]`` -- empty when nothing has
         drifted. A file that has never been applied here is not drift.
+
+    Raises:
+        psycopg.Error: anything other than the bookkeeping table being absent.
+
+    **Why the except clause is one error and not ``Exception``.** ``[]`` here means "nothing
+    has drifted", and ``apply_migrations(strict=True)`` reads it as permission to proceed.
+    A bare ``except Exception`` made *permission denied for ledger.schema_migrations*, a
+    dropped connection and a renamed column indistinguishable from *the table does not exist
+    yet* -- so ``strict`` passed **vacuously** and applied an edited migration, which is the
+    exact opposite of what it was asked to do. A drift check that cannot read its own
+    evidence has not found no drift; it has failed, and it says so.
     """
+    import psycopg
+
     try:
         recorded = dict(applied_migrations(connection))
-    except Exception:  # the bookkeeping table does not exist yet: nothing can have drifted
+    except psycopg.errors.UndefinedTable:
+        # 0001 has not run here yet, so nothing can have drifted. The rollback clears the
+        # aborted transaction this left behind on a non-autocommit connection.
         connection.rollback()
         return []
     paths = list(files) if files is not None else migration_files()
