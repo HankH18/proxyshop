@@ -1,0 +1,601 @@
+{
+  "_doc": "T-060's fixture stream and tampering fixture. `events` are the raw LedgerEvent inputs; `sealed` is what the writer produces from them (recorded here so a change in canonicalisation or sealing is a failing test, not a silent re-baseline); `tampered` is `sealed` with one event's payload rewritten AFTER it was sealed. Regenerate only when the hashing rule is deliberately changed.",
+  "events": [
+    {
+      "event_id": "fx-00",
+      "ts": "2026-01-01T00:00:00.000Z",
+      "kind": "auction_opened",
+      "auction_id": "auc-1",
+      "payload": {
+        "category": "coffee",
+        "slots": 3
+      }
+    },
+    {
+      "event_id": "fx-01",
+      "ts": "2026-01-01T00:00:01.250Z",
+      "kind": "bid_placed",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "payload": {
+        "offer": {
+          "unit_price": 19.99,
+          "total_price": 19.99,
+          "discount": {
+            "type": "percentage",
+            "value": 10.0
+          }
+        },
+        "product_ref": "p-1"
+      }
+    },
+    {
+      "event_id": "fx-02",
+      "ts": "2026-01-01T00:00:01.250Z",
+      "kind": "bid_placed",
+      "auction_id": "auc-1",
+      "store_id": "store-northroast",
+      "payload": {
+        "offer": {
+          "unit_price": 21.5,
+          "total_price": 21.5,
+          "discount": null
+        },
+        "product_ref": "p-1"
+      }
+    },
+    {
+      "event_id": "fx-03",
+      "ts": "2026-01-01T00:00:02.000Z",
+      "kind": "shown",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "payload": {
+        "slot": 1,
+        "surface": "chat"
+      }
+    },
+    {
+      "event_id": "fx-04",
+      "ts": "2026-01-01T00:00:03.500Z",
+      "kind": "accepted",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "checkout_token": "ck-1",
+        "offer": {
+          "product_ref": "p-1",
+          "unit_price": 19.99,
+          "total_price": 19.99,
+          "discount": {
+            "type": "percentage",
+            "value": 10.0
+          }
+        }
+      }
+    },
+    {
+      "event_id": "fx-05",
+      "ts": "2026-01-01T00:00:04.000Z",
+      "kind": "code_created",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "code": "PROXY-10-CAFÉ",
+        "unicode_note": "é ☕ 😀 ￿"
+      }
+    },
+    {
+      "event_id": "fx-06",
+      "ts": "2026-01-01T00:00:05.000Z",
+      "kind": "checkout_pixel",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "clientId": "cid-1",
+        "checkout_token": "ck-1",
+        "total_price": 19.99,
+        "discountApplications": [
+          {
+            "type": "percentage",
+            "value": 10.0
+          }
+        ]
+      }
+    },
+    {
+      "event_id": "fx-07",
+      "ts": "2026-01-01T00:00:06.000Z",
+      "kind": "order_paid",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "checkout_token": "ck-1",
+        "order_id": "o-1",
+        "total_price": 19.99,
+        "discountApplications": [
+          {
+            "type": "percentage",
+            "value": 10.0
+          }
+        ],
+        "test_mode": false
+      }
+    },
+    {
+      "event_id": "fx-08",
+      "ts": "2026-01-01T00:00:07.000Z",
+      "kind": "reconciled",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "pixel_seen": true,
+        "comparisons": {
+          "total_price": "match",
+          "discount": "match"
+        }
+      }
+    },
+    {
+      "event_id": "fx-09",
+      "ts": "2026-01-01T00:00:08.000Z",
+      "kind": "claim_verified",
+      "store_id": "store-brightbean",
+      "payload": {
+        "dim": "price_honored",
+        "type": "verified",
+        "observed_at": "2026-01-01T00:00:08.000Z"
+      }
+    },
+    {
+      "event_id": "fx-10",
+      "ts": "2026-01-01T00:00:09.000Z",
+      "kind": "claim_verified",
+      "store_id": "store-northroast",
+      "payload": {
+        "dim": "catalog_claim_accuracy",
+        "type": "contradicted",
+        "observed_at": "2026-01-01T00:00:09.000Z"
+      }
+    },
+    {
+      "event_id": "fx-11",
+      "ts": "2026-01-01T00:00:10.000Z",
+      "kind": "order_fulfilled",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "shipped_at": "2026-01-01T00:00:10.000Z",
+        "carrier": "test",
+        "boxes": 1
+      }
+    }
+  ],
+  "sealed": [
+    {
+      "event_id": "fx-00",
+      "ts": "2026-01-01T00:00:00.000Z",
+      "kind": "auction_opened",
+      "auction_id": "auc-1",
+      "payload": {
+        "category": "coffee",
+        "slots": 3
+      },
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "event_hash": "d6eae51139e1bdc0edc022ecba110724b9756bdaeec4c1b866824b9e4c1a3961",
+      "seq": 1
+    },
+    {
+      "event_id": "fx-01",
+      "ts": "2026-01-01T00:00:01.250Z",
+      "kind": "bid_placed",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "payload": {
+        "offer": {
+          "unit_price": 19.99,
+          "total_price": 19.99,
+          "discount": {
+            "type": "percentage",
+            "value": 10.0
+          }
+        },
+        "product_ref": "p-1"
+      },
+      "prev_hash": "d6eae51139e1bdc0edc022ecba110724b9756bdaeec4c1b866824b9e4c1a3961",
+      "event_hash": "d53a121f7e5c03fdc8fc8e45ad367fcdc91dbdc97b843d14ba1b3e6f0a8ba042",
+      "seq": 2
+    },
+    {
+      "event_id": "fx-02",
+      "ts": "2026-01-01T00:00:01.250Z",
+      "kind": "bid_placed",
+      "auction_id": "auc-1",
+      "store_id": "store-northroast",
+      "payload": {
+        "offer": {
+          "unit_price": 21.5,
+          "total_price": 21.5,
+          "discount": null
+        },
+        "product_ref": "p-1"
+      },
+      "prev_hash": "d53a121f7e5c03fdc8fc8e45ad367fcdc91dbdc97b843d14ba1b3e6f0a8ba042",
+      "event_hash": "d0a91369ebca8a6f5d0236c186126175d14d7e45fa999b3615c58c3ed75da120",
+      "seq": 3
+    },
+    {
+      "event_id": "fx-03",
+      "ts": "2026-01-01T00:00:02.000Z",
+      "kind": "shown",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "payload": {
+        "slot": 1,
+        "surface": "chat"
+      },
+      "prev_hash": "d0a91369ebca8a6f5d0236c186126175d14d7e45fa999b3615c58c3ed75da120",
+      "event_hash": "bb9a381a9fa13dae6237e5a20d22b47a3df76b0ab9ab1891f9926db7ab4ec8c9",
+      "seq": 4
+    },
+    {
+      "event_id": "fx-04",
+      "ts": "2026-01-01T00:00:03.500Z",
+      "kind": "accepted",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "checkout_token": "ck-1",
+        "offer": {
+          "product_ref": "p-1",
+          "unit_price": 19.99,
+          "total_price": 19.99,
+          "discount": {
+            "type": "percentage",
+            "value": 10.0
+          }
+        }
+      },
+      "prev_hash": "bb9a381a9fa13dae6237e5a20d22b47a3df76b0ab9ab1891f9926db7ab4ec8c9",
+      "event_hash": "19a9b3f11e317aa07f9d929e07e1a55560a94861b6bdbf63316fb1d08d972904",
+      "seq": 5
+    },
+    {
+      "event_id": "fx-05",
+      "ts": "2026-01-01T00:00:04.000Z",
+      "kind": "code_created",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "code": "PROXY-10-CAFÉ",
+        "unicode_note": "é ☕ 😀 ￿"
+      },
+      "prev_hash": "19a9b3f11e317aa07f9d929e07e1a55560a94861b6bdbf63316fb1d08d972904",
+      "event_hash": "af3267cff71f919360d45f08a962add8f327938341915c71cdf61c7db1c679f4",
+      "seq": 6
+    },
+    {
+      "event_id": "fx-06",
+      "ts": "2026-01-01T00:00:05.000Z",
+      "kind": "checkout_pixel",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "clientId": "cid-1",
+        "checkout_token": "ck-1",
+        "total_price": 19.99,
+        "discountApplications": [
+          {
+            "type": "percentage",
+            "value": 10.0
+          }
+        ]
+      },
+      "prev_hash": "af3267cff71f919360d45f08a962add8f327938341915c71cdf61c7db1c679f4",
+      "event_hash": "75975dd1007786ee86f37809eedab7cecb4e5dd7b93a25a7e9d5750e781a06b0",
+      "seq": 7
+    },
+    {
+      "event_id": "fx-07",
+      "ts": "2026-01-01T00:00:06.000Z",
+      "kind": "order_paid",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "checkout_token": "ck-1",
+        "order_id": "o-1",
+        "total_price": 19.99,
+        "discountApplications": [
+          {
+            "type": "percentage",
+            "value": 10.0
+          }
+        ],
+        "test_mode": false
+      },
+      "prev_hash": "75975dd1007786ee86f37809eedab7cecb4e5dd7b93a25a7e9d5750e781a06b0",
+      "event_hash": "044422d0c97465d867518937838893e1d3da3b0f62e5a1b46d8ebde812f93434",
+      "seq": 8
+    },
+    {
+      "event_id": "fx-08",
+      "ts": "2026-01-01T00:00:07.000Z",
+      "kind": "reconciled",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "pixel_seen": true,
+        "comparisons": {
+          "total_price": "match",
+          "discount": "match"
+        }
+      },
+      "prev_hash": "044422d0c97465d867518937838893e1d3da3b0f62e5a1b46d8ebde812f93434",
+      "event_hash": "2028f809160cc75680b3e081570ad98e41317ec0dd83ee89b04371c8837635e7",
+      "seq": 9
+    },
+    {
+      "event_id": "fx-09",
+      "ts": "2026-01-01T00:00:08.000Z",
+      "kind": "claim_verified",
+      "store_id": "store-brightbean",
+      "payload": {
+        "dim": "price_honored",
+        "type": "verified",
+        "observed_at": "2026-01-01T00:00:08.000Z"
+      },
+      "prev_hash": "2028f809160cc75680b3e081570ad98e41317ec0dd83ee89b04371c8837635e7",
+      "event_hash": "d449cfef982d77a12ce8144461e91f3f06eb973a3a59be5ab829e706e5202748",
+      "seq": 10
+    },
+    {
+      "event_id": "fx-10",
+      "ts": "2026-01-01T00:00:09.000Z",
+      "kind": "claim_verified",
+      "store_id": "store-northroast",
+      "payload": {
+        "dim": "catalog_claim_accuracy",
+        "type": "contradicted",
+        "observed_at": "2026-01-01T00:00:09.000Z"
+      },
+      "prev_hash": "d449cfef982d77a12ce8144461e91f3f06eb973a3a59be5ab829e706e5202748",
+      "event_hash": "5a5f052254425bf81bbef2f0d6386eb44089f1f86a1d1d66c3c60a5513d016e1",
+      "seq": 11
+    },
+    {
+      "event_id": "fx-11",
+      "ts": "2026-01-01T00:00:10.000Z",
+      "kind": "order_fulfilled",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "shipped_at": "2026-01-01T00:00:10.000Z",
+        "carrier": "test",
+        "boxes": 1
+      },
+      "prev_hash": "5a5f052254425bf81bbef2f0d6386eb44089f1f86a1d1d66c3c60a5513d016e1",
+      "event_hash": "2d61a6ba82d0c8f71898769e2724d911f976f6bc9c0562d0efe231f3f380bcdf",
+      "seq": 12
+    }
+  ],
+  "tampered": [
+    {
+      "event_id": "fx-00",
+      "ts": "2026-01-01T00:00:00.000Z",
+      "kind": "auction_opened",
+      "auction_id": "auc-1",
+      "payload": {
+        "category": "coffee",
+        "slots": 3
+      },
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "event_hash": "d6eae51139e1bdc0edc022ecba110724b9756bdaeec4c1b866824b9e4c1a3961",
+      "seq": 1
+    },
+    {
+      "event_id": "fx-01",
+      "ts": "2026-01-01T00:00:01.250Z",
+      "kind": "bid_placed",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "payload": {
+        "offer": {
+          "unit_price": 19.99,
+          "total_price": 19.99,
+          "discount": {
+            "type": "percentage",
+            "value": 10.0
+          }
+        },
+        "product_ref": "p-1"
+      },
+      "prev_hash": "d6eae51139e1bdc0edc022ecba110724b9756bdaeec4c1b866824b9e4c1a3961",
+      "event_hash": "d53a121f7e5c03fdc8fc8e45ad367fcdc91dbdc97b843d14ba1b3e6f0a8ba042",
+      "seq": 2
+    },
+    {
+      "event_id": "fx-02",
+      "ts": "2026-01-01T00:00:01.250Z",
+      "kind": "bid_placed",
+      "auction_id": "auc-1",
+      "store_id": "store-northroast",
+      "payload": {
+        "offer": {
+          "unit_price": 21.5,
+          "total_price": 21.5,
+          "discount": null
+        },
+        "product_ref": "p-1"
+      },
+      "prev_hash": "d53a121f7e5c03fdc8fc8e45ad367fcdc91dbdc97b843d14ba1b3e6f0a8ba042",
+      "event_hash": "d0a91369ebca8a6f5d0236c186126175d14d7e45fa999b3615c58c3ed75da120",
+      "seq": 3
+    },
+    {
+      "event_id": "fx-03",
+      "ts": "2026-01-01T00:00:02.000Z",
+      "kind": "shown",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "payload": {
+        "slot": 1,
+        "surface": "chat"
+      },
+      "prev_hash": "d0a91369ebca8a6f5d0236c186126175d14d7e45fa999b3615c58c3ed75da120",
+      "event_hash": "bb9a381a9fa13dae6237e5a20d22b47a3df76b0ab9ab1891f9926db7ab4ec8c9",
+      "seq": 4
+    },
+    {
+      "event_id": "fx-04",
+      "ts": "2026-01-01T00:00:03.500Z",
+      "kind": "accepted",
+      "auction_id": "auc-1",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "checkout_token": "ck-1",
+        "offer": {
+          "product_ref": "p-1",
+          "unit_price": 19.99,
+          "total_price": 9.99,
+          "discount": {
+            "type": "percentage",
+            "value": 10.0
+          }
+        }
+      },
+      "prev_hash": "bb9a381a9fa13dae6237e5a20d22b47a3df76b0ab9ab1891f9926db7ab4ec8c9",
+      "event_hash": "19a9b3f11e317aa07f9d929e07e1a55560a94861b6bdbf63316fb1d08d972904",
+      "seq": 5
+    },
+    {
+      "event_id": "fx-05",
+      "ts": "2026-01-01T00:00:04.000Z",
+      "kind": "code_created",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "code": "PROXY-10-CAFÉ",
+        "unicode_note": "é ☕ 😀 ￿"
+      },
+      "prev_hash": "19a9b3f11e317aa07f9d929e07e1a55560a94861b6bdbf63316fb1d08d972904",
+      "event_hash": "af3267cff71f919360d45f08a962add8f327938341915c71cdf61c7db1c679f4",
+      "seq": 6
+    },
+    {
+      "event_id": "fx-06",
+      "ts": "2026-01-01T00:00:05.000Z",
+      "kind": "checkout_pixel",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "clientId": "cid-1",
+        "checkout_token": "ck-1",
+        "total_price": 19.99,
+        "discountApplications": [
+          {
+            "type": "percentage",
+            "value": 10.0
+          }
+        ]
+      },
+      "prev_hash": "af3267cff71f919360d45f08a962add8f327938341915c71cdf61c7db1c679f4",
+      "event_hash": "75975dd1007786ee86f37809eedab7cecb4e5dd7b93a25a7e9d5750e781a06b0",
+      "seq": 7
+    },
+    {
+      "event_id": "fx-07",
+      "ts": "2026-01-01T00:00:06.000Z",
+      "kind": "order_paid",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "checkout_token": "ck-1",
+        "order_id": "o-1",
+        "total_price": 19.99,
+        "discountApplications": [
+          {
+            "type": "percentage",
+            "value": 10.0
+          }
+        ],
+        "test_mode": false
+      },
+      "prev_hash": "75975dd1007786ee86f37809eedab7cecb4e5dd7b93a25a7e9d5750e781a06b0",
+      "event_hash": "044422d0c97465d867518937838893e1d3da3b0f62e5a1b46d8ebde812f93434",
+      "seq": 8
+    },
+    {
+      "event_id": "fx-08",
+      "ts": "2026-01-01T00:00:07.000Z",
+      "kind": "reconciled",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "pixel_seen": true,
+        "comparisons": {
+          "total_price": "match",
+          "discount": "match"
+        }
+      },
+      "prev_hash": "044422d0c97465d867518937838893e1d3da3b0f62e5a1b46d8ebde812f93434",
+      "event_hash": "2028f809160cc75680b3e081570ad98e41317ec0dd83ee89b04371c8837635e7",
+      "seq": 9
+    },
+    {
+      "event_id": "fx-09",
+      "ts": "2026-01-01T00:00:08.000Z",
+      "kind": "claim_verified",
+      "store_id": "store-brightbean",
+      "payload": {
+        "dim": "price_honored",
+        "type": "verified",
+        "observed_at": "2026-01-01T00:00:08.000Z"
+      },
+      "prev_hash": "2028f809160cc75680b3e081570ad98e41317ec0dd83ee89b04371c8837635e7",
+      "event_hash": "d449cfef982d77a12ce8144461e91f3f06eb973a3a59be5ab829e706e5202748",
+      "seq": 10
+    },
+    {
+      "event_id": "fx-10",
+      "ts": "2026-01-01T00:00:09.000Z",
+      "kind": "claim_verified",
+      "store_id": "store-northroast",
+      "payload": {
+        "dim": "catalog_claim_accuracy",
+        "type": "contradicted",
+        "observed_at": "2026-01-01T00:00:09.000Z"
+      },
+      "prev_hash": "d449cfef982d77a12ce8144461e91f3f06eb973a3a59be5ab829e706e5202748",
+      "event_hash": "5a5f052254425bf81bbef2f0d6386eb44089f1f86a1d1d66c3c60a5513d016e1",
+      "seq": 11
+    },
+    {
+      "event_id": "fx-11",
+      "ts": "2026-01-01T00:00:10.000Z",
+      "kind": "order_fulfilled",
+      "store_id": "store-brightbean",
+      "order_ref": "o-1",
+      "payload": {
+        "shipped_at": "2026-01-01T00:00:10.000Z",
+        "carrier": "test",
+        "boxes": 1
+      },
+      "prev_hash": "5a5f052254425bf81bbef2f0d6386eb44089f1f86a1d1d66c3c60a5513d016e1",
+      "event_hash": "2d61a6ba82d0c8f71898769e2724d911f976f6bc9c0562d0efe231f3f380bcdf",
+      "seq": 12
+    }
+  ],
+  "stream_hash": "2d61a6ba82d0c8f71898769e2724d911f976f6bc9c0562d0efe231f3f380bcdf",
+  "head_hash": "2d61a6ba82d0c8f71898769e2724d911f976f6bc9c0562d0efe231f3f380bcdf",
+  "length": 12,
+  "tamper": {
+    "index": 4,
+    "event_id": "fx-04",
+    "seq": 5,
+    "what": "payload.offer.total_price 19.99 -> 9.99, leaving the stored event_hash alone",
+    "expected_reason": "tampered"
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "fixture_version": 1,
+  "description": "Approved envelope for store-beta: a store-wide floor of 40.00 with one product carrying a tighter floor of its own. Pins that a floor with no product_ref applies to every product, and that the two floors compose to the stricter of the pair.",
+  "approved_by": "merchant onboarding approval; the second approved envelope exists so the store-wide-floor branch is graded against data rather than only against store-alpha's per-product floors",
+  "envelope": {
+    "store_id": "store-beta",
+    "version": 1,
+    "floors": [
+      { "product_ref": null, "min_price": 40.0 },
+      { "product_ref": "prod-tight", "min_price": 48.0 }
+    ],
+    "max_discount_pct": 50.0,
+    "budget_cap": 250.0,
+    "pursue_clusters": ["cluster-warm-layers"],
+    "standing_commitments": [
+      {
+        "key": "warranty",
+        "value": "1 year",
+        "provenance": {
+          "source": "owner_statement",
+          "ref": "envelope:store-beta:v1#warranty",
+          "observed_at": "2026-02-01T00:00:00Z",
+          "authority_rank": 1
+        }
+      }
+    ],
+    "activation": "active"
+  },
+  "catalog": {
+    "prod-open": {
+      "product_ref": "prod-open",
+      "list_price": 80.0,
+      "material": "recycled fleece"
+    },
+    "prod-tight": {
+      "product_ref": "prod-tight",
+      "list_price": 60.0,
+      "material": "down"
+    }
+  },
+  "discount_expectations": [
+    {
+      "product_ref": "prod-open",
+      "requested_pct": 49.0,
+      "outcome": "granted",
+      "note": "40.80 >= the 40.00 store-wide floor"
+    },
+    {
+      "product_ref": "prod-open",
+      "requested_pct": 50.0,
+      "outcome": "granted",
+      "note": "lands exactly on the store-wide floor at exactly the cap; both walls may be reached"
+    },
+    {
+      "product_ref": "prod-open",
+      "requested_pct": 50.1,
+      "outcome": "denied",
+      "reason": "over_max_discount_pct",
+      "note": "past the cap"
+    },
+    {
+      "product_ref": "prod-tight",
+      "requested_pct": 20.0,
+      "outcome": "granted",
+      "note": "48.00 lands exactly on this product's own tighter floor"
+    },
+    {
+      "product_ref": "prod-tight",
+      "requested_pct": 21.0,
+      "outcome": "denied",
+      "reason": "below_price_floor",
+      "note": "47.40 clears the 40.00 store-wide floor and is nowhere near the 50% cap, yet is refused: the product's own 48.00 floor is the stricter of the two and binds"
+    },
+    {
+      "product_ref": "prod-tight",
+      "requested_pct": 40.0,
+      "outcome": "denied",
+      "reason": "below_price_floor",
+      "note": "36.00 — under both floors, and still inside the 50% cap: depth alone never tells you whether a request is allowed"
+    }
+  ]
+}

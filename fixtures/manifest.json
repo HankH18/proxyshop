@@ -1,0 +1,370 @@
+{
+  "manifest_version": "1.0.0",
+  "notes": [
+    "HUMAN-APPROVED GROUND TRUTH (T-080, SPEC A3). This document defines the dishonest",
+    "store's behaviours, the episode budget, the new-store prior N, the expected trust",
+    "trajectory, the claim_type -> trust-dimension routing table and the persona scripts.",
+    "It is READ by the trust engine (T-062), the simulator (T-081), the persona (T-045) and",
+    "the verification eval gates (T-065); none of them writes it. A3: 'the trust engine",
+    "catches the dishonest store' is circular if the dishonest behaviours come from the",
+    "trust engine's own config, so they come from here and a human approves them.",
+    "The approval block is filled by a HUMAN running `python -m fixtures.approval`.",
+    "EXECUTION.md rule 6 forbids any agent from fabricating it."
+  ],
+  "seed_category": "coffee",
+  "seed": 20260901,
+  "seed_catalog": {
+    "path": "fixtures/catalog/coffee.json",
+    "sha256": "4a94895f4209b30d2a96296072e44222245ee44c0fc7e556c700233258cb20d7"
+  },
+  "blacklist_threshold": 0.35,
+  "episode_budget": 12,
+  "new_store_prior_n": 5,
+  "trust_prior": {
+    "alpha": 2.0,
+    "beta": 2.0,
+    "comment": "DESIGN: neutral prior ~Beta(2,2) with explicit low confidence. new_store_prior_n is the number of clean episodes below which a store is flagged low_data."
+  },
+  "half_life_days": 30,
+  "observation_weights": {
+    "verified": 1.0,
+    "fulfilled": 1.0,
+    "unsupported": 0.5,
+    "ambiguous": 0.0,
+    "contradicted": 2.0,
+    "mismatch_return": 1.5,
+    "severe_policy": 3.0,
+    "comment": "DESIGN 'Reconciliation (approved)': contradicted 2.0, severe policy 3.0, mismatch returns 1.5; verified + fulfilled positive. These are manifest constants, not trust-engine config (D18), so S2 stays checkable against the manifest."
+  },
+  "claim_type_dimensions": {
+    "price": "price_honored",
+    "unit_price": "price_honored",
+    "total_price": "price_honored",
+    "discount": "discount_honored",
+    "promo_eligibility": "discount_honored",
+    "delivery": "shipped_on_time",
+    "shipping_speed": "shipped_on_time",
+    "dispatch_window": "shipped_on_time",
+    "return_policy": "not_returned",
+    "warranty": "not_returned",
+    "ingredients": "catalog_claim_accuracy",
+    "compatibility": "catalog_claim_accuracy",
+    "nutrition": "catalog_claim_accuracy",
+    "specifications": "catalog_claim_accuracy"
+  },
+  "claim_type_dimensions_meta": {
+    "published_in": "DESIGN.md 'Claim-type -> trust-dimension mapping'; amended by D53",
+    "exhaustive": true,
+    "unmapped_claim_type": "RAISES at manifest load (fixtures.manifest.UnmappedClaimTypeError). It never silently defaults to a dimension - that failure mode is the whole value of 'exhaustive'.",
+    "classes": {
+      "offer_integrity": [
+        "price",
+        "unit_price",
+        "total_price",
+        "discount",
+        "promo_eligibility",
+        "delivery",
+        "shipping_speed",
+        "dispatch_window",
+        "return_policy",
+        "warranty"
+      ],
+      "product_fact": [
+        "ingredients",
+        "compatibility",
+        "nutrition",
+        "specifications"
+      ]
+    },
+    "feedback_match": "Takes NO verification outcome at all. It is the post-purchase, buyer-reported match between pitch and delivery (R14), cross-checked against return behaviour. Routing product facts here would score catalog dishonesty as a buyer complaint that never happened."
+  },
+  "claim_outcome_treatment": {
+    "verified": {
+      "observation": "positive",
+      "weight": 1.0,
+      "moves_mean": true,
+      "counts_as_evidence": true,
+      "satisfies_hard_constraint": true,
+      "note": "A positive observation on whichever dimension claim_type_dimensions selects."
+    },
+    "contradicted": {
+      "observation": "negative",
+      "weight": 2.0,
+      "moves_mean": true,
+      "counts_as_evidence": true,
+      "satisfies_hard_constraint": false,
+      "note": "The published negative weight (DESIGN). This is the outcome the sixth dimension exists to carry for product facts."
+    },
+    "unsupported": {
+      "observation": "negative",
+      "weight": 0.5,
+      "moves_mean": true,
+      "counts_as_evidence": false,
+      "satisfies_hard_constraint": false,
+      "note": "A published fractional weight STRICTLY BELOW contradicted. Its dominant effect is to hold confidence and coverage down rather than to move score (D53, R19)."
+    },
+    "ambiguous": {
+      "observation": "none",
+      "weight": 0.0,
+      "moves_mean": false,
+      "counts_as_evidence": false,
+      "satisfies_hard_constraint": false,
+      "note": "No dimension observation at all - no mean movement whatsoever. It lowers coverage and confidence only, and can never satisfy a hard constraint by construction (D53, R19)."
+    }
+  },
+  "stores": [
+    {
+      "store_id": "store-brightbean",
+      "business_identity": "brightbean-coffee-llc",
+      "display_name": "Bright Bean Coffee",
+      "domain": "brightbean.myshopify.com",
+      "honest": false,
+      "role": "the scripted dishonest store (S2 / A3)"
+    },
+    {
+      "store_id": "store-northroast",
+      "business_identity": "north-roast-collective-llc",
+      "display_name": "North Roast Collective",
+      "domain": "northroast.myshopify.com",
+      "honest": true,
+      "role": "honest control store"
+    },
+    {
+      "store_id": "store-slowreply",
+      "business_identity": "slow-reply-supply-llc",
+      "display_name": "Slow Reply Supply",
+      "domain": "slowreply.myshopify.com",
+      "honest": true,
+      "role": "honest but slow - exercises the timeout gate without dishonesty"
+    },
+    {
+      "store_id": "store-secondchance",
+      "business_identity": "second-chance-coffee-llc",
+      "display_name": "Second Chance Coffee",
+      "domain": "secondchance.myshopify.com",
+      "honest": true,
+      "role": "blacklist entry EXPIRED 2026-08-01 - exercises the blacklist-expiry gate"
+    },
+    {
+      "store_id": "store-harborline",
+      "business_identity": "harborline-goods-llc",
+      "display_name": "Harborline Goods",
+      "domain": "harborline.myshopify.com",
+      "honest": true,
+      "role": "new store, no history - exercises the new_store_prior_n low-data flag"
+    }
+  ],
+  "dishonest_store": {
+    "store_id": "store-brightbean",
+    "business_identity": "brightbean-coffee-llc",
+    "note": "Every behaviour below is replayed once per simulation episode. `kind` is what T-081's dishonest script is graded on, element for element; `dim` and `type` are what T-062 turns the behaviour into as a trust observation. All six dimensions are exercised, so no dimension can be left unimplemented and still pass S2.",
+    "behaviours": [
+      {
+        "kind": "bait_and_switch_unit_price",
+        "dim": "price_honored",
+        "type": "contradicted",
+        "claim_type": "unit_price",
+        "description": "Pitches a unit price below the price the checkout actually charges."
+      },
+      {
+        "kind": "phantom_discount",
+        "dim": "discount_honored",
+        "type": "contradicted",
+        "claim_type": "discount",
+        "description": "Advertises a percentage discount that the minted code does not apply."
+      },
+      {
+        "kind": "overpromised_dispatch",
+        "dim": "shipped_on_time",
+        "type": "contradicted",
+        "claim_type": "dispatch_window",
+        "description": "Promises next-day dispatch and fulfils outside the promised window."
+      },
+      {
+        "kind": "return_window_retracted",
+        "dim": "not_returned",
+        "type": "severe_policy",
+        "claim_type": "return_policy",
+        "description": "Advertises free 60-day returns, then refuses the return. Severe policy weight 3.0."
+      },
+      {
+        "kind": "misrepresented_ingredients",
+        "dim": "catalog_claim_accuracy",
+        "type": "contradicted",
+        "claim_type": "ingredients",
+        "description": "Claims 100% single-origin arabica for a product the catalog records as a blend. A false PRODUCT FACT - not a price, delivery or returns failure (D53)."
+      },
+      {
+        "kind": "inflated_specification",
+        "dim": "catalog_claim_accuracy",
+        "type": "contradicted",
+        "claim_type": "specifications",
+        "description": "Claims 15 bar of brew pressure for a 9 bar machine."
+      },
+      {
+        "kind": "pitch_delivery_mismatch",
+        "dim": "feedback_match",
+        "type": "mismatch_return",
+        "claim_type": null,
+        "description": "The buyer reports that what arrived does not match what was pitched, and returns it. feedback_match takes no verification outcome - it is buyer-reported (R14)."
+      }
+    ]
+  },
+  "expected_trust_trajectory": [
+    {
+      "episode": 0,
+      "score": 0.5,
+      "tolerance": 0.08,
+      "note": "the neutral Beta(2,2) prior, above the blacklist threshold: a store that starts below it proves nothing"
+    },
+    {
+      "episode": 2,
+      "score": 0.42,
+      "tolerance": 0.08
+    },
+    {
+      "episode": 4,
+      "score": 0.33,
+      "tolerance": 0.07
+    },
+    {
+      "episode": 6,
+      "score": 0.26,
+      "tolerance": 0.06
+    },
+    {
+      "episode": 9,
+      "score": 0.19,
+      "tolerance": 0.05
+    },
+    {
+      "episode": 12,
+      "score": 0.13,
+      "tolerance": 0.05,
+      "note": "S2: below the 0.35 blacklist threshold even at the top of the tolerance band, inside the 12-episode budget"
+    }
+  ],
+  "personas": {
+    "aggressive": {
+      "store_id": "store-brightbean",
+      "description": "The adversarial reference persona (T-045). It answers the fixture intent with exactly the scripted claims below and nothing else, every one of them tagged seller_asserted - a persona that could stamp its own provenance would make R8 vacuous.",
+      "scripted_claims": [
+        {
+          "key": "unit_price",
+          "value": "18.50",
+          "claim_type": "unit_price",
+          "truthful": false,
+          "note": "checkout charges 22.50"
+        },
+        {
+          "key": "discount",
+          "value": "25%",
+          "claim_type": "discount",
+          "truthful": false,
+          "note": "the minted code applies 5%"
+        },
+        {
+          "key": "dispatch_window",
+          "value": "ships within 24 hours",
+          "claim_type": "dispatch_window",
+          "truthful": false
+        },
+        {
+          "key": "return_policy",
+          "value": "free returns for 60 days",
+          "claim_type": "return_policy",
+          "truthful": false
+        },
+        {
+          "key": "ingredients",
+          "value": "100% single-origin arabica",
+          "claim_type": "ingredients",
+          "truthful": false
+        }
+      ]
+    },
+    "honest": {
+      "store_id": "store-northroast",
+      "description": "The honest control persona: the same intent answered truthfully, so that S2's assertion cannot be satisfied by a scorer that sinks everybody.",
+      "scripted_claims": [
+        {
+          "key": "unit_price",
+          "value": "19.50",
+          "claim_type": "unit_price",
+          "truthful": true
+        },
+        {
+          "key": "dispatch_window",
+          "value": "ships within 2 business days",
+          "claim_type": "dispatch_window",
+          "truthful": true
+        },
+        {
+          "key": "return_policy",
+          "value": "free returns for 30 days",
+          "claim_type": "return_policy",
+          "truthful": true
+        },
+        {
+          "key": "ingredients",
+          "value": "arabica coffee beans",
+          "claim_type": "ingredients",
+          "truthful": true
+        }
+      ]
+    }
+  },
+  "fixture_intent": {
+    "intent_id": "intent-coffee-001",
+    "text": "I want a 250 g bag of light-roast single-origin whole beans, shipped this week, under $25.",
+    "category": "coffee",
+    "budget_cents": 2500,
+    "ship_to": {
+      "country": "US",
+      "postal_code": "78701"
+    },
+    "constraints": [
+      {
+        "key": "roast_level",
+        "op": "eq",
+        "value": "light",
+        "hard": true
+      },
+      {
+        "key": "net_weight",
+        "op": "eq",
+        "value": "250 g",
+        "hard": true
+      }
+    ],
+    "preferences": [
+      {
+        "key": "origin",
+        "value": "Ethiopia",
+        "weight": 0.6
+      },
+      {
+        "key": "certifications",
+        "value": "organic",
+        "weight": 0.4
+      }
+    ]
+  },
+  "golden_set": {
+    "path": "fixtures/golden/golden_set.json",
+    "sha256": "dc94dbbb66ef70b08dec80da74be18ed7403a2766aab6285d8db0395baf09f60",
+    "count": 11,
+    "note": "This reference sits INSIDE the body the approval digest covers, so approving the manifest transitively approves the exact bytes of the golden set. Change either and the chain breaks loudly."
+  },
+  "approval": {
+    "status": "pending_human_approval",
+    "approver": null,
+    "approved_at": null,
+    "artifact": null,
+    "content_hash": "87c49f8026f66b0f0f2fed55c65ce6cfce151b40921e00acaef03672cdd1bb43",
+    "request": "fixtures/approval/REQUEST-manifest-approval.md",
+    "how_to_approve": "A HUMAN runs:  PROXYSHOP_WORKER=<n> ./.venv/bin/python -m fixtures.approval --approver \"<your full name>\"",
+    "note": "T-080 is a human gate (EXECUTION.md rule 6). No agent may fill approver/approved_at/artifact. `content_hash` is a computed digest of this document's body (this block excluded) and is NOT itself an approval; it is recorded so downstream readers can detect drift, and so the human approves a document whose digest is already published rather than one an agent hashes afterwards.",
+    "approver_null_because": "nobody has approved this yet"
+  }
+}
