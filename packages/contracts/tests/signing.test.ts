@@ -15,11 +15,13 @@ import {
   SIGNED_FIELDS,
   canonicalJson,
   canonicalSigningBytes,
+  canonicalSigningBytesFromJson,
   isSignedBidSubmission,
   keyringSecret,
   missingSigningFields,
   parseSignableJson,
   payloadHash,
+  payloadHashFromJson,
   signingEnvelopeErrors,
 } from "../src/ts/signing.js";
 import type {Payload} from "../src/ts/signing.js";
@@ -711,3 +713,143 @@ describe("T-108 — both envelope gates refuse a whitespace-only value", () => {
 function envelopeOf(payload: Payload): Payload {
   return Object.fromEntries(REQUIRED_SIGNING_FIELDS.map((field) => [field, payload[field]]));
 }
+
+// --- T-113: the guard is on the DEFAULT path, not an opt-in nobody calls -------------------
+//
+// T-103 built `parseSignableJson`, and its verifier found the thing that makes a guard
+// worthless: nothing called it. `JSON.parse` → `canonicalSigningBytes` was still the default,
+// still coerced 9007199254740993 to …992, and still signed it. These cases drive the DEFAULT
+// entry points — never `parseSignableJson` — and every one of them would pass on main.
+
+/** A submission whose `quantity` is the literal `wire` says, as `JSON.parse` delivers it. */
+function submissionFromWire(literal: string, key = "quantity"): Payload {
+  const text = JSON.stringify({...makeSubmission(), [key]: 0}).replace(
+    `"${key}":0`,
+    `"${key}":${literal}`,
+  );
+  return JSON.parse(text) as Payload;
+}
+
+/** The same submission as raw wire text, for the text-taking doors. */
+function wireFor(literal: string, key = "quantity"): string {
+  return JSON.stringify({...makeSubmission(), [key]: 0}).replace(
+    `"${key}":0`,
+    `"${key}":${literal}`,
+  );
+}
+
+describe("T-113 — the default signing path refuses an integer the wire cannot state", () => {
+  it.each(NON_DOUBLE_INTEGER_WIRE)(
+    "canonicalSigningBytes refuses %s with no opt-in at all",
+    (literal) => {
+      // THE ticket. `JSON.parse` has already coerced by the time this value exists, and the
+      // default path used to sign the coercion without a word.
+      expect(() => canonicalSigningBytes(submissionFromWire(literal))).toThrow(
+        CanonicalisationError,
+      );
+    },
+  );
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("payloadHash refuses %s with no opt-in at all", (literal) => {
+    expect(() => payloadHash(submissionFromWire(literal))).toThrow(CanonicalisationError);
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s nested inside the offer", (literal) => {
+    const payload = makeSubmission();
+    const text = JSON.stringify(payload).replace('"unit_price":49', `"unit_price":${literal}`);
+    expect(text).toContain(literal);
+    expect(() => canonicalSigningBytes(JSON.parse(text) as Payload)).toThrow(
+      CanonicalisationError,
+    );
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s in a COVERED field, not only the body", (literal) => {
+    // `auction_id` and `store_id` are only checked non-empty by `missingSigningFields`, so a
+    // numeric one reaches `canonicalJson` through `covered` and never through `payloadHash`.
+    expect(() => canonicalSigningBytes(submissionFromWire(literal, "auction_id"))).toThrow(
+      CanonicalisationError,
+    );
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("the text door names the literal it refused: %s", (literal) => {
+    expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(CanonicalisationError);
+    expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(
+      new RegExp(`cannot accept the integer ${literal}`),
+    );
+    expect(() => payloadHashFromJson(wireFor(literal))).toThrow(CanonicalisationError);
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)(
+    "would have signed %s as %s before this ticket, and the digest proves it",
+    (literal, coerced) => {
+      // The defect held still. `canonicalJson` — the RFC-8785 RENDERER, which the conformance
+      // gate pins against both Python implementations — happily writes the coerced value; it is
+      // the signing doors that now refuse to carry it into a signature.
+      const payload = submissionFromWire(literal);
+      expect(canonicalJson(payload["quantity"])).toBe(coerced);
+      expect(String(payload["quantity"])).not.toBe(literal);
+    },
+  );
+});
+
+describe("T-113 — the opt-out is explicit, named, and does exactly what it says", () => {
+  it.each(NON_DOUBLE_INTEGER_WIRE)("signs %s only when allowUnsafeIntegers is passed", (literal) => {
+    const payload = submissionFromWire(literal);
+    expect(() => canonicalSigningBytes(payload)).toThrow(CanonicalisationError);
+    const bytes = canonicalSigningBytes(payload, {allowUnsafeIntegers: true});
+    expect(bytes.length).toBeGreaterThan(0);
+    // And it buys exactly what the flag's name says: the COERCED value gets signed. The flag is
+    // an admission, not a fix, which is why the wire doors never need it.
+    expect(payloadHash(payload, {allowUnsafeIntegers: true})).toBe(
+      payloadHash(JSON.parse(JSON.stringify(payload)) as Payload, {allowUnsafeIntegers: true}),
+    );
+  });
+
+  it("refuses an exact large double on the value path too, because the value cannot say", () => {
+    // 9007199254740992 IS an exact double and the Python peer signs it. TypeScript, handed only
+    // the number, cannot distinguish it from 9007199254740993 — so the value path fails closed
+    // and the caller must either say `allowUnsafeIntegers` or hand over the text.
+    const payload = submissionFromWire("9007199254740992");
+    expect(() => canonicalSigningBytes(payload)).toThrow(CanonicalisationError);
+    expect(canonicalSigningBytes(payload, {allowUnsafeIntegers: true}).length).toBeGreaterThan(0);
+  });
+
+  it.each(EXACT_DOUBLE_INTEGER_WIRE)("the TEXT door signs the exact double %s unaided", (literal) => {
+    // The control that stops "refuse everything large" from passing this suite. The text door
+    // reads the literal, so it can tell an exact double from a coerced one — no flag, no
+    // opt-in, and the same answer the Python peer gives.
+    expect(canonicalSigningBytesFromJson(wireFor(literal)).length).toBeGreaterThan(0);
+    expect(payloadHashFromJson(wireFor(literal))).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("the text door reproduces the pinned bytes for a legal submission", () => {
+    // The other control: the guard must not move the bytes of anything that already signed.
+    const wire = JSON.stringify(makeSubmission());
+    expect(decode(canonicalSigningBytesFromJson(wire))).toBe(EXPECTED_CANONICAL_BYTES);
+    expect(payloadHashFromJson(wire)).toBe(payloadHash(makeSubmission()));
+  });
+
+  it("still refuses malformed wire text as a SyntaxError, not a signing failure", () => {
+    expect(() => canonicalSigningBytesFromJson('{"a":')).toThrow(SyntaxError);
+    expect(() => payloadHashFromJson('{"a":')).toThrow(SyntaxError);
+  });
+
+  it("leaves the RFC-8785 renderer alone, and that split is deliberate", () => {
+    // `canonicalJson` MUST keep rendering exact large doubles: `e2e/test_jcs_conformance.py`
+    // requires it to agree byte for byte with both Python canonicalizers, and both render
+    // these. The refusal belongs to the D52 signing doors, which is what a signature covers.
+    expect(canonicalJson({n: 2 ** 53})).toBe('{"n":9007199254740992}');
+    expect(canonicalJson({n: 1e16})).toBe('{"n":10000000000000000}');
+    expect(canonicalJson({n: 1e21})).toBe('{"n":1e+21}');
+    expect(() => payloadHash({n: 1e21})).toThrow(CanonicalisationError);
+  });
+
+  it("does not refuse anything a real bid actually carries", () => {
+    // Fractions, safe integers and negative zero all sign with no flag. A guard that refused
+    // 44.1 would satisfy every rejection above and break the protocol.
+    expect(canonicalSigningBytes(makeSubmission()).length).toBeGreaterThan(0);
+    for (const n of [0, -0, 1, -42, 44.1, 1e-5, 1.5, Number.MAX_SAFE_INTEGER, -9007199254740991]) {
+      expect(() => payloadHash({...makeSubmission(), quantity: n}), String(n)).not.toThrow();
+    }
+  });
+});
