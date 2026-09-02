@@ -37,7 +37,14 @@ from proxyshop_support.clock import EPOCH, ManualClock
 from proxyshop_support.embedding import EMBEDDING_DIM, cosine, hash_embed
 from proxyshop_support.llm_double import LLMDouble
 from proxyshop_support.neo4j_lock import Neo4jLockTimeout, held_depth, neo4j_flock
-from proxyshop_support.postgres import ROLES, database_name, maintenance_dsn, role_dsn
+from proxyshop_support.postgres import (
+    ROLE_PASSWORD_ENV,
+    ROLES,
+    SEEDED_ROLES,
+    database_name,
+    maintenance_dsn,
+    role_dsn,
+)
 from proxyshop_support.redis_client import WorkerRedis, namespaced, worker_redis
 from proxyshop_support.worker import key_prefix, redis_db_index
 
@@ -70,6 +77,10 @@ def test_hash_embed_is_stable_across_processes() -> None:
         print(sum(hash_embed("espresso")[:8]))
         """
     )
+    # T-122 sweep: deliberately no `env=`. Passing none means the child INHERITS this
+    # session's environment whole, so any PYTHONPATH already carrying `.pkgroot` survives —
+    # the opposite of the clobber that broke the ledger surface tests. `proxyshop_support`
+    # itself sits at the repo root, which `cwd` puts on the path for a `-c` child.
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -266,13 +277,69 @@ def test_dsns_are_derived_from_the_worker_not_copied_from_env(worker: int, monke
 
 
 def test_role_dsns_default_without_any_env(monkeypatch) -> None:
+    """The dev default, in the environment this test's own name promises: nothing set.
+
+    T-120. This used to delete only the four ``PROXYSHOP_PG_DSN_*`` override variables and
+    then assert the dev default *unconditionally*, which stopped being true the moment T-112
+    gave ``$PROXYSHOP_ROLE_PASSWORD`` authority over the seeded roles' password
+    (``proxyshop_support/postgres.py``, "T-112: the role password has ONE source of truth").
+    A developer who exported that variable — that is, who USED the feature T-112 was written
+    to deliver — turned the whole repo gate red right here, on a test whose name says it is
+    about the case where nothing is exported.
+
+    The assertion below is byte-for-byte what it always was. What changed is that the test
+    now actually ESTABLISHES the "without any env" precondition it claims, instead of
+    inheriting whatever the shell happened to carry. The case removed from it is not
+    dropped: it is graded, more strictly, by
+    :func:`test_role_dsns_use_the_role_password_variable_when_it_is_set` directly below.
+    """
     for env_var, _, _ in ROLES.values():
         monkeypatch.delenv(env_var, raising=False)
+    # T-120: the variable that decides the password, not just the ones that decide the DSN.
+    monkeypatch.delenv(ROLE_PASSWORD_ENV, raising=False)
     monkeypatch.delenv("PGHOST", raising=False)
     monkeypatch.setenv("PG_PORT", "5432")
     assert role_dsn("exchange", 3) == "postgresql://exchange:x@localhost:5432/proxyshop_w3"
     with pytest.raises(KeyError):
         role_dsn("root", 3)
+
+
+def test_role_dsns_use_the_role_password_variable_when_it_is_set(monkeypatch) -> None:
+    """T-120 acceptance 3: the SET branch, so the two branches cannot drift apart again.
+
+    The default above holds only while ``$PROXYSHOP_ROLE_PASSWORD`` is unset, and that is a
+    claim about half of the behaviour. This is the other half, deliberately adjacent to it:
+    what has to be true the moment somebody sets the variable. Before T-120 the SET branch
+    was asserted nowhere on the connect side, so a change to :func:`role_password` that
+    served one branch and broke the other passed the suite; now it fails a test.
+    """
+    for env_var, _, _ in ROLES.values():
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.delenv("PGHOST", raising=False)
+    monkeypatch.setenv("PG_PORT", "5432")
+    monkeypatch.setenv(ROLE_PASSWORD_ENV, "t120-not-the-default")
+
+    # The four roles `db/init/00-roles.sql` seeds connect with what created them ...
+    for role in sorted(SEEDED_ROLES):
+        user = ROLES[role][1]
+        assert role_dsn(role, 3) == (
+            f"postgresql://{user}:t120-not-the-default@localhost:5432/proxyshop_w3"
+        ), (
+            f"{role} still connects with the dev default after ${ROLE_PASSWORD_ENV} was set, "
+            f"so the connect side disagrees with the volume that seeded the role"
+        )
+
+    # ... and `admin` does NOT: it is initdb's superuser, created from compose's
+    # POSTGRES_PASSWORD and never touched by 00-roles.sql. Rewriting it here would break
+    # every admin connection — including the one that CREATEs each worker database.
+    assert role_dsn("admin", 3) == (
+        "postgresql://proxyshop:proxyshop_dev_pw@localhost:5432/proxyshop_w3"
+    )
+
+    # A password is a URI component, so it is percent-encoded rather than interpolated:
+    # `postgresql://app:p@ss@host/db` names the host `ss`, which is a silent re-point.
+    monkeypatch.setenv(ROLE_PASSWORD_ENV, "p@ss/w:rd")
+    assert role_dsn("app", 3) == "postgresql://app:p%40ss%2Fw%3Ard@localhost:5432/proxyshop_w3"
 
 
 # --------------------------------------------------------------------------------------
@@ -300,6 +367,9 @@ def test_neo4j_flock_still_excludes_a_second_process(tmp_path: Path) -> None:
     """The point of D37: a different worker process waits, and times out loudly."""
     lock = tmp_path / "neo4j.lock"
     ready = tmp_path / "ready"
+    # T-122 sweep: deliberately no `env=` — the holder inherits this session's environment
+    # whole, so an inherited PYTHONPATH is preserved rather than replaced, and `cwd` (the
+    # repo root) is what makes `proxyshop_support.neo4j_lock` importable in the child.
     holder = subprocess.Popen(
         [
             sys.executable,
