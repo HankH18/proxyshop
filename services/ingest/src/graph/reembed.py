@@ -40,7 +40,7 @@ from .schema import (
     record_embedding_run,
     schema_report,
 )
-from .upsert import EmbeddingDimensionMismatch, set_product_embedding
+from .upsert import EmbeddingDimensionMismatch, clear_product_embedding, set_product_embedding
 
 #: How many products to pull per round trip.
 DEFAULT_BATCH_SIZE = 200
@@ -164,10 +164,14 @@ def reembed_products(
     """Recompute and store ``Product.embedding`` for every product in the graph.
 
     Records an :class:`~ingest.graph.schema.EmbeddingRun` marker against the vector index —
-    ``running`` before the first batch, ``complete`` after the last — so that both "which
-    provider wrote these vectors" and "did the pass finish" are readable from the graph
-    rather than assumed. :func:`ingest.graph.query.candidate_products` refuses to answer a
-    vector query that disagrees with it.
+    ``running`` before the first batch, and ``complete`` after the last **only when the pass
+    embedded every product it read** — so that both "which provider wrote these vectors" and
+    "did the pass cover the whole catalog" are readable from the graph rather than assumed.
+    :func:`ingest.graph.query.candidate_products` refuses to answer a vector query that
+    disagrees with it.
+
+    A product whose composed text is empty is skipped, and any vector a previous pass left
+    on it is *removed* rather than left behind in that pass's vector space.
 
     Args:
         session: an open ``neo4j.Session``.
@@ -241,7 +245,18 @@ def reembed_products(
                 # A product with no name and no structured context embeds to the zero
                 # vector, which cosine cannot rank. Leaving it unembedded and *reported* is
                 # honest; writing a zero vector would make it silently unreachable instead.
+                #
+                # "Unembedded" has to be made true, not merely intended. Skipping the write
+                # and moving on leaves whatever vector a PREVIOUS pass wrote sitting on the
+                # product — in the previous provider's space, inside an index this pass is
+                # filling with a different one. Measured: the stale row still ranks (0.4911
+                # against a legitimate 0.4953) while `products_missing_embeddings()`,
+                # `products_missing_status()` and `provenance_violations()` all report ``[]``,
+                # because the product *has* an embedding and a vector is not a material fact.
+                # Removing it hands that product to the one detector that needs no marker at
+                # all, and costs nothing recoverable: there was no text to re-embed it from.
                 skipped.append(row["product_id"])
+                clear_product_embedding(session, product_id=row["product_id"])
                 continue
             set_product_embedding(
                 session,
@@ -251,23 +266,32 @@ def reembed_products(
             )
             embedded += 1
         skip += len(rows)
-    record_embedding_run(
-        session,
-        provider=resolved.name,
-        dimension=index_dimensions,
-        state=EMBEDDING_RUN_COMPLETE,
-        products=products,
-        embedded=embedded,
-    )
-    if await_index:
-        await_indexes(session)
-    return ReembedReport(
+    report = ReembedReport(
         provider=resolved.name,
         dimension=resolved.dimension,
         products=products,
         embedded=embedded,
         skipped=sorted(skipped),
     )
+    # The marker records what the REPORT says, not merely that the loop reached its end.
+    # Stamping `complete` unconditionally certified a pass the report itself called
+    # incomplete: `_check_vector_path` then found a finished marker naming the right
+    # provider and raised nothing, so a catalog holding one product's worth of a foreign
+    # vector space answered queries as if it were whole. `ReembedReport.complete` has always
+    # been the honest reading of the same pass — the marker is now derived from it, so the
+    # two cannot disagree, and `main()`'s non-zero exit and the graph's own state say the
+    # same thing to an operator who reads only one of them.
+    record_embedding_run(
+        session,
+        provider=resolved.name,
+        dimension=index_dimensions,
+        state=EMBEDDING_RUN_COMPLETE if report.complete else EMBEDDING_RUN_RUNNING,
+        products=products,
+        embedded=embedded,
+    )
+    if await_index:
+        await_indexes(session)
+    return report
 
 
 @contextmanager

@@ -771,6 +771,51 @@ def set_product_embedding(
         )
 
 
+_CLEAR_PRODUCT_EMBEDDING = f"""
+MATCH (p:Product {{product_id: $product_id}})
+WITH p, p.{EMBEDDING_PROPERTY} IS NOT NULL AS had
+REMOVE p.{EMBEDDING_PROPERTY}
+RETURN had
+"""
+
+
+def clear_product_embedding(session: Any, *, product_id: str) -> bool:
+    """Remove ``Product.embedding``, so the product is visibly unembedded again.
+
+    The inverse of :func:`set_product_embedding`, and the only honest answer for a product a
+    re-embed pass could not embed. A vector is a *derived* value stamped with the identity of
+    the pass that wrote it (:class:`~ingest.graph.schema.EmbeddingRun`); when a later pass
+    skips the product, the vector still sitting on it belongs to the PREVIOUS pass's vector
+    space. Leaving it there is worse than having nothing: ``products_missing_embeddings()``
+    counts the product as embedded, ``provenance_violations()`` is clean — a vector is not a
+    material fact and the audit rightly ignores it — and every cosine measured against it is
+    noise from a foreign space that is indistinguishable from a similarity.
+
+    Removing the property costs the product nothing it can use: it had no embeddable text, so
+    the pass could not have replaced the vector with a valid one anyway.
+
+    Args:
+        session: an open ``neo4j.Session`` or transaction.
+        product_id: the product to un-embed.
+
+    Returns:
+        ``True`` when a vector was actually removed, ``False`` when there was none — so a
+        caller can report what changed rather than guess.
+
+    Raises:
+        ProvenanceRequired: no such product. Symmetric with
+            :func:`set_product_embedding`: a typo'd id is the more fundamental mistake and is
+            reported rather than silently matching nothing.
+    """
+    row = session.run(_CLEAR_PRODUCT_EMBEDDING, product_id=product_id).single()
+    if row is None:
+        raise ProvenanceRequired(
+            f"no Product with product_id={product_id!r}; there is no embedding to clear, and "
+            f"an embedding is derived from facts and never creates them"
+        )
+    return bool(row["had"])
+
+
 # ---------------------------------------------------------------------------------------
 # The provenance audit
 # ---------------------------------------------------------------------------------------
@@ -942,6 +987,7 @@ __all__ = [
     "ProvenanceRequired",
     "ProvenanceViolation",
     "assert_provenance_complete",
+    "clear_product_embedding",
     "link_category",
     "link_compatible_with",
     "link_ingredient",
