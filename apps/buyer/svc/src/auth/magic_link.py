@@ -9,6 +9,13 @@ that the obvious dict-of-tokens implementation does not:
 * **A link is single use and time boxed.** Redeeming marks the record consumed rather than
   deleting it, so a replay is refused as *already used* rather than as *unknown*, and the
   two are distinguishable in the service's own logs while the HTTP layer collapses them.
+  Finding, checking and consuming happen under one lock: FastAPI runs a ``def`` endpoint in
+  a threadpool, so two requests carrying the same token really do arrive at once, and a
+  check-then-mark split across three statements is single use only when nobody races it.
+* **The table of unredeemed links is bounded.** ``request_login`` takes no credential, so
+  everything about that table's size is chosen by whoever can reach the route. Issuing a
+  link drops the address's own outstanding unredeemed links and every link past its expiry,
+  and refuses rather than evicting once :data:`DEFAULT_MAX_PENDING` live links are held.
 * **The token never rides on the response.** :meth:`MagicLinkAuth.request_login` returns
   only when the link expires; the token itself goes to the injected ``deliver`` callable,
   which in production is an email sender. A route cannot accidentally echo it.
@@ -27,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -43,6 +51,7 @@ from .sessions import (
 
 __all__ = [
     "DEFAULT_LINK_TTL",
+    "DEFAULT_MAX_PENDING",
     "AccountDirectory",
     "InMemoryAccountDirectory",
     "LinkIssued",
@@ -50,6 +59,7 @@ __all__ = [
     "MagicLinkAuth",
     "MagicLinkError",
     "MagicLinkExpired",
+    "MagicLinkThrottled",
     "MagicLinkUnknown",
     "token_fingerprint",
 ]
@@ -57,6 +67,12 @@ __all__ = [
 #: How long a magic link stays redeemable. Short: the link is a bearer credential sitting
 #: in a mailbox.
 DEFAULT_LINK_TTL = timedelta(minutes=15)
+
+#: The most unredeemed links the service will hold at once. ``POST /buyer/auth/magic-link``
+#: takes no credential, so without a ceiling an unauthenticated caller sizes this table.
+#: With :data:`DEFAULT_LINK_TTL` at fifteen minutes and one live link per address, ten
+#: thousand is a large real deployment and a few megabytes of memory.
+DEFAULT_MAX_PENDING = 10_000
 
 _TOKEN_BYTES = 32
 
@@ -75,6 +91,15 @@ class MagicLinkExpired(MagicLinkError):
 
 class MagicLinkAlreadyUsed(MagicLinkError):
     """The link was redeemed once already. Links are single use."""
+
+
+class MagicLinkThrottled(MagicLinkError):
+    """The pending-link table is full, so no new link was issued.
+
+    Raised by :meth:`MagicLinkAuth.request_login`, never by :meth:`MagicLinkAuth.redeem`: a
+    link somebody is already holding is never dropped to make room for a new one. The HTTP
+    layer answers ``429``.
+    """
 
 
 def token_fingerprint(token: str) -> str:
@@ -160,6 +185,7 @@ class MagicLinkAuth:
             token is ever handed out. Defaults to :func:`_drop`.
         clock: injectable ``now``.
         link_ttl / session_ttl: lifetimes.
+        max_pending: ceiling on the unredeemed-link table. See :data:`DEFAULT_MAX_PENDING`.
     """
 
     vault: PseudonymVault = field(default_factory=PseudonymVault)
@@ -169,23 +195,71 @@ class MagicLinkAuth:
     clock: Callable[[], datetime] = _utcnow
     link_ttl: timedelta = DEFAULT_LINK_TTL
     session_ttl: timedelta = DEFAULT_SESSION_TTL
+    max_pending: int = DEFAULT_MAX_PENDING
     _pending: dict[str, _PendingLink] = field(default_factory=dict, repr=False)
+    #: Serialises every mutation of ``_pending``. FastAPI runs a ``def`` endpoint in a
+    #: threadpool, so ``POST /buyer/auth/session`` is genuinely concurrent and an
+    #: unsynchronised check-then-mark would let two racing requests both find a link unused.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     # -- issuing --------------------------------------------------------------------
 
+    @property
+    def pending_links(self) -> int:
+        """How many links are currently held, redeemed or not. Bounded; see below."""
+        with self._lock:
+            return len(self._pending)
+
+    def _forget_stale(self, now: datetime, superseded: str | None = None) -> None:
+        """Drop every link that can no longer be honoured. The caller holds ``_lock``.
+
+        Two families go:
+
+        * anything past its expiry — expiry used to be checked only on redemption, so a link
+          nobody ever clicked was kept for the life of the process;
+        * ``superseded``'s outstanding unredeemed links, when a new one is being minted for
+          that address. A magic link is a bearer credential in a mailbox: the buyer who
+          re-requests one *because* they think the first mail was intercepted must not be
+          handing the interceptor a second working credential. Redeemed records are kept
+          until they expire so a replay is still recognised as a replay.
+        """
+        dead = [
+            fingerprint
+            for fingerprint, link in self._pending.items()
+            if now >= link.expires_at
+            or (superseded is not None and link.email == superseded and link.used_at is None)
+        ]
+        for fingerprint in dead:
+            del self._pending[fingerprint]
+
     def request_login(self, email: str) -> LinkIssued:
         """Mint a single-use magic link for ``email`` and hand it to ``deliver``.
+
+        Any link previously issued to ``email`` and not yet redeemed stops working.
 
         Returns:
             :class:`LinkIssued` — the expiry, and nothing else. The token is not returned.
 
         Raises:
             ValueError: ``email`` is not usable as a vault key.
+            MagicLinkThrottled: the pending-link table is full. New requests are shed rather
+                than a live link evicted — evicting the oldest would let an unauthenticated
+                caller delete a chosen victim's link on demand, which is the wrong direction
+                to fail in. This bounds memory; it is not a rate limiter, and a deployment
+                still wants one in front of the route.
         """
         key = normalise_buyer_key(email)
         token = secrets.token_urlsafe(_TOKEN_BYTES)
-        expires_at = self.clock() + self.link_ttl
-        self._pending[token_fingerprint(token)] = _PendingLink(email=key, expires_at=expires_at)
+        now = self.clock()
+        expires_at = now + self.link_ttl
+        with self._lock:
+            self._forget_stale(now, superseded=key)
+            if len(self._pending) >= self.max_pending:
+                raise MagicLinkThrottled(
+                    f"{len(self._pending)} magic links are already pending; refusing to issue "
+                    f"another rather than evicting one somebody is holding"
+                )
+            self._pending[token_fingerprint(token)] = _PendingLink(email=key, expires_at=expires_at)
         self.deliver(key, token, expires_at)
         return LinkIssued(expires_at=expires_at)
 
@@ -206,21 +280,29 @@ class MagicLinkAuth:
         """
         if not isinstance(token, str) or not token:
             raise MagicLinkUnknown("no such magic link")
-        pending = self._pending.get(token_fingerprint(token))
-        if pending is None:
-            raise MagicLinkUnknown("no such magic link")
+        fingerprint = token_fingerprint(token)
+        # `clock` is read outside the lock: it is injectable, so calling it while holding the
+        # lock would let a caller's clock decide how long every other request blocks.
         now = self.clock()
-        if pending.used_at is not None:
-            raise MagicLinkAlreadyUsed("this magic link has already been used")
-        if now >= pending.expires_at:
-            raise MagicLinkExpired("this magic link has expired; request another")
+        with self._lock:
+            # Find, check and consume in one critical section. Doing it in three separate
+            # steps loses single use exactly when it matters: two requests carrying the same
+            # token both see `used_at is None` and both get a session.
+            pending = self._pending.get(fingerprint)
+            if pending is None:
+                raise MagicLinkUnknown("no such magic link")
+            if pending.used_at is not None:
+                raise MagicLinkAlreadyUsed("this magic link has already been used")
+            if now >= pending.expires_at:
+                raise MagicLinkExpired("this magic link has expired; request another")
+            pending.used_at = now
+            email = pending.email
 
-        pending.used_at = now
-        if self.accounts.get(pending.email) is None:
+        if self.accounts.get(email) is None:
             # First link redeemed for this address: magic-link signup and login are one
             # gesture, so the account is created here rather than refused.
-            self.accounts.upsert(pending.email, {"email": pending.email})
-        pseudonym = self.vault.issue(pending.email)
+            self.accounts.upsert(email, {"email": email})
+        pseudonym = self.vault.issue(email)
         return self.sessions.open(pseudonym, ttl=self.session_ttl)
 
     # -- using a session ------------------------------------------------------------

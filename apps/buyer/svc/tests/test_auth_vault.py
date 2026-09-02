@@ -33,6 +33,7 @@ import json
 import pathlib
 import random
 import re
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -800,3 +801,486 @@ def test_the_store_facing_row_is_readable_while_the_mapping_is_not(
         (pseudonym,),
     )
     assert resolved == [(email,)], "the vault role must still be able to resolve the pseudonym"
+
+
+# =======================================================================================
+# Hardening — the objective, not the acceptance criteria
+#
+# T-070's objective is "magic-link auth ... per-session pseudonym rotation ... only vault
+# role reads mappings". The three criteria above are all satisfiable while each of the
+# following is live, which is why every test here drives a *concrete* input and asserts
+# both directions: the one that must be refused and the one that must be admitted.
+# =======================================================================================
+
+
+def test_the_identity_backstop_admits_a_buyer_whose_email_names_a_bucket_value() -> None:
+    """The backstop must reject disclosure, not coincidence.
+
+    ``identity_leaks`` matches an account's identity fragments as substrings of the
+    serialized bucket text. Four of the five buckets are drawn from a **closed vocabulary**
+    the coarseners emit regardless of the account (``none``/``occasional``/``regular``/
+    ``frequent`` and the canonical budget bands), and ``category_affinity`` carries slugs of
+    the buyer's own order categories. A buyer whose email local part happens to spell one of
+    those — ``none@example.com`` is the whole default state of a brand-new signup, which has
+    no orders and therefore ``frequency_tier == "none"`` — has an identity fragment that
+    collides with a value no account could have leaked into.
+
+    The refusal direction is asserted alongside so this cannot be "read" as a licence to
+    stop checking: a rewired coarsener that emits the postal code is still a leak.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks
+
+    # Admitted: the collision is with the coarsener's own vocabulary, not with the account.
+    fresh_signup = {"email": "none@example.com", "orders": []}
+    assert (
+        build_profile(fresh_signup, "psn-" + "ab" * 16).model_dump()["buckets"]["frequency_tier"]
+        == "none"
+    )
+
+    espresso = {
+        "email": "espresso.fan@example.com",
+        "orders": [{"order_ref": f"o{n}", "total": 12.0, "category": "espresso"} for n in range(3)],
+    }
+    admitted = build_profile(espresso, "psn-" + "cd" * 16).model_dump()
+    assert admitted["buckets"]["frequency_tier"] == "regular"
+    assert admitted["buckets"]["category_affinity"] == ["espresso"]
+
+    for email, orders in (
+        ("regular@example.com", 3),
+        ("frequent.buyer@example.com", 12),
+        ("occasional@example.com", 1),
+    ):
+        account = {
+            "email": email,
+            "orders": [
+                {"order_ref": f"o{n}", "total": 12.0, "category": "tents"} for n in range(orders)
+            ],
+        }
+        build_profile(account, "psn-" + "ef" * 16)  # must not raise
+
+    # Refused: a value that is neither the coarseners' vocabulary nor one of this account's
+    # own category slugs is still a disclosure.
+    assert identity_leaks({"pseudonym": "psn-leaky", "buckets": {"region": "97205"}}, DANA) == [
+        "97205"
+    ]
+    with pytest.raises(IdentityLeak):
+        build_profile(DANA, DANA["email"])
+
+
+def test_the_profile_route_serves_a_buyer_whose_email_collides_with_a_bucket_value() -> None:
+    """The same defect, through the app a deployment actually boots.
+
+    ``GET /buyer/profile`` answered ``500`` for a buyer who had just signed up as
+    ``none@example.com`` — no orders, so ``frequency_tier == "none"``, so the backstop saw
+    the local part of their address inside their own profile and refused to build it. The
+    route is reachable from an unauthenticated start: request a link, redeem it, read the
+    profile.
+    """
+    from buyer_svc.auth import MagicLinkAuth
+    from buyer_svc.auth.routes import get_auth_service
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    tokens: list[str] = []
+    service = MagicLinkAuth(deliver=lambda email, token, expires_at: tokens.append(token))
+    app = create_app()
+    app.dependency_overrides[get_auth_service] = lambda: service
+    client = TestClient(app, raise_server_exceptions=False)
+
+    assert (
+        client.post("/buyer/auth/magic-link", json={"email": "none@example.com"}).status_code == 202
+    )
+    created = client.post("/buyer/auth/session", json={"token": tokens[-1]})
+    assert created.status_code == 201, created.text
+
+    fetched = client.get(
+        "/buyer/profile", headers={"X-Buyer-Session": created.json()["session_id"]}
+    )
+    assert fetched.status_code == 200, (
+        f"a brand-new buyer could not read their own profile: {fetched.status_code} {fetched.text}"
+    )
+    assert set(fetched.json()) == {"pseudonym", "buckets"}
+    assert fetched.json()["buckets"]["frequency_tier"] == "none"
+
+
+def test_requesting_a_new_link_retires_the_previous_one() -> None:
+    """A magic link is a bearer credential; asking for a new one must void the old one.
+
+    Without this, every link a buyer ever requested stays redeemable for its full TTL. The
+    buyer who re-requests *because* they think the first mail was intercepted hands the
+    interceptor a second working credential rather than killing the first.
+    """
+    from buyer_svc.auth import MagicLinkAuth, MagicLinkUnknown
+
+    tokens: list[str] = []
+    auth = MagicLinkAuth(deliver=lambda email, token, expires_at: tokens.append(token))
+    auth.request_login("dana.reyes@example.com")
+    auth.request_login("dana.reyes@example.com")
+    superseded, current = tokens[0], tokens[1]
+
+    # Refused: the link that was replaced.
+    with pytest.raises(MagicLinkUnknown):
+        auth.redeem(superseded)
+    # Admitted: the newest link still works, and another buyer's link is untouched.
+    auth.request_login("samir.okafor@example.com")
+    other = tokens[-1]
+    assert auth.redeem(current).pseudonym.startswith("psn-")
+    assert auth.redeem(other).pseudonym.startswith("psn-")
+
+
+def test_pending_links_do_not_accumulate_for_an_unauthenticated_caller() -> None:
+    """``POST /buyer/auth/magic-link`` is unauthenticated; its table must stay bounded.
+
+    Two separate leaks: one address asked for a thousand links keeps a thousand records, and
+    a record is only ever checked for expiry when somebody redeems it, so an expired link is
+    never dropped at all. Both are reachable by anyone who can reach the route.
+    """
+    from buyer_svc.auth import MagicLinkAuth
+
+    now = {"t": datetime(2026, 3, 1, 12, 0, tzinfo=UTC)}
+    auth = MagicLinkAuth(clock=lambda: now["t"])
+
+    for _ in range(1000):
+        auth.request_login("victim@example.invalid")
+    assert auth.pending_links == 1, (
+        f"one address holds {auth.pending_links} pending links after 1000 requests"
+    )
+
+    for index in range(500):
+        auth.request_login(f"spray-{index}@example.invalid")
+    assert auth.pending_links == 501
+
+    # Admitted: a link inside its TTL survives an unrelated request.
+    now["t"] += timedelta(minutes=1)
+    auth.request_login("late@example.invalid")
+    assert auth.pending_links == 502
+
+    # Refused: everything past its expiry is dropped rather than kept forever.
+    now["t"] += timedelta(days=1)
+    auth.request_login("tomorrow@example.invalid")
+    assert auth.pending_links == 1, (
+        f"{auth.pending_links} expired links survived a day past their TTL"
+    )
+
+
+def test_the_pending_table_refuses_new_links_rather_than_evicting_live_ones() -> None:
+    """At the ceiling the service sheds *new* requests, never a link somebody is holding.
+
+    Evicting the oldest entry would let an unauthenticated caller delete a specific victim's
+    live link on demand, which is the wrong direction for adversary one. Refusing is a
+    denial of new logins and is reported as ``429`` rather than as a broken link.
+    """
+    from buyer_svc.auth import MagicLinkAuth, MagicLinkThrottled
+    from buyer_svc.auth.routes import get_auth_service
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    now = {"t": datetime(2026, 3, 1, 12, 0, tzinfo=UTC)}
+    tokens: list[str] = []
+    auth = MagicLinkAuth(
+        deliver=lambda email, token, expires_at: tokens.append(token),
+        clock=lambda: now["t"],
+        max_pending=3,
+    )
+    for index in range(3):
+        auth.request_login(f"filler-{index}@example.invalid")
+    victim = tokens[0]
+
+    with pytest.raises(MagicLinkThrottled):
+        auth.request_login("overflow@example.invalid")
+    # The live link that was already outstanding was not evicted to make room.
+    assert auth.redeem(victim).pseudonym.startswith("psn-")
+
+    # Admitted again once the window has rolled over.
+    now["t"] += timedelta(hours=1)
+    auth.request_login("later@example.invalid")
+
+    app = create_app()
+    app.dependency_overrides[get_auth_service] = lambda: auth
+    client = TestClient(app, raise_server_exceptions=False)
+    for index in range(3):
+        client.post("/buyer/auth/magic-link", json={"email": f"http-{index}@example.com"})
+    refused = client.post("/buyer/auth/magic-link", json={"email": "http-last@example.com"})
+    assert refused.status_code == 429, (
+        f"a full pending table answered {refused.status_code}, not 429: {refused.text}"
+    )
+
+
+def test_a_magic_link_cannot_be_redeemed_twice_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single use must hold when two requests race, not only when they are serialised.
+
+    FastAPI runs a ``def`` endpoint in a threadpool, so ``POST /buyer/auth/session`` really
+    is concurrent. ``redeem`` reads ``used_at``, then reads ``expires_at``, then writes
+    ``used_at``; the gate below parks whichever thread reaches ``expires_at`` first until the
+    second arrives, which is exactly the interleaving an unsynchronised check-then-mark
+    loses — both threads see ``used_at is None`` and both mint a session from one link.
+
+    The gate has a timeout so the *fixed* implementation, which serialises the two and never
+    lets the second thread reach it, finishes rather than hanging.
+    """
+    from buyer_svc.auth import MagicLinkAlreadyUsed, MagicLinkAuth
+    from buyer_svc.auth import magic_link as magic_link_module
+
+    gate = threading.Barrier(2)
+
+    class _GatedLink:
+        """A ``_PendingLink`` that parks a reader of ``expires_at`` until a second arrives."""
+
+        def __init__(self, email: str, expires_at: datetime, used_at: datetime | None = None):
+            self.email = email
+            self.used_at = used_at
+            self._expires_at = expires_at
+
+        @property
+        def expires_at(self) -> datetime:
+            try:
+                gate.wait(timeout=2.0)
+            except threading.BrokenBarrierError:
+                pass  # serialised: the second thread never got here. That is the fix working.
+            return self._expires_at
+
+    monkeypatch.setattr(magic_link_module, "_PendingLink", _GatedLink)
+
+    tokens: list[str] = []
+    auth = MagicLinkAuth(deliver=lambda email, token, expires_at: tokens.append(token))
+    auth.request_login("dana.reyes@example.com")
+    token = tokens[-1]
+
+    outcomes: list[str] = []
+    guard = threading.Lock()
+
+    def redeem_once() -> None:
+        try:
+            session = auth.redeem(token)
+        except MagicLinkAlreadyUsed:
+            with guard:
+                outcomes.append("refused")
+        else:
+            with guard:
+                outcomes.append(session.session_id)
+
+    threads = [threading.Thread(target=redeem_once) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    minted = [outcome for outcome in outcomes if outcome != "refused"]
+    assert len(minted) == 1, (
+        f"one single-use magic link minted {len(minted)} sessions under a concurrent "
+        f"redemption: {outcomes}"
+    )
+    assert outcomes.count("refused") == 1, outcomes
+
+
+#: The buyer from the recovered repro: an ordinary street name that is also a substring of
+#: an ordinary category slug. Nothing about this account is unusual and nothing disclosive
+#: reaches the profile, but ``"park"`` is a word of the address and ``"park-gear"`` is what
+#: the coarsener emits, so an unanchored substring match calls it a leak.
+PARK = {
+    "account_id": "acct-3311ba",
+    "email": "l.hunt@example.com",
+    "first_name": "Lena",
+    "last_name": "Hunt",
+    "phone": "+1-555-0144",
+    "address": "12 Park Lane, Boulder CO 80301",
+    "postal_code": "80301",
+    "region": "US-CO",
+    "budget_band": "100-250",
+    "orders": [
+        {"order_ref": "ord-1", "total": 140.0, "category": "park-gear"},
+        {"order_ref": "ord-2", "total": 210.0, "category": "trail-gear"},
+        {"order_ref": "ord-3", "total": 175.0, "category": "park-gear"},
+    ],
+}
+
+
+def test_the_identity_backstop_admits_an_address_word_inside_a_category_slug() -> None:
+    """Surname Cook buying cookware; Hunt buying hunting-gear; Park Lane buying park-gear.
+
+    ``identity_leaks`` matched every whitespace-split word of the buyer's name and address,
+    unanchored, against the concatenation of the bucket values. ``"park"`` is a substring of
+    ``"park-gear"``, so the build refused — permanently, for that buyer, until their address
+    or their order history changed.
+
+    ``category_affinity`` can only ever hold slugs of *this* account's own order categories,
+    which are not identity fields and which the allowlist publishes on purpose. Matching an
+    identity fragment inside one of them reports a coincidence, not a disclosure.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks
+
+    # Admitted: nothing disclosive is in this profile, so it must build.
+    built = build_profile(PARK, "psn-" + "1b" * 16).model_dump()
+    assert built["buckets"]["category_affinity"] == ["park-gear", "trail-gear"]
+    assert built["buckets"]["region"] == "US-CO"
+    assert identity_leaks(built, PARK) == []
+
+    # Refused: a bucket value that is NOT one of this account's own slugs is still searched
+    # in full, substring and all — the coarsener has no business inventing it.
+    assert identity_leaks(
+        {"pseudonym": "psn-x", "buckets": {"category_affinity": ["park-lane-boulder"]}}, PARK
+    ) == ["boulder", "lane", "park"]
+    assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "80301"}}, PARK) == ["80301"]
+    assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "US-CO 80301"}}, PARK) == [
+        "80301"
+    ]
+    with pytest.raises(IdentityLeak):
+        build_profile(PARK, PARK["address"])
+
+    # And the other half of the same defect: the bucket values were concatenated before the
+    # search, so a fragment could match across the seam between two values — reporting a
+    # leak of a string no bucket ever held. Searching each value on its own removes it.
+    seam = {"full_name": "Ana  Bo", "email": "ab@example.com", "orders": []}
+    assert (
+        identity_leaks(
+            {"pseudonym": "psn-x", "buckets": {"region": "ana", "category_affinity": ["bo"]}}, seam
+        )
+        == []
+    )
+
+
+def test_the_profile_route_serves_a_buyer_who_lives_on_park_lane() -> None:
+    """The same defect over HTTP: ``GET /buyer/profile`` answered 500, permanently."""
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.auth.routes import get_auth_service
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    tokens: list[str] = []
+    service = MagicLinkAuth(
+        accounts=InMemoryAccountDirectory({PARK["email"]: PARK}),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+    app = create_app()
+    app.dependency_overrides[get_auth_service] = lambda: service
+    client = TestClient(app, raise_server_exceptions=False)
+
+    client.post("/buyer/auth/magic-link", json={"email": PARK["email"]})
+    created = client.post("/buyer/auth/session", json={"token": tokens[-1]})
+    assert created.status_code == 201, created.text
+    fetched = client.get(
+        "/buyer/profile", headers={"X-Buyer-Session": created.json()["session_id"]}
+    )
+    assert fetched.status_code == 200, (
+        f"a buyer on Park Lane who buys park gear could not read their profile: "
+        f"{fetched.status_code} {fetched.text}"
+    )
+    wire = fetched.text.casefold()
+    for secret in ("hunt", "lena", "boulder", "80301", "acct-3311ba", "555-0144"):
+        assert secret not in wire, f"R5: {secret!r} reached the wire: {wire}"
+
+
+# =======================================================================================
+# The wiring — what the deployment actually constructs
+#
+# Every Postgres test above is real and passes, and none of them is evidence that the
+# service reaches Postgres: they instantiate `PostgresPseudonymStore` themselves. The two
+# tests here drive `build_auth_service`, which is what the running app calls.
+# =======================================================================================
+
+
+def test_the_login_service_refuses_to_run_behind_more_than_one_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Process-local sessions plus a second worker is a broken deployment, not a slow one.
+
+    Sessions and unredeemed magic links live in this process's memory. Under
+    ``uvicorn --workers 4`` a link issued by one worker cannot be redeemed by another and a
+    session minted by one is unknown to the rest, so behind a load balancer roughly half of
+    logins fail with a ``401`` that reads exactly like a genuinely bad link. There is no
+    shared store for either yet, so the honest answer is to refuse the configuration rather
+    than serve it at a coin-flip success rate.
+    """
+    from buyer_svc.auth.routes import WORKER_COUNT_ENVS, ProcessLocalStateUnsafe, build_auth_service
+
+    for name in (*WORKER_COUNT_ENVS, "PROXYSHOP_PG_DSN_VAULT"):
+        monkeypatch.delenv(name, raising=False)
+
+    # Admitted: unset, one worker, and a value that is not a worker count at all.
+    assert build_auth_service().sessions is not None
+    for admitted in ("1", "", "not-a-number"):
+        monkeypatch.setenv("WEB_CONCURRENCY", admitted)
+        assert build_auth_service().sessions is not None
+    monkeypatch.delenv("WEB_CONCURRENCY")
+
+    # The harm the refusal exists to prevent, made concrete: two services built the way a
+    # second worker would build one share nothing. A link issued by the first is *unknown*
+    # to the second, and a session minted by the first is unknown too — both surface as the
+    # same 401 a genuinely bad link gets.
+    from buyer_svc.auth import MagicLinkUnknown, UnknownSession
+
+    tokens: list[str] = []
+    first = build_auth_service()
+    first.deliver = lambda email, token, expires_at: tokens.append(token)
+    second = build_auth_service()
+    first.request_login("dana.reyes@example.com")
+    with pytest.raises(MagicLinkUnknown):
+        second.redeem(tokens[-1])
+    session = first.redeem(tokens[-1])
+    with pytest.raises(UnknownSession):
+        second.session(session.session_id)
+
+    # Refused: any process manager saying it will fork more than one worker.
+    for name in WORKER_COUNT_ENVS:
+        monkeypatch.setenv(name, "4")
+        with pytest.raises(ProcessLocalStateUnsafe) as caught:
+            build_auth_service()
+        assert name in str(caught.value)
+        monkeypatch.delenv(name)
+
+
+@pytest.mark.docker
+def test_the_service_reaches_the_postgres_vault_when_its_dsn_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    vault_scratch: Any,
+    vault_migrated: str,
+    worker_index: int,
+    worker_database: str,
+) -> None:
+    """``build_auth_service`` must actually construct the durable vault, not just be able to.
+
+    ``PostgresPseudonymStore`` and ``publish_profile`` were unreachable from every deployment
+    path: ``auth_service`` built a bare ``MagicLinkAuth()``, whose default vault keeps its
+    history in a dict. R5's "a retired pseudonym is never handed out again" therefore held
+    only for one process lifetime — a restart forgot every pseudonym it had ever issued and
+    the freshness check had nothing left to check against.
+
+    Both directions: no DSN keeps today's in-memory default; a DSN reaches the real table,
+    and a *second* service built afterwards — a restart — still sees the history.
+    """
+    from buyer_svc.auth.routes import VAULT_DSN_ENV, build_auth_service
+    from buyer_svc.vault import InMemoryPseudonymStore, PostgresPseudonymStore
+
+    from proxyshop_support.postgres import role_dsn
+
+    monkeypatch.delenv(VAULT_DSN_ENV, raising=False)
+    assert isinstance(build_auth_service().vault.store, InMemoryPseudonymStore)
+
+    monkeypatch.setenv(
+        VAULT_DSN_ENV, role_dsn("buyer_vault", worker_index, database=worker_database)
+    )
+    email = vault_scratch.email("wired")
+
+    first = build_auth_service()
+    second = build_auth_service()
+    try:
+        assert isinstance(first.vault.store, PostgresPseudonymStore)
+        pseudonym = first.vault.issue(email)
+        assert pseudonym.startswith("psn-")
+
+        # The restart: a service built after the fact resolves what the first one issued.
+        assert second.vault.resolve(pseudonym) == email
+        assert [row.pseudonym for row in second.vault.history(email)] == [pseudonym]
+
+        # And rotation is still rotation across that boundary.
+        rotated = second.vault.issue(email)
+        assert rotated != pseudonym
+        assert [row.pseudonym for row in first.vault.history(email)] == [pseudonym, rotated]
+    finally:
+        for service in (first, second):
+            store = service.vault.store
+            connection = getattr(store, "connection", None)
+            if connection is not None:
+                connection.close()

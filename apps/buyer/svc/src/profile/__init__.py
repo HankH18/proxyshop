@@ -60,6 +60,7 @@ __all__ = [
     "BUCKET_KEYS",
     "BUDGET_BANDS",
     "CATEGORY_LIMIT",
+    "FREQUENCY_TIERS",
     "IDENTITY_ACCOUNT_KEYS",
     "TOP_BUDGET_BAND",
     "IdentityLeak",
@@ -97,6 +98,16 @@ TOP_BUDGET_BAND = "1000+"
 
 #: Most categories an affinity list may carry. A longer list starts to be a purchase log.
 CATEGORY_LIMIT = 3
+
+#: Every value :func:`coarsen_frequency_tier` can emit, and the order-count ceiling that
+#: selects each. Exhaustive on purpose: :func:`identity_leaks` needs to know the coarseners'
+#: closed vocabulary, and a vocabulary written down twice drifts.
+FREQUENCY_TIERS: tuple[tuple[int | None, str], ...] = (
+    (0, "none"),
+    (2, "occasional"),
+    (9, "regular"),
+    (None, "frequent"),
+)
 
 #: Account keys that carry identity. Read by :func:`identity_leaks` — never by a coarsener.
 IDENTITY_ACCOUNT_KEYS: tuple[str, ...] = (
@@ -222,13 +233,10 @@ def coarsen_categories(account: Mapping[str, Any], *, limit: int = CATEGORY_LIMI
 def coarsen_frequency_tier(account: Mapping[str, Any]) -> str:
     """How often this buyer buys, as a tier — never as a count."""
     orders = len(_orders(account))
-    if orders == 0:
-        return "none"
-    if orders <= 2:
-        return "occasional"
-    if orders <= 9:
-        return "regular"
-    return "frequent"
+    for ceiling, tier in FREQUENCY_TIERS:
+        if ceiling is None or orders <= ceiling:
+            return tier
+    raise AssertionError("FREQUENCY_TIERS must end in an open-ended tier")
 
 
 def coarsen_region(value: Any) -> str | None:
@@ -346,6 +354,58 @@ def _distinguishable_from_entropy(value: str) -> bool:
     return len(value) >= 8 or not set(value) <= _HEX_ALPHABET
 
 
+#: Every label the closed-vocabulary coarseners can emit. These values are chosen by
+#: :func:`coarsen_budget_band` and :func:`coarsen_frequency_tier` from a fixed table, never
+#: copied out of the account, so no account could have leaked into one of them.
+_CLOSED_VOCABULARY: frozenset[str] = frozenset(
+    {label for _low, _high, label in BUDGET_BANDS}
+    | {TOP_BUDGET_BAND}
+    | {tier for _ceiling, tier in FREQUENCY_TIERS}
+)
+
+
+def _account_category_slugs(account: Mapping[str, Any]) -> set[str]:
+    """The slugs :func:`coarsen_categories` may legitimately emit for ``account``.
+
+    A slug here came from ``orders[].category`` — the buyer's merchandising taxonomy, which
+    is not an identity field and which the allowlist publishes on purpose.
+    """
+    slugs: set[str] = set()
+    for order in _orders(account):
+        category = order.get("category")
+        if isinstance(category, str):
+            slug = _slug(category)
+            if slug:
+                slugs.add(slug)
+    return slugs
+
+
+def _incidental_bucket_values(account: Mapping[str, Any]) -> set[str]:
+    """Bucket values that cannot be a disclosure however they got into the profile.
+
+    Substring matching an account's identity fragments against the whole serialized profile
+    is the right *shape* for a backstop and the wrong granularity on its own: it cannot tell
+    a coarsener that copied the postal code into ``region`` from a coarsener that emitted its
+    own canonical label which happens to spell a word out of the buyer's address.
+
+    The second is not hypothetical and it is not rare. ``none@example.com`` has no orders, so
+    ``frequency_tier`` is ``"none"``, so the local part of their address appears inside their
+    own profile and the build refuses — that is the default state of *every* brand-new
+    signup. ``espresso.fan@example.com`` who buys espresso is the same collision one bucket
+    over. Both used to fail closed, and failing closed on a value the account could not have
+    supplied is a denial of service, not a privacy guarantee.
+
+    So two families of value are held out of the haystack, and only these two:
+
+    * anything in :data:`_CLOSED_VOCABULARY` — a label from a fixed table;
+    * a slug of one of *this* account's own order categories.
+
+    Everything else — a region code, an unrecognised string, anything a rewired coarsener
+    invents — is still matched in full.
+    """
+    return set(_CLOSED_VOCABULARY) | _account_category_slugs(account)
+
+
 def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
     """Identity values from ``account`` that appear anywhere inside ``profile``.
 
@@ -365,8 +425,14 @@ def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
         body = {key: value for key, value in data.items() if key != "pseudonym"}
 
     fragments = _identity_values(account)
-    haystack = "  ".join(_text_values(body)).casefold()
-    leaked = {value for value in fragments if value in haystack}
+    incidental = _incidental_bucket_values(account)
+    # Each bucket value is searched on its own. Joining them first made a fragment able to
+    # match across the seam between two unrelated values, which is a leak report about a
+    # string no bucket ever held.
+    searchable = [
+        text.casefold() for text in _text_values(body) if text.strip().casefold() not in incidental
+    ]
+    leaked = {value for value in fragments if any(value in text for text in searchable)}
     if isinstance(pseudonym, str):
         name = pseudonym.casefold()
         leaked |= {

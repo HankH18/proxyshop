@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from .magic_link import (
     DEFAULT_LINK_TTL,
+    DEFAULT_MAX_PENDING,
     AccountDirectory,
     InMemoryAccountDirectory,
     LinkIssued,
@@ -28,6 +29,7 @@ from .magic_link import (
     MagicLinkAuth,
     MagicLinkError,
     MagicLinkExpired,
+    MagicLinkThrottled,
     MagicLinkUnknown,
     token_fingerprint,
 )
@@ -44,6 +46,7 @@ from .sessions import (
 
 __all__ = [
     "DEFAULT_LINK_TTL",
+    "DEFAULT_MAX_PENDING",
     "DEFAULT_SESSION_TTL",
     "AccountDirectory",
     "InMemoryAccountDirectory",
@@ -53,6 +56,7 @@ __all__ = [
     "MagicLinkAuth",
     "MagicLinkError",
     "MagicLinkExpired",
+    "MagicLinkThrottled",
     "MagicLinkUnknown",
     "NotAPseudonym",
     "Session",

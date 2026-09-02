@@ -23,20 +23,111 @@ need the mailbox, and the whole scheme would be an open door.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
-from .magic_link import MagicLinkAuth, MagicLinkError
+from ..vault import PostgresPseudonymStore, PseudonymVault
+from .magic_link import MagicLinkAuth, MagicLinkError, MagicLinkThrottled
 from .sessions import SessionError
 
-__all__ = ["auth_service", "get_auth_service", "router", "set_auth_service"]
+__all__ = [
+    "VAULT_DSN_ENV",
+    "WORKER_COUNT_ENVS",
+    "ProcessLocalStateUnsafe",
+    "auth_service",
+    "build_auth_service",
+    "get_auth_service",
+    "router",
+    "set_auth_service",
+]
 
 router = APIRouter(prefix="/buyer", tags=["buyer-auth"])
 
+#: DSN for the one role D5 lets near ``vault.*``. Documented in ``.env.example``; when it is
+#: set the login service keeps its email↔pseudonym history in ``vault.pseudonym_history``
+#: rather than in this process's memory.
+VAULT_DSN_ENV = "PROXYSHOP_PG_DSN_VAULT"
+
+#: The variables a process manager sets when it will fork more than one worker. Standard
+#: names, not invented ones: uvicorn and gunicorn both read ``WEB_CONCURRENCY``.
+WORKER_COUNT_ENVS = ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS")
+
 _service: MagicLinkAuth | None = None
+
+
+class ProcessLocalStateUnsafe(RuntimeError):
+    """The deployment asks for more workers than this service's state model can survive."""
+
+
+def _configured_worker_count() -> tuple[str, int] | None:
+    """The first worker-count variable that is set and asks for more than one worker."""
+    for name in WORKER_COUNT_ENVS:
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        try:
+            count = int(raw.strip())
+        except ValueError:
+            continue  # not a worker count; a process manager would ignore it too
+        if count > 1:
+            return name, count
+    return None
+
+
+def _vault_from_env() -> PseudonymVault | None:
+    """The durable vault, when a ``buyer_vault`` DSN is configured. Otherwise ``None``.
+
+    The connection is opened in autocommit mode on purpose: :class:`PostgresPseudonymStore`
+    reads on every ``issue``, and a long-lived service that left each read sitting in an
+    open transaction would pin a snapshot and block DDL for as long as it ran (CF-4, which
+    this lane's fixtures already had to design around).
+    """
+    dsn = os.environ.get(VAULT_DSN_ENV)
+    if not dsn:
+        return None
+    import psycopg
+
+    return PseudonymVault(PostgresPseudonymStore(psycopg.connect(dsn, autocommit=True)))
+
+
+def build_auth_service() -> MagicLinkAuth:
+    """Construct the login service this process will serve from.
+
+    Two things are decided here, and before this existed neither was decided anywhere: the
+    service was a bare ``MagicLinkAuth()`` and :class:`PostgresPseudonymStore` had no
+    caller outside its own tests.
+
+    * **The vault.** With :data:`VAULT_DSN_ENV` set the email↔pseudonym history lives in
+      ``vault.pseudonym_history`` and survives a restart, which is what makes R5's "a
+      retired pseudonym is never handed out again" a property of the *system* rather than
+      of one process's lifetime — an in-memory vault forgets every pseudonym it ever issued
+      on restart, leaving the freshness check nothing to check against. Without the DSN the
+      in-memory default is kept, so a database-less dev boot is unchanged.
+
+    Raises:
+        ProcessLocalStateUnsafe: a process manager is configured to fork more than one
+            worker. Sessions and unredeemed magic links are held in this process's memory
+            and there is no shared store for either yet, so a second worker cannot redeem a
+            link the first one issued nor recognise a session it minted: behind a load
+            balancer roughly half of logins fail, with a ``401`` indistinguishable from a
+            genuinely bad link. Refusing the configuration is louder and more honest than
+            serving it at a coin-flip success rate.
+    """
+    configured = _configured_worker_count()
+    if configured is not None:
+        name, count = configured
+        raise ProcessLocalStateUnsafe(
+            f"{name}={count} asks for {count} workers, but buyer sessions and unredeemed "
+            f"magic links live in one process's memory: a link issued by one worker cannot "
+            f"be redeemed by another and a session minted by one is unknown to the rest. "
+            f"Run a single worker, or give this service a shared session store first."
+        )
+    vault = _vault_from_env()
+    return MagicLinkAuth() if vault is None else MagicLinkAuth(vault=vault)
 
 
 def auth_service() -> MagicLinkAuth:
@@ -48,7 +139,7 @@ def auth_service() -> MagicLinkAuth:
     """
     global _service
     if _service is None:
-        _service = MagicLinkAuth()
+        _service = build_auth_service()
     return _service
 
 
@@ -117,7 +208,17 @@ def _require_session_header(session_id: str | None) -> str:
     summary="Send a single-use login link to a buyer's mailbox",
 )
 def request_magic_link(body: MagicLinkRequest, service: ServiceDep) -> MagicLinkAccepted:
-    issued = service.request_login(str(body.email))
+    try:
+        issued = service.request_login(str(body.email))
+    except MagicLinkThrottled as exc:
+        # The route takes no credential, so the size of the pending-link table is chosen by
+        # whoever can reach it. At the ceiling the service sheds new requests; it never drops
+        # a link somebody is already holding, which would hand an unauthenticated caller a
+        # way to cancel a chosen buyer's login.
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too many login links are pending; please try again shortly",
+        ) from exc
     return MagicLinkAccepted(expires_at=issued.expires_at)
 
 
