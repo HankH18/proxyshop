@@ -1823,6 +1823,33 @@
         "Do not batch these into one commit; one concern per commit"
       ],
       "parallel_safe": false
+    },
+    {
+      "id": "T-119",
+      "title": "The ledger canonicaliser is one module object under both import spellings",
+      "objective": "T-106's AC3 could not be met in lane: binding the spellings requires editing apps/trust/src/ledger/__init__.py, which was outside the e2e-only scope and shared with T-102. Measured and still true: trust.ledger.canonical is not apps.trust.src.ledger.canonical, and their CanonicalisationError classes are different objects, so a cross-spelling `except CanonicalisationError` fails to catch. packages/llm solved this with _bind_submodules; the block ports over unchanged except that apps/trust/src/ledger is a subpackage rather than a flat src/, so the pkgutil.iter_modules root differs. The T-106 gate already covers the CONSEQUENCE (it compares refusal as a boolean, never as a class) and test_both_spellings_of_the_ledger_canonicaliser_agree stays valid after this lands.",
+      "refs": [
+        "D16",
+        "T-106#AC3",
+        "W2-08"
+      ],
+      "acceptance": [
+        "1. trust.ledger.<mod> is apps.trust.src.ledger.<mod> for every module under the package",
+        "2. CanonicalisationError is the same class object under both spellings, and a cross-spelling except catches",
+        "3. A test asserts both, and the existing T-106 conformance gate still passes unchanged"
+      ],
+      "verify": "pytest apps/trust -q && pytest e2e/test_jcs_conformance.py -q",
+      "scope": [
+        "apps/trust/**"
+      ],
+      "depends_on": [
+        "T-106"
+      ],
+      "non_goals": [
+        "Do not unify the two canonicalizers",
+        "Do not touch packages/contracts"
+      ],
+      "parallel_safe": false
     }
   ]
 }
