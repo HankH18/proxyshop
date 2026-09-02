@@ -27,6 +27,7 @@ byte-for-byte from its inputs (S4) and what lets the whole suite run offline.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -158,6 +159,65 @@ def _sequence(value: Any) -> list[Any]:
     return list(value)
 
 
+class _AdmissionLedger:
+    """What the hooks emitted for the current bid, and which of it has been spent.
+
+    A separate object, held privately, because of what R8 actually argues: the ledger cannot be
+    written by the thing being guarded. The thing being guarded is the hosted path, and the
+    hosted path *holds the facade* — that is what a tool harness is for. A public mutable set on
+    :class:`ToolHooks` therefore hands the guarded party a pen: one ``hooks.emitted_fingerprints
+    .add(...)`` and a claim no hook ever emitted is admissible, with every other wall in this
+    package still standing and still useless. So the set is reachable only from here, the facade
+    exposes immutable snapshots, and the only mutations offered are the two the harness needs —
+    recording an emission, and spending an authorization.
+
+    Neither of those is a hole. Recording happens inside :meth:`ToolHooks._emit`, which is the
+    definition of "a hook emitted this". Spending can only ever *reduce* what is admissible, so
+    a caller that abuses it refuses its own bid.
+
+    Emissions are **counted, not merely noted**, and that is a decision rather than an
+    implementation detail. A fingerprint is content-addressed, so two `authorize_discount` calls
+    for the same depth on the same product produce the same fingerprint — deliberately, because a
+    hosted bid must be byte-identical across two runs (S4) and a nonce would end that. If the
+    ledger were a plain set, "one grant is spendable once" would silently become "this *depth* is
+    spendable once per bid", and calling the hook a second time would buy nothing. Counting keeps
+    the sentence true as written: N authorizations, N spends.
+    """
+
+    __slots__ = ("_emitted", "_spent")
+
+    def __init__(self) -> None:
+        self._emitted: Counter[str] = Counter()
+        self._spent: Counter[str] = Counter()
+
+    def record(self, fingerprint: str) -> None:
+        self._emitted[fingerprint] += 1
+
+    def spend(self, fingerprint: str) -> bool:
+        """Redeem one emission. False when every emission of it has already been redeemed."""
+        if self._spent[fingerprint] >= self._emitted[fingerprint]:
+            return False
+        self._spent[fingerprint] += 1
+        return True
+
+    def remaining(self, fingerprint: str) -> int:
+        """How many emissions of `fingerprint` are still unspent."""
+        return max(0, self._emitted[fingerprint] - self._spent[fingerprint])
+
+    @property
+    def emitted(self) -> frozenset[str]:
+        return frozenset(self._emitted)
+
+    @property
+    def spent(self) -> frozenset[str]:
+        """Fingerprints with no unspent emission left — what the boundary refuses as spent."""
+        return frozenset(
+            fingerprint
+            for fingerprint, count in self._emitted.items()
+            if self._spent[fingerprint] >= count
+        )
+
+
 class ToolHooks:
     """The store-agent's tool harness: six hooks, a ledger, and a call log.
 
@@ -188,10 +248,6 @@ class ToolHooks:
     #: Every claim this facade has emitted, in emission order, across every bid (S5's audit
     #: trail). Never reset — see :meth:`start_bid`.
     emitted_claims: list[Claim]
-    #: Content fingerprints of what was emitted **for the current bid** — what
-    #: `enforce_hook_provenance` checks against. Reset by :meth:`start_bid`, so a grant is
-    #: spendable in the bid it was granted for rather than for the life of the object.
-    emitted_fingerprints: set[str]
     #: One :class:`HookCall` per hook invocation, refusals included. Never reset.
     call_log: list[HookCall]
     #: The bid currently open, as passed to :meth:`start_bid`. Empty before the first one.
@@ -220,8 +276,47 @@ class ToolHooks:
 
         self.call_log = []
         self.emitted_claims = []
-        self.emitted_fingerprints = set()
+        self.__ledger = _AdmissionLedger()
         self.bid_ref = ""
+
+    @property
+    def emitted_fingerprints(self) -> frozenset[str]:
+        """Content fingerprints of what was emitted **for the current bid**.
+
+        What `enforce_hook_provenance` checks against, handed out as a frozen snapshot: the live
+        set is private, so the party this ledger guards cannot enter its own forgeries into it.
+        Reset by :meth:`start_bid`, so a grant is spendable in the bid it was granted for rather
+        than for the life of the object.
+        """
+        return self.__ledger.emitted
+
+    @property
+    def spent_fingerprints(self) -> frozenset[str]:
+        """The authorizations already redeemed in this bid. See :meth:`spend_authorization`."""
+        return self.__ledger.spent
+
+    def spend_authorization(self, fingerprint: str) -> bool:
+        """Redeem an emitted authorization, exactly once. True if this call was the redemption.
+
+        Called by :func:`~.provenance.enforce_hook_provenance` when it admits a grant. A grant is
+        one authorization — the walls were checked once, for one product, at one moment — and a
+        boundary that only asked "is it in the ledger" would let a single `authorize_discount`
+        call furnish the discount for every offer in the bid.
+
+        Public because the boundary lives in another module and must be able to call it, and
+        harmless for being public: spending can only ever shrink what is admissible.
+        """
+        return self.__ledger.spend(str(fingerprint))
+
+    def remaining_authorizations(self, fingerprint: str) -> int:
+        """How many unspent authorizations of `fingerprint` this bid still holds.
+
+        Asked *before* anything is spent, because "exactly once" has to hold inside a single
+        boundary call as well as across two: a bid that lists one grant three times must be
+        refused, and a membership test of what has already been spent cannot see that — nothing
+        has been spent yet. The boundary counts what a call asks for and compares it with this.
+        """
+        return self.__ledger.remaining(str(fingerprint))
 
     def start_bid(self, bid_ref: str = "") -> None:
         """Open a new bid: nothing emitted for the previous one stays admissible.
@@ -245,7 +340,7 @@ class ToolHooks:
         is a long-lived facade that never says when a bid ended.
         """
         self.bid_ref = str(bid_ref)
-        self.emitted_fingerprints = set()
+        self.__ledger = _AdmissionLedger()
 
     # -- provenance refs -----------------------------------------------------------------
 
@@ -289,7 +384,7 @@ class ToolHooks:
         recorded = list(claims)
         for claim in recorded:
             self.emitted_claims.append(claim)
-            self.emitted_fingerprints.add(claim_fingerprint(claim))
+            self.__ledger.record(claim_fingerprint(claim))
         return recorded
 
     def _log(
@@ -567,6 +662,15 @@ class ToolHooks:
         With no learned policy (R10 cold start) the action is the deterministic default: zero
         discount, the envelope's standing commitments, and version ``cold-start``. There is no
         improvisation path.
+
+        **The depth goes through the envelope wall.** ``learned_policy['actions'][cluster]`` is
+        the output of the store's own learning loop, not a merchant approval, and a loop that has
+        learned to ask for 25% must still be refused by a 20% envelope. Copying `discount_pct`
+        out of it verbatim made this hook a second door to a discount — one with no walls at all,
+        reached without calling :meth:`authorize_discount`, and unnoticed because the claim's key
+        is `policy_action`. A depth the envelope refuses fails closed to no discount and is
+        recorded in the call log; the rest of the policy's choice stands, because only the depth
+        is walled.
         """
         ask = _as_mapping(context, "policy context")
         cluster_id = str(ask.get("cluster_id") or "")
@@ -584,13 +688,28 @@ class ToolHooks:
             "discount_pct": 0.0,
             "commitment_keys": sorted(k for k in commitment_keys if k),
         }
+        walled = ""
         learned = self.learned_policy
         if isinstance(learned, Mapping):
             by_cluster = _as_mapping(learned.get("actions"), "learned policy actions")
             chosen = _as_mapping(by_cluster.get(cluster_id), "learned policy action")
-            for name in ("discount_pct", "commitment_keys", "value_prop"):
+            for name in ("commitment_keys", "value_prop"):
                 if name in chosen:
                     action[name] = chosen[name]
+            if "discount_pct" in chosen:
+                proposed = chosen["discount_pct"]
+                try:
+                    depth = float(proposed)
+                except (TypeError, ValueError):
+                    depth = None
+                if depth == 0.0:
+                    # No depth is inside every wall, and asking about a product the policy did
+                    # not name would refuse it for the wrong reason.
+                    action["discount_pct"] = 0.0
+                elif depth is not None and self.would_authorize(product_ref, depth):
+                    action["discount_pct"] = depth
+                else:
+                    walled = f"; envelope refused the policy's {proposed!r}% depth"
 
         claim = mint_claim(
             key="policy_action",
@@ -600,7 +719,13 @@ class ToolHooks:
             observed_at=self._observed_at(),
         )
         emitted = self._emit([claim])
-        self._log("choose_policy_action", cluster_id, "action", emitted, detail=version)
+        self._log(
+            "choose_policy_action",
+            cluster_id,
+            "action_walled" if walled else "action",
+            emitted,
+            detail=f"{version}{walled}",
+        )
         return emitted[0]
 
     # -- hook 6: the network prior -------------------------------------------------------

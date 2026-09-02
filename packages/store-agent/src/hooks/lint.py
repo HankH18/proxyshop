@@ -11,10 +11,17 @@ check reads the whole hosted tree instead of one execution, and it fires at `pyt
 of it ships.
 
 **The rule.** On the hosted path — every module under `packages/store-agent/src/` except the
-minting site itself and `src/external/` — the names `Claim` and `Provenance` may be imported and
-annotated with, but never *called*. Building one means calling `mint_claim` / `mint_provenance`
-in :mod:`.provenance`, which stamps the hook's own source class and the published authority rank
-and cannot be talked into stamping another hook's.
+minting site itself and `src/external/` — the classes `Claim` and `Provenance` may be imported
+and annotated with, but never *called*. Building one means calling `mint_claim` /
+`mint_provenance` in :mod:`.provenance`, which stamps the hook's own source class and the
+published authority rank and cannot be talked into stamping another hook's.
+
+It is a rule about the *object*, not about the token. A checker that matched the callee's
+spelling would be evaded by ``getattr(protocol, 'Claim')(**row)``, by ``MODELS['Claim'](**row)``,
+by ``Fact = contracts.Claim`` and by ``p.Claim.model_validate(row)`` — four ways an ordinary
+author reaches the identical class, none of them written to be sneaky, all of them landing a
+forged claim on the hosted path with the lint silent. So the callee is *resolved* rather than
+matched: see :func:`_resolves_to_guarded`.
 
 **Why `src/external/` is exempt, and why that is not a hole.** The external door (T-044) receives
 Tier-2 submissions from agents this platform does not run. Their claims are `seller_asserted` —
@@ -72,6 +79,18 @@ class Offence:
         )
 
 
+def _string_constants(tree: ast.Module) -> dict[str, str]:
+    """Every local name bound to a string literal. ``WANTED = 'Claim'; MODELS[WANTED](...)``."""
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        bindings[target.id] = node.value.value
+    return bindings
+
+
 def _guarded_names(tree: ast.Module) -> dict[str, str]:
     """Every local name in `tree` bound to a guarded class, mapped to which class it is.
 
@@ -80,9 +99,11 @@ def _guarded_names(tree: ast.Module) -> dict[str, str]:
     class to a name the token test never sees, and neither is an exotic spelling. Resolving the
     bindings first is what turns this into a rule about constructing the thing.
 
-    Assignments are resolved to a fixed point rather than in source order, so a rebinding written
-    above its own source (inside a function defined before the module-level alias, say) is still
-    followed. Modules are small; this converges in a pass or two.
+    Three binding forms are followed, because all three are ordinary Python: an aliased import,
+    a rebinding from another local name, and a rebinding from a module attribute
+    (``Fact = contracts.Claim``). Assignments are resolved to a fixed point rather than in source
+    order, so a rebinding written above its own source (inside a function defined before the
+    module-level alias, say) is still followed. Modules are small; this converges in a pass or two.
     """
     names = {name: name for name in GUARDED_CONSTRUCTORS}
     for node in ast.walk(tree):
@@ -91,13 +112,20 @@ def _guarded_names(tree: ast.Module) -> dict[str, str]:
                 if imported.name in GUARDED_CONSTRUCTORS and imported.asname:
                     names[imported.asname] = imported.name
 
-    assignments = [
-        (target.id, node.value.id)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    ]
+    assignments: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if isinstance(node.value, ast.Name):
+            source = node.value.id
+        elif isinstance(node.value, ast.Attribute) and node.value.attr in GUARDED_CONSTRUCTORS:
+            source = node.value.attr
+        else:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                assignments.append((target.id, source))
+
     changed = True
     while changed:
         changed = False
@@ -109,21 +137,59 @@ def _guarded_names(tree: ast.Module) -> dict[str, str]:
     return names
 
 
-def _guarded_target(node: ast.Call, names: dict[str, str]) -> str | None:
+def _named_string(node: ast.expr, strings: dict[str, str]) -> str | None:
+    """The string a node denotes: a literal, or a local name bound to one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return strings.get(node.id)
+    return None
+
+
+def _resolves_to_guarded(
+    node: ast.expr, names: dict[str, str], strings: dict[str, str]
+) -> str | None:
+    """Which guarded class the expression `node` denotes, or `None`.
+
+    The static half exists for the hosted branch the runtime guard never executes, which means it
+    has to survive being written by someone who does not want it to fire. Every spelling below
+    reaches the identical class object and none of them is exotic:
+
+    * a name bound to it, imported, aliased, or rebound — ``Claim``, ``Fact``, ``P``;
+    * a module attribute — ``contracts.Claim``, ``protocol.Claim``;
+    * ``getattr(module, 'Claim')`` — the same attribute access, spelled as a call;
+    * a registry lookup — ``MODELS['Claim']``, or ``MODELS[WANTED]`` with ``WANTED = 'Claim'``.
+
+    Resolution is by construction, not by regex, so widening it does not widen what counts as a
+    construction: every branch still has to name a guarded class.
+    """
+    if isinstance(node, ast.Name):
+        return names.get(node.id)
+    if isinstance(node, ast.Attribute):
+        return node.attr if node.attr in GUARDED_CONSTRUCTORS else None
+    if isinstance(node, ast.Call):
+        callee = node.func
+        if isinstance(callee, ast.Name) and callee.id == "getattr" and len(node.args) >= 2:
+            wanted = _named_string(node.args[1], strings)
+            return wanted if wanted in GUARDED_CONSTRUCTORS else None
+        return None
+    if isinstance(node, ast.Subscript):
+        wanted = _named_string(node.slice, strings)
+        return wanted if wanted in GUARDED_CONSTRUCTORS else None
+    return None
+
+
+def _guarded_target(node: ast.Call, names: dict[str, str], strings: dict[str, str]) -> str | None:
     """Which guarded class `node` builds, or `None` if it builds none.
 
-    Three shapes reach the same object: calling a name bound to the class (`Claim(...)`, or any
-    alias of it), calling it off a module (`protocol.Claim(...)`), and calling one of its
-    constructor class methods (`Claim.model_validate(...)`).
+    Two questions, in this order: is the callee one of the class's constructor methods, in which
+    case the *receiver* is what must resolve to a guarded class (`Claim.model_validate(...)`,
+    `p.Claim.model_validate(...)`); otherwise, does the callee itself resolve to one.
     """
     func = node.func
-    if isinstance(func, ast.Name):
-        return names.get(func.id)
-    if isinstance(func, ast.Attribute):
-        if func.attr in CONSTRUCTOR_METHODS and isinstance(func.value, ast.Name):
-            return names.get(func.value.id)
-        return func.attr if func.attr in GUARDED_CONSTRUCTORS else None
-    return None
+    if isinstance(func, ast.Attribute) and func.attr in CONSTRUCTOR_METHODS:
+        return _resolves_to_guarded(func.value, names, strings)
+    return _resolves_to_guarded(func, names, strings)
 
 
 def _is_exempt(relative: Path) -> bool:
@@ -153,10 +219,11 @@ def hosted_claim_construction_offenders(source_root: str | Path) -> list[Offence
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         names = _guarded_names(tree)
+        strings = _string_constants(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            name = _guarded_target(node, names)
+            name = _guarded_target(node, names, strings)
             if name is not None:
                 offences.append(Offence(path=relative.as_posix(), line=node.lineno, name=name))
     return offences
