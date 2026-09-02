@@ -159,18 +159,37 @@ def load_provenance(name: str) -> dict[str, Any]:
 
 
 def load_system_contract(name: str) -> str:
-    """The system contract the recorded fixture ``name`` was authored against."""
-    document = json.loads(recording_path(name).read_text(encoding="utf-8"))
-    system = document.get("system", "")
-    return system if isinstance(system, str) else ""
+    """The system contract the recorded fixture ``name`` was authored against.
+
+    ``""`` when the fixture declares none — meaning "authored for calls with no system
+    contract at all".
+
+    Raises:
+        RecordingError: if there is no such fixture, or it fails validation. It goes
+            through :func:`load_recording` for that: reading the file directly here made
+            this the one function in the module that answered a typo'd stem with a bare
+            ``FileNotFoundError`` and a path, instead of the "have: ..." list every
+            sibling gives, and it also skipped provenance validation (D21) — so an
+            unreviewed file could still hand back a contract.
+    """
+    recordings = load_recording(name)
+    # load_recording_file keys every entry of one file on that file's `system`, and
+    # refuses an empty table, so any key carries the contract.
+    contract, _ = next(iter(recordings))
+    return contract
 
 
 def load_all_recordings() -> dict[tuple[str, str], str]:
     """Every committed recording, merged into one table.
 
+    A ``(system, prompt)`` key recorded in two files with the **same** reply is merged
+    silently — the two files agree, so there is nothing to disambiguate and the merged
+    table is smaller than the sum of the parts. Only a *conflict* is refused.
+
     Raises:
-        RecordingError: on a duplicate prompt across two files — two different reviewed
-            answers to the same prompt is an ambiguity, not a merge.
+        RecordingError: when two files record different replies for one ``(system,
+            prompt)`` key — two different reviewed answers to the same call is an
+            ambiguity, not a merge.
     """
     merged: dict[tuple[str, str], str] = {}
     origins: dict[tuple[str, str], str] = {}

@@ -17,12 +17,25 @@ anything that opens one:
   green. :func:`llm.prompting.wire_key` computes the pair exactly as
   :class:`llm.client.AnthropicLLM` sends it, so the two cannot drift.
 * :class:`DeterministicLLM` — answers any prompt with a stable function of
-  ``(role, prompt)``. For code paths that must run offline but whose reply text nobody
-  asserts on. The reply shape matches ``proxyshop_support.llm_double.LLMDouble`` so the
-  two agree: ``double:<role>:<16 hex chars>``.
+  ``(role, system, prompt)``. For code paths that must run offline but whose reply text
+  nobody asserts on. The reply *shape* matches ``proxyshop_support.llm_double.LLMDouble``
+  — ``double:<role>:<16 hex chars>`` — but see that class's docstring for the three
+  places it is not a byte-for-byte drop-in.
 
 Both record every call in ``.calls``, which is how a test asserts on *prompt assembly* —
-e.g. that the static store context precedes the dynamic tail (C4).
+e.g. that the static store context precedes the dynamic tail (C4). Note **where** the two
+halves land: a call is recorded split the way it is sent, so the static context is on
+``call.system`` and the dynamic tail is on ``call.prompt``. The assertion is therefore
+over the pair::
+
+    call = double.calls[-1]
+    assert call.system == STORE_CONTEXT           # the cached half, sent first
+    assert call.prompt == "buyer asks: ..."       # the dynamic half, sent last
+
+and NOT ``call.prompt.index(STORE_CONTEXT) < call.prompt.index(tail)``, which cannot work:
+``call.prompt`` holds the tail alone, so that raises ``ValueError: substring not found``.
+Assert on the assembled single string with :func:`llm.prompting.CachedPrompt.text` if that
+is what you want to see.
 
 Both also implement the full surface of the orchestrator-frozen
 ``proxyshop_support.llm_double.LLMDouble`` — :meth:`queue`, :meth:`when`, ``calls``,
@@ -140,6 +153,15 @@ class _RecordingBase:
 
         Matched against the whole prompt *including the system half*, so a rule keyed on
         contract text ("never infer") fires the way a reader expects.
+
+        A rule is **persistent and unconditional**: unlike :meth:`queue`, which is
+        consumed, a rule keeps matching for the life of the double and :meth:`reset` does
+        not clear it. On :class:`RecordedLLM` that is a deliberate hole in strictness — a
+        call whose prompt contains ``substring`` gets ``response`` and never consults the
+        recorded table, so it can no longer raise :class:`UnrecordedPromptError` for that
+        prompt. Strictness is intact for every prompt no rule matches, which is what
+        ``test_a_when_rule_does_not_make_the_recorded_double_permissive_for_everything``
+        pins. Keep the needle specific, and prefer :meth:`queue` for a one-off.
         """
         self._canned[substring] = response
         return self
@@ -186,11 +208,25 @@ class _RecordingBase:
         digest = hashlib.sha256(f"{role}\x00{prompt}".encode()).hexdigest()[:16]
         return f"double:{role}:{digest}"
 
+    @property
+    def model(self) -> str:
+        """``"double:<role>"`` — the parity of :attr:`llm.client.AnthropicLLM.model`.
+
+        A double sends no request and has no model id, but a consumer that logs
+        ``client.model`` should not work under ``LLM_PROVIDER=anthropic`` and raise
+        ``AttributeError`` under D20's default. It deliberately does NOT look like a
+        model id: reading ``double:buyer`` in a log is the point.
+        """
+        return f"double:{getattr(self, 'role', None) or 'default'}"
+
     def reset(self) -> None:
         """Forget the recorded calls and any queued replies.
 
         Canned :meth:`when` rules and the recorded table survive, matching the frozen
-        ``LLMDouble.reset``.
+        ``LLMDouble.reset``. That parity is deliberate, and it is also a leak: a
+        session- or module-scoped double carrying a :meth:`when` rule keeps answering
+        with it in every later test, and ``reset()`` between tests will not save you.
+        Register rules on a per-test double, or drop the rule explicitly.
         """
         self.calls.clear()
         self._queue.clear()
@@ -301,6 +337,20 @@ class RecordedLLM(_RecordingBase):
         system_text, user_text = key
         source = f" ({self.name})" if self.name else ""
 
+        # Name the function that fixes the single most likely miss. `from_fixture(name)`
+        # loads the fixture's recordings but NOT its system contract, so the obvious first
+        # call — `RecordedLLM.from_fixture(n).complete(recorded_prompt)` — misses on the
+        # system half, and the message used to describe the miss without ever spelling the
+        # one-liner that resolves it.
+        contract_hint = (
+            f"\nThis double was built from the {self.name!r} fixture, whose recordings "
+            f"were authored against that file's system contract. Pass it:\n"
+            f"    from llm.recordings import load_system_contract\n"
+            f"    double.complete(prompt, system=load_system_contract({self.name!r}))"
+            if self.name
+            else ""
+        )
+
         # The most valuable miss to diagnose: the user turn is recorded, but under a
         # different system contract. That is a prompt-contract change, and saying so is
         # the difference between a two-second fix and an afternoon.
@@ -319,7 +369,8 @@ class RecordedLLM(_RecordingBase):
                 f"system recorded: "
                 + "; ".join(f"({len(other)} chars) {other[:200]!r}" for other in same_prompt[:2])
                 + "\nIf the contract genuinely changed, re-review the recording. If it "
-                "did not, pass the same system text the fixture was authored against.",
+                "did not, pass the same system text the fixture was authored against."
+                + contract_hint,
                 prompt=user_text,
             )
 
@@ -338,7 +389,7 @@ class RecordedLLM(_RecordingBase):
             f"or pass it in the recordings dict.\n"
             f"prompt ({len(user_text)} chars): {user_text[:400]!r}\n"
             f"system ({len(system_text)} chars): {system_text[:200]!r}\n"
-            f"{len(self._recordings)} recording(s) available.{hint}",
+            f"{len(self._recordings)} recording(s) available.{hint}{contract_hint}",
             prompt=user_text,
         )
 
@@ -351,16 +402,27 @@ class DeterministicLLM(_RecordingBase):
     """Answers any prompt with a stable, offline, content-derived string.
 
     Args:
-        role: the role label used in the reply and recorded on every call.
         default: a fixed reply for every prompt. ``None`` selects :meth:`deterministic`.
+            Positional, matching ``LLMDouble(default)``.
+        role: the role label used in the reply and recorded on every call. Keyword-only;
+            the frozen double takes its role per *call* instead.
 
     This is what :func:`llm.client.build_llm` returns for ``LLM_PROVIDER=double`` when no
     recordings were supplied: code that must *run* offline gets a reply, and code that
     asserts on the reply uses :class:`RecordedLLM` instead. :meth:`queue` and :meth:`when`
     work here too, so a test can script an exchange without leaving the default provider.
+
+    **Not a byte-for-byte drop-in for the frozen ``LLMDouble``**, in three known places:
+    the digest covers the system half here and not there, so any call passing ``system=``
+    gets a different reply string; :meth:`complete_json` returns a marker object on an
+    unscripted call where the frozen one raises ``JSONDecodeError``; and the role is a
+    constructor argument here (defaulting to ``"default"``) as well as a per-call one.
+    Everything the frozen double's tests actually assert — the ``double:<role>:<hex>``
+    shape, :meth:`queue`/:meth:`when` precedence, ``calls``/``last_prompt``/:meth:`reset`,
+    and ``deterministic()`` itself — agrees exactly.
     """
 
-    def __init__(self, *, role: str = "default", default: str | None = None) -> None:
+    def __init__(self, default: str | None = None, *, role: str = "default") -> None:
         super().__init__()
         self.role = role
         self._default = default
@@ -394,22 +456,39 @@ class DeterministicLLM(_RecordingBase):
         """What the deterministic hash is taken over.
 
         With no system half this is the bare prompt, so :meth:`deterministic` agrees with
-        the frozen ``LLMDouble`` byte for byte for the calls that double can make.
+        the frozen ``LLMDouble`` byte for byte for calls that pass no ``system=``. A call
+        that passes one **diverges deliberately**: the frozen double drops the system half
+        entirely, so inverting the prompt contract leaves its reply unchanged, and this
+        package exists partly to stop exactly that.
         """
         return f"{system_text}{SECTION_SEPARATOR}{user_text}" if system_text else user_text
 
     def complete_json(self, prompt: Any, **kwargs: Any) -> Any:
-        """:meth:`complete`, parsed as JSON — and it always parses.
+        """:meth:`complete`, parsed as JSON. Only the **unscripted** reply is rescued.
 
-        A deterministic reply is ``double:<role>:<hex>``, which is not JSON, so this used
-        to raise ``JSONDecodeError`` on every call that had no queued, canned or default
-        reply. Two of this package's four recorded roles are JSON roles, so any consumer
-        running under the default provider (D20) died on its first call. It now returns
-        the same information as an object.
+        :meth:`complete` has four reply sources, and this method changes exactly one of
+        them. A queued reply, a :meth:`when` reply and a ``default=`` reply are parsed
+        as-is and raise ``json.JSONDecodeError`` when they are not JSON — you wrote that
+        text, so a silent rescue would hide your typo. Only the fall-through
+        ``double:<role>:<hex>``, which nobody wrote, is turned into an object:
 
-        The shape is ``{"double": <role>, "digest": <hex>}`` — stable, but deliberately
-        NOT your schema. A consumer that needs a schema-shaped reply wants
-        :class:`RecordedLLM`, or a ``default=`` holding the JSON it expects.
+        ==============  ==================================================
+        reply source    non-JSON reply
+        ==============  ==================================================
+        ``queue()``     raises ``JSONDecodeError``
+        ``when()``      raises ``JSONDecodeError``
+        ``default=``    raises ``JSONDecodeError``
+        unscripted      returns ``{"double": <role>, "digest": <hex>}``
+        ==============  ==================================================
+
+        The unscripted rescue exists because ``double:<role>:<hex>`` is not JSON, so this
+        used to raise on every call that had no queued, canned or default reply. Two of
+        this package's four recorded roles are JSON roles, so any consumer running under
+        the default provider (D20) died on its first call.
+
+        The marker shape is stable, but deliberately NOT your schema. A consumer that
+        needs a schema-shaped reply wants :class:`RecordedLLM`, or a ``default=`` holding
+        the JSON it expects.
         """
         reply = self.complete(prompt, **kwargs)
         try:

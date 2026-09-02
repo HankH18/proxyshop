@@ -145,3 +145,42 @@ def test_a_missing_fixture_names_the_ones_that_exist() -> None:
     assert "no_such_fixture" in message
     for name in available_recordings():
         assert name in message
+
+
+# --------------------------------------------------------------------------------------
+# load_system_contract goes through the validated loader (W1-20)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_missing_contract_names_the_fixtures_that_exist_like_every_sibling_does() -> None:
+    """It used to read the file directly and raise a bare FileNotFoundError with a path.
+
+    Every other entry point in this module answers a typo'd stem with a RecordingError
+    naming the committed fixtures; this one did not, so the most likely mistake got the
+    least useful message.
+    """
+    with pytest.raises(RecordingError) as excinfo:
+        load_system_contract("no_such_fixture")
+    message = str(excinfo.value)
+    assert "no_such_fixture" in message
+    for name in available_recordings():
+        assert name in message, "the message must list the fixtures that do exist"
+
+
+def test_a_contract_read_without_provenance_is_refused_too(tmp_path, monkeypatch) -> None:
+    """D21 validation applies here as well: an unreviewed file cannot supply a contract."""
+    from llm import recordings as recordings_module
+
+    monkeypatch.setattr(recordings_module, "RECORDINGS_DIR", tmp_path)
+    (tmp_path / "unreviewed.json").write_text(
+        json.dumps({"system": "A CONTRACT", "recordings": {"p": "r"}}), encoding="utf-8"
+    )
+    with pytest.raises(RecordingError) as excinfo:
+        load_system_contract("unreviewed")
+    assert "provenance" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("name", available_recordings())
+def test_the_contract_matches_the_one_every_key_in_the_file_carries(name: str) -> None:
+    contract = load_system_contract(name)
+    assert {system for system, _ in load_recording(name)} == {contract}

@@ -316,3 +316,229 @@ def test_deterministic_double_accepts_a_fixed_default(no_network) -> None:
     assert double.complete_json(CachedPrompt("STATIC", "TAIL")) == {"claims": []}
     assert double.last_prompt == "TAIL"
     assert double.calls[-1].system == "STATIC"
+
+
+# --------------------------------------------------------------------------------------
+# what `when` does to strictness (W1-13), and what it does across tests (EXTRA-4)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_when_rule_does_not_make_the_recorded_double_permissive_for_everything(
+    no_network,
+) -> None:
+    """A rule is an intentional hole in strictness — a hole, not a demolition.
+
+    `queue` has this guarantee tested, and it holds there partly for free: a queue is
+    consumed, so it cannot keep answering. A `when` rule is persistent and unconditional,
+    so the equivalent guarantee is the one that could actually be lost, and nothing
+    asserted it. A rule keyed on the *user* half is enough to break it — this is not about
+    the system-half haystack.
+    """
+    double = RecordedLLM(RECORDINGS).when("classify", "canned")
+
+    # The hole, on purpose: a prompt the rule matches is answered without consulting the
+    # table, so an UNRECORDED prompt containing the needle gets the canned reply.
+    assert double.complete("please classify this thing") == "canned"
+
+    # ...and strictness is intact everywhere else, before and after the rule has fired.
+    for unmatched in ("summarize the envelop", "a prompt that was never recorded"):
+        with pytest.raises(UnrecordedPromptError):
+            double.complete(unmatched)
+
+    # The recorded table still answers a prompt the rule does not match.
+    assert double.complete("summarize the envelope") == RECORDINGS["summarize the envelope"]
+
+
+def test_reset_does_not_clear_when_rules_so_a_shared_double_leaks_across_tests() -> None:
+    """Frozen-double parity, and a trap worth stating: `reset()` will not save you.
+
+    `LLMDouble.reset` keeps canned matches, so ours does too. A session- or module-scoped
+    double therefore carries a `when` rule into every later test that uses it.
+    """
+    from proxyshop_support.llm_double import LLMDouble
+
+    for double in (RecordedLLM(RECORDINGS), DeterministicLLM(), LLMDouble()):
+        double.queue("queued").when("classify", "canned")
+        double.reset()
+        assert double.calls == []
+        assert double.complete("classify the intent") == "canned", (
+            "the queue is cleared by reset(); the when rule deliberately is not"
+        )
+
+
+# --------------------------------------------------------------------------------------
+# the miss message names the function that fixes it (W1-19)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_fixture_miss_names_load_system_contract(no_network) -> None:
+    """`from_fixture(n).complete(recorded_prompt)` is the obvious first call, and it misses.
+
+    `from_fixture` loads the recordings but not the fixture's system contract, so the
+    prompt is recorded and the call still misses on the system half. Five consumer tickets
+    will hit this, and the message has to spell the one-liner that resolves it rather than
+    only describing the miss.
+    """
+    name = "buyer_intent"
+    recorded_prompt = next(iter(load_recording(name)))[1]
+    double = RecordedLLM.from_fixture(name)
+
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        double.complete(recorded_prompt)
+    message = str(excinfo.value)
+    assert "load_system_contract" in message, "name the function that fixes it"
+    assert name in message
+
+    # And the spelling the message gives actually works.
+    from packages.llm import load_system_contract
+
+    assert double.complete(recorded_prompt, system=load_system_contract(name))
+
+    # The same hint reaches the "no recording at all" miss, not only the contract miss.
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        double.complete("PITCH\nnothing like this was ever recorded")
+    assert "load_system_contract" in str(excinfo.value)
+
+
+def test_a_double_with_no_fixture_name_does_not_claim_to_have_one(no_network) -> None:
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        RecordedLLM(RECORDINGS).complete("unrecorded")
+    assert "load_system_contract" not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------------------
+# `.model` parity with the live client (EXTRA-2)
+# --------------------------------------------------------------------------------------
+
+
+def test_both_doubles_expose_model_so_a_consumer_logging_it_does_not_crash() -> None:
+    """`client.model` worked under `anthropic` and AttributeError'd under D20's default.
+
+    The value deliberately does not look like a model id: a double sends no request, and
+    `double:buyer` in a log is the useful thing to read.
+    """
+    assert RecordedLLM({"p": "r"}, role="buyer").model == "double:buyer"
+    assert DeterministicLLM(role="extract").model == "double:extract"
+    assert DeterministicLLM().model == "double:default"
+    assert RecordedLLM({"p": "r"}).model == "double:default"
+
+
+# --------------------------------------------------------------------------------------
+# how far DeterministicLLM is a drop-in for the frozen LLMDouble (W1-22 / W1-25)
+# --------------------------------------------------------------------------------------
+
+
+def test_the_deterministic_double_behaves_like_the_frozen_one_where_it_claims_to() -> None:
+    """Behavioural parity, not `hasattr`.
+
+    `test_both_doubles_implement_the_whole_frozen_double_surface` compares NAMES only, so
+    it passes whatever those methods do. This runs the same calls through both.
+    """
+    from proxyshop_support.llm_double import LLMDouble
+
+    # `default` is positional on both. `DeterministicLLM("reply")` used to be a TypeError,
+    # while the documented claim was byte-for-byte agreement.
+    assert DeterministicLLM("reply").complete("p") == LLMDouble("reply").complete("p") == "reply"
+
+    # No system half: the digests agree byte for byte, for every role spelling.
+    for role in ("default", "buyer", "extract"):
+        assert DeterministicLLM(role=role).complete("a prompt") == LLMDouble().complete(
+            "a prompt", role=role
+        )
+
+    # queue > when > default, in the same order, with the same replies.
+    mine, frozen = DeterministicLLM("fallback"), LLMDouble("fallback")
+    for double in (mine, frozen):
+        double.queue("q1").when("needle", "canned")
+    assert (
+        [mine.complete("needle"), mine.complete("needle"), mine.complete("plain")]
+        == [
+            frozen.complete("needle"),
+            frozen.complete("needle"),
+            frozen.complete("plain"),
+        ]
+        == ["q1", "canned", "fallback"]
+    )
+
+
+def test_the_deterministic_double_diverges_from_the_frozen_one_exactly_where_documented(
+    no_network,
+) -> None:
+    """The three known non-drop-in spots, pinned so the docstring cannot go stale."""
+    from proxyshop_support.llm_double import LLMDouble
+
+    # 1. the system half is part of this double's digest and not the frozen one's — which
+    #    is the whole point: an inverted contract must not return the identical reply.
+    assert DeterministicLLM().complete("p", system="s") != LLMDouble().complete("p", system="s")
+    assert LLMDouble().complete("p", system="s") == LLMDouble().complete("p", system="INVERTED")
+    assert DeterministicLLM().complete("p", system="s") != DeterministicLLM().complete(
+        "p", system="INVERTED"
+    )
+
+    # 2. complete_json rescues the unscripted reply here; the frozen one raises.
+    assert DeterministicLLM(role="extract").complete_json("p")["double"] == "extract"
+    with pytest.raises(json.JSONDecodeError):
+        LLMDouble().complete_json("p")
+
+    # 3. the role is a constructor argument here as well as a per-call one.
+    assert DeterministicLLM(role="buyer").complete("p") == DeterministicLLM().complete(
+        "p", role="buyer"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# complete_json rescues exactly one of four reply sources (EXTRA-3)
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source", "build"),
+    [
+        ("queue", lambda: DeterministicLLM().queue("not json")),
+        ("when", lambda: DeterministicLLM().when("p", "not json")),
+        ("default", lambda: DeterministicLLM("not json")),
+    ],
+)
+def test_complete_json_does_not_rescue_a_reply_you_wrote_yourself(no_network, source, build):
+    """The docstring's `and it always parses` was false for three of four reply sources.
+
+    Rescuing text a test author wrote would hide their typo; only the fall-through
+    `double:<role>:<hex>`, which nobody wrote, is turned into an object.
+    """
+    with pytest.raises(json.JSONDecodeError):
+        build().complete_json("p")
+
+
+def test_complete_json_rescues_only_the_unscripted_reply(no_network) -> None:
+    assert DeterministicLLM(role="buyer").complete_json("p") == {
+        "double": "buyer",
+        "digest": DeterministicLLM(role="buyer").complete("p").rsplit(":", 1)[1],
+    }
+    # A queued/canned/default reply that IS valid JSON is returned parsed, as promised.
+    assert DeterministicLLM('{"ok": true}').complete_json("p") == {"ok": True}
+
+
+# --------------------------------------------------------------------------------------
+# where the two halves land on a recorded call (W1-18)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_recorded_call_splits_the_halves_the_way_they_are_sent(no_network) -> None:
+    """The module docstring's ordering example, executed.
+
+    It used to document `call.prompt.index(static) < call.prompt.index(tail)`, which raises
+    `ValueError: substring not found`: `call.prompt` holds the dynamic tail ALONE, because
+    that is what the user turn carries. The assertion is over the pair.
+    """
+    double = DeterministicLLM(role="store_agent")
+    prompt = assemble_prompt("STORE CONTEXT\nfloor 18.00", "BUYER\nquote me")
+    double.complete(prompt)
+
+    call = double.calls[-1]
+    assert call.system == "STORE CONTEXT\nfloor 18.00"
+    assert call.prompt == "BUYER\nquote me"
+    with pytest.raises(ValueError, match="substring not found"):
+        call.prompt.index("STORE CONTEXT")
+
+    # The assembled single string is where an ordering assertion belongs.
+    assert prompt.text.index("STORE CONTEXT") < prompt.text.index("BUYER")
