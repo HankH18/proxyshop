@@ -6,8 +6,13 @@ protocol. This module regenerates the two typed views of it:
 * `packages/contracts/generated/python/protocol.py` — Pydantic v2 models, via
   `datamodel-code-generator`;
 * `packages/contracts/generated/ts/protocol.schema.d.ts` — TypeScript types, via
-  `json-schema-to-typescript` (the `codegen` script already declared in this package's
-  `package.json`).
+  `json-schema-to-typescript`.
+
+`_json2ts_argv` below is the ONLY definition of that json2ts invocation. `package.json` used to
+carry a second, independently-written `codegen` script with the same flags; the two agreed, but
+the drift test only ever regenerates through this module, so an edit to either was invisible to
+the other and nothing would have caught them diverging. `tests/test_schema_bundle.py` now pins
+that there is exactly one.
 
 Run it with::
 

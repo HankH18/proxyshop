@@ -372,7 +372,10 @@ describe("RFC 8785 §3.1 — the number rule", () => {
     // The structural reason TS needed no coercion fix: the literal 9007199254740993 IS
     // 9007199254740992 by the time it is a value. The rule still has to be pinned, because the
     // bigint door is open.
-    expect(9007199254740993).toBe(9007199254740992);
+    // Built from a string, not written as a literal: `no-loss-of-precision` rejects the literal
+    // form, which is itself the point being made.
+    expect(Number("9007199254740993")).toBe(Number(2n ** 53n));
+    expect(JSON.parse('{"n":9007199254740993}').n).toBe(Number(2n ** 53n));
     expect(Number.isSafeInteger(2 ** 53)).toBe(false);
     // ...and 2**53 is nonetheless an exact double that must canonicalize, which is exactly what
     // a safe-integer bound gets wrong.

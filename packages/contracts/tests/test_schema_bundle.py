@@ -193,3 +193,37 @@ def test_the_object_and_enum_partitions_are_non_empty() -> None:
     assert len(_ENUMS) >= 9
     assert set(_OBJECTS).isdisjoint(_ENUMS)
     assert set(_OBJECTS) | _ENUMS == set(DEFS)
+
+
+# --- F9: exactly one definition of the codegen command --------------------------------------
+
+
+def test_the_json2ts_invocation_is_defined_in_exactly_one_place() -> None:
+    """`package.json` used to declare its own `codegen` script re-stating every json2ts flag.
+    The two agreed, but the drift test only ever regenerates through `contracts.codegen`, so an
+    edit to either was invisible to the other: the npm script could have kept
+    `--unreachableDefinitions` after the Python side dropped it (or vice versa) and every test in
+    this repo would still have been green.
+
+    `_json2ts_argv` is the single definition. Nothing else may re-state it."""
+    import json as _json
+
+    from contracts.codegen import _json2ts_argv
+
+    package_json = _json.loads(
+        (PROTOCOL_SCHEMA.parent.parent / "package.json").read_text(encoding="utf-8")
+    )
+    scripts = package_json.get("scripts", {})
+    offenders = [
+        name for name, body in scripts.items() if "json2ts" in body or "json-schema-to" in body
+    ]
+    assert offenders == [], (
+        f"package.json re-defines the codegen command in {offenders}; `_json2ts_argv` in "
+        "contracts.codegen is the one definition"
+    )
+
+    # Control: the one definition really is the json2ts call, so this test cannot pass by the
+    # command having quietly disappeared from the codebase altogether.
+    argv = _json2ts_argv(TS_OUT)
+    assert "json2ts" in argv
+    assert "--unreachableDefinitions" in argv

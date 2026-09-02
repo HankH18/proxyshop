@@ -214,8 +214,7 @@ def _signing_envelope_reasons(bid: Any) -> list[str]:
     """
     payload = _as_plain(bid)
     reasons = [
-        f"{REASON_SIGNING_ENVELOPE_INCOMPLETE}:{field}"
-        for field in missing_signing_fields(payload)
+        f"{REASON_SIGNING_ENVELOPE_INCOMPLETE}:{field}" for field in missing_signing_fields(payload)
     ]
     signature = payload.get("signature") if isinstance(payload, Mapping) else None
     if not isinstance(signature, str) or not signature.strip():

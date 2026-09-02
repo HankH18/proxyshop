@@ -260,9 +260,7 @@ def payload_hash(payload: Mapping[str, Any]) -> str:
     thing the seller is actually promising, rather than only the metadata around it.
     """
     if not isinstance(payload, Mapping):
-        raise CanonicalisationError(
-            f"payload_hash expects a mapping, got {type(payload).__name__}"
-        )
+        raise CanonicalisationError(f"payload_hash expects a mapping, got {type(payload).__name__}")
     body = {key: value for key, value in payload.items() if key not in _NON_BODY_KEYS}
     digest = hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
     return f"{PAYLOAD_HASH_ALGORITHM}:{digest}"

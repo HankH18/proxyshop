@@ -430,32 +430,24 @@ def test_an_unsigned_submission_is_rejected_at_the_external_door() -> None:
     from packages.contracts import validate_external_submission
 
     unsigned = make_bid()  # a plain Bid: four envelope fields absent
-    result = validate_external_submission(
-        unsigned, trust_snapshot=make_snapshot_table(), now=NOW
-    )
+    result = validate_external_submission(unsigned, trust_snapshot=make_snapshot_table(), now=NOW)
     assert result.ok is False, "an unsigned external submission was admitted"
     for field in ("signer_id", "key_id", "issued_at", "nonce"):
         assert f"signing_envelope_incomplete:{field}" in result.reasons
 
     # Control: the identical bid with the envelope on it is admitted, so this is not
     # "reject every external submission".
-    control = validate_external_submission(
-        _signed(), trust_snapshot=make_snapshot_table(), now=NOW
-    )
+    control = validate_external_submission(_signed(), trust_snapshot=make_snapshot_table(), now=NOW)
     assert control.ok is True, control.reasons
 
 
-@pytest.mark.parametrize(
-    "field", ("signer_id", "key_id", "issued_at", "nonce", "schema_version")
-)
+@pytest.mark.parametrize("field", ("signer_id", "key_id", "issued_at", "nonce", "schema_version"))
 def test_the_external_door_rejects_a_submission_missing_any_one_envelope_field(field: str) -> None:
     from packages.contracts import validate_external_submission
 
     payload = _signed()
     del payload[field]
-    result = validate_external_submission(
-        payload, trust_snapshot=make_snapshot_table(), now=NOW
-    )
+    result = validate_external_submission(payload, trust_snapshot=make_snapshot_table(), now=NOW)
     assert result.ok is False
     assert any(reason.startswith("signing_envelope_incomplete") for reason in result.reasons), (
         result.reasons
@@ -533,9 +525,7 @@ def test_a_stated_utc_offset_is_honoured_not_discarded() -> None:
 
     # ...and they are NOT the same instant as the naked wall clock, which is what dropping the
     # offset would make them.
-    assert parse_timestamp("2026-01-01T00:00:00-08:00") != parse_timestamp(
-        "2026-01-01T00:00:00Z"
-    )
+    assert parse_timestamp("2026-01-01T00:00:00-08:00") != parse_timestamp("2026-01-01T00:00:00Z")
 
 
 def test_the_offset_decides_admit_versus_reject_for_an_offer_at_the_edge() -> None:
