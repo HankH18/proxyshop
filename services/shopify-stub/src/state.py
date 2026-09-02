@@ -324,11 +324,28 @@ class WebhookSubscription:
 
 @dataclass
 class WebhookDelivery:
-    """The record of one delivery attempt, kept whether or not it succeeded.
+    """The record of one **delivery**, kept whether or not it succeeded.
 
-    Acceptance criterion 3 is "webhooks always delivered" — so a delivery that the receiver
-    rejects is *retried*, and every attempt lands here. A test asserting delivery reads
-    this log, not the receiver, so a receiver bug cannot be mistaken for a stub bug.
+    Acceptance criterion 3 is "webhooks always delivered" — so a delivery the receiver
+    rejects is *retried*, and the outcome lands here either way. A test asserting delivery
+    reads this log, not the receiver, so a receiver bug cannot be mistaken for a stub bug.
+
+    One record per ``(dispatch, subscription)`` pair, **not** one per attempt. This
+    docstring used to say "the record of one delivery attempt … every attempt lands here",
+    which reads as a row per attempt and is not what
+    :meth:`~shopify_stub.webhooks.WebhookDispatcher.dispatch` writes: it retries inside one
+    record and appends it once, after the loop. Three attempts produce one row with
+    ``attempts == 3``, which is why ``attempts`` is an ``int`` and not a list. Pinned by
+    ``test_stub_webhooks.test_the_delivery_log_holds_one_row_per_delivery_not_per_attempt``.
+
+    Attributes:
+        attempts: how many POSTs were made, 1..``MAX_ATTEMPTS``.
+        delivered: whether the last attempt was accepted (2xx).
+        status_code: the **last** attempt's status, or ``None`` when the last attempt
+            raised before a response (a connection error, a timeout).
+        error: the last attempt's failure, or ``None`` when it was accepted. An earlier
+            failure that a later attempt recovered from leaves no trace here beyond
+            ``attempts`` being greater than one.
     """
 
     id: int

@@ -5,8 +5,14 @@ accident of implementation: Shopify retries a failed webhook delivery on an esca
 schedule for up to 48 hours before it gives up, so from an app's point of view the order
 webhook is the record of truth and the pixel is a hint. This module reproduces that
 contract in the small: a delivery is retried until the receiver accepts it or the attempt
-budget is exhausted, and **every** attempt is recorded in
+budget is exhausted, and **every delivery** is recorded in
 :attr:`~shopify_stub.state.StubState.deliveries` whether it succeeded or not.
+
+One row per delivery, carrying the attempt *count* — not one row per attempt. The retry
+loop below runs inside a single :class:`~shopify_stub.state.WebhookDelivery`, which is
+appended once, after the loop, with ``attempts`` set and ``status_code``/``error`` holding
+the **last** attempt's outcome. Two 500s followed by a 200 leave one row reading
+``attempts=3, delivered=True, status_code=200``, not three rows.
 
 There is deliberately **no drop-rate knob here.** A configurable webhook loss rate would let
 a consumer's test pass while its production reconciliation was wrong, because it would make
