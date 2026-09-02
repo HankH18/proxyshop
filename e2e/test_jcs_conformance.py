@@ -33,6 +33,41 @@ rendered on one side (silently coerced to ``…992``, so the signature covered a
 wrote) and raised on the other — so a case that one implementation renders and another rejects
 fails this gate even though neither produced *wrong* bytes.
 
+Which DOORS the gate drives, and why it is not just the renderers (T-125)
+------------------------------------------------------------------------
+It used to be just the renderers, and that hole cost a whole wave. ``grep -c
+canonicalSigningBytes e2e/test_jcs_conformance.py`` returned **0**, so when T-113 gave the
+TypeScript *signing* door a value-domain rule the renderer does not have — refuse any
+integer-valued ``number`` at or beyond 2**53 — every case in this file still passed while
+``canonicalSigningBytes`` refused ``10**16``, which satisfies ``float(v) == v``, which RFC 8785
+§3.1 requires, and which ``contracts.signing.canonical_signing_bytes`` signs. A Node seller
+could not sign a bid a Python exchange signs happily, and this gate was structurally blind to
+it. Renderer agreement is not protocol agreement; the door that produces the signed bytes is
+the one a signature actually depends on.
+
+So every case now runs through three doors, not one:
+
+======================  ==================================================================
+renderer                ``canonical_json`` / ``canonicalJson`` — bytes compared
+signing door (value)    ``canonical_signing_bytes`` / ``canonicalSigningBytes`` over the
+                        same value wrapped in :data:`SIGNING_ENVELOPE` — bytes compared
+signing door (text)     :data:`SIGNING_TEXT_CASES` only: ``json.loads`` + the Python door,
+                        against ``canonicalSigningBytesFromJson`` — bytes compared
+======================  ==================================================================
+
+The text lane exists because the two languages are asymmetric in exactly one place and this is
+where it shows. Python's ``int`` is arbitrary precision, so ``json.loads`` hands the door the
+integer the wire spelled and ``float(v) == v`` is decidable on the value; JavaScript has no
+integer type, so the same question is only decidable on the literal. ``10**16`` must be signed
+by both and ``2**53 + 1`` refused by both, and the second of those can only be *stated* to
+JavaScript as text — which is why a value-lane case for it would be vacuous
+(``wire=False``) and the text lane is not optional.
+
+The ledger is the third implementation here too, on refusal parity rather than bytes: its
+artifact is a D16 chain link, not a D52 signature, so the bytes differ by design. What must not
+differ is *whether* a payload can be carried at all — a bid that signs and then cannot be
+recorded is the same protocol split wearing different clothes.
+
 Refusal is compared as a boolean, never as an exception class, and that is not fastidiousness:
 
 * ``contracts.signing.CanonicalisationError`` and ``trust.ledger.canonical.CanonicalisationError``
@@ -132,6 +167,70 @@ class Impl(NamedTuple):
 PY_IMPLS: tuple[Impl, ...] = (
     Impl("contracts.signing", contracts_signing.canonical_json),
     Impl("trust.ledger.canonical", trust_canonical.canonical_json),
+)
+
+
+#: The D52 envelope every signing case rides in. Complete and valid by construction, so the
+#: envelope is never the reason a door refuses: `canonical_signing_bytes` rejects an incomplete
+#: envelope before it looks at anything else, and a gate whose cases all died there would be
+#: green and vacuous. It is sent to the TypeScript bridge rather than duplicated in the driver,
+#: so the two sides cannot drift.
+SIGNING_ENVELOPE: dict[str, Any] = {
+    "signer_id": "signer-jcs",
+    "key_id": "key-jcs",
+    "issued_at": "2026-09-02T00:00:00Z",
+    "nonce": "nonce-jcs",
+    "schema_version": "1.0.0",
+    "auction_id": "auction-jcs",
+    "store_id": "store-jcs",
+}
+
+#: A prev-hash for the ledger door. Any fixed 64-hex string will do — the gate compares whether
+#: the link could be computed, never the link.
+LEDGER_PREV_HASH = "0" * 64
+
+
+def _submission(value: Any) -> dict[str, Any]:
+    """The case value as the BODY of a complete D52 submission.
+
+    One key, `body`, chosen because it is not in `contracts.signing._NON_BODY_KEYS` — so the
+    value really does reach the payload digest — and because it cannot collide with an envelope
+    field whatever the case happens to contain.
+    """
+    return {**SIGNING_ENVELOPE, "body": value}
+
+
+def _contracts_signing_bytes(value: Any) -> str:
+    """D52: the exact bytes a signature covers, with `value` as the body."""
+    return contracts_signing.canonical_signing_bytes(_submission(value)).decode("utf-8")
+
+
+def _ledger_link(value: Any) -> str:
+    """D16: the chain link for an event carrying the same submission as its payload.
+
+    Compared on refusal only. The D52 signature and the D16 link are different artifacts over
+    different material and their bytes are supposed to differ; what may not differ is whether
+    the payload can be carried at all, because a bid that signs and then cannot be recorded is
+    the same split this file exists to prevent.
+    """
+    event = {"event_id": "evt-jcs", "kind": "jcs.conformance", "payload": _submission(value)}
+    return trust_canonical.compute_event_hash(LEDGER_PREV_HASH, event)
+
+
+def _sign_wire_text(text: Any) -> str:
+    """Python's text-taking signing door: `json.loads`, then the D52 door.
+
+    There is no `canonical_signing_bytes_from_json` in Python and there does not need to be —
+    `json.loads` hands back the integer the wire actually spelled, so `canonical_json`'s
+    `float(v) == v` test IS the literal rule already. TypeScript needs a separate door only
+    because `JSON.parse` has rounded before any guard can run.
+    """
+    return contracts_signing.canonical_signing_bytes(json.loads(text)).decode("utf-8")
+
+
+SIGNING_IMPLS: tuple[Impl, ...] = (
+    Impl("contracts.canonical_signing_bytes", _contracts_signing_bytes),
+    Impl("trust.compute_event_hash", _ledger_link),
 )
 
 
@@ -583,6 +682,72 @@ ALL_CASES: tuple[Case, ...] = CURATED_CASES + RANDOM_CASE_LIST
 
 
 # ---------------------------------------------------------------------------------------
+# the wire-TEXT signing lane
+# ---------------------------------------------------------------------------------------
+
+
+class TextCase(NamedTuple):
+    """One raw-JSON-text signing case.
+
+    Args:
+        tid: unique, ASCII, stable — the pytest id and the key the bridge answers on.
+        body: the BODY member's raw JSON text, spliced into the envelope verbatim. Written as
+            text and never as a value, because the whole point of this lane is the literal: by
+            the time `9007199254740993` is a JavaScript value it is `…992` and the case can no
+            longer state what it means.
+        refuse: both languages' text doors must refuse this submission.
+    """
+
+    tid: str
+    body: str
+    refuse: bool = False
+
+
+def _submission_text(body: str) -> str:
+    """:data:`SIGNING_ENVELOPE` plus `body`, as raw JSON text. Pure ASCII, no escape anywhere.
+
+    Built by hand rather than with `json.dumps` so `body` reaches both languages spelled the way
+    the case wrote it: `json.dumps` would parse and re-render the number and destroy the case.
+    """
+    members = ",".join(
+        f"{json.dumps(key)}:{json.dumps(value)}" for key, value in SIGNING_ENVELOPE.items()
+    )
+    return "{" + members + ',"body":' + body + "}"
+
+
+#: Integers that are exact doubles must sign; integers that are not must be refused. This is
+#: T-125 acceptance 3, and it is stateable only here: `2**53 + 1` cannot be handed to JavaScript
+#: as a value at all, so a value-lane case for it would compare two different inputs.
+SIGNING_TEXT_CASES: tuple[TextCase, ...] = (
+    # THE case. `float(10**16) == 10**16`, so §3.1 requires it, so both doors must sign it.
+    TextCase("ten-16", '{"n":10000000000000000}'),
+    # The refusal T-125's non-goal forbids relaxing. Python sees the int; TypeScript sees the
+    # literal; both must say no rather than sign `…992`.
+    TextCase("two-53-plus-one", '{"n":9007199254740993}', refuse=True),
+    TextCase("two-53", '{"n":9007199254740992}'),
+    TextCase("two-64", '{"n":18446744073709551616}'),
+    TextCase("two-64-plus-one", '{"n":18446744073709551617}', refuse=True),
+    TextCase("neg-two-64", '{"n":-18446744073709551616}'),
+    TextCase("neg-two-53-plus-one", '{"n":-9007199254740993}', refuse=True),
+    TextCase("ten-23", '{"n":100000000000000000000000}', refuse=True),
+    # No double at all: Python's `float()` raises OverflowError, `Number()` gives Infinity.
+    TextCase("ten-1000", '{"n":1' + "0" * 1000 + "}", refuse=True),
+    TextCase("one-e-400", '{"n":1e400}', refuse=True),
+    # The same value spelled exponentially. Both sides parse it to a float and render it the
+    # same way, which is why the literal check leaves fractional and exponential spellings to
+    # the float rules both languages already share.
+    TextCase("ten-16-exponential", '{"n":1e16}'),
+    TextCase("safe-max", '{"n":9007199254740991}'),
+    TextCase("fractions", '{"n":0.1,"m":1e-5,"k":1.5e300}'),
+    # The control: a run of digits inside a STRING is not a number and must not be scanned as
+    # one. Without this, "refuse every 16-digit run" would pass this lane.
+    TextCase("digits-in-string", '{"s":"9007199254740993","n":1}'),
+    TextCase("nested", '{"a":{"b":[1,{"c":2}]},"d":[[]]}'),
+    TextCase("plain", '{"n":1,"s":"ok","a":[1,2,3],"t":true,"z":null}'),
+)
+
+
+# ---------------------------------------------------------------------------------------
 # the TypeScript bridge
 # ---------------------------------------------------------------------------------------
 
@@ -656,7 +821,12 @@ def _same_json_value(left: Any, right: Any) -> bool:
 
 @pytest.fixture(scope="module")
 def ts_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Outcome]:
-    """Every wire-representable case, canonicalised once by the TypeScript twin.
+    """Every wire-representable case, put through the TypeScript twin's three doors once.
+
+    Keys: ``<cid>`` is the renderer's answer, ``sign:<cid>`` the value-taking signing door's for
+    the same case wrapped in :data:`SIGNING_ENVELOPE`, and ``text:<tid>`` the text-taking signing
+    door's for a :class:`TextCase`. One subprocess answers all three, so adding the signing
+    comparison cost the gate no start-up and no second bridge to keep honest.
 
     One subprocess for the whole module: `vite-node` costs about a second to start and nothing
     per case, so paying it per test would make the gate slower than the suite it guards.
@@ -682,11 +852,22 @@ def ts_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Outcome]:
     wire_cases = [case for case in ALL_CASES if case.wire]
     case_file = tmp_path_factory.mktemp("jcs") / "cases.ndjson"
     # Pure ASCII by construction: after `_encode_for_ts` every string is a list of integers, so
-    # the file holds no non-ASCII character and no `\uXXXX` escape at all.
+    # the file holds no non-ASCII character and no `\uXXXX` escape at all. The text cases are
+    # the one exception and are ASCII by their own construction — asserted, not assumed, because
+    # an escape in one of them would put the literal this lane exists to compare back through
+    # the decoder fault the encoding was built to route around.
+    assert all(case.body.isascii() for case in SIGNING_TEXT_CASES)
+    records = [{"kind": "envelope", "value": _encode_for_ts(SIGNING_ENVELOPE)}]
+    records += [
+        {"kind": "value", "id": case.cid, "input": _encode_for_ts(case.value)}
+        for case in wire_cases
+    ]
+    records += [
+        {"kind": "text", "id": f"text:{case.tid}", "text": _submission_text(case.body)}
+        for case in SIGNING_TEXT_CASES
+    ]
     case_file.write_text(
-        "\n".join(
-            json.dumps({"id": case.cid, "input": _encode_for_ts(case.value)}) for case in wire_cases
-        ),
+        "\n".join(json.dumps(record) for record in records),
         encoding="utf-8",
     )
 
@@ -712,9 +893,8 @@ def ts_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Outcome]:
     results = [
         json.loads(line) for line in completed.stdout.decode("utf-8").split("\n") if line != ""
     ]
-    assert len(results) == len(wire_cases), (
-        f"the bridge answered {len(results)} of {len(wire_cases)} cases"
-    )
+    expected = len(wire_cases) + len(SIGNING_TEXT_CASES)
+    assert len(results) == expected, f"the bridge answered {len(results)} of {expected} cases"
 
     by_id = {entry["id"]: entry for entry in results}
     assert len(by_id) == len(results), "the bridge answered the same case id twice"
@@ -726,6 +906,11 @@ def ts_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Outcome]:
             json.loads(by_id[case.cid]["echo"]), json.loads(json.dumps(case.value))
         )
     ]
+    mismatched += [
+        case.tid
+        for case in SIGNING_TEXT_CASES
+        if by_id[f"text:{case.tid}"]["echo"] != _submission_text(case.body)
+    ]
     assert not mismatched, (
         f"{len(mismatched)} case(s) reached the TypeScript side as a DIFFERENT value than "
         f"Python sent — {mismatched[:5]}. This is a JSON transport fault, not a "
@@ -734,10 +919,17 @@ def ts_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Outcome]:
         f"canonicalizer."
     )
 
-    return {
-        entry["id"]: Outcome(entry["ok"], entry.get("out", ""), entry.get("error", ""))
-        for entry in results
-    }
+    outcomes: dict[str, Outcome] = {}
+    for entry in results:
+        outcomes[entry["id"]] = Outcome(entry["ok"], entry.get("out", ""), entry.get("error", ""))
+        if "sign_ok" in entry:
+            # The SIGNING door's answer for the same case, under a prefixed key so the renderer
+            # comparison above is untouched. `grep -c canonicalSigningBytes` on this file is no
+            # longer 0, which is the whole of T-125's second half.
+            outcomes[f"sign:{entry['id']}"] = Outcome(
+                entry["sign_ok"], entry.get("sign_out", ""), entry.get("sign_error", "")
+            )
+    return outcomes
 
 
 # ---------------------------------------------------------------------------------------
@@ -903,6 +1095,152 @@ def test_the_random_differential_crosses_the_language_boundary(
         f"{len(divergences)} of {len(RANDOM_CASE_LIST)} random inputs canonicalise differently "
         f"in TypeScript (seed {RANDOM_SEED}):\n" + "\n".join(divergences[:10])
     )
+
+
+# ---------------------------------------------------------------------------------------
+# the SIGNING doors — the half of the gate T-113 slipped through
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", CURATED_CASES, ids=[case.cid for case in CURATED_CASES])
+def test_the_python_signing_doors_agree(case: Case) -> None:
+    """The D52 signing door and the D16 ledger link must accept and refuse the same payloads.
+
+    Refusal parity, not byte equality: the two produce different artifacts over different
+    material by design. What they may not do is disagree about whether the material can be
+    carried, because a bid that signs and then cannot be recorded is a protocol split.
+    """
+    outcomes = {impl.name: _run(impl, case.value) for impl in SIGNING_IMPLS}
+    accepted = {name for name, outcome in outcomes.items() if outcome.ok}
+    refused = {name for name, outcome in outcomes.items() if not outcome.ok}
+    assert not (accepted and refused), (
+        f"{case.cid}: sign/refuse split — {sorted(accepted)} produced an artifact while "
+        f"{sorted(refused)} refused. Details: "
+        + "; ".join(
+            f"{name}={outcome.detail}" for name, outcome in outcomes.items() if not outcome.ok
+        )
+    )
+    assert bool(accepted) is not case.refuse, (
+        f"{case.cid}: expected the signing doors to "
+        f"{'refuse' if case.refuse else 'accept'} this input"
+    )
+
+
+@pytest.mark.parametrize("case", CURATED_CASES, ids=[case.cid for case in CURATED_CASES])
+def test_the_signing_door_refuses_exactly_what_the_renderer_refuses(case: Case) -> None:
+    """T-125 stated as a property, in the language where it held, so it cannot silently stop.
+
+    A signing door with a NARROWER number domain than the renderer is precisely the T-113
+    defect: `canonicalJson` rendered `10**16` and `canonicalSigningBytes` refused it, and every
+    renderer-only comparison in this file stayed green. In Python the two share `canonical_json`
+    by construction — this asserts that construction rather than trusting it, so a future
+    value-domain guard bolted onto `canonical_signing_bytes` fails here as well as in TypeScript.
+    """
+    renderer = _run(PY_IMPLS[0], case.value)
+    door = _run(SIGNING_IMPLS[0], case.value)
+    assert door.ok == renderer.ok, (
+        f"{case.cid}: contracts.signing renders={renderer.ok} but signs={door.ok}. The signing "
+        f"door may not have a narrower value domain than the RFC-8785 renderer. "
+        f"renderer={renderer.detail} door={door.detail}"
+    )
+
+
+@pytest.mark.parametrize("case", TS_CASES, ids=[case.cid for case in TS_CASES])
+def test_the_typescript_signing_door_agrees(case: Case, ts_outcomes: dict[str, Outcome]) -> None:
+    """The same submission, signed on both sides, compared BYTE FOR BYTE.
+
+    This is the comparison that did not exist. `canonicalSigningBytes` and
+    `canonical_signing_bytes` are what a signature depends on; that their renderers agreed said
+    nothing about them, and for the whole of T-113 they disagreed about every exact double at or
+    beyond 2**53 with this file green.
+    """
+    ts = ts_outcomes[f"sign:{case.cid}"]
+    py = _run(SIGNING_IMPLS[0], case.value)
+
+    assert ts.ok == py.ok, (
+        f"{case.cid}: sign/refuse split across languages — TypeScript "
+        f"{'signed' if ts.ok else 'refused'} and Python {'signed' if py.ok else 'refused'}. "
+        f"ts={ts.detail or ts.text!r} py={py.detail or py.text!r}"
+    )
+    if not ts.ok:
+        return
+    assert ts.text == py.text, (
+        f"{case.cid}: the two signing doors produce different bytes —\n"
+        f"  typescript: {ts.text!r}\n"
+        f"  python:     {py.text!r}"
+    )
+
+
+def test_the_random_differential_crosses_the_signing_doors(
+    ts_outcomes: dict[str, Outcome],
+) -> None:
+    """The seeded random corpus, through both signing doors rather than both renderers."""
+    divergences: list[str] = []
+    for case in RANDOM_CASE_LIST:
+        ts = ts_outcomes[f"sign:{case.cid}"]
+        py = _run(SIGNING_IMPLS[0], case.value)
+        if ts.ok != py.ok:
+            divergences.append(f"{case.cid}: ts_ok={ts.ok} py_ok={py.ok} {ts.detail}{py.detail}")
+        elif ts.ok and ts.text != py.text:
+            divergences.append(f"{case.cid}: ts={ts.text!r} != py={py.text!r}")
+    assert not divergences, (
+        f"{len(divergences)} of {len(RANDOM_CASE_LIST)} random inputs SIGN differently across "
+        f"the language boundary (seed {RANDOM_SEED}):\n" + "\n".join(divergences[:10])
+    )
+
+
+@pytest.mark.parametrize("case", SIGNING_TEXT_CASES, ids=[case.tid for case in SIGNING_TEXT_CASES])
+def test_the_signing_doors_agree_on_raw_wire_text(
+    case: TextCase, ts_outcomes: dict[str, Outcome]
+) -> None:
+    """T-125 acceptance 3: `10**16` signs on both sides, `2**53 + 1` is refused on both.
+
+    The text lane, because the second half cannot be stated any other way. Python reads the
+    submission with `json.loads`, which preserves the integer exactly, and hands it to
+    `canonical_signing_bytes`; TypeScript uses `canonicalSigningBytesFromJson`, the only door in
+    that language that still sees the literal. Same text in, same answer out — and when both
+    sign, the same bytes.
+    """
+    text = _submission_text(case.body)
+    ts = ts_outcomes[f"text:{case.tid}"]
+    py = _run(Impl("contracts (json.loads + door)", _sign_wire_text), text)
+
+    assert ts.ok == py.ok, (
+        f"text:{case.tid}: sign/refuse split across languages on raw text — TypeScript "
+        f"{'signed' if ts.ok else 'refused'} and Python {'signed' if py.ok else 'refused'}. "
+        f"ts={ts.detail or ts.text!r} py={py.detail or py.text!r}"
+    )
+    assert py.ok is not case.refuse, (
+        f"text:{case.tid}: expected both text doors to "
+        f"{'refuse' if case.refuse else 'sign'} this submission; python said "
+        f"{py.detail or 'signed'}"
+    )
+    if not ts.ok:
+        return
+    assert ts.text == py.text, (
+        f"text:{case.tid}: the two text signing doors produce different bytes —\n"
+        f"  typescript: {ts.text!r}\n"
+        f"  python:     {py.text!r}"
+    )
+
+
+def test_the_text_lane_states_both_halves_of_the_rule() -> None:
+    """The lane is only a gate if it holds an accept AND a refuse at the boundary.
+
+    A lane of nothing but refusals would pass with a door that refuses everything; a lane of
+    nothing but acceptances would pass with a door that signs everything. Both are named here
+    so deleting either is a red test rather than a smaller green one.
+    """
+    by_id = {case.tid: case for case in SIGNING_TEXT_CASES}
+    assert by_id["ten-16"].body == '{"n":10000000000000000}'
+    assert by_id["ten-16"].refuse is False, "10**16 is an exact double; RFC 8785 §3.1 requires it"
+    assert by_id["two-53-plus-one"].body == '{"n":9007199254740993}'
+    assert by_id["two-53-plus-one"].refuse is True, "2**53+1 has no exact double"
+    assert float(10**16) == 10**16 and float(2**53 + 1) != 2**53 + 1
+    signed = sum(1 for case in SIGNING_TEXT_CASES if not case.refuse)
+    refused = sum(1 for case in SIGNING_TEXT_CASES if case.refuse)
+    assert signed >= 8 and refused >= 6, (signed, refused)
+    assert len({case.tid for case in SIGNING_TEXT_CASES}) == len(SIGNING_TEXT_CASES)
 
 
 # ---------------------------------------------------------------------------------------

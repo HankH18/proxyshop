@@ -714,12 +714,20 @@ function envelopeOf(payload: Payload): Payload {
   return Object.fromEntries(REQUIRED_SIGNING_FIELDS.map((field) => [field, payload[field]]));
 }
 
-// --- T-113: the guard is on the DEFAULT path, not an opt-in nobody calls -------------------
+// --- T-125: the signing doors and the canonicalizer agree on what a number IS --------------
 //
-// T-103 built `parseSignableJson`, and its verifier found the thing that makes a guard
-// worthless: nothing called it. `JSON.parse` → `canonicalSigningBytes` was still the default,
-// still coerced 9007199254740993 to …992, and still signed it. These cases drive the DEFAULT
-// entry points — never `parseSignableJson` — and every one of them would pass on main.
+// T-113 built the right guard in the wrong domain. `parseSignableJson` — the LITERAL check —
+// was correct and uncalled, so T-113 gave `payloadHash`/`canonicalSigningBytes` a VALUE-domain
+// approximation of it: refuse any integer-valued `number` at or beyond 2**53. That refuses
+// 10**16, which satisfies `float(v) == v`, which RFC 8785 §3.1 therefore requires, which
+// `canonicalJson` renders and `contracts.signing.canonical_signing_bytes` signs — so a Node
+// seller could not sign a bid a Python exchange signs happily. The T-106 conformance gate never
+// saw it, because it drove the renderers only: `grep -c canonicalSigningBytes
+// e2e/test_jcs_conformance.py` was 0. T-125 removes the value-domain guard, keeps the literal
+// one where the evidence still exists, and extends that gate to the signing doors.
+//
+// Everything below drives the DEFAULT entry points — never `parseSignableJson`. The refusals
+// still refuse on the T-113 module; the acceptances are what fails on it.
 
 /** A submission whose `quantity` is the literal `wire` says, as `JSON.parse` delivers it. */
 function submissionFromWire(literal: string, key = "quantity"): Payload {
@@ -738,64 +746,171 @@ function wireFor(literal: string, key = "quantity"): string {
   );
 }
 
-describe("T-113 — the default signing path refuses an integer the wire cannot state", () => {
-  it.each(NON_DOUBLE_INTEGER_WIRE)(
-    "canonicalSigningBytes refuses %s with no opt-in at all",
+/**
+ * The bytes `contracts.signing.canonical_signing_bytes` produces for a submission carrying
+ * `quantity: 10**16` — pinned identically by
+ * `tests/test_signing_envelope.py::EXPECTED_TEN_16_CANONICAL_BYTES`.
+ *
+ * The second shared constant in this file, and it exists for the case the first one could not
+ * reach: `EXPECTED_CANONICAL_BYTES` carries only safe integers, so it stayed green through the
+ * whole of T-113 while the two languages disagreed about every exact double above 2**53.
+ */
+const EXPECTED_TEN_16_CANONICAL_BYTES =
+  '{"auction_id":"auc-0100","issued_at":"2026-01-01T00:00:00Z","key_id":"key-2026-01",' +
+  '"nonce":"nonce-ext-0001",' +
+  '"payload_hash":"sha256:6f5022c55463964c26b49be49e428ef0804edc4c31b9a9b8795c4d96454ba2f1",' +
+  '"schema_version":"1.0.0","signer_id":"store-external-1","store_id":"store-external-1"}';
+
+/**
+ * Every number class the doors have to have an answer for, labelled so a failure names it.
+ *
+ * Deliberately spans both sides of 2**53, both ends of the double range, the ECMAScript
+ * exponential switch points, and the two things that are NOT finite doubles — a non-finite
+ * `number` and a `bigint` with no double — because the property being asserted is agreement
+ * with the renderer, which is only meaningful if the list contains inputs it refuses.
+ */
+const NUMBER_DOMAIN_CASES: ReadonlyArray<readonly [string, unknown]> = [
+  ["0", 0],
+  ["-0", -0],
+  ["1", 1],
+  ["-42", -42],
+  ["44.1", 44.1],
+  ["1e-5", 1e-5],
+  ["1.5", 1.5],
+  ["2**53", 2 ** 53],
+  ["2**53+2", 2 ** 53 + 2],
+  ["1e16", 1e16],
+  ["1e21", 1e21],
+  ["2**63", 2 ** 63],
+  ["2**64", 2 ** 64],
+  ["max-double", 1.7976931348623157e308],
+  ["min-subnormal", 5e-324],
+  ["MAX_SAFE_INTEGER", Number.MAX_SAFE_INTEGER],
+  ["-(2**53-1)", -9007199254740991],
+  ["NaN", Number.NaN],
+  ["Infinity", Number.POSITIVE_INFINITY],
+  ["-Infinity", Number.NEGATIVE_INFINITY],
+  ["9007199254740993n", 9007199254740993n],
+];
+
+/** True when `thunk` threw. The comparison is refusal, never which class was thrown. */
+function refuses(thunk: () => unknown): boolean {
+  try {
+    thunk();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+describe("T-125 — the signing doors accept every integer that satisfies float(v) == v", () => {
+  it("signs 10**16 through both doors, byte for byte with the Python peer", () => {
+    // THE ticket. `float(10**16) == 10**16` is true, so RFC 8785 §3.1 requires this number to
+    // be signable, and the Python side signs it — into exactly these bytes.
+    const payload = {...makeSubmission(), quantity: 1e16};
+    expect(decode(canonicalSigningBytes(payload))).toBe(EXPECTED_TEN_16_CANONICAL_BYTES);
+    expect(decode(canonicalSigningBytesFromJson(JSON.stringify(payload)))).toBe(
+      EXPECTED_TEN_16_CANONICAL_BYTES,
+    );
+    expect(payloadHash(payload)).toBe(payloadHashFromJson(JSON.stringify(payload)));
+  });
+
+  it.each(EXACT_DOUBLE_INTEGER_WIRE)(
+    "the VALUE door signs the exact double %s with no opt-in of any kind",
     (literal) => {
-      // THE ticket. `JSON.parse` has already coerced by the time this value exists, and the
-      // default path used to sign the coercion without a word.
-      expect(() => canonicalSigningBytes(submissionFromWire(literal))).toThrow(
-        CanonicalisationError,
+      // There is no flag to pass any more, which is the point: `SigningNumberOptions` existed
+      // only to undo a refusal that should never have applied to these values.
+      const payload = submissionFromWire(literal);
+      expect(canonicalSigningBytes(payload).length).toBeGreaterThan(0);
+      expect(payloadHash(payload)).toBe(payloadHashFromJson(wireFor(literal)));
+    },
+  );
+
+  it.each(NUMBER_DOMAIN_CASES)(
+    "refuses %s at the signing doors if and only if canonicalJson refuses it",
+    (_label, value) => {
+      // The property that makes "over-rejection" checkable rather than a matter of taste. The
+      // signing doors are not allowed a narrower number domain than the renderer the
+      // conformance gate pins against both Python implementations — that gap IS the divergence
+      // class T-106 exists to close, and it is where T-113 put a guard.
+      const rendered = refuses(() => canonicalJson({n: value}));
+      expect(refuses(() => payloadHash({...makeSubmission(), quantity: value}))).toBe(rendered);
+      expect(refuses(() => canonicalSigningBytes({...makeSubmission(), quantity: value}))).toBe(
+        rendered,
       );
     },
   );
 
-  it.each(NON_DOUBLE_INTEGER_WIRE)("payloadHash refuses %s with no opt-in at all", (literal) => {
-    expect(() => payloadHash(submissionFromWire(literal))).toThrow(CanonicalisationError);
-  });
-
-  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s nested inside the offer", (literal) => {
-    const payload = makeSubmission();
-    const text = JSON.stringify(payload).replace('"unit_price":49', `"unit_price":${literal}`);
-    expect(text).toContain(literal);
-    expect(() => canonicalSigningBytes(JSON.parse(text) as Payload)).toThrow(
-      CanonicalisationError,
-    );
-  });
-
-  it.each(NON_DOUBLE_INTEGER_WIRE)("the text door names the literal it refused: %s", (literal) => {
-    expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(CanonicalisationError);
-    expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(
-      new RegExp(`cannot accept the integer ${literal}`),
-    );
-    expect(() => payloadHashFromJson(wireFor(literal))).toThrow(CanonicalisationError);
+  it("has no opt-out left to pass, and ignores one offered anyway", () => {
+    // `SigningNumberOptions` is gone with the guard it configured. Asserted by BEHAVIOUR, not
+    // by arity: `function f(payload, options = {})` also reports `length === 1`, so an arity
+    // check would have passed on the T-113 module unchanged and proved nothing. Handing the
+    // door an options object must not change the answer — on T-113 the first row of this loop
+    // (`{}`, i.e. the default) threw.
+    const withOptions: (payload: Payload, options?: unknown) => Uint8Array = canonicalSigningBytes;
+    const digestWithOptions: (payload: Payload, options?: unknown) => string = payloadHash;
+    const payload = {...makeSubmission(), quantity: 1e16};
+    for (const stray of [{}, {allowUnsafeIntegers: false}, {allowUnsafeIntegers: true}]) {
+      expect(decode(withOptions(payload, stray))).toBe(EXPECTED_TEN_16_CANONICAL_BYTES);
+      expect(digestWithOptions(payload, stray)).toBe(payloadHash(payload));
+    }
   });
 
   it.each(NON_DOUBLE_INTEGER_WIRE)(
-    "would have signed %s as %s before this ticket, and the digest proves it",
+    "signs the double JSON.parse delivered for %s, because by then it IS %s",
     (literal, coerced) => {
-      // The defect held still. `canonicalJson` — the RFC-8785 RENDERER, which the conformance
-      // gate pins against both Python implementations — happily writes the coerced value; it is
-      // the signing doors that now refuse to carry it into a signature.
+      // The honest statement of what a value-domain door can and cannot do, and the reason no
+      // narrower guard was possible. This value is already `coerced` — an exact double the
+      // Python peer signs — and no test on the value could separate it from a submission that
+      // spelled `coerced` outright. The proof is the digest: both spellings hash the same.
       const payload = submissionFromWire(literal);
       expect(canonicalJson(payload["quantity"])).toBe(coerced);
       expect(String(payload["quantity"])).not.toBe(literal);
+      expect(canonicalSigningBytes(payload).length).toBeGreaterThan(0);
+      expect(payloadHash(payload)).toBe(payloadHash(submissionFromWire(coerced)));
     },
   );
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)(
+    "the TEXT door still refuses %s, and names the literal it refused",
+    (literal) => {
+      // Unchanged and load-bearing: this is the door where RFC 8785 §3.1 is still decidable in
+      // JavaScript, and T-125's non-goal is that it keeps refusing. `2**53+1` is here.
+      expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(CanonicalisationError);
+      expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(
+        new RegExp(`cannot accept the integer ${literal}`),
+      );
+      expect(() => payloadHashFromJson(wireFor(literal))).toThrow(CanonicalisationError);
+    },
+  );
+
+  it("the two doors now agree on 1e16 spelled either way, which they did not before", () => {
+    // Measured on the T-113 module: `payloadHashFromJson` on this exact text returned
+    // sha256:39b0550897…, while `payloadHash(JSON.parse(text))` threw "cannot sign the integer
+    // 10000000000000000". One implementation, two doors, two answers — because the literal
+    // check skips exponential spellings by design (`json.loads` gives Python a float for those
+    // too), so "the literals have been checked" was never true of the whole payload. That was
+    // the justification `payloadHashFromJson` gave for switching the value guard off (T-129).
+    const exponential = wireFor("1e16");
+    const expanded = wireFor("10000000000000000");
+    expect(payloadHashFromJson(exponential)).toBe(payloadHashFromJson(expanded));
+    expect(payloadHash(JSON.parse(exponential) as Payload)).toBe(payloadHashFromJson(exponential));
+  });
 });
 
 // --- T-128: the covered-field guard could refuse nothing, and is gone ----------------------
 //
-// T-113 added `assertSignableNumbers(covered, options, "submission")` plus the five `it.each`
-// cases that used to sit directly above, on the claim that `auction_id` and `store_id` "reach
-// canonicalJson through `covered` and never through payloadHash". The claim is false and the
-// five cases were tautological: deleting the guard left ALL 586 vitest cases green — measured,
-// with the line removed and the suite re-run.
+// T-113 added `assertSignableNumbers(covered, options, "submission")` plus five `it.each` cases
+// to prove it, on the claim that `auction_id` and `store_id` "reach canonicalJson through
+// `covered` and never through payloadHash". The claim is false — `NON_BODY_KEYS` is exactly
+// {signer_id, key_id, issued_at, nonce, signature}, so both are IN the body — and deleting the
+// guard left all 586 vitest cases green, measured. These five replaced those five and grade the
+// structural facts the claim got wrong, so the guard cannot come back on the same reasoning.
 //
-// These five replace them and grade the structural facts the claim got wrong, so the guard
-// cannot come back on the same reasoning. Each is sensitive to a real change: adding a key to
-// `NON_BODY_KEYS`, or letting `missingSigningFields` accept a non-string envelope field, turns
-// one of them red.
+// The fourth case is the one T-125 changed: with the value-domain guard gone, a numeric
+// `auction_id` is no longer refused at all (it is an exact double), so what is graded is that
+// it reaches the bytes and moves the digest — the property that actually protects a signature
+// from being lifted onto another auction.
 
 describe("T-128 — the body digest already reaches every SIGNED_FIELD that can hold a number", () => {
   it("auction_id and store_id are INSIDE the body payloadHash walks", () => {
@@ -813,8 +928,8 @@ describe("T-128 — the body digest already reaches every SIGNED_FIELD that can 
   });
 
   it("and every one of those four is already forced to be a non-blank STRING", () => {
-    // Which is what makes a number check on `covered` unreachable: a numeric envelope field is
-    // rejected before it, by `missingSigningFields`, with a different and better message.
+    // Which is what makes a number check on `covered` unreachable: the submission is rejected
+    // before it, by `missingSigningFields`, with a different and better message.
     for (const field of ["signer_id", "key_id", "issued_at", "nonce"] as const) {
       const numeric = makeSubmission({[field]: 9007199254740992});
       expect(missingSigningFields(numeric)).toContain(field);
@@ -822,21 +937,23 @@ describe("T-128 — the body digest already reaches every SIGNED_FIELD that can 
     }
   });
 
-  it("a numeric auction_id is refused by the BODY walk, with no covered check in the path", () => {
-    // The exact input the deleted guard was claimed to be the sole refuser of. `payloadHash`
-    // alone — which never sees `covered` — refuses it, which is the claim disproved in one line.
-    const numeric = submissionFromWire("9007199254740993", "auction_id");
-    expect(typeof numeric["auction_id"]).toBe("number");
-    expect(() => payloadHash(numeric)).toThrow(CanonicalisationError);
-    expect(() => canonicalSigningBytes(numeric)).toThrow(CanonicalisationError);
+  it("a numeric auction_id reaches the bytes through the body, with no covered check at all", () => {
+    // The one input the deleted guard was supposed to be the sole refuser of. It is not refused
+    // now — `float(v) == v` holds for it — and the property that actually matters still holds:
+    // it changes the digest, so a signature over one auction_id cannot be lifted onto another.
+    const numeric = makeSubmission({auction_id: 9007199254740992});
+    expect(decode(canonicalSigningBytes(numeric))).toContain('"auction_id":9007199254740992');
+    expect(payloadHash(numeric)).not.toBe(payloadHash(makeSubmission()));
+    expect(payloadHash(numeric)).not.toBe(payloadHash(makeSubmission({auction_id: "auc-OTHER"})));
   });
 
   it("the five NON_BODY_KEYS are the only keys the digest ignores", () => {
-    // The same structural fact stated as a closed set: change anything else and the digest
-    // moves. Adding a key to NON_BODY_KEYS turns this red, which is the regression the false
-    // claim would otherwise have licensed.
+    // The other half of the same structural fact, stated as a closed set: change anything else
+    // and the digest moves. Adding a key to NON_BODY_KEYS turns this red, which is the
+    // regression the false claim would otherwise have licensed.
     const base = payloadHash(makeSubmission());
-    for (const key of ["signer_id", "key_id", "issued_at", "nonce", "signature"]) {
+    const ignored = ["signer_id", "key_id", "issued_at", "nonce", "signature"];
+    for (const key of ignored) {
       expect(payloadHash(makeSubmission({[key]: "CHANGED"})), key).toBe(base);
     }
     for (const key of ["auction_id", "store_id", "schema_version", "agent_version", "offer"]) {
@@ -845,28 +962,7 @@ describe("T-128 — the body digest already reaches every SIGNED_FIELD that can 
   });
 });
 
-describe("T-113 — the opt-out is explicit, named, and does exactly what it says", () => {
-  it.each(NON_DOUBLE_INTEGER_WIRE)("signs %s only when allowUnsafeIntegers is passed", (literal) => {
-    const payload = submissionFromWire(literal);
-    expect(() => canonicalSigningBytes(payload)).toThrow(CanonicalisationError);
-    const bytes = canonicalSigningBytes(payload, {allowUnsafeIntegers: true});
-    expect(bytes.length).toBeGreaterThan(0);
-    // And it buys exactly what the flag's name says: the COERCED value gets signed. The flag is
-    // an admission, not a fix, which is why the wire doors never need it.
-    expect(payloadHash(payload, {allowUnsafeIntegers: true})).toBe(
-      payloadHash(JSON.parse(JSON.stringify(payload)) as Payload, {allowUnsafeIntegers: true}),
-    );
-  });
-
-  it("refuses an exact large double on the value path too, because the value cannot say", () => {
-    // 9007199254740992 IS an exact double and the Python peer signs it. TypeScript, handed only
-    // the number, cannot distinguish it from 9007199254740993 — so the value path fails closed
-    // and the caller must either say `allowUnsafeIntegers` or hand over the text.
-    const payload = submissionFromWire("9007199254740992");
-    expect(() => canonicalSigningBytes(payload)).toThrow(CanonicalisationError);
-    expect(canonicalSigningBytes(payload, {allowUnsafeIntegers: true}).length).toBeGreaterThan(0);
-  });
-
+describe("T-113 — the text door is the one that reads the literal, and it still does", () => {
   it.each(EXACT_DOUBLE_INTEGER_WIRE)("the TEXT door signs the exact double %s unaided", (literal) => {
     // The control that stops "refuse everything large" from passing this suite. The text door
     // reads the literal, so it can tell an exact double from a coerced one — no flag, no
@@ -887,19 +983,22 @@ describe("T-113 — the opt-out is explicit, named, and does exactly what it say
     expect(() => payloadHashFromJson('{"a":')).toThrow(SyntaxError);
   });
 
-  it("leaves the RFC-8785 renderer alone, and that split is deliberate", () => {
-    // `canonicalJson` MUST keep rendering exact large doubles: `e2e/test_jcs_conformance.py`
-    // requires it to agree byte for byte with both Python canonicalizers, and both render
-    // these. The refusal belongs to the D52 signing doors, which is what a signature covers.
+  it("the renderer and the signing doors are no longer split, and that is the fix", () => {
+    // `canonicalJson` MUST render exact large doubles: `e2e/test_jcs_conformance.py` requires
+    // it to agree byte for byte with both Python canonicalizers, and both render these. T-113
+    // let the signing doors refuse what the renderer rendered and called the split deliberate;
+    // T-125's ruling is that the split IS the divergence class T-106 exists to close, so the
+    // doors follow the renderer here.
     expect(canonicalJson({n: 2 ** 53})).toBe('{"n":9007199254740992}');
     expect(canonicalJson({n: 1e16})).toBe('{"n":10000000000000000}');
     expect(canonicalJson({n: 1e21})).toBe('{"n":1e+21}');
-    expect(() => payloadHash({n: 1e21})).toThrow(CanonicalisationError);
+    expect(payloadHash({n: 1e21})).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(payloadHash({n: 1e21})).not.toBe(payloadHash({n: 1e16}));
   });
 
   it("does not refuse anything a real bid actually carries", () => {
-    // Fractions, safe integers and negative zero all sign with no flag. A guard that refused
-    // 44.1 would satisfy every rejection above and break the protocol.
+    // Fractions, safe integers and negative zero all sign. A guard that refused 44.1 would
+    // satisfy every rejection above and break the protocol.
     expect(canonicalSigningBytes(makeSubmission()).length).toBeGreaterThan(0);
     for (const n of [0, -0, 1, -42, 44.1, 1e-5, 1.5, Number.MAX_SAFE_INTEGER, -9007199254740991]) {
       expect(() => payloadHash({...makeSubmission(), quantity: n}), String(n)).not.toThrow();
