@@ -385,3 +385,167 @@ def test_an_unhashable_store_id_is_rejected_rather_than_raising(path: str) -> No
         result = check(make_bid(store_id=store_id), path)
         assert result.ok is False
         assert result.reasons
+
+
+# --- D52: the signing envelope at the external door ----------------------------------------
+
+
+def _signed(**overrides):
+    """A wire submission: `make_bid`'s store and auction, plus the five D52 fields and a
+    signature. `make_submission` drops `signature`, which is itself a rejection case here."""
+    payload = make_bid()
+    payload.update(
+        {
+            "signer_id": "store-1",
+            "key_id": "key-2026-01",
+            "issued_at": "2026-06-01T00:00:00Z",
+            "nonce": "nonce-0001",
+            "schema_version": "1.0.0",
+            "signature": "sig-deadbeef",
+        }
+    )
+    payload.update(overrides)
+    return payload
+
+
+def test_validate_bid_alone_does_not_judge_the_signing_envelope() -> None:
+    """The documented gap, pinned so it cannot become an accident again.
+
+    `validate_bid` checks the R8/R18/S5 table against `Bid`, which carries no envelope. This
+    assertion exists so the docstring's warning is a fact and not a hope — and so that a caller
+    reaching for the external door has to reach for `validate_external_submission`.
+    """
+    from packages.contracts import missing_signing_fields
+
+    unsigned = make_bid()
+    assert missing_signing_fields(unsigned) == ["signer_id", "key_id", "issued_at", "nonce"]
+    assert check(unsigned, EXTERNAL_PATH).ok is True
+
+
+def test_an_unsigned_submission_is_rejected_at_the_external_door() -> None:
+    """D52: a submission missing any of the five is Rejected at the boundary, before extraction
+    and before verification, with the same finality as a bad signature. Before this check, a
+    Tier-2 seller POSTing a bid with no signer_id, key_id, issued_at, nonce or signature got
+    `ok=True, reasons=[]` from the only boundary function this package exported."""
+    from packages.contracts import validate_external_submission
+
+    unsigned = make_bid()  # a plain Bid: four envelope fields absent
+    result = validate_external_submission(
+        unsigned, trust_snapshot=make_snapshot_table(), now=NOW
+    )
+    assert result.ok is False, "an unsigned external submission was admitted"
+    for field in ("signer_id", "key_id", "issued_at", "nonce"):
+        assert f"signing_envelope_incomplete:{field}" in result.reasons
+
+    # Control: the identical bid with the envelope on it is admitted, so this is not
+    # "reject every external submission".
+    control = validate_external_submission(
+        _signed(), trust_snapshot=make_snapshot_table(), now=NOW
+    )
+    assert control.ok is True, control.reasons
+
+
+@pytest.mark.parametrize(
+    "field", ("signer_id", "key_id", "issued_at", "nonce", "schema_version")
+)
+def test_the_external_door_rejects_a_submission_missing_any_one_envelope_field(field: str) -> None:
+    from packages.contracts import validate_external_submission
+
+    payload = _signed()
+    del payload[field]
+    result = validate_external_submission(
+        payload, trust_snapshot=make_snapshot_table(), now=NOW
+    )
+    assert result.ok is False
+    assert any(reason.startswith("signing_envelope_incomplete") for reason in result.reasons), (
+        result.reasons
+    )
+
+
+@pytest.mark.parametrize("signature", (None, "", "   ", 12345, [], {"a": 1}))
+def test_the_external_door_rejects_a_submission_without_a_usable_signature(signature) -> None:
+    """`signature` is the thing the envelope exists to carry. A submission whose signature is
+    absent, blank or not even a string cannot be verified, so it is refused here rather than
+    handed to T-044 to fail on."""
+    from packages.contracts import REASON_SIGNATURE_MISSING, validate_external_submission
+
+    result = validate_external_submission(
+        _signed(signature=signature), trust_snapshot=make_snapshot_table(), now=NOW
+    )
+    assert result.ok is False
+    assert REASON_SIGNATURE_MISSING in result.reasons
+
+
+def test_the_external_door_still_applies_the_whole_r8_r18_table() -> None:
+    """The envelope is an ADDITIONAL condition, not a replacement: a fully signed submission that
+    is expired, or from a blacklisted store, still rejects."""
+    from packages.contracts import validate_external_submission
+
+    for overrides, needle in (
+        ({"offer": make_offer(expires_at=LONG_EXPIRED)}, "offer_expired"),
+        ({"store_id": "store-bad"}, "store_blacklisted"),
+        ({"claims": [make_claim("spf", 30, None)]}, "claim_without_provenance"),
+    ):
+        result = validate_external_submission(
+            _signed(**overrides), trust_snapshot=make_snapshot_table(), now=NOW
+        )
+        assert result.ok is False, overrides
+        assert any(needle in reason for reason in result.reasons), result.reasons
+
+    # ...and a signed, seller-asserted claim is still admitted and flagged (R18).
+    flagged = validate_external_submission(
+        _signed(claims=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))]),
+        trust_snapshot=make_snapshot_table(),
+        now=NOW,
+    )
+    assert flagged.ok is True, flagged.reasons
+    assert flagged.requires_verification is True
+
+
+def test_the_external_door_never_raises_on_a_hostile_submission() -> None:
+    """The whole point of the boundary: "reject" and "500" must not be the same observable."""
+    from packages.contracts import validate_external_submission
+
+    for payload in (None, "a raw string", [1, 2, 3], 42, {}, {"store_id": {"a": 1}}):
+        result = validate_external_submission(
+            payload, trust_snapshot=make_snapshot_table(), now=NOW
+        )
+        assert result.ok is False
+        assert result.reasons
+
+
+# --- F4: a stated UTC offset is part of the instant, not decoration -------------------------
+
+
+def test_a_stated_utc_offset_is_honoured_not_discarded() -> None:
+    """`parse_timestamp` defaults NAIVE values to UTC. Replacing the tzinfo on an aware value
+    instead — `parsed.replace(tzinfo=UTC)` — reads `...-08:00` as if it were `...Z`, which shifts
+    a US-Pacific store's offer by eight hours. No other test in this suite uses a non-zero
+    offset, so that mutation passed the whole suite."""
+    for stated, equivalent_utc in (
+        ("2026-01-01T00:00:00-08:00", "2026-01-01T08:00:00Z"),
+        ("2026-01-01T00:00:00+05:30", "2025-12-31T18:30:00Z"),
+        ("2026-01-01T12:00:00+00:00", "2026-01-01T12:00:00Z"),
+    ):
+        assert parse_timestamp(stated) == parse_timestamp(equivalent_utc), (
+            f"{stated} and {equivalent_utc} are the same instant"
+        )
+
+    # ...and they are NOT the same instant as the naked wall clock, which is what dropping the
+    # offset would make them.
+    assert parse_timestamp("2026-01-01T00:00:00-08:00") != parse_timestamp(
+        "2026-01-01T00:00:00Z"
+    )
+
+
+def test_the_offset_decides_admit_versus_reject_for_an_offer_at_the_edge() -> None:
+    """A US-Pacific store's offer expiring at 00:00-08:00 is live at 04:00Z and dead at 09:00Z.
+    Discarding the offset rejects it as expired eight hours early."""
+    offer = make_offer(expires_at="2026-01-01T00:00:00-08:00")  # == 08:00Z
+
+    live = check(make_bid(offer=offer), EXTERNAL_PATH, now="2026-01-01T04:00:00Z")
+    assert live.ok is True, f"a live Pacific offer was rejected as expired: {live.reasons}"
+
+    dead = check(make_bid(offer=offer), EXTERNAL_PATH, now="2026-01-01T09:00:00Z")
+    assert dead.ok is False
+    assert any("offer_expired" in reason for reason in dead.reasons)

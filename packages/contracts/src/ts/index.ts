@@ -33,11 +33,14 @@ export {
   REASON_OFFER_EXPIRY_MISSING,
   REASON_OFFER_EXPIRY_UNPARSEABLE,
   REASON_SCHEMA_INVALID,
+  REASON_SIGNATURE_MISSING,
+  REASON_SIGNING_ENVELOPE_INCOMPLETE,
   REASON_STORE_BLACKLISTED,
   REASON_TRUST_SNAPSHOT_UNAVAILABLE,
   REASON_UNKNOWN_PATH,
   parseTimestamp,
   validateBid,
+  validateExternalSubmission,
 } from "./boundary.js";
 export type {BidPathName, TrustSnapshotMap, TrustSnapshotRow, ValidateBidOptions} from "./boundary.js";
 

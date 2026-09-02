@@ -21,6 +21,15 @@ Four conditions reject on BOTH paths, because none of them is about who is speak
 `validate_bid` never raises on bad input. A boundary that threw would make "reject" and "crash"
 indistinguishable to the caller and would give the exchange nothing to log back to the seller;
 every refusal comes back as `ok=False` with at least one machine-readable reason.
+
+**The signing envelope is a FIFTH condition, and it applies to the external path only.** D52:
+a submission missing any of `signer_id`, `key_id`, `issued_at`, `nonce`, `schema_version` — or
+its `signature` — is rejected at the exchange boundary, before extraction and before verification,
+with the same finality as a bad signature. `validate_bid` validates the bid against `Bid`, which
+by design carries no envelope, so it cannot see those fields and does not check them by default:
+its verdict is the R8/R18/S5 table and nothing more. Use `validate_external_submission` — or
+`validate_bid(..., require_signing_envelope=True)` — for the real Tier-2 door. Calling plain
+`validate_bid(bid, path="external", ...)` on a wire submission admits an UNSIGNED bid.
 """
 
 from __future__ import annotations
@@ -31,7 +40,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from contracts.protocol import Bid, BidValidationResult, ProvenanceSource
+from contracts.protocol import Bid, BidValidationResult, ProvenanceSource, SignedBidSubmission
+from contracts.signing import missing_signing_fields
 
 #: R8: the six provenance sources a store-agent can only mint by calling a tool hook. T-040 pins
 #: the hook→source table (`get_product_fact`→`scraped`, `get_live_state`→`pixel_feed`,
@@ -69,6 +79,8 @@ REASON_OFFER_EXPIRY_MISSING = "offer_expiry_missing"
 REASON_OFFER_EXPIRY_UNPARSEABLE = "offer_expiry_unparseable"
 REASON_STORE_BLACKLISTED = "store_blacklisted"
 REASON_TRUST_SNAPSHOT_UNAVAILABLE = "trust_snapshot_unavailable"
+REASON_SIGNING_ENVELOPE_INCOMPLETE = "signing_envelope_incomplete"
+REASON_SIGNATURE_MISSING = "signature_missing"
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -193,14 +205,40 @@ def _eligibility_reasons(store_id: Any, trust_snapshot: Any) -> list[str]:
     return []
 
 
+def _signing_envelope_reasons(bid: Any) -> list[str]:
+    """D52: the five envelope fields plus a `signature`, or the submission is refused.
+
+    Read off the raw submission, not off a validated `Bid`: `Bid` carries no envelope by design,
+    so a schema check against it can never see these fields. That is precisely how an unsigned
+    external submission used to come back `ok=True, reasons=[]`.
+    """
+    payload = _as_plain(bid)
+    reasons = [
+        f"{REASON_SIGNING_ENVELOPE_INCOMPLETE}:{field}"
+        for field in missing_signing_fields(payload)
+    ]
+    signature = payload.get("signature") if isinstance(payload, Mapping) else None
+    if not isinstance(signature, str) or not signature.strip():
+        reasons.append(REASON_SIGNATURE_MISSING)
+    return reasons
+
+
 def validate_bid(
     bid: Any,
     *,
     path: str,
     trust_snapshot: Mapping[str, Any],
     now: datetime | str | float | None = None,
+    require_signing_envelope: bool = False,
 ) -> BidValidationResult:
     """Decide whether `bid` may enter the auction through `path`.
+
+    **This function does NOT check the signing envelope unless you ask it to.** It judges the
+    R8/R18/S5 table — provenance, expiry, eligibility, schema — and its schema check is against
+    `Bid`, which carries no `signer_id`, `key_id`, `issued_at`, `nonce` or `signature`. A wire
+    submission with none of those comes back `ok=True` from the default call. For the real Tier-2
+    door use `validate_external_submission`, which is this function with
+    `require_signing_envelope=True`.
 
     Args:
         bid: the bid, as a mapping or as any object exposing the `Bid` fields.
@@ -209,6 +247,11 @@ def validate_bid(
             A store with no row is treated as an unavailable eligibility read and denied (R12).
         now: the instant expiry is judged against. Defaults to the current UTC time; pass it
             explicitly to keep a caller deterministic.
+        require_signing_envelope: when true, D52's five envelope fields and a non-empty
+            `signature` are required, each gap reported as its own reason. Off by default because
+            a hosted Tier-1 agent holds no key and has nothing to sign with, and because
+            `validate_bid` is also used to judge already-extracted `Bid` objects that never
+            carried an envelope.
 
     Returns:
         `BidValidationResult` — `ok`, the `path` it was judged on, `reasons` (non-empty exactly
@@ -229,9 +272,13 @@ def validate_bid(
     reasons: list[str] = []
 
     # 1. Schema validity. A bid that is not this object is refused on every path, before any
-    #    field of it is interpreted.
+    #    field of it is interpreted. The model depends on what the caller says it is holding:
+    #    `Bid` forbids extra keys, so validating a real D52 submission against it would report
+    #    the four envelope fields as schema violations — the mirror image of admitting a bid
+    #    that has none of them.
+    model = SignedBidSubmission if require_signing_envelope else Bid
     try:
-        Bid.model_validate(_as_plain(bid))
+        model.model_validate(_as_plain(bid))
     except ValidationError as exc:
         reasons.append(
             f"{REASON_SCHEMA_INVALID}:"
@@ -251,6 +298,11 @@ def validate_bid(
     reasons.extend(_expiry_reasons(_get(bid, "offer"), evaluated_at))
     reasons.extend(_eligibility_reasons(_get(bid, "store_id"), trust_snapshot))
 
+    # 5. D52's signing envelope, when the caller is the external door rather than a component
+    #    judging an already-extracted `Bid`.
+    if require_signing_envelope:
+        reasons.extend(_signing_envelope_reasons(bid))
+
     ok = not reasons
     return BidValidationResult(
         ok=ok,
@@ -259,6 +311,28 @@ def validate_bid(
         # A rejected bid is not "admitted pending verification": there is nothing to verify.
         requires_verification=bool(ok and unverified),
         unverified_claim_indexes=unverified if ok else [],
+    )
+
+
+def validate_external_submission(
+    submission: Any,
+    *,
+    trust_snapshot: Mapping[str, Any],
+    now: datetime | str | float | None = None,
+) -> BidValidationResult:
+    """The Tier-2 door: everything `validate_bid` judges, plus D52's signing envelope.
+
+    This is the function an exchange should call on a body arriving at
+    `POST /v1/auctions/{auction_id}/bids`. It refuses an unsigned submission with the same
+    finality as an expired offer or a blacklisted store — before extraction and before
+    verification — and, like `validate_bid`, it never raises.
+    """
+    return validate_bid(
+        submission,
+        path=EXTERNAL_PATH,
+        trust_snapshot=trust_snapshot,
+        now=now,
+        require_signing_envelope=True,
     )
 
 
@@ -276,9 +350,12 @@ __all__ = [
     "REASON_OFFER_EXPIRY_MISSING",
     "REASON_OFFER_EXPIRY_UNPARSEABLE",
     "REASON_SCHEMA_INVALID",
+    "REASON_SIGNATURE_MISSING",
+    "REASON_SIGNING_ENVELOPE_INCOMPLETE",
     "REASON_STORE_BLACKLISTED",
     "REASON_TRUST_SNAPSHOT_UNAVAILABLE",
     "REASON_UNKNOWN_PATH",
     "parse_timestamp",
     "validate_bid",
+    "validate_external_submission",
 ]

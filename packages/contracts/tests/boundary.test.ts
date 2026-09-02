@@ -19,11 +19,13 @@ import {
   REASON_OFFER_EXPIRY_MISSING,
   REASON_OFFER_EXPIRY_UNPARSEABLE,
   REASON_SCHEMA_INVALID,
+  REASON_SIGNATURE_MISSING,
   REASON_STORE_BLACKLISTED,
   REASON_TRUST_SNAPSHOT_UNAVAILABLE,
   REASON_UNKNOWN_PATH,
   parseTimestamp,
   validateBid,
+  validateExternalSubmission,
 } from "../src/ts/boundary.js";
 import {PROVENANCE_SOURCES} from "../src/ts/vocabulary.js";
 import {
@@ -295,5 +297,114 @@ describe("R12 fail-closed, on the flag spellings a real snapshot uses", () => {
       const snapshot = {"store-1": {store_id: "store-1", score: 0.6, blacklisted: flag}};
       expect(check(makeBid(), path, snapshot as never).ok).toBe(true);
     }
+  });
+});
+
+describe("D52 — the signing envelope at the external door", () => {
+  /** A wire submission: `makeBid`'s store and auction, plus the five D52 fields and a signature. */
+  function signed(overrides: Record<string, unknown> = {}) {
+    return {
+      ...makeBid(),
+      signer_id: "store-1",
+      key_id: "key-2026-01",
+      issued_at: "2026-06-01T00:00:00Z",
+      nonce: "nonce-0001",
+      schema_version: "1.0.0",
+      signature: "sig-deadbeef",
+      ...overrides,
+    };
+  }
+
+  const door = (submission: unknown) =>
+    validateExternalSubmission(submission, {trustSnapshot: makeSnapshotTable(), now: NOW});
+
+  it("validateBid alone does not judge the envelope — the documented gap, pinned", () => {
+    // `validateBid` checks the R8/R18/S5 table against `Bid`, which carries no envelope.
+    expect(check(makeBid(), EXTERNAL_PATH).ok).toBe(true);
+  });
+
+  it("rejects an unsigned submission at the external door", () => {
+    const result = door(makeBid());
+    expect(result.ok, "an unsigned external submission was admitted").toBe(false);
+    for (const field of ["signer_id", "key_id", "issued_at", "nonce"]) {
+      expect(result.reasons).toContain(`signing_envelope_incomplete:${field}`);
+    }
+    // Control: the identical bid WITH the envelope is admitted.
+    expect(door(signed()).ok, JSON.stringify(door(signed()).reasons)).toBe(true);
+  });
+
+  it.each(["signer_id", "key_id", "issued_at", "nonce", "schema_version"])(
+    "rejects a submission missing %s",
+    (field) => {
+      const payload = signed();
+      delete (payload as Record<string, unknown>)[field];
+      const result = door(payload);
+      expect(result.ok).toBe(false);
+      expect(result.reasons.join(" ")).toContain("signing_envelope_incomplete");
+    },
+  );
+
+  it.each([null, "", "   ", 12345, [], {a: 1}])(
+    "rejects a submission whose signature is %s",
+    (signature) => {
+      const result = door(signed({signature}));
+      expect(result.ok).toBe(false);
+      expect(result.reasons).toContain(REASON_SIGNATURE_MISSING);
+    },
+  );
+
+  it("still applies the whole R8/R18 table to a signed submission", () => {
+    // The envelope is an ADDITIONAL condition, not a replacement.
+    for (const [overrides, needle] of [
+      [{offer: makeOffer({expires_at: LONG_EXPIRED})}, "offer_expired"],
+      [{store_id: "store-bad"}, "store_blacklisted"],
+      [{claims: [makeClaim("spf", 30, null)]}, "claim_without_provenance"],
+    ] as const) {
+      const result = door(signed(overrides as Record<string, unknown>));
+      expect(result.ok, JSON.stringify(overrides)).toBe(false);
+      expect(result.reasons.join(" ")).toContain(needle);
+    }
+
+    const flagged = door(signed({claims: [makeClaim("spf", 30, ASSERTED_PROVENANCE)]}));
+    expect(flagged.ok, JSON.stringify(flagged.reasons)).toBe(true);
+    expect(flagged.requires_verification).toBe(true);
+  });
+
+  it("never throws on a hostile submission", () => {
+    // "reject" and "500" must not be the same observable at the public door.
+    for (const payload of [null, "a raw string", [1, 2, 3], 42, {}, {store_id: {a: 1}}]) {
+      const result = door(payload);
+      expect(result.ok).toBe(false);
+      expect(result.reasons.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("F4 — a stated UTC offset is part of the instant, not decoration", () => {
+  it("honours a non-zero offset rather than discarding it", () => {
+    for (const [stated, equivalentUtc] of [
+      ["2026-01-01T00:00:00-08:00", "2026-01-01T08:00:00Z"],
+      ["2026-01-01T00:00:00+05:30", "2025-12-31T18:30:00Z"],
+    ]) {
+      expect(parseTimestamp(stated)?.getTime(), `${stated} === ${equivalentUtc}`).toBe(
+        parseTimestamp(equivalentUtc)?.getTime(),
+      );
+    }
+    expect(parseTimestamp("2026-01-01T00:00:00-08:00")?.getTime()).not.toBe(
+      parseTimestamp("2026-01-01T00:00:00Z")?.getTime(),
+    );
+  });
+
+  it("lets the offset decide admit versus reject at the edge", () => {
+    // A Pacific store's offer expiring at 00:00-08:00 is live at 04:00Z and dead at 09:00Z.
+    const offer = makeOffer({expires_at: "2026-01-01T00:00:00-08:00"});
+    const at = (now: string) =>
+      validateBid(makeBid({offer}), {
+        path: EXTERNAL_PATH,
+        trustSnapshot: makeSnapshotTable(),
+        now,
+      });
+    expect(at("2026-01-01T04:00:00Z").ok, "a live Pacific offer was rejected as expired").toBe(true);
+    expect(at("2026-01-01T09:00:00Z").ok).toBe(false);
   });
 });

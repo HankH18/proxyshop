@@ -8,6 +8,7 @@
  */
 import type {Bid, BidValidationResult, LedgerEvent} from "../../generated/ts/protocol.schema.d.ts";
 import {validationErrors} from "./schemas.js";
+import {missingSigningFields} from "./signing.js";
 
 export type BidPathName = "hosted" | "external";
 
@@ -42,6 +43,8 @@ export const REASON_OFFER_EXPIRY_MISSING = "offer_expiry_missing";
 export const REASON_OFFER_EXPIRY_UNPARSEABLE = "offer_expiry_unparseable";
 export const REASON_STORE_BLACKLISTED = "store_blacklisted";
 export const REASON_TRUST_SNAPSHOT_UNAVAILABLE = "trust_snapshot_unavailable";
+export const REASON_SIGNING_ENVELOPE_INCOMPLETE = "signing_envelope_incomplete";
+export const REASON_SIGNATURE_MISSING = "signature_missing";
 
 export interface TrustSnapshotRow {
   store_id?: string;
@@ -56,6 +59,12 @@ export interface ValidateBidOptions {
   trustSnapshot: TrustSnapshotMap;
   /** The instant expiry is judged against. Defaults to now; pass it to stay deterministic. */
   now?: Date | string | number;
+  /**
+   * When true, D52's five envelope fields and a non-empty `signature` are required, each gap
+   * reported as its own reason. Off by default: `Bid` carries no envelope, and a hosted Tier-1
+   * agent holds no key. `validateExternalSubmission` is this flag turned on.
+   */
+  requireSigningEnvelope?: boolean;
 }
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
@@ -146,7 +155,30 @@ function eligibilityReasons(storeId: unknown, snapshot: TrustSnapshotMap): strin
   return [];
 }
 
-/** Decide whether `bid` may enter the auction through `options.path`. Never throws. */
+/**
+ * D52: the five envelope fields plus a `signature`, or the submission is refused.
+ *
+ * Read off the raw submission, not off a validated `Bid`: `Bid` carries no envelope by design, so
+ * a schema check against it can never see these fields.
+ */
+function signingEnvelopeReasons(bid: unknown): string[] {
+  const record = readRecord(bid) ?? {};
+  const reasons = missingSigningFields(record).map(
+    (field) => `${REASON_SIGNING_ENVELOPE_INCOMPLETE}:${field}`,
+  );
+  const signature = record["signature"];
+  if (typeof signature !== "string" || signature.trim() === "") {
+    reasons.push(REASON_SIGNATURE_MISSING);
+  }
+  return reasons;
+}
+
+/**
+ * Decide whether `bid` may enter the auction through `options.path`. Never throws.
+ *
+ * Does NOT check the signing envelope unless `options.requireSigningEnvelope` is set — see
+ * `validateExternalSubmission`, which is the wire door.
+ */
 export function validateBid(bid: unknown, options: ValidateBidOptions): BidValidationResult {
   const evaluatedAt = parseTimestamp(options.now) ?? new Date();
 
@@ -162,8 +194,14 @@ export function validateBid(bid: unknown, options: ValidateBidOptions): BidValid
   const path: BidPathName = options.path;
   const reasons: string[] = [];
 
-  // 1. Schema validity — refused on every path, before any field is interpreted.
-  const schemaProblems = validationErrors("Bid", bid);
+  // 1. Schema validity — refused on every path, before any field is interpreted. The model
+  //    depends on what the caller says it is holding: `Bid` forbids extra keys, so validating a
+  //    real D52 submission against it would report the four envelope fields as schema
+  //    violations — the mirror image of admitting a bid that has none of them.
+  const schemaProblems = validationErrors(
+    options.requireSigningEnvelope ? "SignedBidSubmission" : "Bid",
+    bid,
+  );
   if (schemaProblems.length > 0) {
     reasons.push(`${REASON_SCHEMA_INVALID}:${schemaProblems.slice(0, 8).join(";")}`);
   }
@@ -178,6 +216,10 @@ export function validateBid(bid: unknown, options: ValidateBidOptions): BidValid
   reasons.push(...expiryReasons(record["offer"], evaluatedAt));
   reasons.push(...eligibilityReasons(record["store_id"], options.trustSnapshot));
 
+  // 5. D52's signing envelope, when the caller is the external door rather than a component
+  //    judging an already-extracted `Bid`.
+  if (options.requireSigningEnvelope) reasons.push(...signingEnvelopeReasons(bid));
+
   const ok = reasons.length === 0;
   return {
     ok,
@@ -187,6 +229,24 @@ export function validateBid(bid: unknown, options: ValidateBidOptions): BidValid
     requires_verification: ok && claims.unverified.length > 0,
     unverified_claim_indexes: ok ? claims.unverified : [],
   };
+}
+
+/**
+ * The Tier-2 door: everything `validateBid` judges, plus D52's signing envelope.
+ *
+ * The function an exchange should call on a body arriving at
+ * `POST /v1/auctions/{auction_id}/bids`. It refuses an unsigned submission with the same finality
+ * as an expired offer or a blacklisted store, and, like `validateBid`, it never throws.
+ */
+export function validateExternalSubmission(
+  submission: unknown,
+  options: Omit<ValidateBidOptions, "path" | "requireSigningEnvelope">,
+): BidValidationResult {
+  return validateBid(submission, {
+    ...options,
+    path: EXTERNAL_PATH,
+    requireSigningEnvelope: true,
+  });
 }
 
 export type {Bid, BidValidationResult, LedgerEvent};

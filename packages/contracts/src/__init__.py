@@ -13,7 +13,10 @@ their component types and closed enums.
 
 **The dual-path bid boundary** — `validate_bid(bid, path=…, trust_snapshot=…)`. Hosted bids reject
 on any non-hook provenance; external bids admit `seller_asserted` claims flagged for verification;
-expired offers, blacklisted stores and schema-invalid bids reject on every path.
+expired offers, blacklisted stores and schema-invalid bids reject on every path. `validate_bid`
+judges that table and nothing else: it does NOT check the signing envelope, because `Bid` does not
+carry one. The wire door is `validate_external_submission`, which adds D52's envelope to the same
+verdict.
 
 **The external signing envelope** — `SigningEnvelope`, `SignedBidSubmission`,
 `canonical_signing_bytes`, `payload_hash`. Five required fields on every submission through
@@ -39,8 +42,11 @@ from contracts.boundary import (
     HOOK_PROVENANCE_SOURCES,
     HOSTED_PATH,
     NON_HOOK_PROVENANCE_SOURCES,
+    REASON_SIGNATURE_MISSING,
+    REASON_SIGNING_ENVELOPE_INCOMPLETE,
     parse_timestamp,
     validate_bid,
+    validate_external_submission,
 )
 from contracts.claims import claim_id, claim_id_for
 from contracts.labels import (
@@ -194,8 +200,11 @@ __all__ = [
     "HOOK_PROVENANCE_SOURCES",
     "HOSTED_PATH",
     "NON_HOOK_PROVENANCE_SOURCES",
+    "REASON_SIGNATURE_MISSING",
+    "REASON_SIGNING_ENVELOPE_INCOMPLETE",
     "parse_timestamp",
     "validate_bid",
+    "validate_external_submission",
     # signing
     "REQUIRED_SIGNING_FIELDS",
     "SIGNED_FIELDS",
