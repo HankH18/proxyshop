@@ -420,6 +420,41 @@ def test_no_public_attribute_of_the_facade_is_the_writable_ledger(hooks: ToolHoo
         )
 
 
+def test_the_audit_trail_cannot_be_written_by_the_party_it_records(hooks: ToolHooks) -> None:
+    """S5's record is a record, or the criterion it serves is unfalsifiable.
+
+    "Every claim in the bid traces to a hook call" is checkable only against a log the party
+    being audited did not write. `emitted_claims` and `call_log` are exactly that log, and they
+    are read straight off the facade the hosted path holds — including by the frozen acceptance
+    suite. An `append` here writes a hook call that never happened.
+    """
+    denied = hooks.authorize_discount("prod-cap", 25.0)
+    assert isinstance(denied, Denied), "a denial mints nothing and logs a refusal"
+    calls, claims = len(hooks.call_log), len(hooks.emitted_claims)
+
+    forged = mint_claim(
+        key="free_returns",
+        value="forged",
+        source=ProvenanceSource.owner_statement,
+        ref="envelope:store-alpha:v3#free_returns",
+    )
+    with pytest.raises(TypeError):
+        hooks.emitted_claims.append(forged)
+    with pytest.raises(TypeError):
+        hooks.call_log.append(hooks.call_log[0])
+    with pytest.raises(TypeError):
+        hooks.call_log[0] = hooks.call_log[0]
+
+    assert (len(hooks.call_log), len(hooks.emitted_claims)) == (calls, claims), (
+        "the record must be exactly what the hooks did"
+    )
+
+    # It still reads like the list every caller (the frozen suite included) treats it as.
+    assert hooks.emitted_claims == []
+    assert hooks.call_log[-1].outcome == "over_max_discount_pct"
+    assert [c.hook for c in hooks.call_log] == ["authorize_discount"]
+
+
 # ---------------------------------------------------------------------------------------------
 # 4. The static half must be a rule about building a Claim, not about how it is spelled
 # ---------------------------------------------------------------------------------------------
