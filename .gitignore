@@ -49,3 +49,7 @@ coverage/
 .docker-data/
 .claude/.claude-build.json
 *.py[co]
+# build_succeeds' evidence log (goals.json amendment 3): rewritten every
+# measurement, and a tracked copy would churn main each cycle and put a
+# .swarm-loop/ path in any branch diff that produced it (check-branch vetoes those).
+.swarm-loop/reports/verify-last.log

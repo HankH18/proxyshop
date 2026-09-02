@@ -74,5 +74,8 @@
     "Makefile",
     "scripts/verify.sh",
     "scripts/check_verify_contracts.py"
+  ],
+  "pending_remeasure": [
+    7
   ]
 }

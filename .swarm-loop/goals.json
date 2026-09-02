@@ -1,6 +1,6 @@
 {
   "frozen": true,
-  "frozen_at": "2026-09-01T14:45:56",
+  "frozen_at": "2026-09-02T14:42:49",
   "metrics": [
     {
       "id": "acceptance_pass_rate",
@@ -26,7 +26,7 @@
       "id": "build_succeeds",
       "name": "Root verify pipeline is green (0/1)",
       "kind": "global",
-      "command": "if PROXYSHOP_WORKER=0 make verify >/dev/null 2>&1; then echo 1; else echo 0; fi",
+      "command": "if PROXYSHOP_WORKER=0 make verify >.swarm-loop/reports/verify-last.log 2>&1; then echo 1; else echo 0; fi",
       "target": 1,
       "direction": "maximize",
       "tolerance": 0,
@@ -132,7 +132,7 @@
       "timeout": 2400
     }
   ],
-  "amendments": 2,
-  "last_amended_at": "2026-09-01T14:45:56",
-  "last_amend_reason": "Amendment 2, user-approved (ESC-002). test_compose_declares_healthchecked_postgres_neo4j_redis_and_separate_deployables was UNSATISFIABLE: it read services only from the root docker-compose.yml via a textual parser that never followed 'include:', while the four deployables (buyer/merchant/exchange/trust) live in per-lane fragments by design \u2014 the root file's own header states a service ticket fills its own fragment and no ticket ever edits the root. So the test could never pass whatever any ticket built, pinning acceptance_pass_rate (target 100, tolerance 0) permanently below target and spec_criteria_passing at 7/8. Fix: two new helpers, _compose_include_paths() parses the include: block textually (no PyYAML dependency, consistent with _compose_services), and _compose_stack_services() unions the root's services with every included fragment's; the test now reads that union. Verified in both directions before re-freezing: with the four fragments as shipped (empty 'services: {}' stubs) the test is RED for the correct reason, and with the four temporarily filled it is GREEN \u2014 so the amendment makes C1 reachable without making it free. No assertion was weakened, no test renamed, no test added or removed; the suite stays at 120. Only test_spec_criteria.py changed."
+  "amendments": 3,
+  "last_amended_at": "2026-09-02T14:42:49",
+  "last_amend_reason": "build_succeeds discarded BOTH streams to /dev/null, so a zero left no artifact anywhere: four false zeros in six cycles, four manual re-runs, four different causes. Redirect the same output to .swarm-loop/reports/verify-last.log instead. Identical command, exit test, emitted value, target (1), direction (maximize) and tolerance (0) - no assertion weakened, nothing made easier to pass; only where the bytes go. User-approved 2026-09-02."
 }
