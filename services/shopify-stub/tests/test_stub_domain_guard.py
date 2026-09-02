@@ -59,7 +59,12 @@ from shopify_stub.state import (
     Variant,
 )
 from shopify_stub.telemetry import checkout_completed_payload
-from shopify_stub.testing import NON_BARE_HOSTS, SEED_VARIANT, StubClient
+from shopify_stub.testing import (
+    NON_BARE_HOSTS,
+    RESPONSE_SPLITTING_HOSTS,
+    SEED_VARIANT,
+    StubClient,
+)
 
 from proxyshop_support.asgi_server import serve
 
@@ -474,3 +479,27 @@ def test_the_raises_clause_and_the_guard_describe_the_same_set() -> None:
     for code_point in (0x21, 0x2F, 0x7E):
         char = chr(code_point)
         assert not _FORBIDDEN_IN_PATH.search(char), f"U+{code_point:04X} must be allowed"
+
+
+def test_the_response_splitting_subset_is_named_not_counted() -> None:
+    """`NON_BARE_HOSTS`'s comment used to point at the wrong rows, and nothing noticed.
+
+    It said "the last two are the response-splitting pair" and then described the trailing
+    LF/CRLF pair — which sit at positions 15 and 16 of 18, so "the last two" actually named
+    `embedded lf` and `header injection`. The table had grown past the sentence.
+
+    So the subset is named in `RESPONSE_SPLITTING_HOSTS` and held to the table here, in
+    both directions: a new CR/LF entry that is not named, or a named key that stops
+    carrying one, is a red test rather than a quietly wrong comment.
+    """
+    carries_a_line_break = {
+        key for key, host in NON_BARE_HOSTS.items() if "\n" in host or "\r" in host
+    }
+    assert carries_a_line_break == set(RESPONSE_SPLITTING_HOSTS), (
+        "every CR/LF-bearing entry must be named in RESPONSE_SPLITTING_HOSTS and vice versa"
+    )
+    assert RESPONSE_SPLITTING_HOSTS <= set(NON_BARE_HOSTS), "a named key must exist in the table"
+    # And the reason the subset is interesting at all: every one of them is refused.
+    for key in RESPONSE_SPLITTING_HOSTS:
+        with pytest.raises(PermalinkError):
+            _assert_bare_host(NON_BARE_HOSTS[key])
