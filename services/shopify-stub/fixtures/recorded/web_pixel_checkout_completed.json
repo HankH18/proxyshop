@@ -53,6 +53,10 @@
     },
     "data": {
       "checkout": {
+        "$may_be_empty": [
+          "discountApplications"
+        ],
+        "$may_be_empty_note": "A checkout with no code applied fires the same event with `discountApplications: []`. Every other array here must arrive populated.",
         "token": "0f3d1c9a5b2e4f8a9c7d6e5b4a3f2e1d",
         "order": {
           "id": "5500000000001"

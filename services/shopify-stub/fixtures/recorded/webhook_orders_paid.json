@@ -32,6 +32,11 @@
   },
   "header_notes": "shopify.dev prints the HMAC header three ways across its own pages (X-Shopify-Hmac-Sha256, X-Shopify-Hmac-SHA256, x-shopify-hmac-sha256) and states that header names must be treated as case-insensitive. X-Shopify-Name is also real but optional and is not sent by the stub.",
   "payload": {
+    "$may_be_empty": [
+      "discount_codes",
+      "discount_applications"
+    ],
+    "$may_be_empty_note": "Every OTHER array recorded here must arrive populated: an empty `line_items` or `note_attributes` on an orders/paid body is a defect, and the shape check now reports it. These two are the exceptions -- they are empty for an undiscounted order, and the published sample they were derived from has BOTH `[]`. Marking them here is what keeps the non-empty rule from false-positiving on a legitimate no-discount order.",
     "id": 5500000000001,
     "admin_graphql_api_id": "gid://shopify/Order/5500000000001",
     "name": "#1001",

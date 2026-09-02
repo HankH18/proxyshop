@@ -127,6 +127,12 @@ def test_the_shape_matcher_detects_the_differences_that_matter() -> None:
         "bool must not satisfy a number slot: isinstance(True, int) is True in Python"
     )
     assert diff_shape(template, {"a": 1, "b": {"c": "x"}, "d": [{"wrong": True}]})
+    # Each of the four assertions above passes `"d": []` and is satisfied entirely by its
+    # non-array defect — so the negative control that exists to prove this matcher can fail
+    # was demonstrating, four times over, that an empty array is accepted. That is the hole
+    # that let the orders/paid webhook ship ZERO line items with the whole suite green. An
+    # emptied array must now fail on its own, with nothing else wrong.
+    assert diff_shape(template, {"a": 1, "b": {"c": "x"}, "d": []})
     # A wider response is fine: the stub may answer more than the recording asked for.
     assert diff_shape(template, {"a": 1, "b": {"c": "x", "extra": 0}, "d": [{"e": True}]}) == []
 
@@ -382,3 +388,143 @@ def test_the_recorded_throttle_block_carries_the_documented_numbers() -> None:
         "currentlyAvailable": 954,
         "restoreRate": 50,
     }
+
+
+# ---------------------------------------------------------------------------------------
+# The emptied-array hole, and the per-array opt-out that closes it without false positives
+# ---------------------------------------------------------------------------------------
+
+
+def test_an_emptied_array_is_a_difference_unless_the_recording_says_otherwise() -> None:
+    """The rule, and the reason it is per-array rather than blanket.
+
+    Blanket ("expected non-empty, actual empty, always a difference") passes every test in
+    this file and then false-positives on the first real payload: ``webhook_orders_paid``
+    records a populated ``discount_codes``/``discount_applications``, and both are
+    legitimately ``[]`` for an undiscounted order. So the recording opts *out* per array.
+    """
+    template = {"items": [{"sku": "a"}], "notes": [{"n": 1}]}
+    assert diff_shape(template, {"items": [{"sku": "b"}], "notes": [{"n": 2}]}) == []
+
+    problems = diff_shape(template, {"items": [], "notes": [{"n": 2}]})
+    assert problems and "items" in problems[0]
+
+    # The opt-out is named per key and applies to that key only.
+    lenient = {"$may_be_empty": ["items"], **template}
+    assert diff_shape(lenient, {"items": [], "notes": [{"n": 2}]}) == []
+    assert diff_shape(lenient, {"items": [], "notes": []}), (
+        "$may_be_empty must exempt only the arrays it names; 'notes' is not one of them"
+    )
+    # And the marker is metadata, not shape: it is never required of the response.
+    assert diff_shape(lenient, {"items": [{"sku": "b"}], "notes": [{"n": 2}]}) == []
+
+
+def test_an_empty_recorded_array_still_asserts_only_that_it_is_an_array() -> None:
+    """Unchanged, and deliberately so: an empty doc example documents no element shape."""
+    assert diff_shape({"userErrors": []}, {"userErrors": []}) == []
+    assert diff_shape({"userErrors": []}, {"userErrors": [{"anything": 1}]}) == []
+    assert diff_shape({"userErrors": []}, {"userErrors": {}})
+
+
+async def test_the_orders_paid_webhook_can_never_ship_zero_line_items(
+    stub: StubClient, webhook_receiver: Receiver
+) -> None:
+    """Acceptance criterion 1's headline claim, stated so a sabotage cannot pass it.
+
+    Emptying the ``line_items`` comprehension in ``orders.py`` left the suite at 164 passed
+    and the parity check reporting ``PASSED with 0 line items``: element-wise comparison
+    iterates the *actual* array, so an empty one was compared zero times, and
+    ``collect_keys({"line_items": []})`` produces no ``line_items[]`` path for the
+    invented-key check to object to. A webhook body with no line items is not a conforming
+    orders/paid body under any reading.
+    """
+    receiver, url = webhook_receiver
+    await stub.subscribe("ORDERS_PAID", url)
+    await stub.create_code("PSX-7QK2ZB0M", percentage=0.10)
+    await stub.buy(VARIANT_ID, code="PSX-7QK2ZB0M")
+
+    delivered = json.loads(receiver.requests[0]["body"])
+    assert delivered["line_items"], "an orders/paid body with no line items sells nothing"
+    assert delivered["note_attributes"], (
+        "the client_id join key rides in note_attributes; an empty array breaks every "
+        "downstream reconciliation without breaking any shape check"
+    )
+    assert_conforms(load("webhook_orders_paid")["payload"], delivered, label="orders/paid")
+
+
+async def test_an_undiscounted_order_still_conforms_with_empty_discount_arrays(
+    stub: StubClient, webhook_receiver: Receiver
+) -> None:
+    """The false positive the blanket rule would have caused, asserted as a passing case.
+
+    An order placed with no code carries ``discount_codes: []`` and
+    ``discount_applications: []``. Both are recorded non-empty, and both are named in the
+    recording's ``$may_be_empty``, so this conforms. Without the per-array opt-out this test
+    is what T-050/T-061 would have hit the first time they asserted conformance on an order
+    that happened to have no discount.
+    """
+    receiver, url = webhook_receiver
+    await stub.subscribe("ORDERS_PAID", url)
+    await stub.buy(VARIANT_ID)  # no code
+
+    delivered = json.loads(receiver.requests[0]["body"])
+    assert delivered["discount_codes"] == []
+    assert delivered["discount_applications"] == []
+    recording = load("webhook_orders_paid")
+    assert_conforms(recording["payload"], delivered, label="orders/paid, no discount")
+    assert_no_invented_keys(delivered, recording["documented_keys"], label="orders/paid")
+
+
+async def test_an_undiscounted_order_conforms_in_the_orders_query_too(stub: StubClient) -> None:
+    """Same false positive, second surface: ``discountCodes`` and ``discountApplications``."""
+    await stub.buy(VARIANT_ID)  # no code
+    recording = load("admin_orders_query")
+    body = (await stub.graphql(recording["request"]["query"], {"first": 10})).json()
+
+    node = body["data"]["orders"]["edges"][0]["node"]
+    assert node["discountCodes"] == []
+    assert node["discountApplications"]["edges"] == []
+    assert node["lineItems"]["edges"], "an order with no line items is not an order"
+    assert_conforms(recording["response"], body, label="orders, no discount")
+
+
+async def test_an_undiscounted_checkout_conforms_in_the_pixel_event_too(stub: StubClient) -> None:
+    """Third surface. ``discountApplications: []`` is what a no-code checkout emits."""
+    await stub.buy(VARIANT_ID)  # no code
+    (event,) = await stub.events()
+    assert event["payload"]["data"]["checkout"]["discountApplications"] == []
+    assert_conforms(
+        load("web_pixel_checkout_completed")["payload"],
+        event["payload"],
+        label="checkout_completed, no discount",
+    )
+
+
+def test_every_may_be_empty_marker_names_an_array_the_recording_actually_records() -> None:
+    """The opt-out must not rot into a list of names that mean nothing.
+
+    A marker naming a key that is absent, or that is not an array, or that is *already* empty
+    in the recording, exempts nothing and reads as though it does — which is how a fail-closed
+    check quietly becomes fail-open again.
+    """
+
+    def walk(node: Any, where: str) -> list[str]:
+        bad: list[str] = []
+        if isinstance(node, dict):
+            for name in node.get(recordings.MAY_BE_EMPTY_KEY, []):
+                value = node.get(name)
+                if not isinstance(value, list) or not value:
+                    bad.append(f"{where}.{name}: marked $may_be_empty but is {value!r}")
+            for key, value in node.items():
+                if not key.startswith("$"):
+                    bad.extend(walk(value, f"{where}.{key}"))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                bad.extend(walk(item, f"{where}[{index}]"))
+        return bad
+
+    problems: list[str] = []
+    for path in recording_paths():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        problems.extend(walk(data, path.stem))
+    assert not problems, "\n".join(problems)

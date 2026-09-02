@@ -41,6 +41,10 @@
           {
             "cursor": "b3JkZXI6NTUwMDAwMDAwMDAwMQ==",
             "node": {
+              "$may_be_empty": [
+                "discountCodes"
+              ],
+              "$may_be_empty_note": "An undiscounted order carries `discountCodes: []` and an empty `discountApplications.edges` (marked separately, inside that object). Every other array on this node -- `customAttributes`, `lineItems.edges` -- must arrive populated, and so must `orders.edges` itself once an order exists.",
               "id": "gid://shopify/Order/5500000000001",
               "legacyResourceId": "5500000000001",
               "name": "#1001",
@@ -114,6 +118,9 @@
               ],
               "customer": null,
               "discountApplications": {
+                "$may_be_empty": [
+                  "edges"
+                ],
                 "edges": [
                   {
                     "cursor": "ZGlzY291bnQ6NTUwMDAwMDAwMDAwMQ==",

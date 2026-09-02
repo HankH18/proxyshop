@@ -118,7 +118,14 @@ def json_type(value: Any) -> str:
     return type(value).__name__
 
 
-def diff_shape(expected: Any, actual: Any, path: str = "") -> list[str]:
+#: The ``$``-prefixed key a recording uses to name the arrays that are allowed to arrive
+#: empty. See :func:`diff_shape`.
+MAY_BE_EMPTY_KEY = "$may_be_empty"
+
+
+def diff_shape(
+    expected: Any, actual: Any, path: str = "", *, may_be_empty: bool = False
+) -> list[str]:
     """Structural differences between a recorded template and a live value.
 
     Rules, and the reasoning for each:
@@ -132,6 +139,38 @@ def diff_shape(expected: Any, actual: Any, path: str = "") -> list[str]:
     * Arrays are compared element-wise against ``expected[0]``. An empty ``expected`` array
       only asserts "this is an array" — which is the honest reading of a doc example whose
       array is empty.
+    * **A recorded non-empty array must not arrive empty**, unless the recording explicitly
+      says that array may be. This is the rule that was missing, and its absence was the
+      single largest hole in acceptance criterion 1.
+
+    Why the last rule, and why it is per-array
+    ------------------------------------------
+    Element-wise comparison iterates ``actual``, so an empty ``actual`` iterated zero times
+    and reported nothing. Making the ``orders/paid`` webhook ship **zero line items** —
+    the payload's entire point — left the suite fully green and the parity check reporting
+    ``PASSED``. :func:`collect_keys` could not see it either: ``{"line_items": []}`` yields
+    no ``line_items[]`` path at all, so :func:`assert_no_invented_keys` has nothing to
+    object to. Both guard mechanisms were blind to a dropped array, in the one direction
+    that matters most.
+
+    The obvious fix — "non-empty expected, empty actual, always a difference" — is wrong,
+    and cheaply so: ``webhook_orders_paid`` records a populated ``discount_codes`` and
+    ``discount_applications``, and both are *legitimately* empty for an undiscounted order.
+    A blanket rule would fire on the first no-discount order any consumer asserts on.
+
+    So the rule is **fail-closed with a per-array opt-out**: a recording names the arrays
+    that may legitimately be empty in a sibling ``"$may_be_empty": [...]`` list (``$`` keys
+    are skipped by the key walk above, so it is metadata, not shape). Fail-closed rather
+    than fail-open because a new recording that forgets the marker should get the protection,
+    not silently lose it — an opt-in ``$non_empty`` list would reintroduce exactly this hole
+    for every recording anybody adds later.
+
+    Args:
+        expected: the recorded template.
+        actual: the live value.
+        path: dotted path, for the message.
+        may_be_empty: set by the parent object when this value's key is named in its
+            ``$may_be_empty`` list. Only meaningful for arrays.
     """
     problems: list[str] = []
     here = path or "<root>"
@@ -142,14 +181,23 @@ def diff_shape(expected: Any, actual: Any, path: str = "") -> list[str]:
     if expected_type != actual_type:
         return [f"{here}: expected {expected_type}, got {actual_type}"]
     if expected_type == "object":
+        optional = expected.get(MAY_BE_EMPTY_KEY) or []
         for key, value in expected.items():
             if key.startswith("$"):
                 continue
             if key not in actual:
                 problems.append(f"{here}.{key}: missing")
                 continue
-            problems.extend(diff_shape(value, actual[key], f"{here}.{key}"))
+            problems.extend(
+                diff_shape(value, actual[key], f"{here}.{key}", may_be_empty=key in optional)
+            )
     elif expected_type == "array" and expected:
+        if not actual and not may_be_empty:
+            problems.append(
+                f"{here}: the recording documents a non-empty array here and the response "
+                f"is empty. If this array is legitimately empty in some valid scenario, name "
+                f"it in the enclosing object's {MAY_BE_EMPTY_KEY!r} list and say why."
+            )
         for index, item in enumerate(actual):
             problems.extend(diff_shape(expected[0], item, f"{here}[{index}]"))
     return problems
