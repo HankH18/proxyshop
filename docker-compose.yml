@@ -24,8 +24,17 @@ services:
     pull_policy: missing
     command: ["postgres","-c","shared_buffers=256MB","-c","max_connections=200",
               "-c","fsync=off","-c","synchronous_commit=off","-c","full_page_writes=off"]
+    # PROXYSHOP_ROLE_PASSWORD (T-112) is forwarded because db/init/00-roles.sql runs INSIDE
+    # this container and can only read what the container has: without this line the four
+    # least-privilege roles were seeded with the dev default on every volume the project
+    # itself creates, no matter what the host environment said — T-110's defect, one layer
+    # down. The default is deliberately EMPTY rather than `:-x`: a value here would be a
+    # second copy of the dev password, and an empty one falls through to the single
+    # coalesce(nullif(current_setting('proxyshop.role_password', true), ''), 'x') in
+    # 00-roles.sql. proxyshop_support/postgres.py reads the same variable to connect.
     environment: { POSTGRES_USER: proxyshop, POSTGRES_PASSWORD: proxyshop_dev_pw,
-                   POSTGRES_DB: proxyshop_template }
+                   POSTGRES_DB: proxyshop_template,
+                   PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}" }
     ports: ["${PG_PORT:-5432}:5432"]
     volumes: [ "pgdata:/var/lib/postgresql/data",
                "./db/init:/docker-entrypoint-initdb.d:ro" ]   # 00-roles.sql runs ONCE (D38)
