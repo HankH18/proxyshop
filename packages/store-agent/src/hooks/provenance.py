@@ -61,6 +61,21 @@ CLAIM_FINGERPRINT_PREFIX = "hookclaim"
 #: Hash behind the fingerprint. Part of the value, so a future change is visible per entry.
 CLAIM_FINGERPRINT_ALGORITHM = "sha256"
 
+#: Separates a rule citation from the product the rule was *applied to*, inside a claim `ref`:
+#: ``envelope:store-alpha:v3#max_discount_pct@prod-cap`` reads "the v3 envelope's discount cap,
+#: as evaluated for prod-cap". One ref that names both the rule and the subject it was checked
+#: against, so the fingerprint of a grant differs per product.
+CLAIM_SCOPE_SEPARATOR = "@"
+
+#: Claim keys that are an *authorization for one product*, not a fact about the store.
+#:
+#: A discount is the only one so far, and it is the clearest case: the walls it clears are
+#: per product — `prod-cap` has a 10.00 floor and `prod-floor` a 95.00 one — so "15% is
+#: allowed" is only ever true of the product whose floor was actually checked. A claim listed
+#: here must carry a product scope in its ref, and :func:`enforce_hook_provenance` refuses one
+#: presented in a bid about a different product.
+PRODUCT_SCOPED_CLAIM_KEYS = frozenset({"authorized_discount_pct"})
+
 
 class HookProvenanceError(RuntimeError):
     """A claim reached the bid boundary that no tool hook emitted (R8/S5).
@@ -73,6 +88,15 @@ class HookProvenanceError(RuntimeError):
     def __init__(self, message: str, offenders: Iterable[tuple[int, str]] = ()) -> None:
         super().__init__(message)
         self.offenders: tuple[tuple[int, str], ...] = tuple(offenders)
+
+
+class ClaimScopeError(HookProvenanceError):
+    """A genuinely hook-emitted claim was presented for a product it was not granted for.
+
+    The ledger cannot catch this one: the claim *is* in the ledger — a real hook really did
+    emit it — just for a different product. Subclasses :class:`HookProvenanceError` so a caller
+    that already refuses un-hooked claims refuses transferred ones by the same `except`.
+    """
 
 
 class NotAClaimError(ValueError):
@@ -94,6 +118,33 @@ def _read(node: Any, field: str, default: Any = None) -> Any:
     if isinstance(node, Mapping):
         return node.get(field, default)
     return getattr(node, field, default)
+
+
+def scoped_ref(rule_ref: str, product_ref: str) -> str:
+    """``<rule_ref>@<product_ref>`` — a rule citation bound to the product it was applied to.
+
+    The one place the scoping spelling lives, so the hook that mints a scoped ref and the guard
+    that checks one cannot drift apart. Built rather than parsed at the check site: comparing
+    against a constructed ref means a product_ref containing the separator is still matched
+    exactly, where splitting the string would guess.
+    """
+    return f"{rule_ref}{CLAIM_SCOPE_SEPARATOR}{product_ref}"
+
+
+def claim_scope(claim: Any) -> str | None:
+    """The product a claim's ref is bound to, or `None` when the ref names no product.
+
+    Reads the ref rather than a dedicated field because `Claim` has none: the ref is the claim's
+    citation, and "which product this grant was evaluated for" is part of the citation, not
+    metadata beside it. It is covered by :func:`claim_fingerprint`, so a scope cannot be edited
+    onto a claim without the ledger noticing.
+    """
+    provenance = _read(claim, "provenance")
+    if provenance is None or isinstance(provenance, (str, bytes)):
+        return None
+    ref = str(_enum_value(_read(provenance, "ref")) or "")
+    rule, separator, scope = ref.rpartition(CLAIM_SCOPE_SEPARATOR)
+    return scope if separator and rule and scope else None
 
 
 def mint_provenance(
