@@ -31,10 +31,13 @@ from typing import Any
 
 from ..embeddings import EmbeddingProvider, get_embedding_provider
 from .schema import (
+    EMBEDDING_RUN_COMPLETE,
+    EMBEDDING_RUN_RUNNING,
     VECTOR_INDEX_NAME,
     apply_schema,
     await_indexes,
     rebuild_vector_index,
+    record_embedding_run,
     schema_report,
 )
 from .upsert import EmbeddingDimensionMismatch, set_product_embedding
@@ -160,6 +163,12 @@ def reembed_products(
 ) -> ReembedReport:
     """Recompute and store ``Product.embedding`` for every product in the graph.
 
+    Records an :class:`~ingest.graph.schema.EmbeddingRun` marker against the vector index —
+    ``running`` before the first batch, ``complete`` after the last — so that both "which
+    provider wrote these vectors" and "did the pass finish" are readable from the graph
+    rather than assumed. :func:`ingest.graph.query.candidate_products` refuses to answer a
+    vector query that disagrees with it.
+
     Args:
         session: an open ``neo4j.Session``.
         provider: the provider to embed with. Defaults to
@@ -194,6 +203,28 @@ def reembed_products(
             f"write and then match none of them. Rebuild the index for this width first: "
             f"python -m ingest.graph.reembed --provider {resolved.name} --rebuild-index"
         )
+    # Stamp the index BEFORE the first batch, and again after the last.
+    #
+    # Two failures this closes, one needing an operator mistake and one needing only a
+    # network blip:
+    #
+    # * A second *valid* 1024-d provider can re-embed the whole catalog and the width guard
+    #   above cannot fire, because every registered provider declares
+    #   ``EMBEDDING_DIMENSIONS``. Recording ``provider`` is what lets
+    #   :func:`ingest.graph.query.candidate_products` notice it is reading someone else's
+    #   vector space instead of silently returning a re-ranked catalog.
+    # * The per-product writes below auto-commit and are paged with SKIP/LIMIT, so a failure
+    #   on page two leaves half the catalog in the new space and half in the old, with
+    #   ``products_missing_embeddings() == []``. Nothing rolls back — a pass-spanning
+    #   transaction over an arbitrarily large catalog is not the answer either — so the
+    #   marker is left in :data:`~ingest.graph.schema.EMBEDDING_RUN_RUNNING` and the
+    #   half-finished state becomes *visible* rather than silent.
+    record_embedding_run(
+        session,
+        provider=resolved.name,
+        dimension=index_dimensions,
+        state=EMBEDDING_RUN_RUNNING,
+    )
     products = 0
     embedded = 0
     skipped: list[str] = []
@@ -220,6 +251,14 @@ def reembed_products(
             )
             embedded += 1
         skip += len(rows)
+    record_embedding_run(
+        session,
+        provider=resolved.name,
+        dimension=index_dimensions,
+        state=EMBEDDING_RUN_COMPLETE,
+        products=products,
+        embedded=embedded,
+    )
     if await_index:
         await_indexes(session)
     return ReembedReport(

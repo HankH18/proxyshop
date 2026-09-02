@@ -29,6 +29,7 @@ import math
 import pathlib
 import re
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -2057,3 +2058,172 @@ def test_the_query_predicate_indexes_match_what_the_query_actually_compares(
     live = set(schema_report(graph_schema_session).indexes)
     for name, _label, _prop in QUERY_PREDICATE_INDEXES:
         assert name in live, f"{name} is declared but not present in the database"
+
+
+# =======================================================================================
+# 13. Findings from the second adversarial review (wave 1). Same rule as section 12:
+#     every test below is a regression guard for a defect that was reproduced live.
+# =======================================================================================
+
+
+class _SecondProvider(EmbeddingProvider):
+    """A second, entirely valid, 1024-d provider — the shape of the ``local_bge`` swap.
+
+    ``.env.example`` sets ``EMBEDDING_PROVIDER=hash`` and ``make e2e-live`` sets
+    ``local_bge``; both declare ``EMBEDDING_DIM``. So the width guard in ``reembed_products``
+    is structurally incapable of noticing the swap, and a double that declares a *different*
+    width would not reproduce the defect at all.
+    """
+
+    name = "second"
+    dimension = EMBEDDING_DIM
+
+    def embed(self, text: str) -> list[float]:
+        """Embed into a different 1024-d space than ``HashEmbedding``."""
+        return hash_embed("SECOND::" + text, dim=self.dimension)
+
+
+class _DiesPartWayThrough(EmbeddingProvider):
+    """A provider that fails after the first batch — a network blip, not a misconfiguration."""
+
+    name = "flaky"
+    dimension = EMBEDDING_DIM
+
+    def __init__(self, *, fail_after: int = 1) -> None:
+        self.fail_after = fail_after
+        self.batches = 0
+
+    def embed(self, text: str) -> list[float]:
+        """Embed one text into the second provider's space."""
+        return hash_embed("SECOND::" + text, dim=self.dimension)
+
+    def embed_batch(self, texts: Sequence[str]) -> list[list[float]]:
+        """Answer ``fail_after`` batches, then raise."""
+        self.batches += 1
+        if self.batches > self.fail_after:
+            raise ConnectionError("the embedding backend went away mid-pass")
+        return [self.embed(text) for text in texts]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_completed_reembed_records_which_provider_wrote_the_vectors(
+    graph_seeded_catalog: dict[str, Any],
+) -> None:
+    """W1-27, half one: the graph now says who wrote the vectors it holds."""
+    from ingest.graph import EMBEDDING_RUN_COMPLETE, embedding_run
+
+    run = embedding_run(graph_seeded_catalog["session"])
+    assert run is not None, "a completed re-embed must leave a marker"
+    assert run.index == VECTOR_INDEX_NAME
+    assert run.provider == "hash"
+    assert run.dimension == VECTOR_INDEX_DIMENSIONS
+    assert run.state == EMBEDDING_RUN_COMPLETE
+    assert run.complete is True
+    assert run.products == run.embedded == len(graph_seeded_catalog["product_ids"])
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_querying_vectors_written_by_another_provider_is_refused(
+    graph_seeded_catalog: dict[str, Any],
+) -> None:
+    """W1-27: a second valid 1024-d provider re-embeds; the default one must not rank it.
+
+    Measured before the fix: no exception, ``report.complete is True``,
+    ``products_missing_embeddings() == []``, the index ``ONLINE`` — and the catalog silently
+    re-ranked, because cosine between two unrelated 1024-d spaces is noise that looks
+    exactly like a similarity. The width guard cannot fire: ``HashEmbedding.dimension`` and
+    ``LocalBgeEmbedding.dimension`` are both ``EMBEDDING_DIM``.
+    """
+    from ingest.graph import EmbeddingProviderMismatch, embedding_run
+
+    session = graph_seeded_catalog["session"]
+    before = [c.product_id for c in candidate_products(session, query_text=PROBE_A, limit=10)]
+    assert before, "the fixture's own provider must be able to query its own vectors"
+
+    reembed_products(session, _SecondProvider())
+    assert products_missing_embeddings(session) == [], (
+        "the point of this defect is that every existing detector stays clean"
+    )
+    run = embedding_run(session)
+    assert run is not None and run.provider == "second"
+
+    with pytest.raises(EmbeddingProviderMismatch, match="second"):
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=10)
+    # The precomputed-vector entry point takes precedence over query_text, so it needs the
+    # same guard or the check is bypassed by the parameter a caller is likelier to use.
+    with pytest.raises(EmbeddingProviderMismatch):
+        candidate_products(
+            session, embedding=HashEmbedding().embed(PROBE_A), provider=HashEmbedding(), limit=10
+        )
+    # And the provider that actually wrote them still works.
+    assert [
+        c.product_id
+        for c in candidate_products(
+            session, query_text=PROBE_A, provider=_SecondProvider(), limit=10
+        )
+    ]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_an_interrupted_reembed_is_visible_rather_than_silent(
+    graph_seeded_catalog: dict[str, Any],
+) -> None:
+    """X1: a failure on page two leaves two vector spaces in one index.
+
+    ``reembed_products`` pages with SKIP/LIMIT and the per-product writes auto-commit, so
+    nothing rolls back. Before the marker, the only trace of a half-finished pass was a
+    catalog that ranked wrongly: ``products_missing_embeddings()`` reported ``[]`` and the
+    exception was the operator's only warning — and ``main()`` caught only
+    ``EmbeddingDimensionMismatch``, so a ``ConnectionError`` here was not even that.
+    """
+    from ingest.graph import EMBEDDING_RUN_RUNNING, EmbeddingRunIncomplete, embedding_run
+
+    session = graph_seeded_catalog["session"]
+    with pytest.raises(ConnectionError):
+        reembed_products(session, _DiesPartWayThrough(fail_after=1), batch_size=1)
+
+    assert products_missing_embeddings(session) == [], (
+        "the interrupted pass leaves every product carrying *some* vector — that is the trap"
+    )
+    run = embedding_run(session)
+    assert run is not None
+    assert run.state == EMBEDDING_RUN_RUNNING, "the half-finished pass must still be marked open"
+    assert run.complete is False
+
+    with pytest.raises(EmbeddingRunIncomplete, match="running"):
+        candidate_products(session, query_text=PROBE_A, provider=_DiesPartWayThrough(), limit=10)
+
+    # Completing a pass clears it.
+    reembed_products(session, HashEmbedding())
+    assert embedding_run(session).complete is True
+    assert candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=10)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_vectors_of_unrecorded_provenance_are_still_queryable(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """The guard must not break the seam six downstream tickets use.
+
+    T-020…T-024 and T-031 seed ``Product.embedding`` through ``set_product_embedding`` with
+    the shared ``hash_embedding`` fixture and never run the re-embed pass, so no marker
+    exists. Unknown provenance is not the same as *wrong* provenance, and refusing here
+    would have made the fix worse than the defect.
+    """
+    from ingest.graph import embedding_run
+
+    upsert_product(
+        graph_schema_session, Product("p-seeded", "Directly Seeded"), source=graph_source
+    )
+    set_product_embedding(
+        graph_schema_session, product_id="p-seeded", embedding=hash_embed("Directly Seeded")
+    )
+    assert embedding_run(graph_schema_session) is None
+    assert [
+        c.product_id
+        for c in candidate_products(graph_schema_session, query_text="Directly Seeded", limit=5)
+    ] == ["p-seeded"]

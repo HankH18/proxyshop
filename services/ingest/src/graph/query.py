@@ -28,7 +28,7 @@ from typing import Any
 
 from ..embeddings import EmbeddingProvider, get_embedding_provider
 from .model import canonical_text, category_id, ingredient_id
-from .schema import VECTOR_INDEX_NAME
+from .schema import VECTOR_INDEX_NAME, embedding_run
 
 #: How many rows to pull out of the vector index per requested result before the structured
 #: filters are applied. A product excluded by an attribute filter still occupies a slot in
@@ -55,6 +55,35 @@ class UnretrievableQuery(ValueError):
 
     Raised rather than answered, because the only way to satisfy such a request would be a
     free-text scan over ``Product.canonical_name`` — which DESIGN forbids.
+    """
+
+
+class VectorIndexUnusable(RuntimeError):
+    """The ``product_embedding`` index cannot honestly answer a vector query right now.
+
+    Not a bad argument — the *call* is well formed and the graph is in a state where any
+    answer to it would be wrong, which is why this is a ``RuntimeError`` rather than a
+    ``ValueError``. Both subclasses describe a condition the previous code answered with a
+    plausible-looking, silently wrong ranking.
+    """
+
+
+class EmbeddingProviderMismatch(VectorIndexUnusable):
+    """The vectors in the index were written by a *different* provider than the querying one.
+
+    Every registered provider declares :data:`~ingest.graph.model.EMBEDDING_DIMENSIONS`, so
+    the width guard on the write side cannot detect a ``hash`` ↔ ``local_bge`` swap. Measured
+    on this repo: re-embedding the catalog with a second valid 1024-d provider and then
+    querying with the default one raised nothing and moved a product from rank 1 to rank 3.
+    """
+
+
+class EmbeddingRunIncomplete(VectorIndexUnusable):
+    """The recorded re-embed pass never reported completion.
+
+    The per-product writes auto-commit, so an interruption part-way leaves two vector spaces
+    inside one index while ``products_missing_embeddings()`` still reports ``[]``. Cosine
+    across two spaces is noise, so the query refuses rather than ranks.
     """
 
 
@@ -209,6 +238,46 @@ def _run(
     ]
 
 
+def _check_vector_path(session: Any, vector: list[float], *, provider_name: str) -> None:
+    """Refuse a vector query the ``product_embedding`` index cannot honestly answer.
+
+    Reads the :class:`~ingest.graph.schema.EmbeddingRun` marker
+    :func:`ingest.graph.reembed.reembed_products` writes, and compares it against the
+    provider this call would rank with.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        vector: the query vector.
+        provider_name: the name of the provider whose space ``vector`` lives in.
+
+    Raises:
+        EmbeddingRunIncomplete: the recorded pass never finished, so the index holds two
+            vector spaces and every cosine across them is noise.
+        EmbeddingProviderMismatch: the vectors were written by another provider.
+    """
+    run = embedding_run(session)
+    if run is None:
+        # No pass recorded. A graph seeded straight through `set_product_embedding` — which
+        # is what the adapter tickets do — has vectors of genuinely unknown provenance, and
+        # refusing every such query would break the seam this library exists to provide.
+        return
+    if not run.complete:
+        raise EmbeddingRunIncomplete(
+            f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded as "
+            f"{run.state!r}, so the index holds vectors from more than one pass. Re-run "
+            f"`python -m ingest.graph.reembed --provider {run.provider}` to completion "
+            f"before querying it."
+        )
+    if run.provider != provider_name:
+        raise EmbeddingProviderMismatch(
+            f"{run.index} holds vectors written by provider {run.provider!r} but this query "
+            f"was embedded with {provider_name!r}. Both are {run.dimension}-d, so Neo4j will "
+            f"happily return a fully-populated, silently re-ranked shortlist. Either set "
+            f"EMBEDDING_PROVIDER={run.provider} or re-embed: "
+            f"`python -m ingest.graph.reembed --provider {provider_name}`."
+        )
+
+
 def candidate_products(
     session: Any,
     *,
@@ -261,15 +330,26 @@ def candidate_products(
     Raises:
         UnretrievableQuery: no vector and no structured predicate was supplied.
         ValueError: ``limit`` or ``oversample`` is not positive.
+        EmbeddingProviderMismatch: the vectors in the index were written by a different
+            provider than the one this query embeds with.
+        EmbeddingRunIncomplete: the recorded re-embed pass never finished, so the index
+            holds more than one vector space.
     """
     if limit <= 0 or oversample <= 0:
         raise ValueError(f"limit and oversample must be positive, got {limit} / {oversample}")
 
     vector: list[float] | None = None
+    provider_name = ""
     if embedding is not None:
+        # The caller supplied the vector, so the only statement available about which space
+        # it lives in is the process's configured provider — which is exactly the statement
+        # `reembed_products` records on the write side, so the two are comparable.
         vector = [float(component) for component in embedding]
+        provider_name = (provider or get_embedding_provider()).name
     elif query_text:
-        vector = list((provider or get_embedding_provider()).embed(query_text))
+        resolved = provider or get_embedding_provider()
+        provider_name = resolved.name
+        vector = list(resolved.embed(query_text))
 
     # `is not None`, never truthiness: Product.brand DEFAULTS to "", so `brand=""` is the
     # legitimate query "products with no brand" — and `bool("")` made it unaskable, raising
@@ -300,6 +380,7 @@ def candidate_products(
     }
     if vector is None:
         return _run(session, _STRUCTURED_HEAD, parameters=parameters)
+    _check_vector_path(session, vector, provider_name=provider_name)
     parameters["embedding"] = vector
     parameters["fetch"] = min(max(limit * oversample, limit), MAX_INDEX_FETCH)
     return _run(session, _VECTOR_HEAD, parameters=parameters)
@@ -346,7 +427,10 @@ __all__ = [
     "MAX_INDEX_FETCH",
     "AttributeFilter",
     "Candidate",
+    "EmbeddingProviderMismatch",
+    "EmbeddingRunIncomplete",
     "UnretrievableQuery",
+    "VectorIndexUnusable",
     "candidate_products",
     "cosine_from_score",
     "products_missing_embeddings",

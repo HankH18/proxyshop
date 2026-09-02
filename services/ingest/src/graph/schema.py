@@ -312,22 +312,167 @@ def rebuild_vector_index(
     return report
 
 
+# ---------------------------------------------------------------------------------------
+# What the live index actually holds
+# ---------------------------------------------------------------------------------------
+
+#: The label of the marker node that records **which provider wrote the vectors currently in
+#: the index**, and whether the pass that wrote them finished.
+#:
+#: Deliberately not a member of :data:`~ingest.graph.model.MATERIAL_FACT_LABELS`,
+#: :data:`~ingest.graph.model.VOCABULARY_LABELS` or :data:`~ingest.graph.model.ID_PROPERTY`:
+#: it asserts nothing about the world, so it is not a fact needing a ``Source``, and it is
+#: not a term. It is operational metadata *about the index*, which is why it lives here
+#: beside the index definition rather than in the catalog model.
+#:
+#: Why it has to exist at all: ``HashEmbedding.dimension`` and ``LocalBgeEmbedding.dimension``
+#: are both :data:`~ingest.graph.model.EMBEDDING_DIMENSIONS`, so the width guard in
+#: :func:`ingest.graph.reembed.reembed_products` **cannot fire** for the ``hash`` →
+#: ``local_bge`` swap ``make e2e-live`` actually performs. Measured: re-embedding with a
+#: second valid 1024-d provider and then querying with the default one raised nothing, left
+#: ``products_missing_embeddings() == []`` and the index ``ONLINE``, and silently re-ranked
+#: the catalog. Nothing in the graph recorded who wrote the vectors — so now something does.
+EMBEDDING_RUN_LABEL = "EmbeddingRun"
+
+#: A pass that has started writing and has not yet reported completion. A marker left in
+#: this state is the *only* evidence that an interrupted pass has mixed two vector spaces
+#: into one index — the per-product writes auto-commit, so nothing rolls back.
+EMBEDDING_RUN_RUNNING = "running"
+
+#: A pass that wrote every product it read.
+EMBEDDING_RUN_COMPLETE = "complete"
+
+_RECORD_EMBEDDING_RUN = f"""
+MERGE (r:{EMBEDDING_RUN_LABEL} {{index: $index}})
+SET r.provider = $provider,
+    r.dimension = $dimension,
+    r.state = $state,
+    r.products = $products,
+    r.embedded = $embedded
+"""
+
+_READ_EMBEDDING_RUN = f"""
+MATCH (r:{EMBEDDING_RUN_LABEL} {{index: $index}})
+RETURN r.provider AS provider, r.dimension AS dimension, r.state AS state,
+       r.products AS products, r.embedded AS embedded
+LIMIT 1
+"""
+
+
+@dataclass(frozen=True)
+class EmbeddingRun:
+    """Who wrote the vectors in one vector index, and whether they finished writing."""
+
+    index: str
+    provider: str
+    dimension: int
+    state: str
+    products: int = 0
+    embedded: int = 0
+
+    @property
+    def complete(self) -> bool:
+        """True when the recorded pass reported completion."""
+        return self.state == EMBEDDING_RUN_COMPLETE
+
+
+def record_embedding_run(
+    session: Any,
+    *,
+    provider: str,
+    dimension: int,
+    state: str,
+    products: int = 0,
+    embedded: int = 0,
+    index: str = VECTOR_INDEX_NAME,
+) -> EmbeddingRun:
+    """Stamp the index with the identity of the pass writing into it.
+
+    One marker per index (``MERGE`` on ``index``), overwritten by each pass — the question
+    it answers is "what is in there *now*", not "what has ever been in there". D38 makes the
+    single Neo4j database serialised by an ``flock``, so there is one writer and the
+    unconstrained ``MERGE`` cannot race.
+
+    Args:
+        session: an open ``neo4j.Session`` or transaction.
+        provider: :attr:`ingest.embeddings.EmbeddingProvider.name` of the writer.
+        dimension: the width of the vectors being written.
+        state: :data:`EMBEDDING_RUN_RUNNING` or :data:`EMBEDDING_RUN_COMPLETE`.
+        products: how many products the pass read.
+        embedded: how many it wrote.
+        index: the vector index the marker describes.
+
+    Returns:
+        The :class:`EmbeddingRun` as recorded.
+    """
+    session.run(
+        _RECORD_EMBEDDING_RUN,
+        index=index,
+        provider=provider,
+        dimension=int(dimension),
+        state=state,
+        products=int(products),
+        embedded=int(embedded),
+    ).consume()
+    return EmbeddingRun(
+        index=index,
+        provider=provider,
+        dimension=int(dimension),
+        state=state,
+        products=int(products),
+        embedded=int(embedded),
+    )
+
+
+def embedding_run(session: Any, *, index: str = VECTOR_INDEX_NAME) -> EmbeddingRun | None:
+    """Read back who wrote the vectors currently in ``index``.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        index: the vector index to ask about.
+
+    Returns:
+        The :class:`EmbeddingRun`, or ``None`` when no pass has been recorded. ``None`` is
+        not an error: a graph seeded directly through
+        :func:`ingest.graph.upsert.set_product_embedding` (which is what the adapter tickets
+        do) has vectors whose provenance this library genuinely does not know, and inventing
+        an answer there would be worse than admitting it.
+    """
+    row = session.run(_READ_EMBEDDING_RUN, index=index).single()
+    if row is None:
+        return None
+    return EmbeddingRun(
+        index=index,
+        provider=str(row["provider"]),
+        dimension=int(row["dimension"]),
+        state=str(row["state"]),
+        products=int(row["products"] or 0),
+        embedded=int(row["embedded"] or 0),
+    )
+
+
 __all__ = [
     "ADAPTER_LOOKUP_INDEXES",
     "EMBEDDING_PROPERTY",
+    "EMBEDDING_RUN_COMPLETE",
+    "EMBEDDING_RUN_LABEL",
+    "EMBEDDING_RUN_RUNNING",
     "LOOKUP_INDEXES",
     "QUERY_PREDICATE_INDEXES",
     "VECTOR_INDEX_DIMENSIONS",
     "VECTOR_INDEX_NAME",
     "VECTOR_INDEX_SIMILARITY",
     "VECTOR_INDEX_STATEMENT",
+    "EmbeddingRun",
     "SchemaReport",
     "apply_schema",
     "await_indexes",
     "constraint_name",
+    "embedding_run",
     "constraint_statements",
     "lookup_index_statements",
     "rebuild_vector_index",
+    "record_embedding_run",
     "schema_report",
     "schema_statements",
     "vector_index_statement",
