@@ -464,10 +464,15 @@ export function canonicalSigningBytes(
   }
   const covered: Payload = {};
   for (const field of SIGNED_FIELDS) covered[field] = payload[field];
-  // The covered fields are checked in their own right: `missingSigningFields` forces five of
-  // them to be strings, but `auction_id` and `store_id` are only checked non-empty, so a wire
-  // `{"auction_id": 9007199254740993}` would otherwise be signed as `…992` right here.
-  assertSignableNumbers(covered, options, "submission");
+  // No number check on `covered`, and the claim T-113 made for one here was false on its own
+  // terms (T-128). It said `auction_id` and `store_id` "reach canonicalJson through `covered`
+  // and never through payloadHash". `NON_BODY_KEYS` is exactly {signer_id, key_id, issued_at,
+  // nonce, signature}, so both are INSIDE the body `payloadHash` builds and already walks; and
+  // the four `SIGNED_FIELDS` that really are outside the body — signer_id, key_id, issued_at,
+  // nonce — are four of the five `missingSigningFields` has already rejected the submission
+  // over unless they are non-blank STRINGS, which cannot hold a number at all. So a check here
+  // could refuse nothing the body walk does not already reach, which deleting it proved: all
+  // 586 vitest cases stayed green. A guard that cannot refuse anything is documentation.
   covered["payload_hash"] = payloadHash(payload, options);
   return new TextEncoder().encode(canonicalJson(covered));
 }

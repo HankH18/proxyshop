@@ -763,14 +763,6 @@ describe("T-113 — the default signing path refuses an integer the wire cannot 
     );
   });
 
-  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s in a COVERED field, not only the body", (literal) => {
-    // `auction_id` and `store_id` are only checked non-empty by `missingSigningFields`, so a
-    // numeric one reaches `canonicalJson` through `covered` and never through `payloadHash`.
-    expect(() => canonicalSigningBytes(submissionFromWire(literal, "auction_id"))).toThrow(
-      CanonicalisationError,
-    );
-  });
-
   it.each(NON_DOUBLE_INTEGER_WIRE)("the text door names the literal it refused: %s", (literal) => {
     expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(CanonicalisationError);
     expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(
@@ -790,6 +782,67 @@ describe("T-113 — the default signing path refuses an integer the wire cannot 
       expect(String(payload["quantity"])).not.toBe(literal);
     },
   );
+});
+
+// --- T-128: the covered-field guard could refuse nothing, and is gone ----------------------
+//
+// T-113 added `assertSignableNumbers(covered, options, "submission")` plus the five `it.each`
+// cases that used to sit directly above, on the claim that `auction_id` and `store_id` "reach
+// canonicalJson through `covered` and never through payloadHash". The claim is false and the
+// five cases were tautological: deleting the guard left ALL 586 vitest cases green — measured,
+// with the line removed and the suite re-run.
+//
+// These five replace them and grade the structural facts the claim got wrong, so the guard
+// cannot come back on the same reasoning. Each is sensitive to a real change: adding a key to
+// `NON_BODY_KEYS`, or letting `missingSigningFields` accept a non-string envelope field, turns
+// one of them red.
+
+describe("T-128 — the body digest already reaches every SIGNED_FIELD that can hold a number", () => {
+  it("auction_id and store_id are INSIDE the body payloadHash walks", () => {
+    const base = payloadHash(makeSubmission());
+    expect(payloadHash(makeSubmission({auction_id: "auc-OTHER"}))).not.toBe(base);
+    expect(payloadHash(makeSubmission({store_id: "store-OTHER"}))).not.toBe(base);
+  });
+
+  it("the SIGNED_FIELDS outside the body are exactly the four envelope identity fields", () => {
+    const base = payloadHash(makeSubmission());
+    const outside = SIGNED_FIELDS.filter(
+      (field) => payloadHash(makeSubmission({[field]: "CHANGED"})) === base,
+    );
+    expect([...outside].sort()).toEqual(["issued_at", "key_id", "nonce", "signer_id"]);
+  });
+
+  it("and every one of those four is already forced to be a non-blank STRING", () => {
+    // Which is what makes a number check on `covered` unreachable: a numeric envelope field is
+    // rejected before it, by `missingSigningFields`, with a different and better message.
+    for (const field of ["signer_id", "key_id", "issued_at", "nonce"] as const) {
+      const numeric = makeSubmission({[field]: 9007199254740992});
+      expect(missingSigningFields(numeric)).toContain(field);
+      expect(() => canonicalSigningBytes(numeric)).toThrow(/incomplete signing envelope/);
+    }
+  });
+
+  it("a numeric auction_id is refused by the BODY walk, with no covered check in the path", () => {
+    // The exact input the deleted guard was claimed to be the sole refuser of. `payloadHash`
+    // alone — which never sees `covered` — refuses it, which is the claim disproved in one line.
+    const numeric = submissionFromWire("9007199254740993", "auction_id");
+    expect(typeof numeric["auction_id"]).toBe("number");
+    expect(() => payloadHash(numeric)).toThrow(CanonicalisationError);
+    expect(() => canonicalSigningBytes(numeric)).toThrow(CanonicalisationError);
+  });
+
+  it("the five NON_BODY_KEYS are the only keys the digest ignores", () => {
+    // The same structural fact stated as a closed set: change anything else and the digest
+    // moves. Adding a key to NON_BODY_KEYS turns this red, which is the regression the false
+    // claim would otherwise have licensed.
+    const base = payloadHash(makeSubmission());
+    for (const key of ["signer_id", "key_id", "issued_at", "nonce", "signature"]) {
+      expect(payloadHash(makeSubmission({[key]: "CHANGED"})), key).toBe(base);
+    }
+    for (const key of ["auction_id", "store_id", "schema_version", "agent_version", "offer"]) {
+      expect(payloadHash(makeSubmission({[key]: "CHANGED"})), key).not.toBe(base);
+    }
+  });
 });
 
 describe("T-113 — the opt-out is explicit, named, and does exactly what it says", () => {
