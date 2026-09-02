@@ -80,6 +80,7 @@ def web_pixel_settings(
     shop_domain: str,
     *,
     collector: str | None = None,
+    app_url: str | None = None,
     api_version: str | None = None,
 ) -> dict[str, Any]:
     """The ``WebPixelInput.settings`` payload ``webPixelCreate`` is called with.
@@ -88,12 +89,19 @@ def web_pixel_settings(
     gets. ``collectorUrl`` is the one that must be right — a pixel pointed at the wrong
     origin reports nothing and looks exactly like a pixel that was never installed.
 
+    ``collector`` and ``app_url`` are two ways of naming that destination and are resolved
+    in that order: ``collector`` is the whole URL and wins outright; otherwise ``app_url``
+    is the origin :func:`collector_url` hangs :data:`COLLECTOR_PATH` off; otherwise the
+    configured default. Neither is ever dropped. A caller-supplied destination that is
+    silently ignored produces exactly the failure above — a pixel that installs cleanly,
+    reports to somebody else's origin, and looks like a shop that simply never checks out.
+
     Deliberately absent: anything identifying a shopper. C5 grants this app no
     protected-customer-data scope and the collector rejects every PII field (T-051), so a
     setting that carried one would be authority the system has decided not to hold.
     """
     return {
-        "collectorUrl": collector or collector_url(),
+        "collectorUrl": collector or collector_url(app_url),
         "shopDomain": shop_domain,
         "apiVersion": api_version or app_config().api_version,
     }

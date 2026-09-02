@@ -116,3 +116,18 @@ def install_env(
     for name, value in values.items():
         monkeypatch.setenv(name, value)
     return values
+
+
+@pytest.fixture
+def install_pixel_origin() -> Iterator[tuple[RecordingReceiver, str]]:
+    """A receiver standing in for the app's whole public **origin**. Yields ``(receiver, origin)``.
+
+    Where :func:`install_collector` hands back one fixed URL — what a caller passes as
+    ``collector=`` — this hands back a bare origin, what a caller passes as ``app_url=``.
+    The difference matters: only an origin lets the install itself choose the path, so a
+    test can tell "``app_url`` reached the pixel" apart from "the pixel used the configured
+    default", which a full collector URL cannot distinguish.
+    """
+    receiver = RecordingReceiver()
+    with serve(receiver) as base_url:
+        yield receiver, base_url.rstrip("/")

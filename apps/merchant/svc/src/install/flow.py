@@ -183,8 +183,12 @@ def install(
         shop_domain: the ``<name>.myshopify.com`` host being installed on.
         admin_client: anything exposing ``execute(document, variables)``, or callable with
             that signature.
-        app_url: this app's public origin; defaults to ``MERCHANT_APP_URL``.
-        collector: override for the pixel's ``collectorUrl``.
+        app_url: this app's public origin. Every URL this install hands Shopify is
+            built from it — the three webhook callback URLs *and* the pixel's
+            ``collectorUrl``, which must agree or the shop reports its checkouts to a
+            different host than its orders. Defaults to ``MERCHANT_APP_URL``.
+        collector: the pixel's ``collectorUrl`` in full; wins over ``app_url`` when
+            both are given.
         access_token: the shop's offline token. When given it is stored against the shop,
             which is the step that makes the install survive the staff session that started
             it. When omitted, an already-stored token is reported instead.
@@ -215,7 +219,7 @@ def install(
     else:
         stored = store.get(shop)
 
-    settings = web_pixel_settings(shop, collector=collector)
+    settings = web_pixel_settings(shop, collector=collector, app_url=app_url)
     pixel_response = execute(WEB_PIXEL_CREATE, {"webPixel": {"settings": settings}})
     pixel_payload = _payload(pixel_response, "webPixelCreate")
     blocking = _blocking_user_errors(pixel_payload)

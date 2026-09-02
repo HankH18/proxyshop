@@ -533,3 +533,83 @@ async def test_the_service_mounts_the_install_router(install_app_url: str) -> No
         schema = (await client.get(f"{install_app_url}/openapi.json")).json()
     assert "/install" in schema["paths"]
     assert "/webhooks/shopify/{resource}/{action}" in schema["paths"]
+
+
+# ======================================================================================
+# app_url is a destination, not a suggestion
+# ======================================================================================
+async def test_a_caller_supplied_app_url_is_where_the_pixel_actually_beacons(
+    install_env: dict[str, str],
+    install_stub: StubClient,
+    install_stub_url: str,
+    install_pixel_origin: Collector,
+    install_tokens: InMemoryOfflineTokenStore,
+) -> None:
+    """``install(..., app_url=X)`` puts the pixel on ``X``, not on the configured origin.
+
+    Regression for a silent-drop: ``install`` forwarded ``app_url`` when it built the three
+    webhook callback URLs but not when it built the pixel's ``collectorUrl``, so a caller
+    who named a destination got webhooks on their origin and checkout events on somebody
+    else's — installed cleanly, no error, and indistinguishable afterwards from a shop
+    whose shoppers simply never check out.
+
+    The assertion is end to end, because the settings dict alone cannot tell them apart:
+    ``MERCHANT_APP_URL`` is set (by ``install_env``) to a *third*, live origin, so a pixel
+    that ignored ``app_url`` would still be pointed somewhere real. What is checked is
+    where a completed checkout's beacon physically lands.
+    """
+    receiver, origin = install_pixel_origin
+    configured = install_env["MERCHANT_APP_URL"]
+    assert origin != configured, "the fixture must not hand back the configured origin"
+
+    with _admin(install_stub_url) as admin:
+        result = install(
+            SHOP,
+            admin,
+            access_token=DEFAULT_ACCESS_TOKEN,
+            tokens=install_tokens,
+            app_url=origin,
+        )
+
+    assert result.pixel_settings["collectorUrl"] == f"{origin}/pixel/collect"
+    assert not result.pixel_settings["collectorUrl"].startswith(configured)
+    # The pixel and the webhooks now agree on one origin — the caller's.
+    for registration in result.webhooks:
+        assert registration.callback_url.startswith(f"{origin}/")
+
+    completed = await install_stub.buy(VARIANT_ID)
+    assert completed["pixel_event_posted"] is True
+
+    beacons = [request for request in receiver.requests if request["path"] == "/pixel/collect"]
+    assert len(beacons) == 1, (
+        "the checkout event did not reach the origin the caller asked for; paths seen: "
+        + repr([request["path"] for request in receiver.requests])
+    )
+    assert json.loads(beacons[0]["body"])["checkoutToken"] == completed["checkout_token"]
+
+
+def test_an_explicit_collector_still_outranks_app_url(
+    install_env: dict[str, str],
+    install_stub_url: str,
+    install_tokens: InMemoryOfflineTokenStore,
+) -> None:
+    """Precedence, stated once: the full URL wins, the origin is the fallback, then config.
+
+    Without this the fix above could have been written as "``app_url`` wins", which would
+    have broken every existing caller that passes ``collector=``.
+    """
+    with _admin(install_stub_url) as admin:
+        both = install(
+            SHOP,
+            admin,
+            access_token=DEFAULT_ACCESS_TOKEN,
+            tokens=install_tokens,
+            app_url="https://origin.example",
+            collector="https://collector.example/collect",
+        )
+        neither = install(SHOP, admin, access_token=DEFAULT_ACCESS_TOKEN, tokens=install_tokens)
+
+    assert both.pixel_settings["collectorUrl"] == "https://collector.example/collect"
+    assert neither.pixel_settings["collectorUrl"] == (
+        f"{install_env['MERCHANT_APP_URL']}/pixel/collect"
+    )
