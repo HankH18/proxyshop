@@ -1,0 +1,134 @@
+{
+  "fixture_version": 1,
+  "description": "Approved envelope for store-alpha: a 20% discount cap and two per-product price floors. Pins that the cap and the floor are independent walls — one request is refused by the cap alone, another by the floor alone.",
+  "approved_by": "merchant onboarding approval (DESIGN: an envelope is only ever authored by a human review); recorded here as the artifact T-040's envelope-wall criterion is graded against",
+  "envelope": {
+    "store_id": "store-alpha",
+    "version": 3,
+    "floors": [
+      { "product_ref": "prod-floor", "min_price": 95.0 },
+      { "product_ref": "prod-cap", "min_price": 10.0 }
+    ],
+    "max_discount_pct": 20.0,
+    "budget_cap": 500.0,
+    "pursue_clusters": ["cluster-warm-layers"],
+    "standing_commitments": [
+      {
+        "key": "free_returns",
+        "value": "30 days",
+        "provenance": {
+          "source": "owner_statement",
+          "ref": "envelope:store-alpha:v3#free_returns",
+          "observed_at": "2026-01-01T00:00:00Z",
+          "authority_rank": 1
+        }
+      },
+      {
+        "key": "ships_within",
+        "value": "2 business days",
+        "provenance": {
+          "source": "owner_statement",
+          "ref": "envelope:store-alpha:v3#ships_within",
+          "observed_at": "2026-01-01T00:00:00Z",
+          "authority_rank": 1
+        }
+      }
+    ],
+    "activation": "shadow"
+  },
+  "catalog": {
+    "prod-cap": {
+      "product_ref": "prod-cap",
+      "list_price": 100.0,
+      "material": "merino wool",
+      "gtin": "00000000000017"
+    },
+    "prod-floor": {
+      "product_ref": "prod-floor",
+      "list_price": 100.0,
+      "material": "alpaca",
+      "gtin": "00000000000024"
+    }
+  },
+  "discount_expectations": [
+    {
+      "product_ref": "prod-cap",
+      "requested_pct": 0.0,
+      "outcome": "granted",
+      "note": "no discount at all is inside every wall"
+    },
+    {
+      "product_ref": "prod-cap",
+      "requested_pct": 19.99,
+      "outcome": "granted",
+      "note": "80.01 >= the 10.00 floor, 19.99 <= the 20% cap"
+    },
+    {
+      "product_ref": "prod-cap",
+      "requested_pct": 20.0,
+      "outcome": "granted",
+      "note": "exactly at the approved cap; 80.00 >= the 10.00 floor"
+    },
+    {
+      "product_ref": "prod-cap",
+      "requested_pct": 20.01,
+      "outcome": "denied",
+      "reason": "over_max_discount_pct",
+      "note": "one step past the cap, and 79.99 is still far above the floor — only the cap can refuse this"
+    },
+    {
+      "product_ref": "prod-cap",
+      "requested_pct": 25.0,
+      "outcome": "denied",
+      "reason": "over_max_discount_pct",
+      "note": "75.00 clears the 10.00 floor with room to spare; the cap is the only wall that bites"
+    },
+    {
+      "product_ref": "prod-cap",
+      "requested_pct": -1.0,
+      "outcome": "denied",
+      "reason": "negative_discount",
+      "note": "a negative discount is a price increase wearing a discount's name"
+    },
+    {
+      "product_ref": "prod-floor",
+      "requested_pct": 3.0,
+      "outcome": "granted",
+      "note": "97.00 >= the 95.00 floor"
+    },
+    {
+      "product_ref": "prod-floor",
+      "requested_pct": 5.0,
+      "outcome": "granted",
+      "note": "lands exactly on the 95.00 floor; an approved floor may be reached"
+    },
+    {
+      "product_ref": "prod-floor",
+      "requested_pct": 5.01,
+      "outcome": "denied",
+      "reason": "below_price_floor",
+      "note": "94.99 — one cent under the floor, and a quarter of the way to the cap"
+    },
+    {
+      "product_ref": "prod-floor",
+      "requested_pct": 10.0,
+      "outcome": "denied",
+      "reason": "below_price_floor",
+      "note": "90.00 < 95.00 while 10% is only half the cap — the floor refuses this on its own"
+    },
+    {
+      "product_ref": "prod-floor",
+      "requested_pct": 25.0,
+      "outcome": "denied",
+      "reason": "over_max_discount_pct",
+      "note": "past both walls; the cap is checked first, so that is the reason reported"
+    },
+    {
+      "product_ref": "prod-absent",
+      "requested_pct": 1.0,
+      "outcome": "denied",
+      "reason": "unknown_product",
+      "note": "no list price means no checkable floor; fail closed rather than authorize blind"
+    }
+  ]
+}
