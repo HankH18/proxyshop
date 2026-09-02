@@ -150,8 +150,14 @@ def code_expiry(*, now: datetime, offer_expires_at: datetime | None) -> datetime
         The instant the code stops being redeemable.
 
     Raises:
-        ValueError: ``now`` is naive. A naive datetime here silently shifts expiry by the
-            host's UTC offset, which is a bug that only appears outside UTC.
+        ValueError: either ``now`` or ``offer_expires_at`` is naive — both are checked, with
+            a message naming the one at fault. A naive datetime here silently shifts expiry
+            by the host's UTC offset, which is a bug that only appears outside UTC, and it
+            shifts it just as far whichever side of the ``min`` it arrives on. This clause
+            used to blame ``now`` alone; the second check has been there since the function
+            was written and ``test_stub_codes.test_expiry_refuses_naive_datetimes`` has
+            always pinned it. The two sets are now compared by
+            ``test_stub_codes.test_the_expiry_raises_clause_names_every_argument_that_raises``.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
