@@ -640,3 +640,74 @@ describe("a JS peer and the Python `claim_id` render the same material identical
     expect(JSON.stringify(material, Object.keys(material).sort())).not.toBe(expected);
   });
 });
+
+// --- T-108: the schema gate and `missingSigningFields` agree on whitespace -----------------
+
+/**
+ * Every whitespace-only spelling the envelope's `pattern` excludes, written by code point so no
+ * raw control character lands in this file. `String.prototype.trim()` is NOT this set — it keeps
+ * U+001C-U+001F, which Python's `str.strip()` removes and the schema's class excludes — so a
+ * `trim()`-based check disagreed with the very schema Ajv compiles from the same bundle.
+ */
+const WHITESPACE_ONLY: readonly string[] = [
+  0x20, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0xa0, 0x1680, 0x2000, 0x2003, 0x2028,
+  0x2029, 0x202f, 0x205f, 0x3000,
+]
+  .map((code) => String.fromCodePoint(code))
+  .concat(["   ", String.fromCodePoint(0x20, 0x09, 0x0a)]);
+
+describe("T-108 — both envelope gates refuse a whitespace-only value", () => {
+  it.each(
+    REQUIRED_SIGNING_FIELDS.flatMap((field) =>
+      WHITESPACE_ONLY.map((blank) => [field, blank] as const),
+    ),
+  )("refuses %s = %j", (field, blank) => {
+    const payload = makeSubmission({[field]: blank});
+    expect(missingSigningFields(payload)).toContain(field);
+    expect(isValid("SignedBidSubmission", payload)).toBe(false);
+    expect(isValid("SigningEnvelope", envelopeOf(payload))).toBe(false);
+    expect(() => canonicalSigningBytes(payload)).toThrow(/incomplete signing envelope/);
+  });
+
+  it.each([...REQUIRED_SIGNING_FIELDS])("still admits a real %s", (field) => {
+    // The control. A pattern that rejected everything would satisfy the cases above and refuse
+    // every legal submission — including the padded-but-non-empty spellings that stay valid.
+    const value = field === "issued_at" ? "2026-01-01T00:00:00Z" : " padded ";
+    const payload = makeSubmission({[field]: value});
+    expect(missingSigningFields(payload)).toEqual([]);
+    expect(isValid("SignedBidSubmission", payload)).toBe(true);
+    expect(isValid("SigningEnvelope", envelopeOf(payload))).toBe(true);
+    expect(canonicalSigningBytes(payload).length).toBeGreaterThan(0);
+  });
+
+  it("agrees with the compiled schema on every one of these, character by character", () => {
+    // The point of the ticket: two gates on one rule that disagree is ONE gate, and it is
+    // whichever one the caller happens to be standing on. `canonicalSigningBytes` stands on
+    // `missingSigningFields`; Ajv stands on the schema. They must not differ.
+    for (const blank of WHITESPACE_ONLY) {
+      const payload = makeSubmission({nonce: blank});
+      expect(missingSigningFields(payload).includes("nonce"), JSON.stringify(blank)).toBe(true);
+      expect(isValid("SignedBidSubmission", payload), JSON.stringify(blank)).toBe(false);
+    }
+  });
+
+  it("agrees with itself even where the two regex engines differ", () => {
+    // U+0085 (NEL) is Unicode White_Space, so Python's `str.strip()` and the rust-regex `\s`
+    // behind pydantic call it blank; JavaScript's `\s` and `trim()` do not. U+FEFF is the mirror
+    // image. What T-108 asks for is that the SCHEMA and `missingSigningFields` agree, and on this
+    // side they do — for both characters, whichever way the answer falls. The cross-language
+    // split lives in `str.strip()` vs `String.trim()` and is older than this ticket.
+    for (const code of [0x85, 0xfeff]) {
+      const blank = String.fromCodePoint(code);
+      const payload = makeSubmission({nonce: blank});
+      const functionSaysPresent = !missingSigningFields(payload).includes("nonce");
+      const schemaSaysPresent = isValid("SignedBidSubmission", payload);
+      expect(functionSaysPresent, `U+${code.toString(16).toUpperCase()}`).toBe(schemaSaysPresent);
+    }
+  });
+});
+
+/** The five envelope fields lifted out of a submission, as `SigningEnvelope` shaped. */
+function envelopeOf(payload: Payload): Payload {
+  return Object.fromEntries(REQUIRED_SIGNING_FIELDS.map((field) => [field, payload[field]]));
+}

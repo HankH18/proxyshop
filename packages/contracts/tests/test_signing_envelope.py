@@ -21,6 +21,7 @@ import json
 import pathlib
 
 import pytest
+from pydantic import ValidationError
 
 from packages.contracts import (
     REQUIRED_SIGNING_FIELDS,
@@ -409,13 +410,18 @@ def test_the_two_envelope_gates_agree_with_each_other() -> None:
         with pytest.raises(Exception):
             envelope_of(payload)
 
-    # The one remaining asymmetry, and it points the SAFE way: `SigningEnvelope` spells its rule
-    # `min_length=1`, so `"   "` satisfies pydantic, while `missing_signing_fields` strips and
-    # calls it missing. The strict gate is the one `canonical_signing_bytes` is on, so a
-    # whitespace-only nonce cannot be signed either way.
+    # T-108 closed the last asymmetry. This line used to read
+    #     assert envelope_of(whitespace).nonce == "   "
+    # which pinned the DEVIATION rather than the rule: `SigningEnvelope` spelled its constraint
+    # `min_length=1`, so `"   "` satisfied pydantic while `missing_signing_fields` stripped it and
+    # called it missing. That is the very disagreement this test's name denies, recorded as though
+    # it were the contract. It pointed the safe way only because `canonical_signing_bytes` happens
+    # to sit on the strict gate. The schema now carries `pattern` alongside `minLength`, so both
+    # gates refuse a whitespace-only value and the assertion states the rule instead of the gap.
     whitespace = make_submission(nonce="   ")
     assert missing_signing_fields(whitespace) == ["nonce"]
-    assert envelope_of(whitespace).nonce == "   "
+    with pytest.raises(ValidationError):
+        envelope_of(whitespace)
     with pytest.raises(ValueError, match="incomplete signing envelope"):
         canonical_signing_bytes(whitespace)
 
@@ -717,3 +723,89 @@ def test_well_formed_astral_characters_are_still_signable() -> None:
     assert canonical_json({"s": "café — “quoted” 😀🎉"}) == '{"s":"café — “quoted” 😀🎉"}'
     # ...and it still round-trips through the wire form the JavaScript peer would send.
     assert canonical_json({"s": json.loads('"\\ud83d\\ude00"')}) == '{"s":"\U0001f600"}'
+
+
+# --- T-108: the two envelope gates agree on WHITESPACE, not merely on length ------------------
+
+
+#: Every whitespace-only spelling `str.strip()` collapses to empty, by code point so the file
+#: itself carries no raw control characters. `\S` alone would NOT cover U+001C-U+001F: Unicode
+#: does not classify those four as whitespace, but Python's `str.strip()` does, which is exactly
+#: the gap a `\S` pattern would have left open between the schema and `missing_signing_fields`.
+WHITESPACE_ONLY: list[str] = [
+    chr(code)
+    for code in (
+        0x20,
+        0x09,
+        0x0A,
+        0x0B,
+        0x0C,
+        0x0D,
+        0x1C,
+        0x1D,
+        0x1E,
+        0x1F,
+        0x85,
+        0xA0,
+        0x1680,
+        0x2000,
+        0x2003,
+        0x2028,
+        0x2029,
+        0x202F,
+        0x205F,
+        0x3000,
+    )
+] + ["   ", chr(0x20) + chr(0x09) + chr(0x0A), chr(0x09) * 4]
+
+
+@pytest.mark.parametrize("field", REQUIRED_SIGNING_FIELDS)
+@pytest.mark.parametrize(
+    "blank", WHITESPACE_ONLY, ids=lambda s: "-".join(f"U+{ord(c):04X}" for c in s)
+)
+def test_both_envelope_gates_refuse_every_whitespace_only_value(field: str, blank: str) -> None:
+    """`SigningEnvelope` used to spell its rule `min_length=1`, which admits any number of spaces;
+    `missing_signing_fields` strips and calls the same value missing. Two gates on one rule that
+    disagree is one gate, and it is whichever one the caller happens to be standing on."""
+    assert blank.strip() == "", "this case is not actually whitespace-only"
+
+    payload = make_submission(**{field: blank})
+    assert field in missing_signing_fields(payload), (field, repr(blank))
+    with pytest.raises(ValidationError):
+        envelope_of(payload)
+    with pytest.raises(ValidationError):
+        SigningEnvelope.model_validate({name: payload[name] for name in REQUIRED_SIGNING_FIELDS})
+    with pytest.raises(ValidationError):
+        SignedBidSubmission.model_validate(payload)
+    with pytest.raises(ValueError, match="incomplete signing envelope"):
+        canonical_signing_bytes(payload)
+
+
+@pytest.mark.parametrize("field", REQUIRED_SIGNING_FIELDS)
+def test_a_value_with_real_content_still_passes_both_gates(field: str) -> None:
+    """The control. A pattern that rejected everything would satisfy the test above and break
+    every legal submission, including the padded-but-non-empty spellings that are still valid."""
+    for value in ("x", " padded ", chr(0x09) + "tabbed", "nonce-ext-0001"):
+        if field == "issued_at":
+            value = "2026-01-01T00:00:00Z"
+        payload = make_submission(**{field: value})
+        assert missing_signing_fields(payload) == []
+        assert getattr(envelope_of(payload), field) == value
+        assert canonical_signing_bytes(payload)
+
+
+def test_the_schema_states_the_whitespace_rule_where_both_languages_read_it() -> None:
+    """The rule has to live in `protocol.schema.json`, not in a Python validator: Ajv compiles the
+    same file, so a rule spelled anywhere else is a rule TypeScript does not have."""
+    defs = json.loads(
+        (
+            pathlib.Path(__file__).resolve().parents[1] / "schemas" / "protocol.schema.json"
+        ).read_text(encoding="utf-8")
+    )["$defs"]
+    for name in ("SigningEnvelope", "SignedBidSubmission"):
+        for field in REQUIRED_SIGNING_FIELDS:
+            spec = defs[name]["properties"][field]
+            assert spec.get("minLength") == 1, (name, field)
+            assert spec.get("pattern"), f"{name}.{field} has no non-blank pattern"
+            # Length alone is what let `"   "` through; the pattern is the part that closes it.
+            assert "\\s" in spec["pattern"], (name, field, spec["pattern"])

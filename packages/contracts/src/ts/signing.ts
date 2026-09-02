@@ -264,12 +264,40 @@ export function payloadHash(payload: Payload): string {
 }
 
 /**
+ * True when `value` holds no character the envelope's schema `pattern` would accept.
+ *
+ * The SAME class `protocol.schema.json` spells as `[^\s\u001c-\u001f]`, so the schema Ajv
+ * compiles from that bundle and this function cannot disagree. Plain `String.prototype.trim()`
+ * is NOT that class: it keeps U+001C-U+001F, which Python's `str.strip()` removes and the schema
+ * excludes. Two gates on one rule that disagree is one gate, and it is whichever one the caller
+ * happens to be standing on.
+ */
+function isBlank(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    // U+001C-U+001F, the four information separators. `trim()` keeps them; `str.strip()` and the
+    // schema's class both discard them, so they are handled here rather than left to `trim()`.
+    if (unit >= 0x1c && unit <= 0x1f) continue;
+    // Everything else: ECMA-262 defines `\s` as exactly what `trim()` removes, so a one-unit
+    // `trim()` IS the `\s` test — written this way because a regex literal holding the control
+    // characters above trips `no-control-regex`, and disabling a lint rule to keep a clause the
+    // language already gives you is the wrong trade.
+    if (value.charAt(index).trim() !== "") return false;
+  }
+  return true;
+}
+
+/**
  * Which of the five required envelope fields are absent or empty. Empty array means complete.
  *
  * Required BY TYPE, not merely by presence. All five are `string` in the schema, and a check that
  * only asked "is it null/undefined or blank?" reported `nonce: 0`, `nonce: false`, `signer_id: []`
  * and `issued_at: 12345` as present — every one of which the schema rejects. `nonce: false` is a
  * constant nonce, which is exactly what D52's replay defence exists to make impossible.
+ *
+ * "Empty" is `isBlank`, not `minLength`. The schema used to say `minLength: 1` alone, so
+ * `"   "` satisfied it while this function called the same value missing; the schema now carries
+ * the same class this does, and both refuse it.
  */
 export function missingSigningFields(payload: unknown): string[] {
   const record =
@@ -279,7 +307,7 @@ export function missingSigningFields(payload: unknown): string[] {
   if (record === undefined) return [...REQUIRED_SIGNING_FIELDS];
   return REQUIRED_SIGNING_FIELDS.filter((field) => {
     const value = record[field];
-    return typeof value !== "string" || value.trim() === "";
+    return typeof value !== "string" || isBlank(value);
   });
 }
 

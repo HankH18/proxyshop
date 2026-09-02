@@ -245,22 +245,22 @@
 
     "SigningEnvelope": {
       "title": "SigningEnvelope",
-      "description": "D52 / DESIGN §Interfaces. ALL FIVE fields are required on every Bid submitted through the\nexternal door `POST /v1/auctions/{auction_id}/bids`. There is no legacy-tolerant production\npath and no optional-field mode: optionality would leave the public boundary unable to rotate\nkeys, check freshness, or protect against replay — the three reasons the door is signed at all.\n\n`signer_id` is the registered submitting identity (equal to `store_id` for a single-store\nseller, distinct when one seller submits for several). `key_id` selects one of that signer's\nlive keys, so the keyring is `{signer_id: {key_id: secret}}` and a lookup keyed on `key_id`\nalone is wrong. `nonce` is the replay/idempotency key, unique PER SIGNER, never globally.",
+      "description": "D52 / DESIGN §Interfaces. ALL FIVE fields are required on every Bid submitted through the\nexternal door `POST /v1/auctions/{auction_id}/bids`. There is no legacy-tolerant production\npath and no optional-field mode: optionality would leave the public boundary unable to rotate\nkeys, check freshness, or protect against replay — the three reasons the door is signed at all.\n\n`signer_id` is the registered submitting identity (equal to `store_id` for a single-store\nseller, distinct when one seller submits for several). `key_id` selects one of that signer's\nlive keys, so the keyring is `{signer_id: {key_id: secret}}` and a lookup keyed on `key_id`\nalone is wrong. `nonce` is the replay/idempotency key, unique PER SIGNER, never globally.\n\nThe five envelope fields are non-blank BY PATTERN, not merely by length. `minLength: 1`\nalone admits `\"   \"`, which `contracts.signing.missing_signing_fields` strips and calls\nMISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,\nso the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no\nschema should admit one. The class is spelled `[^\\s\\u001c-\\u001f]` rather than `\\S`\nbecause Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as\nwhitespace: `\\S` alone would leave those four characters disagreeing with the very\nfunction this pattern exists to match.",
       "type": "object",
       "additionalProperties": false,
       "required": ["signer_id", "key_id", "issued_at", "nonce", "schema_version"],
       "properties": {
-        "signer_id": { "type": "string", "minLength": 1 },
-        "key_id": { "type": "string", "minLength": 1 },
-        "issued_at": { "type": "string", "format": "date-time", "minLength": 1 },
-        "nonce": { "type": "string", "minLength": 1 },
-        "schema_version": { "type": "string", "minLength": 1 }
+        "signer_id": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "key_id": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "issued_at": { "type": "string", "format": "date-time", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "nonce": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "schema_version": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" }
       }
     },
 
     "SignedBidSubmission": {
       "title": "SignedBidSubmission",
-      "description": "The wire shape of `POST /v1/auctions/{auction_id}/bids`: a `Bid` with the `SigningEnvelope`\nflattened onto it. A submission missing ANY of the five envelope fields is Rejected at the\nexchange boundary with the same finality as a bad signature, before extraction and before\nverification (D52).\n\nThe property set is asserted to be exactly `Bid` ∪ `SigningEnvelope` by a checked-in test, so\nthis definition cannot drift away from the two it composes.",
+      "description": "The wire shape of `POST /v1/auctions/{auction_id}/bids`: a `Bid` with the `SigningEnvelope`\nflattened onto it. A submission missing ANY of the five envelope fields is Rejected at the\nexchange boundary with the same finality as a bad signature, before extraction and before\nverification (D52).\n\nThe property set is asserted to be exactly `Bid` ∪ `SigningEnvelope` by a checked-in test, so\nthis definition cannot drift away from the two it composes.\n\nThe five envelope fields are non-blank BY PATTERN, not merely by length. `minLength: 1`\nalone admits `\"   \"`, which `contracts.signing.missing_signing_fields` strips and calls\nMISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,\nso the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no\nschema should admit one. The class is spelled `[^\\s\\u001c-\\u001f]` rather than `\\S`\nbecause Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as\nwhitespace: `\\S` alone would leave those four characters disagreeing with the very\nfunction this pattern exists to match.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -284,11 +284,11 @@
         "message": { "type": ["string", "null"] },
         "agent_version": { "type": "string", "minLength": 1 },
         "signature": { "type": ["string", "null"] },
-        "schema_version": { "type": "string", "minLength": 1 },
-        "signer_id": { "type": "string", "minLength": 1 },
-        "key_id": { "type": "string", "minLength": 1 },
-        "issued_at": { "type": "string", "format": "date-time", "minLength": 1 },
-        "nonce": { "type": "string", "minLength": 1 }
+        "schema_version": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "signer_id": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "key_id": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "issued_at": { "type": "string", "format": "date-time", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" },
+        "nonce": { "type": "string", "minLength": 1, "pattern": "[^\\s\\u001c-\\u001f]" }
       }
     },
 
