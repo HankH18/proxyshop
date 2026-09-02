@@ -17,12 +17,15 @@ handed an already-eligible roster and takes no eligibility argument (D54).
 
 from __future__ import annotations
 
-from .collect import FALLBACK_REASONS, BidEntry, collect_bids
+from .collect import FALLBACK_REASONS, MALFORMED_RESPONSE_REASONS, BidEntry, collect_bids
 from .fanout import (
     DEFAULT_BID_WINDOW_SECONDS,
+    MAX_FAN_OUT_WORKERS,
     ArrivalClock,
+    BoundedFanOutPool,
     FanOut,
     ask_store,
+    fan_out_pool,
     parallel_fan_out,
     sequential_fan_out,
 )
@@ -60,6 +63,8 @@ __all__ = [
     "DEFAULT_BID_WINDOW_SECONDS",
     "EXPIRED",
     "FALLBACK_REASONS",
+    "MALFORMED_RESPONSE_REASONS",
+    "MAX_FAN_OUT_WORKERS",
     "OPEN",
     "TRANSITIONS",
     "ArrivalClock",
@@ -67,6 +72,7 @@ __all__ = [
     "AuctionStateMachine",
     "AuctionStore",
     "BidEntry",
+    "BoundedFanOutPool",
     "FanOut",
     "IllegalAuctionTransition",
     "InMemoryAuctionStore",
@@ -79,6 +85,7 @@ __all__ = [
     "ask_store",
     "build_event",
     "collect_bids",
+    "fan_out_pool",
     "parallel_fan_out",
     "sequential_fan_out",
 ]

@@ -59,7 +59,18 @@ from .codes import (
     offer_quantity,
 )
 from .domain import OffDomainCheckout, assert_on_domain, is_on_domain
-from .lint import MINTING_CALLEES, MintingCallSite, code_minting_call_sites
+from .lint import (
+    CHECKOUT_REQUEST,
+    INDIRECT_LOOKUPS,
+    MINTING_CALLEES,
+    MINTING_CLIENTS,
+    MINTING_METHODS,
+    TRUSTED_DOMAIN_KEYWORD,
+    MintingCallSite,
+    UnboundCheckoutRequest,
+    code_minting_call_sites,
+    unbound_checkout_requests,
+)
 from .provider import (
     CHECKOUT_EVENT_KINDS,
     CheckoutProvider,
@@ -69,6 +80,7 @@ from .provider import (
     PortMethodIsFinal,
     RegisteredDomains,
     default_permalink,
+    domain_is_platform_verified,
     registered_domain_for,
 )
 from .providers import (
@@ -84,27 +96,36 @@ from .registry import (
     registered_modes,
     resolve_provider,
 )
+from .sellers import NoRegisteredDomains, StaticRegisteredDomains
 
 __all__ = [
     "CHECKOUT_EVENT_KINDS",
     "CHECKOUT_MODES",
+    "CHECKOUT_REQUEST",
     "CODE_ALPHABET",
     "CODE_BODY_LENGTH",
     "CODE_PREFIX",
     "DEFAULT_CHECKOUT_MODE",
     "MAX_CODE_TTL_SECONDS",
+    "INDIRECT_LOOKUPS",
     "MINTING_CALLEES",
+    "MINTING_CLIENTS",
+    "MINTING_METHODS",
+    "TRUSTED_DOMAIN_KEYWORD",
     "CheckoutCreatorError",
     "CheckoutProvider",
     "CheckoutRequest",
     "CheckoutResult",
     "MintedCheckout",
     "MintingCallSite",
+    "NoRegisteredDomains",
     "OffDomainCheckout",
     "RegisteredDomains",
     "PortMethodIsFinal",
     "ShopifyCheckoutProvider",
+    "StaticRegisteredDomains",
     "SimulatedRedirectProvider",
+    "UnboundCheckoutRequest",
     "UnknownCheckoutMode",
     "UnusableOffer",
     "assert_offer_is_mintable",
@@ -113,6 +134,7 @@ __all__ = [
     "code_expiry",
     "code_minting_call_sites",
     "default_permalink",
+    "domain_is_platform_verified",
     "is_on_domain",
     "mint_code",
     "offer_quantity",
@@ -120,4 +142,5 @@ __all__ = [
     "registered_domain_for",
     "registered_modes",
     "resolve_provider",
+    "unbound_checkout_requests",
 ]

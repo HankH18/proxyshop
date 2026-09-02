@@ -41,12 +41,41 @@ from ..orchestration import solicit_bids
 from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
 
-__all__ = ["DEFAULT_BID_TIMEOUT_SECONDS", "NullSolicitor", "configure_auctions", "router"]
+__all__ = [
+    "DEFAULT_BID_TIMEOUT_SECONDS",
+    "MAX_BID_TIMEOUT_SECONDS",
+    "NullSolicitor",
+    "bid_window_seconds",
+    "configure_auctions",
+    "router",
+]
 
 router = APIRouter(tags=["auctions"])
 
 #: R10's hard timeout. Short on purpose: a buyer is synchronously waiting on this call.
 DEFAULT_BID_TIMEOUT_SECONDS = 3.0
+
+#: The **server's** ceiling on that timeout, and it is not negotiable by the caller.
+#:
+#: ``bid_timeout_seconds`` arrives on an unauthenticated request body and this route is
+#: synchronous end to end: the window the caller names is time a worker spends parked. With
+#: only a lower clamp (``max(0.0, ...)``) anyone could post ``bid_timeout_seconds: 86400``
+#: and hold a worker for a day, and enough such requests take the service down without a
+#: single credential. So the caller may ask for *less* than the default and is capped here
+#: when it asks for more. Clamping rather than rejecting is deliberate: a client that asks
+#: for too long is not attacking anyone in particular, and giving it the maximum window is
+#: a better answer than a 422 it has no way to interpret.
+MAX_BID_TIMEOUT_SECONDS = 10.0
+
+
+def bid_window_seconds(requested: float) -> float:
+    """The real window this auction gets: what was asked for, clamped at both ends.
+
+    Total order matters more than it looks. ``nan`` compares false against everything, so
+    ``max(0.0, nan)`` is ``0.0`` and the ``min`` below leaves it there — a garbage timeout
+    becomes "no window", never "an infinite one". ``inf`` clamps to the ceiling.
+    """
+    return min(MAX_BID_TIMEOUT_SECONDS, max(0.0, float(requested)))
 
 
 class NullSolicitor:
@@ -167,7 +196,13 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     roster = [entry.model_dump() for entry in body.roster]
 
     opened_at = time.time()
-    window = max(0.0, float(body.bid_timeout_seconds))
+    # Taken next to `opened_at`, and for the same instant: this is the monotonic reading the
+    # whole window is measured from. Everything between here and the fan-out (two ledger
+    # writes and an eligibility read per rostered store) is I/O, and it is spent INSIDE the
+    # window — which is what makes R10's timeout a bound on this request rather than only on
+    # the part of it that talks to stores.
+    started_at = time.monotonic()
+    window = bid_window_seconds(body.bid_timeout_seconds)
     deadline = opened_at + window
 
     machine.create(
@@ -190,6 +225,7 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         # answering after `bid_timeout_seconds` would be stamped against the platform
         # default instead of the timeout this auction actually granted.
         window=window,
+        started_at=started_at,
     )
 
     record = machine.close(auction_id, now=time.time())
