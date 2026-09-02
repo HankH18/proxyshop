@@ -94,7 +94,14 @@ export function payloadHash(payload: Payload): string {
   return `${PAYLOAD_HASH_ALGORITHM}:${digest}`;
 }
 
-/** Which of the five required envelope fields are absent or empty. Empty array means complete. */
+/**
+ * Which of the five required envelope fields are absent or empty. Empty array means complete.
+ *
+ * Required BY TYPE, not merely by presence. All five are `string` in the schema, and a check that
+ * only asked "is it null/undefined or blank?" reported `nonce: 0`, `nonce: false`, `signer_id: []`
+ * and `issued_at: 12345` as present — every one of which the schema rejects. `nonce: false` is a
+ * constant nonce, which is exactly what D52's replay defence exists to make impossible.
+ */
 export function missingSigningFields(payload: unknown): string[] {
   const record =
     typeof payload === "object" && payload !== null && !Array.isArray(payload)
@@ -103,7 +110,7 @@ export function missingSigningFields(payload: unknown): string[] {
   if (record === undefined) return [...REQUIRED_SIGNING_FIELDS];
   return REQUIRED_SIGNING_FIELDS.filter((field) => {
     const value = record[field];
-    return value === null || value === undefined || (typeof value === "string" && value.trim() === "");
+    return typeof value !== "string" || value.trim() === "";
   });
 }
 
@@ -152,15 +159,23 @@ export function isSignedBidSubmission(payload: unknown): payload is SignedBidSub
  * string, so a lookup keyed on `key_id` alone is wrong. An unknown pair returns `undefined` and
  * never falls back to another key of that signer — falling back is what makes a revoked key still
  * work.
+ *
+ * Both ids must be strings: they arrive off the wire, and JS would happily index a keyring with
+ * `String({})` — `"[object Object]"` — rather than refusing. A stored secret must be a non-empty
+ * string; a row seeded with `""` (a placeholder, a truncated secret, a key cleared but not
+ * deleted) is NOT a usable HMAC key, and returning it would make "no such key" and "this key"
+ * the same answer. The Python peer reads it the same way.
  */
 export function keyringSecret(
   keyring: Record<string, Record<string, string> | undefined>,
   signerId: string,
   keyId: string,
 ): string | undefined {
-  const signerKeys = keyring?.[signerId];
+  if (typeof signerId !== "string" || typeof keyId !== "string") return undefined;
+  if (typeof keyring !== "object" || keyring === null) return undefined;
+  const signerKeys = keyring[signerId];
   if (typeof signerKeys !== "object" || signerKeys === null) return undefined;
-  const secret = signerKeys[keyId];
+  const secret = (signerKeys as Record<string, unknown>)[keyId];
   return typeof secret === "string" && secret !== "" ? secret : undefined;
 }
 

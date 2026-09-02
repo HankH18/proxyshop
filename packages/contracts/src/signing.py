@@ -197,13 +197,21 @@ def payload_hash(payload: Mapping[str, Any]) -> str:
 
 
 def missing_signing_fields(payload: Mapping[str, Any]) -> list[str]:
-    """Which of the five required envelope fields are absent or empty. Empty list means complete."""
+    """Which of the five required envelope fields are absent or empty. Empty list means complete.
+
+    Required BY TYPE, not merely by presence. All five are `string` in the schema, and a check
+    that only asked "is it None or blank?" reported `nonce: 0`, `nonce: false`, `signer_id: []`
+    and `issued_at: 12345` as present — every one of which `SigningEnvelope` rejects. `nonce:
+    false` is a constant nonce, which is exactly what D52's replay defence exists to make
+    impossible, and `canonical_signing_bytes` calls this function rather than `envelope_of`, so
+    the loose gate was the only one on the path.
+    """
     if not isinstance(payload, Mapping):
         return list(REQUIRED_SIGNING_FIELDS)
     missing = []
     for field in REQUIRED_SIGNING_FIELDS:
         value = payload.get(field)
-        if value is None or (isinstance(value, str) and not value.strip()):
+        if not isinstance(value, str) or not value.strip():
             missing.append(field)
     return missing
 
@@ -250,18 +258,40 @@ def keyring_secret(
     the store. Two signers may legitimately use the same `key_id` string, so a lookup keyed on
     `key_id` alone is wrong; and an unknown pair never falls back to another key of that signer,
     because falling back is what makes a revoked key still work.
+
+    Both ids must be strings, and both lookups are guarded. `signer_id` and `key_id` arrive off
+    the wire, and `{"signer_id": {"a": 1}}` makes `dict.get` raise `TypeError: unhashable type`
+    — an uncaught 500 from an unauthenticated caller where a rejection belongs. `boundary.py`
+    already guards this exact hazard on `store_id`; the reasoning carries here unchanged.
+
+    A stored secret must be a non-empty string. A row seeded with `""` — a placeholder, a
+    truncated secret, a key cleared but not deleted — is NOT a usable HMAC key, and returning it
+    would make "no such key" and "this key" the same answer.
     """
     if not isinstance(keyring, Mapping):
         return None
-    signer_keys = keyring.get(signer_id)
+    if not isinstance(signer_id, str) or not isinstance(key_id, str):
+        return None
+    try:
+        signer_keys = keyring.get(signer_id)
+    except TypeError:  # a keyring whose own keys refuse this lookup is simply not a match
+        return None
     if not isinstance(signer_keys, Mapping):
         return None
-    secret = signer_keys.get(key_id)
+    try:
+        secret = signer_keys.get(key_id)
+    except TypeError:
+        return None
     return secret if isinstance(secret, str) and secret else None
 
 
 def signing_envelope_errors(payload: Mapping[str, Any]) -> Sequence[str]:
-    """Human-readable reasons a submission's envelope is unacceptable. Empty means acceptable."""
+    """Human-readable reasons a submission's envelope is unacceptable. Empty means acceptable.
+
+    A non-mapping is not an acceptable envelope — it is five errors. Returning `[]` for one would
+    mean "acceptable", and a caller trusting the empty list would admit a bare string or a JSON
+    array as a signed submission.
+    """
     missing = missing_signing_fields(payload)
     return [f"missing required signing field: {field}" for field in missing]
 

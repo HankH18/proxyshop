@@ -253,3 +253,91 @@ describe("canonicalization edge cases the fixtures do not reach", () => {
     expect(() => canonicalJson({n: Symbol("x")})).toThrow();
   });
 });
+
+describe("F3 — the five envelope fields are required BY TYPE, not merely by presence", () => {
+  it.each(
+    REQUIRED_SIGNING_FIELDS.flatMap((field) =>
+      [0, 1, false, true, 12345, [], {}, ["x"], {a: 1}, 1.5, null].map(
+        (value) => [field, value] as const,
+      ),
+    ),
+  )("counts %s = %s as missing", (field, value) => {
+    // All five are `string` in the schema, and `isSignedBidSubmission` rejects every one of these.
+    // A check that only asked "is it null/undefined or blank?" called them present — and
+    // `nonce: false` is a CONSTANT nonce, the thing D52's replay defence exists to make
+    // impossible.
+    const payload = makeSubmission({[field]: value});
+    expect(missingSigningFields(payload), `${field}=${JSON.stringify(value)}`).toContain(field);
+    expect(isSignedBidSubmission(payload)).toBe(false);
+  });
+
+  it.each(
+    REQUIRED_SIGNING_FIELDS.flatMap((field) =>
+      [0, false, [], {}, 12345].map((value) => [field, value] as const),
+    ),
+  )("refuses to canonicalize %s = %s", (field, value) => {
+    // The end-to-end consequence: `{issued_at: 12345}` used to produce signing bytes reading
+    // `"issued_at":12345`, over a submission the schema would never have admitted.
+    expect(() => canonicalSigningBytes(makeSubmission({[field]: value}))).toThrow(
+      /incomplete signing envelope/,
+    );
+  });
+});
+
+describe("F5 / F2 — the keyring guard", () => {
+  const keyring = {
+    "store-external-1": {
+      "key-good": "secret-1",
+      "key-empty": "",
+      "key-blank": "   ",
+      "key-null": null,
+      "key-num": 12345,
+      "key-arr": ["secret-1"],
+      "key-bool": true,
+    },
+  } as never;
+
+  it.each(["key-empty", "key-null", "key-num", "key-arr", "key-bool"])(
+    "does not treat %s as a usable HMAC key",
+    (keyId) => {
+      // A row seeded with "" — a placeholder, a truncated secret, a key cleared but not deleted
+      // — must read as "no such key". The Python peer is pinned the same way.
+      expect(keyringSecret(keyring, "store-external-1", keyId)).toBeUndefined();
+    },
+  );
+
+  it("still returns the real secret, and a whitespace-only one", () => {
+    expect(keyringSecret(keyring, "store-external-1", "key-good")).toBe("secret-1");
+    // The contract is "non-empty string", not "looks like a key". Pinned so the edge is explicit.
+    expect(keyringSecret(keyring, "store-external-1", "key-blank")).toBe("   ");
+  });
+
+  it.each([
+    [{a: 1}, "key-good"],
+    [["x"], "key-good"],
+    ["store-external-1", {a: 1}],
+    ["store-external-1", null],
+    [null, null],
+    [12345, 67890],
+  ])("returns undefined for a non-string id pair (%s, %s)", (signerId, keyId) => {
+    // JS would otherwise index the keyring with `String({})` — "[object Object]" — rather than
+    // refusing. The Python peer raises `TypeError: unhashable type` without the same guard.
+    expect(keyringSecret(keyring, signerId as never, keyId as never)).toBeUndefined();
+  });
+});
+
+describe("F7 — a non-mapping is not an acceptable envelope", () => {
+  it.each(["a raw string", "", ["signer_id", "key_id"], 42, null, undefined, true])(
+    "reports five errors for %s",
+    (payload) => {
+      // `[]` means "acceptable envelope": a caller trusting an empty list would admit a bare
+      // string or a JSON array as a signed submission.
+      expect(signingEnvelopeErrors(payload)).toHaveLength(5);
+      expect(missingSigningFields(payload)).toEqual([...REQUIRED_SIGNING_FIELDS]);
+    },
+  );
+
+  it("reports zero errors for a complete submission", () => {
+    expect(signingEnvelopeErrors(makeSubmission())).toEqual([]);
+  });
+});

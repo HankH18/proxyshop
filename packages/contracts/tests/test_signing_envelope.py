@@ -341,3 +341,140 @@ def test_non_finite_numbers_are_refused() -> None:
     for value in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError):
             canonical_json({"n": value})
+
+
+# --- F3: the five envelope fields are required BY TYPE, not merely by presence --------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (field, value)
+        for field in REQUIRED_SIGNING_FIELDS
+        for value in (0, 1, False, True, 12345, [], {}, ["x"], {"a": 1}, 1.5, None)
+    ],
+)
+def test_a_non_string_envelope_field_counts_as_missing(field: str, value: object) -> None:
+    """All five are `string` in the schema, and `SigningEnvelope` rejects every one of these
+    values. `missing_signing_fields` used to call them present, which meant `nonce: false` — a
+    CONSTANT nonce, the thing D52's replay defence exists to make impossible — sailed through.
+    `canonical_signing_bytes` calls this function and never `envelope_of`, so the loose gate was
+    the only one on the path."""
+    payload = make_submission(**{field: value})
+    assert field in missing_signing_fields(payload), (
+        f"{field}={value!r} was accepted as a present envelope field"
+    )
+    with pytest.raises(Exception):
+        SigningEnvelope.model_validate({f: payload.get(f) for f in REQUIRED_SIGNING_FIELDS})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [(field, value) for field in REQUIRED_SIGNING_FIELDS for value in (0, False, [], {}, 12345)],
+)
+def test_a_non_string_envelope_field_cannot_be_canonicalized(field: str, value: object) -> None:
+    """The end-to-end consequence: `{"issued_at": 12345}` used to produce signing bytes reading
+    `"issued_at":12345`, over a submission `SigningEnvelope` would never have admitted."""
+    with pytest.raises(ValueError, match="incomplete signing envelope"):
+        canonical_signing_bytes(make_submission(**{field: value}))
+
+
+def test_the_two_envelope_gates_agree_with_each_other() -> None:
+    """`envelope_of` (pydantic) and `missing_signing_fields` are two gates on the same rule. They
+    disagreed on every non-string value, and the stricter one was the one nobody was on the path
+    of."""
+    for value in (0, False, [], {}, 12345, 1.5, None, ""):
+        payload = make_submission(nonce=value)
+        assert missing_signing_fields(payload) != [], f"nonce={value!r} passed the loose gate"
+        with pytest.raises(Exception):
+            envelope_of(payload)
+
+    # The one remaining asymmetry, and it points the SAFE way: `SigningEnvelope` spells its rule
+    # `min_length=1`, so `"   "` satisfies pydantic, while `missing_signing_fields` strips and
+    # calls it missing. The strict gate is the one `canonical_signing_bytes` is on, so a
+    # whitespace-only nonce cannot be signed either way.
+    whitespace = make_submission(nonce="   ")
+    assert missing_signing_fields(whitespace) == ["nonce"]
+    assert envelope_of(whitespace).nonce == "   "
+    with pytest.raises(ValueError, match="incomplete signing envelope"):
+        canonical_signing_bytes(whitespace)
+
+    # Control: a real nonce passes both.
+    assert missing_signing_fields(make_submission()) == []
+    assert envelope_of(make_submission()).nonce == "nonce-ext-0001"
+
+
+# --- F2: the keyring lookup is on the public path and must not raise ------------------------
+
+
+def test_an_unhashable_signer_or_key_is_a_miss_rather_than_a_crash() -> None:
+    """`{"signer_id": {"a": 1}, "key_id": "k-1"}` on the public submission route made
+    `dict.get` raise `TypeError: unhashable type: 'dict'` — an uncaught 500 from an
+    unauthenticated caller where a rejection belongs. `boundary.py` already guards this exact
+    hazard on `store_id` for the same reason."""
+    keyring = {"store-external-1": {"key-2026-01": "secret-1"}}
+    for signer_id, key_id in (
+        ({"a": 1}, "key-2026-01"),
+        (["x"], "key-2026-01"),
+        ("store-external-1", {"a": 1}),
+        ("store-external-1", ["x"]),
+        ({1, 2}, {3, 4}),
+        (None, None),
+        (12345, 67890),
+    ):
+        assert keyring_secret(keyring, signer_id, key_id) is None, (
+            f"({signer_id!r}, {key_id!r}) resolved to a secret"
+        )
+
+    # Control: the well-typed pair still resolves, so this is not "return None for everything".
+    assert keyring_secret(keyring, "store-external-1", "key-2026-01") == "secret-1"
+
+
+# --- F5: an empty or non-string stored secret is not a key ----------------------------------
+
+
+def test_a_blank_or_non_string_stored_secret_is_not_a_usable_key() -> None:
+    """A keyring row seeded with `""` — a placeholder, a truncated secret, a key cleared but not
+    deleted — must read as "no such key". Returning it would hand T-044 an empty HMAC key. The
+    TypeScript peer is pinned the same way."""
+    keyring = {
+        "store-external-1": {
+            "key-good": "secret-1",
+            "key-empty": "",
+            "key-blank": "   ",
+            "key-none": None,
+            "key-int": 12345,
+            "key-list": ["secret-1"],
+            "key-bool": True,
+        }
+    }
+    for key_id in ("key-empty", "key-none", "key-int", "key-list", "key-bool"):
+        assert keyring_secret(keyring, "store-external-1", key_id) is None, (
+            f"{key_id} was treated as a usable HMAC key"
+        )
+
+    # Control: the real secret still comes back.
+    assert keyring_secret(keyring, "store-external-1", "key-good") == "secret-1"
+    # A whitespace-only secret is a real (if silly) string and is returned — the contract is
+    # "non-empty string", not "looks like a key". Pinned so the boundary of the rule is explicit.
+    assert keyring_secret(keyring, "store-external-1", "key-blank") == "   "
+
+
+# --- F7: a non-mapping is not an acceptable envelope ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "payload", ("a raw string", "", ["signer_id", "key_id"], 42, None, True, {1, 2}, b"bytes")
+)
+def test_a_non_mapping_envelope_is_five_errors_not_zero(payload: object) -> None:
+    """`[]` from `signing_envelope_errors` means "acceptable envelope". A caller trusting an
+    empty list would admit a bare string or a JSON array as a signed submission."""
+    from packages.contracts.src.signing import signing_envelope_errors
+
+    assert len(signing_envelope_errors(payload)) == 5, (
+        f"{payload!r} was reported as an acceptable envelope"
+    )
+    assert missing_signing_fields(payload) == list(REQUIRED_SIGNING_FIELDS)
+
+    # Control: a complete mapping is zero errors.
+    assert list(signing_envelope_errors(make_submission())) == []
