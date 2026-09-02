@@ -59,13 +59,42 @@ class ProtectedScopeRequested(ValueError):
         )
 
 
+#: Shopify writes a granted scope set as one comma-joined string — the ``scope`` field of
+#: the token-exchange response is ``"read_orders,write_pixels"``, not a list. A scope entry
+#: is therefore split on commas before it is checked, or the whole string is treated as one
+#: unrecognised scope name and every protected scope inside it goes unseen.
+SCOPE_SEPARATOR = ","
+
+
 def normalize_scopes(scopes: Iterable[str]) -> tuple[str, ...]:
-    """Lower-case, strip and de-duplicate a scope list, preserving first-seen order."""
+    """Lower-case, strip, split and de-duplicate a scope list, preserving first-seen order.
+
+    Args:
+        scopes: an iterable of scope names. Each entry may itself be a comma-joined set,
+            which is the spelling Shopify's own token response uses.
+
+    Raises:
+        TypeError: ``scopes`` is a bare ``str`` or ``bytes``.
+
+    A bare ``str`` is refused rather than accepted, because a ``str`` *is* an
+    ``Iterable[str]`` — of single characters. ``normalize_scopes("read_customers")`` used to
+    return ``('r', 'e', 'a', 'd', …)``, none of which is a protected scope name, so the C5
+    check passed and the forbidden scope was admitted. The one input a caller is most
+    likely to pass by mistake was the one input that silently disarmed the guard.
+    """
+    if isinstance(scopes, str | bytes):
+        raise TypeError(
+            "scopes must be an iterable of scope names, not a bare "
+            f"{type(scopes).__name__}: a string iterates as single characters, none of "
+            "which is a scope name, so every protected scope in it would go undetected. "
+            f"Pass [{scopes!r}] or split it on {SCOPE_SEPARATOR!r}."
+        )
     seen: dict[str, None] = {}
     for scope in scopes:
-        cleaned = str(scope).strip().lower()
-        if cleaned:
-            seen.setdefault(cleaned, None)
+        for part in str(scope).split(SCOPE_SEPARATOR):
+            cleaned = part.strip().lower()
+            if cleaned:
+                seen.setdefault(cleaned, None)
     return tuple(seen)
 
 
@@ -79,12 +108,21 @@ def assert_scopes_allowed(scopes: Iterable[str]) -> tuple[str, ...]:
 
     This is the only place the C5 rule is enforced, and it is enforced on the *argument*
     rather than on :data:`REQUIRED_SCOPES`: a check against a module constant can never
-    refuse anything. Both callers pass a caller-supplied list —
+    refuse anything.
+
+    **What this guard does and does not currently cover.** Its two callers,
     :func:`~merchant_svc.install.oauth.authorize_url` and
-    :func:`~merchant_svc.install.flow.install`.
+    :func:`~merchant_svc.install.flow.install`, both accept a caller-supplied list, and
+    both are reached from ``routes.py`` with :data:`REQUIRED_SCOPES` — the module constant.
+    So on the deployed HTTP path this refuses nothing today; it refuses real input only
+    from a library caller, which is what the tests exercise. It is also the *requested*
+    scope set that is checked. Nothing here inspects the set Shopify actually **granted**
+    (the ``scope`` field of the token-exchange response), so a shop whose grant differs
+    from the request is not detected — stated because the gap is real, not covered.
 
     Raises:
         ProtectedScopeRequested: any protected-customer-data scope was requested.
+        TypeError: ``scopes`` is a bare ``str`` or ``bytes``.
         ValueError: the scope list is empty.
     """
     normalized = normalize_scopes(scopes)

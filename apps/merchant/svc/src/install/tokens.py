@@ -18,7 +18,7 @@ replaces it without touching a caller.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -39,10 +39,20 @@ class ShopNotInstalled(LookupError):
 
 @dataclass(frozen=True)
 class OfflineToken:
-    """One shop's offline Admin API credential."""
+    """One shop's offline Admin API credential.
+
+    The credential is kept out of ``repr()``. That is not decoration: this object is
+    reachable from :class:`~merchant_svc.install.flow.InstallResult`, so any
+    ``logger.info("%r", result)``, any ``%s`` interpolation, any pytest assertion diff and
+    any traceback rendered with locals would otherwise print a live, long-lived Admin API
+    token in full. A credential that only leaks when something goes wrong leaks exactly
+    when the logs are most likely to be shipped somewhere and read by the most people.
+    """
 
     shop_domain: str
-    access_token: str
+    #: ``repr=False`` is load-bearing, not cosmetic — it is what keeps the secret out of
+    #: the generated ``__repr__``. :meth:`__str__` below renders the redacted form instead.
+    access_token: str = field(repr=False)
     scopes: tuple[str, ...]
     issued_at: datetime
 
@@ -50,6 +60,18 @@ class OfflineToken:
         """The token with its secret elided, safe to log."""
         head = self.access_token[:6]
         return f"{head}…({len(self.access_token)} chars)"
+
+    def __str__(self) -> str:
+        """The human-readable form, with the credential redacted rather than omitted.
+
+        ``repr`` drops the token entirely; this keeps the prefix and the length, which is
+        what actually helps somebody reading a log decide whether the right credential is
+        in play, and is why :meth:`redacted` exists.
+        """
+        return (
+            f"OfflineToken({self.shop_domain} {self.redacted()} "
+            f"scopes={','.join(self.scopes) or '-'})"
+        )
 
 
 @runtime_checkable

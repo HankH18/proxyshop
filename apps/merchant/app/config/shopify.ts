@@ -86,12 +86,40 @@ export class InvalidShopDomain extends Error {
   }
 }
 
-/** Lower-case, trim and de-duplicate a scope list, preserving first-seen order. */
+/**
+ * Shopify writes a granted scope set as one comma-joined string — the `scope` field of the
+ * token-exchange response is `"read_orders,write_pixels"`, not an array. A scope entry is
+ * split on this before it is checked, or the whole string reads as one unrecognised scope
+ * name and every protected scope inside it goes unseen.
+ */
+export const SCOPE_SEPARATOR = ','
+
+/**
+ * Lower-case, trim, split and de-duplicate a scope list, preserving first-seen order.
+ *
+ * A bare string is refused rather than accepted, because a string IS an `Iterable<string>`
+ * — of single characters. `normalizeScopes('read_customers')` used to return
+ * `['r','e','a','d',…]`, none of which is a scope name, so the C5 check passed and the
+ * forbidden scope was admitted. The input a caller is most likely to pass by mistake was
+ * the input that silently disarmed the guard.
+ *
+ * @throws {TypeError} when `scopes` is a bare string.
+ */
 export function normalizeScopes(scopes: Iterable<string>): string[] {
+  if (typeof scopes === 'string') {
+    throw new TypeError(
+      'scopes must be an iterable of scope names, not a bare string: a string iterates ' +
+        'as single characters, none of which is a scope name, so every protected scope ' +
+        `in it would go undetected. Pass [${JSON.stringify(scopes)}] or split it on ` +
+        `${JSON.stringify(SCOPE_SEPARATOR)}.`,
+    )
+  }
   const seen = new Set<string>()
   for (const scope of scopes) {
-    const cleaned = String(scope).trim().toLowerCase()
-    if (cleaned) seen.add(cleaned)
+    for (const part of String(scope).split(SCOPE_SEPARATOR)) {
+      const cleaned = part.trim().toLowerCase()
+      if (cleaned) seen.add(cleaned)
+    }
   }
   return [...seen]
 }

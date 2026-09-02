@@ -36,6 +36,7 @@ from merchant_svc.install import (
     AdminGraphQLClient,
     ForbiddenWebhookTopic,
     InMemoryOfflineTokenStore,
+    InstallResult,
     InvalidShopDomain,
     OAuthCallbackRejected,
     OnlineTokenRefused,
@@ -51,11 +52,13 @@ from merchant_svc.install import (
     exchange_code,
     handle_delivery,
     install,
+    normalize_scopes,
     normalize_shop_domain,
     read_callback,
     set_webhook_sink,
     sign,
     sign_callback,
+    unauthorized_scopes,
     verify,
     verify_callback_hmac,
 )
@@ -1045,3 +1048,123 @@ def test_forgetting_a_delivery_this_inbox_never_recorded_disarms_nothing() -> No
     inbox.forget(recorded.event)
     assert inbox.events() == ()
     assert deliver().duplicate is False
+
+
+# ======================================================================================
+# The C5 guard has to survive the shapes a real caller hands it
+# ======================================================================================
+def test_the_scope_guard_is_not_disarmed_by_the_shape_shopify_itself_returns() -> None:
+    """A comma-joined scope string is the granted-scope spelling, and it must be checked.
+
+    ``str`` is an ``Iterable[str]`` — of single characters — so the guard used to shred a
+    bare scope name into letters, none of which is a protected scope, and pass. Worse, the
+    one-entry comma-joined list is *exactly* what Shopify's token-exchange response puts in
+    its ``scope`` field, so feeding the granted set back through the guard admitted
+    ``read_customers`` with C5 never firing.
+
+    REFUSED, concretely: ``["read_orders,read_customers"]`` and the bare string
+    ``"read_customers"``. ADMITTED, concretely: ``["read_orders,write_pixels"]`` — which
+    normalizes to both scopes rather than being refused wholesale, so the fix cannot be
+    "reject anything with a comma in it".
+    """
+    # ADMITTED: the comma-joined form is split, not refused.
+    assert normalize_scopes(["read_orders,write_pixels"]) == ("read_orders", "write_pixels")
+    assert assert_scopes_allowed(["read_orders, Write_Pixels "]) == (
+        "read_orders",
+        "write_pixels",
+    )
+    assert assert_scopes_allowed(list(REQUIRED_SCOPES)) == REQUIRED_SCOPES
+
+    # REFUSED: a protected scope hiding inside the granted-scope string is now seen.
+    assert unauthorized_scopes(["read_orders,read_customers"]) == ("read_customers",)
+    with pytest.raises(ProtectedScopeRequested) as refused:
+        assert_scopes_allowed(["read_orders,read_customers"])
+    assert refused.value.offending == ("read_customers",)
+
+    # REFUSED: a bare string cannot be quietly iterated into harmless characters.
+    for bare in ("read_customers", "read_orders"):
+        with pytest.raises(TypeError):
+            assert_scopes_allowed(bare)
+        with pytest.raises(TypeError):
+            normalize_scopes(bare)
+
+    # And the guard still refuses every protected scope one at a time, comma-joined.
+    for scope in sorted(PROTECTED_CUSTOMER_DATA_SCOPES):
+        with pytest.raises(ProtectedScopeRequested):
+            assert_scopes_allowed([f"read_orders,{scope}"])
+
+
+def test_an_offline_token_never_appears_in_the_text_of_the_objects_that_hold_it() -> None:
+    """The credential must not be one traceback or one ``%r`` away from the logs.
+
+    :class:`OfflineToken` is reachable from :class:`InstallResult`, so a single
+    ``logger.info("%r", result)``, an f-string, a pytest assertion diff or a traceback
+    rendered with locals would have printed a live, long-lived Admin API token in full.
+
+    REFUSED, concretely: the raw ``shpat_…`` value, in ``repr``, ``str``, f-string and the
+    enclosing :class:`InstallResult`. ADMITTED, concretely: the shop, the scopes and the
+    redacted prefix-and-length, which is what makes the line useful to read.
+    """
+    secret = "shpat_do_not_print_me_0123456789"
+    token = InMemoryOfflineTokenStore().save(SHOP, secret, scopes=REQUIRED_SCOPES)
+
+    for rendering in (repr(token), str(token), f"{token}", f"{token!r}", f"{token!s}"):
+        assert secret not in rendering, f"the token leaked into {rendering!r}"
+
+    result = InstallResult(
+        shop_domain=SHOP, scopes=REQUIRED_SCOPES, pixel_settings={}, offline_token=token
+    )
+    assert secret not in repr(result)
+    assert secret not in str(result)
+
+    # Still useful: the shop, the scopes and enough of the token to identify it.
+    assert SHOP in str(token)
+    assert "read_orders" in str(token)
+    assert token.redacted() in str(token)
+    assert str(len(secret)) in token.redacted()
+    assert token.access_token == secret, "the value itself must still be readable in code"
+
+
+def test_a_body_too_deeply_nested_to_parse_is_refused_not_retried_forever() -> None:
+    """An authenticated body that can never parse must terminate, not loop.
+
+    ``json.loads`` raises ``RecursionError`` — not ``ValueError`` — on a deeply nested
+    document, so a **validly signed** body escaped ``handle_delivery`` and the route
+    answered 5xx. Shopify retries 5xx, the body can never parse, and the retry is
+    permanent: an authenticated sender could pin one delivery in a forever-loop.
+
+    REFUSED, concretely: 60,000-deep nesting, answered 400 ``unparseable-body`` — the same
+    answer flat garbage gets. ADMITTED, concretely: an ordinary one-level payload, and
+    nesting deep enough to be unusual but shallow enough to parse.
+    """
+    inbox = WebhookInbox()
+
+    def deliver(payload: bytes) -> WebhookDecision:
+        return handle_delivery(
+            body=payload,
+            headers={
+                "X-Shopify-Topic": "orders/paid",
+                "X-Shopify-Hmac-Sha256": sign(payload, DEFAULT_WEBHOOK_SECRET),
+                "X-Shopify-Webhook-Id": f"w-{len(payload)}",
+            },
+            secret=DEFAULT_WEBHOOK_SECRET,
+            path_topic="orders/paid",
+            inbox=inbox,
+        )
+
+    nested = b'{"a":' * 60000 + b"1" + b"}" * 60000
+    refused = deliver(nested)
+    assert refused.status_code == 400
+    assert refused.reason == "unparseable-body"
+    assert refused.accepted is False
+
+    # The pre-existing refusal is unchanged: flat garbage is still a 400, not a 500.
+    assert deliver(b"not json at all").reason == "unparseable-body"
+    assert deliver(b'"a bare string is not an object"').reason == "unparseable-body"
+
+    # ADMITTED: an ordinary body, and one nested deeply enough to be odd but still legal.
+    ordinary = json.dumps({"id": 1, "checkout_token": "t"}).encode("utf-8")
+    assert deliver(ordinary).reason == "recorded"
+    survivable = b'{"a":' * 40 + b"1" + b"}" * 40
+    assert deliver(survivable).reason == "recorded"
+    assert len(inbox.events()) == 2

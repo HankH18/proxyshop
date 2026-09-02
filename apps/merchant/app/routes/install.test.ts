@@ -95,6 +95,23 @@ describe('C5 — the scopes this app asks for', () => {
       expect(() => assertScopesAllowed(['read_orders', scope])).toThrow(ProtectedScopeRequested)
     }
   })
+
+  it('is not disarmed by the comma-joined shape Shopify itself returns', () => {
+    // A string IS an Iterable<string> - of characters - so a bare scope name used to
+    // shred into letters, none of which is a protected scope, and pass. The one-entry
+    // comma-joined list is exactly what the token-exchange response puts in `scope`.
+    // REFUSED, concretely:
+    expect(() => assertScopesAllowed(['read_orders,read_customers'])).toThrow(
+      ProtectedScopeRequested,
+    )
+    expect(unauthorizedScopes(['read_orders,read_customers'])).toEqual(['read_customers'])
+    expect(() => assertScopesAllowed('read_customers' as unknown as string[])).toThrow(TypeError)
+    // ADMITTED, concretely: the comma-joined form is split, not refused wholesale.
+    expect(assertScopesAllowed(['read_orders, Write_Pixels '])).toEqual([
+      'read_orders',
+      'write_pixels',
+    ])
+  })
 })
 
 describe('C5 — the webhook topics, and the ceiling on them', () => {

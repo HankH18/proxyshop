@@ -353,7 +353,12 @@ def handle_delivery(
 
     try:
         payload = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # RecursionError, not just ValueError: a deeply nested body exhausts the decoder's
+        # stack rather than failing to parse, and it arrives with a VALID signature — the
+        # sender is authenticated, so this is not a forgery, it is a body that can never
+        # parse. Letting it escape answered 5xx, which Shopify retries forever; the same
+        # 400 every other unparseable body gets is what stops the loop.
         return WebhookDecision(400, "unparseable-body", detail={"topic": topic})
     if not isinstance(payload, dict):
         return WebhookDecision(400, "unparseable-body", detail={"topic": topic})
