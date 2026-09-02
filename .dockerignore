@@ -1,0 +1,47 @@
+# Build-context excludes for every image in this repo (T-000's stack, filled by the deploy
+# lane). The build context is the REPO ROOT for all of them — the flat `src/` layout (D42)
+# means an image has to reach across member directories — so without this file every build
+# would upload ~950 MiB of node_modules + .venv before running its first instruction.
+#
+# Nothing here is a source file any Dockerfile COPYs; each Dockerfile names the exact
+# subtrees it needs.
+
+# Version control and agent state
+.git
+.gitignore
+.swarm-loop
+.codegraph
+.claude
+
+# Python environments and caches (312 MiB and rising)
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.hypothesis
+*.egg-info
+.coverage
+htmlcov
+coverage
+
+# Node (630 MiB and rising)
+node_modules
+**/node_modules
+**/.next
+**/dist
+**/build
+**/*.tsbuildinfo
+**/.turbo
+.eslintcache
+
+# Local secrets and volumes — an image must never bake these in
+.env
+.env.*
+!.env.example
+.docker-data
+
+# Editor / OS noise
+.DS_Store
