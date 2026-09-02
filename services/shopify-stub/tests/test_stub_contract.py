@@ -22,11 +22,13 @@ property of this stub, not of the seeder.
 
 from __future__ import annotations
 
+import inspect
 import re
 
 import httpx
 import pytest
 from shopify_stub import app as app_module
+from shopify_stub import state as state_module
 from shopify_stub.state import DEFAULT_ACCESS_TOKEN
 from shopify_stub.testing import SEED_VARIANT, SUBSCRIBE_MUTATION, StubClient
 
@@ -321,3 +323,68 @@ def test_the_route_table_names_the_control_plane_route_that_was_missing() -> Non
     assert ("GET", "/_stub/codes") in _documented_surface(), (
         "and the control-plane table must name it"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# T-129 (adversarial): DEFAULT_API_VERSION's comment described the route it replaced
+# ---------------------------------------------------------------------------------------
+#
+# `shopify_stub.state.DEFAULT_API_VERSION` carried "Callers may use any version segment in
+# the URL" long after `admin_graphql` began answering 404 for every version but the
+# configured one — reproduced by driving a live stub: 2026-07 -> 200, and 2025-01,
+# 2099-99 and "banana" -> 404 each. That is the same defect class as the rest of T-129: a
+# sentence that survived the change it described, in the one file a consumer reads to find
+# out what version to send.
+#
+# The corrected comment names the refusal status. This test reads that number back out of
+# the comment and compares it to what the route actually answers, so the prose is now held
+# to the code rather than sitting beside it.
+
+#: The refusal status, as the ``#:`` block above ``DEFAULT_API_VERSION`` states it.
+_DOCUMENTED_REFUSAL = re.compile(r"refused with \*\*(?P<status>\d{3})\*\*")
+
+
+def _documented_version_refusal_status() -> int:
+    """The status `state.py`'s own comment promises for an unserved API version.
+
+    The ``#:`` block is unwrapped to one line before matching, so the sentence may be
+    rewrapped by a formatter without changing what this reads.
+    """
+    source = inspect.getsource(state_module)
+    anchor = source.index("DEFAULT_API_VERSION = ")
+    lines = source[:anchor].splitlines()
+    block: list[str] = []
+    for line in reversed(lines):
+        if not line.startswith("#:"):
+            break
+        block.append(line[2:].strip())
+    prose = " ".join(reversed(block))
+    matches = _DOCUMENTED_REFUSAL.findall(prose)
+    assert len(matches) == 1, (
+        "DEFAULT_API_VERSION's comment must state exactly one refusal status for an "
+        f"unserved version; found {matches}. It used to state none at all, and said "
+        '"callers may use any version segment in the URL" instead.'
+    )
+    return int(matches[0])
+
+
+async def test_the_documented_version_refusal_is_the_one_the_route_gives(
+    stub: StubClient,
+) -> None:
+    """The comment's promise, checked against the live route in both directions."""
+    documented = _documented_version_refusal_status()
+    assert documented != 200, "a comment documenting success for an unserved version is the bug"
+
+    served = (await stub.config())["api_version"]
+    ok = await stub.graphql("query { orders(first: 1) { edges { cursor } } }", version=served)
+    assert ok.status_code == 200, "the configured version must still answer"
+
+    for other in ("2019-04", "2025-01", "9999-99", "banana"):
+        assert other != served
+        response = await stub.graphql(
+            "query { orders(first: 1) { edges { cursor } } }", version=other
+        )
+        assert response.status_code == documented, (
+            f"state.py documents {documented} for an unserved version; "
+            f"{other!r} answered {response.status_code}"
+        )
