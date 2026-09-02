@@ -4,7 +4,7 @@
   "audit_loops": 3,
   "audit_loops_completed": 0,
   "clean_audit": false,
-  "current_cycle": 0,
+  "current_cycle": 2,
   "autonomy": "approve-cycle-1",
   "push_remote": "when-clean",
   "stall_limit": 3,
@@ -16,6 +16,20 @@
       "changed": true,
       "tracked_files": 248,
       "codebase": "2e07a2774abcd630250a397a2bb513c0a2b9b1f87b8ecebb80a4908035ff0801"
+    },
+    {
+      "cycle": 1,
+      "head": "e6fcaf56f8f22e212b37e0894ac0e8ba4c1ef405",
+      "changed": true,
+      "tracked_files": 375,
+      "codebase": "198cd7fd8de9947f34310e030d6c835c54860f20477f6a3e78e5a9eb30de79c6"
+    },
+    {
+      "cycle": 2,
+      "head": "48679ae1d2bbb4da1e24c410148ed8b7d81b786e",
+      "changed": true,
+      "tracked_files": 377,
+      "codebase": "a9572eb84d0544378a3605d1ecfc6bc7e7cf4ef8865e5e954856a1b25215635d"
     }
   ],
   "created": "2026-08-31T23:23:23",

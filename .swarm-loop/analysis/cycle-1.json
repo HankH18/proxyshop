@@ -1,0 +1,425 @@
+{
+  "cycle": 1,
+  "max_cycles": 102,
+  "generated": "2026-09-01T22:53:33",
+  "all_targets_met": false,
+  "harness_integrity": "intact",
+  "harness_notes": [
+    ".swarm-loop/goals.json cannot be reconciled against .swarm-loop/freeze-log.jsonl \u2014 this run was frozen before the canonical goals digest existed, so a moved target is caught only by manifest.json's own digest. The next 'freeze --amend' records it and closes the gap."
+  ],
+  "pending_remeasure": [],
+  "pre_amendment_metrics": [],
+  "errors_recomputed_for": [
+    "acceptance_collected",
+    "e3_exchange_passing",
+    "e4_store_agent_passing",
+    "e6_trust_passing",
+    "e8_proofs_passing"
+  ],
+  "stale_metrics": [],
+  "manual_records": [],
+  "manual_records_trusted": false,
+  "escalated_metrics": [],
+  "goal_amendments": 2,
+  "last_amended_at": "2026-09-01T14:45:56",
+  "last_amend_reason": "Amendment 2, user-approved (ESC-002). test_compose_declares_healthchecked_postgres_neo4j_redis_and_separate_deployables was UNSATISFIABLE: it read services only from the root docker-compose.yml via a textual parser that never followed 'include:', while the four deployables (buyer/merchant/exchange/trust) live in per-lane fragments by design \u2014 the root file's own header states a service ticket fills its own fragment and no ticket ever edits the root. So the test could never pass whatever any ticket built, pinning acceptance_pass_rate (target 100, tolerance 0) permanently below target and spec_criteria_passing at 7/8. Fix: two new helpers, _compose_include_paths() parses the include: block textually (no PyYAML dependency, consistent with _compose_services), and _compose_stack_services() unions the root's services with every included fragment's; the test now reads that union. Verified in both directions before re-freezing: with the four fragments as shipped (empty 'services: {}' stubs) the test is RED for the correct reason, and with the four temporarily filled it is GREEN \u2014 so the amendment makes C1 reachable without making it free. No assertion was weakened, no test renamed, no test added or removed; the suite stays at 120. Only test_spec_criteria.py changed.",
+  "metrics": [
+    {
+      "id": "e6_trust_passing",
+      "name": "E6 Trust & verification criteria passing",
+      "direction": "maximize",
+      "target": 26.0,
+      "latest_cycle": 1,
+      "latest_value": 0.0,
+      "latest_error": 26.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": 0.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 26.0,
+      "verdict": "stalled",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "e3_exchange_passing",
+      "name": "E3 Exchange criteria passing",
+      "direction": "maximize",
+      "target": 21.0,
+      "latest_cycle": 1,
+      "latest_value": 0.0,
+      "latest_error": 21.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": 0.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 21.0,
+      "verdict": "stalled",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "e4_store_agent_passing",
+      "name": "E4 Store agent & sellers criteria passing",
+      "direction": "maximize",
+      "target": 20.0,
+      "latest_cycle": 1,
+      "latest_value": 0.0,
+      "latest_error": 20.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": 0.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 20.0,
+      "verdict": "stalled",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "e5_merchant_passing",
+      "name": "E5 Merchant criteria passing",
+      "direction": "maximize",
+      "target": 10.0,
+      "latest_cycle": 1,
+      "latest_value": 0.0,
+      "latest_error": 10.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": 0.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 10.0,
+      "verdict": "stalled",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "e7_buyer_passing",
+      "name": "E7 Buyer criteria passing",
+      "direction": "maximize",
+      "target": 9.0,
+      "latest_cycle": 1,
+      "latest_value": 0.0,
+      "latest_error": 9.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": 0.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 9.0,
+      "verdict": "stalled",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "e2_ingestion_passing",
+      "name": "E2 Ingestion criteria passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 1,
+      "latest_value": 0.0,
+      "latest_error": 8.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": 0.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 8.0,
+      "verdict": "stalled",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "e8_proofs_passing",
+      "name": "E8 Fixtures & proofs criteria passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 1,
+      "latest_value": 0.0,
+      "latest_error": 8.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": 0.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 8.0,
+      "verdict": "stalled",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "acceptance_pass_rate",
+      "name": "Acceptance test pass rate (%)",
+      "direction": "maximize",
+      "target": 100.0,
+      "latest_cycle": 1,
+      "latest_value": 13.33,
+      "latest_error": 86.67,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": -10.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 3.33,
+          "error": 96.67,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "spec_criteria_passing",
+      "name": "SPEC cross-cutting criteria + S8 release blockers passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 1,
+      "latest_value": 6.0,
+      "latest_error": 2.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": -2.0,
+      "r2": 1.0,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 4.0,
+          "error": 4.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "acceptance_collected",
+      "name": "Acceptance tests collected (count)",
+      "direction": "maximize",
+      "target": 120.0,
+      "latest_cycle": 1,
+      "latest_value": 120.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "build_succeeds",
+      "name": "Root verify pipeline is green (0/1)",
+      "direction": "maximize",
+      "target": 1.0,
+      "latest_cycle": 1,
+      "latest_value": 1.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    },
+    {
+      "id": "e1_foundation_passing",
+      "name": "E1 Foundation criteria passing",
+      "direction": "maximize",
+      "target": 10.0,
+      "latest_cycle": 1,
+      "latest_value": 10.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-01T22:51:32",
+      "pre_amendment": false,
+      "n_points": 2,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        }
+      ]
+    }
+  ],
+  "note": "Linear fit over per-cycle error. With <=10 points this is trend detection, not inference; treat slope/projection as a steering signal, not a statistical claim."
+}
