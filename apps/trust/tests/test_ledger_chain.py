@@ -30,11 +30,11 @@ import pytest
 
 from apps.trust.src.ledger import (
     GENESIS_HASH,
-    MAX_SAFE_INTEGER,
     CanonicalisationError,
     ChainIntegrityError,
     LedgerError,
     append_event,
+    canonical_bytes,
     canonical_event,
     canonical_json,
     chain_events,
@@ -155,20 +155,83 @@ def test_canonical_json_uses_the_ecmascript_number_form() -> None:
     assert json.dumps(1e-5) == "1e-05", "repr()'s exponential threshold has moved"
 
 
-def test_integers_outside_the_safe_range_are_refused_rather_than_hashed_two_ways() -> None:
-    """A JSON number is a double (RFC-8785 §3.2.2.2), and ``10**23`` is not one.
+def test_integers_that_are_not_doubles_are_refused_rather_than_hashed_two_ways() -> None:
+    """A JSON number is a double (RFC-8785 §3.1), and ``10**23`` is not one.
 
     ``10**23`` as a Python ``int`` renders as 24 digits; the same JSON text read back by any
     parser -- or by Postgres ``jsonb`` -- becomes the float ``1e23`` and renders as
     ``"1e+23"``. Two digests for one value. Refused loudly instead, because a ledger whose
     hash depends on which parser last touched the payload is not a ledger.
+
+    This assertion used to read ``for value in (MAX_SAFE_INTEGER + 1, ...)`` and so claimed
+    that *every* integer above ``2**53`` is refused. That claim was wrong: RFC-8785 §3.1
+    says "expressible as IEEE 754 double-precision", not "below the safe-integer bound", and
+    ``10**16``, ``2**53 + 2``, ``2**63`` and ``2**64`` are all exactly doubles. The old bound
+    refused a bid quantity that the contracts canonicaliser had already signed and verified,
+    which made a valid event unrecordable. The refusal is right; the boundary was not, so it
+    is narrowed here to non-representable values and the exact doubles get their own case
+    below. See ``test_exact_doubles_above_the_safe_range_are_canonicalised``.
     """
-    assert canonical_json(MAX_SAFE_INTEGER) == "9007199254740992"
-    assert canonical_json(-MAX_SAFE_INTEGER) == "-9007199254740992"
-    for value in (MAX_SAFE_INTEGER + 1, 10**23, 2**200, -(10**30)):
+    assert canonical_json(2**53) == "9007199254740992"
+    assert canonical_json(-(2**53)) == "-9007199254740992"
+    # Every one of these falls strictly between two adjacent doubles, or beyond `DBL_MAX`.
+    # `2**200 + 1` is here rather than `2**200`: the power of two IS a double, and that is
+    # exactly the distinction the old magnitude bound could not draw.
+    for value in (2**53 + 1, 2**54 - 1, 10**23, 2**200 + 1, -(10**30), 10**400):
         with pytest.raises(CanonicalisationError) as raised:
             canonical_json(value)
-        assert "safe-integer" in str(raised.value)
+        assert "IEEE-754 double" in str(raised.value)
+    # `10**400` overflows `float()` outright; the OverflowError must not leak to the caller.
+    with pytest.raises(CanonicalisationError):
+        canonical_json({"n": 10**400})
+
+
+def test_exact_doubles_above_the_safe_range_are_canonicalised() -> None:
+    """RFC-8785 §3.1 admits any integer expressible as an IEEE-754 double, not just small ones.
+
+    The rendering is ECMAScript's ``Number::toString`` of the *double*, which above ``2**53``
+    is not the integer's decimal expansion: ``String(2**64)`` in JavaScript is
+    ``"18446744073709552000"``, because the shortest digit string that round-trips to that
+    double is 17 significant digits. Emitting ``str(2**64)`` instead would disagree with
+    every conforming JCS implementation.
+    """
+    assert canonical_json(10**16) == "10000000000000000"
+    assert canonical_json(2**53 + 2) == "9007199254740994"
+    assert canonical_json(2**63) == "9223372036854776000"
+    assert canonical_json(2**64) == "18446744073709552000"
+    assert canonical_json(-(10**16)) == "-10000000000000000"
+    # Past 1e21 ES6 switches to exponential, and a huge exact double takes that branch.
+    assert canonical_json(10**21) == "1e+21"
+    assert canonical_json(2**200) == "1.6069380442589903e+60"
+    assert canonical_json({"quantity": 10**16}) == '{"quantity":10000000000000000}'
+    # The int and the float spell the same double, so they must hash identically.
+    assert canonical_json(10**16) == canonical_json(1e16)
+    big_int = observation_event(1) | {"payload": {"q": 10**16}}
+    big_float = observation_event(1) | {"payload": {"q": 1e16}}
+    assert compute_event_hash(GENESIS_HASH, big_int) == compute_event_hash(GENESIS_HASH, big_float)
+
+
+def test_lone_surrogates_terminate_with_a_canonicalisation_error() -> None:
+    """RFC-8785 §3.2.2.2: unpaired surrogates MUST terminate a compliant implementation.
+
+    ``json.loads('{"\\ud800": 1}')`` hands Python a string UTF-8 cannot encode, so there are
+    no canonical bytes to hash. This used to escape as a bare ``UnicodeEncodeError`` -- from
+    ``str.encode`` inside the key sort for a key, and from ``canonical_bytes`` for a value --
+    so a caller guarding the append path with ``except CanonicalisationError`` caught neither.
+    """
+    for value in ("\ud800", "a\udfffb", "\ud83d"):  # the last is a lone high surrogate
+        with pytest.raises(CanonicalisationError, match="lone surrogate"):
+            canonical_json(value)
+        with pytest.raises(CanonicalisationError, match="lone surrogate"):
+            canonical_json({value: 1})
+        with pytest.raises(CanonicalisationError, match="lone surrogate"):
+            canonical_json({"k": [value]})
+        with pytest.raises(CanonicalisationError, match="lone surrogate"):
+            canonical_bytes({"k": value})
+    # A *paired* surrogate is an ordinary astral character and must still canonicalise.
+    assert canonical_json("\U0001f600") == '"\U0001f600"'
+    with pytest.raises(CanonicalisationError, match="lone surrogate"):
+        compute_event_hash(GENESIS_HASH, observation_event(1) | {"payload": {"note": "\ud800"}})
 
 
 def test_the_rfc_8785_worked_example_reproduces_byte_for_byte() -> None:
@@ -557,6 +620,34 @@ def test_append_event_chains_from_genesis(ledger_clean) -> None:
     assert second.event["prev_hash"] == first.event["event_hash"]
     assert head_hash(connection) == second.event["event_hash"] == second.head_hash
     assert verify_chain_in_db(connection)["ok"] is True
+
+
+@pytest.mark.docker
+def test_exact_double_integers_survive_the_jsonb_round_trip_identically(ledger_clean) -> None:
+    """The claim the refusal rule rests on, finally measured rather than asserted.
+
+    ``_serialise_number`` refuses a non-double integer on the grounds that it "would hash one
+    way as a Python int and another way once Postgres ``jsonb`` has read it back". That
+    argument only licenses refusing *non*-doubles if the doubles themselves do survive, and
+    until this test nothing checked. They do: ``jsonb`` stores a JSON number as ``numeric``,
+    which is arbitrary-precision, so the exact integer comes back and re-hashes to the same
+    digest -- which is what makes ``verify_chain_in_db`` pass over a payload carrying one.
+    """
+    connection = ledger_clean
+    payload = {"q": 10**16, "big": 2**63, "small": 2**53 - 1, "f": 1e16}
+    written = append_event(connection, observation_event(0) | {"payload": payload})
+    assert written.inserted is True
+
+    (stored,) = read_events(connection)
+    assert stored["payload"] == payload, "jsonb changed a value the hash commits to"
+    assert stored["payload"]["big"] == 2**63  # not 9223372036854776000
+    assert compute_event_hash(stored["prev_hash"], stored) == stored["event_hash"]
+    assert verify_chain_in_db(connection)["ok"] is True
+
+    # And the other half of the rule: a non-double never reaches the database at all.
+    with pytest.raises(CanonicalisationError):
+        append_event(connection, observation_event(1) | {"payload": {"q": 10**23}})
+    assert len(read_events(connection)) == 1
 
 
 @pytest.mark.docker

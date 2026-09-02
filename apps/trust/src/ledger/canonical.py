@@ -137,6 +137,25 @@ def rfc3339_ms(value: Any) -> str:
 # ---------------------------------------------------------------------------------------
 
 
+def _reject_lone_surrogate(text: str, role: str) -> None:
+    """RFC-8785 §3.2.2.2: a lone surrogate MUST terminate canonicalisation with an error.
+
+    A Python ``str`` can hold an unpaired ``U+D800``-``U+DFFF`` code unit -- ``json.loads``
+    produces one from ``"\\ud800"`` -- but UTF-8 cannot encode it, so there are no canonical
+    *bytes* to hash. Left alone, that surfaced as a bare ``UnicodeEncodeError`` from
+    :func:`_sort_key` or from :func:`canonical_bytes`, a different exception type at each
+    door and neither one catchable as :class:`CanonicalisationError`. The RFC's answer is to
+    terminate with an error; ours is to terminate with *the* error.
+    """
+    for character in text:
+        if "\ud800" <= character <= "\udfff":
+            raise CanonicalisationError(
+                f"lone surrogate U+{ord(character):04X} in {role} {text!r}: RFC-8785 "
+                f"§3.2.2.2 requires canonicalisation to terminate on unpaired surrogates, "
+                f"and UTF-8 cannot encode one, so this value has no canonical bytes."
+            )
+
+
 def _serialise_string(value: str) -> str:
     out = ['"']
     for character in value:
@@ -145,15 +164,34 @@ def _serialise_string(value: str) -> str:
             out.append(escape)
         elif character < " ":
             out.append(f"\\u{ord(character):04x}")
+        elif "\ud800" <= character <= "\udfff":
+            _reject_lone_surrogate(value, "string")
         else:
             out.append(character)
     out.append('"')
     return "".join(out)
 
 
-#: ECMAScript's safe-integer bound. An ``int`` larger than this is not exactly a double, so
-#: it has no ES6 -- and therefore no JCS -- rendering that round-trips.
-MAX_SAFE_INTEGER = 2**53
+def is_representable_as_double(value: int) -> bool:
+    """RFC-8785 §3.1: a JSON number MUST be expressible as an IEEE-754 double.
+
+    The predicate is ``float(v) == v`` and nothing else. A safe-integer magnitude bound is
+    the wrong test in *both* directions, and this module used to be wrong in one of them: it
+    refused ``10**16``, ``2**53 + 2``, ``2**63`` and ``2**64``, every one of which is an
+    exact double with an unambiguous ES6 rendering. The cost was not theoretical -- a bid
+    carrying ``{"quantity": 10000000000000000}`` signed and verified through the contracts
+    canonicaliser and then could not be recorded, because :func:`compute_event_hash` raised
+    and the append failed. A valid, unrecordable event is a hole in the provenance chain.
+
+    The bound is wrong in the other direction too, and that half stays refused:
+    ``2**53 + 1`` is *not* a double, so serialising it means serialising a different number.
+    """
+    try:
+        return float(value) == value
+    except OverflowError:
+        # `10**400` has no double at all -- `float()` raises rather than returning `inf`.
+        # Not representable, therefore not canonicalisable; the caller raises.
+        return False
 
 
 def _es6_number(value: float) -> str:
@@ -192,17 +230,30 @@ def _es6_number(value: float) -> str:
 
 
 def _serialise_number(value: float | int) -> str:
-    """RFC-8785 §3.2.2.2: a JSON number is an IEEE-754 double, rendered by ES6."""
+    """RFC-8785 §3.2.2.2: a JSON number is an IEEE-754 double, rendered by ES6.
+
+    ``bool`` is an ``int`` subclass in Python, so :func:`canonical_json` must -- and does --
+    dispatch ``True``/``False`` before it reaches here.
+    """
     if isinstance(value, int):
-        if -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER:
-            # Exactly a double, and ES6 renders an integral double as its digits.
-            return str(value)
-        raise CanonicalisationError(
-            f"{value} is outside the IEEE-754 safe-integer range, so it has no canonical "
-            f"JSON form: RFC-8785 defines a JSON number as a double, and this value would "
-            f"hash one way as a Python int and another way once any JSON parser (or "
-            f"Postgres `jsonb`) has read it back as a float. Carry it as a string."
-        )
+        if not is_representable_as_double(value):
+            # `10**400` has 401 digits; an error message is not the place for all of them.
+            digits = str(value)
+            shown = digits if len(digits) <= 32 else f"{digits[:24]}...({len(digits)} digits)"
+            raise CanonicalisationError(
+                f"{shown} is not expressible as an IEEE-754 double, so it has no canonical "
+                f"JSON form: RFC-8785 §3.1 defines a JSON number as a double, and this "
+                f"value would hash one way as a Python int and another way once any JSON "
+                f"parser (or Postgres `jsonb`) has read it back as a float. Rounding it to "
+                f"the nearest double would commit the chain to a number the event does not "
+                f"state. Carry it as a string."
+            )
+        # ES6 renders the *double*, not the Python int, and above 2**53 those differ:
+        # `2**64` is an exact double whose shortest round-tripping form is
+        # "18446744073709552000", which is what JavaScript's `String(2**64)` gives and what
+        # every conforming JCS implementation hashes. `str(value)` would emit the exact
+        # decimal expansion instead and disagree with all of them.
+        return _es6_number(float(value))
     if math.isnan(value) or math.isinf(value):
         raise CanonicalisationError(f"{value!r} has no JSON representation")
     return _es6_number(value)
@@ -210,7 +261,13 @@ def _serialise_number(value: float | int) -> str:
 
 def _sort_key(name: str) -> tuple[int, ...]:
     """RFC-8785 §3.2.3: object members sort by their UTF-16 code units."""
-    encoded = name.encode("utf-16-be")
+    try:
+        encoded = name.encode("utf-16-be")
+    except UnicodeEncodeError:
+        # Only a lone surrogate reaches here; re-raise it as this module's own error so a
+        # caller's `except CanonicalisationError` covers keys as well as values.
+        _reject_lone_surrogate(name, "object key")
+        raise  # unreachable: `_reject_lone_surrogate` always raises on this input
     return tuple(int.from_bytes(encoded[i : i + 2], "big") for i in range(0, len(encoded), 2))
 
 
@@ -227,8 +284,9 @@ def canonical_json(value: Any) -> str:
         whatever order their mappings were built in.
 
     Raises:
-        CanonicalisationError: on a non-finite float, a non-string mapping key, or a value
-            of a type JSON cannot carry.
+        CanonicalisationError: on a non-finite float, an integer that is not exactly an
+            IEEE-754 double (RFC-8785 §3.1), a lone surrogate in any key or string
+            (§3.2.2.2), a non-string mapping key, or a value of a type JSON cannot carry.
     """
     if value is None:
         return "null"
