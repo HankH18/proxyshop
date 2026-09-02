@@ -6,12 +6,15 @@ Mounted by the frozen entrypoint ``apps/trust/src/main.py``, which globs
 ===========================  =========================================================
 ``POST /events``             append one ``LedgerEvent``; ``201`` when it lands, ``200``
                              when the ``event_id`` was already in the chain.
-``GET  /events``             the chain in insertion order (filterable, for projection).
+``GET  /events``             the chain in insertion order (filterable, for projection),
+                             **paged** -- see :data:`DEFAULT_EVENT_PAGE`.
 ``GET  /events/head``        the stored head and the anchored length.
 ``GET  /events/verify``      links **and** anchor, with the broken link named.
 ``GET  /events/replay``      the whole chain replayed out of the ledger, with the
                              recomputed stream hash. This is the S3 evidence endpoint.
-``GET  /events/{event_id}``  one event by its idempotency key.
+                             Verification covers every event; the events it *serialises*
+                             are paged like ``GET /events``.
+``GET  /events/{event_id}``  one event by its idempotency key (one index probe).
 ===========================  =========================================================
 
 Two decisions worth stating, because both are load-bearing:
@@ -47,9 +50,29 @@ from .errors import (
 )
 from .store import LEDGER_EVENT_KINDS, append
 
-__all__ = ["EventIn", "router", "store_for"]
+__all__ = ["DEFAULT_EVENT_PAGE", "MAX_EVENT_PAGE", "EventIn", "router", "store_for"]
 
 router = APIRouter(prefix="/events", tags=["ledger"])
+
+#: How many events a read returns when the caller does not say. **A default is not a
+#: nicety here, it is the only cap that binds.** ``limit`` was previously
+#: ``Query(None, ge=1, le=10_000)``, which reads like a ceiling and is not one: the
+#: validator only runs on a value that was *supplied*, so the ten-thousand-row limit
+#: constrained exactly the callers who had already chosen to be polite, and an
+#: unparameterised ``GET /events`` serialised the entire append-only history into one
+#: response body. On a ledger that only grows, that is unbounded server memory and
+#: unbounded bytes on the wire, reachable by anyone who can open the port and costing them
+#: one request.
+#:
+#: A thousand is chosen to be far above any interactive page and far below "the ledger":
+#: every ordinary caller sees a complete, untruncated answer (``truncated: false``), and
+#: the ones that genuinely want history walk it with ``after_seq`` -- which the response
+#: hands back as ``next_after_seq`` so paging needs no arithmetic on the client's part.
+DEFAULT_EVENT_PAGE = 1_000
+
+#: The most a caller may ask for in one response, even explicitly. Unchanged from the
+#: ceiling that was already declared; what changed is that it is no longer the *only* one.
+MAX_EVENT_PAGE = 10_000
 
 
 class EventIn(BaseModel):
@@ -177,23 +200,46 @@ def get_events(
     request: Request,
     after_seq: int = Query(0, ge=0, description="Return events after this sequence number."),
     store_id: str | None = Query(None, description="Projection filter. NOT a chain."),
-    limit: int | None = Query(None, ge=1, le=10_000),
+    limit: int = Query(
+        DEFAULT_EVENT_PAGE,
+        ge=1,
+        le=MAX_EVENT_PAGE,
+        description="Rows per response. Capped by default; see DEFAULT_EVENT_PAGE.",
+    ),
 ) -> dict[str, Any]:
-    """The chain, oldest first.
+    """The chain, oldest first, **one page at a time**.
 
     ``store_id`` yields a **projection, not a chain** -- the links skip whatever the filter
     removed -- so the response says so in ``is_chain`` rather than letting a caller hand the
     result to a verifier and get a ``broken_link`` it caused itself.
+
+    ``truncated`` is the other half of that honesty, and it is why the read asks the store
+    for ``limit + 1`` rows: a page that is silently short is indistinguishable from a ledger
+    that is short, and a caller told "here are 1000 events, ok" about a ledger of 40000 has
+    been misled about the one thing this endpoint exists to report. The extra row is the
+    cheapest possible way to know which of the two happened, and it is discarded.
+
+    ``is_chain`` therefore means *complete and unfiltered*, not *unlimited*: a page that
+    happened to fit is still the whole chain, and a page that was cut is not -- which is a
+    strictly better answer than the old ``limit is None``, under which asking for a limit of
+    ten against a ledger of three declared the complete result "not a chain".
     """
     store = store_for(request)
     try:
-        events = store.read(after_seq=after_seq, store_id=store_id, limit=limit)
+        # One row past the page: present means there is more, absent means this is all.
+        window = store.read(after_seq=after_seq, store_id=store_id, limit=limit + 1)
     except EventServiceError as exc:
         raise _refuse(exc) from exc
+
+    truncated = len(window) > limit
+    events = window[:limit]
     return {
         "events": events,
         "count": len(events),
-        "is_chain": store_id is None and after_seq == 0 and limit is None,
+        "limit": limit,
+        "truncated": truncated,
+        "next_after_seq": int(events[-1]["seq"]) if events else after_seq,
+        "is_chain": store_id is None and after_seq == 0 and not truncated,
     }
 
 
@@ -227,6 +273,13 @@ def get_verify(request: Request) -> dict[str, Any]:
 def get_replay(
     request: Request,
     include_events: bool = Query(True, description="Include the replayed events themselves."),
+    limit: int = Query(
+        DEFAULT_EVENT_PAGE,
+        ge=1,
+        le=MAX_EVENT_PAGE,
+        description="How many replayed events to serialise. Verification is never capped.",
+    ),
+    after_seq: int = Query(0, ge=0, description="Start the serialised page after this seq."),
     snapshots: bool = Query(False, description="Also rebuild trust snapshots (T-062)."),
     as_of: str | None = Query(None, description="Required with snapshots=true. Never a clock."),
 ) -> dict[str, Any]:
@@ -242,6 +295,16 @@ def get_replay(
     number to T-062's scorer. This ticket computes no scores; when the scorer is not built
     the answer is a ``503`` naming it, never an empty mapping that would compare equal to
     nothing and read as a pass.
+
+    **What is capped and what is not.** ``limit`` bounds the events this endpoint
+    *serialises*, because an uncapped one put the entire append-only history into a single
+    response body -- the same unbounded-response hole ``GET /events`` had. It does **not**
+    bound what was verified or what was folded: ``ok``, ``reason``, ``length``,
+    ``head_hash``, ``stream_hash`` and any ``snapshots`` are computed over every event in
+    the ledger, before the page is cut, because those five numbers are the evidence this
+    endpoint exists to produce and a stream hash over a page is a hash of something nobody
+    asked about. ``events_truncated`` / ``events_returned`` / ``next_after_seq`` say which
+    slice of that verified stream came back, and ``after_seq`` walks the rest.
     """
     store = store_for(request)
     try:
@@ -265,6 +328,8 @@ def get_replay(
         from ..ledger import replay as ledger_replay
 
         try:
+            # The WHOLE stream, before any paging: a snapshot rebuilt from a page is a
+            # snapshot of a ledger that does not exist.
             report["snapshots"] = ledger_replay(report["events"], as_of=as_of)
         except ModuleNotFoundError as exc:
             raise HTTPException(503, {"error": "scorer_unavailable", "message": str(exc)}) from exc
@@ -272,6 +337,16 @@ def get_replay(
 
     if not include_events:
         report.pop("events", None)
+        return report
+
+    replayed: list[dict[str, Any]] = list(report.get("events") or [])
+    remaining = [row for row in replayed if int(row.get("seq") or 0) > after_seq]
+    page = remaining[:limit]
+    report["events"] = page
+    report["events_returned"] = len(page)
+    report["events_truncated"] = len(page) < len(remaining)
+    report["next_after_seq"] = int(page[-1]["seq"]) if page else after_seq
+    report["limit"] = limit
     return report
 
 

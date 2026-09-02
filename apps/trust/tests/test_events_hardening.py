@@ -1,0 +1,526 @@
+"""W6 hardening of the ledger writer: availability, cost, and legible failure.
+
+Every test here was written **red first**, against the code as it shipped, and each one
+reproduces a defect an adversarial audit found in ``apps/trust/src/events/**``. They are in
+a file of their own rather than appended to ``test_events.py`` because they grade a
+different property: not "does the ledger tell the truth" (that file's subject) but "does
+the ledger stay *available*, stay *cheap*, and say something *useful* when it cannot".
+
+===============================================  =====================================
+An unreachable datastore is a 503, not a 500     :func:`test_a_datastore_that_cannot_be_
+                                                 reached_is_a_503_with_the_documented_body`
+...and it is bounded, not a 30-second stall      :func:`test_an_unreachable_dsn_fails_
+                                                 fast_rather_than_blocking_on_the_pool`
+One event costs one row, not the whole ledger    :func:`test_reading_one_event_by_id_
+                                                 reads_one_row_and_not_the_ledger`
+An unparameterised read is capped                :func:`test_an_unparameterised_events_
+                                                 read_is_capped_by_default`
+``seq`` is outside the hash, on purpose          :func:`test_seq_is_a_position_label_the_
+                                                 chain_deliberately_does_not_hash`
+A break at genesis reads as a break at genesis   :func:`test_a_break_in_the_first_link_
+                                                 does_not_blame_a_predecessor_that_
+                                                 does_not_exist`
+===============================================  =====================================
+"""
+
+from __future__ import annotations
+
+import contextlib
+import socket
+import time
+from collections.abc import Iterator
+from typing import Any
+
+import httpx
+import psycopg
+import pytest
+
+from apps.trust.src.events import (
+    InMemoryEventStore,
+    PostgresEventStore,
+    append,
+    normalise_event,
+    verify_stream,
+)
+from apps.trust.src.events.service import create_events_app
+from apps.trust.src.ledger import (
+    CHAIN_FIELDS,
+    EVENT_FIELDS,
+    GENESIS_HASH,
+    chain_events,
+    compute_event_hash,
+    seal_event,
+    stream_hash,
+)
+from proxyshop_support.asgi_server import serve
+
+#: A fixed instant. Nothing in this file compares against the wall clock.
+AS_OF = "2026-01-01T00:00:00.000Z"
+
+
+# --------------------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------------------
+def _event(event_id: str, kind: str = "claim_verified", **extra: Any) -> dict[str, Any]:
+    """A plain ``LedgerEvent`` body, ready to append or POST."""
+    event: dict[str, Any] = {
+        "event_id": event_id,
+        "ts": AS_OF,
+        "kind": kind,
+        "store_id": "s-1",
+        "payload": {"n": 1},
+    }
+    event.update(extra)
+    return event
+
+
+@contextlib.contextmanager
+def _client_for(store: Any) -> Iterator[httpx.Client]:
+    """A real HTTP client against a real loopback server serving ``store``."""
+    with (
+        serve(create_events_app(store)) as base_url,
+        httpx.Client(base_url=base_url, timeout=60.0) as client,
+    ):
+        yield client
+
+
+def _closed_loopback_port() -> int:
+    """A port on 127.0.0.1 that nothing is listening on."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _refuse_to_connect() -> Any:
+    """A ``connect`` factory that fails exactly as psycopg fails on a dead server.
+
+    ``psycopg.OperationalError`` is what an unreachable, restarting, out-of-connections or
+    shutting-down Postgres produces (SQLSTATE class 08/53/57), and it is what
+    ``psycopg_pool`` raises too -- ``PoolTimeout`` and ``PoolClosed`` are both subclasses of
+    it. Simulating the outage this way keeps the test deterministic and instant while
+    exercising the *same* exception the real outage delivers.
+    """
+    raise psycopg.OperationalError(
+        "connection failed: connection to server at 127.0.0.1, port 1 failed: Connection refused"
+    )
+
+
+# ======================================================================================
+# 1. [HIGH] a connection failure must become StoreUnavailable, and therefore a 503
+# ======================================================================================
+def test_a_datastore_that_cannot_be_reached_is_a_503_with_the_documented_body() -> None:
+    """Every endpoint must refuse with the documented 503 body, not an empty 500.
+
+    Red first: ``_connection()`` used to acquire the connection *outside* the guarded
+    region in ``_append_on``, so ``psycopg.OperationalError`` walked straight out of the
+    handler and Starlette turned it into a bare ``500 Internal Server Error`` with no body
+    at all. A caller could not tell "the ledger is down, retry" from "your event broke the
+    server, do not retry" -- which is the whole reason :class:`StoreUnavailable` and its
+    503 exist.
+    """
+    store = PostgresEventStore(connect=_refuse_to_connect)
+
+    with _client_for(store) as client:
+        responses = {
+            "POST /events": client.post("/events", json=_event("ev-1")),
+            "GET /events": client.get("/events"),
+            "GET /events/head": client.get("/events/head"),
+            "GET /events/verify": client.get("/events/verify"),
+            "GET /events/replay": client.get("/events/replay"),
+            "GET /events/{id}": client.get("/events/ev-1"),
+        }
+
+    for name, response in responses.items():
+        assert response.status_code == 503, f"{name} answered {response.status_code}"
+        body = response.json()
+        assert body["detail"]["error"] == "store_unavailable", f"{name}: {body}"
+        message = body["detail"]["message"]
+        assert message, f"{name} returned a 503 with an empty message"
+        assert "Connection refused" in message, (
+            f"{name}'s 503 does not carry the driver's diagnosis, so an operator cannot "
+            f"tell an unreachable host from a wrong password: {message!r}"
+        )
+
+
+@pytest.mark.docker
+def test_an_unreachable_dsn_fails_fast_rather_than_blocking_on_the_pool() -> None:
+    """A real DSN pointing at a dead port: bounded wait, 503, no 30-second stall.
+
+    Red first, twice over. ``psycopg_pool.ConnectionPool``'s default ``timeout`` is 30
+    seconds, so every request against a Postgres that is down parked an HTTP worker for
+    half a minute and *then* answered 500. The pool's wait is now derived from
+    ``connect_timeout``, so this store gives up in roughly two seconds -- and reports the
+    outage as the documented refusal.
+    """
+    dsn = f"postgresql://proxyshop:proxyshop@127.0.0.1:{_closed_loopback_port()}/nowhere"
+    store = PostgresEventStore(dsn, connect_timeout=1)
+
+    try:
+        started = time.monotonic()
+        with _client_for(store) as client:
+            response = client.post("/events", json=_event("ev-1"))
+        elapsed = time.monotonic() - started
+    finally:
+        store.close()
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["error"] == "store_unavailable"
+    assert elapsed < 15.0, (
+        f"the writer blocked {elapsed:.1f}s on an unreachable datastore; a request that "
+        f"cannot be served must be refused promptly, not hold a worker for the pool's "
+        f"whole default wait"
+    )
+
+
+def test_a_store_with_no_dsn_at_all_still_reports_store_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-existing 503 path must survive the new one: no DSN is still a 503.
+
+    This is the control for the test above. If the connection-failure mapping had been
+    written as a blanket ``except Exception`` it would also have swallowed the *configuration*
+    failure into a different message, and the two outages -- "nothing is configured" and
+    "the configured thing is down" -- read identically to the operator who has to fix one
+    of them.
+    """
+    from apps.trust.src.events.pg import DEFAULT_DSN_ENV
+
+    for name in DEFAULT_DSN_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+    with _client_for(PostgresEventStore()) as client:
+        response = client.post("/events", json=_event("ev-1"))
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "store_unavailable"
+    assert "no DSN was passed" in detail["message"], (
+        "a misconfigured writer must not be reported with the same message as a dead server"
+    )
+
+
+# ======================================================================================
+# 2. [MEDIUM] one event by id costs one row, not the whole ledger
+# ======================================================================================
+class _CountingCursor:
+    """A cursor that records the statement it runs and how many rows it hands back."""
+
+    def __init__(self, inner: Any, log: list[tuple[str, int]]) -> None:
+        self._inner = inner
+        self._log = log
+        self._statement = ""
+
+    def __enter__(self) -> _CountingCursor:
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, *exc_info: Any) -> Any:
+        return self._inner.__exit__(*exc_info)
+
+    def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        self._statement = str(query)
+        self._log.append((self._statement, -1))
+        return self._inner.execute(query, params, **kwargs)
+
+    def fetchall(self) -> Any:
+        rows = self._inner.fetchall()
+        self._log[-1] = (self._statement, len(rows))
+        return rows
+
+    def fetchone(self) -> Any:
+        row = self._inner.fetchone()
+        self._log[-1] = (self._statement, 0 if row is None else 1)
+        return row
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _CountingConnection:
+    """A connection proxy that logs ``(sql, rows_returned)`` for every statement."""
+
+    def __init__(self, inner: Any, log: list[tuple[str, int]]) -> None:
+        self._inner = inner
+        self._log = log
+
+    def cursor(self, *args: Any, **kwargs: Any) -> _CountingCursor:
+        return _CountingCursor(self._inner.cursor(*args, **kwargs), self._log)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+@pytest.mark.docker
+def test_reading_one_event_by_id_reads_one_row_and_not_the_ledger(
+    events_dsn: str, ledger_clean: Any
+) -> None:
+    """``GET /events/{event_id}`` must be an indexed lookup, not a full scan plus a loop.
+
+    Red first: ``PostgresEventStore.get`` called ``read_events(connection)`` with no
+    predicate and no limit, pulled **every** row into Python, and linear-scanned the list.
+    On a ledger of any size that is the difference between one index probe and reading the
+    whole append-only history to answer "is this one event there" -- once per request, on
+    the endpoint a retrying client hits hardest.
+    """
+    seeded = PostgresEventStore(events_dsn)
+    try:
+        for index in range(25):
+            seeded.append(_event(f"ev-{index:03d}"))
+    finally:
+        seeded.close()
+
+    log: list[tuple[str, int]] = []
+
+    def connect() -> Any:
+        return _CountingConnection(
+            psycopg.connect(events_dsn, autocommit=True, connect_timeout=5), log
+        )
+
+    store = PostgresEventStore(connect=connect)
+
+    found = store.get("ev-007")
+    assert found is not None and found["event_id"] == "ev-007"
+    read = [(sql, rows) for sql, rows in log if rows > 0]
+    assert read, "the lookup issued no row-returning statement at all"
+    assert max(rows for _, rows in read) == 1, (
+        f"looking one event up read {max(rows for _, rows in read)} rows; it must read one. "
+        f"statements: {[sql for sql, _ in log]}"
+    )
+    assert any("idempotency_key" in sql for sql, _ in log), (
+        "the lookup does not select on the unique idempotency_key index, so it cannot be "
+        "O(1) however few rows happen to exist right now"
+    )
+
+    log.clear()
+    assert store.get("ev-nope") is None
+    assert all(rows <= 0 for _, rows in log), "a miss must not read the ledger either"
+
+
+# ======================================================================================
+# 3. [MEDIUM] an unparameterised read must not serialise the whole ledger
+# ======================================================================================
+#: Longer than any sane default page, and fixed here rather than derived from the cap, so
+#: that the tests below fail on the *behaviour* rather than on an import of the new name.
+LONG_STREAM = 1500
+
+
+@pytest.fixture
+def events_long_stream() -> InMemoryEventStore:
+    """An in-memory ledger comfortably longer than any sane default page."""
+    store = InMemoryEventStore()
+    for index in range(LONG_STREAM):
+        append(store, _event(f"ev-{index:05d}"))
+    return store
+
+
+def test_an_unparameterised_events_read_is_capped_by_default(
+    events_long_stream: InMemoryEventStore,
+) -> None:
+    """``GET /events`` with no parameters must page, and must say that it paged.
+
+    Red first: ``limit`` was ``Query(None, ge=1, le=10_000)``, so the ceiling bound only
+    the callers who *asked* for one. A caller who asked for nothing got every row in the
+    ledger serialised into a single response -- unbounded memory in the server, unbounded
+    bytes on the wire, and a denial of service available to anyone who can reach the port.
+    """
+    with _client_for(events_long_stream) as client:
+        body = client.get("/events").json()
+
+    assert body["count"] < LONG_STREAM, (
+        f"an unparameterised read serialised all {body['count']} rows in the ledger"
+    )
+    assert len(body["events"]) == body["count"]
+    assert body["truncated"] is True, "a capped response that does not say so is a lie by omission"
+    assert body["is_chain"] is False, "a prefix of the ledger is not the ledger"
+    assert body["next_after_seq"] == body["count"], (
+        "a truncated page must hand the caller the cursor that continues it"
+    )
+
+
+def test_the_default_page_is_the_documented_one(
+    events_long_stream: InMemoryEventStore,
+) -> None:
+    """The cap is a published number, not whatever the handler happens to do today."""
+    from apps.trust.src.events.routes import DEFAULT_EVENT_PAGE, MAX_EVENT_PAGE
+
+    assert 1 <= DEFAULT_EVENT_PAGE <= MAX_EVENT_PAGE
+    assert LONG_STREAM > DEFAULT_EVENT_PAGE, (
+        "the fixture must exceed the cap or this proves nothing"
+    )
+
+    with _client_for(events_long_stream) as client:
+        body = client.get("/events").json()
+        over = client.get("/events", params={"limit": MAX_EVENT_PAGE + 1})
+
+    assert body["count"] == DEFAULT_EVENT_PAGE
+    assert body["limit"] == DEFAULT_EVENT_PAGE
+    assert over.status_code == 422, "the ceiling on an explicit limit must still bind"
+
+
+def test_the_events_cursor_walks_the_whole_ledger_in_pages(
+    events_long_stream: InMemoryEventStore,
+) -> None:
+    """The cap is only acceptable if the rest is still reachable."""
+    seen: list[str] = []
+    after = 0
+    with _client_for(events_long_stream) as client:
+        for _ in range(10):
+            body = client.get("/events", params={"after_seq": after, "limit": 400}).json()
+            seen.extend(row["event_id"] for row in body["events"])
+            if not body["truncated"]:
+                break
+            after = body["next_after_seq"]
+
+    assert seen == [row["event_id"] for row in events_long_stream.events]
+
+
+def test_a_short_ledger_read_whole_is_still_labelled_a_chain() -> None:
+    """The cap must not turn every complete answer into a suspected prefix."""
+    store = InMemoryEventStore()
+    for index in range(3):
+        append(store, _event(f"ev-{index}"))
+
+    with _client_for(store) as client:
+        body = client.get("/events").json()
+
+    assert body["count"] == 3
+    assert body["truncated"] is False
+    assert body["is_chain"] is True
+
+
+def test_replay_caps_the_events_it_serialises_without_narrowing_what_it_verified(
+    events_long_stream: InMemoryEventStore,
+) -> None:
+    """``GET /events/replay`` had the same hole, and its fix must not weaken the evidence.
+
+    Red first: ``/events/replay`` took no ``limit`` at all and serialised every row.
+    Capping the *serialised* list is safe; capping what is *verified* would not be, because
+    ``stream_hash``, ``length`` and ``ok`` are the evidence the endpoint exists to produce
+    and they are only meaningful over the whole ledger. So the numbers below must still
+    describe all of it.
+    """
+    total = events_long_stream.length
+    with _client_for(events_long_stream) as client:
+        report = client.get("/events/replay").json()
+
+    assert report["ok"] is True, report["detail"]
+    assert report["length"] == total, "replay must verify the whole ledger, not the page"
+    assert report["stream_hash"] == stream_hash(events_long_stream.events)
+    assert report["head_hash"] == events_long_stream.head_hash
+    assert len(report["events"]) < total, (
+        f"replay serialised all {len(report['events'])} rows into one response"
+    )
+    assert report["events_truncated"] is True
+    assert report["events_returned"] == len(report["events"])
+
+
+# ======================================================================================
+# 4. [LOW] `seq` is outside the hash, and this is the decision being pinned
+# ======================================================================================
+def test_seq_is_a_position_label_the_chain_deliberately_does_not_hash() -> None:
+    """``seq`` is stamped after sealing, and it must stay out of the hashed body.
+
+    This test pins the *choice*, not an accident. ``seq`` cannot be hashed:
+
+    * in Postgres it is a ``bigserial`` the database assigns when the row lands, which is
+      strictly after the digest is computed -- an event cannot commit to a number that does
+      not exist yet;
+    * and if the in-memory store hashed a ``seq`` it made up while Postgres hashed one the
+      database made up, the two writers would produce different digests for the same event
+      and "one hashing rule, two stores" (D16) would be false.
+
+    What commits to an event's *position* is ``prev_hash``: every event names its
+    predecessor's digest, so the order is sealed even though the label of the order is not.
+    The two assertions below are the two halves of that claim.
+    """
+    assert "seq" in CHAIN_FIELDS, "seq is a chain field: written onto the event, not into it"
+    assert "seq" not in EVENT_FIELDS
+
+    body = normalise_event(_event("ev-1"))
+    sealed = seal_event(body, GENESIS_HASH)
+    assert "seq" not in sealed, "seal_event must not invent a position"
+
+    # Half one: relabelling moves no digest. That is what "outside the hash" means, and it
+    # is why the label alone is not evidence of anything.
+    relabelled = {**sealed, "seq": 4321}
+    assert compute_event_hash(GENESIS_HASH, relabelled) == sealed["event_hash"]
+
+    # Half two: the ORDER the label names is sealed anyway. Renumber two events so that a
+    # `order by seq` read hands them back the other way round, and the links catch it.
+    stream = chain_events([normalise_event(_event(f"ev-{i}")) for i in range(4)])
+    for index, row in enumerate(stream):
+        row["seq"] = index + 1
+    assert verify_stream(stream)["ok"] is True
+
+    stream[1]["seq"], stream[2]["seq"] = stream[2]["seq"], stream[1]["seq"]
+    reread = sorted(stream, key=lambda row: int(row["seq"]))
+    report = verify_stream(reread)
+    assert report["ok"] is False, (
+        "renumbering seq changed the order a reader gets and nothing noticed -- if this "
+        "ever passes, seq has become an unverifiable field that decides what a reader sees"
+    )
+    assert report["reason"] == "broken_link"
+
+
+def test_both_stores_stamp_the_same_seq_onto_the_same_event(events_memory: Any) -> None:
+    """The in-memory ``seq`` is 1-based insertion order, exactly as ``bigserial`` is.
+
+    The label is not hashed, so the only thing keeping the two stores' labels comparable is
+    that both count the same way. ``test_events.py`` asserts the Postgres side end to end;
+    this is the in-memory half, so a change to either is a failing test rather than a
+    quietly divergent ``seq`` in an API response.
+    """
+    for index in range(3):
+        outcome = append(events_memory, _event(f"ev-{index}"))
+        assert outcome.seq == index + 1
+        assert outcome.event["seq"] == index + 1
+
+
+# ======================================================================================
+# 5. [LOW] a break in the first link must not blame a predecessor that does not exist
+# ======================================================================================
+def test_a_break_in_the_first_link_does_not_blame_a_predecessor_that_does_not_exist() -> None:
+    """Index 0 has no predecessor, so the message must talk about genesis.
+
+    Red first: ``describe_break`` interpolated ``index - 1`` and the predecessor's
+    ``event_id`` unconditionally, so a stream whose first event does not link to genesis --
+    which is exactly what "events were deleted from the front of the ledger" looks like --
+    was reported as "the event before it (index -1, event_id=None) hashes to 000...0". The
+    one case where the reader most needs to be told *what* is missing was the one case the
+    sentence was nonsense.
+    """
+    stream = chain_events([normalise_event(_event(f"ev-{i}")) for i in range(4)])
+    beheaded = stream[1:]  # the front of the ledger, removed
+
+    report = verify_stream(beheaded)
+    assert report["ok"] is False
+    assert report["reason"] == "broken_link"
+    assert report["broken_at"] == 0
+
+    detail = report["detail"]
+    assert "index -1" not in detail, f"the report invented an event at index -1: {detail}"
+    assert "event_id=None" not in detail, f"the report blamed a nonexistent event: {detail}"
+    assert "genesis" in detail.lower(), (
+        f"a first-link break is a claim about the genesis link; the message must say so: {detail}"
+    )
+    assert GENESIS_HASH in detail
+    assert str(beheaded[0]["prev_hash"]) in detail, (
+        "the message must show what the event actually stores, or it cannot be acted on"
+    )
+
+    broken = report["broken_event"]
+    assert broken["event_id"] == "ev-1"
+    assert broken["predecessor_event_id"] is None
+    assert broken["expected_prev_hash"] == GENESIS_HASH
+
+
+def test_a_break_in_a_later_link_still_names_its_real_predecessor() -> None:
+    """The control for the fix above: the ordinary case must keep naming the predecessor."""
+    stream = chain_events([normalise_event(_event(f"ev-{i}")) for i in range(4)])
+    stream[1], stream[2] = stream[2], stream[1]
+
+    report = verify_stream(stream)
+    assert report["reason"] == "broken_link"
+    assert report["broken_at"] == 1
+    assert "index 0" in report["detail"]
+    assert "'ev-0'" in report["detail"]

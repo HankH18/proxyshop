@@ -46,6 +46,15 @@ GENESIS_HASH = "0" * 64
 
 #: Fields the chain writes *onto* an event. They are excluded from the hashed body, because
 #: an event cannot commit to its own digest.
+#:
+#: ``seq`` is here for a second reason worth stating, since it is the one excluded field that
+#: is neither a digest nor derived from one: it is the *position label*, and in Postgres it is
+#: a ``bigserial`` the database assigns when the row lands -- strictly after the digest over
+#: that row's body has been computed. There is no moment at which it could be hashed. What
+#: commits to the position it names is ``prev_hash``: every event carries its predecessor's
+#: digest, so the ORDER is sealed even though the label of the order is not. See
+#: ``apps/trust/src/events/store.py`` (the in-memory append) for the full argument and
+#: ``apps/trust/tests/test_events_hardening.py`` for the tests that pin it.
 CHAIN_FIELDS = ("prev_hash", "event_hash", "seq")
 
 #: The LedgerEvent fields carried into the hash, in DESIGN §Interfaces order. Optional ones
