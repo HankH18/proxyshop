@@ -1776,8 +1776,8 @@
     },
     {
       "id": "T-117",
-      "title": "The per-ticket gate runs the tests that grade the per-ticket acceptance criteria",
-      "objective": "scripts/verify.sh:105 runs `-m 'not needs_model and not docker and not slow'` for `check`, which is the per-ticket gate every worker and every fix lane runs. T-110's verifier found that this DESELECTS all three of its fresh-volume tests, including the one grading acceptance criterion 2 \u2014 so a lane can report its gate green while the tests written to grade its own acceptance never executed. This is the same class as the docker-skip gate in T-109 and should be fixed with it.",
+      "title": "[BLOCKED: protected path] The per-ticket gate runs the tests that grade its own acceptance",
+      "objective": "BLOCKED \u2014 not dispatchable as scoped. The fix requires editing scripts/verify.sh:105, which is in state.json protected_paths ('.swarm-loop/acceptance', '.swarm-loop/goals.json', 'Makefile', 'scripts/verify.sh', 'scripts/check_verify_contracts.py'), so check-branch vetoes any branch that touches it and no worker may proceed. The defect is real and was found by T-110's verifier: `verify.sh check` runs -m 'not needs_model and not docker and not slow', which DESELECTED all three of T-110's fresh-volume tests including the one grading its acceptance criterion 2 \u2014 so a lane can report its gate green while the tests written to grade it never executed. Two ways forward, both the user's call, not a worker's: (a) amend the frozen harness so verify.sh may change, or (b) fix the reachability half in conftest.py/proxyshop_support (T-109's scope, unprotected) and accept that the marker-based deselection stays. Do not dispatch until one is chosen.",
       "refs": [
         "D38",
         "W2-verify-dbinit"
@@ -1793,7 +1793,8 @@
         "T-109"
       ],
       "non_goals": [
-        "Do not remove the docker marker"
+        "Do NOT touch scripts/verify.sh without a user-approved amendment",
+        "Do NOT work around the veto by moving the logic elsewhere to dodge check-branch"
       ],
       "parallel_safe": false
     },
