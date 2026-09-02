@@ -74,6 +74,12 @@ INSTALL_STATE_TTL_SECONDS = 600
 #: one rather than a silent misparse.
 _STATE_VERSION = "s1"
 
+#: How far ahead of this process another replica's clock may be before its states are
+#: refused. Removing the pending-state map was justified by making the flow multi-replica
+#: (see :func:`issue_install_state`); rejecting every state whose issue time is one second
+#: in the future would have handed that back, since two hosts are never exactly in step.
+INSTALL_STATE_CLOCK_SKEW_SECONDS = 120
+
 
 class InstallStateRejected(OAuthCallbackRejected):
     """The ``state`` on a callback was not one this app issued, or is no longer valid."""
@@ -121,6 +127,7 @@ def read_install_state(
     secret: str,
     now: datetime | None = None,
     ttl_seconds: int = INSTALL_STATE_TTL_SECONDS,
+    clock_skew_seconds: int = INSTALL_STATE_CLOCK_SKEW_SECONDS,
 ) -> str:
     """Verify a ``state`` and return the shop it was issued for.
 
@@ -153,8 +160,15 @@ def read_install_state(
     except ValueError as exc:
         raise InstallStateRejected("the callback state carries no issue time") from exc
     age = int((now or datetime.now(UTC)).timestamp()) - issued
-    if age < 0 or age > ttl_seconds:
+    if age > ttl_seconds:
         raise InstallStateRejected(f"the callback state expired {age}s after it was issued")
+    if age < -clock_skew_seconds:
+        # Bounded, not unbounded: a state dated far in the future is not a clock, it is
+        # somebody trying to mint one that never expires.
+        raise InstallStateRejected(
+            f"the callback state is dated {-age}s in the future, beyond the "
+            f"{clock_skew_seconds}s skew allowance"
+        )
     try:
         return normalize_shop_domain(shop)
     except InvalidShopDomain as exc:

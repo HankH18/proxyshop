@@ -13,11 +13,13 @@ fire-and-forget and no shopper's page should wait on this app's reply.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from merchant_svc.collector import PIXEL_INBOX, PixelEventRejected, accept_pixel_event
+from merchant_svc.http_limits import BodyTooLarge, read_capped_body
 from merchant_svc.install.config import COLLECTOR_PATH
 
 _log = logging.getLogger(__name__)
@@ -29,12 +31,22 @@ router = APIRouter()
 async def collect_pixel_event(request: Request) -> Response:
     """Accept one client-side checkout observation.
 
-    A malformed or PII-carrying beacon is a 400 and nothing is stored. The refusal echoes
-    the offending *field names* only — the values are the thing this app has decided not to
-    hold, and an error body is as much a place data lives as a database is.
+    A malformed or PII-carrying beacon is a 400 and nothing is stored. The refusal names
+    **neither the offending values nor their keys** — both are attacker-chosen text, and an
+    error body is as much a place data lives as a database is. It reports how many fields
+    were refused; the accepted set is published in :mod:`merchant_svc.collector`, which is
+    what an integrator actually needs to fix their beacon.
+
+    The body is size-capped: this route takes no credential, so an unbounded read is a
+    denial of service that costs the sender one connection.
     """
     try:
-        payload = await request.json()
+        raw = await read_capped_body(request)
+    except BodyTooLarge:
+        return JSONResponse(status_code=413, content={"error": "body-too-large"})
+
+    try:
+        payload = json.loads(raw)
     except Exception:  # noqa: BLE001 - any decode failure is the same 400, never a 500
         return JSONResponse(status_code=400, content={"error": "unparseable-body"})
 
@@ -43,7 +55,7 @@ async def collect_pixel_event(request: Request) -> Response:
     except PixelEventRejected as exc:
         return JSONResponse(
             status_code=400,
-            content={"error": "rejected", "detail": str(exc), "fields": list(exc.fields)},
+            content={"error": "rejected", "detail": str(exc), "refused_fields": len(exc.fields)},
         )
 
     PIXEL_INBOX.record(observation)

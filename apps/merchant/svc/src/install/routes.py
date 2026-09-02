@@ -26,11 +26,14 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from merchant_svc.http_limits import BodyTooLarge, read_capped_body
 from merchant_svc.install.admin import AdminAPIError, AdminGraphQLClient
 from merchant_svc.install.config import WEBHOOK_PATH_PREFIX, admin_base_url, app_config
 from merchant_svc.install.flow import InstallFailed, install
@@ -73,26 +76,43 @@ _CONSUMED_STATES: dict[str, float] = {}
 #: an install volume this bound is too small for, or somebody trying to age one out.
 _CONSUMED_LIMIT = 4096
 
+#: ``finish_install`` is a synchronous ``def``, so FastAPI runs it in the anyio threadpool and
+#: two callbacks really are concurrent. Without this lock the prune loop below iterated the
+#: dict while another thread inserted into it — measured as a 500 (`RuntimeError: dictionary
+#: changed size during iteration`) on a *legitimate* install under 600 concurrent callbacks.
+#: A replay guard that fails a real merchant is worse than the replay it was guarding against.
+_CONSUMED_LOCK = threading.Lock()
+
 
 def _consume_state(state: str, *, now: float | None = None) -> bool:
-    """Mark ``state`` spent. ``False`` when it was already spent (a replay)."""
+    """Mark ``state`` spent. ``False`` when it was already spent (a replay). Thread-safe."""
     moment = now if now is not None else time.time()
-    expired = [key for key, expiry in _CONSUMED_STATES.items() if expiry <= moment]
-    for key in expired:
-        del _CONSUMED_STATES[key]
-    if state in _CONSUMED_STATES:
-        return False
-    _CONSUMED_STATES[state] = moment + INSTALL_STATE_TTL_SECONDS
-    while len(_CONSUMED_STATES) > _CONSUMED_LIMIT:
-        evicted = next(iter(_CONSUMED_STATES))
-        del _CONSUMED_STATES[evicted]
-        _log.warning(
-            "the redeemed-install-state window is full (%d entries) and is evicting "
-            "un-expired entries; a callback replayed within %ds would not be caught",
-            _CONSUMED_LIMIT,
-            INSTALL_STATE_TTL_SECONDS,
-        )
+    with _CONSUMED_LOCK:
+        for key in [key for key, expiry in _CONSUMED_STATES.items() if expiry <= moment]:
+            del _CONSUMED_STATES[key]
+        if state in _CONSUMED_STATES:
+            return False
+        _CONSUMED_STATES[state] = moment + INSTALL_STATE_TTL_SECONDS
+        while len(_CONSUMED_STATES) > _CONSUMED_LIMIT:
+            del _CONSUMED_STATES[next(iter(_CONSUMED_STATES))]
+            _log.warning(
+                "the redeemed-install-state window is full (%d entries) and is evicting "
+                "un-expired entries; a callback replayed within %ds would not be caught",
+                _CONSUMED_LIMIT,
+                INSTALL_STATE_TTL_SECONDS,
+            )
     return True
+
+
+#: A redeemed state is NEVER released, not even when the step after it failed.
+#:
+#: Releasing it on a failed token exchange was tried and reverted: the callback URL carries
+#: `code`, `hmac` AND `state`, so it leaks as a unit through browser history, a Referer, or
+#: any proxy log — and a failed exchange is precisely the case where Shopify has NOT yet
+#: consumed the `code`. Making it redeemable again therefore hands whoever holds that URL a
+#: live install ticket for the offline token. The merchant restarting at `GET /install` is a
+#: recoverable annoyance; the other direction is not recoverable at all. Stated here because
+#: "retry after a transient failure" is the obvious-looking change, and it is the wrong one.
 
 
 def _problem(status: int, reason: str, **detail: Any) -> JSONResponse:
@@ -126,7 +146,9 @@ def _refuse_unless_admin(request: Request) -> JSONResponse | None:
 def start_install(shop: str) -> Any:
     """Begin an install: redirect the merchant to Shopify's authorize screen."""
     config = app_config()
-    if not config.api_key or not config.api_secret:
+    # `.strip()`: a secret of " " is not a configured secret, and treating it as one issues
+    # states nobody can verify and refuses every webhook while looking configured.
+    if not config.api_key.strip() or not config.api_secret.strip():
         return _problem(503, "app-not-configured", missing=["SHOPIFY_API_KEY/SECRET"])
     try:
         shop_domain = normalize_shop_domain(shop)
@@ -154,7 +176,7 @@ def finish_install(request: Request) -> Any:
     from merchant_svc.install.oauth import exchange_code
 
     config = app_config()
-    if not config.api_key or not config.api_secret:
+    if not config.api_key.strip() or not config.api_secret.strip():
         return _problem(503, "app-not-configured", missing=["SHOPIFY_API_KEY/SECRET"])
 
     params = dict(request.query_params)
@@ -192,7 +214,13 @@ def finish_install(request: Request) -> Any:
             # instead of the 502 an unreachable token endpoint is supposed to produce.
             base_url=admin_base_url(callback.shop_domain),
         )
-    except OAuthCallbackRejected as exc:
+    except (OAuthCallbackRejected, httpx.HTTPError) as exc:
+        # `httpx.HTTPError` too, and it is the case that actually happens: `exchange_code`
+        # converts a refusal and an unparseable answer into `OAuthCallbackRejected`, but a
+        # token endpoint that is unreachable or slow raises `ConnectError`/`ReadTimeout`,
+        # which escaped and became a 500 — a status Shopify's own retry semantics and every
+        # uptime check read as "this app is broken" rather than "Shopify was unreachable".
+        # The state stays spent — see the note above `_CONSUMED_STATES` on why.
         return _problem(502, "token-exchange-failed", detail=str(exc))
 
     try:
@@ -238,7 +266,13 @@ async def receive_webhook(topic: str, request: Request) -> Any:
     *constraint* only. Nothing signs a URL, so the topic a delivery is filed under comes
     from ``X-Shopify-Topic`` and a path that disagrees is a 400 rather than an override.
     """
-    body = await request.body()
+    try:
+        # Capped: the signature is computed over these bytes, so there is no ordering in
+        # which this route can authenticate before it reads. An unbounded read on a route
+        # anyone can POST to is a denial of service that costs the sender one connection.
+        body = await read_capped_body(request)
+    except BodyTooLarge:
+        return _problem(413, "body-too-large")
     decision = handle_delivery(
         body=body,
         headers=dict(request.headers),
