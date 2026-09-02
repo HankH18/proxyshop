@@ -350,7 +350,9 @@ def address_refusal(address: IPAddress, policy: FetchPolicy = DEFAULT_POLICY) ->
     return None
 
 
-def resolve_host(host: str, port: int, policy: FetchPolicy = DEFAULT_POLICY) -> tuple[IPAddress, ...]:
+def resolve_host(
+    host: str, port: int, policy: FetchPolicy = DEFAULT_POLICY
+) -> tuple[IPAddress, ...]:
     """Every address ``host`` resolves to, deduplicated and order-preserved.
 
     Raises:

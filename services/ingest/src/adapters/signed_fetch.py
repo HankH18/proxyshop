@@ -1,0 +1,639 @@
+"""The signed page fetcher: a `CatalogAdapter` over a real storefront (T-020, C6, A1).
+
+What this adapter is for, from SPEC A1: *dev stores are password-protected, so they are
+absent from Shopify's Global Catalog and their public endpoints sit behind the storefront
+password.* The MCP adapter cannot see them at all. This one can, because it does what a
+browser does — establishes a storefront-password session — and then reads the two surfaces
+every Shopify storefront publishes:
+
+* ``/products.json`` — the paginated catalog, authoritative for variants, SKUs and prices.
+* the product pages' ``application/ld+json`` blocks — schema.org ``Product``/``Offer``,
+  authoritative for brand, currency and availability, and present even when a theme has
+  customised everything else.
+
+Read together they cover more than either alone, and disagreements are resolved in favour
+of ``products.json`` (a machine endpoint) over JSON-LD (theme-authored, more often stale).
+
+Three properties are load-bearing and each is enforced structurally rather than by care:
+
+**It cannot be pointed at your own network.** Every request goes through
+:class:`~ingest.adapters.transport.SafeHTTPClient`, whose default policy refuses anything
+not publicly routable and re-checks every redirect hop. There is no code path in this module
+that opens a socket itself.
+
+**It cannot be made to crawl forever.** Every request is charged to a
+:class:`~ingest.adapters.budgets.CrawlLedger` before it is sent, pagination stops on the
+budget as well as on the data, and product pages are fetched at depth 1 only.
+
+**Unchanged content does no downstream work.** Every resource is hashed as it arrives and
+compared against ``request.known_hashes``; a product whose page and catalog entry both hash
+to what we already have is marked ``changed=False``, and :meth:`SignedFetchAdapter.to_upserts`
+emits nothing at all for it. The zero is structural — ``to_upserts`` iterates
+``snapshot.changed_products`` — not a conditional someone could forget.
+
+Everything fetched is untrusted store input (C10). It is parsed, coerced and bounded here;
+it is never interpolated into a query, a prompt, or a URL.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import urlencode, urljoin, urlsplit
+
+from ..graph.model import Category, Offer, Product, Source, Store, Variant
+from .base import CatalogAdapter as _CatalogAdapter
+from .base import (
+    CatalogRequest,
+    CatalogSnapshot,
+    FetchedResource,
+    ProductRecord,
+    UpsertOp,
+    VariantRecord,
+)
+from .budgets import BudgetExceeded, CrawlLedger
+from .hashing import canonical_json_hash, content_hash, has_changed
+from .netguard import FetchRefused
+from .robots import USER_AGENT, may_fetch, robots_url, robots_verdict_for_status
+from .transport import HTTPResult, RequestSigner, SafeHTTPClient, TransportError
+
+__all__ = ["SignedFetchAdapter"]
+
+ADAPTER_NAME = "signed_fetch"
+EXTRACTOR_VERSION = "signed_fetch@1.0.0"
+PRODUCTS_PATH = "/products.json"
+PASSWORD_PATH = "/password"
+_PAGE_SIZE = 250
+
+#: schema.org availability URLs -> the vocabulary `ingest.graph` stores on an Offer.
+_AVAILABILITY = {
+    "instock": "in_stock",
+    "in_stock": "in_stock",
+    "onlineonly": "in_stock",
+    "limitedavailability": "limited",
+    "outofstock": "out_of_stock",
+    "soldout": "out_of_stock",
+    "discontinued": "discontinued",
+    "preorder": "preorder",
+    "presale": "preorder",
+    "backorder": "backorder",
+}
+
+
+def _now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _stable_id(*parts: str) -> str:
+    return hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _availability(value: Any) -> str:
+    if isinstance(value, bool):
+        return "in_stock" if value else "out_of_stock"
+    token = str(value or "").strip().lower().rsplit("/", 1)[-1].replace(" ", "")
+    return _AVAILABILITY.get(token, "unknown")
+
+
+class SignedFetchAdapter:
+    """Ingest a storefront over HTTP, including a password-protected dev store.
+
+    Args:
+        user_agent: the identified crawler agent string (C6).
+        signer: optional HMAC signer, so a merchant can verify a crawl is really ours.
+        client: a pre-built transport; one is constructed per request when omitted, which
+            is what keeps the per-request SSRF policy in :class:`CatalogRequest` effective.
+        clock: returns the ISO-8601 observation timestamp. Injectable for determinism.
+        session_password_path: the storefront password form path.
+    """
+
+    def __init__(
+        self,
+        *,
+        user_agent: str = USER_AGENT,
+        signer: RequestSigner | None = None,
+        client: SafeHTTPClient | None = None,
+        clock=_now,
+        session_password_path: str = PASSWORD_PATH,
+    ) -> None:
+        self.user_agent = user_agent
+        self.signer = signer
+        self._client = client
+        self._clock = clock
+        self.session_password_path = session_password_path
+
+    # -- CatalogAdapter ------------------------------------------------------------------
+
+    def fetch_catalog(self, request: CatalogRequest) -> CatalogSnapshot:
+        """Read ``request.base_url``'s catalog under its budgets, guards and robots rules.
+
+        Never raises for an ordinary crawl outcome. A blown budget, a refused host or a
+        transport failure ends the crawl and is reported in ``snapshot.warnings`` with
+        whatever was gathered before it — a partial catalog is useful and an exception
+        halfway through a 200-page crawl is not.
+        """
+        observed_at = self._clock()
+        ledger = CrawlLedger(request.budget)
+        client = self._client or SafeHTTPClient(
+            policy=request.policy, user_agent=self.user_agent, signer=self.signer
+        )
+        base = request.base_url.rstrip("/")
+        host = (urlsplit(base).hostname or "").lower()
+        allowed = tuple(dict.fromkeys((host, *request.allowed_hosts)))
+
+        resources: list[FetchedResource] = []
+        warnings: list[str] = []
+        products: list[ProductRecord] = []
+
+        def get(url: str, **kwargs) -> HTTPResult | None:
+            try:
+                return client.fetch(url, allowed_hosts=allowed, ledger=ledger, **kwargs)
+            except (FetchRefused, TransportError) as exc:
+                warnings.append(f"{url}: {exc}")
+                return None
+
+        def record(result: HTTPResult) -> FetchedResource:
+            known = request.known_hashes.get(result.url) or request.known_hashes.get(
+                result.final_url
+            )
+            resource = FetchedResource(
+                url=result.final_url,
+                status=result.status,
+                content_hash=result.content_hash,
+                media_type=result.media_type,
+                changed=has_changed(known, result.content_hash),
+                snapshot_ref=result.snapshot_ref,
+                bytes_downloaded=result.bytes_downloaded,
+                redirect_chain=result.redirect_chain,
+            )
+            resources.append(resource)
+            return resource
+
+        robots_text = ""
+        try:
+            robots = get(robots_url(base))
+            posture = robots_verdict_for_status(robots.status if robots else None)
+            if robots is not None:
+                record(robots)
+            if posture == "disallow-all":
+                warnings.append("robots.txt unavailable or forbidding; crawl abandoned")
+                return CatalogSnapshot(
+                    store_id=request.store_id,
+                    base_url=base,
+                    observed_at=observed_at,
+                    adapter=ADAPTER_NAME,
+                    resources=tuple(resources),
+                    usage=ledger.snapshot(),
+                    extractor_version=EXTRACTOR_VERSION,
+                    warnings=tuple(warnings),
+                )
+            if posture == "use" and robots is not None:
+                robots_text = robots.text()
+
+            if request.storefront_password:
+                self._unlock(client, base, request, ledger, robots_text, warnings)
+
+            products = self._read_catalog(
+                client, base, request, ledger, robots_text, allowed, get, record, warnings
+            )
+        except BudgetExceeded as exc:
+            warnings.append(f"budget: {exc}")
+
+        return CatalogSnapshot(
+            store_id=request.store_id,
+            base_url=base,
+            observed_at=observed_at,
+            adapter=ADAPTER_NAME,
+            products=tuple(products),
+            resources=tuple(resources),
+            usage=ledger.snapshot(),
+            robots_txt=robots_text,
+            extractor_version=EXTRACTOR_VERSION,
+            warnings=tuple(warnings),
+        )
+
+    def to_upserts(self, snapshot: CatalogSnapshot) -> list[UpsertOp]:
+        """Map a snapshot to graph writes, in dependency order. Pure — no I/O.
+
+        Only ``snapshot.changed_products`` are visited, which is where the "unchanged
+        content produces zero re-extraction work" guarantee actually lives: for a crawl
+        whose every hash matched, this returns ``[]`` without inspecting a single product.
+        """
+        changed = snapshot.changed_products
+        if not changed:
+            return []
+
+        store_source = self._source(
+            snapshot.base_url,
+            content_hash(snapshot.base_url),
+            snapshot.observed_at,
+            confidence=1.0,
+        )
+        ops: list[UpsertOp] = [
+            UpsertOp(
+                kind="store",
+                node=Store(
+                    store_id=snapshot.store_id,
+                    domain=(urlsplit(snapshot.base_url).hostname or "").lower(),
+                ),
+                source=store_source,
+            )
+        ]
+
+        for product in changed:
+            source = self._source(
+                product.source_url or snapshot.base_url,
+                product.content_hash or content_hash(product.product_id),
+                snapshot.observed_at,
+            )
+            ops.append(
+                UpsertOp(
+                    kind="product",
+                    node=Product(
+                        product_id=product.product_id,
+                        canonical_name=product.canonical_name,
+                        brand=product.brand,
+                        status=product.status,
+                    ),
+                    source=source,
+                )
+            )
+            ops.append(
+                UpsertOp(
+                    kind="sells",
+                    node=None,
+                    source=source,
+                    context={"store_id": snapshot.store_id, "product_id": product.product_id},
+                )
+            )
+            for name in product.categories:
+                ops.append(
+                    UpsertOp(
+                        kind="category",
+                        node=Category(name=name),
+                        source=source,
+                        context={"product_id": product.product_id},
+                    )
+                )
+            for variant in product.variants:
+                ops.append(
+                    UpsertOp(
+                        kind="variant",
+                        node=Variant(
+                            variant_id=variant.variant_id,
+                            seller_sku=variant.seller_sku,
+                            name=variant.name,
+                            status=variant.status,
+                        ),
+                        source=source,
+                        context={"product_id": product.product_id},
+                    )
+                )
+                if variant.price is None:
+                    continue
+                ops.append(
+                    UpsertOp(
+                        kind="offer",
+                        node=Offer(
+                            offer_id=f"off_{_stable_id(snapshot.store_id, variant.variant_id)}",
+                            price=float(variant.price),
+                            currency=variant.currency,
+                            availability=variant.availability,
+                            observed_at=snapshot.observed_at,
+                        ),
+                        source=source,
+                        context={
+                            "store_id": snapshot.store_id,
+                            "variant_id": variant.variant_id,
+                        },
+                    )
+                )
+        return ops
+
+    # -- storefront password (A1) ---------------------------------------------------------
+
+    def _unlock(
+        self,
+        client: SafeHTTPClient,
+        base: str,
+        request: CatalogRequest,
+        ledger: CrawlLedger,
+        robots_text: str,
+        warnings: list[str],
+    ) -> None:
+        """Establish a storefront-password session.
+
+        Posts the same form a browser posts. The session cookie the store sets is kept by
+        the transport's jar, bound to the host that issued it, so it rides on subsequent
+        catalog requests and on nothing else.
+        """
+        url = urljoin(base + "/", self.session_password_path.lstrip("/"))
+        if not may_fetch(robots_text, url, self.user_agent):
+            warnings.append(f"robots.txt disallows {url}; storefront stays locked")
+            return
+        payload = urlencode(
+            {
+                "form_type": "storefront_password",
+                "utf8": "✓",
+                "password": request.storefront_password or "",
+            }
+        ).encode("utf-8")
+        try:
+            result = client.fetch(
+                url,
+                method="POST",
+                body=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                allowed_hosts=(urlsplit(base).hostname or "",),
+                ledger=ledger,
+            )
+        except (FetchRefused, TransportError) as exc:
+            warnings.append(f"storefront password POST failed: {exc}")
+            return
+        if result.status >= 400:
+            warnings.append(f"storefront password rejected with HTTP {result.status}")
+
+    # -- catalog ---------------------------------------------------------------------------
+
+    def _read_catalog(
+        self,
+        client: SafeHTTPClient,
+        base: str,
+        request: CatalogRequest,
+        ledger: CrawlLedger,
+        robots_text: str,
+        allowed: tuple[str, ...],
+        get,
+        record,
+        warnings: list[str],
+    ) -> list[ProductRecord]:
+        raw: list[tuple[dict, str, str]] = []  # (payload, source_url, page_hash)
+        page = 1
+        while len(raw) < request.max_products:
+            query = urlencode({"limit": min(_PAGE_SIZE, request.max_products), "page": page})
+            url = f"{base}{PRODUCTS_PATH}?{query}"
+            if not may_fetch(robots_text, url, self.user_agent):
+                warnings.append(f"robots.txt disallows {url}")
+                break
+            if not ledger.may_enqueue(0):
+                break
+            result = get(url)
+            if result is None or result.status != 200:
+                if result is not None and result.status != 200:
+                    warnings.append(f"{url}: HTTP {result.status}")
+                break
+            record(result)
+            try:
+                payload = json.loads(result.text())
+            except ValueError as exc:
+                warnings.append(f"{url}: products.json did not parse ({exc})")
+                break
+            entries = payload.get("products") if isinstance(payload, dict) else None
+            if not isinstance(entries, list) or not entries:
+                break
+            for entry in entries:
+                if isinstance(entry, dict):
+                    raw.append((entry, result.final_url, canonical_json_hash(entry)))
+                if len(raw) >= request.max_products:
+                    break
+            if len(entries) < min(_PAGE_SIZE, request.max_products):
+                break
+            page += 1
+
+        products: list[ProductRecord] = []
+        for entry, page_url, entry_hash in raw:
+            handle = str(entry.get("handle") or "").strip()
+            page_hash = ""
+            jsonld: dict[str, Any] = {}
+            product_url = urljoin(base + "/", f"products/{handle}") if handle else ""
+            if request.fetch_product_pages and handle and ledger.may_enqueue(1):
+                if may_fetch(robots_text, product_url, self.user_agent):
+                    try:
+                        ledger.charge_depth(1)
+                        result = get(product_url)
+                    except BudgetExceeded as exc:
+                        warnings.append(f"budget: {exc}")
+                        result = None
+                    if result is not None and result.status == 200:
+                        resource = record(result)
+                        page_hash = resource.content_hash
+                        jsonld = self._json_ld_product(result.text(), warnings, product_url)
+                else:
+                    warnings.append(f"robots.txt disallows {product_url}")
+
+            # The product's identity digest covers both surfaces it was built from, and is
+            # keyed under the `product:` namespace rather than under its page URL — that URL
+            # is also a *resource* key carrying the page's own body digest, and letting the
+            # two share a key makes every product look changed on every crawl for ever.
+            composite = content_hash(f"{entry_hash}|{page_hash}")
+            product_id = self._product_id(request.store_id, entry)
+            known = request.known_hashes.get(f"product:{product_id}")
+            products.append(
+                self._to_record(
+                    request.store_id,
+                    entry,
+                    jsonld,
+                    product_url or page_url,
+                    composite,
+                    changed=has_changed(known, composite),
+                )
+            )
+        return products
+
+    @staticmethod
+    def _product_id(store_id: str, entry: Mapping[str, Any]) -> str:
+        """The graph's stable ID for a storefront product.
+
+        Derived from the store and the store's own identifier for the product, so the same
+        product keeps the same node across crawls (and a re-crawl of unchanged content
+        cannot churn the graph through ID drift).
+        """
+        native = str(entry.get("id") or entry.get("handle") or "").strip()
+        return f"prod_{_stable_id(store_id, native)}"
+
+    def _to_record(
+        self,
+        store_id: str,
+        entry: Mapping[str, Any],
+        jsonld: Mapping[str, Any],
+        source_url: str,
+        digest: str,
+        *,
+        changed: bool,
+    ) -> ProductRecord:
+        """Merge one ``products.json`` entry with its page's JSON-LD into one record.
+
+        ``products.json`` wins on anything it states; JSON-LD fills the gaps (brand,
+        currency, availability) that the machine endpoint does not carry.
+        """
+        native = str(entry.get("id") or entry.get("handle") or "").strip()
+        product_id = self._product_id(store_id, entry)
+        brand = str(entry.get("vendor") or "").strip() or self._brand(jsonld)
+        title = str(entry.get("title") or jsonld.get("name") or "").strip()
+        ld_offers = self._offers(jsonld)
+        default_currency = next(
+            (o.get("priceCurrency") for o in ld_offers if o.get("priceCurrency")), "USD"
+        )
+        default_availability = next(
+            (o.get("availability") for o in ld_offers if o.get("availability")), None
+        )
+
+        by_sku = {str(o.get("sku")): o for o in ld_offers if o.get("sku")}
+        variants: list[VariantRecord] = []
+        for item in entry.get("variants") or []:
+            if not isinstance(item, dict):
+                continue
+            sku = str(item.get("sku") or "").strip()
+            matched = by_sku.get(sku, {})
+            native_variant = str(item.get("id") or sku or item.get("title") or "").strip()
+            price = _as_float(item.get("price"))
+            if price is None:
+                price = _as_float(matched.get("price"))
+            available = item.get("available")
+            availability = (
+                _availability(available)
+                if available is not None
+                else _availability(matched.get("availability") or default_availability)
+            )
+            variants.append(
+                VariantRecord(
+                    variant_id=f"var_{_stable_id(store_id, native, native_variant)}",
+                    seller_sku=sku,
+                    name=str(item.get("title") or "").strip(),
+                    price=price,
+                    currency=str(matched.get("priceCurrency") or default_currency or "USD"),
+                    availability=availability,
+                    status="active",
+                )
+            )
+
+        categories = tuple(c for c in [str(entry.get("product_type") or "").strip()] if c)
+        return ProductRecord(
+            product_id=product_id,
+            canonical_name=title,
+            brand=brand,
+            status=str(entry.get("status") or "active").strip() or "active",
+            handle=str(entry.get("handle") or "").strip(),
+            source_url=source_url,
+            content_hash=digest,
+            changed=changed,
+            variants=tuple(variants),
+            categories=categories,
+        )
+
+    # -- JSON-LD ---------------------------------------------------------------------------
+
+    @staticmethod
+    def _blocks(html: str) -> Iterable[Any]:
+        """Every parsed ``application/ld+json`` block in a page, bad ones skipped."""
+        try:
+            from bs4 import BeautifulSoup
+
+            try:
+                soup = BeautifulSoup(html, "lxml")
+            except Exception:
+                soup = BeautifulSoup(html, "html.parser")
+            scripts = [
+                tag.string or tag.get_text()
+                for tag in soup.find_all("script")
+                if str(tag.get("type", "")).strip().lower() == "application/ld+json"
+            ]
+        except Exception:
+            scripts = re.findall(
+                r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+                html,
+                re.DOTALL | re.IGNORECASE,
+            )
+        for raw in scripts:
+            if not raw or not raw.strip():
+                continue
+            try:
+                yield json.loads(raw)
+            except ValueError:
+                continue
+
+    def _json_ld_product(self, html: str, warnings: list[str], url: str) -> dict[str, Any]:
+        """The first schema.org ``Product`` on a page, flattened out of ``@graph`` if needed."""
+        for block in self._blocks(html):
+            for node in self._flatten(block):
+                types = node.get("@type")
+                types = types if isinstance(types, list) else [types]
+                if any(str(t).lower() == "product" for t in types if t):
+                    return node
+        if html.strip():
+            warnings.append(f"{url}: no schema.org Product in JSON-LD")
+        return {}
+
+    @staticmethod
+    def _flatten(block: Any) -> Iterable[dict[str, Any]]:
+        stack = [block]
+        while stack:
+            node = stack.pop(0)
+            if isinstance(node, list):
+                stack.extend(node)
+            elif isinstance(node, dict):
+                yield node
+                graph = node.get("@graph")
+                if isinstance(graph, list):
+                    stack.extend(graph)
+
+    @staticmethod
+    def _brand(jsonld: Mapping[str, Any]) -> str:
+        brand = jsonld.get("brand")
+        if isinstance(brand, dict):
+            return str(brand.get("name") or "").strip()
+        return str(brand or "").strip()
+
+    @staticmethod
+    def _offers(jsonld: Mapping[str, Any]) -> list[dict[str, Any]]:
+        offers = jsonld.get("offers")
+        if isinstance(offers, dict):
+            if str(offers.get("@type", "")).lower() == "aggregateoffer":
+                nested = offers.get("offers")
+                if isinstance(nested, list):
+                    return [o for o in nested if isinstance(o, dict)]
+            return [offers]
+        if isinstance(offers, list):
+            return [o for o in offers if isinstance(o, dict)]
+        return []
+
+    # -- provenance --------------------------------------------------------------------------
+
+    @staticmethod
+    def _source(url: str, digest: str, observed_at: str, *, confidence: float = 0.9) -> Source:
+        """A `Source` node for one observed URL — DESIGN: Source ≡ Provenance.
+
+        ``source_id`` is derived from the URL and the digest, so re-observing unchanged
+        content produces the *same* Source rather than a new one every crawl.
+        """
+        return Source(
+            source_id=f"src_{_stable_id(url, digest)}",
+            url=url,
+            content_hash=digest,
+            observed_at=observed_at,
+            extractor_version=EXTRACTOR_VERSION,
+            confidence=confidence,
+            source_class="scraped",
+        )
+
+
+def _satisfies_catalog_adapter() -> bool:
+    """Structural check that this really is the interface both adapters share (C6).
+
+    Asserted at runtime by ``test_signed_fetch.py`` rather than trusted: a protocol nobody
+    verifies against is a comment.
+    """
+    return isinstance(SignedFetchAdapter(), _CatalogAdapter)
