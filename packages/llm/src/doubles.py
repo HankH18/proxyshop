@@ -37,6 +37,16 @@ and NOT ``call.prompt.index(STORE_CONTEXT) < call.prompt.index(tail)``, which ca
 Assert on the assembled single string with :func:`llm.prompting.CachedPrompt.text` if that
 is what you want to see.
 
+``call.system`` is the blocks **joined** for reading, so it cannot distinguish a call that
+sent two blocks from one that sent a single block holding the same joined text. When that
+distinction is what you are asserting — a per-call system arriving as its own uncached
+block, say — use the structure instead::
+
+    assert call.system_blocks == (STORE_CONTEXT, "turn 3 of 9")   # lossless
+    assert call.system == f"{STORE_CONTEXT}\\n\\nturn 3 of 9"       # a rendering
+
+See :class:`KeyedLLMCall`, which is what ``.calls`` actually holds.
+
 Both also implement the full surface of the orchestrator-frozen
 ``proxyshop_support.llm_double.LLMDouble`` — :meth:`queue`, :meth:`when`, ``calls``,
 ``last_prompt``, ``reset``, ``complete_json`` — so a ticket whose tests were written
@@ -61,6 +71,7 @@ from llm.prompting import (
     CachedPrompt,
     SystemKey,
     canonical_system_key,
+    system_key_blocks,
     system_key_text,
     wire_key,
 )
@@ -68,6 +79,31 @@ from llm.recordings import load_recording
 
 #: How many near-miss prompts an :class:`UnrecordedPromptError` suggests.
 SUGGESTION_COUNT = 3
+
+#: How much of a block's text the miss message prints when it spells out the structure.
+BLOCK_PREVIEW_CHARS = 80
+
+
+def _describe_system_key(key: SystemKey) -> str:
+    """How a system contract is printed in a miss message: the text, plus its structure.
+
+    The flat rendering alone is not enough here, and this is T-118 (a) at the *error*
+    surface. ``("STORE ENVELOPE", "turn 3 of 9")`` and ``"STORE ENVELOPE\\n\\nturn 3 of
+    9"`` are different calls with the same :func:`llm.prompting.system_key_text`, so a
+    message that printed only the text announced "a DIFFERENT system contract" directly
+    above two identical-looking strings — the single most confusing thing it could say
+    about a real and correct miss.
+
+    So a key of more than one block also names its blocks. One block (or none) prints as
+    before: there is nothing to disambiguate, and every existing message stays readable.
+    """
+    text = system_key_text(key)
+    rendered = f"({len(text)} chars) {text[:200]!r}"
+    blocks = system_key_blocks(key)
+    if len(blocks) > 1:
+        preview = tuple(block[:BLOCK_PREVIEW_CHARS] for block in blocks)
+        rendered += f", sent as {len(blocks)} separate blocks: {preview!r}"
+    return rendered
 
 
 @dataclass(frozen=True)
@@ -89,6 +125,59 @@ class LLMCall:
     prompt: str = ""
     system: str | None = None
     kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class KeyedLLMCall(LLMCall):
+    """An :class:`LLMCall` that also carries the call's **lossless** system identity.
+
+    This is what both doubles actually append to ``.calls``; it is an ``LLMCall`` in every
+    respect an assertion can see, plus one field the frozen ``LLMDouble`` has no analogue
+    for.
+
+    Why it exists (T-118 (a)): :attr:`LLMCall.system` is the blocks joined by
+    :data:`llm.prompting.SECTION_SEPARATOR`, and **any** join is lossy. So the two calls
+    below — genuinely different requests, which the lookup key tells apart — recorded
+    byte-identical ``LLMCall``\\ s, and the recording surface could not be used to check
+    which one was made::
+
+        double.complete(CachedPrompt("A", "q"), system="B")  # two system blocks
+        double.complete(CachedPrompt("A\\n\\nB", "q"))         # one system block
+        # both recorded system='A\\n\\nB'
+
+    The join cannot be removed from :attr:`~LLMCall.system`: it is ``str | None`` on the
+    orchestrator-frozen ``proxyshop_support.llm_double.LLMCall``, downstream tickets assert
+    ``call.system == STORE_CONTEXT`` against it, and
+    ``packages/llm/tests/test_llm_contract_seam.py`` pins both the flat rendering and its
+    ``str``-ness. It is a *rendering*, and a rendering it stays. So the structure is added
+    beside it rather than folded into it, and :attr:`system_key` — not
+    :attr:`~LLMCall.system` — is the thing to compare when the block structure matters.
+
+    ``LLMCall`` itself keeps exactly the frozen double's four fields, in its order, so
+    ``dataclasses.fields(LLMCall)`` still matches field for field and positional
+    construction still cannot transpose. The extra field lives here, last, with a default.
+
+    Attributes:
+        system_key: the :data:`llm.prompting.SystemKey` this call was looked up under —
+            the block texts themselves. ``""`` when the call carried no system contract.
+
+    Note:
+        Being a subclass, a ``KeyedLLMCall`` never compares equal to a plain ``LLMCall``
+        built from the same four fields (dataclass ``__eq__`` requires the same class).
+        Assert on fields, or build a ``KeyedLLMCall``.
+    """
+
+    system_key: SystemKey = ""
+
+    @property
+    def system_blocks(self) -> tuple[str, ...]:
+        """The system contract as the block list that was sent: ``()``, one, or several.
+
+        The readable spelling of :attr:`system_key`, and the one to assert on::
+
+            assert call.system_blocks == ("STORE ENVELOPE", "turn 3 of 9")
+        """
+        return system_key_blocks(self.system_key)
 
 
 def prompt_text(prompt: Any) -> str:
@@ -156,7 +245,7 @@ class _RecordingBase:
     """
 
     def __init__(self) -> None:
-        self.calls: list[LLMCall] = []
+        self.calls: list[KeyedLLMCall] = []
         self._queue: list[str] = []
         self._canned: dict[str, str] = {}
 
@@ -198,14 +287,23 @@ class _RecordingBase:
         return None
 
     def _record(
-        self, role: str | None, prompt: str, system: str | None, kwargs: dict[str, Any]
+        self, role: str | None, prompt: str, system_key: SystemKey, kwargs: dict[str, Any]
     ) -> None:
+        """Append one :class:`KeyedLLMCall`, keyed losslessly and rendered flat.
+
+        It takes the :data:`~llm.prompting.SystemKey` rather than the rendered text so
+        the two cannot drift: ``system`` is *derived* here, in the one place, from the
+        same key the lookup used. A caller that flattened first would have handed this
+        method a string with the structure already destroyed.
+        """
+        system_text = system_key_text(system_key)
         self.calls.append(
-            LLMCall(
+            KeyedLLMCall(
                 role=role if role is not None else "default",
                 prompt=prompt,
-                system=system,
+                system=system_text or None,
                 kwargs=dict(kwargs),
+                system_key=system_key,
             )
         )
 
@@ -340,13 +438,11 @@ class RecordedLLM(_RecordingBase):
         """
         key = wire_key(prompt, system)
         system_key, user_text = key
-        # The key is looked up as-is (a tuple of block texts once there is more than one);
-        # only the human-facing copies — the call record, `when` matching, the miss
-        # message — flatten it, and none of those is an identity.
+        # The key is looked up as-is (a tuple of block texts once there is more than one),
+        # and it is what `_record` stores on `KeyedLLMCall.system_key`. Only `when`
+        # matching and `LLMCall.system` flatten it, and neither of those is an identity.
         system_text = system_key_text(system_key)
-        self._record(
-            role if role is not None else self.role, user_text, system_text or None, kwargs
-        )
+        self._record(role if role is not None else self.role, user_text, system_key, kwargs)
         scripted = self._scripted(system_text, user_text)
         if scripted is not None:
             return scripted
@@ -361,7 +457,6 @@ class RecordedLLM(_RecordingBase):
 
     def _miss(self, key: tuple[SystemKey, str]) -> UnrecordedPromptError:
         system_key, user_text = key
-        system_text = system_key_text(system_key)
         source = f" ({self.name})" if self.name else ""
 
         # Name the function that fixes the single most likely miss. `from_fixture(name)`
@@ -381,8 +476,10 @@ class RecordedLLM(_RecordingBase):
         # The most valuable miss to diagnose: the user turn is recorded, but under a
         # different system contract. That is a prompt-contract change, and saying so is
         # the difference between a two-second fix and an afternoon.
+        # The recorded system KEYS, not their flat renderings: two of these can render to
+        # the same string and still be the different contracts this message is about.
         same_prompt = [
-            system_key_text(recorded_system)
+            recorded_system
             for (recorded_system, recorded_prompt) in self._recordings
             if recorded_prompt == user_text
         ]
@@ -392,9 +489,9 @@ class RecordedLLM(_RecordingBase):
                 f"system contract, so the recorded reply is not valid for this call "
                 f"(D21: recordings are reviewed answers to a specific contract).\n"
                 f"prompt: {user_text[:200]!r}\n"
-                f"system sent    ({len(system_text)} chars): {system_text[:200]!r}\n"
+                f"system sent:     {_describe_system_key(system_key)}\n"
                 f"system recorded: "
-                + "; ".join(f"({len(other)} chars) {other[:200]!r}" for other in same_prompt[:2])
+                + "; ".join(_describe_system_key(other) for other in same_prompt[:2])
                 + "\nIf the contract genuinely changed, re-review the recording. If it "
                 "did not, pass the same system text the fixture was authored against."
                 + contract_hint,
@@ -415,7 +512,7 @@ class RecordedLLM(_RecordingBase):
             f"never invents one or calls a live model (D20/D21). Add it to the fixture, "
             f"or pass it in the recordings dict.\n"
             f"prompt ({len(user_text)} chars): {user_text[:400]!r}\n"
-            f"system ({len(system_text)} chars): {system_text[:200]!r}\n"
+            f"system {_describe_system_key(system_key)}\n"
             f"{len(self._recordings)} recording(s) available.{hint}{contract_hint}",
             prompt=user_text,
         )
@@ -471,7 +568,7 @@ class DeterministicLLM(_RecordingBase):
         system_key, user_text = wire_key(prompt, system)
         system_text = system_key_text(system_key)
         effective_role = role if role is not None else self.role
-        self._record(effective_role, user_text, system_text or None, kwargs)
+        self._record(effective_role, user_text, system_key, kwargs)
         scripted = self._scripted(system_text, user_text)
         if scripted is not None:
             return scripted

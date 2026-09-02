@@ -295,11 +295,34 @@ def system_key_text(key: SystemKey) -> str:
     For logging, for :meth:`llm.doubles._RecordingBase.when` substring matching, and for
     the ``system`` field of a recorded :class:`llm.doubles.LLMCall`. It is deliberately
     **not** an identity: the join is lossy, which is the entire reason the key itself is a
-    tuple. Never compare two calls by this string.
+    tuple. Never compare two calls by this string — compare
+    :func:`system_key_blocks`, or the keys themselves.
     """
     if isinstance(key, str):
         return key
     return SECTION_SEPARATOR.join(key)
+
+
+def system_key_blocks(key: SystemKey) -> tuple[str, ...]:
+    """A :data:`SystemKey` as the block list it stands for. The **lossless** rendering.
+
+    It undoes the two degenerate-arity collapses and nothing else::
+
+        ""            -> ()              # no system blocks
+        "a contract"  -> ("a contract",) # one block
+        ("a", "b")    -> ("a", "b")      # two, unchanged
+
+    so ``canonical_system_key(system_key_blocks(key)) == key`` for every key
+    :func:`canonical_system_key` can produce — which is the injectivity of
+    :data:`SystemKey` stated as a round trip.
+
+    This is the function to compare two calls' system halves with when the *structure*
+    matters. :func:`system_key_text` joins, and any join is lossy: ``("A", "B")`` and
+    ``"A\\n\\nB"`` render to the same string and are different calls.
+    """
+    if isinstance(key, str):
+        return (key,) if key else ()
+    return key
 
 
 def wire_key(prompt: object, system: str | None = None) -> tuple[SystemKey, str]:
