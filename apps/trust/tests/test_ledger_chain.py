@@ -1666,16 +1666,67 @@ def _anchor_delete_is_refused_by_the_trigger(owner, statement: str) -> None:
         owner.rollback()
 
 
+def _anchor_delete_succeeds_once_the_arm_is_switched_off(owner, statement: str) -> None:
+    """The positive control: the SAME statement on the SAME connection, arm disabled.
+
+    T-118 (f). ``has_table_privilege`` being TRUE is a weaker fact than the prose next to it
+    used to claim. It says the privilege check will not be what refuses this statement --
+    and for a superuser it says that unconditionally, whatever the table's ACL holds -- but
+    it says nothing about what else might. A CHECK constraint, a foreign key, a rule or a
+    row-security policy would refuse this DELETE too, and a test that only ever sees the
+    statement fail cannot tell any of them apart from the trigger.
+
+    Disabling the arm and watching the identical statement succeed is what closes that gap:
+    with ``chain_head_guard_trigger`` off and nothing else changed, the DELETE removes the
+    anchor row. So the refusal next door is the trigger's, and the guard is load-bearing
+    rather than redundant with something else.
+
+    Everything is rolled back, including the ``ALTER TABLE``, so the arm is back on and the
+    anchor is back before the next assertion runs.
+    """
+    try:
+        with owner.cursor() as cur:
+            cur.execute("alter table ledger.chain_head disable trigger chain_head_guard_trigger")
+            try:
+                cur.execute(statement)
+            except psycopg.Error as exc:
+                raise AssertionError(
+                    f"{statement!r} was still refused with chain_head_guard_trigger DISABLED, "
+                    f"by {type(exc).__name__}: {exc}. Something other than that trigger is "
+                    f"stopping this statement, so the refusal asserted next door is not "
+                    f"evidence about the arm -- which is exactly what asserting "
+                    f"has_table_privilege alone could never tell you."
+                ) from exc
+            assert cur.rowcount == 1, (
+                f"{statement!r} matched {cur.rowcount} rows with chain_head_guard_trigger "
+                f"DISABLED. The refusal asserted elsewhere is then not evidence about the "
+                f"trigger -- something other than the guard is what stops this statement."
+            )
+            cur.execute("select count(*) from ledger.chain_head")
+            assert cur.fetchone() == (0,), "the anchor row survived a DELETE that reported 1 row"
+    finally:
+        owner.rollback()
+
+
 @pytest.mark.docker
 def test_the_anchor_guards_delete_arm_refuses_the_table_owner_as_well(ledger_clean) -> None:
-    """W2-04 acceptance 1: the arm fires for the one principal no grant can stop.
+    """W2-04 acceptance 1: the arm fires for the principal the grant layer cannot refuse.
 
     ``ledger_roles.denied(role, "delete from ledger.chain_head")`` above proves only that
     ``trust_rw`` and ``app`` lack the privilege -- Postgres refuses those before the trigger
     is ever consulted, so that assertion stays green with the DELETE arm deleted. The owner
-    is the principal that separates the two layers: ``has_table_privilege`` is asserted TRUE
-    here, so the trigger is the only thing standing between this statement and an anchorless
-    ledger.
+    is the principal that separates the two layers.
+
+    **What the precondition below is and is not** (T-118 (f)). This connection owns the
+    table and is a superuser, so ``has_table_privilege`` is TRUE *by ownership*, and a
+    superuser's ``has_table_privilege`` is TRUE for every table in the cluster whatever its
+    ACL says. It therefore establishes exactly one thing -- that the privilege check is not
+    what will refuse the statement -- and NOT the stronger claim the prose here used to
+    make, that the trigger is the only thing left in the way. The discriminator is the
+    positive control that follows it: with the arm switched off and nothing else changed,
+    the identical statement on the identical connection succeeds. That, plus the verbatim
+    message match inside :func:`_anchor_delete_is_refused_by_the_trigger`, is what makes
+    this a test of the trigger rather than of "something said no".
     """
     connection = ledger_clean
     for index in range(3):
@@ -1696,6 +1747,11 @@ def test_the_anchor_guards_delete_arm_refuses_the_table_owner_as_well(ledger_cle
                     "the trigger"
                 )
             owner.rollback()
+
+            # ...and the fact that actually discriminates the two layers (T-118 (f)).
+            _anchor_delete_succeeds_once_the_arm_is_switched_off(
+                owner, "delete from ledger.chain_head"
+            )
 
             _anchor_delete_is_refused_by_the_trigger(owner, "delete from ledger.chain_head")
             _anchor_delete_is_refused_by_the_trigger(
