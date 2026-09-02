@@ -18,6 +18,8 @@ directly, because "webhooks always delivered" is only meaningful if it cannot be
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import UTC, datetime
 
 from shopify_stub.testing import SEED_VARIANT, RecordingReceiver, StubClient
 from shopify_stub.webhooks import (
@@ -356,3 +358,129 @@ async def test_two_subscribers_on_one_topic_both_receive_the_same_body(
         assert len(await stub.deliveries()) == 2, (
             "the delivery log must count both, not report one delivery for two subscribers"
         )
+
+
+# ---------------------------------------------------------------------------------------
+# T-105: the header block asserted by VALUE
+# ---------------------------------------------------------------------------------------
+
+
+async def test_every_delivery_header_carries_its_real_value(
+    stub: StubClient, webhook_receiver: Receiver
+) -> None:
+    """Every header, against the value it is supposed to be derived from.
+
+    ``test_delivery_headers_are_the_documented_ones`` above checks that seven header *names*
+    are present and pins three of the values. That leaves ``X-Shopify-API-Version``,
+    ``X-Shopify-Webhook-Id`` and ``X-Shopify-Event-Id`` asserted only as "some string is
+    here" — and measured on this suite, replacing all three with the literal ``"CONSTANT"``
+    in ``delivery_headers`` shipped **297 passed**. A header whose value is never read is a
+    header a consumer cannot rely on, and the two ids are how a consumer deduplicates a
+    retried delivery.
+
+    So each value is compared to its source: the api version and the shop domain to the
+    *reconfigured* config (a default would prove nothing), the ids to the id the stub itself
+    recorded in its delivery log, and the signature to a recomputation over the raw bytes.
+    """
+    receiver, url = webhook_receiver
+    version = "2025-01"
+    domain = "store-headers.example.com"
+    secret = "shpss_headers_specific_secret_0001"
+    # Subscribe *before* moving the api version: the Admin GraphQL route answers only on the
+    # configured version, and `StubClient.subscribe` addresses the default one.
+    await stub.subscribe("ORDERS_PAID", url)
+    assert (await stub.configure(api_version=version)).status_code == 200
+    assert (await stub.configure(shop_domain=domain)).status_code == 200
+    assert (await stub.configure(webhook_secret=secret)).status_code == 200
+
+    await stub.buy(VARIANT_ID)
+
+    (delivery,) = await stub.deliveries()
+    request = receiver.requests[0]
+    headers = request["headers"]
+
+    assert headers["content-type"] == "application/json"
+    assert headers[HEADER_TOPIC.lower()] == "orders/paid"
+    # Read from the config, not from a constant: both were just changed away from default.
+    assert headers[HEADER_API_VERSION.lower()] == version
+    assert headers[HEADER_SHOP_DOMAIN.lower()] == domain
+    # The ids are the stub's own recorded id, and the two spellings agree.
+    assert headers[HEADER_WEBHOOK_ID.lower()] == delivery["webhook_id"]
+    assert headers[HEADER_EVENT_ID.lower()] == delivery["webhook_id"]
+    assert uuid.UUID(headers[HEADER_WEBHOOK_ID.lower()]).version == 4
+    # The signature is the HMAC of these exact bytes under the configured secret.
+    assert headers[HEADER_HMAC.lower()] == sign(request["body"], secret)
+    assert headers[HEADER_HMAC.lower()] == delivery["hmac"]
+    # And the trigger time is a real instant, not a placeholder.
+    triggered = headers[HEADER_TRIGGERED_AT.lower()]
+    assert triggered.endswith("Z")
+    parsed = datetime.fromisoformat(triggered.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
+    assert abs((datetime.now(UTC) - parsed).total_seconds()) < 120
+
+
+async def test_the_webhook_id_is_fresh_for_every_delivery(
+    stub: StubClient, webhook_receiver: Receiver
+) -> None:
+    """Two deliveries, two ids. A constant would satisfy every per-delivery check above.
+
+    This is the assertion a hard-coded id cannot pass however plausible the constant looks,
+    and it is the property a consumer's deduplication actually depends on: the same id twice
+    means "this is a retry of one event", so a shared id would make two real orders collapse
+    into one.
+    """
+    receiver, url = webhook_receiver
+    await stub.subscribe("ORDERS_PAID", url)
+    await stub.buy(VARIANT_ID)
+    await stub.buy(VARIANT_ID)
+
+    first, second = await stub.deliveries()
+    assert first["webhook_id"] != second["webhook_id"]
+    sent = [request["headers"][HEADER_WEBHOOK_ID.lower()] for request in receiver.requests]
+    assert sent == [first["webhook_id"], second["webhook_id"]]
+    assert len(set(sent)) == 2, "a constant webhook id makes two orders look like one retry"
+
+
+async def test_a_retried_delivery_keeps_one_id_and_one_signature(
+    stub: StubClient, flaky_webhook_receiver: Receiver
+) -> None:
+    """The other half of the id contract: a *retry* must reuse the id, not mint a new one.
+
+    ``test_the_webhook_id_is_fresh_for_every_delivery`` pins "different events differ"; this
+    pins "the same event, delivered three times, is one event". Together they say the id
+    identifies the event rather than the attempt — which is exactly what makes it usable for
+    deduplication.
+    """
+    receiver, url = flaky_webhook_receiver
+    await stub.subscribe("ORDERS_PAID", url)
+    await stub.buy(VARIANT_ID)
+
+    (delivery,) = await stub.deliveries()
+    assert delivery["attempts"] == 3
+    assert delivery["delivered"] is True
+    assert len(receiver.requests) == 3
+    ids = {request["headers"][HEADER_WEBHOOK_ID.lower()] for request in receiver.requests}
+    signatures = {request["headers"][HEADER_HMAC.lower()] for request in receiver.requests}
+    assert ids == {delivery["webhook_id"]}
+    assert signatures == {delivery["hmac"]}
+
+
+async def test_the_topic_header_names_the_topic_that_fired(
+    stub: StubClient, webhook_receiver: Receiver
+) -> None:
+    """``orders/paid``, ``orders/fulfilled`` and ``refunds/create``, each by value.
+
+    The existing coverage asserts the first two on separate deliveries and never the third.
+    All three subscribe to one receiver here so the header is what distinguishes them.
+    """
+    receiver, url = webhook_receiver
+    for topic in ("ORDERS_PAID", "ORDERS_FULFILLED", "REFUNDS_CREATE"):
+        await stub.subscribe(topic, url)
+
+    result = await stub.buy(VARIANT_ID)
+    order_id = result["order_id"]
+    assert (await stub.fulfil(order_id)).status_code == 200
+    assert (await stub.refund(order_id, amount="10.00")).status_code == 201
+
+    topics = [request["headers"][HEADER_TOPIC.lower()] for request in receiver.requests]
+    assert topics == ["orders/paid", "orders/fulfilled", "refunds/create"]
