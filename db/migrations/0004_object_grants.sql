@@ -26,6 +26,21 @@
 -- reaching the closed schema.
 
 -- ---------------------------------------------------------------------------------------
+-- Bounded waits, first statement in the file.
+--
+-- The runner executes each migration inside ONE transaction and holds every lock it takes
+-- until end-of-file, so one blocked statement stalls the whole file -- and with no
+-- `lock_timeout` set anywhere in this repo, "stalls" meant FOREVER rather than for a bounded
+-- interval. That is the shape of failure this project has already lost real time to, so it
+-- is bounded here rather than diagnosed again. `SET LOCAL` scopes both settings to this
+-- file's transaction and restores whatever the session had on COMMIT, so a migration can
+-- never leave a timeout behind on a pooled connection. Applying a file by hand: wrap it in
+-- BEGIN/COMMIT, or psql warns that SET LOCAL outside a transaction block does nothing.
+-- ---------------------------------------------------------------------------------------
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '60s';
+
+-- ---------------------------------------------------------------------------------------
 -- The read-only auction role. SELECT on the two open schemas, nothing anywhere else, and
 -- no write anywhere at all (DESIGN §Data models: "`exchange` role: no write").
 -- ---------------------------------------------------------------------------------------
@@ -82,15 +97,35 @@ REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ledger, app FROM PUBLIC;
 -- the ledger's lock and sit on it, blocking every append in the database. A role documented
 -- "no write" must not hold the writers' mutex. Function ACLs are per-database, so this is a
 -- per-database statement like every other grant here.
+--
+-- ALL EIGHT bigint overloads, not four. Postgres has ONE 8-byte advisory-lock space, and
+-- every one of these functions takes a lock in it: the four exclusive forms below and the
+-- four `_shared` forms beside them. `ShareLock` conflicts with `ExclusiveLock`, so a role
+-- holding `pg_advisory_lock_shared(776167449)` blocks `pg_advisory_xact_lock(776167449)`
+-- exactly as an exclusive holder would -- and with no `lock_timeout` the blocked append
+-- waits forever, not for a bounded interval. Revoking only the exclusive half left the
+-- read-only auction role able to halt every ledger append in the database with one SELECT
+-- against a published constant. Proven live before this line was written:
+--   exchange pg_advisory_lock_shared: ALLOWED; app's append while it was held: BLOCKED.
+-- The two-argument (int, int) overloads use the OTHER, disjoint key space and cannot
+-- conflict with CHAIN_LOCK_KEY, so they are deliberately not named here.
 -- ---------------------------------------------------------------------------------------
-REVOKE EXECUTE ON FUNCTION pg_advisory_xact_lock(bigint)     FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pg_advisory_lock(bigint)          FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pg_try_advisory_xact_lock(bigint) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION pg_try_advisory_lock(bigint)      FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION pg_advisory_xact_lock(bigint)     TO trust_rw, app;
-GRANT EXECUTE ON FUNCTION pg_advisory_lock(bigint)          TO trust_rw, app;
-GRANT EXECUTE ON FUNCTION pg_try_advisory_xact_lock(bigint) TO trust_rw, app;
-GRANT EXECUTE ON FUNCTION pg_try_advisory_lock(bigint)      TO trust_rw, app;
+REVOKE EXECUTE ON FUNCTION pg_advisory_xact_lock(bigint)            FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_advisory_lock(bigint)                 FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_try_advisory_xact_lock(bigint)        FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_try_advisory_lock(bigint)             FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_advisory_xact_lock_shared(bigint)     FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_advisory_lock_shared(bigint)          FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_try_advisory_xact_lock_shared(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_try_advisory_lock_shared(bigint)      FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pg_advisory_xact_lock(bigint)            TO trust_rw, app;
+GRANT EXECUTE ON FUNCTION pg_advisory_lock(bigint)                 TO trust_rw, app;
+GRANT EXECUTE ON FUNCTION pg_try_advisory_xact_lock(bigint)        TO trust_rw, app;
+GRANT EXECUTE ON FUNCTION pg_try_advisory_lock(bigint)             TO trust_rw, app;
+GRANT EXECUTE ON FUNCTION pg_advisory_xact_lock_shared(bigint)     TO trust_rw, app;
+GRANT EXECUTE ON FUNCTION pg_advisory_lock_shared(bigint)          TO trust_rw, app;
+GRANT EXECUTE ON FUNCTION pg_try_advisory_xact_lock_shared(bigint) TO trust_rw, app;
+GRANT EXECUTE ON FUNCTION pg_try_advisory_lock_shared(bigint)      TO trust_rw, app;
 
 
 -- ---------------------------------------------------------------------------------------
@@ -155,6 +190,21 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON ledger.schema_migrations FROM trust_r
 -- The anchor row moves on every append, and the AFTER INSERT trigger that moves it runs as
 -- the INSERTing role (it is not SECURITY DEFINER, deliberately -- there is no such function
 -- anywhere in this schema). So the two roles that may append need UPDATE on that ONE row's
--- table, and nothing else gains a write it did not already have. The read-only auction role
--- keeps SELECT on it, which is what lets it check the ledger it can read.
+-- table. The read-only auction role keeps SELECT on it, which is what lets it check the
+-- ledger it can read.
+--
+-- UPDATE ONLY, and INSERT/DELETE explicitly taken back. `chain_head` is the ONLY mechanism
+-- that can detect tail truncation, so it is the one table in this schema whose writers must
+-- not also be able to re-author it. The blanket `SELECT, INSERT, UPDATE, DELETE ON ALL
+-- TABLES IN SCHEMA ledger TO trust_rw` above reaches it, and `SELECT, INSERT ... TO app`
+-- reaches it too, and the earlier wording of this comment -- "nothing else gains a write it
+-- did not already have" -- was wrong: the append path grants chain-GUARDED, append-only
+-- writes, while INSERT and DELETE here grant ARBITRARY control of the commitment. Proven
+-- live before these lines were written, as trust_rw:
+--   DELETE FROM ledger.chain_head           -> ALLOWED; appends then kept succeeding with
+--                                              no anchor at all and no error;
+--   re-INSERT a forged anchor               -> a truncated chain verified {'ok': True}.
+-- The trigger added by 0002 is the second half of this: grants stop the two roles, and the
+-- trigger stops anyone who reaches the table by some other route.
 GRANT UPDATE ON ledger.chain_head TO trust_rw, app;
+REVOKE INSERT, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ledger.chain_head FROM trust_rw, app;
