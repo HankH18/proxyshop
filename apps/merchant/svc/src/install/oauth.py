@@ -136,9 +136,7 @@ def read_install_state(
     body, _, supplied = str(state).partition(".")
     if not body or not supplied:
         raise InstallStateRejected("the callback state is not in the issued format")
-    expected = hmac.new(
-        signature_bytes(secret), signature_bytes(body), hashlib.sha256
-    ).digest()
+    expected = hmac.new(signature_bytes(secret), signature_bytes(body), hashlib.sha256).digest()
     if not secure_equals(_b64url(expected), supplied):
         raise InstallStateRejected("the callback state did not verify")
     try:

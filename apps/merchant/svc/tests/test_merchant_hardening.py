@@ -46,9 +46,7 @@ SHOP = DEFAULT_SHOP_DOMAIN
 SECRET = DEFAULT_WEBHOOK_SECRET
 
 #: The HTTP methods an OpenAPI path item may carry; everything else in it is metadata.
-_HTTP_METHODS = frozenset(
-    {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
-)
+_HTTP_METHODS = frozenset({"get", "put", "post", "delete", "patch", "head", "options", "trace"})
 
 
 def _signed_headers(body: bytes, *, topic: str | None, webhook_id: str) -> dict[str, str]:
@@ -164,7 +162,7 @@ def test_a_signed_body_is_bound_to_the_topic_it_was_first_recorded_under() -> No
     crossed = deliver("refunds/create")
     assert crossed.duplicate is True, "one signed body became two events"
     assert crossed.detail.get("recorded_as") == "orders/paid", (
-        "a cross-topic replay must say which topic already owns the body: " f"{crossed.detail}"
+        f"a cross-topic replay must say which topic already owns the body: {crossed.detail}"
     )
     assert len(inbox.events()) == 1
 
@@ -404,9 +402,7 @@ def test_the_served_routes_match_the_pinned_contract() -> None:
         if method.lower() in _HTTP_METHODS
     }
     pinned = {
-        (route.method.lower(), route.path)
-        for route in PINNED_ROUTES
-        if route.domain == "merchant"
+        (route.method.lower(), route.path) for route in PINNED_ROUTES if route.domain == "merchant"
     }
     exempt = {
         ("get", "/install"),
