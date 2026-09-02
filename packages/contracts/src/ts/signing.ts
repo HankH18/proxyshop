@@ -362,25 +362,48 @@ export function payloadHashFromJson(text: string): string {
 }
 
 /**
+ * Every code point the envelope's blank rule treats as empty. The SAME set
+ * `schemas/protocol.schema.json` enumerates in the five envelope fields' `pattern`, and the twin
+ * of `contracts.signing.BLANK_CODE_POINTS`.
+ *
+ * Enumerated rather than left to `String.prototype.trim()`, and enumerated in the schema rather
+ * than spelled with the `\s` shorthand, because both of those are ENGINE-DEPENDENT. Rust's regex
+ * crate (what pydantic compiles) and Python's `re` read that shorthand as Unicode White_Space,
+ * which includes U+0085; ECMAScript (what Ajv compiles) reads it as a fixed list that excludes
+ * U+0085 and includes U+FEFF. Measured over all of Unicode the split was exactly those two
+ * characters — so the one artifact both languages read described two different rules, which is
+ * the single thing a shared contract may not do.
+ *
+ * This set is the UNION of both readings, so it relaxes neither gate: everything either side
+ * already called blank still is. `tests/signing.test.ts` walks every code point and fails if this
+ * set and the pattern Ajv compiled ever disagree.
+ */
+const BLANK_CODE_POINTS: ReadonlySet<number> = new Set([
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, // tab, LF, VT, FF, CR
+  0x1c, 0x1d, 0x1e, 0x1f, // the four information separators — `trim()` keeps these
+  0x20, // SPACE
+  0x85, // NEL — Unicode White_Space, but not ECMAScript whitespace
+  0xa0, // NBSP
+  0x1680, // OGHAM SPACE MARK
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
+  0x2028, // LINE SEPARATOR
+  0x2029, // PARAGRAPH SEPARATOR
+  0x202f, // NARROW NO-BREAK SPACE
+  0x205f, // MEDIUM MATHEMATICAL SPACE
+  0x3000, // IDEOGRAPHIC SPACE
+  0xfeff, // ZWNBSP — ECMAScript whitespace, but not Unicode White_Space
+]);
+
+/**
  * True when `value` holds no character the envelope's schema `pattern` would accept.
  *
- * The SAME class `protocol.schema.json` spells as `[^\s\u001c-\u001f]`, so the schema Ajv
- * compiles from that bundle and this function cannot disagree. Plain `String.prototype.trim()`
- * is NOT that class: it keeps U+001C-U+001F, which Python's `str.strip()` removes and the schema
- * excludes. Two gates on one rule that disagree is one gate, and it is whichever one the caller
- * happens to be standing on.
+ * Iterated by CODE POINT, so an astral character is one item and can never be mistaken for two
+ * code units that happen not to be listed. An empty string is blank, which is what `minLength: 1`
+ * says about it too.
  */
 function isBlank(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const unit = value.charCodeAt(index);
-    // U+001C-U+001F, the four information separators. `trim()` keeps them; `str.strip()` and the
-    // schema's class both discard them, so they are handled here rather than left to `trim()`.
-    if (unit >= 0x1c && unit <= 0x1f) continue;
-    // Everything else: ECMA-262 defines `\s` as exactly what `trim()` removes, so a one-unit
-    // `trim()` IS the `\s` test — written this way because a regex literal holding the control
-    // characters above trips `no-control-regex`, and disabling a lint rule to keep a clause the
-    // language already gives you is the wrong trade.
-    if (value.charAt(index).trim() !== "") return false;
+  for (const character of value) {
+    if (!BLANK_CODE_POINTS.has(character.codePointAt(0) ?? -1)) return false;
   }
   return true;
 }
@@ -393,9 +416,10 @@ function isBlank(value: string): boolean {
  * and `issued_at: 12345` as present — every one of which the schema rejects. `nonce: false` is a
  * constant nonce, which is exactly what D52's replay defence exists to make impossible.
  *
- * "Empty" is `isBlank`, not `minLength`. The schema used to say `minLength: 1` alone, so
- * `"   "` satisfied it while this function called the same value missing; the schema now carries
- * the same class this does, and both refuse it.
+ * "Empty" is `isBlank`, not `minLength` and not `trim()`. The schema used to say `minLength: 1`
+ * alone, so `"   "` satisfied it while this function called the same value missing; the schema
+ * now enumerates the same code points `BLANK_CODE_POINTS` does, and both refuse it — including
+ * U+0085 and U+FEFF, the two the old engine-dependent spelling split the languages on.
  */
 export function missingSigningFields(payload: unknown): string[] {
   const record =

@@ -25,7 +25,7 @@ import {
   signingEnvelopeErrors,
 } from "../src/ts/signing.js";
 import type {Payload} from "../src/ts/signing.js";
-import {isValid} from "../src/ts/schemas.js";
+import {isValid, protocolSchema} from "../src/ts/schemas.js";
 import {makeBid, makeOffer, makeSubmission} from "./fixtures.js";
 
 /** Pinned identically in the Python suite. Changing one without the other is the bug. */
@@ -850,6 +850,150 @@ describe("T-113 — the opt-out is explicit, named, and does exactly what it say
     expect(canonicalSigningBytes(makeSubmission()).length).toBeGreaterThan(0);
     for (const n of [0, -0, 1, -42, 44.1, 1e-5, 1.5, Number.MAX_SAFE_INTEGER, -9007199254740991]) {
       expect(() => payloadHash({...makeSubmission(), quantity: n}), String(n)).not.toThrow();
+    }
+  });
+});
+
+// --- T-115: the blank rule is engine-independent, and asserted as a PROPERTY ---------------
+//
+// T-108 put a `\s`-based class in `protocol.schema.json`. That shorthand is ENGINE-DEPENDENT:
+// Unicode White_Space to Rust's regex crate (what pydantic compiles) and to Python's `re`, a
+// different fixed list to ECMAScript (what Ajv compiles). The single artifact whose whole purpose
+// is that both languages read the SAME contract therefore stated two rules, and they split on
+// U+0085 (blank in Python only) and U+FEFF (blank in TypeScript only).
+//
+// The guarantee was also pinned against WHITESPACE_ONLY above — ~20 spellings someone thought of,
+// which says nothing about the 1,114,092 code points not on it. These walk every code point.
+
+/**
+ * The one class, spelled out. The SAME literal `tests/test_signing_envelope.py::BLANK_PATTERN`
+ * pins, which is what makes the two languages one rule: each suite proves its own gate agrees
+ * with this string over all of Unicode, so the two gates agree with each other.
+ */
+const BLANK_PATTERN =
+  "[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680" +
+  "\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]";
+
+/** The spelling T-115 removed, kept so the property can prove it would have caught it. */
+const SUPERSEDED_SHORTHAND_PATTERN = ["[^", "\\s", "\\u001c-\\u001f", "]"].join("");
+
+/** Every code point the blank class covers. The twin of `contracts.signing.BLANK_CODE_POINTS`. */
+const EXPECTED_BLANK_CODE_POINTS: ReadonlySet<number> = new Set<number>([
+  ...[0x09, 0x0a, 0x0b, 0x0c, 0x0d],
+  ...[0x1c, 0x1d, 0x1e, 0x1f, 0x20],
+  0x85,
+  0xa0,
+  0x1680,
+  ...Array.from({length: 11}, (_unused, index) => 0x2000 + index),
+  0x2028,
+  0x2029,
+  0x202f,
+  0x205f,
+  0x3000,
+  0xfeff,
+]);
+
+/** Every code point there is, minus the surrogates, which are not characters. */
+function* allCodePoints(): Generator<number> {
+  for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    yield cp;
+  }
+}
+
+describe("T-115 — one blank rule, stated so both regex engines read it the same way", () => {
+  it("spells the class identically in all ten places, with no engine-dependent shorthand", () => {
+    const defs = protocolSchema.$defs as unknown as Record<
+      string,
+      {properties: Record<string, {minLength?: number; pattern?: string}>}
+    >;
+    let seen = 0;
+    for (const name of ["SigningEnvelope", "SignedBidSubmission"]) {
+      for (const field of REQUIRED_SIGNING_FIELDS) {
+        const spec = defs[name]!.properties[field]!;
+        expect(spec.minLength, `${name}.${field}`).toBe(1);
+        expect(spec.pattern, `${name}.${field}`).toBe(BLANK_PATTERN);
+        for (const shorthand of ["\\s", "\\S", "\\w", "\\W", "\\d", "\\D", "\\p", "\\P", "\\b"]) {
+          expect(spec.pattern, `${name}.${field} still carries ${shorthand}`).not.toContain(
+            shorthand,
+          );
+        }
+        seen += 1;
+      }
+    }
+    expect(seen).toBe(10);
+  });
+
+  it("agrees with the code-level blank check on every code point in Unicode", () => {
+    // The property, under the engine that actually gates data on this side. `isValid` is Ajv
+    // compiling the bundle; `missingSigningFields` is the function `canonicalSigningBytes` stands
+    // on. Two gates on one rule that disagree is one gate, and it is whichever one the caller
+    // happens to be standing on — so they are compared over ALL of Unicode, not over a list.
+    const base = {
+      signer_id: "store-external-1",
+      key_id: "key-2026-01",
+      issued_at: "2026-01-01T00:00:00Z",
+      nonce: "nonce-ext-0001",
+      schema_version: "1.0.0",
+    };
+    const disagreements: string[] = [];
+    for (const cp of allCodePoints()) {
+      const payload = {...base, nonce: String.fromCodePoint(cp)};
+      const schemaSaysPresent = isValid("SigningEnvelope", payload);
+      const functionSaysPresent = !missingSigningFields(payload).includes("nonce");
+      const shouldBeBlank = EXPECTED_BLANK_CODE_POINTS.has(cp);
+      if (schemaSaysPresent !== functionSaysPresent || schemaSaysPresent === shouldBeBlank) {
+        disagreements.push(
+          `U+${cp.toString(16).toUpperCase()} schema=${schemaSaysPresent} ` +
+            `fn=${functionSaysPresent} expectedBlank=${shouldBeBlank}`,
+        );
+        if (disagreements.length > 20) break;
+      }
+    }
+    expect(disagreements).toEqual([]);
+  });
+
+  it("agrees with the pinned pattern compiled directly, with and without the u flag", () => {
+    // Ajv chooses the flags; the rule must not depend on that choice either.
+    for (const flags of ["", "u"]) {
+      const compiled = new RegExp(BLANK_PATTERN, flags);
+      const wrong: string[] = [];
+      for (const cp of allCodePoints()) {
+        const hasContent = compiled.test(String.fromCodePoint(cp));
+        if (hasContent === EXPECTED_BLANK_CODE_POINTS.has(cp)) {
+          wrong.push(`U+${cp.toString(16).toUpperCase()}`);
+          if (wrong.length > 20) break;
+        }
+      }
+      expect(wrong, `flags="${flags}"`).toEqual([]);
+    }
+  });
+
+  it("would have failed for the shorthand spelling the ticket removed", () => {
+    // What makes the properties above mean something: they must not be satisfiable by the OLD
+    // pattern. ECMAScript's `\s` excludes U+0085 and includes U+FEFF; Rust's and Python's include
+    // U+0085 and exclude U+FEFF. Same file, two rules — which is the whole finding.
+    const old = new RegExp(SUPERSEDED_SHORTHAND_PATTERN, "u");
+    expect(old.test(String.fromCodePoint(0x85)), "U+0085 was content under ECMAScript").toBe(true);
+    expect(old.test(String.fromCodePoint(0xfeff)), "U+FEFF was blank under ECMAScript").toBe(false);
+    const divergent: string[] = [];
+    for (const cp of allCodePoints()) {
+      if (old.test(String.fromCodePoint(cp)) === EXPECTED_BLANK_CODE_POINTS.has(cp)) {
+        divergent.push(`U+${cp.toString(16).toUpperCase()}`);
+      }
+    }
+    expect(divergent).toEqual(["U+85"]);
+  });
+
+  it("still calls a real value content", () => {
+    // The control. A class that swallowed everything would satisfy every property above.
+    const compiled = new RegExp(BLANK_PATTERN, "u");
+    for (const value of ["x", " padded ", "\ttabbed", "nonce-ext-0001", "é", "\u{1F600}"]) {
+      expect(compiled.test(value), value).toBe(true);
+      const payload = makeSubmission({nonce: value});
+      expect(missingSigningFields(payload), value).toEqual([]);
+      expect(isValid("SigningEnvelope", envelopeOf(payload)), value).toBe(true);
+      expect(isValid("SignedBidSubmission", payload), value).toBe(true);
     }
   });
 });

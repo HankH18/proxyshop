@@ -61,6 +61,52 @@ _NON_BODY_KEYS: frozenset[str] = frozenset(
 #: Prefix on `payload_hash` output, so a digest is self-describing if the algorithm ever moves.
 PAYLOAD_HASH_ALGORITHM = "sha256"
 
+#: Every code point the envelope's blank rule treats as empty. The SAME set
+#: `schemas/protocol.schema.json` enumerates in the five envelope fields' `pattern`.
+#:
+#: Enumerated rather than delegated to `str.strip()`, and enumerated in the schema rather than
+#: spelled `\s`, for one reason: `\s` and `strip()` are engine-dependent. Rust's regex crate
+#: (what pydantic compiles) and Python's `re` read `\s` as Unicode White_Space, which includes
+#: U+0085; ECMAScript (what Ajv compiles) reads it as a fixed list that excludes U+0085 and
+#: includes U+FEFF. `str.strip()` follows `str.isspace()`, which is Unicode White_Space plus
+#: U+001C-U+001F; `String.prototype.trim()` follows ECMAScript. Measured, the split was exactly
+#: two characters — U+0085 blank in Python only, U+FEFF blank in TypeScript only — so the ONE
+#: artifact both languages read described two different rules.
+#:
+#: This set is the UNION of both readings. A union relaxes neither gate (T-108's non-goal): every
+#: character either side already called blank is still blank, and the two disputed characters are
+#: now blank on both sides. `tests/test_signing_envelope.py` walks all of Unicode and fails if
+#: this set and the compiled schema pattern ever disagree; `src/ts/signing.ts` carries the twin.
+BLANK_CODE_POINTS: frozenset[int] = frozenset(
+    {
+        *range(0x09, 0x0E),  # tab, LF, VT, FF, CR
+        *range(0x1C, 0x21),  # the four information separators, and SPACE
+        0x85,  # NEL — Unicode White_Space, but not ECMAScript whitespace
+        0xA0,  # NBSP
+        0x1680,  # OGHAM SPACE MARK
+        *range(0x2000, 0x200B),  # EN QUAD … HAIR SPACE
+        0x2028,  # LINE SEPARATOR
+        0x2029,  # PARAGRAPH SEPARATOR
+        0x202F,  # NARROW NO-BREAK SPACE
+        0x205F,  # MEDIUM MATHEMATICAL SPACE
+        0x3000,  # IDEOGRAPHIC SPACE
+        0xFEFF,  # ZWNBSP — ECMAScript whitespace, but not Unicode White_Space
+    }
+)
+
+
+def is_blank(value: str) -> bool:
+    """True when `value` holds no character the envelope's schema `pattern` would accept.
+
+    The Python half of one rule stated in three places that must not drift: this function, the
+    schema's `pattern`, and `isBlank` in `src/ts/signing.ts`. `str.strip()` is NOT this rule —
+    it treats U+FEFF as content, which the schema and the TypeScript peer do not.
+
+    An empty string is blank, which is what the caller wants: `minLength: 1` and this function
+    then agree that `""` is missing rather than disagreeing about a value with no characters.
+    """
+    return all(ord(char) in BLANK_CODE_POINTS for char in value)
+
 
 class CanonicalisationError(ValueError, TypeError):
     """The one error a caller has to catch around the canonicalizer.
@@ -275,13 +321,17 @@ def missing_signing_fields(payload: Mapping[str, Any]) -> list[str]:
     false` is a constant nonce, which is exactly what D52's replay defence exists to make
     impossible, and `canonical_signing_bytes` calls this function rather than `envelope_of`, so
     the loose gate was the only one on the path.
+
+    "Empty" is `is_blank`, not `str.strip()`. `strip()` is Python's own idea of whitespace and
+    the schema's `pattern` is the shared one; they differed on U+FEFF, so a value the schema
+    called blank was one this function called present. Both now read `BLANK_CODE_POINTS`.
     """
     if not isinstance(payload, Mapping):
         return list(REQUIRED_SIGNING_FIELDS)
     missing = []
     for field in REQUIRED_SIGNING_FIELDS:
         value = payload.get(field)
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str) or is_blank(value):
             missing.append(field)
     return missing
 
@@ -370,6 +420,7 @@ def signing_envelope_errors(payload: Mapping[str, Any]) -> Sequence[str]:
 
 
 __all__ = [
+    "BLANK_CODE_POINTS",
     "PAYLOAD_HASH_ALGORITHM",
     "CanonicalisationError",
     "REQUIRED_SIGNING_FIELDS",
@@ -379,6 +430,7 @@ __all__ = [
     "canonical_json",
     "canonical_signing_bytes",
     "envelope_of",
+    "is_blank",
     "keyring_secret",
     "missing_signing_fields",
     "payload_hash",

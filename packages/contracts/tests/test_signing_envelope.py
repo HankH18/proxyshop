@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 import pytest
+from packages.contracts.signing import BLANK_CODE_POINTS, is_blank
 from pydantic import ValidationError
 
 from packages.contracts import (
@@ -808,4 +810,135 @@ def test_the_schema_states_the_whitespace_rule_where_both_languages_read_it() ->
             assert spec.get("minLength") == 1, (name, field)
             assert spec.get("pattern"), f"{name}.{field} has no non-blank pattern"
             # Length alone is what let `"   "` through; the pattern is the part that closes it.
-            assert "\\s" in spec["pattern"], (name, field, spec["pattern"])
+            #
+            # T-115 REPLACED the assertion that used to stand here, `assert "\\s" in
+            # spec["pattern"]`. That assertion demanded the shorthand class, and the shorthand
+            # class is precisely the defect: `\\s` is Unicode White_Space to Rust's regex crate
+            # (pydantic) and to Python's `re`, and a different fixed list to ECMAScript (Ajv) —
+            # measured, Python and TypeScript disagreed about U+0085 and U+FEFF while reading the
+            # SAME file. A shared contract that means two things is not a contract, so the old
+            # assertion pinned the bug rather than the rule. What is required instead is that the
+            # pattern carry no engine-dependent shorthand at all.
+            pattern = spec["pattern"]
+            for shorthand in ("\\s", "\\S", "\\w", "\\W", "\\d", "\\D", "\\p", "\\P", "\\b"):
+                assert shorthand not in pattern, (name, field, shorthand, pattern)
+            assert pattern.startswith("[^") and pattern.endswith("]"), (name, field, pattern)
+            # ...and it is the ONE class, identical in all ten places, that both languages read.
+            assert pattern == BLANK_PATTERN, (name, field, pattern)
+
+
+# --- T-115: the blank rule is engine-independent, and asserted as a PROPERTY ----------------
+#
+# T-108 closed the min_length asymmetry by putting a `\s`-based class in the schema. `\s` is
+# ENGINE-DEPENDENT -- Unicode White_Space to Rust's regex crate (what pydantic compiles) and to
+# Python's `re`, a different fixed list to ECMAScript (what Ajv compiles) -- so the single artifact
+# whose whole purpose is that both languages read the same contract described two rules, splitting
+# on U+0085 (blank in Python only) and U+FEFF (blank in TypeScript only).
+#
+# It was also pinned by a hand-written list of ~20 spellings, which says nothing about the
+# 1,114,092 code points not on the list. What follows walks EVERY code point instead.
+
+#: The one class, spelled out. Pinned here as a literal rather than read from the schema, so a
+#: change to the schema has to be a deliberate change to this test too -- and pinned identically in
+#: `tests/signing.test.ts`, which is what makes it one rule rather than two that agree today.
+BLANK_PATTERN = (
+    "[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680"
+    "\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]"
+)
+
+#: The spelling T-115 removed, kept so the property tests can prove they would have caught it.
+SUPERSEDED_SHORTHAND_PATTERN = "[^\\s\\u001c-\\u001f]"
+
+#: Every code point there is, minus the surrogates, which are not characters.
+ALL_CODE_POINTS = tuple(cp for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF)
+
+
+def test_the_blank_pattern_and_the_blank_set_agree_on_every_code_point_in_unicode() -> None:
+    """The property, under Python's own engine -- the one `jsonschema` compiles the bundle with.
+
+    Not a list of whitespace spellings someone thought of: every code point, both directions. A
+    character outside `BLANK_CODE_POINTS` must MATCH the class (it is content); a character inside
+    it must not.
+    """
+    compiled = re.compile(BLANK_PATTERN)
+    wrong = [
+        hex(cp)
+        for cp in ALL_CODE_POINTS
+        if bool(compiled.search(chr(cp))) is (cp in BLANK_CODE_POINTS)
+    ]
+    assert wrong == [], f"pattern and BLANK_CODE_POINTS disagree on {wrong[:20]}"
+
+
+def test_the_compiled_schema_and_missing_signing_fields_agree_on_every_code_point() -> None:
+    """The property, under the engine that actually gates data on this side.
+
+    `SigningEnvelope` is validated by pydantic (Rust's regex crate), `missing_signing_fields` is
+    plain Python. Two gates on one rule that disagree is one gate, and it is whichever one the
+    caller happens to be standing on -- so they are compared over all of Unicode, not over a list.
+    """
+    base = {
+        "signer_id": "store-external-1",
+        "key_id": "key-2026-01",
+        "issued_at": "2026-01-01T00:00:00Z",
+        "nonce": "nonce-ext-0001",
+        "schema_version": "1.0.0",
+    }
+    disagreements = []
+    for cp in ALL_CODE_POINTS:
+        char = chr(cp)
+        try:
+            SigningEnvelope.model_validate({**base, "nonce": char})
+            schema_says_present = True
+        except ValidationError:
+            schema_says_present = False
+        function_says_present = "nonce" not in missing_signing_fields({**base, "nonce": char})
+        if schema_says_present != function_says_present or is_blank(char) == schema_says_present:
+            disagreements.append(
+                (hex(cp), schema_says_present, function_says_present, is_blank(char))
+            )
+        if len(disagreements) > 20:
+            break
+    assert disagreements == [], f"the two gates disagree: {disagreements}"
+
+
+def test_the_shorthand_spelling_the_ticket_removed_would_fail_this_property() -> None:
+    """The test that makes the two above mean something.
+
+    A property test that passed for the OLD pattern too would prove nothing about the fix. This
+    reproduces T-115's finding directly: under Python's engine the superseded class calls U+0085
+    blank and U+FEFF content, which is the opposite of what ECMAScript's shorthand says, so it
+    cannot agree with a set that has to mean one thing in both languages.
+    """
+    old = re.compile(SUPERSEDED_SHORTHAND_PATTERN)
+    assert not old.search(chr(0x85)), "python's engine no longer calls U+0085 whitespace"
+    assert old.search(chr(0xFEFF)), "python's engine now calls U+FEFF whitespace"
+    assert 0x85 in BLANK_CODE_POINTS and 0xFEFF in BLANK_CODE_POINTS
+    divergent = [
+        hex(cp) for cp in ALL_CODE_POINTS if bool(old.search(chr(cp))) is (cp in BLANK_CODE_POINTS)
+    ]
+    assert divergent == ["0xfeff"], divergent
+
+
+def test_the_union_relaxes_neither_side_of_the_old_split() -> None:
+    """T-108's non-goal: converge on the strict gate, never the loose one.
+
+    Every character either engine already called blank is still blank. The set grew by exactly the
+    two characters the engines disagreed about; nothing that used to be refused is now admitted.
+    """
+    python_blank = {cp for cp in ALL_CODE_POINTS if chr(cp).isspace()}
+    assert python_blank <= BLANK_CODE_POINTS, sorted(
+        hex(cp) for cp in python_blank - BLANK_CODE_POINTS
+    )
+    still_blank = [
+        hex(cp) for cp in ALL_CODE_POINTS if chr(cp).strip() == "" and not is_blank(chr(cp))
+    ]
+    assert still_blank == [], still_blank
+
+
+def test_a_real_value_is_still_content_under_the_new_class() -> None:
+    """The control. A class that swallowed everything would satisfy every property above."""
+    compiled = re.compile(BLANK_PATTERN)
+    for value in ("x", " padded ", "\ttabbed", "nonce-ext-0001", "é", "\U0001f600"):
+        assert compiled.search(value), repr(value)
+        assert not is_blank(value), repr(value)
+        assert missing_signing_fields(make_submission(nonce=value)) == []

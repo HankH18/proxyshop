@@ -289,10 +289,16 @@ export interface Bid {
  * alone admits `"   "`, which `contracts.signing.missing_signing_fields` strips and calls
  * MISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,
  * so the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no
- * schema should admit one. The class is spelled `[^\s\u001c-\u001f]` rather than `\S`
- * because Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as
- * whitespace: `\S` alone would leave those four characters disagreeing with the very
- * function this pattern exists to match.
+ * schema should admit one. The class ENUMERATES every blank character instead of spelling `\s`, and that is the whole
+ * point of this artifact. `\s` is engine-dependent: Rust's regex crate (what pydantic compiles)
+ * and Python's `re` read it as Unicode White_Space, which INCLUDES U+0085; ECMAScript (what Ajv
+ * compiles) reads it as a fixed list that EXCLUDES U+0085 and includes U+FEFF. The one file both
+ * languages read therefore stated two different rules, and Python and TypeScript disagreed about
+ * U+0085 and U+FEFF. The set below is the union of both readings plus U+001C-U+001F, which
+ * Python's `str.strip()` removes and Unicode does not classify as whitespace - so it is at least
+ * as strict as either gate was and relaxes neither. `contracts.signing.is_blank` and `isBlank`
+ * in `src/ts/signing.ts` implement exactly this set; a property test in each suite walks every
+ * code point in Unicode and fails if the compiled pattern and the function ever disagree.
  *
  * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
  * via the `definition` "SigningEnvelope".
@@ -317,10 +323,16 @@ export interface SigningEnvelope {
  * alone admits `"   "`, which `contracts.signing.missing_signing_fields` strips and calls
  * MISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,
  * so the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no
- * schema should admit one. The class is spelled `[^\s\u001c-\u001f]` rather than `\S`
- * because Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as
- * whitespace: `\S` alone would leave those four characters disagreeing with the very
- * function this pattern exists to match.
+ * schema should admit one. The class ENUMERATES every blank character instead of spelling `\s`, and that is the whole
+ * point of this artifact. `\s` is engine-dependent: Rust's regex crate (what pydantic compiles)
+ * and Python's `re` read it as Unicode White_Space, which INCLUDES U+0085; ECMAScript (what Ajv
+ * compiles) reads it as a fixed list that EXCLUDES U+0085 and includes U+FEFF. The one file both
+ * languages read therefore stated two different rules, and Python and TypeScript disagreed about
+ * U+0085 and U+FEFF. The set below is the union of both readings plus U+001C-U+001F, which
+ * Python's `str.strip()` removes and Unicode does not classify as whitespace - so it is at least
+ * as strict as either gate was and relaxes neither. `contracts.signing.is_blank` and `isBlank`
+ * in `src/ts/signing.ts` implement exactly this set; a property test in each suite walks every
+ * code point in Unicode and fails if the compiled pattern and the function ever disagree.
  *
  * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
  * via the `definition` "SignedBidSubmission".
