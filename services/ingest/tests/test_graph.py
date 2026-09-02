@@ -3529,3 +3529,59 @@ def test_a_catalog_with_nothing_embeddable_says_so_instead_of_answering_nothing(
         c.product_id
         for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
     ] == ["p-void-a"], "one embeddable product must be enough; T-116 is not walked back"
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_read_back_checks_every_id_it_claims_to_not_just_the_first(
+    graph_schema_session: Any, graph_source: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-129 (ingest 1): the backstop is graded — this widens the grade to the whole list.
+
+    Deleting ``unresolved = _still_embedded(session, report.skipped)`` outright already
+    turns ``test_the_degraded_state_is_checked_against_the_graph_not_merely_claimed`` red,
+    so the claim that the backstop is ungraded does not survive contact with the tree (the
+    RED is quoted in this commit's message). What that test cannot see is a backstop that
+    *runs* but checks less than it claims: it skips exactly one product, so reading back
+    only the first id is indistinguishable from reading back all of them.
+
+    Here two products are skipped and only the SECOND keeps its vector, which no partial
+    read-back can find. ``degraded`` asserts "every product this pass skipped now has no
+    vector"; a check over a prefix of that list is a claim about a prefix, and the marker
+    does not make a claim about a prefix.
+    """
+    from ingest.graph import EMBEDDING_RUN_RUNNING, EmbeddingRunIncomplete, embedding_run
+    from ingest.graph.upsert import clear_product_embedding as _real_clear
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-keeper", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-aa-clears", "Loses Its Name Cleanly"), source=graph_source)
+    upsert_product(session, Product("p-zz-sticks", "Loses Its Name Messily"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).complete
+
+    session.run(
+        "MATCH (p:Product) WHERE p.product_id IN ['p-aa-clears', 'p-zz-sticks'] "
+        "SET p.canonical_name = ''"
+    ).consume()
+
+    def _clears_all_but_the_last(session: Any, *, product_id: str) -> bool:
+        """Remove every vector except the last skipped product's."""
+        if product_id == "p-zz-sticks":
+            return False
+        return _real_clear(session, product_id=product_id)
+
+    monkeypatch.setattr("ingest.graph.reembed.clear_product_embedding", _clears_all_but_the_last)
+
+    report = reembed_products(session, _SecondProvider())
+    assert report.skipped == ["p-aa-clears", "p-zz-sticks"], "sorted: the stale one is second"
+    assert products_missing_embeddings(session) == ["p-aa-clears"], (
+        "only the first skip really lost its vector; the second is stale in a foreign space"
+    )
+
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_RUNNING, (
+        "a read-back that stops before the end of the skip list certifies a lie about the "
+        f"rest of it; got {run.state!r}"
+    )
+    with pytest.raises(EmbeddingRunIncomplete):
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
