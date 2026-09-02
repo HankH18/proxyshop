@@ -34,6 +34,7 @@ in the T-012 completion report so D6's text can be repaired at the source.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -334,18 +335,45 @@ def rebuild_vector_index(
 #: the catalog. Nothing in the graph recorded who wrote the vectors — so now something does.
 EMBEDDING_RUN_LABEL = "EmbeddingRun"
 
-#: A pass that has started writing and has not yet reported completion. A marker left in
-#: this state is the *only* evidence that an interrupted pass has mixed two vector spaces
-#: into one index — the per-product writes auto-commit, so nothing rolls back. W2-03: a pass
-#: that ran to the end but could not embed every product it read is left in this state too.
-#: "Reached the last batch" is not the question the marker answers; "covers the whole
-#: catalog" is, and a pass that skipped products does not.
+#: A pass that has started writing and has **not reached its end**. A marker left in this
+#: state is the *only* evidence that an interrupted pass has mixed two vector spaces into
+#: one index — the per-product writes auto-commit, so nothing rolls back. This is the one
+#: state a vector query cannot be answered under, because "which space is this vector in"
+#: has no single answer for the index as a whole.
+#:
+#: It is written by the opening stamp and cleared by the closing one. A pass that *reaches*
+#: its end never leaves it here, however many products it had to skip: see
+#: :data:`EMBEDDING_RUN_DEGRADED`.
 EMBEDDING_RUN_RUNNING = "running"
 
-#: A pass that wrote every product it read — and nothing weaker. Stamped from
-#: :attr:`ingest.graph.reembed.ReembedReport.complete`, so the marker in the graph and the
-#: report handed back to the operator cannot disagree about the same pass.
+#: A pass that reached its end and wrote every product it read — and nothing weaker.
+#: Stamped from :attr:`ingest.graph.reembed.ReembedReport.complete`, so the marker in the
+#: graph and the report handed back to the operator cannot disagree about the same pass.
 EMBEDDING_RUN_COMPLETE = "complete"
+
+#: A pass that reached its end having **skipped** products it could not embed (T-116).
+#:
+#: This is a *terminal* state and deliberately not :data:`EMBEDDING_RUN_COMPLETE`: the pass
+#: did not cover the whole catalog, :attr:`EmbeddingRun.complete` stays ``False``, and the
+#: ids it could not embed are recorded on the marker. What it is *not* is the mixed-space
+#: hazard :data:`EMBEDDING_RUN_RUNNING` describes. Every vector now in the index was written
+#: by this pass's provider — a skipped product's stale vector is *removed*, not left behind
+#: (:func:`ingest.graph.reembed.reembed_products`) — so cosine across the index is
+#: single-space and honest, and the skipped products are simply absent from it.
+#:
+#: Why the distinction has to exist: folding the two into one state made a *catalog-wide*
+#: outage out of a *one-product* fact. One Product whose ``canonical_name`` went empty
+#: upstream left the marker open, and :func:`ingest.graph.query.candidate_products` then
+#: refused every vector query in the system — with a remediation (re-run the pass) that
+#: skips the same product again and so never terminates. The degradation belongs to that
+#: product: it has no vector, :func:`ingest.graph.query.products_missing_embeddings` names
+#: it, and the rest of the catalog stays retrievable.
+EMBEDDING_RUN_DEGRADED = "degraded"
+
+#: The states that mean "this pass reached its end", i.e. every vector in the index was
+#: written by the recorded provider. The complement is exactly
+#: :data:`EMBEDDING_RUN_RUNNING`, and the complement is what a vector query must refuse on.
+EMBEDDING_RUN_FINISHED_STATES = frozenset({EMBEDDING_RUN_COMPLETE, EMBEDDING_RUN_DEGRADED})
 
 _RECORD_EMBEDDING_RUN = f"""
 MERGE (r:{EMBEDDING_RUN_LABEL} {{index: $index}})
@@ -353,20 +381,21 @@ SET r.provider = $provider,
     r.dimension = $dimension,
     r.state = $state,
     r.products = $products,
-    r.embedded = $embedded
+    r.embedded = $embedded,
+    r.skipped = $skipped
 """
 
 _READ_EMBEDDING_RUN = f"""
 MATCH (r:{EMBEDDING_RUN_LABEL} {{index: $index}})
 RETURN r.provider AS provider, r.dimension AS dimension, r.state AS state,
-       r.products AS products, r.embedded AS embedded
+       r.products AS products, r.embedded AS embedded, r.skipped AS skipped
 LIMIT 1
 """
 
 
 @dataclass(frozen=True)
 class EmbeddingRun:
-    """Who wrote the vectors in one vector index, and whether they finished writing."""
+    """Who wrote the vectors in one vector index, and how far the pass got."""
 
     index: str
     provider: str
@@ -374,11 +403,33 @@ class EmbeddingRun:
     state: str
     products: int = 0
     embedded: int = 0
+    #: The product ids the pass read but could not embed, sorted. Non-empty exactly when
+    #: :data:`state` is :data:`EMBEDDING_RUN_DEGRADED`. Recorded rather than counted so the
+    #: operator is handed the finite list of catalog rows to fix, which is what makes the
+    #: remediation terminate.
+    skipped: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
-        """True when the recorded pass reported completion."""
+        """True when the recorded pass covered the whole catalog.
+
+        The strong claim, and the one an audit wants: the pass reached its end **and**
+        embedded every product it read. A :data:`EMBEDDING_RUN_DEGRADED` pass is ``False``
+        here — it left products unembedded — which is why the marker can never certify a
+        partial pass as whole.
+        """
         return self.state == EMBEDDING_RUN_COMPLETE
+
+    @property
+    def finished(self) -> bool:
+        """True when the recorded pass reached its end, however many products it skipped.
+
+        The *weaker* claim, and the only one a vector query needs: every vector currently in
+        the index was written by :attr:`provider`, so cosine over it is single-space. A
+        query must not read :attr:`complete` for this — doing so turned one unembeddable
+        product into a refusal of every vector query in the catalog (T-116).
+        """
+        return self.state in EMBEDDING_RUN_FINISHED_STATES
 
 
 def record_embedding_run(
@@ -389,6 +440,7 @@ def record_embedding_run(
     state: str,
     products: int = 0,
     embedded: int = 0,
+    skipped: Sequence[str] = (),
     index: str = VECTOR_INDEX_NAME,
 ) -> EmbeddingRun:
     """Stamp the index with the identity of the pass writing into it.
@@ -402,14 +454,19 @@ def record_embedding_run(
         session: an open ``neo4j.Session`` or transaction.
         provider: :attr:`ingest.embeddings.EmbeddingProvider.name` of the writer.
         dimension: the width of the vectors being written.
-        state: :data:`EMBEDDING_RUN_RUNNING` or :data:`EMBEDDING_RUN_COMPLETE`.
+        state: :data:`EMBEDDING_RUN_RUNNING`, :data:`EMBEDDING_RUN_COMPLETE` or
+            :data:`EMBEDDING_RUN_DEGRADED`.
         products: how many products the pass read.
         embedded: how many it wrote.
+        skipped: the ids it read but could not embed. Written on every stamp, including the
+            opening one, so the *previous* pass's skip list cannot survive into this pass's
+            marker and name products this pass embedded fine.
         index: the vector index the marker describes.
 
     Returns:
         The :class:`EmbeddingRun` as recorded.
     """
+    skipped_ids = tuple(str(product_id) for product_id in skipped)
     session.run(
         _RECORD_EMBEDDING_RUN,
         index=index,
@@ -418,6 +475,7 @@ def record_embedding_run(
         state=state,
         products=int(products),
         embedded=int(embedded),
+        skipped=list(skipped_ids),
     ).consume()
     return EmbeddingRun(
         index=index,
@@ -426,6 +484,7 @@ def record_embedding_run(
         state=state,
         products=int(products),
         embedded=int(embedded),
+        skipped=skipped_ids,
     )
 
 
@@ -453,6 +512,10 @@ def embedding_run(session: Any, *, index: str = VECTOR_INDEX_NAME) -> EmbeddingR
         state=str(row["state"]),
         products=int(row["products"] or 0),
         embedded=int(row["embedded"] or 0),
+        # `or ()` and not a required property: a marker written before `skipped` existed
+        # reads back NULL, and an old marker must degrade to "no skips recorded" rather
+        # than crash the read path that every vector query goes through.
+        skipped=tuple(str(product_id) for product_id in (row["skipped"] or ())),
     )
 
 
@@ -460,6 +523,8 @@ __all__ = [
     "ADAPTER_LOOKUP_INDEXES",
     "EMBEDDING_PROPERTY",
     "EMBEDDING_RUN_COMPLETE",
+    "EMBEDDING_RUN_DEGRADED",
+    "EMBEDDING_RUN_FINISHED_STATES",
     "EMBEDDING_RUN_LABEL",
     "EMBEDDING_RUN_RUNNING",
     "LOOKUP_INDEXES",
