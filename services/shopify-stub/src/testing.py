@@ -36,10 +36,18 @@ SEED_VARIANT: dict[str, Any] = {
 #: ``PUT /_stub/config`` and the three live-URL emit sites to the same table — and a test
 #: module under pytest's ``importlib`` import mode cannot import a sibling.
 #:
-#: The first two entries are the ones that cost something: they render a *live* checkout link
-#: whose real host is ``attacker.tld``. The last two are the response-splitting pair — a bare
-#: LF in a ``Location`` header ends the header, and Python's ``$`` anchor (which
-#: :data:`~shopify_stub.permalink._LABEL` used to use) matches immediately before one.
+#: The two ``userinfo`` entries are the ones that cost something: they render a *live*
+#: checkout link whose real host is ``attacker.tld``.
+#:
+#: The response-splitting entries are the **four** named
+#: :data:`RESPONSE_SPLITTING_HOSTS` — a bare LF in a ``Location`` header ends the header,
+#: and Python's ``$`` anchor (which :data:`~shopify_stub.permalink._LABEL` used to use)
+#: matches immediately before a trailing one. They are named rather than counted because
+#: the comment here used to say "the last two", which stopped being true the moment the
+#: table grew: ``trailing lf`` and ``trailing crlf`` sit at positions 15 and 16 of 18, so
+#: "the last two" pointed at ``embedded lf`` and ``header injection`` while describing the
+#: trailing pair. Positional prose about a literal that anyone may append to is prose that
+#: goes stale silently.
 NON_BARE_HOSTS: dict[str, str] = {
     "userinfo": "good.example.com@attacker.tld",
     "escaped userinfo": "store-a.example.com\\@attacker.tld",
@@ -60,6 +68,15 @@ NON_BARE_HOSTS: dict[str, str] = {
     "embedded lf": "store-a\n.example.com",
     "header injection": "evil.tld\nX-Injected: yes",
 }
+
+#: The keys of :data:`NON_BARE_HOSTS` whose value carries a CR or an LF — the
+#: response-splitting subset, named so the prose above cannot go stale against the table.
+#: ``test_stub_domain_guard.test_the_response_splitting_subset_is_named_not_counted`` holds
+#: this set and the table to each other in both directions, so adding a fifth CR/LF entry
+#: without naming it here is a red test rather than a quietly wrong comment.
+RESPONSE_SPLITTING_HOSTS: frozenset[str] = frozenset(
+    {"trailing lf", "trailing crlf", "embedded lf", "header injection"}
+)
 
 #: The ``discountCodeBasicCreate`` document, written as a real caller writes it: a named
 #: operation with variables and an explicit selection set, so the stub's parser meets the
@@ -342,6 +359,7 @@ __all__ = [
     "DISCOUNT_MUTATION",
     "NON_BARE_HOSTS",
     "ORDERS_QUERY",
+    "RESPONSE_SPLITTING_HOSTS",
     "SEED_VARIANT",
     "SUBSCRIBE_MUTATION",
     "WEB_PIXEL_MUTATION",

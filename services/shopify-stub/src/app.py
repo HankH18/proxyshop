@@ -33,7 +33,8 @@ Route                                          Method  What it is
 ``/_stub/orders/{id}/refund``                  POST    → ``refunds/create``
 ``/_stub/events``                              GET     Emitted pixel events
 ``/_stub/events/suppressed``                   GET     Events that did NOT fire
-``/_stub/webhooks/deliveries``                 GET     Every delivery attempt
+``/_stub/webhooks/deliveries``                 GET     One row per delivery, with its
+                                                       attempt count
 ============================================== ======= =============================
 
 **Operational**: ``GET /healthz``.

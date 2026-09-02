@@ -20,8 +20,10 @@ What is asserted here, and why each one matters:
 
 from __future__ import annotations
 
+import inspect
 import json
 
+from shopify_stub.graphql_admin import _resolve_web_pixel_create
 from shopify_stub.testing import SEED_VARIANT, RecordingReceiver, StubClient
 
 VARIANT_ID = int(SEED_VARIANT["variant_id"])
@@ -294,3 +296,65 @@ async def test_a_typo_in_a_config_key_is_refused(stub: StubClient) -> None:
     response = await stub.configure(pixel_droprate=0.5)
     assert response.status_code == 400
     assert "pixel_droprate" in response.json()["errors"]
+
+
+async def test_installing_a_pixel_does_not_change_the_firing_mode(
+    stub: StubClient, collector_receiver: Receiver
+) -> None:
+    """``webPixelCreate`` records a pixel. It does not decide whether the pixel fires.
+
+    The mutation's docstring used to claim it "turns firing **on**", and that "a store with
+    no pixel installed is the non-firing case". Neither was ever true, and both were
+    reachable in one run: ``_resolve_web_pixel_create`` never assigns ``pixel_mode``, and
+    :meth:`PixelEmitter.should_emit` never reads ``state.web_pixels``.
+    """
+    receiver, collector_url = collector_receiver
+
+    # 1. Nothing installed, and the pixel fires anyway: `pixel_mode` defaults to ON, and
+    #    an empty `web_pixels` is not the non-firing case.
+    assert (await stub.config())["pixel_collector_url"] is None
+    first = await stub.buy(VARIANT_ID)
+    assert first["pixel_event_emitted"] is True
+    assert first["pixel_event_posted"] is False, "nothing installed, so nowhere to post it"
+    assert len(await stub.events()) == 1
+    assert receiver.requests == []
+
+    # 2. An explicit `off` survives an install, even one pointed at a live collector. It
+    #    must: the mode is the caller's statement about whether the beacon fires, and an
+    #    install that silently overrode it would collapse "not installed" into "installed
+    #    and dropping everything" — the distinction PixelMode exists to keep.
+    assert (await stub.configure(pixel_mode="off")).status_code == 200
+    installed = await stub.install_pixel(collector_url)
+    assert installed.status_code == 200, installed.text
+    assert installed.json()["data"]["webPixelCreate"]["webPixel"]["id"]
+
+    config = await stub.config()
+    assert config["pixel_mode"] == "off", "installing a pixel must not turn firing back on"
+    assert config["pixel_collector_url"] == collector_url, "the install DID set the collector"
+
+    second = await stub.buy(VARIANT_ID)
+    assert second["pixel_event_emitted"] is False
+    assert len(await stub.events()) == 1, "still one event: the install fired nothing"
+    (suppressed,) = await stub.suppressed()
+    assert suppressed["reason"] == "not_firing"
+    assert receiver.requests == [], "a non-firing pixel posts nothing to the collector"
+
+    # 3. The webhook is unaffected, as every test in this file checks.
+    assert second["webhook_deliveries"] == []
+
+
+def test_the_web_pixel_mutation_docstring_matches_what_it_touches() -> None:
+    """Anti-drift for the prose above: the resolver must not learn to write ``pixel_mode``.
+
+    A docstring cannot be pinned by behaviour alone, so this reads the resolver's own source
+    and asserts the two facts the docstring now states: it assigns ``pixel_collector_url``
+    and it never assigns ``pixel_mode``.
+    """
+    source = inspect.getsource(_resolve_web_pixel_create)
+    body = source.replace(_resolve_web_pixel_create.__doc__ or "", "")
+    assert "pixel_collector_url" in body, (
+        "the resolver no longer sets the collector url; its docstring says it does"
+    )
+    assert "pixel_mode" not in body, (
+        "the resolver's body now touches pixel_mode; its docstring says it does not"
+    )

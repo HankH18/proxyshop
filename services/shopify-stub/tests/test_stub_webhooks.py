@@ -484,3 +484,55 @@ async def test_the_topic_header_names_the_topic_that_fired(
 
     topics = [request["headers"][HEADER_TOPIC.lower()] for request in receiver.requests]
     assert topics == ["orders/paid", "orders/fulfilled", "refunds/create"]
+
+
+async def test_the_delivery_log_holds_one_row_per_delivery_not_per_attempt(
+    stub: StubClient, flaky_webhook_receiver: Receiver
+) -> None:
+    """The shape of the log, which `WebhookDelivery`'s docstring used to describe wrongly.
+
+    It said "the record of one delivery attempt … every attempt lands here", which reads as
+    a row per attempt. `WebhookDispatcher.dispatch` retries *inside* one record and appends
+    it once, after the loop, so three attempts are one row with `attempts == 3` — and
+    `status_code`/`error` hold the LAST attempt's outcome, not the first failure's.
+
+    Asserted against `/_stub/webhooks/deliveries` (the whole log) rather than the
+    completion response, because the completion response only ever carries the deliveries
+    from its own dispatch and could not see a per-attempt row anyway.
+    """
+    receiver, url = flaky_webhook_receiver
+    await stub.subscribe("ORDERS_PAID", url)
+    await stub.buy(VARIANT_ID)
+
+    assert len(receiver.requests) == 3, "three POSTs really were made — 500, 503, then 200"
+
+    log = await stub.deliveries()
+    assert len(log) == 1, f"one row per delivery, not one per attempt; got {len(log)}"
+    (row,) = log
+    assert row["attempts"] == 3, "the count is what carries the retries"
+    assert row["delivered"] is True
+    assert row["status_code"] == 200, "the row holds the LAST attempt's status, not the 500"
+    assert row["error"] is None, "and the last attempt succeeded, so no error survives"
+
+
+async def test_a_second_subscriber_is_a_second_row(
+    stub: StubClient, webhook_receiver: Receiver, flaky_webhook_receiver: Receiver
+) -> None:
+    """The other half of "one row per (dispatch, subscription)".
+
+    Without this, `len(log) == 1` above is equally consistent with "the log only ever holds
+    one row", which would make that assertion prove nothing.
+    """
+    good_receiver, good_url = webhook_receiver
+    flaky_receiver, flaky_url = flaky_webhook_receiver
+    await stub.subscribe("ORDERS_PAID", good_url)
+    await stub.subscribe("ORDERS_PAID", flaky_url)
+    await stub.buy(VARIANT_ID)
+
+    log = await stub.deliveries()
+    assert len(log) == 2, "two subscriptions, one dispatch, two rows"
+    by_url = {row["callback_url"]: row for row in log}
+    assert by_url[good_url]["attempts"] == 1
+    assert by_url[flaky_url]["attempts"] == 3
+    assert len(good_receiver.requests) == 1
+    assert len(flaky_receiver.requests) == 3

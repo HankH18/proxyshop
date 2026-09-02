@@ -468,10 +468,29 @@ def _resolve_web_pixel_create(
 ) -> dict[str, Any]:
     """Install the web pixel. ``webPixel: {settings: …}``.
 
-    Installing the pixel turns firing **on**: a store with no pixel installed is the
-    non-firing case, and conflating "not installed" with "installed but configured to drop
-    everything" is the exact distinction :class:`~shopify_stub.state.PixelMode` exists to
-    keep.
+    What this actually does, stated exactly, because the prose here used to claim two things
+    the code does not do:
+
+    * it records a :class:`~shopify_stub.state.WebPixel` in ``state.web_pixels``, and
+    * when ``settings.collectorUrl`` is a non-empty string, it points
+      ``state.pixel_collector_url`` at it, which is what makes
+      ``POST /_stub/checkouts/{token}/complete`` forward an emitted event to a collector.
+
+    It does **not** touch :attr:`~shopify_stub.state.StubConfig.pixel_mode`. Installing a
+    pixel into a stub configured ``pixel_mode=off`` leaves it off, deliberately: the mode is
+    the caller's explicit statement about whether the beacon fires, and an install that
+    silently overrode it would destroy the very distinction
+    :class:`~shopify_stub.state.PixelMode` exists to keep.
+
+    Nor is "no pixel installed" the non-firing case. :meth:`PixelEmitter.should_emit` never
+    reads ``state.web_pixels``; ``pixel_mode`` alone decides, and it defaults to ``ON``. A
+    stub that has never seen this mutation still emits ``checkout_completed`` events — see
+    ``test_stub_events.test_a_lossless_pixel_emits_one_event_per_checkout``, which buys four
+    times without installing anything. "Not installed" is modelled by ``PixelMode.OFF``,
+    whose own docstring says so; it is not inferred from an empty ``web_pixels``.
+
+    Both halves are pinned by
+    ``test_stub_events.test_installing_a_pixel_does_not_change_the_firing_mode``.
     """
     payload = arguments.get("webPixel")
     if not isinstance(payload, dict):

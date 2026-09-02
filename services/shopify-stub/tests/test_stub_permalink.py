@@ -262,3 +262,32 @@ def test_host_matches_does_not_report_a_port_bearing_host_as_the_registered_doma
     """
     with pytest.raises(PermalinkError):
         host_matches(f"https://{SELLER_DOMAIN}:8443/cart/1:1?discount={CODE}", SELLER_DOMAIN)
+
+
+@pytest.mark.parametrize(
+    ("label", "code"),
+    [
+        ("accented latin", "PSX-CAFÉ"),
+        ("precomposed", "PSX-CAFÉ"),
+        ("cjk", "PSX-中文"),
+        ("emoji", "PSX-\U0001f600"),
+        ("a space", "PSX A B"),
+        ("a slash", "PSX/AB"),
+        ("a question mark", "PSX?AB"),
+        ("an ampersand", "PSX&AB"),
+    ],
+)
+def test_a_non_ascii_discount_code_still_builds_and_round_trips(label: str, code: str) -> None:
+    """The blast-radius control for T-118 (d)'s tightening of ``_FORBIDDEN_IN_PATH``.
+
+    ``store_url``'s path guard is now an allow-list of printable ASCII. The discount code
+    is **not** subject to it: ``build_permalink`` percent-encodes the code with
+    ``quote(code, safe='')`` and appends it *after* ``store_url`` has returned, so the guard
+    never sees it. Narrowing the path guard must therefore leave every legal code legal —
+    and a code is free-form merchant text, so refusing non-ASCII ones would be a real
+    regression rather than a tightening.
+    """
+    url = build_permalink(shop_domain=SELLER_DOMAIN, variant_id=1, code=code)
+    assert url.startswith(f"https://{SELLER_DOMAIN}/cart/1:1?discount=")
+    assert url.isascii(), "the rendered URL is percent-encoded, so it is ASCII on the wire"
+    assert parse_permalink(url).code == code, "and it decodes back to the caller's code"

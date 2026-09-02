@@ -252,3 +252,35 @@ async def test_a_cursor_the_stub_itself_issued_always_survives_validation(
         assert is_cursor(edge["cursor"])
     second = (await stub.orders(first=2, after=first_page["pageInfo"]["endCursor"])).json()
     assert len(second["data"]["orders"]["edges"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("label", "amount", "message"),
+    [
+        ("zero", "0.00", "refund amount must be positive"),
+        ("negative", "-5.00", "refund amount must be positive"),
+        ("more than the order", "1000.00", "exceeds refundable remainder"),
+    ],
+)
+async def test_every_refusal_in_refund_orders_raises_clause(
+    stub: StubClient, label: str, amount: str, message: str
+) -> None:
+    """`refund_order`'s Raises clause named one of its two refusals, and neither was tested.
+
+    It documented only "the refund would exceed what remains refundable" while the code
+    also raises `ValueError("refund amount must be positive")` for a zero or negative
+    amount — so a caller reading the clause would have expected `amount=0` to record a
+    zero refund. Both spellings are now in the docstring and both are pinned here, along
+    with the 409 the route maps them to and the fact that a refused refund changes nothing.
+    """
+    result = await stub.buy(VARIANT_ID)
+    order_id = result["order_id"]
+
+    response = await stub.refund(order_id, amount=amount)
+    assert response.status_code == 409, f"{label}: {response.text}"
+    assert message in response.json()["errors"]
+
+    # A refused refund is all-or-nothing: no refund recorded, status untouched.
+    accepted = await stub.refund(order_id, amount="1.00")
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["financial_status"] == "partially_refunded"
