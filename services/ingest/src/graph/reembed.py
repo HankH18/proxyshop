@@ -212,6 +212,14 @@ def reembed_products(
       :func:`ingest.graph.query.products_missing_embeddings` names them. One unembeddable
       product degrades itself, not the catalog (T-116).
 
+      With one exception, and it is the floor of that narrowing: when ``embedded == 0`` —
+      every product read was unembeddable — ``degraded`` is still recorded and the index is
+      still single-space, but single-space and *queryable* part company, because there is
+      no vector in it to rank. :func:`ingest.graph.query.candidate_products` refuses with
+      :class:`~ingest.graph.query.EmbeddingIndexEmpty` there rather than answering ``[]``,
+      and :func:`main` exits ``3`` and says so instead of printing the advisory that the
+      catalog is queryable without the skipped rows.
+
     A product whose composed text is empty is skipped, and any vector a previous pass left
     on it is *removed* rather than left behind in that pass's vector space. That removal is
     what makes ``degraded`` honest: it is the reason the index is single-space even when the
@@ -435,10 +443,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         rather than inferred from this process's report, so the operator's exit code and the
         catalog's own state cannot disagree about the same pass.
 
-        * ``0`` — the pass reached a terminal, queryable state:
-          :data:`~ingest.graph.schema.EMBEDDING_RUN_COMPLETE` when it embedded every
-          product, :data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED` when it could not and
-          said which on stderr. **Not** an error, and this is load-bearing: this command is
+        * ``0`` — the pass reached a terminal state the vector path really can be queried
+          under: :data:`~ingest.graph.schema.EMBEDDING_RUN_COMPLETE` when it embedded every
+          product, or :data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED` when it embedded
+          **at least one** and said on stderr which it could not. **Not** an error, and this
+          is load-bearing: this command is
           the remediation :class:`~ingest.graph.query.EmbeddingRunIncomplete` names, and it
           used to return ``1`` for exactly the state that message sends the operator to.
           An operator (or a CI step) reading a non-zero status as "it failed, run it again"
@@ -450,6 +459,14 @@ def main(argv: Sequence[str] | None = None) -> int:
           :data:`~ingest.graph.schema.EMBEDDING_RUN_RUNNING` and vector queries refuse.
           Re-running does not fix this; the stale vectors have to go.
         * ``2`` — the provider's width does not match the live index. Nothing was written.
+        * ``3`` — the pass reached its end and embedded **nothing**: it read products and
+          every one of them was unembeddable, so :data:`~ingest.graph.schema.VECTOR_INDEX_NAME`
+          now holds no vector at all and
+          :class:`~ingest.graph.query.EmbeddingIndexEmpty` refuses every vector query. The
+          marker is still ``degraded`` and the index is still single-space — this status is
+          the one place where "single-space" stops implying "queryable", which is the floor
+          of the T-116 per-product narrowing. Re-running is a fixed point: the same rows
+          still have no text. The remediation is a catalog edit, and stderr says so.
     """
     args = build_parser().parse_args(argv)
     provider = get_embedding_provider(args.provider)
@@ -497,10 +514,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    if run.products > 0 and run.embedded == 0:
+        # The floor of the T-116 narrowing, read off the marker with the SAME predicate
+        # `ingest.graph.query._check_vector_path` evaluates, so the operator's status line
+        # and the refusal a query gets on this identical graph cannot disagree.
+        #
+        # Falling through to the advisory below printed "The index is single-space and
+        # queryable without them" about an index that answers NOTHING: every vector query
+        # raises `EmbeddingIndexEmpty`. Both halves of that sentence were wrong at once —
+        # the index is queryable *without* the skipped rows only while some other row is in
+        # it, and here there is no other row. Exiting 0 said the same thing in the one
+        # signal a CI step reads.
+        print(
+            f"FATAL: every product read was unembeddable, so {VECTOR_INDEX_NAME} now holds "
+            f"no vectors at all. The marker records {state!r} and the index is still "
+            f"single-space, but there is nothing in it to rank: every vector query refuses "
+            f"with EmbeddingIndexEmpty instead of answering an empty shortlist. (A "
+            f"structured query — attributes, category, ingredients, brand — never touches "
+            f"the index and still works.) Re-running this command is a fixed point: the "
+            f"same rows have no text to embed. Give the products listed above embeddable "
+            f"text — that is a catalog edit — and then re-run it.",
+            file=sys.stderr,
+        )
+        return 3
     if report.skipped:
         print(
-            "  ^ these have no embeddable text. The index is single-space and queryable "
-            "without them; fixing them is a catalog edit, not another re-embed.",
+            "  ^ these have no embeddable text. The rest of the catalog is single-space and "
+            "queryable without them; fixing them is a catalog edit, not another re-embed.",
             file=sys.stderr,
         )
     return 0
