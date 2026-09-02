@@ -1508,8 +1508,8 @@
     },
     {
       "id": "T-106",
-      "title": "One JCS canonicalizer, or a conformance gate that both must pass",
-      "objective": "T-010 and T-011 each wrote an RFC-8785 canonicalizer. They now agree byte-for-byte after both adopted float(v)==v, verified over ~1.5M inputs, but nothing in the repo tests both together and D16 says nothing outside apps/trust/src/ledger defines its own hashing while D52 says there is exactly one signing implementation. Also apps/trust/src/ledger has the dual-spelling problem T-014 solved with _bind_submodules: trust.ledger.canonical is not apps.trust.src.ledger.canonical, so a cross-spelling except CanonicalisationError fails to catch. BLOCKED on a user ruling: unifying requires amending D16, which forbids the recommended placement.",
+      "title": "A conformance gate keeps the two JCS canonicalizers from drifting",
+      "objective": "ORCHESTRATOR RULING (cycle 2, user-delegated): keep both RFC-8785 implementations and make divergence impossible, rather than unifying them. D16's letter \u2014 'Nothing outside apps/trust/src/ledger/** (T-011) defines its own hashing' \u2014 is unachievable as written: it asks for one definition owned by the ledger, but packages/contracts is the schema foundation every service imports and apps/trust is an app, so a package cannot import from it and the reverse edge is architecturally wrong. D16 is also already violated on main: T-010's signing.py defines hashing outside the ledger. The two implementations AGREE byte-for-byte today (~1.5M inputs, both on the RFC 3.1 predicate float(v)==v), so the live risk is future drift, not present divergence. A shared conformance gate closes that at near-zero risk; unification would additionally remove duplication, which is real but marginal, while touching a security boundary that just had two CRITICALs fixed. Build the gate. Unification stays available later and is not owed.",
       "refs": [
         "D16",
         "D52",
@@ -1518,21 +1518,26 @@
         "N-14"
       ],
       "acceptance": [
-        "1. A shared conformance test drives canonicalization_corpus.json plus the RFC 3.2.4 sample through BOTH Python implementations and the TypeScript twin",
-        "2. It lives where both are importable without path tricks and runs in the ordinary suite",
-        "3. apps/trust/src/ledger binds its two spellings to one set of module objects",
-        "4. Either D16 is amended to name one implementation, or the escalation records why two stand"
+        "1. A conformance test drives packages/contracts/tests/canonicalization_corpus.json plus the RFC 8785 3.2.4 worked example through BOTH Python canonicalizers in ONE process and asserts byte-identical output",
+        "2. It also covers the classes where independent implementations diverge: integers at and past 2**53/2**63/2**64, 10**16, 10**23, 10**400, -0, exponent-form switchovers at 1e21 and 1e-7, lone surrogates in keys AND values, UTF-16 vs code-point key ordering with non-BMP keys, and an NFC pair (neither may normalize)",
+        "3. Both implementations agree on WHICH inputs they refuse, not merely on what they render \u2014 a refusal on one side and a render on the other is a failure",
+        "4. It lives in e2e/ (in the root testpaths, importable from both) and runs in the ordinary suite, so `make verify` catches drift",
+        "5. Reverting either implementation's number predicate to a safe-integer bound turns the gate RED"
       ],
-      "verify": "pytest e2e -q && pytest apps/trust -q",
-      "scope": "e2e/**, apps/trust/**",
+      "verify": "pytest e2e/test_jcs_conformance.py -q",
+      "scope": [
+        "e2e/**"
+      ],
       "depends_on": [
         "T-010",
         "T-011"
       ],
       "non_goals": [
-        "Do not delete either implementation before the D16 ruling"
+        "Do NOT unify the two implementations",
+        "Do NOT edit packages/contracts/src or apps/trust/src",
+        "Do NOT amend D16"
       ],
-      "parallel_safe": false
+      "parallel_safe": true
     },
     {
       "id": "T-107",
@@ -1649,6 +1654,173 @@
       ],
       "non_goals": [
         "Do not change what bootstrap installs, only how loudly it fails"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-112",
+      "title": "The role password has one source of truth on the project's own fresh volume",
+      "objective": "T-110 made db/init/00-roles.sql read $PROXYSHOP_ROLE_PASSWORD, but its verifier found the ticket's own objective still true where it matters: docker-compose.yml's postgres service passes no PROXYSHOP_ROLE_PASSWORD into the container, so on the project's actual fresh volume the dev default still wins and there are still two sources of truth. Separately, proxyshop_support/postgres.py:51-54 and .env.example:7-10 carry four more independent copies of the literal fallback on the CONNECT side, none of which consults the env var \u2014 so even a correctly-seeded cluster is unreachable by the app unless those agree.",
+      "refs": [
+        "D5",
+        "W2-verify-dbinit-HIGH"
+      ],
+      "acceptance": [
+        "1. docker-compose.yml passes PROXYSHOP_ROLE_PASSWORD into the postgres service with the dev default preserved",
+        "2. The connect side (proxyshop_support/postgres.py, .env.example) reads the same variable rather than a hard-coded literal",
+        "3. A test proves a non-default value seeds AND connects end to end on a fresh volume",
+        "4. No password literal survives except one documented dev default in one place"
+      ],
+      "verify": "pytest apps/trust/tests/test_schema_grants.py -q",
+      "scope": "docker-compose.yml, proxyshop_support/**, .env.example",
+      "depends_on": [
+        "T-110"
+      ],
+      "non_goals": [
+        "Do not change the role set or the grants"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-113",
+      "title": "The TypeScript signing path refuses unsafe integers by default, not opt-in",
+      "objective": "T-103 added parseSignableJson, but its verifier found the guard is OPT-IN and has no production caller anywhere in the repo (ts/signing.ts:165, ts/index.ts:57). The defect T-103 was written to close \u2014 a Node seller signing a number the submission does not state \u2014 remains fully reachable through the unchanged default path, because plain JSON.parse still coerces 2**53+1 to 2**53 before any guard runs. A guard nothing calls is documentation.",
+      "refs": [
+        "D52",
+        "RFC8785#3.1",
+        "W2-verify-contracts"
+      ],
+      "acceptance": [
+        "1. The signing entry points refuse an unsafe integer by default, without the caller opting in",
+        "2. A test drives the DEFAULT path (not parseSignableJson directly) with 2**53+1 and asserts refusal",
+        "3. Any remaining opt-out is explicit, named, and tested"
+      ],
+      "verify": "npx vitest run packages/contracts",
+      "scope": "packages/contracts/**",
+      "depends_on": [
+        "T-103"
+      ],
+      "non_goals": [
+        "Do not unify the canonicalizers"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-114",
+      "title": "The chain_head trigger test does not block the ENABLE ALWAYS hardening",
+      "objective": "T-102's new catalog test asserts pg_trigger.tgenabled == 'O', which turns RED on the one-statement hardening (ALTER TABLE ... ENABLE ALWAYS TRIGGER, tgenabled='A') that closes a live bypass of the very arm the ticket exists to grade: with 'O', a superuser setting session_replication_role='replica' skips the trigger entirely. The test also asserts nothing about the DELETE arm being UNCONDITIONAL \u2014 both behavioural tests drive one fixed statement shape from one connection, so a conditional exemption inside the DELETE branch would pass.",
+      "refs": [
+        "D16",
+        "W2-verify-trust"
+      ],
+      "acceptance": [
+        "1. The catalog assertion accepts 'A' as well as 'O', or asserts the stronger property directly",
+        "2. ENABLE ALWAYS is applied so session_replication_role='replica' cannot skip the arm, with a test proving it",
+        "3. A test drives more than one DELETE statement shape, so a conditional exemption cannot hide",
+        "4. The docstring's claim about which principal the arm stops is made true or corrected"
+      ],
+      "verify": "pytest apps/trust/tests/test_ledger_chain.py -q",
+      "scope": "apps/trust/**, db/migrations/**",
+      "depends_on": [
+        "T-102"
+      ],
+      "non_goals": [
+        "Do not weaken the grant layer"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-115",
+      "title": "The envelope blank rule is engine-independent again",
+      "objective": "T-108 closed the min_length asymmetry but replaced an engine-INDEPENDENT rule (minLength: 1) with an engine-DEPENDENT one \u2014 10 occurrences of \"pattern\": \"[^\\\\s\\\\u001c-\\\\u001f]\" \u2014 in the single artifact whose whole purpose is that both languages read the same contract. '\\s' means Unicode White_Space to some engines and ASCII-only to others, so Python and TypeScript can now disagree about the same schema. The guarantee is also pinned against a hand-written list of ~20 whitespace spellings rather than as a property, so any character outside that list is unasserted.",
+      "refs": [
+        "D52",
+        "W2-verify-contracts"
+      ],
+      "acceptance": [
+        "1. The schema rule means the same thing under both engines, or the blank check lives in code both sides share rather than in the schema",
+        "2. A property-style test asserts the compiled pattern and the blank check agree over a generated character range, not a hand-written list",
+        "3. Both codegen artifacts are regenerated and the drift check passes"
+      ],
+      "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
+      "scope": "packages/contracts/**",
+      "depends_on": [
+        "T-108"
+      ],
+      "non_goals": [
+        "Do not reintroduce the min_length asymmetry"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-116",
+      "title": "A single degenerate product cannot black out vector search",
+      "objective": "T-101's verifier found the fix implements BOTH offered alternatives, and the combination converts a one-product problem into a catalog-wide outage: one Product with an empty canonical_name now leaves the whole index marked incomplete, and _check_vector_path then refuses every vector query. The error's own first remediation is a no-op loop \u2014 it tells the operator to re-run the reembed, which skips the same product again. Acceptance criterion 2 is also pinned only for the provider-swap case, so a narrowing of the fix would pass.",
+      "refs": [
+        "W2-verify-ingest"
+      ],
+      "acceptance": [
+        "1. A single skipped product degrades that product, not the whole catalog's vector path",
+        "2. The EmbeddingRunIncomplete message names a remediation that actually terminates",
+        "3. A test covers the same-provider skip case, not only the provider-swap case"
+      ],
+      "verify": "pytest services/ingest -q",
+      "scope": "services/ingest/**",
+      "depends_on": [
+        "T-101"
+      ],
+      "non_goals": [
+        "Do not reintroduce the silent-complete marker T-101 removed"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-117",
+      "title": "The per-ticket gate runs the tests that grade the per-ticket acceptance criteria",
+      "objective": "scripts/verify.sh:105 runs `-m 'not needs_model and not docker and not slow'` for `check`, which is the per-ticket gate every worker and every fix lane runs. T-110's verifier found that this DESELECTS all three of its fresh-volume tests, including the one grading acceptance criterion 2 \u2014 so a lane can report its gate green while the tests written to grade its own acceptance never executed. This is the same class as the docker-skip gate in T-109 and should be fixed with it.",
+      "refs": [
+        "D38",
+        "W2-verify-dbinit"
+      ],
+      "acceptance": [
+        "1. A ticket's own acceptance tests are not silently deselected by the gate that ticket runs",
+        "2. Deselected counts are reported, not swallowed, so a green gate names what it did not run",
+        "3. T-109's per-service reachability work lands consistently with this"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "scope": "scripts/verify.sh, conftest.py, proxyshop_support/**",
+      "depends_on": [
+        "T-109"
+      ],
+      "non_goals": [
+        "Do not remove the docker marker"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-118",
+      "title": "Wave-2 residue: eight low-severity findings from the lane verifiers",
+      "objective": "Batched from the six wave-2 adversarial verifications; each is real, reproduced, and individually too small for its own ticket. (a) llm doubles.py:346,:472 \u2014 LLMCall.system re-introduces a separator join on the OBSERVABLE recording surface even though the lookup key is now a tuple. (b) llm prompting.py:265 \u2014 canonical_system_key's single-element collapse is injective only if a block is never empty, which it does not enforce. (c) ingest query.py:377-386 \u2014 the EmbeddingRunIncomplete remediation loops. (d) stub permalink.py:39,:121-123 \u2014 the docstring's Raises clause does not match _FORBIDDEN_IN_PATH. (e) contracts test_signing_envelope.py:800-808 \u2014 a positive control collapses to one case for issued_at because the loop reassigns value. (f) trust test_ledger_chain.py:1687-1697 \u2014 the has_table_privilege precondition does not discriminate the grant layer from the trigger the way the test presents it. (g) dbinit test_schema_grants.py:1580 \u2014 `hostname -i` returns a LIST when the container has multiple addresses, so the login probe breaks under IPv6 or a second network. (h) dbinit db/init/00-roles.sql:76-80 \u2014 the rewritten ELSE arm's only job is attribute normalisation and nothing tests attributes.",
+      "refs": [
+        "W2-verify-all"
+      ],
+      "acceptance": [
+        "1. Each of (a)..(h) is fixed or dismissed with a one-line reason recorded in the commit",
+        "2. Every fix carries a test that fails without it",
+        "3. No fix widens the scope of the lane it came from"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "scope": "packages/llm/**, services/ingest/**, services/shopify-stub/**, packages/contracts/**, apps/trust/**, db/init/**",
+      "depends_on": [
+        "T-101",
+        "T-102",
+        "T-104",
+        "T-105",
+        "T-108",
+        "T-110"
+      ],
+      "non_goals": [
+        "Do not batch these into one commit; one concern per commit"
       ],
       "parallel_safe": false
     }
