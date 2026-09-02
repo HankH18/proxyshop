@@ -411,7 +411,7 @@
     {
       "id": "T-033",
       "title": "Accepting an offer produces a validated code and permalink",
-      "objective": "Accept endpoint resolves a CheckoutProvider (T-036) by CHECKOUT_MODE and delegates code creation to it, returns the permalink the provider mints, records the accepted event, and handles code-creation failure with re-offer of the next slot. The starting slice runs SimulatedRedirectProvider \u2014 the checkout URL is validated against the registered seller domain and checkout_redirect plus the downstream LedgerEvent kinds are emitted identically to the Shopify path (C11); Shopify mode selects the T-052 adapter behind the same port.",
+      "objective": "Accept endpoint resolves a CheckoutProvider (T-036) by CHECKOUT_MODE and delegates code creation to it, returns the permalink the provider mints, records the accepted event, and handles code-creation failure with re-offer of the next slot. The starting slice runs SimulatedRedirectProvider \u2014 the checkout URL is validated against the registered seller domain and checkout_redirect plus the downstream LedgerEvent kinds are emitted identically to the Shopify path (C11); Shopify mode selects the T-052 adapter behind the same port.\n\nCONSTRAINT INHERITED FROM T-030/T-036 (recorded 2026-09-02, load-bearing \u2014 do not drop). The checkout host guard compares `offer['checkout_url']` against `bid['store_domain']`, and BOTH come from the SAME store-authored bid \u2014 so by itself it rejects only a store that contradicts itself. MEASURED: a bid claiming `store_domain: attacker.tld` with a matching `checkout_url: https://attacker.tld/...` was ADMITTED and minted a real permalink. The T-030 lane added the seam that closes it: `CheckoutRequest.registered_domains`, a platform lookup that overrides the bid outright and FAILS CLOSED on an unknown seller or a raising lookup. It is deliberately NOT wired by default, because the frozen contract at test_spec_criteria.py:1136 pins `bid['store_domain']` and this request is built HERE. **T-033 must pass the platform's registered domain source when constructing CheckoutRequest \u2014 a one-line change at this call site.** Until it does, the store's own claim about its domain stands and the guard is decorative.",
       "refs": [
         "R3",
         "A5",
@@ -557,7 +557,7 @@
     {
       "id": "T-041",
       "title": "Advocate runtime bids within walls and defaults deterministically cold",
-      "objective": "BidRequest\u2192Bid|decline: cache-layout context assembly, hook-only claim emission, deterministic cold-start bid (list price + standing commitments + intro rule only).",
+      "objective": "BidRequest\u2192Bid|decline: cache-layout context assembly, hook-only claim emission, deterministic cold-start bid (list price + standing commitments + intro rule only).\n\nCONSTRAINT INHERITED FROM T-040 (recorded 2026-09-02, do not drop). `ToolHooks.start_bid()` scopes which emitted grants remain admissible. Constructing a facade opens its first bid, so building ONE `ToolHooks` PER AUCTION is correct with no ceremony and carries zero replay exposure \u2014 that is the pattern this runtime should use. A facade REUSED across auctions MUST call `start_bid()` between them; the harness cannot detect a new auction by itself, which is why this is a caller contract rather than a fail-closed guard. If it is not honoured, a grant obtained in one auction stays admissible in later ones. The live envelope re-check (`_authorization_refusal`) still bounds the ECONOMIC damage \u2014 a grant the envelope no longer supports is refused \u2014 so what a violation costs is S5 audit fidelity (N bids tracing to one `authorize_discount` call), not price control. Measured before the fix: a grant obtained under a 20% cap stayed admissible after the cap was tightened to 5%, while the hook denied the identical fresh request.",
       "refs": [
         "R8",
         "R10",
@@ -2118,9 +2118,11 @@
     {
       "id": "T-130",
       "title": "Sub-HIGH findings from the feature-wave checkers (backlog sweep, not a wave)",
-      "objective": "Recorded so nothing is lost, per the user's standing instruction: report every severity, but only HIGH and above interrupts the build. These are the MEDIUM findings the five feature-lane checkers raised against T-030/T-036, T-040, T-050, T-070 and T-080. Sweep them in ONE batch when the feature frontier is built out \u2014 do NOT spawn a wave per finding, and do not let them displace unbuilt features.\n\n  [MEDIUM] storeagent: provenance.py:167-176 (`claim_fingerprint`'s `material` dict \u2014 The fingerprint covers key, value, claim_type, unit and the full provenance, but silently omits `Claim.source_span`. The docstring justifies excluding `claim_id` and does\n  [MEDIUM] storeagent: lint.py:41 and 66-73 (`GUARDED_CONSTRUCTORS`, `_called_name` \u2014 The static half of acceptance criterion 3 matches only the bare callee name `Claim`/`Provenance`, so three ordinary spellings of the same forgery pass it: an aliased impo\n  [MEDIUM] merchant: oauth.py:121 \u2014 Both signature verifiers call `hmac.compare_digest` with two `str` arguments, one of which is fully attacker-controlled. CPython's `compare_digest` raises `TypeError: com\n  [MEDIUM] merchant: webhooks.py:154-156 (WebhookInbox.record) \u2014 The webhook-id replay guard is evicted in lockstep with the bounded event ring: when the inbox exceeds `INBOX_CAPACITY` (512) it pops the oldest event and does `self._see\n  [MEDIUM] buyer: magic_link.py:172 (`_pending` field), 176-190 (request_login \u2014 `_pending` is an unbounded dict that is only ever written to. `request_login` inserts one `_PendingLink` per call and nothing ever removes an entry: expiry is only checke\n  [MEDIUM] fixtures: __init__.py:175 \u2014 sku = f\"{_slug(store_id)[:6].upper()}-{_sl \u2014 The [:6] truncation erases the store discriminator completely. Every store_id in the manifest roster begins with the literal prefix 'store-' (store-brightbean, store-nort\n  [MEDIUM] exchange: fanout.py:82-104 \u2014 R10 is \"solicited synchronously and in parallel with a hard timeout\", and `solicit_bids` is the public orchestration boundary D54 puts that guarantee on \u2014 but its default\n  [MEDIUM] exchange: collect.py:73-89 (`_list_price_bid`) \u2014 The port conflates \"absent checkout_url\" with \"off-domain checkout_url\" and refuses both. Every list-price fallback bid T-030 manufactures \u2014 `_list_price_bid` builds `off",
+      "objective": "Recorded so nothing is lost, per the user's standing instruction: report every severity, but only HIGH and above interrupts the build. These are the MEDIUM findings the five feature-lane checkers raised against T-030/T-036, T-040, T-050, T-070 and T-080. Sweep them in ONE batch when the feature frontier is built out \u2014 do NOT spawn a wave per finding, and do not let them displace unbuilt features.\n\n!! LOCATIONS CORRECTED 2026-09-02. The original text of this ticket was a LOSSY PROJECTION of the checker journal and FOUR of its eight locations named the wrong file. The minting line was `f\"[{severity}] {lane}: {str(location).split('/')[-1][:60]} \u2014 {str(defect)[:170]}\"`, which (a) `.split('/')[-1]` silently discarded every path but the LAST when a finding had multiple locations, (b) `[:170]` truncated every defect mid-sentence, dropping six of eight consequence clauses, and (c) never read the `reproduction` field at all, so every repro was lost. A sweep working from the ORIGINAL text would have fixed one unauthenticated endpoint and left its twin live, and gone looking for two exchange fixes in files that do not contain them. Full mechanisms below, recovered from the journal.\n\n[MEDIUM] storeagent \u2014 packages/store-agent/src/hooks/provenance.py:167-176 (`claim_fingerprint`)\n  The fingerprint's `material` dict covers key, value, claim_type, unit and the full provenance but silently omits `Claim.source_span`, while the docstring justifies only the `claim_id` exclusion. `contracts.claim_id_for` reads `source_span.pitch_ref` to decide a claim's downstream identity, so a genuine claim can be `model_dump()`ed with a foreign pitch_ref bolted on and keep an identical fingerprint.\n  STATUS: fixed in this session at provenance.py:283 (feat/f1-storeagent 5c80fcb).\n\n[MEDIUM] storeagent \u2014 packages/store-agent/src/hooks/lint.py:41 and 66-73 (`GUARDED_CONSTRUCTORS`, `_called_name`)\n  The static half of acceptance criterion 3 matched only the bare callee name `Claim`/`Provenance`. MEASURED: it caught 0 of 3, not 'at least three spellings pass'. The full bypass set is the aliased import (`from contracts import Claim as C; C(...)`), `Claim.model_validate({...})`, and `Claim.model_construct(...)`.\n  STATUS: fixed in this session at lint.py:48/75/112, with a negative test so the repair is not merely matching more of everything (feat/f1-storeagent 5c80fcb).\n\n[MEDIUM] merchant \u2014 apps/merchant/svc/src/install/oauth.py:121 AND webhooks.py:101 \u2014 TWO CALL SITES\n  *** The second call site appeared in NO on-disk record before this correction. *** Both verifiers call `hmac.compare_digest` with two `str` arguments, one fully attacker-controlled. CPython raises TypeError when a `str` argument is non-ASCII, so one non-ASCII byte in a signature header turns an intended 401 into an uncaught 500 with a stack trace, on two UNAUTHENTICATED PUBLIC endpoints. `verify()` is in `__all__`, so T-051's collector inherits it.\n  STATUS: fixed in this session \u2014 both sites unified into install/signatures.py:48, comparing on bytes (feat/f1-merchant 2381efa).\n\n[MEDIUM] merchant \u2014 apps/merchant/svc/src/install/webhooks.py:154-156 (`WebhookInbox.record`)\n  The webhook-id replay guard is evicted in lockstep with the bounded event ring: once the inbox exceeds INBOX_CAPACITY (512) it pops the oldest event and drops its id from the seen-set, so a replayed webhook older than 512 events is accepted again \u2014 and an attacker can force that eviction cheaply.\n  STATUS: fixed in this session (feat/f1-merchant 2381efa, 'its replay guard refused nothing').\n\n[MEDIUM] buyer \u2014 apps/buyer/svc/src/auth/magic_link.py:172 (`_pending`), 176-190 (`request_login`)\n  `_pending` is an unbounded dict that is only ever written to. `request_login` inserts one `_PendingLink` per call and nothing removes an entry; expiry is only checked on read. Reachable by an UNAUTHENTICATED caller, so the real severity may exceed MEDIUM.\n\n[MEDIUM] fixtures \u2014 fixtures/generator/__init__.py:175 (T-130 originally said a bare `__init__.py:175`; the repo has several `fixtures/*/__init__.py`)\n  `sku = f\"{_slug(store_id)[:6].upper()}-{...}\"`. Every store_id in the roster begins with the literal prefix 'store-', so `[:6]` yields the constant 'STORE-' for all five and the SKU encodes only product+variant, colliding across every store. SKU is the ONLY field in a seeded stub row that can carry store provenance, so after `make demo-seed` nothing can attribute a variant to store-brightbean \u2014 the dishonest store the demo exists to catch. services/shopify-stub/src/orders.py:110 copies sku verbatim into every order line item and re-emits it at :332 and :527.\n\n[MEDIUM] exchange \u2014 apps/exchange/src/orchestration/solicitation.py:154 IS THE LINE TO CHANGE (T-130 originally said fanout.py:82-104, which is the secondary location)\n  `strategy = fan_out if fan_out is not None else sequential_fan_out`. R10 requires bids solicited in parallel with a hard timeout, and `solicit_bids` is the public boundary D54 puts that guarantee on \u2014 but its DEFAULT is `sequential_fan_out`, which is neither parallel nor timed (it accepts `deadline` and documents that it deliberately ignores it). A caller that does not pass `fan_out=parallel_fan_out` gets an unbounded synchronous wait, and one dead store holds the buyer's request open indefinitely. POST /auctions escapes only because routes.py:186 passes the strategy explicitly \u2014 the boundary T-032/T-033/the buyer service are told to call does not. MEASURED: a 1.0s deadline returned after 4.01s.\n\n[MEDIUM] exchange \u2014 apps/exchange/src/checkout/domain.py:47-48 IS THE SITE OF THE FIX (T-130 originally said collect.py:73-89)\n  The port conflates 'absent checkout_url' with 'off-domain checkout_url' and refuses both, so every list-price fallback bid T-030 manufactures is unacceptable at checkout \u2014 every Tier-0 store and every timed-out Tier-1 store, exactly the population R10 exists to represent. GUARDRAIL (lost in the original truncation): do NOT weaken the check for a URL that IS present \u2014 all five hostile hosts must still be refused.\n\n--- ADDED 2026-09-02, exchange lane residuals (reported, not fixed) ---\n[LOW] apps/exchange/src/checkout/lint.py \u2014 the minting lint matches callees by NAME, so `from .codes import mint_code as m; m()` escapes it. Same shape as the store-agent lint that measured 0 of 3; fix it the same way, with a negative test.\n[LOW] a duplicate `store_id` in a roster produces two entries and two eligibility reads.\n[LOW] `resolve_provider(None)` silently returns the default \u2014 the one input that does not raise.\n[RESIDUAL, deliberate] `solicit_bids`' default is now hard-timed but still NOT N-way parallel: the ask order is observable (`result.solicited`; the frozen suite asserts `solicitor.asked == [...]`) and N-way dispatch cannot promise that order. The route already passes `parallel_fan_out` for latency. Left as a stated decision rather than making a frozen test racy.",
       "refs": [
-        "F1-checkers"
+        "F1-checkers",
+        "F1-checker-journal (wf_a7e3e191-4c5/journal.jsonl)",
+        "locations corrected 2026-09-02 from the checker journal"
       ],
       "acceptance": [
         "1. Each listed finding is fixed or dismissed with a one-line reason recorded in the commit",
@@ -2147,6 +2149,111 @@
         "Do not let these displace unbuilt feature tickets"
       ],
       "parallel_safe": false
+    },
+    {
+      "id": "T-131",
+      "title": "The golden answer key is graded weakly, and the dishonest store's flagship lie is not graded at all",
+      "objective": "Raised by the T-080 lane's own adversarial pass, reported rather than fixed because closing them exceeded that lane's cheap scope. These matter more than their severity labels suggest: the golden set is the ANSWER KEY that T-065 and the trust engine are graded against forever, so a weak guard here is a permanently wrong grade downstream, not a test-quality nit.\n\n[HIGH] fixtures/tests/test_golden_set.py:89 \u2014 eval gates are asserted by checking that a STRING is present in `pitch['gates']`, which grades the label rather than the content. The T-080 lane's new value-vs-evidence comparator closed the `wrong_units` mutation, but deleting `gp-003`'s decoy variant, or `gp-006`'s false half, still leaves the suite GREEN. A gate that survives deletion of the thing it gates is not grading anything.\n\n[MEDIUM] fixtures/golden/golden_set.json \u2014 `ingredients` and `compatibility` have ZERO coverage, yet `misrepresented_ingredients` is the dishonest store's flagship catalog lie. The answer key never grades the one lie the manifest scripts, so the demo can pass while failing at its stated purpose.\n\n[MEDIUM] fixtures/golden/golden_set.json:625 \u2014 `gp-009`'s stated rationale (\"byte-identical to gp-008\") is false: `retrieval_notes` differs, and one `snapshot_id` names two documents.\n\n[MEDIUM] fixtures/manifest/__init__.py \u2014 `claim_outcome_treatment` is checked for key presence only; `personas`, `fixture_intent` and `stores` are unvalidated; `behaviours[].claim_type` skips the D53 rule.\n\n[LOW-MED] fixtures/manifest/__init__.py:330,369,396,399 \u2014 referenced documents resolve against REPO_ROOT, so `load_manifest('/tmp/x/manifest.json')` validates a FOREIGN manifest (which may carry a fabricated `approval.status: approved`) against the REPO's golden set. Latent: no caller passes a path today.\n\n[MEDIUM] T-080 acceptance 2 is met only on paper \u2014 `variant_body()` posts only `variants`; `stores`, `catalog`, `attributes` and `event_script` are generated and DISCARDED, and the stub has no store concept. (Acceptance 3 is genuine: real uvicorn, real HTTP, twice, with a negative control.)\n\n[LOW] `make demo-seed SEED_CATEGORY=tea` prints a raw traceback; a malformed manifest raises KeyError rather than GeneratorError.",
+      "depends_on": [
+        "T-080"
+      ],
+      "parallel_safe": true,
+      "scope": [
+        "fixtures/**"
+      ],
+      "non_goals": [
+        "Do not weaken any existing golden-set assertion to make this easier",
+        "Do not regenerate the golden set wholesale - it is approved ground truth"
+      ],
+      "acceptance": [
+        "1. Deleting gp-003's decoy variant or gp-006's false half turns the suite RED",
+        "2. ingredients and compatibility are graded, including the misrepresented_ingredients lie the manifest scripts",
+        "3. Every fix carries a mutation that was green before and is red after",
+        "4. The approved manifest's recorded digests still verify - no fix re-seals ground truth"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "refs": [
+        "T-080 lane adversarial pass, 2026-09-02",
+        "F1-checker-journal"
+      ]
+    },
+    {
+      "id": "T-132",
+      "title": "Rotating pseudonyms are trivially re-linkable, so T-070's central guarantee does not hold",
+      "objective": "NEEDS A DECISION BEFORE DISPATCH \u2014 the fix changes a contract the frozen acceptance suite pins, so it is the user's call, not a worker's.\n\n[HIGH] T-070's objective is 'rotating pseudonyms, identity-free profiles'. The rotation is real but it buys nothing: `buckets` is a PURE FUNCTION OF THE ACCOUNT, so successive pseudonyms publish BYTE-IDENTICAL profiles. MEASURED by the T-070 lane: 3 rotations produced 3 distinct pseudonyms and ONE identical bucket set. Any store that has seen a buyer once re-links every later pseudonym of that buyer, which is precisely the linkage the feature exists to prevent. The pseudonym rotates; the fingerprint underneath it does not.\n\nContributing, from the same lane: `coarsen_categories` passes order-category free text through with a count cap but NO length or vocabulary cap. That free-text slug is the high-entropy half of the linkage \u2014 a bucket set drawn from a closed vocabulary is far less identifying than one carrying arbitrary category strings.\n\nWHY IT NEEDS A DECISION: closing it requires suppression or k-anonymity on `BuyerProfile`, which changes the profile contract the frozen acceptance tests pin. Options are (a) amend the frozen contract (user-approved amendment, as with ESC-002), (b) accept the linkage and downgrade the objective's claim so the docs stop promising unlinkability, or (c) a scheme that preserves the pinned shape while breaking linkage. Do not dispatch until one is chosen.",
+      "depends_on": [
+        "T-070"
+      ],
+      "parallel_safe": false,
+      "scope": [
+        "apps/buyer/**"
+      ],
+      "non_goals": [
+        "Do not amend a frozen test without explicit user approval",
+        "Do not silently weaken the objective's wording to make the defect definitionally fine"
+      ],
+      "acceptance": [
+        "1. A store holding profile P for pseudonym A cannot identify profile P' for the same buyer's later pseudonym B above the chosen bound",
+        "2. The bound is stated as a number (k, or an explicit suppression rule), not as a vibe",
+        "3. A test rotates a real buyer and asserts the published profiles are not trivially equal",
+        "4. Whatever is decided, the objective's own wording and the docs match what the code actually provides"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "refs": [
+        "T-070 lane adversarial pass, 2026-09-02"
+      ]
+    },
+    {
+      "id": "T-133",
+      "title": "Buyer residue: shared session state, unwired publish half, and unbounded stores",
+      "objective": "Reported by the T-070 lane, not fixed because each crosses its scope or needs shared infrastructure. The lane DID ship a loud refusal for the first item \u2014 `build_auth_service` now refuses to start when WORKER_COUNT_ENVS indicates more than one worker, raising `ProcessLocalStateUnsafe` \u2014 so the failure is now noisy rather than silent. The root causes remain.\n\n[HIGH] Session and pending-link state is still process-local, so the service cannot run more than one replica. The root fix is a shared session store (a migration, or Redis via the sanctioned worker_redis wrapper) and lives outside apps/buyer/**.\n\n[MEDIUM] `publish_profile` still has no production caller, so `app.buyer_accounts` \u2014 the table the exchange and stores actually read buckets from \u2014 is never written by the running service. The T-070 lane wired the VAULT half (PostgresPseudonymStore from PROXYSHOP_PG_DSN_VAULT); the PUBLISH half needs a second role connection and is arguably T-071's.\n\n[MEDIUM] No rate limit on POST /buyer/auth/magic-link. The lane's DEFAULT_MAX_PENDING ceiling bounds MEMORY, not outbound email \u2014 a victim's inbox can still be flooded. Needs a shared limiter. Note DEFAULT_MAX_PENDING = 10_000 is a judgment call, not a measurement.\n\n[MEDIUM] `InMemorySessionStore` grows without bound; expired sessions drop only on lookup.\n\n[LOW] `IdentityLeak`'s message embeds the leaked identity values and escapes `read_profile` as an unhandled 500, so they land in tracebacks; `NotAPseudonym` likewise embeds the rejected subject \u2014 an email address, in the very mistake it exists to catch. `sessions.open` checks only the `psn-` prefix, not vault membership.",
+      "depends_on": [
+        "T-070"
+      ],
+      "parallel_safe": true,
+      "scope": [
+        "apps/buyer/**",
+        "packages/**"
+      ],
+      "non_goals": [
+        "Do not remove the multi-worker refusal until a shared store actually replaces it"
+      ],
+      "acceptance": [
+        "1. Two replicas share sessions and pending links, and the multi-worker refusal is lifted only then",
+        "2. app.buyer_accounts is written by the running service, not only by tests",
+        "3. No exception message carries a raw identity value into a log or traceback"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "refs": [
+        "T-070 lane adversarial pass, 2026-09-02"
+      ]
+    },
+    {
+      "id": "T-134",
+      "title": "Merchant residue: a scope guard that shreds strings, a token in repr, and six inbox findings that never reached the lane",
+      "objective": "PROVENANCE NOTE: findings #6-#11 below were produced by an adversarial verifier the T-050 lane spawned. The verifier's report reached the ORCHESTRATOR but NOT the lane \u2014 the lane received only a summary line, requested a verbatim resend, and never got one. It therefore could not act on them. They are transcribed here verbatim so they are not lost a second time; this is the same loss mode that cost the previous session six HIGH defects.\n\n=== VERIFIED BY THE ORCHESTRATOR, both executed against the branch ===\n\n[HIGH] apps/merchant/svc/src/install/scopes.py \u2014 `assert_scopes_allowed` is a LIVE C5 BYPASS, not a tautology. A `str` is an `Iterable[str]`, so the guard shreds it into characters. MEASURED: `assert_scopes_allowed('read_customers')` returns `('r','e','a','d','_','c','u','s','t','o','m')` and PASSES. Worse, `assert_scopes_allowed(['read_orders,read_customers'])` \u2014 EXACTLY the shape Shopify's token response uses for its `scope` field \u2014 passes with `read_customers` never detected. So the guard admits precisely the input the real API produces. Fix: reject a bare `str`, and split comma-joined scope strings before checking. Needs a negative test naming an admitted scope set and a refused one.\n\n[HIGH] apps/merchant/svc/src/install/tokens.py \u2014 `OfflineToken.access_token` has `repr=True`, so `repr(token)` embeds the raw `shpat_...` credential. MEASURED: all four fields report `repr=True`. Any log line, traceback, or debug print leaks the token. `redacted()` exists and has NO production caller. Fix is one line: `field(repr=False)` on the secret. Widest credential exposure in the lane.\n\n=== FROM THE VERIFIER, transcribed verbatim, NOT independently re-verified ===\n\n[MEDIUM] #8 webhooks.py:346-360, `target.forget(event)` at :354 \u2014 the sink-failure path silently requires an IDEMPOTENT sink and the contract is undocumented. A sink whose side effect lands before it raises (row written, then commit fails) is retried and applies twice. Observed: 'sink saw the same order 2x: [77, 77]'. webhooks.py:295-297 promises retry safety and never states the sink must be idempotent. The downstream consumer is E6's ledger writer.\n\n[LOW-MEDIUM] #9 webhooks.py:329-332 \u2014 `except ValueError` does not catch `RecursionError`. With a VALID signature, body `b'[' * 200_000 + b']' * 200_000` raises RecursionError from the JSON decoder -> HTTP 500 instead of the 400 `unparseable-body` two lines below. Shopify retries 5xx forever and the body can never parse, so it is a permanent retry loop.\n\n[LOW] #6 webhooks.py:232-233 \u2014 `forget()` un-dedupes an event it never recorded; it pops identity keys unconditionally with `pop(key, None)`. Not reachable from `handle_delivery` (guarded by `fresh` at :347), but `WebhookInbox` is in `__all__`, so a downstream lane can trip it.\n\n[LOW] #7 webhooks.py:222-223 + :234-237 \u2014 a sink failure on the ring-overflow delivery destroys an unrelated event: `record()` pops `_events[0]`, `forget()` deletes the new event but never restores the popped one.\n\n[MEDIUM] #10 routes.py:141 \u2014 `await request.body()` is unbounded and runs BEFORE authentication; no middleware or body cap exists. MEASURED: an unauthenticated 64 MB POST is fully buffered and HMAC'd, process peak RSS 68 MB -> 270 MB, then answered 401. Pre-existing.\n\n[MEDIUM] #11 routes.py:35-42,85 \u2014 an unauthenticated attacker breaks any in-flight install. `_PENDING_LIMIT = 256` with FIFO eviction and `_PENDING_STATES.pop()` at :85 runs BEFORE signature verification. MEASURED: honest merchant starts an install, attacker sends 300 x `GET /install?shop=attacker.myshopify.com`, honest merchant's correctly-signed callback returns `400 unknown-state`. Pre-existing.\n\n=== STATED RESIDUAL, deliberately not fixed ===\nThe delivery identity is now `sha256(body)` alone \u2014 topic and webhook id were both removed because both are unsigned and attacker-chosen. `shop_domain` is deliberately NOT in the key: it is an unsigned header, and there is ONE `SHOPIFY_API_SECRET` for all shops, so no trustworthy shop identity exists at this layer. Consequence: two genuinely distinct shops sending byte-identical bodies would collide. Measured as not reachable in practice \u2014 18 deliveries constructed to collide produced 18 distinct digests \u2014 and not reachable from real Shopify semantics, where ids are globally unique. Do NOT 'fix' this by scoping the key on `shop_domain`: that would let any replayer mint unlimited fresh deliveries by varying an attacker-controlled header, and it breaks the misattribution assertions in `test_a_replay_cannot_buy_a_second_count_by_renaming_its_unsigned_webhook_id`.",
+      "depends_on": [
+        "T-050"
+      ],
+      "parallel_safe": true,
+      "scope": [
+        "apps/merchant/**"
+      ],
+      "non_goals": [
+        "Do not scope the webhook identity key on shop_domain or any other unsigned header",
+        "Do not weaken the misattribution or replay assertions in test_install.py"
+      ],
+      "acceptance": [
+        "1. assert_scopes_allowed refuses a bare str and refuses a comma-joined scope string that hides a forbidden scope, with a negative test naming an admitted set",
+        "2. No credential appears in any dataclass repr; a test asserts the token is absent from repr()",
+        "3. A valid-signature body that cannot be parsed returns 400, never 5xx",
+        "4. Every fix carries a test that fails without it"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "refs": [
+        "T-050 lane adversarial verifier, 2026-09-02",
+        "orchestrator-verified items marked inline"
+      ]
     }
   ]
 }
