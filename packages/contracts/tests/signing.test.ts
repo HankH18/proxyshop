@@ -425,3 +425,57 @@ describe("the corpus itself", () => {
     expect(canonicalJson(negativeZeros[0]!.input)).toBe('{"n":0}');
   });
 });
+
+// ----------------------------------------------------------------------------------------------
+// RFC 8785 §3.2.2.2 — lone surrogates terminate with an error, in BOTH languages.
+//
+// The cases are written as WIRE text and parsed, because that is exactly how one arrives. This
+// list is the same list the Python suite parametrizes, so the two cannot drift apart again.
+// ----------------------------------------------------------------------------------------------
+const LONE_SURROGATE_WIRE = [
+  '"\\ud800"',
+  '"\\udfff"',
+  '"a\\ud83dz"',
+  '"\\udc00\\ud800"',
+  '"caf\\u00e9 \\udbff"',
+];
+
+describe("RFC 8785 §3.2.2.2 — lone surrogates", () => {
+  it.each(LONE_SURROGATE_WIRE)("refuses %s as a string value", (wire) => {
+    // `JSON.stringify` does NOT refuse these — it emits escaped hex and succeeds — which made
+    // this the more dangerous half of the mismatch: TS produced bytes where Python raised
+    // `UnicodeEncodeError` at the public door. §3.2.2.2 says both were wrong.
+    const value = JSON.parse(wire);
+    expect(() => canonicalJson({s: value})).toThrow(/lone surrogate/);
+    expect(() => canonicalJson({s: value})).toThrow(CanonicalisationError);
+    expect(() => canonicalJson([value])).toThrow(/lone surrogate/);
+  });
+
+  it.each(LONE_SURROGATE_WIRE)("refuses %s as an object KEY", (wire) => {
+    expect(() => canonicalJson({[JSON.parse(wire)]: 1})).toThrow(/lone surrogate/);
+  });
+
+  it("keeps a lone surrogate out of the signing bytes entirely", () => {
+    const payload = makeSubmission({message: JSON.parse('"\\ud800"')});
+    expect(() => canonicalSigningBytes(payload)).toThrow(/lone surrogate/);
+    expect(() => payloadHash(payload)).toThrow(/lone surrogate/);
+  });
+
+  it("still signs well-formed astral characters", () => {
+    // The control. An emoji is a surrogate PAIR here and one code point in Python; refusing it
+    // would break every bid whose message contains one and put the two languages back out of
+    // step.
+    expect(canonicalJson({s: "\u{1F600}"})).toBe('{"s":"\u{1F600}"}');
+    expect(canonicalJson({"\u{1F600}": 1, "Ｚ": 2})).toBe('{"\u{1F600}":1,"Ｚ":2}');
+    expect(canonicalJson({s: JSON.parse('"\\ud83d\\ude00"')})).toBe('{"s":"\u{1F600}"}');
+  });
+
+  it("agrees with the Python peer on every one of these inputs", () => {
+    // Both suites drive the SAME wire list to the SAME outcome — a typed refusal. That equality
+    // is the point: a differential fuzz over 4044 wire inputs found exactly this class of
+    // mismatch, 4 cases, all of them lone surrogates.
+    for (const wire of LONE_SURROGATE_WIRE) {
+      expect(() => canonicalJson({s: JSON.parse(wire)})).toThrow(CanonicalisationError);
+    }
+  });
+});

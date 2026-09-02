@@ -654,3 +654,66 @@ def test_negative_zero_is_actually_in_the_corpus_and_actually_negative() -> None
     ]
     assert len(negative_zeros) == 1, "the corpus does not contain a real -0 case"
     assert canonical_json(negative_zeros[0]["input"]) == '{"n":0}'
+
+
+# --- RFC 8785 §3.2.2.2: lone surrogates terminate with an error, in BOTH languages -----------
+
+#: Wire forms that decode to a Python `str` holding an unpaired surrogate. Written as JSON text
+#: and parsed, because that is exactly how one arrives — off the wire, through `json.loads`.
+_LONE_SURROGATE_WIRE = (
+    '"\\ud800"',  # a bare high surrogate
+    '"\\udfff"',  # a bare low surrogate
+    '"a\\ud83dz"',  # a high surrogate not followed by a low one
+    '"\\udc00\\ud800"',  # low then high: the pair in the wrong order
+    '"caf\\u00e9 \\udbff"',  # a lone surrogate after perfectly ordinary text
+)
+
+
+@pytest.mark.parametrize("wire", _LONE_SURROGATE_WIRE)
+def test_a_lone_surrogate_in_a_string_is_refused(wire: str) -> None:
+    """RFC 8785 §3.2.2.2: "occurrences of such data MUST cause a compliant JCS implementation to
+    terminate with an appropriate error."
+
+    Before this, Python emitted the surrogate into the output string and only blew up at
+    `.encode("utf-8")` with `UnicodeEncodeError`, while the TypeScript peer SUCCEEDED and emitted
+    escaped hex. `Claim.value` is unconstrained, so a Node seller could sign a bid the Python
+    exchange then crashed on at the public door rather than rejecting."""
+    from packages.contracts import CanonicalisationError
+
+    value = json.loads(wire)
+    with pytest.raises(CanonicalisationError, match="lone surrogate"):
+        canonical_json({"s": value})
+    with pytest.raises(CanonicalisationError, match="lone surrogate"):
+        canonical_json([value])
+
+
+@pytest.mark.parametrize("wire", _LONE_SURROGATE_WIRE)
+def test_a_lone_surrogate_in_a_KEY_is_refused(wire: str) -> None:
+    """Keys go through `_utf16_key`, which passes surrogates through for sorting. A refusal has
+    to happen before that, or the same crash reappears one layer down."""
+    from packages.contracts import CanonicalisationError
+
+    with pytest.raises(CanonicalisationError, match="lone surrogate"):
+        canonical_json({json.loads(wire): 1})
+
+
+def test_a_lone_surrogate_never_reaches_the_signing_bytes() -> None:
+    """The end-to-end shape of it: a rejection, not a `UnicodeEncodeError` at the public door."""
+    from packages.contracts import CanonicalisationError
+
+    payload = make_submission(message=json.loads('"\\ud800"'))
+    with pytest.raises(CanonicalisationError, match="lone surrogate"):
+        canonical_signing_bytes(payload)
+    with pytest.raises(CanonicalisationError, match="lone surrogate"):
+        payload_hash(payload)
+
+
+def test_well_formed_astral_characters_are_still_signable() -> None:
+    """The control. A real emoji is ONE code point in Python and a surrogate PAIR in JavaScript;
+    refusing it would break every bid whose message contains one, and would put the two languages
+    right back out of step."""
+    assert canonical_json({"s": "\U0001f600"}) == '{"s":"\U0001f600"}'
+    assert canonical_json({"\U0001f600": 1, "Ｚ": 2}) == '{"\U0001f600":1,"Ｚ":2}'
+    assert canonical_json({"s": "café — “quoted” 😀🎉"}) == '{"s":"café — “quoted” 😀🎉"}'
+    # ...and it still round-trips through the wire form the JavaScript peer would send.
+    assert canonical_json({"s": json.loads('"\\ud83d\\ude00"')}) == '{"s":"\U0001f600"}'

@@ -75,6 +75,39 @@ function assertDoubleRepresentable(value: bigint): never {
 }
 
 /**
+ * RFC 8785 §3.2.2.2: a lone surrogate MUST terminate canonicalisation with an error.
+ *
+ * A JS string is a sequence of UTF-16 code units, so a well-formed astral character is a HIGH
+ * surrogate followed by a LOW one; anything else is unpaired. `JSON.stringify` does NOT refuse
+ * these — since ES2019 it emits them as escaped hex and succeeds — which made this the more
+ * dangerous half of a cross-language mismatch: a Node seller could sign a bid whose `message` or
+ * `Claim.value` held a lone surrogate (`Claim.value` is unconstrained, so it is trivially
+ * reachable) and the Python exchange raised `UnicodeEncodeError` at the public door instead of
+ * returning a rejection. §3.2.2.2 says both were wrong; both now raise.
+ *
+ * Hand-rolled rather than `String.prototype.isWellFormed()` so the rule does not depend on the
+ * runtime's ES2024 support, and so the error can name the offending index.
+ */
+function rejectLoneSurrogates(text: string, what: string): void {
+  for (let i = 0; i < text.length; i += 1) {
+    const unit = text.charCodeAt(i);
+    if (unit < 0xd800 || unit > 0xdfff) continue;
+    const isHigh = unit <= 0xdbff;
+    const next = isHigh ? text.charCodeAt(i + 1) : Number.NaN;
+    if (isHigh && next >= 0xdc00 && next <= 0xdfff) {
+      i += 1; // a well-formed pair: one real character, keep going
+      continue;
+    }
+    throw new CanonicalisationError(
+      `canonicalJson cannot sign ${what} containing a lone surrogate ` +
+        `(U+${unit.toString(16).toUpperCase().padStart(4, "0")} at index ${i}): RFC 8785 ` +
+        "§3.2.2.2 requires a compliant implementation to terminate with an error rather than " +
+        "emit bytes for it",
+    );
+  }
+}
+
+/**
  * RFC-8785 canonical JSON: UTF-16-ordered keys, ECMAScript numbers, no insignificant whitespace.
  *
  * Written by hand rather than with `JSON.stringify(value, Object.keys(value).sort())`, because
@@ -94,6 +127,7 @@ export function canonicalJson(value: unknown): string {
     const entries = Object.entries(value as Payload)
       .filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const [key] of entries) rejectLoneSurrogates(key, "an object key");
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
   }
   if (typeof value === "bigint") assertDoubleRepresentable(value);
@@ -105,7 +139,11 @@ export function canonicalJson(value: unknown): string {
     // The Python side reimplements `Number::toString` for the same reason — `repr` is NOT it.
     return String(value);
   }
-  if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "string") {
+    rejectLoneSurrogates(value, "a string");
+    return JSON.stringify(value);
+  }
+  if (typeof value === "boolean") return JSON.stringify(value);
   throw new CanonicalisationError(
     `canonicalJson cannot sign a ${typeof value}; a signed payload must be plain JSON so both ` +
       "sides can reproduce the bytes from the wire form alone",

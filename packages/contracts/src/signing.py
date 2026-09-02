@@ -141,6 +141,29 @@ def _ecmascript_number(value: float) -> str:
     return f"{head}e{sign}{abs(n - 1)}"
 
 
+def _reject_lone_surrogates(text: str, what: str) -> None:
+    """RFC 8785 §3.2.2.2: a lone surrogate MUST terminate canonicalisation with an error.
+
+    In Python every code point in U+D800–U+DFFF inside a `str` IS a lone surrogate — a real
+    astral character is one code point at or above U+10000 — so the test is that simple.
+
+    This was a cross-language MISMATCH, and TypeScript was wrong in the more dangerous
+    direction: `JSON.stringify("\ud800")` emits `"\ud800"` as escaped hex and SUCCEEDS, while
+    Python's `.encode("utf-8")` raised `UnicodeEncodeError` — so a Node seller could sign a bid
+    whose `message` or `Claim.value` held a lone surrogate (`Claim.value` is unconstrained, so it
+    is trivially reachable) and the Python exchange would raise at the public door instead of
+    returning a rejection. §3.2.2.2 says BOTH were wrong: the answer is a typed error on both
+    sides, which is what this is.
+    """
+    for index, char in enumerate(text):
+        if 0xD800 <= ord(char) <= 0xDFFF:
+            raise CanonicalisationError(
+                f"canonical_json cannot sign {what} containing a lone surrogate "
+                f"(U+{ord(char):04X} at index {index}): RFC 8785 §3.2.2.2 requires a compliant "
+                "implementation to terminate with an error rather than emit bytes for it"
+            )
+
+
 def _utf16_key(key: str) -> bytes:
     """Sort key reproducing JavaScript's string ordering.
 
@@ -149,6 +172,8 @@ def _utf16_key(key: str) -> bytes:
     `"😀" < ""` is true by code point and false by code unit. Encoding to UTF-16-BE and
     comparing bytes reproduces the JavaScript order exactly.
     """
+    # `surrogatepass` only so this helper cannot itself raise a bare `UnicodeEncodeError`;
+    # `_reject_lone_surrogates` has already refused any key that would need it.
     return key.encode("utf-16-be", errors="surrogatepass")
 
 
@@ -177,6 +202,7 @@ def _write_canonical(value: Any, out: list[str]) -> None:
     elif value is False:
         out.append("false")
     elif isinstance(value, str):
+        _reject_lone_surrogates(value, "a string")
         # `ensure_ascii=False` so non-ASCII stays literal, matching `JSON.stringify`.
         out.append(json.dumps(value, ensure_ascii=False))
     elif isinstance(value, int):
@@ -203,6 +229,7 @@ def _write_canonical(value: Any, out: list[str]) -> None:
                     "object members are strings, and coercing one would let two different "
                     "payloads sign identically"
                 )
+            _reject_lone_surrogates(key, "an object key")
         out.append("{")
         for index, key in enumerate(sorted(value, key=_utf16_key)):
             if index:
