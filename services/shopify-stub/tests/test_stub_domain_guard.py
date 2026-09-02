@@ -31,6 +31,7 @@ was a legal host. A bare LF in a ``Location`` header ends the header.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import unicodedata
@@ -42,6 +43,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from shopify_stub import permalink as permalink_module
 from shopify_stub.app import create_app
 from shopify_stub.orders import create_order_from_checkout, order_webhook_payload
 from shopify_stub.permalink import (
@@ -503,3 +505,121 @@ def test_the_response_splitting_subset_is_named_not_counted() -> None:
     for key in RESPONSE_SPLITTING_HOSTS:
         with pytest.raises(PermalinkError):
             _assert_bare_host(NON_BARE_HOSTS[key])
+
+
+# ---------------------------------------------------------------------------------------
+# T-129 (stub 1): the documented set vs the ENFORCED set, not two substrings
+# ---------------------------------------------------------------------------------------
+#
+# `test_the_raises_clause_and_the_guard_describe_the_same_set` above is T-118 (d)'s
+# permanent fix and it cannot do what its name says. It reads `store_url.__doc__` for the
+# single purpose of asserting that the substrings "0x21" and "0x7E" are present somewhere
+# in it; every other assertion it makes is `_FORBIDDEN_IN_PATH` against itself. A Raises
+# clause rewritten to "the path raises when it carries a control character, 0x21 and 0x7E
+# excepted" — the exact prose the ticket existed to remove — keeps both substrings and
+# stays green.
+#
+# The three tests below close that. Each derives the DOCUMENTED set from the live prose,
+# derives the ENFORCED set by calling `store_url`, and compares the two. Neither half is
+# read from the other, so prose drift and code drift are each a red test.
+
+#: A stated boundary, in either of the two spellings permalink.py uses: ``0x21``-``0x7E``
+#: inside the Raises clause and ``(0x21-0x7E)`` inside `_FORBIDDEN_IN_PATH`'s comment.
+_STATED_BOUNDARY = re.compile(r"0x(?P<low>[0-9A-Fa-f]{2})(?:``)?-(?:``)?0x(?P<high>[0-9A-Fa-f]{2})")
+
+#: A stated ``U+XXXX``-``U+XXXX`` range, as the Raises clause writes the C1 block.
+_STATED_UNICODE_RANGE = re.compile(r"U\+(?P<low>[0-9A-F]{4})``-``U\+(?P<high>[0-9A-F]{4})")
+
+#: The code points the enforced set is measured over: the whole of Latin-1 and the two
+#: blocks past it that carry the interesting separators and format characters, plus a
+#: sample from further up so "ASCII only" is distinguished from "BMP only".
+_PROBE_CODE_POINTS = sorted(
+    set(range(0x00, 0x300))
+    | {0x2028, 0x2029, 0x202E, 0x200B, 0xFEFF, 0x4E2D, 0xFFFD, 0x10000, 0x1F600, 0x10FFFF}
+)
+
+
+def _stated_boundaries(text: str) -> set[tuple[int, int]]:
+    """Every printable-ASCII boundary `text` states, as ``(low, high)`` code-point pairs."""
+    return {
+        (int(match.group("low"), 16), int(match.group("high"), 16))
+        for match in _STATED_BOUNDARY.finditer(text)
+    }
+
+
+def _enforced_allowed() -> set[int]:
+    """The code points `store_url` actually accepts in a path. Measured, never read."""
+    allowed = set()
+    for code_point in _PROBE_CODE_POINTS:
+        try:
+            store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{chr(code_point)}")
+        except PermalinkError:
+            continue
+        allowed.add(code_point)
+    return allowed
+
+
+def test_the_documented_boundary_is_the_boundary_store_url_enforces() -> None:
+    """The docstring's set and the guard's set, compared as sets.
+
+    The documented set is `low..high` parsed out of the live Raises clause; the enforced
+    set is whatever `store_url` does not raise on. Widening either one alone is red.
+    """
+    stated = _stated_boundaries(store_url.__doc__ or "")
+    assert len(stated) == 1, (
+        f"store_url's Raises clause must state exactly one code-point boundary, found {stated}"
+    )
+    low, high = stated.pop()
+    documented_allowed = {cp for cp in _PROBE_CODE_POINTS if low <= cp <= high}
+    assert documented_allowed, "a boundary that documents an empty allow-list is not a boundary"
+    assert _enforced_allowed() == documented_allowed, (
+        "store_url's Raises clause and _FORBIDDEN_IN_PATH describe different sets"
+    )
+
+
+def test_every_boundary_the_module_states_is_the_same_boundary() -> None:
+    """The prose says it twice — the Raises clause and `_FORBIDDEN_IN_PATH`'s comment.
+
+    Updating one and not the other is exactly how T-118 (d)'s drift started, one line
+    below the comment warning against it.
+    """
+    source = inspect.getsource(permalink_module)
+    stated = _stated_boundaries(source)
+    assert len(stated) == 1, f"the module states more than one boundary: {sorted(stated)}"
+    low, high = stated.pop()
+    occurrences = len(_STATED_BOUNDARY.findall(source))
+    assert occurrences >= 2, (
+        f"the boundary is stated in both the constant's comment and the Raises clause; "
+        f"found {occurrences} statement(s) — the parser has stopped seeing one of them"
+    )
+    assert _enforced_allowed() == {cp for cp in _PROBE_CODE_POINTS if low <= cp <= high}
+
+
+def test_the_c1_range_the_clause_names_is_refused_and_really_is_c1() -> None:
+    """The clause's other measurable claim, taken from the prose rather than restated here.
+
+    It says the **C1 controls** ``U+0080``-``U+009F`` are control characters that used to
+    be accepted. Both halves are checked against the live range in the docstring: every
+    code point in it is Unicode category ``Cc``, the old deny-list did not match it, and
+    `store_url` refuses it now.
+    """
+    doc = store_url.__doc__ or ""
+    ranges = {
+        (int(match.group("low"), 16), int(match.group("high"), 16))
+        for match in _STATED_UNICODE_RANGE.finditer(doc)
+    }
+    assert ranges == {(0x80, 0x9F)}, (
+        f"the Raises clause must name the C1 block as U+0080-U+009F, found {sorted(ranges)}"
+    )
+    low, high = ranges.pop()
+    old_deny_list = re.compile(r"[\x00-\x20\x7f]")
+    for code_point in range(low, high + 1):
+        char = chr(code_point)
+        assert unicodedata.category(char) == "Cc", (
+            f"U+{code_point:04X} is documented as a C1 control but is not category Cc"
+        )
+        assert old_deny_list.search(char) is None, (
+            f"U+{code_point:04X} is documented as having been accepted by the old deny-list"
+        )
+        with pytest.raises(PermalinkError):
+            store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{char}")
