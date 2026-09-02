@@ -92,6 +92,10 @@ class EmbeddingRunIncomplete(VectorIndexUnusable):
     The per-product writes auto-commit, so an interruption part-way leaves two vector spaces
     inside one index while ``products_missing_embeddings()`` still reports ``[]``. Cosine
     across two spaces is noise, so the query refuses rather than ranks.
+
+    A pass that ran to the end but *skipped* products is the same condition reported by a
+    different route (W2-03): it too covered only part of the catalog, and the marker is left
+    open until one pass has embedded all of it.
     """
 
 
@@ -371,9 +375,12 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
     if not run.complete:
         raise EmbeddingRunIncomplete(
             f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded as "
-            f"{run.state!r}, so the index holds vectors from more than one pass. Re-run "
+            f"{run.state!r}: it either died part-way, leaving vectors from more than one "
+            f"pass in the index, or it finished having skipped products it could not embed. "
+            f"Either way it covered only part of the catalog. Re-run "
             f"`python -m ingest.graph.reembed --provider {run.provider}` to completion "
-            f"before querying it."
+            f"before querying it; a pass that keeps reporting skips is naming products with "
+            f"no embeddable text, which is a catalog problem, not an embedding one."
         )
     if run.provider != provider_name:
         raise EmbeddingProviderMismatch(

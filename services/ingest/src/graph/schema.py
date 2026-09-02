@@ -336,10 +336,15 @@ EMBEDDING_RUN_LABEL = "EmbeddingRun"
 
 #: A pass that has started writing and has not yet reported completion. A marker left in
 #: this state is the *only* evidence that an interrupted pass has mixed two vector spaces
-#: into one index — the per-product writes auto-commit, so nothing rolls back.
+#: into one index — the per-product writes auto-commit, so nothing rolls back. W2-03: a pass
+#: that ran to the end but could not embed every product it read is left in this state too.
+#: "Reached the last batch" is not the question the marker answers; "covers the whole
+#: catalog" is, and a pass that skipped products does not.
 EMBEDDING_RUN_RUNNING = "running"
 
-#: A pass that wrote every product it read.
+#: A pass that wrote every product it read — and nothing weaker. Stamped from
+#: :attr:`ingest.graph.reembed.ReembedReport.complete`, so the marker in the graph and the
+#: report handed back to the operator cannot disagree about the same pass.
 EMBEDDING_RUN_COMPLETE = "complete"
 
 _RECORD_EMBEDDING_RUN = f"""
