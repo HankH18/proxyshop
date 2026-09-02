@@ -22,8 +22,11 @@ property of this stub, not of the seeder.
 
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
+from shopify_stub import app as app_module
 from shopify_stub.state import DEFAULT_ACCESS_TOKEN
 from shopify_stub.testing import SEED_VARIANT, SUBSCRIBE_MUTATION, StubClient
 
@@ -242,3 +245,79 @@ async def test_the_version_that_answers_is_the_version_the_stub_stamps_on_its_ou
     )
     subscription = response.json()["data"]["webhookSubscriptionCreate"]["webhookSubscription"]
     assert subscription["apiVersion"]["handle"] == "2027-01"
+
+
+# ---------------------------------------------------------------------------------------
+# T-129 (stub 3): the module route table is the served surface, not a summary of it
+# ---------------------------------------------------------------------------------------
+#
+# `shopify_stub.app`'s module docstring is the only index of this service's HTTP surface —
+# there is no OpenAPI page (`docs_url` and `redoc_url` are both None), so a consumer reads
+# the docstring or reads every decorator. It drifted: `GET /_stub/codes` was registered at
+# `@router.get("/codes")` and served from the day the route landed, and appeared in neither
+# group of the table; the delivery-log commit edited that exact table and did not notice.
+#
+# The two tests below close the drift in both directions by comparing the prose to the
+# LIVE application rather than to another copy of the prose. `create_app().openapi()`
+# enumerates what is actually routable, so a documented route that is not served and a
+# served route that is not documented are each a red test.
+
+#: A row of either reStructuredText table: ``` ``/path`` ``` then the method column.
+#: ``GET/PUT`` is one row with two methods, so the method cell is split on ``/``.
+_TABLE_ROW = re.compile(r"^``(?P<path>/[^`]+)``\s+(?P<methods>[A-Z]+(?:/[A-Z]+)*)(?:\s|$)", re.M)
+
+#: The "**Operational**: ``GET /healthz``." line, which is prose rather than a table row.
+_INLINE_ROUTE = re.compile(r"``(?P<methods>[A-Z]+) (?P<path>/[^`]+)``")
+
+
+def _documented_surface() -> set[tuple[str, str]]:
+    """``(method, path)`` pairs named in ``shopify_stub.app``'s module docstring."""
+    doc = app_module.__doc__ or ""
+    documented: set[tuple[str, str]] = set()
+    for match in _TABLE_ROW.finditer(doc):
+        for method in match.group("methods").split("/"):
+            documented.add((method, match.group("path")))
+    for match in _INLINE_ROUTE.finditer(doc):
+        documented.add((match.group("methods"), match.group("path")))
+    return documented
+
+
+def _served_surface() -> set[tuple[str, str]]:
+    """``(method, path)`` pairs the freshly-built application actually routes."""
+    spec = app_module.create_app().openapi()
+    return {
+        (method.upper(), path)
+        for path, operations in spec["paths"].items()
+        for method in operations
+    }
+
+
+def test_the_module_route_table_is_the_served_surface() -> None:
+    """Every served route is documented and every documented route is served.
+
+    Set equality, not containment: containment in one direction lets a route be added
+    without a table row (the `/_stub/codes` defect) and containment in the other lets a
+    row outlive the route it names.
+    """
+    documented = _documented_surface()
+    served = _served_surface()
+    assert documented, "the docstring parser found no routes at all — it has stopped working"
+    assert served - documented == set(), (
+        f"served but undocumented in shopify_stub.app's route table: {sorted(served - documented)}"
+    )
+    assert documented - served == set(), (
+        f"documented in the route table but not served: {sorted(documented - served)}"
+    )
+
+
+def test_the_route_table_names_the_control_plane_route_that_was_missing() -> None:
+    """The specific regression, named, so the set comparison above cannot be read as noise.
+
+    ``GET /_stub/codes`` is what the drift hid. Asserted here against the live surface as
+    well as the prose, so this stays a fact about the service and not a fact about a
+    string.
+    """
+    assert ("GET", "/_stub/codes") in _served_surface(), "the route is registered and served"
+    assert ("GET", "/_stub/codes") in _documented_surface(), (
+        "and the control-plane table must name it"
+    )

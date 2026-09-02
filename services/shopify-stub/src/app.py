@@ -27,10 +27,12 @@ Route                                          Method  What it is
 ``/_stub/config``                              GET/PUT Read/modify the knobs
 ``/_stub/reset``                               POST    Wipe all state
 ``/_stub/seed``                                POST    Idempotent catalog seeding
+``/_stub/codes``                               GET     The discount-code table and
+                                                       D22's ``offer_id`` index
 ``/_stub/checkouts/{token}``                   GET     Introspect a checkout
 ``/_stub/checkouts/{token}/complete``          POST    Complete → order + webhook
-``/_stub/orders/{id}/fulfill``                 POST    → ``orders/fulfilled``
-``/_stub/orders/{id}/refund``                  POST    → ``refunds/create``
+``/_stub/orders/{order_id}/fulfill``           POST    → ``orders/fulfilled``
+``/_stub/orders/{order_id}/refund``            POST    → ``refunds/create``
 ``/_stub/events``                              GET     Emitted pixel events
 ``/_stub/events/suppressed``                   GET     Events that did NOT fire
 ``/_stub/webhooks/deliveries``                 GET     One row per delivery, with its
@@ -38,6 +40,13 @@ Route                                          Method  What it is
 ============================================== ======= =============================
 
 **Operational**: ``GET /healthz``.
+
+This table is not a summary that may lag the code: it is compared route by route, method
+by method, against the running application by
+``test_stub_contract.test_the_module_route_table_is_the_served_surface``. It was a summary
+that lagged — ``GET /_stub/codes`` was registered and served for the whole of the stub's
+life and named in neither group, and the two order rows spelled the path parameter
+``{id}`` where the routes declare ``{order_id}``.
 
 Why the completion step is an explicit call rather than something the cart route does:
 visiting a cart permalink is not a purchase. Collapsing the two would make it impossible to
