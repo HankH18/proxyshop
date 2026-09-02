@@ -609,3 +609,34 @@ describe("RFC 8785 §3.1 — parsing refuses integers the wire cannot state", ()
     expect(() => parseSignableJson(wire)).toThrow(CanonicalisationError);
   });
 });
+
+// --- T-107: the same canonicalizer now defines `claim_id` ---------------------------------
+
+describe("a JS peer and the Python `claim_id` render the same material identically", () => {
+  /** Byte-for-byte the strings `tests/test_claim_identity.py::JCS_DIVERGENCES` pins. Those are
+   * the two cases where `json.dumps(sort_keys=True)` — what `claim_id` used to hash — differs
+   * from RFC 8785, so this is where a JS peer used to compute a different id for the same
+   * claim. Pinning the same literals in both suites is what makes that one definition. */
+  it.each([
+    [
+      {claim_type: "return_policy", key: "free_returns", pitch_ref: "pitch:p-1", value: {rate: 1e-5}},
+      '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",' +
+        '"value":{"rate":0.00001}}',
+    ],
+    [
+      {
+        claim_type: "return_policy",
+        key: "free_returns",
+        pitch_ref: "pitch:p-1",
+        value: {"\u{1F600}": 1, "￿": 2},
+      },
+      '{"claim_type":"return_policy","key":"free_returns","pitch_ref":"pitch:p-1",' +
+        '"value":{"\u{1F600}":1,"￿":2}}',
+    ],
+  ])("renders claim material %#", (material, expected) => {
+    expect(canonicalJson(material)).toBe(expected);
+    // The rendering `claim_id` used to hash, for contrast: `JSON.stringify` with sorted keys is
+    // the JS spelling of `sort_keys=True`, and it disagrees on both rows.
+    expect(JSON.stringify(material, Object.keys(material).sort())).not.toBe(expected);
+  });
+});

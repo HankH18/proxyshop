@@ -16,14 +16,32 @@ four matter:
 
 Provenance is deliberately NOT in the hash. The same claim re-observed from a fresher snapshot is
 the same claim; folding provenance in would mint a new id every crawl and defeat idempotency.
+
+The material is serialized with `contracts.signing.canonical_json` — RFC 8785 — and NOT with
+`json.dumps(sort_keys=True)`. They are different serializations, and both differences are
+reachable from a real claim value:
+
+* `sort_keys` orders by CODE POINT, JCS by UTF-16 CODE UNIT, so `{"😀": 1, "\\uffff": 2}` comes
+  out `{"\\uffff":2,"😀":1}` one way and `{"😀":1,"\\uffff":2}` the other;
+* `json.dumps` writes numbers with `repr`, so `{"rate": 1e-5}` becomes `{"rate":1e-05}` where
+  ECMAScript — and therefore JCS, and therefore any JS peer — writes `{"rate":0.00001}`.
+
+A JS peer computing a claim id disagreed on both, and this module was a FOURTH independent
+hashing definition in a system whose decisions (D16, D52) say there should be one.
+
+**Adopting JCS re-identifies every existing claim.** The bytes change wherever a claim value
+carries a non-ASCII key or a number `repr` and ECMAScript spell differently, so every id derived
+from such a value moves. Nothing has stored one yet — this lands before any consumer does, and
+there is deliberately no migration path, because there is nothing to migrate.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from contracts.signing import canonical_json
 
 #: Prefix on the returned id, so a bare string is self-describing in a log or a database column.
 CLAIM_ID_PREFIX = "claim"
@@ -74,13 +92,13 @@ def claim_id(
         "value": canonicalize_value(value),
         "claim_type": str(getattr(claim_type, "value", claim_type) or ""),
     }
-    # No `default=`: a value the canonicalizer did not normalize would otherwise be stringified
-    # by `repr`, and `repr` of anything unordered or memory-addressed is not stable across
+    # `canonical_json` refuses anything it cannot render as JSON rather than falling back to
+    # `repr`, and `repr` of anything unordered or memory-addressed is not stable across
     # processes. A claim whose value cannot be canonicalized has no stable id, and saying so is
-    # better than minting one that silently changes on the next run.
-    encoded = json.dumps(
-        material, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    # better than minting one that silently changes on the next run. It also refuses an integer
+    # with no exact double (RFC 8785 §3.1) — a JS peer could not state that value, so the two
+    # could not agree on an id for it either.
+    encoded = canonical_json(material).encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()
     return f"{CLAIM_ID_PREFIX}:{CLAIM_ID_ALGORITHM}:{digest}"
 
