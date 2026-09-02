@@ -38,13 +38,17 @@ Refusal is compared as a boolean, never as an exception class, and that is not f
 * ``contracts.signing.CanonicalisationError`` and ``trust.ledger.canonical.CanonicalisationError``
   are unrelated classes that merely share a name;
 * the TypeScript twin's is a third;
-* and ``apps/trust/src/ledger`` still has the dual-spelling problem T-014 solved elsewhere with
-  ``_bind_submodules`` — measured in this process, ``trust.ledger.canonical`` is **not**
-  ``apps.trust.src.ledger.canonical``, so even within the ledger a cross-spelling
-  ``except CanonicalisationError`` does not catch. Binding those spellings lives in
-  ``apps/trust/src/ledger/__init__.py``, outside this file's scope;
-  :func:`test_both_spellings_of_the_ledger_canonicaliser_agree` covers the consequence that
-  matters — the two spellings must not drift — without depending on class identity.
+* and ``apps/trust/src/ledger`` no longer adds a fourth. It used to: the ledger is reachable
+  under two dotted names and each one executed the package separately. **T-119 bound them**,
+  with the ``_bind_submodules`` block T-014 introduced for ``packages/llm``, so — measured in
+  this process — ``trust.ledger.canonical`` **is** ``apps.trust.src.ledger.canonical`` (``is``
+  → ``True``, one ``sys.modules`` entry, one ``CanonicalisationError`` class), and a
+  cross-spelling ``except CanonicalisationError`` now catches. The two *package* objects stay
+  distinct on purpose (``trust.ledger is apps.trust.src.ledger`` → ``False``); what T-119
+  shares is every submodule. That binding lives in ``apps/trust/src/ledger/__init__.py``,
+  outside this file's scope;
+  :func:`test_both_spellings_of_the_ledger_canonicaliser_agree` is what keeps it true — the
+  two spellings must not drift back apart — without depending on class identity.
 
 Three deliberate, out-of-scope differences, excluded by name
 -----------------------------------------------------------
@@ -689,6 +693,9 @@ def ts_outcomes(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Outcome]:
     # The case file travels in the environment, not in argv: `vite-node` inserts its own
     # arguments, so the driver's `argv[2]` is the driver's own path and an argv protocol would
     # have it read its own source as JSON.
+    # T-122 sweep: deliberately no PYTHONPATH. The child is `vite-node` running the
+    # TypeScript signer — there is no Python interpreter here for `.pkgroot` to serve — and
+    # `{**os.environ, ...}` extends the inherited environment rather than replacing it.
     completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, repo-local binary
         [str(VITE_NODE), str(TS_DRIVER)],
         cwd=REPO_ROOT,
@@ -1005,13 +1012,22 @@ def test_the_excluded_differences_are_still_the_only_ones() -> None:
 def test_both_spellings_of_the_ledger_canonicaliser_agree() -> None:
     """`trust.ledger.canonical` and `apps.trust.src.ledger.canonical` must not drift.
 
-    The two spellings are separate module objects in this process (T-106 acceptance criterion 3
-    asks `apps/trust/src/ledger/__init__.py` to bind them the way T-014's `_bind_submodules`
-    does; that file is outside this gate's scope). Until they are bound, the property that
-    actually matters is that the two copies produce the same bytes — a stale `__pycache__`, a
-    half-applied edit, or a second physical file on one of the paths would break it silently,
-    and the frozen acceptance suite reaches the ledger by the `apps.` spelling while every
-    member package reaches it by the `trust.` spelling.
+    T-119 did what T-106 acceptance criterion 3 asked: `apps/trust/src/ledger/__init__.py` now
+    binds the two spellings with the `_bind_submodules` block T-014 introduced for
+    `packages/llm`, so both names resolve to ONE module object. Measured in this process:
+    `trust.ledger.canonical is apps.trust.src.ledger.canonical` → `True`, one `sys.modules`
+    entry, the same `canonical_json` function object.
+
+    That makes the comparison below **trivially satisfied by construction** — a module cannot
+    disagree with itself — and the test is KEPT anyway, deliberately, because it is the
+    regression guard for exactly that binding. Remove the binding, or let a stale
+    `__pycache__`, a half-applied edit, or a second physical file on one of the paths
+    reintroduce a second copy, and the two spellings are two module objects again, free to
+    canonicalise differently, with nothing else in the suite noticing. That is why the guard
+    is cheap and permanent: the frozen acceptance suite reaches the ledger by the `apps.`
+    spelling while every member package reaches it by the `trust.` spelling, so a divergence
+    would split D16's single source of hashing truth in half. The `__file__` assertion is part
+    of the same guard — it fails if the `apps.` spelling ever resolves to a different file.
     """
     other = importlib.import_module("apps.trust.src.ledger.canonical")
     assert Path(other.__file__ or "").resolve() == (

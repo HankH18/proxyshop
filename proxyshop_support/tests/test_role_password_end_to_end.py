@@ -363,6 +363,8 @@ def test_the_admin_password_is_pinned_to_composes_superuser_password() -> None:
 
 
 def _docker(*argv: str, timeout: int = 180, env: dict[str, str] | None = None):
+    # T-122 sweep: deliberately no PYTHONPATH. The child is the `docker` CLI, not a Python
+    # interpreter; what it needs is PROXYSHOP_ROLE_PASSWORD, which callers pass in `env`.
     return subprocess.run(
         ["docker", *argv],
         capture_output=True,

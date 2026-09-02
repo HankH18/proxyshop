@@ -40,6 +40,11 @@ def _hostile_env_import(statements: str) -> subprocess.CompletedProcess[str]:
     dependencies (pydantic, …) still import; otherwise this would prove only that `-S`
     hides pydantic, not that the fallback works. That leaves precisely the situation the
     fallback exists for: the repo root on the path, and nothing else about this repo.
+
+    T-122 sweep, explicitly: do NOT add ``.pkgroot`` to this environment. Every other
+    subprocess test in the repo hands the child both directories; this one must not, because
+    handing it ``.pkgroot`` supplies the very thing the fallback is here to synthesise and
+    inverts the test into one that passes no matter what the fallback does.
     """
     env = {
         "PATH": "/usr/bin:/bin",

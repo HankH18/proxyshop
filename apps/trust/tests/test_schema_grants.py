@@ -107,6 +107,12 @@ def _run_lint_imports(config: Path, *, pythonpath: Path) -> subprocess.Completed
 
     A subprocess and not an in-process call on purpose: D35's criterion is that *the check
     exits non-zero*, and the exit status is the thing ``make verify`` reads.
+
+    T-122: ``pythonpath`` is APPENDED to whatever the parent had rather than replacing it,
+    and every real call site names ``REPO_ROOT / ".pkgroot"`` explicitly, so the child can
+    reach the flat package spellings whether or not the venv's ``_proxyshop.pth`` applies.
+    The two lint fixture configs pass their own directory on purpose — they are graded on a
+    contrived import graph, not on this repo's.
     """
     env = dict(os.environ)
     existing = env.get("PYTHONPATH")
@@ -1489,6 +1495,8 @@ def _compose_postgres_settings() -> dict[str, str]:
 
 
 def _docker(*argv: str, timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    # T-122 sweep: deliberately no PYTHONPATH. The child is the `docker` CLI, not a Python
+    # interpreter, so `.pkgroot` would be noise on its environment.
     return subprocess.run(
         ["docker", *argv], capture_output=True, text=True, timeout=timeout, check=False
     )
@@ -1804,6 +1812,8 @@ def _run_address_picker(fake_hostname_output: str, tmp_path: Path) -> subprocess
     stub = tmp_path / "hostname"
     stub.write_text(f'#!/bin/sh\necho "{fake_hostname_output}"\n', encoding="utf-8")
     stub.chmod(0o755)
+    # T-122 sweep: deliberately no PYTHONPATH. The child is `/bin/sh` running a shell
+    # fragment, and PATH — not the import path — is the variable under test here.
     return subprocess.run(
         ["sh", "-c", f'{_ROUTABLE_ADDRESS_SH}; printf %s "$addr"'],
         capture_output=True,

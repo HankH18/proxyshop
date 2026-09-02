@@ -18,6 +18,7 @@ it can only be observed by actually collecting a directory.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -100,7 +101,16 @@ def _write_directory(directory: Path, *, duplicate: bool) -> None:
 
 
 def _run_pytest(directory: Path) -> subprocess.CompletedProcess[str]:
-    """Collect and run ``directory`` in a fresh interpreter, outside this repo's rootdir."""
+    """Collect and run ``directory`` in a fresh interpreter, outside this repo's rootdir.
+
+    T-122: the environment is hermetic on purpose — the whole point is a pytest run that
+    inherits nothing from this session — but the import path names BOTH the repo root and
+    ``.pkgroot``. The root alone reaches ``proxyshop_support``, which is all today's probe
+    needs; ``.pkgroot`` is what reaches every flat package spelling (``contracts``,
+    ``trust``, ...), and a probe that grows one import of one of those would otherwise fail
+    with ``ModuleNotFoundError`` on any machine where the venv's ``_proxyshop.pth`` does not
+    apply, which is exactly how the same defect took ``make verify`` down once already.
+    """
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-v", "."],
         cwd=directory,
@@ -109,7 +119,7 @@ def _run_pytest(directory: Path) -> subprocess.CompletedProcess[str]:
         timeout=180,
         env={
             "PATH": "/usr/bin:/bin",
-            "PYTHONPATH": str(REPO_ROOT),
+            "PYTHONPATH": os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / ".pkgroot")]),
             "PYTHONDONTWRITEBYTECODE": "1",
         },
     )
