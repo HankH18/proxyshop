@@ -2397,3 +2397,48 @@ def test_a_separator_variant_of_a_key_converges_on_one_node(
             )
         }
         assert found == {"p-under", "p-space"}, f"{spelling!r} saw only {sorted(found)}"
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+@pytest.mark.parametrize("argv", [[], ["--rebuild-index"]], ids=["plain", "rebuild-index"])
+def test_the_reembed_cli_restores_the_whole_schema_however_it_is_invoked(
+    graph_schema_session: Any, argv: list[str]
+) -> None:
+    """W1-33: ``--rebuild-index`` took ``apply_schema`` away instead of adding to it.
+
+    Driven live against a stripped schema, ``main(["--rebuild-index"])`` returned **rc 0
+    with zero constraints**, and a second ``CREATE (p:Product {product_id:'cli-1'})`` then
+    succeeded — the MERGE-based idempotence of the entire upsert library lost its backstop
+    while the command reported success.
+
+    ``main()` had also never executed in this suite at all: sabotage confirmed it, with
+    ``raise AssertionError`` as its first statement leaving the suite at 136 passed. So this
+    drives the real entrypoint, against the real database, through ``graph_driver()``.
+
+    The shared graph is restored in ``finally`` regardless of outcome — every other worker
+    reads this database.
+    """
+    from ingest.graph.reembed import main as reembed_main
+
+    expected = set(schema_report(graph_schema_session).constraints)
+    assert len(expected) == len(ID_PROPERTY), "the fixture must start from a whole schema"
+    try:
+        for name in sorted(expected):
+            graph_schema_session.run(f"DROP CONSTRAINT {name} IF EXISTS").consume()
+        assert schema_report(graph_schema_session).constraints == {}, "the strip must land"
+
+        assert reembed_main([*argv, "--provider", "hash"]) == 0
+        assert set(schema_report(graph_schema_session).constraints) == expected, (
+            "the CLI must leave the constraint set whole, not just the vector index"
+        )
+
+        # And the restored constraints are load-bearing, not merely present.
+        graph_schema_session.run("CREATE (p:Product {product_id:'cli-1'})").consume()
+        with pytest.raises(Exception, match="onstraint|already exists"):
+            graph_schema_session.run("CREATE (p:Product {product_id:'cli-1'})").consume()
+    finally:
+        apply_schema(graph_schema_session)
+    live = schema_report(graph_schema_session)
+    assert set(live.constraints) == expected
+    assert live.vector_dimensions == VECTOR_INDEX_DIMENSIONS

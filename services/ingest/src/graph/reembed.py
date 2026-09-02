@@ -341,14 +341,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     provider = get_embedding_provider(args.provider)
     with graph_driver() as driver, driver.session() as session:
+        # UNCONDITIONAL, and the rebuild is an ADDITION to it rather than an alternative.
+        # `--rebuild-index` used to take the `else` branch away from `apply_schema`, so
+        # driving this CLI against a stripped schema returned rc 0 with zero constraints —
+        # measured, and a second `CREATE (p:Product {product_id:'cli-1'})` then succeeded.
+        # Every MERGE in this library is idempotent *because* a uniqueness constraint backs
+        # it; without the constraints the whole upsert layer silently loses its backstop,
+        # and the one command an operator runs after a schema problem was the command that
+        # skipped fixing it.
+        apply_schema(session)
         if args.rebuild_index:
             # Rebuild for THIS provider's width. Rebuilding at D6's 1024 for a 512-d
             # provider — which is what this did before — drops a working index, creates an
             # identical one, and then embeds the entire catalog into an index that can never
             # match it, with exit status 0.
             rebuild_vector_index(session, dimensions=provider.dimension)
-        else:
-            apply_schema(session)
         try:
             report = reembed_products(session, provider, batch_size=args.batch_size)
         except EmbeddingDimensionMismatch as exc:
