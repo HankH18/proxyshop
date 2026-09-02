@@ -17,7 +17,20 @@ import json
 import sys
 from collections.abc import Sequence
 
+from fixtures.generator import CATALOG_DIR, GeneratorError
+from fixtures.manifest import ManifestError
 from fixtures.seed import DEFAULT_STUB_URL, SeedError, build_payload, seed_stub, variant_body
+
+
+def _known_categories() -> list[str]:
+    """The SEED_CATEGORY values that actually have a config, for the error message.
+
+    A "no config for 'tea'" that does not say which categories DO exist sends the reader
+    looking for a directory listing the tool could have printed.
+    """
+    if not CATALOG_DIR.is_dir():
+        return []
+    return sorted(p.stem for p in CATALOG_DIR.glob("*.json") if p.is_file())
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -56,8 +69,39 @@ def main(argv: Sequence[str] | None = None, client: object | None = None) -> int
     # An empty --category is what `make demo-seed` passes when SEED_CATEGORY is unset; fall
     # back to the manifest rather than failing on an empty string.
     category = (args.category or "").strip() or None
-    payload = build_payload(category, args.seed)
-    body = variant_body(payload)
+
+    # `make demo-seed SEED_CATEGORY=tea` reaches exactly this line, and building the payload
+    # is the step most likely to refuse: an unknown category, an unreadable category config,
+    # a manifest whose digest chain has drifted. All three used to escape as a raw traceback
+    # from the module's ONLY production entry point — a `make` target printing a stack trace
+    # reads as "the tool is broken", not as "you named a category that does not exist".
+    try:
+        payload = build_payload(category, args.seed)
+        body = variant_body(payload)
+    except GeneratorError as exc:
+        known = _known_categories()
+        print(
+            f"FATAL: {exc}\n"
+            f"       SEED_CATEGORY must name a category config in "
+            f"{CATALOG_DIR.relative_to(CATALOG_DIR.parents[1]).as_posix()}/. "
+            f"Available: {', '.join(known) if known else '(none)'}\n"
+            "       Either run `make demo-seed SEED_CATEGORY=<one of those>`, or add the "
+            "config and re-pin the manifest\n"
+            "       (./.venv/bin/python -m fixtures.manifest --refresh-digests).",
+            file=sys.stderr,
+        )
+        return 3
+    except ManifestError as exc:
+        print(
+            f"FATAL: the approved fixture manifest is not usable ground truth: {exc}\n"
+            "       Nothing was seeded. Inspect it with "
+            "`./.venv/bin/python -m fixtures.manifest` (read-only).",
+            file=sys.stderr,
+        )
+        return 3
+    except SeedError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 3
 
     summary = {
         "seed_category": payload["seed_category"],

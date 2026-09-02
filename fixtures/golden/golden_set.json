@@ -596,6 +596,7 @@
         "store_id": "store-slowreply",
         "evidence_refs": ["snap-vector64-2026-08-22#prod-vector64-grinder"],
         "partial": true,
+        "retrieval_notes": ["warranty page fetch exceeded the 5 s budget; attribute omitted rather than guessed"],
         "products": [
           {
             "product_ref": "prod-vector64-grinder",
@@ -787,6 +788,142 @@
           "expected_dimension": "catalog_claim_accuracy",
           "rationale": "A rehabilitated seller telling the truth: the trajectory back up must be reachable, or the blacklist is a life sentence.",
           "provenance": {"source": "seller_asserted", "ref": "gp-011-blacklist-expiry#c-burrs", "observed_at": "2026-08-24T10:00:00Z", "authority_rank": 0}
+        }
+      ]
+    },
+    {
+      "pitch_id": "gp-012-misrepresented-ingredients",
+      "intent_ref": "intent-coffee-001",
+      "store_id": "store-brightbean",
+      "product_ref": "prod-houseblend-250g",
+      "gates": ["contradiction"],
+      "text": "Our House Blend Daily Drinker is 100% single-origin arabica, arabica beans and nothing else, roasted light, 95 mg of caffeine per serving in every 250 g bag.",
+      "catalog_snapshot": {
+        "snapshot_id": "snap-houseblend-2026-08-25",
+        "captured_at": "2026-08-25T09:00:00Z",
+        "store_id": "store-brightbean",
+        "evidence_refs": ["snap-houseblend-2026-08-25#prod-houseblend-250g"],
+        "products": [
+          {
+            "product_ref": "prod-houseblend-250g",
+            "variant_ref": "var-houseblend-250g",
+            "canonical_name": "House Blend Daily Drinker",
+            "evidence_ref": "snap-houseblend-2026-08-25#prod-houseblend-250g",
+            "observed_at": "2026-08-25T09:00:00Z",
+            "attributes": {
+              "ingredients": {"value": ["arabica beans", "robusta beans"]},
+              "origin": {"value": "blend (Brazil, Vietnam)"},
+              "roast_level": {"value": "light"},
+              "net_weight": {"value": 250, "unit": "g"},
+              "caffeine_mg_per_serving": {"value": 95, "unit": "mg"}
+            },
+            "offer": {"unit_price": 15.5, "currency": "USD", "availability": "in_stock"}
+          }
+        ]
+      },
+      "claims": [
+        {
+          "claim_ref": "gp-012-c-single-origin",
+          "text": "100% single-origin arabica.",
+          "key": "ingredients",
+          "value": "100% single-origin arabica",
+          "claim_type": "ingredients",
+          "product_ref": "prod-houseblend-250g",
+          "expected_status": "contradicted",
+          "expected_dimension": "catalog_claim_accuracy",
+          "rationale": "The manifest's FLAGSHIP scripted lie, `misrepresented_ingredients` (fixtures/manifest.json dishonest_store.behaviours): 100% single-origin arabica claimed for a product the catalog records as an arabica/robusta blend. Without this case the answer key never grades the one catalog lie the manifest actually scripts, and the demo can pass while failing at its stated purpose. A FALSE PRODUCT FACT: not a price, delivery or returns failure, so it lands on catalog_claim_accuracy (D53).",
+          "provenance": {"source": "seller_asserted", "ref": "gp-012-misrepresented-ingredients#c-single-origin", "observed_at": "2026-08-25T10:00:00Z", "authority_rank": 0}
+        },
+        {
+          "claim_ref": "gp-012-c-arabica",
+          "text": "Arabica beans.",
+          "key": "ingredients",
+          "value": "arabica beans",
+          "claim_type": "ingredients",
+          "product_ref": "prod-houseblend-250g",
+          "expected_status": "verified",
+          "expected_dimension": "catalog_claim_accuracy",
+          "rationale": "The true half of the same ingredient list. The lie is the '100% single-origin', not the arabica: a verifier that contradicted every ingredients claim in the set would otherwise be graded green on the one claim_type the dishonest store's flagship behaviour uses.",
+          "provenance": {"source": "seller_asserted", "ref": "gp-012-misrepresented-ingredients#c-arabica", "observed_at": "2026-08-25T10:00:00Z", "authority_rank": 0}
+        },
+        {
+          "claim_ref": "gp-012-c-caffeine",
+          "text": "95 mg of caffeine per serving.",
+          "key": "caffeine_mg_per_serving",
+          "value": "95 mg",
+          "claim_type": "nutrition",
+          "product_ref": "prod-houseblend-250g",
+          "expected_status": "verified",
+          "expected_dimension": "catalog_claim_accuracy",
+          "rationale": "A TRUE nutrition claim, in the same units the snapshot records. gp-004's caffeine claim is the only other nutrition case and it is false, so without this one a verifier that contradicted every nutrition claim would score perfectly on the type.",
+          "provenance": {"source": "seller_asserted", "ref": "gp-012-misrepresented-ingredients#c-caffeine", "observed_at": "2026-08-25T10:00:00Z", "authority_rank": 0}
+        }
+      ]
+    },
+    {
+      "pitch_id": "gp-013-compatibility-mismatch",
+      "intent_ref": "intent-coffee-002",
+      "store_id": "store-brightbean",
+      "product_ref": "prod-basket-51",
+      "gates": ["contradiction"],
+      "text": "The Precision Shower Basket drops straight into any portafilter-58mm, and it is a perfect fit for the bar-9-espresso-machine. Stainless steel throughout.",
+      "catalog_snapshot": {
+        "snapshot_id": "snap-basket-2026-08-25",
+        "captured_at": "2026-08-25T09:00:00Z",
+        "store_id": "store-brightbean",
+        "evidence_refs": ["snap-basket-2026-08-25#prod-basket-51"],
+        "products": [
+          {
+            "product_ref": "prod-basket-51",
+            "variant_ref": "var-basket-51-standard",
+            "canonical_name": "Precision Shower Basket 51 mm",
+            "evidence_ref": "snap-basket-2026-08-25#prod-basket-51",
+            "observed_at": "2026-08-25T09:00:00Z",
+            "attributes": {
+              "compatible_with": {"value": ["portafilter-51mm", "bar-9-espresso-machine"]},
+              "material": {"value": "stainless steel"},
+              "basket_diameter_mm": {"value": 51, "unit": "mm"}
+            },
+            "offer": {"unit_price": 28.0, "currency": "USD", "availability": "in_stock"}
+          }
+        ]
+      },
+      "claims": [
+        {
+          "claim_ref": "gp-013-c-portafilter",
+          "text": "Drops straight into any portafilter-58mm.",
+          "key": "compatible_with",
+          "value": "portafilter-58mm",
+          "claim_type": "compatibility",
+          "product_ref": "prod-basket-51",
+          "expected_status": "contradicted",
+          "expected_dimension": "catalog_claim_accuracy",
+          "rationale": "A FALSE compatibility claim, and the buyer's stated need: intent-coffee-002 asks for 58 mm. The snapshot's compatible_with lists portafilter-51mm. `compatibility` is one of the four product-fact claim types the approved table routes to catalog_claim_accuracy (D53) and it had no case at all, so nothing graded a verifier's handling of it.",
+          "provenance": {"source": "seller_asserted", "ref": "gp-013-compatibility-mismatch#c-portafilter", "observed_at": "2026-08-25T10:00:00Z", "authority_rank": 0}
+        },
+        {
+          "claim_ref": "gp-013-c-bar9",
+          "text": "A perfect fit for the bar-9-espresso-machine.",
+          "key": "compatible_with",
+          "value": "bar-9-espresso-machine",
+          "claim_type": "compatibility",
+          "product_ref": "prod-basket-51",
+          "expected_status": "verified",
+          "expected_dimension": "catalog_claim_accuracy",
+          "rationale": "The TRUE compatibility claim in the same list. One entry of compatible_with is claimed truthfully and one falsely, so a verifier cannot decide the type by pitch-level sentiment.",
+          "provenance": {"source": "seller_asserted", "ref": "gp-013-compatibility-mismatch#c-bar9", "observed_at": "2026-08-25T10:00:00Z", "authority_rank": 0}
+        },
+        {
+          "claim_ref": "gp-013-c-material",
+          "text": "Stainless steel throughout.",
+          "key": "material",
+          "value": "stainless steel",
+          "claim_type": "specifications",
+          "product_ref": "prod-basket-51",
+          "expected_status": "verified",
+          "expected_dimension": "catalog_claim_accuracy",
+          "rationale": "True, and on the same product: a false compatibility claim does not make the material claim false.",
+          "provenance": {"source": "seller_asserted", "ref": "gp-013-compatibility-mismatch#c-material", "observed_at": "2026-08-25T10:00:00Z", "authority_rank": 0}
         }
       ]
     }

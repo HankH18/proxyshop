@@ -341,3 +341,48 @@ def test_demo_seed_reports_a_diagnosis_rather_than_a_traceback_when_no_stub_is_r
     err = capsys.readouterr().err
     assert "could not reach the shopify-stub" in err
     assert re.search(r"--dry-run", err)
+
+
+def test_an_unknown_seed_category_is_a_diagnosis_not_a_traceback(capsys) -> None:
+    """`make demo-seed SEED_CATEGORY=tea` used to print a raw stack trace.
+
+    ``build_payload()`` was called OUTSIDE ``main()``'s try/except, so ``GeneratorError`` —
+    the ordinary, expected refusal for a category with no config, and only ``coffee`` has
+    one — escaped from the module's ONLY production entry point as an unhandled exception.
+    A make target that answers a typo with a traceback reads as "the tool is broken", and
+    the one thing the reader needs (which categories DO exist) was nowhere in the output.
+    """
+    from fixtures.seed.__main__ import main
+
+    assert main(["--category", "tea", "--dry-run"]) == 3
+    captured = capsys.readouterr()
+    assert captured.out == "", "a refusal must not also print a report on stdout"
+    err = captured.err
+    assert err.startswith("FATAL:"), err
+    assert "Traceback" not in err and "GeneratorError" not in err
+    assert "tea" in err and "fixtures/catalog" in err
+    assert SEED_CATEGORY in err, (
+        "the error must name the categories that DO have a config, or the reader is sent "
+        "hunting for a directory listing the tool could have printed"
+    )
+
+
+def test_a_manifest_that_is_not_ground_truth_is_a_diagnosis_not_a_traceback(
+    capsys, monkeypatch
+) -> None:
+    """The same entry point, the other way ``build_payload()`` refuses.
+
+    ``ManifestError`` (a drifted digest chain, an unmapped claim type) reaches this line
+    too, and it must arrive as a refusal rather than as a stack trace out of a `make` run.
+    """
+    from fixtures.manifest import DigestMismatchError
+    from fixtures.seed import __main__ as seed_main
+
+    def _refuse(*_args, **_kwargs):
+        raise DigestMismatchError("manifest.golden_set.sha256 does not match")
+
+    monkeypatch.setattr(seed_main, "build_payload", _refuse)
+    assert seed_main.main(["--dry-run"]) == 3
+    err = capsys.readouterr().err
+    assert err.startswith("FATAL:") and "Traceback" not in err
+    assert "not usable ground truth" in err

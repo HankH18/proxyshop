@@ -352,8 +352,8 @@
   },
   "golden_set": {
     "path": "fixtures/golden/golden_set.json",
-    "sha256": "dc94dbbb66ef70b08dec80da74be18ed7403a2766aab6285d8db0395baf09f60",
-    "count": 11,
+    "sha256": "0f8c092f0c9ce3935da2e6e6673ee0de50d7c6f9520f79665139b1dc89777012",
+    "count": 13,
     "note": "This reference sits INSIDE the body the approval digest covers, so approving the manifest transitively approves the exact bytes of the golden set. Change either and the chain breaks loudly."
   },
   "approval": {
@@ -361,7 +361,7 @@
     "approver": null,
     "approved_at": null,
     "artifact": null,
-    "content_hash": "87c49f8026f66b0f0f2fed55c65ce6cfce151b40921e00acaef03672cdd1bb43",
+    "content_hash": "130608ab82568409e6e0e2a2086bf6eccb3d535338f5a32fe9dccb72a9205ce6",
     "request": "fixtures/approval/REQUEST-manifest-approval.md",
     "how_to_approve": "A HUMAN runs:  PROXYSHOP_WORKER=<n> ./.venv/bin/python -m fixtures.approval --approver \"<your full name>\"",
     "note": "T-080 is a human gate (EXECUTION.md rule 6). No agent may fill approver/approved_at/artifact. `content_hash` is a computed digest of this document's body (this block excluded) and is NOT itself an approval; it is recorded so downstream readers can detect drift, and so the human approves a document whose digest is already published rather than one an agent hashes afterwards.",
