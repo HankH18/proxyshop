@@ -11,6 +11,9 @@ tail, and ``idempotency_key`` *is* ``event_id``. What this module adds is the pa
 * **a vocabulary**, so a caller learns whether to fix the event (:class:`InvalidEvent`),
   stop re-sending it (:class:`IdempotencyConflict`), or retry it (:class:`ChainForked`),
   instead of receiving ``UniqueViolation`` and guessing;
+* **an answer when there is no database at all** (:class:`StoreUnavailable`), because a
+  service whose datastore is down still has to say so -- see :func:`classify_connection_error`
+  and :meth:`PostgresEventStore._connection`;
 * **verification that names the broken link**, via :mod:`.integrity`.
 
 Why idempotency is not enforced here
@@ -57,6 +60,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "DEFAULT_DSN_ENV",
     "PostgresEventStore",
+    "classify_connection_error",
     "classify_write_error",
     "default_store",
 ]
@@ -135,6 +139,42 @@ def classify_write_error(exc: BaseException, event_id: str) -> EventServiceError
     return None
 
 
+def classify_connection_error(exc: BaseException) -> StoreUnavailable | None:
+    """Translate "there is no working connection" into the service's vocabulary.
+
+    Args:
+        exc: whatever failed while acquiring or using a connection.
+
+    Returns:
+        A :class:`StoreUnavailable` when ``exc`` means the datastore could not be reached,
+        or ``None`` when it means something else and must propagate untouched.
+
+    **Why this is separate from :func:`classify_write_error`, and why the two cannot
+    overlap.** psycopg maps SQLSTATE classes 08 (connection exception), 53 (insufficient
+    resources), 57 (operator intervention -- ``admin_shutdown``, ``crash_shutdown``,
+    ``cannot_connect_now``) and 58 (system error) onto :class:`psycopg.OperationalError`,
+    and maps class 23 (integrity constraint violation) onto :class:`psycopg.IntegrityError`.
+    The two branches are therefore disjoint by construction: a duplicate ``event_id`` can
+    never be mistaken for an outage, and an outage can never be reported as "your event is
+    malformed". ``psycopg_pool.PoolTimeout`` / ``PoolClosed`` / ``TooManyRequests`` are all
+    subclasses of ``OperationalError``, so waiting the pool out for a database that is down
+    lands here too.
+
+    ``InterfaceError`` is included because "the connection is already closed" is the same
+    outage seen one moment later, and a bare ``OSError`` because a socket failure that
+    escapes the driver is still the datastore being unreachable -- not a bad request.
+    """
+    import psycopg
+
+    if isinstance(exc, EventServiceError):
+        return None
+    if isinstance(exc, psycopg.OperationalError | psycopg.InterfaceError | OSError):
+        return StoreUnavailable(
+            f"the ledger writer could not reach its datastore: {type(exc).__name__}: {exc}".rstrip()
+        )
+    return None
+
+
 class PostgresEventStore:
     """An append-only event store over ``ledger.commerce_events``.
 
@@ -146,6 +186,9 @@ class PostgresEventStore:
         max_size: pool size when ``psycopg_pool`` is available. It bounds how many appends
             can be in flight, not how many can succeed -- the chain's advisory lock
             serialises them regardless.
+        connect_timeout: seconds libpq waits for a single connection attempt.
+        pool_timeout: seconds a caller waits for a pooled connection before the request is
+            refused as :class:`StoreUnavailable`. Defaults to twice ``connect_timeout``.
 
     The connection resource is opened **lazily**, on the first operation. Constructing this
     object therefore never touches the network, which is what lets
@@ -159,11 +202,22 @@ class PostgresEventStore:
         connect: Callable[[], psycopg.Connection] | None = None,
         max_size: int = 16,
         connect_timeout: int = 5,
+        pool_timeout: float | None = None,
     ) -> None:
         self._dsn = dsn
         self._connect = connect
         self._max_size = max_size
         self._connect_timeout = connect_timeout
+        # `psycopg_pool`'s own default is 30 seconds, which is not a wait -- it is an
+        # outage. Against a Postgres that is down, every request parked an HTTP worker for
+        # half a minute and then failed anyway, so a restarting database took the writer's
+        # whole thread pool with it and the caller's client usually timed out first and saw
+        # nothing at all. The healthy-path wait for a free connection is sub-millisecond
+        # (the pool holds `max_size` of them and an append is one short transaction), so
+        # anything on the order of seconds is already "the datastore is not serving".
+        self._pool_timeout = (
+            float(pool_timeout) if pool_timeout is not None else max(2.0 * connect_timeout, 1.0)
+        )
         self._pool: Any | None = None
         self._pool_attempted = False
 
@@ -197,6 +251,7 @@ class PostgresEventStore:
             min_size=1,
             max_size=self._max_size,
             kwargs={"autocommit": True, "connect_timeout": self._connect_timeout},
+            timeout=self._pool_timeout,
             open=True,
             name="proxyshop-ledger-writer",
         )
@@ -204,36 +259,62 @@ class PostgresEventStore:
 
     @contextmanager
     def _connection(self) -> Iterator[psycopg.Connection]:
-        """One autocommit connection for one operation.
+        """One autocommit connection for one operation, or :class:`StoreUnavailable`.
 
         Autocommit is not a detail: :func:`trust.ledger.append_event` refuses a connection
         with a transaction already open, because its chain lock is transaction-scoped and
         would otherwise be held until the *caller* commits -- blocking every other ledger
         writer in the system for that whole span.
+
+        **The acquisition is inside the guard, and that is the whole point of this shape.**
+        It used to be outside: every method opened its connection here and only the *SQL*
+        ran inside :meth:`_append_on`'s ``except`` clauses, so an unreachable or restarting
+        Postgres never became a :class:`StoreUnavailable`. ``psycopg.OperationalError`` --
+        the single thing a dead database produces -- walked past every handler and reached
+        the client as a bare ``500`` with an empty body, which tells a caller nothing and,
+        worse, tells it the opposite of the truth: 5xx-without-a-code reads as "your request
+        broke the server, do not retry", when the correct reading was "the ledger is down,
+        retry". Wrapping the acquisition *and* the body means every operation on this store
+        -- append, read, head, verify, replay, get -- reports an outage the one documented
+        way, instead of each caller re-discovering it.
+
+        The body is inside the guard as well, deliberately: a connection that dies mid
+        statement is the same outage noticed a moment later, and ``classify_connection_error``
+        is narrow enough (SQLSTATE 08/53/57/58) that a constraint refusal cannot be
+        swallowed by it.
         """
-        if self._connect is not None:
-            connection = self._connect()
+        try:
+            if self._connect is not None:
+                connection = self._connect()
+                try:
+                    yield connection
+                finally:
+                    connection.close()
+                return
+
+            pool = self._ensure_pool()
+            if pool is not None:
+                with pool.connection() as connection:
+                    yield connection
+                return
+
+            import psycopg
+
+            connection = psycopg.connect(
+                self._resolve_dsn(), autocommit=True, connect_timeout=self._connect_timeout
+            )
             try:
                 yield connection
             finally:
                 connection.close()
-            return
-
-        pool = self._ensure_pool()
-        if pool is not None:
-            with pool.connection() as connection:
-                yield connection
-            return
-
-        import psycopg
-
-        connection = psycopg.connect(
-            self._resolve_dsn(), autocommit=True, connect_timeout=self._connect_timeout
-        )
-        try:
-            yield connection
-        finally:
-            connection.close()
+        except Exception as exc:
+            # `EventServiceError` passes straight through -- `classify_connection_error`
+            # returns None for it -- so the "no DSN is configured" 503 keeps its own message
+            # and is not relabelled as a dead server. The two outages have different fixes.
+            unavailable = classify_connection_error(exc)
+            if unavailable is None:
+                raise
+            raise unavailable from exc
 
     def close(self) -> None:
         """Release the pool, if one was opened. Safe to call more than once."""
@@ -320,13 +401,23 @@ class PostgresEventStore:
             return read_events(connection, after_seq=after_seq, store_id=store_id, limit=limit)
 
     def get(self, event_id: str) -> dict[str, Any] | None:
-        """One event by ``event_id``, or ``None``."""
+        """One event by ``event_id``, or ``None``. **One index probe, not a scan.**
+
+        The predicate belongs in the query. This used to read the *entire ledger* --
+        ``read_events(connection)`` with no filter and no limit -- and then linear-scan the
+        result in Python, once per request, on the endpoint a retrying client hits hardest.
+        On an append-only history that only ever grows, "is this one event there" cost
+        O(ledger) in rows fetched, bytes off the wire and Python objects built, and the
+        answer was one row.
+
+        ``idempotency_key`` carries ``commerce_events_idempotency_key_key``, a UNIQUE index,
+        so the filtered read is a single index probe. ``limit=1`` is belt and braces: the
+        constraint already makes at most one row possible, and the limit means a future
+        schema that relaxed it would still not turn this method back into a scan.
+        """
         with self._connection() as connection:
-            rows = read_events(connection)
-        for row in rows:
-            if str(row.get("event_id")) == event_id:
-                return row
-        return None
+            rows = read_events(connection, event_id=event_id, limit=1)
+        return rows[0] if rows else None
 
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
