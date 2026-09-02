@@ -1413,3 +1413,39 @@ def test_the_gate_covers_every_input_class_it_claims_to() -> None:
         "must be one of the 10 non-double numbers or the 9 non-JSON types, each commented at "
         "its construction site"
     )
+
+
+def test_the_typescript_header_states_the_asymmetry_it_actually_has() -> None:
+    """T-129: `ts/signing.ts`'s header asserted Python/TS equivalence flatly.
+
+    It said the two `canonical_signing_bytes` "must produce the SAME bytes for the same
+    submission" and stopped there, which stayed on the page unchanged while T-113 made it false
+    for every exact double at or beyond 2**53. The header now states the claim in its two real
+    halves — same value, same bytes; same wire text, same accepted literals — and names the two
+    reasons they are separate.
+
+    Prose cannot be graded by reading it, so what is graded is the two things that make the
+    claim TRUE and that a later edit could silently remove: the header must cite the gate that
+    backs it, and this gate must still hold a test for each half. Deleting either grading test,
+    or reverting the header, turns this red — which is the most a documentation fix can honestly
+    be asked to carry, and more than a substring check would.
+    """
+    source = (REPO_ROOT / "packages" / "contracts" / "src" / "ts" / "signing.ts").read_text("utf-8")
+    header = source.split("*/", 1)[0]
+    assert "e2e/test_jcs_conformance.py" in header, (
+        "the module header no longer names the gate that backs its equivalence claim; an "
+        "unbacked claim is exactly what T-129 found"
+    )
+    assert "parseSignableJson" in header and "no Python peer" in header, (
+        "the header states the equivalence without naming the one place the two surfaces "
+        "differ, which is the shape the false claim had"
+    )
+
+    value_half = globals().get("test_the_typescript_signing_door_agrees")
+    text_half = globals().get("test_the_signing_doors_agree_on_raw_wire_text")
+    assert callable(value_half) and callable(text_half), (
+        "the header claims both halves are graded across the language boundary; one of the "
+        "tests that grades them is gone"
+    )
+    assert TS_CASES, "the value half is parametrized over an empty case list"
+    assert SIGNING_TEXT_CASES, "the text half is parametrized over an empty case list"

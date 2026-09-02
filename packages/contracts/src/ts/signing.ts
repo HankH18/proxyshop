@@ -2,10 +2,29 @@
  * The external signing envelope and the one canonical form the signature covers (D52), in
  * TypeScript.
  *
- * A peer of `contracts/signing.py`, byte for byte: `canonicalSigningBytes` here and
- * `canonical_signing_bytes` there must produce the SAME bytes for the same submission, or a bid
- * signed by a Node seller could not be verified by a Python exchange. `tests/signing.test.ts`
- * pins the exact bytes against a fixture the Python tests pin too.
+ * A peer of `contracts/signing.py`. The equivalence is stated in two halves, because it has two
+ * halves and stating it as one was how a real split hid inside it for a whole wave (T-129):
+ *
+ *   1. **Given the same VALUE**, `canonicalSigningBytes` here and `canonical_signing_bytes`
+ *      there produce the SAME bytes and refuse the same submissions — or a bid signed by a Node
+ *      seller could not be verified by a Python exchange.
+ *   2. **Given the same wire TEXT**, the two sides accept and refuse exactly the same integer
+ *      literals.
+ *
+ * `tests/signing.test.ts` pins the exact bytes against fixtures the Python tests pin too, and
+ * `e2e/test_jcs_conformance.py` grades BOTH halves across the language boundary — the value
+ * half over the whole conformance corpus, the text half over `SIGNING_TEXT_CASES`. Until T-125
+ * that file drove the renderers only, so the header could assert equivalence flatly while
+ * `canonicalSigningBytes` refused every exact double at or beyond 2**53 that Python signed.
+ *
+ * The two halves are separate because the SURFACE is not symmetric, and that asymmetry is real
+ * rather than an accident to be tidied away. Python's `int` is arbitrary precision, so
+ * `json.loads` hands `canonical_json` the integer the wire actually spelled and RFC 8785 §3.1's
+ * `float(v) == v` is a decidable question about the value. JavaScript has no integer type —
+ * `JSON.parse` has already rounded before any guard can run — so the same rule is decidable
+ * only on the literal. That is why `parseSignableJson` and the `…FromJson` doors exist here and
+ * have no Python peer: in Python, `json.loads` followed by the ordinary door already IS the
+ * text door.
  */
 import {createHash} from "node:crypto";
 
