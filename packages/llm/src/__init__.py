@@ -80,8 +80,10 @@ from llm.errors import (
 from llm.prompting import (
     CACHE_CONTROL,
     SECTION_SEPARATOR,
+    SYSTEM_BLOCK_SEPARATOR,
     CachedPrompt,
     assemble_prompt,
+    compose_request,
     wire_key,
 )
 from llm.recordings import (
@@ -121,6 +123,7 @@ __all__ = [
     "ROLE_INTERVIEW",
     "ROLE_STORE_AGENT",
     "SECTION_SEPARATOR",
+    "SYSTEM_BLOCK_SEPARATOR",
     "SUPPORTED_PROVIDERS",
     "TIMEOUT_ENV_VAR",
     "AnthropicLLM",
@@ -142,6 +145,7 @@ __all__ = [
     "assemble_prompt",
     "available_recordings",
     "build_llm",
+    "compose_request",
     "default_model",
     "load_all_recordings",
     "load_provenance",

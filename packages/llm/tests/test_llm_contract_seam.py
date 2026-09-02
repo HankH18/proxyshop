@@ -15,7 +15,9 @@ import socket
 import pytest
 
 from packages.llm import (
+    SYSTEM_BLOCK_SEPARATOR,
     AnthropicLLM,
+    CachedPrompt,
     RecordedLLM,
     UnrecordedPromptError,
     assemble_prompt,
@@ -106,7 +108,14 @@ def test_the_double_keys_on_exactly_what_the_client_sends(no_network) -> None:
 
     recorder = _Recorder()
     AnthropicLLM("buyer", model="m", client=recorder).complete(prompt, system=per_call)
-    sent_system = "\n\n".join(block["text"] for block in recorder.last["system"])
+    # W1-24: this join used to be a literal "\n\n" (SECTION_SEPARATOR). The requirement
+    # asserted below — the key is the canonical join of exactly the blocks the client sent,
+    # paired with exactly the user turn it sent — is unchanged; only the separator moved.
+    # "\n\n" can occur inside a block's own text, so it made two genuinely different calls
+    # canonicalise to one key: CachedPrompt("A") + system="B" (two blocks) and
+    # CachedPrompt("A\n\nB") (one block) both became "A\n\nB", and RecordedLLM then replayed
+    # the reply reviewed for the other one. SYSTEM_BLOCK_SEPARATOR is NUL, which cannot.
+    sent_system = SYSTEM_BLOCK_SEPARATOR.join(block["text"] for block in recorder.last["system"])
     sent_user = recorder.last["messages"][0]["content"][0]["text"]
 
     assert wire_key(prompt, per_call) == (sent_system, sent_user)
@@ -157,3 +166,178 @@ def test_the_store_context_still_leads_when_there_is_no_per_call_system() -> Non
     recorder = _Recorder()
     AnthropicLLM("store_agent", model="m", client=recorder).complete(prompt)
     assert [block["text"] for block in recorder.last["system"]] == ["STORE ENVELOPE\nfloor 18.00"]
+
+
+# ======================================================================================
+# W1-15: ONE composer, over every input shape — not just the one that had a test
+# ======================================================================================
+
+CUSTOM_SEPARATOR = "\n---\n"
+
+#: ``(label, prompt, system, expected_system_blocks, expected_user_turn)`` — the full
+#: cross-product of {CachedPrompt, bare string} x {system, no system} x {default, custom
+#: separator}. Exactly one of these eight shapes (CachedPrompt + system + default
+#: separator) had coverage, and the bare-string branch composed its request independently
+#: of ``wire_key``: measured against 9a1ea2f, stripping the halves in the client's string
+#: branch left the whole suite green while making a recording unreachable through the very
+#: client it was recorded for.
+#:
+#: The expectations are written as LITERALS on purpose. Asserting only that the client and
+#: ``wire_key`` agree would stay green under any change applied to the shared composer —
+#: the sabotage this file exists to catch.
+COMPOSITION_SHAPES = [
+    (
+        "cached-prompt + system",
+        CachedPrompt("  STORE CONTEXT  ", "  BUYER\nquote me  "),
+        "  turn 3 of 9  ",
+        ["  STORE CONTEXT  ", "  turn 3 of 9  "],
+        "  BUYER\nquote me  ",
+    ),
+    (
+        "cached-prompt, no system",
+        CachedPrompt("  STORE CONTEXT  ", "  BUYER\nquote me  "),
+        None,
+        ["  STORE CONTEXT  "],
+        "  BUYER\nquote me  ",
+    ),
+    (
+        "cached-prompt + system, custom separator",
+        CachedPrompt("  STORE CONTEXT  ", "  BUYER\nquote me  ", CUSTOM_SEPARATOR),
+        "  turn 3 of 9  ",
+        ["  STORE CONTEXT  ", "  turn 3 of 9  "],
+        "  BUYER\nquote me  ",
+    ),
+    (
+        "cached-prompt, no system, custom separator",
+        CachedPrompt("  STORE CONTEXT  ", "  BUYER\nquote me  ", CUSTOM_SEPARATOR),
+        None,
+        ["  STORE CONTEXT  "],
+        "  BUYER\nquote me  ",
+    ),
+    (
+        "bare string + system",
+        "  BUYER\nquote me  ",
+        "  turn 3 of 9  ",
+        ["  turn 3 of 9  "],
+        "  BUYER\nquote me  ",
+    ),
+    (
+        "bare string, no system",
+        "  BUYER\nquote me  ",
+        None,
+        [],
+        "  BUYER\nquote me  ",
+    ),
+    (
+        "bare string + empty system",
+        "  BUYER\nquote me  ",
+        "",
+        [],
+        "  BUYER\nquote me  ",
+    ),
+    (
+        "cached-prompt with an empty static context",
+        CachedPrompt("", "  BUYER\nquote me  "),
+        None,
+        [],
+        "  BUYER\nquote me  ",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "system", "expected_blocks", "expected_user"),
+    [shape[1:] for shape in COMPOSITION_SHAPES],
+    ids=[shape[0] for shape in COMPOSITION_SHAPES],
+)
+def test_every_prompt_shape_composes_the_same_way_for_the_client_and_the_double(
+    no_network, prompt, system, expected_blocks, expected_user
+) -> None:
+    """One composer, checked against literals, over every shape a consumer can pass.
+
+    Three separate claims, and the literals are what make the first two real:
+
+    1. the client puts exactly ``expected_blocks`` and ``expected_user`` on the wire;
+    2. ``wire_key`` — what the doubles look up — reports exactly the same two halves;
+    3. a recording keyed on ``wire_key`` is therefore reachable through the client.
+
+    Claim 3 alone cannot catch a change applied to the shared composer, because both
+    sides would move together. Claims 1 and 2 can, which is why every expectation carries
+    its surrounding whitespace: stripping a half is the measured sabotage.
+    """
+    recorder = _Recorder()
+    AnthropicLLM("buyer", model="m", client=recorder).complete(prompt, system=system)
+
+    sent_blocks = [block["text"] for block in recorder.last.get("system", [])]
+    sent_user = recorder.last["messages"][0]["content"][0]["text"]
+    assert sent_blocks == expected_blocks
+    assert sent_user == expected_user
+    assert ("system" in recorder.last) == bool(expected_blocks), (
+        "an empty system block list must be omitted from the request, never sent as []"
+    )
+
+    key = wire_key(prompt, system)
+    assert key == (SYSTEM_BLOCK_SEPARATOR.join(expected_blocks), expected_user)
+
+    double = RecordedLLM({key: "recorded"})
+    assert double.complete(prompt, system=system) == "recorded", (
+        "a recording keyed on wire_key must be reachable through the client that sends it"
+    )
+
+
+def test_a_bare_string_prompt_with_no_system_still_keys_on_exactly_the_prompt(
+    no_network,
+) -> None:
+    """The frozen acceptance path: ``RecordedLLM({"p": "r"}).complete("p")``.
+
+    Every other shape may move; this one may not. The frozen suite builds a
+    ``dict[str, str]`` and calls with a plain string, so the composed key has to stay
+    ``("", prompt)`` byte for byte.
+    """
+    assert wire_key("summarize the envelope") == ("", "summarize the envelope")
+    assert wire_key("summarize the envelope", None) == ("", "summarize the envelope")
+    assert (
+        RecordedLLM({"summarize the envelope": "floors respected"}).complete(
+            "summarize the envelope"
+        )
+        == "floors respected"
+    )
+
+
+def test_two_different_block_structures_do_not_collide_on_one_key(no_network) -> None:
+    """W1-24: joining system blocks with "\\n\\n" made two distinct calls one key.
+
+    ``CachedPrompt("A") + system="B"`` is two blocks; ``CachedPrompt("A\\n\\nB")`` is one.
+    They are different requests — different cache structure, different bytes on the wire —
+    and both used to canonicalise to ``("A\\n\\nB", "q")``, so a double built for one
+    replayed its reviewed answer for the other.
+    """
+    two_blocks = CachedPrompt("A", "q")
+    one_block = CachedPrompt("A\n\nB", "q")
+
+    assert wire_key(two_blocks, "B") != wire_key(one_block)
+
+    double = RecordedLLM({wire_key(one_block): "answer for the one-block call"})
+    assert double.complete(one_block) == "answer for the one-block call"
+    with pytest.raises(UnrecordedPromptError):
+        double.complete(two_blocks, system="B")
+
+
+def test_a_separator_is_a_property_of_the_assembled_text_not_of_the_wire(no_network) -> None:
+    """A custom separator changes ``.text`` and the cache prefix — never the request.
+
+    The two halves travel separately, so the separator that joins them for a human reader
+    is never sent, and a double keyed on one separator must answer a call made with the
+    other.
+    """
+    default = CachedPrompt("STATIC", "TAIL")
+    custom = CachedPrompt("STATIC", "TAIL", CUSTOM_SEPARATOR)
+    assert default.text != custom.text
+    assert wire_key(default) == wire_key(custom) == ("STATIC", "TAIL")
+
+    recorder = _Recorder()
+    client = AnthropicLLM("buyer", model="m", client=recorder)
+    client.complete(default)
+    first = recorder.last
+    client.complete(custom)
+    assert recorder.last == first

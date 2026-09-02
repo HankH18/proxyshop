@@ -41,15 +41,24 @@ from llm.errors import (
     ProviderNotConfiguredError,
     TruncatedReplyError,
 )
-from llm.prompting import CachedPrompt
+from llm.prompting import compose_request
 
 #: Request fields this wrapper owns; a per-call keyword may not overwrite them.
 #:
 #: ``model`` is the one that matters: C4 makes model ids config rather than code, and a
 #: ``complete(prompt, model="...")`` keyword walks past both :mod:`llm.config` and the
 #: frozen AST scan — the scan can only see literals in this package, never a value a
-#: caller passes in. ``messages`` and ``system`` are here because overwriting them would
-#: silently discard the cache boundary this module just built.
+#: caller passes in. ``messages`` is here because overwriting it would silently discard
+#: the cache boundary this module just built.
+#:
+#: ``system`` is listed for **documentation only** and the guard can never fire for it:
+#: :meth:`AnthropicLLM.complete` declares ``system`` as a keyword-only *named* parameter,
+#: so it is bound there and can never land in ``**kwargs``. Deleting it from this set
+#: would change no behaviour whatsoever — which is exactly why
+#: ``test_the_reserved_field_guard_is_live_for_every_field_that_can_reach_kwargs``
+#: parametrizes over the fields that CAN reach ``**kwargs`` rather than over this set, and
+#: a separate test pins the signature that makes ``system`` unreachable. Keep the name
+#: here so a reader adding a field knows ``system`` is owned too, not merely forgotten.
 RESERVED_REQUEST_FIELDS: frozenset[str] = frozenset({"model", "messages", "system"})
 
 #: ``stop_reason`` values that mean "there is no usable reply here".
@@ -167,6 +176,7 @@ class AnthropicLLM:
         *,
         system: str | None = None,
         max_tokens: int | None = None,
+        cache_system: bool = True,
         **kwargs: Any,
     ) -> str:
         """Send ``prompt`` and return the reply text.
@@ -175,11 +185,32 @@ class AnthropicLLM:
             prompt: a :class:`llm.prompting.CachedPrompt` — strongly preferred, because it
                 carries the cache boundary and this method turns it into a cached system
                 prefix plus a dynamic user turn (C4) — or a plain string.
-            system: static system text. With a string prompt this becomes the cacheable
-                prefix; with a :class:`~llm.prompting.CachedPrompt` it is prepended to the
-                prompt's own static context.
+            system: static system text.
+
+                * With a plain **string** prompt there is no other static half, so
+                  ``system`` **is** the static context: it becomes the request's one
+                  system block and, by default, the cached prefix.
+                * With a :class:`~llm.prompting.CachedPrompt` the prompt already owns the
+                  static context, so ``system`` is **appended after** it as a second,
+                  uncached block — never merged in front of it, because anything in front
+                  of the store envelope pushes it off byte zero and no request is ever a
+                  cache hit again.
             max_tokens: per-call override.
+            cache_system: attach the ``cache_control`` breakpoint to the static block.
+
+                Leave it on for text that repeats across calls; turn it **off** for a
+                string-prompt call whose ``system`` varies per call (a turn counter, a
+                timestamp, a request id), because that writes a cache entry no later call
+                can read. The flag exists because ``system=`` alone does not say which of
+                those two it is, and the answer used to depend on the runtime type of a
+                *different* argument: a ``CachedPrompt`` prompt made ``system`` uncached,
+                a string prompt made the same text cached.
             **kwargs: passed through to ``messages.create``.
+
+        Raises:
+            ModelOverrideError: if a per-call keyword names a field in
+                :data:`RESERVED_REQUEST_FIELDS` that can reach ``**kwargs``.
+            llm.errors.PromptAssemblyError: if there is no user turn to send.
         """
         reserved = RESERVED_REQUEST_FIELDS & set(kwargs)
         if reserved:
@@ -191,21 +222,15 @@ class AnthropicLLM:
                 f"env var, or construct AnthropicLLM(role, model=...) deliberately."
             )
 
-        if isinstance(prompt, CachedPrompt):
-            cached = prompt
-            # The per-call system goes AFTER the store context, as a second block. In
-            # front of it, any varying system text (a turn counter, a timestamp) would
-            # push the stable envelope off byte zero and the prefix could never be a
-            # cache hit again — see CachedPrompt.to_system_blocks.
-            system_blocks = cached.to_system_blocks(extra=system)
-        else:
-            cached = CachedPrompt(static_context=system or "", dynamic_tail=str(prompt))
-            system_blocks = cached.to_system_blocks() if system else []
+        # ONE composer, shared with llm.prompting.wire_key — which is what the offline
+        # doubles key on. Composing the request here instead is how a recording becomes
+        # unreachable through the very client it was recorded for, silently.
+        system_blocks, messages = compose_request(prompt, system, cache=cache_system)
 
         request: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
-            "messages": cached.to_messages(),
+            "messages": messages,
         }
         if system_blocks:
             request["system"] = system_blocks
@@ -267,30 +292,69 @@ def build_llm(
 
     Args:
         role: one of :data:`llm.config.KNOWN_ROLES`.
-        provider: overrides ``LLM_PROVIDER``.
-        recordings: when the double is selected, replay this table strictly
+        provider: overrides ``LLM_PROVIDER``. Normalised the same way
+            :func:`llm.config.resolve_provider` normalises the env var — stripped and
+            lower-cased — so ``provider="Anthropic"`` and ``LLM_PROVIDER=Anthropic``
+            select the same thing. They used to disagree: the env var was normalised and
+            the keyword was matched verbatim, so the keyword raised
+            ``ProviderNotConfiguredError`` on a spelling the env var accepted.
+        recordings: **double-only.** Replay this table strictly
             (:class:`~llm.doubles.RecordedLLM`) instead of answering deterministically.
             Keys may be prompt strings, ``(system, prompt)`` pairs, or ``CachedPrompt``s.
+            Passing it with a non-double provider raises rather than silently dropping the
+            recordings and returning a live client.
         env: environment mapping to resolve from.
-        **kwargs: forwarded to :class:`AnthropicLLM` when the live provider is selected.
+        **kwargs: forwarded to :class:`AnthropicLLM`, so they are accepted **only** on the
+            ``anthropic`` path. On the double path they would be ignored, so they raise:
+            ``build_llm("buyer", model="…", api_key="…")`` used to return a double that
+            had quietly discarded every one of them.
+
+    Returns:
+        Whichever client the provider selects. All three expose ``.complete()``
+        (:class:`LLMClient`) and all three expose ``.model``; on a double that is the
+        label ``"double:<role>"`` rather than an Anthropic model id, because a double
+        sends no request and has no model — see :attr:`llm.doubles._RecordingBase.model`.
 
     Raises:
         UnknownRoleError: if ``role`` is not one of :data:`llm.config.KNOWN_ROLES` —
             on every provider path, including the offline double.
         ProviderNotConfiguredError: for an unimplemented provider name.
+        TypeError: for a keyword the selected provider would ignore — an unusable
+            ``recordings=``, or any ``**kwargs`` on a path that does not forward them.
     """
     # Validate the role on EVERY path. It used to be checked only where the live client
     # resolved a model, so `build_llm("store-agent")` — the hyphenated directory name —
     # worked offline and raised only under LLM_PROVIDER=anthropic. Every test in this
     # repo runs offline (D3), so the typo would have reached production unexercised.
     _validate_role(role)
-    name = provider if provider is not None else resolve_provider(env)
+
+    name = provider.strip().lower() if provider is not None else resolve_provider(env)
+    if name not in SUPPORTED_PROVIDERS:
+        raise ProviderNotConfiguredError(
+            f"unknown LLM provider {name!r}; supported: {', '.join(SUPPORTED_PROVIDERS)}"
+        )
+    # Refuse a keyword this provider would throw away. Silently accepting one is worse
+    # than a TypeError: `build_llm(role, model="claude-x")` under D20's default read as a
+    # configured client and was a DeterministicLLM that had discarded the model, and
+    # `recordings=` with a live provider read as offline replay and was a live client.
+    if recordings is not None and name != PROVIDER_DOUBLE:
+        raise TypeError(
+            f"recordings= only applies to the offline double, but provider {name!r} was "
+            f"selected, so this table would be discarded and a live client returned. "
+            f"Pass provider={PROVIDER_DOUBLE!r} (or leave LLM_PROVIDER unset — D20 makes "
+            f"the double the default), or drop recordings=."
+        )
+    if kwargs and name != PROVIDER_ANTHROPIC:
+        raise TypeError(
+            f"{', '.join(sorted(kwargs))} cannot be passed with provider {name!r}: those "
+            f"keywords are forwarded to AnthropicLLM and provider {name!r} ignores them, "
+            f"so they would be silently discarded. Configure the double explicitly "
+            f"(recordings=, or llm.doubles.DeterministicLLM(role=..., default=...)), or "
+            f"select provider={PROVIDER_ANTHROPIC!r}."
+        )
+
     if name == PROVIDER_DOUBLE:
         if recordings is not None:
             return RecordedLLM(recordings, role=role)
         return DeterministicLLM(role=role)
-    if name == PROVIDER_ANTHROPIC:
-        return AnthropicLLM(role, env=env, **kwargs)
-    raise ProviderNotConfiguredError(
-        f"unknown LLM provider {name!r}; supported: {', '.join(SUPPORTED_PROVIDERS)}"
-    )
+    return AnthropicLLM(role, env=env, **kwargs)

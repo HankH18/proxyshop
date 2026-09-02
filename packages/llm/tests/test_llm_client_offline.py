@@ -384,3 +384,212 @@ def test_build_llm_only_reaches_for_the_live_client_on_an_explicit_opt_in(
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     with pytest.raises(ProviderNotConfiguredError):
         build_llm("interview")
+
+
+# --------------------------------------------------------------------------------------
+# the cache policy is stated by the caller, not inferred from another argument's type
+# --------------------------------------------------------------------------------------
+
+
+def test_the_string_path_documents_system_as_the_static_context_and_caches_it(
+    no_network,
+) -> None:
+    """On the string path there is no other static half, so `system` IS the static context.
+
+    That is why it carries the breakpoint by default — and why the default is wrong for a
+    system string that varies per call, which `cache_system=False` is for.
+    """
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    AnthropicLLM("buyer", model="m", client=fake).complete("hi", system="STORE POLICY v3")
+    assert recorder["request"]["system"] == [
+        {"type": "text", "text": "STORE POLICY v3", "cache_control": {"type": "ephemeral"}}
+    ]
+
+
+def test_cache_system_false_stops_a_per_call_system_writing_an_unreadable_cache_entry(
+    no_network,
+) -> None:
+    """W1-12: the same `system=` keyword meant "cache this" or "do not" depending on the
+    runtime type of a DIFFERENT argument — a CachedPrompt prompt made it uncached, a
+    string prompt made the identical text cached. A system string that varies per call
+    then wrote a fresh cache entry on every turn that no later turn could ever read.
+
+    The policy is now the caller's to state.
+    """
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    client = AnthropicLLM("buyer", model="m", client=fake)
+
+    for turn in range(1, 4):
+        client.complete("hi", system=f"turn {turn} of 9", cache_system=False)
+        assert recorder["request"]["system"] == [{"type": "text", "text": f"turn {turn} of 9"}]
+        assert "cache_control" not in recorder["request"]["system"][0]
+
+
+def test_cache_system_false_also_lifts_the_breakpoint_off_a_cached_prompt(no_network) -> None:
+    """Same meaning on both paths: it is the breakpoint on the STATIC block."""
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    prompt = assemble_prompt("STORE CONTEXT", "quote me")
+    client = AnthropicLLM("store_agent", model="m", client=fake)
+
+    client.complete(prompt)
+    assert recorder["request"]["system"][0]["cache_control"] == {"type": "ephemeral"}
+
+    client.complete(prompt, cache_system=False)
+    assert recorder["request"]["system"] == [{"type": "text", "text": "STORE CONTEXT"}]
+
+
+def test_cache_system_is_a_named_parameter_and_never_reaches_the_request(no_network) -> None:
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    AnthropicLLM("buyer", model="m", client=fake).complete("hi", system="s", cache_system=False)
+    assert "cache_system" not in recorder["request"]
+
+
+# --------------------------------------------------------------------------------------
+# the reserved-field guard: which entries can actually fire it (EXTRA-1)
+# --------------------------------------------------------------------------------------
+
+#: The reserved fields a caller CAN smuggle in through `**kwargs`. `system` cannot be one
+#: of them — `complete` binds it as a named keyword-only parameter — so parametrizing the
+#: guard test over the whole constant would silently include a case that proves nothing.
+REACHABLE_RESERVED_FIELDS = sorted(RESERVED_REQUEST_FIELDS - {"system"})
+
+
+@pytest.mark.parametrize("field", REACHABLE_RESERVED_FIELDS)
+def test_the_reserved_field_guard_is_live_for_every_field_that_can_reach_kwargs(
+    no_network, field
+) -> None:
+    """Deleting the guard must turn this red — which `"system" in RESERVED_REQUEST_FIELDS`
+    could never do, because that is true by construction and stays true with no guard at
+    all.
+
+    Parametrized over the reachable fields rather than a hard-coded pair, so a field added
+    to the constant is covered here the moment it is added.
+    """
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    client = AnthropicLLM("buyer", model="env-resolved", client=fake)
+
+    with pytest.raises(ModelOverrideError) as excinfo:
+        client.complete("hi", **{field: "smuggled"})
+    assert field in str(excinfo.value)
+    assert "request" not in recorder, "the request must not have been sent at all"
+
+
+def test_system_is_listed_in_the_reserved_fields_for_documentation_only(no_network) -> None:
+    """`system` is in the constant and the guard can NEVER fire for it.
+
+    `complete` declares `system` as a keyword-only NAMED parameter, so it is bound there
+    and cannot land in `**kwargs`. The constant entry is documentation; the signature is
+    the enforcement. Asserting `"system" in RESERVED_REQUEST_FIELDS` proves nothing about
+    the guard, so this asserts the mechanism that actually excludes it — and that the
+    keyword is composed rather than passed through blind.
+    """
+    import inspect
+
+    parameter = inspect.signature(AnthropicLLM.complete).parameters["system"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, (
+        "if `system` ever stops being a named parameter, the guard becomes load-bearing "
+        "and this test should be replaced by a ModelOverrideError one"
+    )
+
+    recorder: dict = {}
+    fake = _fake_sdk(recorder).Anthropic()  # type: ignore[attr-defined]
+    AnthropicLLM("buyer", model="m", client=fake).complete("hi", system="be terse")
+    assert recorder["request"]["system"][0]["text"] == "be terse"
+
+
+# --------------------------------------------------------------------------------------
+# build_llm refuses a keyword the selected provider would throw away
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"model": "smuggled-model"},
+        {"api_key": "sk-not-real"},
+        {"timeout": 5},
+        {"max_tokens": 32},
+        {"utter_nonsense": object()},
+        {"model": "smuggled-model", "timeout": 5},
+    ],
+)
+def test_build_llm_refuses_kwargs_the_double_would_silently_discard(
+    monkeypatch, no_network, kwargs
+) -> None:
+    """`build_llm(role, model="…")` under D20's default read as a configured client and
+    was a double that had thrown the model away — including outright nonsense."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    with pytest.raises(TypeError) as excinfo:
+        build_llm("buyer", **kwargs)
+    for name in kwargs:
+        assert name in str(excinfo.value), "the error must name the offending keyword"
+
+
+def test_build_llm_still_forwards_those_kwargs_on_the_path_that_uses_them(
+    monkeypatch, no_network
+) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    client = build_llm("buyer", model="explicit-model", timeout=7.5)
+    assert isinstance(client, AnthropicLLM)
+    assert client.model == "explicit-model"
+    assert client.timeout == 7.5
+
+
+@pytest.mark.parametrize("case", [str.lower, str.upper, str.title, "  {}  ".format])
+@pytest.mark.parametrize(
+    ("provider", "expected"), [("anthropic", AnthropicLLM), ("double", DeterministicLLM)]
+)
+def test_build_llm_normalizes_the_provider_keyword_the_way_the_env_var_is_normalized(
+    monkeypatch, no_network, case, provider, expected
+) -> None:
+    """`resolve_provider` strips and lower-cases `LLM_PROVIDER`; the keyword did not.
+
+    So `LLM_PROVIDER=Anthropic` selected the live client while `provider="Anthropic"`
+    raised ProviderNotConfiguredError — the same spelling, two different answers. Every
+    spelling the env var accepts, the keyword must accept too.
+    """
+    spelling = case(provider)
+
+    monkeypatch.setenv("LLM_PROVIDER", spelling)
+    assert isinstance(build_llm("buyer"), expected), f"LLM_PROVIDER={spelling!r}"
+
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    assert isinstance(build_llm("buyer", provider=spelling), expected), f"provider={spelling!r}"
+
+
+def test_build_llm_refuses_recordings_it_would_have_to_discard(monkeypatch, no_network) -> None:
+    """`recordings=` with a live provider read as offline replay and was a live client."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    with pytest.raises(TypeError) as excinfo:
+        build_llm("buyer", provider="anthropic", recordings={"p": "r"})
+    assert "recordings" in str(excinfo.value)
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    with pytest.raises(TypeError):
+        build_llm("buyer", recordings={"p": "r"})
+
+    # ...and it is still accepted where it is honoured.
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    assert isinstance(build_llm("buyer", recordings={"p": "r"}), RecordedLLM)
+
+
+def test_build_llm_reports_an_unknown_provider_before_it_complains_about_keywords(
+    no_network,
+) -> None:
+    with pytest.raises(ProviderNotConfiguredError):
+        build_llm("buyer", provider="openai", model="x", recordings={"p": "r"})
+
+
+def test_every_client_build_llm_can_return_exposes_model(monkeypatch, no_network) -> None:
+    """A consumer logging `client.model` must not work live and AttributeError offline."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    assert build_llm("buyer").model == "double:buyer"
+    assert build_llm("buyer", recordings={"p": "r"}).model == "double:buyer"
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("BUYER_MODEL", "sentinel-buyer-model")
+    assert build_llm("buyer").model == "sentinel-buyer-model"
