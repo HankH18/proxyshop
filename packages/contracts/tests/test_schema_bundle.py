@@ -14,6 +14,7 @@ useless:
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -176,11 +177,22 @@ def test_the_generated_python_carries_a_do_not_edit_header() -> None:
 
 def test_the_codegen_cli_reports_rather_than_writes_under_check() -> None:
     before = PYTHON_OUT.read_bytes()
+    repo_root = PROTOCOL_SCHEMA.parent.parent.parent.parent
+    # The child gets none of the in-process import help: not pytest's `pythonpath` ini, not the
+    # `packages/contracts/__init__.py` fallback. Without this it can only find the flat `contracts`
+    # namespace through the venv's editable-install `.pth`, which macOS/uv writes UF_HIDDEN and
+    # CPython's `site.addpackage` then silently skips. Hand `.pkgroot` to the child explicitly, the
+    # way `packages/llm/tests/test_llm_client_offline.py` does.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(repo_root), str(repo_root / ".pkgroot"), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     result = subprocess.run(  # noqa: S603 - fixed argv
         [sys.executable, "-m", "contracts.codegen", "--check", "--python-only"],
         capture_output=True,
         text=True,
-        cwd=str(PROTOCOL_SCHEMA.parent.parent.parent.parent),
+        cwd=str(repo_root),
+        env=env,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert PYTHON_OUT.read_bytes() == before
