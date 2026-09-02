@@ -2442,3 +2442,146 @@ def test_the_reembed_cli_restores_the_whole_schema_however_it_is_invoked(
     live = schema_report(graph_schema_session)
     assert set(live.constraints) == expected
     assert live.vector_dimensions == VECTOR_INDEX_DIMENSIONS
+
+
+class _LyingProvider(EmbeddingProvider):
+    """Declares 1024-d and emits 512-d.
+
+    Not a straw man: a provider's ``dimension`` is a class attribute and its ``embed`` is a
+    call into a model, so "declares one width, returns another" is exactly what a wrong
+    model revision, a truncated download or a config typo produces.
+    """
+
+    name = "liar"
+    dimension = EMBEDDING_DIM
+
+    def embed(self, text: str) -> list[float]:
+        """Emit half the declared width."""
+        return hash_embed(text, dim=EMBEDDING_DIM // 2)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_live_vector_width_is_checked_against_the_index_not_the_vector(
+    graph_seeded_catalog: dict[str, Any],
+) -> None:
+    """W1-34: the only thing standing between a lying provider and a total blackout.
+
+    ``reembed.py`` passes ``dimensions=index_dimensions`` to ``set_product_embedding``.
+    Changing that to ``dimensions=len(vector)`` left the whole suite green — and with this
+    provider the sabotaged version stores 512-wide vectors against a 1024-d index, reports
+    ``complete=True``, exits 0, and ``candidate_products`` then returns ``[]`` for every
+    query in the system. The pre-flight guard at ``reembed.py:190`` cannot help: this
+    provider *declares* 1024, so ``resolved.dimension == index_dimensions`` holds.
+    """
+    from ingest.graph import EmbeddingDimensionMismatch
+
+    session = graph_seeded_catalog["session"]
+    provider = _LyingProvider()
+    assert provider.dimension == VECTOR_INDEX_DIMENSIONS, "the declaration must pass pre-flight"
+    assert len(provider.embed("x")) == 512, "and the emission must not"
+
+    with pytest.raises(EmbeddingDimensionMismatch, match="512"):
+        reembed_products(session, provider)
+
+    # The refusal has to be total: not one 512-d vector may have landed.
+    widths = {
+        len(row["embedding"])
+        for row in session.run(
+            "MATCH (p:Product) WHERE p.embedding IS NOT NULL RETURN p.embedding AS embedding"
+        ).data()
+    }
+    assert widths == {VECTOR_INDEX_DIMENSIONS}, f"a narrow vector was stored: {widths}"
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_provenance_audit_covers_every_material_label_and_every_material_edge(
+    graph_schema_session: Any,
+) -> None:
+    """W1-28: the audit could be narrowed invisibly.
+
+    Narrowing ``upsert.py``'s ``labels=`` to ``["Product"]`` and ``types=`` to
+    ``["CONTAINS"]`` took a six-violation graph to **zero** violations with the suite
+    byte-identical at 136 passed. The audit code was correct; nothing would have noticed if
+    it stopped being. So the reported vocabularies are asserted to *equal* the declared ones,
+    against a graph that plants one unsourced instance of every member of both.
+    """
+    session = graph_schema_session
+    for index, label in enumerate(sorted(MATERIAL_FACT_LABELS)):
+        session.run(
+            f"CREATE (n:{label} {{{ID_PROPERTY[label]}: $id}})", id=f"raw-node-{index}"
+        ).consume()
+    for index, (edge, (start, end)) in enumerate(sorted(MATERIAL_FACT_EDGES.items())):
+        session.run(
+            f"CREATE (a:{start} {{{ID_PROPERTY[start]}: $a_id}})"
+            f"-[:{edge}]->"
+            f"(b:{end} {{{ID_PROPERTY[end]}: $b_id}})",
+            a_id=f"raw-{edge}-a-{index}",
+            b_id=f"raw-{edge}-b-{index}",
+        ).consume()
+
+    violations = provenance_violations(session)
+    reported_labels = {v.label_or_type for v in violations if v.kind == "unsourced_node"}
+    reported_edges = {v.label_or_type for v in violations if v.kind == "unsourced_edge"}
+    assert reported_labels == set(MATERIAL_FACT_LABELS), (
+        f"the node audit does not cover {set(MATERIAL_FACT_LABELS) - reported_labels}"
+    )
+    assert reported_edges == set(MATERIAL_FACT_EDGES), (
+        f"the edge audit does not cover {set(MATERIAL_FACT_EDGES) - reported_edges}"
+    )
+    with pytest.raises(ProvenanceRequired):
+        assert_provenance_complete(session)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        pytest.param(
+            AttributeFilter("SPF", min_number=30),
+            AttributeFilter("spf", min_number=30),
+            {"prod-spf-daily"},
+            id="key-case",
+        ),
+        pytest.param(
+            AttributeFilter("Skin_Type", value_string="sensitive"),
+            AttributeFilter("skin_type", value_string="sensitive"),
+            {"prod-serum-c", "prod-spf-daily"},
+            id="key-case-and-separator",
+        ),
+        pytest.param(
+            AttributeFilter("volume", equals_number=50, unit="ML"),
+            AttributeFilter("volume", equals_number=50, unit="ml"),
+            {"prod-cream-night", "prod-spf-daily"},
+            id="unit-case",
+        ),
+    ],
+)
+def test_the_attribute_filter_canonicalisation_fold_is_load_bearing(
+    graph_seeded_catalog: dict[str, Any],
+    left: AttributeFilter,
+    right: AttributeFilter,
+    expected: set[str],
+) -> None:
+    """W1-29: both halves of ``AttributeFilter.as_parameter``'s fold were untested.
+
+    Sabotaging the key fold turned three working filters into ``[]`` each with the suite
+    green, and sabotaging the *unit* fold alone did the same — the value fold was the only
+    third covered (``AttributeFilter("skin_type", value_string="sensitive")``). A filter that
+    silently returns nothing is the worst failure a retrieval library has, because an empty
+    shortlist reads as "no such product" rather than "your query did not canonicalise".
+
+    Each case asserts the folded spelling and the already-canonical spelling return the
+    **same non-empty** set, so a fold that stops folding fails rather than merely differing.
+    """
+    session = graph_seeded_catalog["session"]
+    left_ids = {
+        c.product_id for c in candidate_products(session, attribute_filters=[left], limit=10)
+    }
+    right_ids = {
+        c.product_id for c in candidate_products(session, attribute_filters=[right], limit=10)
+    }
+    assert left_ids == expected, f"{left} returned {sorted(left_ids)}"
+    assert right_ids == expected, f"{right} returned {sorted(right_ids)}"
