@@ -279,3 +279,231 @@ def test_importing_the_ledger_still_pulls_in_no_database_driver() -> None:
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert proc.stdout.strip() == "lazy"
+
+
+# =======================================================================================
+# T-126 -- the three properties T-119 left ungraded
+# =======================================================================================
+# Every test above imports the two spellings one after the other, which is the only order
+# a single-threaded test can produce. The binding was written to hold in any order, and it
+# did -- but "any order" and "no order at all" are different claims, and only the first was
+# ever driven. The three tests below drive the other one, plus the two halves of the
+# machinery that no assertion in this file could previously distinguish from absent.
+
+
+#: A child that imports the two spellings from two threads released at the same instant.
+#:
+#: Both threads reach ``import_module`` before either can finish, so the eager
+#: ``from .canonical import (...)`` at the top of ``__init__.py`` runs TWICE before the
+#: ``_bind_submodules()`` at the bottom runs once. Measured with that as the only sequencing
+#: (i.e. before T-126), 5 runs out of 5 in this tree: ``canonical``, ``chain`` and ``replay``
+#: each came out as two module objects, and one run in five died inside the lazy loader with
+#: ``ValueError: module object for 'trust.ledger.migrations' substituted in sys.modules
+#: during a lazy load``.
+_RACE_PROGRAM = """
+import importlib
+import pkgutil
+import sys
+import threading
+
+SPELLINGS = ("trust.ledger", "apps.trust.src.ledger")
+released = threading.Barrier(len(SPELLINGS))
+failures = []
+
+
+def first_import(name):
+    released.wait()
+    try:
+        importlib.import_module(name)
+    except BaseException as exc:
+        failures.append(name + ": " + repr(exc))
+
+
+threads = [
+    threading.Thread(target=first_import, args=(name,), name=name) for name in SPELLINGS
+]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(timeout=60)
+
+alive = [thread.name for thread in threads if thread.is_alive()]
+assert not alive, "the racing first-imports never returned: " + repr(alive)
+assert not failures, failures
+
+trust_spelling = sys.modules["trust.ledger"]
+apps_spelling = sys.modules["apps.trust.src.ledger"]
+
+names = sorted(info.name for info in pkgutil.iter_modules(trust_spelling.__path__))
+assert names, "pkgutil found no submodules under the ledger package"
+
+split = [
+    name
+    for name in names
+    if sys.modules.get("trust.ledger." + name)
+    is not sys.modules.get("apps.trust.src.ledger." + name)
+]
+assert split == [], (
+    "a concurrent first import produced TWO module objects for " + repr(split) + ": every "
+    "class, exception and module-level constant in those files exists twice, so an "
+    "`except` written against one spelling does not catch what the other raises."
+)
+
+module_type = type(sys)
+for name in names:
+    module = sys.modules["trust.ledger." + name]
+    for package in (trust_spelling, apps_spelling):
+        bound = getattr(package, name, None)
+        if isinstance(bound, module_type):
+            assert bound is module, (package.__name__, name)
+
+assert trust_spelling.__all__ == apps_spelling.__all__
+differing = [
+    name
+    for name in trust_spelling.__all__
+    if getattr(trust_spelling, name) is not getattr(apps_spelling, name)
+]
+assert differing == [], "exported names differ after a concurrent first import: " + repr(
+    differing
+)
+
+for producer, catcher in ((trust_spelling, apps_spelling), (apps_spelling, trust_spelling)):
+    try:
+        producer.canonical_json(float("nan"))
+    except catcher.CanonicalisationError:
+        pass
+    else:
+        raise AssertionError(
+            "canonical_json(nan) did not raise the other spelling's CanonicalisationError"
+        )
+
+print("raced")
+"""
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_the_binding_holds_when_both_spellings_are_first_imported_concurrently(
+    attempt: int,
+) -> None:
+    """T-126 acceptance 1: the binding raced rather than merely re-ordered.
+
+    ``test_the_binding_does_not_depend_on_which_spelling_is_imported_first`` above proves
+    the binding survives either ORDER. It cannot prove it survives NO order: in that test
+    one execution is always complete before the other begins, which is precisely the
+    assumption the bottom-of-file binding rests on. Here the two first-imports are released
+    from a barrier into two threads.
+
+    Repeated rather than run once because a race that fails intermittently is a race that
+    passes intermittently, and one green run of a thread test is not evidence. (The defect
+    this closes was in fact deterministic in this tree -- 5 of 5 -- but that is a property
+    of one interpreter on one machine, not something to encode.)
+    """
+    proc = _run(_RACE_PROGRAM)
+    assert proc.returncode == 0, f"attempt {attempt}:\n{proc.stdout}\n{proc.stderr}"
+    assert proc.stdout.strip() == "raced"
+
+
+@pytest.mark.parametrize(
+    ("opening", "other"),
+    [
+        ("trust.ledger", "apps.trust.src.ledger"),
+        ("apps.trust.src.ledger", "trust.ledger"),
+    ],
+)
+def test_a_plain_submodule_import_leaves_the_attribute_bound_too(opening: str, other: str) -> None:
+    """T-126 acceptance 2: the ``setattr`` half of ``_publish``, driven.
+
+    ``_publish`` does two things per spelling, and its docstring says both matter. Only one
+    of them was graded. Every other test in this file reaches submodules through
+    ``importlib.import_module`` or through ``sys.modules``, and both of those are satisfied
+    by the ``sys.modules.setdefault`` half alone -- so deleting the ``setattr`` half left
+    all 19 tests here green.
+
+    What it breaks is the statement a consumer actually writes. ``import a.b.c`` is a no-op
+    when ``a.b.c`` is already in ``sys.modules``, and the import machinery binds ``c`` on
+    ``a.b`` only when it *loads* the module; a pre-seeded ``sys.modules`` entry skips that.
+    So ``import apps.trust.src.ledger.store`` succeeds and the very next line --
+    ``apps.trust.src.ledger.store.append_event`` -- raises
+    ``AttributeError: module 'apps.trust.src.ledger' has no attribute 'store'``. Measured
+    verbatim in this tree with the ``setattr`` half removed, in both directions.
+
+    ``store`` is the sharp case on purpose: it is published as a LAZY module object, so
+    nothing has executed ``store.py`` at the point the attribute has to be there.
+    """
+    proc = _run(
+        f"import {opening}\n"
+        f"import sys\n"
+        f"import {other}.store\n"
+        f"append_event = {other}.store.append_event\n"
+        f"assert callable(append_event), append_event\n"
+        f"assert {other}.store is sys.modules['{other}.store']\n"
+        f"assert {other}.store is sys.modules['{opening}.store']\n"
+        f"print('attribute-bound')\n"
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert proc.stdout.strip() == "attribute-bound"
+
+
+@pytest.mark.parametrize(
+    ("root_on_path", "opening", "other"),
+    [
+        (REPO_ROOT, "apps.trust.src.ledger", "trust.ledger"),
+        (REPO_ROOT / ".pkgroot", "trust.ledger", "apps.trust.src.ledger"),
+    ],
+    ids=["repo-root only", ".pkgroot only"],
+)
+def test_the_spelling_fallback_lends_sys_path_a_root_and_takes_it_back(
+    root_on_path: Path, opening: str, other: str, tmp_path: Path
+) -> None:
+    """T-126 acceptance 3: the fallback's side effect on the interpreter, bounded.
+
+    ``_bind_submodules`` puts the other spelling's root on ``sys.path`` when that spelling
+    is not importable from the path the interpreter already has. That is load-bearing -- a
+    consumer holding only ``.pkgroot`` never creates the ``apps.`` name otherwise, and a
+    *later* ``import apps.trust.src.ledger`` would then execute the package a second time
+    and rebuild the duplicates this whole file is about.
+
+    It used to be permanent, and that is the part this grades. ``import trust.ledger`` is a
+    statement about one package; leaving ``<checkout>`` on ``sys.path`` afterwards silently
+    makes the whole repository importable for the rest of the process, and the reverse
+    direction makes every member package under ``.pkgroot`` importable. Nothing declared it
+    and nothing tested it, so nothing would have noticed code growing to depend on it.
+
+    The child gets exactly ONE of the two roots and runs under ``-S``, so ``_proxyshop.pth``
+    -- which puts both on the path in any developer checkout and would make this vacuous --
+    contributes nothing. Both halves are asserted: the binding still holds (so the fallback
+    really did fire and really was needed), and ``sys.path`` is byte-for-byte what it was.
+    """
+    missing_root = REPO_ROOT if root_on_path != REPO_ROOT else REPO_ROOT / ".pkgroot"
+    env = {
+        **_child_env(),
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": os.pathsep.join([str(root_on_path), sysconfig.get_paths()["purelib"]]),
+    }
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            f"import sys\n"
+            f"assert {str(missing_root)!r} not in sys.path, 'the child was handed both roots'\n"
+            f"before = list(sys.path)\n"
+            f"import {opening}\n"
+            f"import {other}\n"
+            f"assert sys.modules['{opening}.canonical'] is sys.modules['{other}.canonical'], (\n"
+            f"    'the fallback did not bind: this test would be vacuous'\n"
+            f")\n"
+            f"added = [entry for entry in sys.path if entry not in before]\n"
+            f"assert added == [], 'the fallback left entries on sys.path: ' + repr(added)\n"
+            f"assert sys.path == before, (before, sys.path)\n"
+            f"print('scoped')\n",
+        ],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert proc.stdout.strip() == "scoped"
