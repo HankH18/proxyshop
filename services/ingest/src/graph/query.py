@@ -39,6 +39,7 @@ from .model import (
 from .schema import (
     EMBEDDING_RUN_COMPLETE,
     EMBEDDING_RUN_DEGRADED,
+    EMBEDDING_RUN_RUNNING,
     VECTOR_INDEX_NAME,
     embedding_run,
 )
@@ -92,11 +93,21 @@ class EmbeddingProviderMismatch(VectorIndexUnusable):
 
 
 class EmbeddingRunIncomplete(VectorIndexUnusable):
-    """The recorded re-embed pass never reached its end.
+    """The recorded re-embed pass left the index holding more than one vector space.
 
     The per-product writes auto-commit, so an interruption part-way leaves two vector spaces
     inside one index while ``products_missing_embeddings()`` still reports ``[]``. Cosine
     across two spaces is noise, so the query refuses rather than ranks.
+
+    Two graph states raise this, and their remediations are opposites — the message says
+    which one it is, and ``EmbeddingRun.skipped`` is the discriminator:
+
+    * an **interrupted** pass (the opening ``running`` stamp, empty skip list): re-running
+      the pass fixes it, and always terminates;
+    * a pass that **reached its end** and whose read-back found products it skipped still
+      carrying a vector (the closing ``running`` stamp, non-empty skip list): re-running is
+      a fixed point — it skips the same products for the same reason. The named vectors
+      have to be removed, or the reason the removal did not take found.
 
     Deliberately **not** raised for a pass that reached its end having skipped products it
     could not embed (:data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED`). That pass left one
@@ -106,6 +117,35 @@ class EmbeddingRunIncomplete(VectorIndexUnusable):
     that case (T-116) turned one Product with an empty ``canonical_name`` into a refusal of
     every vector query in the catalog, under a remediation — re-run the pass — that skips
     the same product again and so never terminates.
+
+    ``degraded`` is therefore not raised here, but it is not therefore *queryable*: when the
+    pass embedded **nothing**, the index holds no vector and :class:`EmbeddingIndexEmpty` is
+    raised instead. Both this class's messages say so, because both name ``degraded`` as the
+    state their remediation lands on.
+    """
+
+
+class EmbeddingIndexEmpty(VectorIndexUnusable):
+    """The recorded pass read products and embedded **none** of them.
+
+    The whole-catalog case of the per-product degradation T-116 introduced, and the one
+    place that degradation stops being per-product. With no vector in the index at all,
+    ``db.index.vector.queryNodes`` returns nothing for *every* query, so the caller is handed
+    ``[]`` — indistinguishable from "your query matched nothing", which is the one reading
+    that is certainly wrong. Before T-116 this state raised and named its cause; the
+    narrowing gave the answer back its plausibility and took away the reason.
+
+    Deliberately **not** raised for a catalog that is genuinely empty (a pass that read zero
+    products records :data:`~ingest.graph.schema.EMBEDDING_RUN_COMPLETE`, and ``[]`` really
+    is the whole truth there), nor for a marker written before these counters existed, nor —
+    the point of T-116 — for a catalog where even one product embedded. One unembeddable row
+    degrades itself; a catalog of nothing but unembeddable rows has no vector path to
+    degrade, and saying so is the only honest answer.
+
+    Nor is it the *first* answer when the querying provider is not the one that wrote the
+    marker: :class:`EmbeddingProviderMismatch` is raised ahead of it, because "give these
+    rows embeddable text and re-run" is a remediation that leaves a mismatched read path
+    mismatched, only now behind a full index.
     """
 
 
@@ -362,10 +402,18 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             Checked *here*, before any parameter is built, because the raw path answered a
             512-d vector with ``neo4j.exceptions.ClientError`` — neither of the exceptions
             the docstring declares, and not even a ``ValueError``.
-        EmbeddingRunIncomplete: the recorded pass never reached its end, so the index holds
-            two vector spaces and every cosine across them is noise. A pass that reached its
-            end having *skipped* products does not raise: see the class docstring.
-        EmbeddingProviderMismatch: the vectors were written by another provider.
+        EmbeddingRunIncomplete: the index holds two vector spaces — either because the pass
+            never reached its end, or because it did and its read-back caught skipped
+            products still carrying a vector. The message distinguishes them, because the
+            remediations are opposites. A pass that reached its end having *skipped*
+            products whose vectors were really removed does not raise: see the class
+            docstring.
+        EmbeddingProviderMismatch: the vectors were written by another provider. Checked
+            **before** ``EmbeddingIndexEmpty``: the two are independent, and an empty index
+            that masked a mismatch sent the operator to fix a catalog and then straight into
+            the silently re-ranked shortlist this refusal exists to prevent.
+        EmbeddingIndexEmpty: the recorded pass read products and embedded none of them, so
+            the index holds no vector and every query would answer ``[]``.
     """
     run = embedding_run(session)
     # The marker records the width the vectors were actually written at, which is what a
@@ -392,6 +440,39 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
     # `products_missing_embeddings()` names them. That is a per-product degradation and it
     # is already visible without refusing anybody else's query.
     if not run.finished:
+        # TWO different graph states reach this line, and they need OPPOSITE remediations.
+        #
+        # `reembed_products` writes `running` twice: once as the opening stamp, with an
+        # empty skip list, and once from the closing stamp when its read-back found a
+        # product it skipped *still carrying a vector*. So `run.skipped` is the
+        # discriminator, and it is exact: the opening stamp always writes `skipped=[]`, and
+        # the closing `running` is only ever reached with a non-empty skip list.
+        #
+        # T-118(c) rewrote this message for the first state — an interrupted pass — and
+        # promised, unconditionally, that re-running the pass "always records an end state".
+        # For the second state that promise is false twice over: the pass *did* reach its
+        # end, and re-running it skips the same products for the same reason, fails the same
+        # read-back and records `running` again. The message T-118(c) removed from one
+        # branch was still being handed to the operator on the other, which is the same
+        # no-op loop wearing the fixed message.
+        if run.skipped:
+            raise EmbeddingRunIncomplete(
+                f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded "
+                f"as {run.state!r}: the pass DID reach its end, but its read-back found "
+                f"{len(run.skipped)} product(s) it skipped still carrying a vector — "
+                f"{', '.join(run.skipped)} — written by an earlier pass into a space this "
+                f"one did not fill, so every cosine across the index is noise. "
+                f"Re-running `python -m ingest.graph.reembed` is NOT the remediation here: "
+                f"it skips the same products for the same reason, its read-back fails "
+                f"again and it records {EMBEDDING_RUN_RUNNING!r} again. Remove those "
+                f"vectors first — `clear_product_embedding(session, product_id=...)` for "
+                f"each id above — or find out why the removal did not take; the next pass "
+                f"then records {EMBEDDING_RUN_DEGRADED!r}, and the index is queryable "
+                f"PROVIDED at least one product embeds. If none can — every row in the "
+                f"catalog unembeddable — the pass still records {EMBEDDING_RUN_DEGRADED!r} "
+                f"but leaves no vector in the index, and the next refusal is "
+                f"EmbeddingIndexEmpty, whose remediation is a catalog edit, not a pass."
+            )
         raise EmbeddingRunIncomplete(
             f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded as "
             f"{run.state!r}: it started writing and never reached its end, so the index "
@@ -399,11 +480,27 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             f"Re-run `python -m ingest.graph.reembed --provider {run.provider}`. That "
             f"remediation terminates: the pass rewrites every product into one space and "
             f"always records an end state — {EMBEDDING_RUN_COMPLETE!r} when it embedded them "
-            f"all, or {EMBEDDING_RUN_DEGRADED!r} listing the products it could not embed, "
-            f"and both are queryable. Products with no embeddable text no longer hold this "
-            f"refusal open; `products_missing_embeddings(session)` names that finite set, "
-            f"and fixing them is a catalog edit, not another re-embed."
+            f"all, or {EMBEDDING_RUN_DEGRADED!r} listing the products it could not embed. "
+            f"{EMBEDDING_RUN_COMPLETE!r} is queryable, and {EMBEDDING_RUN_DEGRADED!r} is too "
+            f"PROVIDED at least one product embedded — the command exits 0 for exactly those "
+            f"two, so a non-zero status never means 'run it again'. The one exception, and "
+            f"it is the floor of that rule: if EVERY product is unembeddable the pass still "
+            f"records {EMBEDDING_RUN_DEGRADED!r} but leaves no vector in the index at all, "
+            f"the command exits non-zero and says so, and the next refusal is "
+            f"EmbeddingIndexEmpty rather than this one. Products with no embeddable text no "
+            f"longer hold THIS refusal open; `products_missing_embeddings(session)` names "
+            f"that finite set, and fixing them is a catalog edit, not another re-embed."
         )
+    # ORDER IS LOAD-BEARING: the provider question is asked FIRST.
+    #
+    # These two conditions are independent — a pass by provider X that embedded nothing, read
+    # by a query embedded with Y, satisfies both — and the empty-index check used to win. Its
+    # message then sent the operator to `--provider X` (the RECORDED provider, correctly) to
+    # fix a catalog, and said nothing about the fact that their read path is on Y: they would
+    # give every row embeddable text, re-run, get a full index, and be handed the silently
+    # re-ranked shortlist `EmbeddingProviderMismatch` exists to refuse. An empty index masked
+    # the mismatch and the remediation misdirected. Whose vector space this index holds is
+    # answerable whether or not anything is in it, so it is answered first.
     if run.provider != provider_name:
         raise EmbeddingProviderMismatch(
             f"{run.index} holds vectors written by provider {run.provider!r} but this query "
@@ -411,6 +508,32 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             f"happily return a fully-populated, silently re-ranked shortlist. Either set "
             f"EMBEDDING_PROVIDER={run.provider} or re-embed: "
             f"`python -m ingest.graph.reembed --provider {provider_name}`."
+        )
+    # The whole-catalog end of the T-116 narrowing, and the only place it has to stop being
+    # per-product. `degraded` with `embedded == 0` means the index holds no product vector
+    # at all: `queryNodes` returns nothing for every query, and the caller gets `[]` — the
+    # same answer a well-populated index gives for "nothing matched", which is the one
+    # reading that is certainly wrong. The marker knows why; the caller did not, because
+    # nothing told it. `products > 0` is what keeps this off a genuinely empty catalog
+    # (which records `complete`) and off a legacy marker whose counters read 0.
+    if run.products > 0 and run.embedded == 0:
+        # TRUNCATED, and the truncation is graded: a catalog of 5000 unembeddable rows makes
+        # a refusal nobody can read, and `products_missing_embeddings(session)` — named below
+        # — is the unbounded list. The count of the remainder is carried so the operator
+        # knows the named ten are a prefix rather than the whole set.
+        named = ", ".join(run.skipped[:10]) or "none recorded"
+        if len(run.skipped) > 10:
+            named += f", and {len(run.skipped) - 10} more"
+        raise EmbeddingIndexEmpty(
+            f"{run.index} holds no product vectors: the last re-embed (provider "
+            f"{run.provider!r}) read {run.products} product(s) and embedded none of them. "
+            f"Every vector query against it returns an empty shortlist, which reads as "
+            f"'nothing matched your query' when the truth is 'nothing is in the index'. "
+            f"The pass named the rows it could not embed: {named}. Give them embeddable "
+            f"text — `products_missing_embeddings(session)` is that same list, in full — and "
+            f"re-run `python -m ingest.graph.reembed --provider {run.provider}`. ONE "
+            f"embeddable product reopens the vector path: this refusal is the whole-catalog "
+            f"case only, never the one-bad-row case."
         )
 
 
@@ -482,6 +605,15 @@ def candidate_products(
             skipped products it could not embed does **not** raise: those products carry no
             vector at all (:func:`products_missing_embeddings` names them) and the rest of
             the catalog stays retrievable.
+        EmbeddingIndexEmpty: the recorded pass read products and embedded **none** of them,
+            so the index is empty and ``[]`` would read as "nothing matched" rather than
+            "nothing is indexed". One embeddable product is enough to keep the vector path
+            open; this is the whole-catalog case only. Raised *after*
+            ``EmbeddingProviderMismatch``, so an empty index cannot mask a mismatch. Note
+            that :data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED` is therefore **not**
+            unconditionally queryable: it is queryable exactly when the pass embedded at
+            least one product, and ``python -m ingest.graph.reembed`` exits non-zero in the
+            case where it did not.
     """
     if limit <= 0 or oversample <= 0:
         raise ValueError(f"limit and oversample must be positive, got {limit} / {oversample}")
@@ -625,6 +757,7 @@ __all__ = [
     "MAX_INDEX_FETCH",
     "AttributeFilter",
     "Candidate",
+    "EmbeddingIndexEmpty",
     "EmbeddingProviderMismatch",
     "EmbeddingRunIncomplete",
     "UnretrievableQuery",

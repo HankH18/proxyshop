@@ -57,6 +57,7 @@ from .model import (
 from .query import (
     AttributeFilter,
     Candidate,
+    EmbeddingIndexEmpty,
     EmbeddingProviderMismatch,
     EmbeddingRunIncomplete,
     UnretrievableQuery,
@@ -147,6 +148,7 @@ __all__ = [
     "Candidate",
     "Category",
     "EmbeddingDimensionMismatch",
+    "EmbeddingIndexEmpty",
     "EmbeddingProviderMismatch",
     "EmbeddingRun",
     "EmbeddingRunIncomplete",
