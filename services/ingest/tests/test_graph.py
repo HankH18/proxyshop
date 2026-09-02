@@ -3461,3 +3461,71 @@ def test_the_remediation_command_exits_zero_on_the_state_the_refusal_sends_it_to
     assert reembed_main(["--provider", "hash"]) == 1, (
         "a pass whose read-back failed leaves the index unqueryable; that is a real failure"
     )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_catalog_with_nothing_embeddable_says_so_instead_of_answering_nothing(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """T-129 (ingest 4): the whole-catalog end of the T-116 narrowing, decided and pinned.
+
+    T-116 made one unembeddable product degrade itself rather than the catalog, and it was
+    right to. But the narrowing has no floor: when EVERY product is unembeddable the marker
+    is still ``degraded``, ``_check_vector_path`` still passes, and ``queryNodes`` over an
+    index holding zero vectors hands the caller ``[]``. That is the same value a healthy
+    index returns for "your query matched nothing" — the one reading that is certainly
+    wrong — and before T-116 this state raised and named its cause.
+
+    The decision, taken deliberately: ``[]`` is refused here, because at
+    ``embedded == 0`` the degradation has stopped being per-product. There is no vector path
+    left to degrade, so there is nothing the caller can be told by an empty result.
+    ``products > 0`` keeps this off a genuinely empty catalog, and the test below proves the
+    floor is exactly one product: T-116 is not walked back an inch.
+    """
+    from ingest.graph import (
+        EMBEDDING_RUN_COMPLETE,
+        EMBEDDING_RUN_DEGRADED,
+        EmbeddingIndexEmpty,
+        embedding_run,
+    )
+
+    session = graph_schema_session
+
+    # 1. A genuinely empty catalog: `[]` is the whole truth, and must stay unrefused.
+    assert reembed_products(session, HashEmbedding()).complete
+    assert embedding_run(session).state == EMBEDDING_RUN_COMPLETE
+    assert candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5) == []
+
+    # 2. Every product unembeddable. The marker knows exactly why; the caller did not.
+    upsert_product(session, Product("p-void-a", ""), source=graph_source)
+    upsert_product(session, Product("p-void-b", ""), source=graph_source)
+    report = reembed_products(session, HashEmbedding())
+    assert report.products == 2 and report.embedded == 0
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED
+    assert products_missing_embeddings(session) == ["p-void-a", "p-void-b"]
+
+    with pytest.raises(EmbeddingIndexEmpty) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=10)
+    message = str(refused.value)
+    assert "p-void-a" in message and "p-void-b" in message, (
+        f"the marker carries the finite list of rows to fix, so the refusal must too: {message}"
+    )
+
+    # 3. The structured path never consults the index, so it is untouched — a caller with a
+    #    real predicate still gets its answer out of a catalog with no vectors at all.
+    assert [c.product_id for c in candidate_products(session, brand="", limit=10, status=None)] == [
+        "p-void-a",
+        "p-void-b",
+    ]
+
+    # 4. THE FLOOR. One embeddable product reopens the vector path for the whole catalog —
+    #    the other row is still unembeddable and still degrades only itself (T-116).
+    upsert_product(session, Product("p-void-a", "Gentle Vitamin C Serum"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).skipped == ["p-void-b"]
+    assert embedding_run(session).state == EMBEDDING_RUN_DEGRADED
+    assert [
+        c.product_id
+        for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    ] == ["p-void-a"], "one embeddable product must be enough; T-116 is not walked back"

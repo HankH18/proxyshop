@@ -120,6 +120,25 @@ class EmbeddingRunIncomplete(VectorIndexUnusable):
     """
 
 
+class EmbeddingIndexEmpty(VectorIndexUnusable):
+    """The recorded pass read products and embedded **none** of them.
+
+    The whole-catalog case of the per-product degradation T-116 introduced, and the one
+    place that degradation stops being per-product. With no vector in the index at all,
+    ``db.index.vector.queryNodes`` returns nothing for *every* query, so the caller is handed
+    ``[]`` — indistinguishable from "your query matched nothing", which is the one reading
+    that is certainly wrong. Before T-116 this state raised and named its cause; the
+    narrowing gave the answer back its plausibility and took away the reason.
+
+    Deliberately **not** raised for a catalog that is genuinely empty (a pass that read zero
+    products records :data:`~ingest.graph.schema.EMBEDDING_RUN_COMPLETE`, and ``[]`` really
+    is the whole truth there), nor for a marker written before these counters existed, nor —
+    the point of T-116 — for a catalog where even one product embedded. One unembeddable row
+    degrades itself; a catalog of nothing but unembeddable rows has no vector path to
+    degrade, and saying so is the only honest answer.
+    """
+
+
 @dataclass(frozen=True)
 class AttributeFilter:
     """One structured predicate against an ``AttributeValue`` node.
@@ -379,6 +398,8 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             remediations are opposites. A pass that reached its end having *skipped*
             products whose vectors were really removed does not raise: see the class
             docstring.
+        EmbeddingIndexEmpty: the recorded pass read products and embedded none of them, so
+            the index holds no vector and every query would answer ``[]``.
         EmbeddingProviderMismatch: the vectors were written by another provider.
     """
     run = embedding_run(session)
@@ -448,6 +469,28 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             f"no embeddable text no longer hold this refusal open; "
             f"`products_missing_embeddings(session)` names that finite set, and fixing them "
             f"is a catalog edit, not another re-embed."
+        )
+    # The whole-catalog end of the T-116 narrowing, and the only place it has to stop being
+    # per-product. `degraded` with `embedded == 0` means the index holds no product vector
+    # at all: `queryNodes` returns nothing for every query, and the caller gets `[]` — the
+    # same answer a well-populated index gives for "nothing matched", which is the one
+    # reading that is certainly wrong. The marker knows why; the caller did not, because
+    # nothing told it. `products > 0` is what keeps this off a genuinely empty catalog
+    # (which records `complete`) and off a legacy marker whose counters read 0.
+    if run.products > 0 and run.embedded == 0:
+        named = ", ".join(run.skipped[:10]) or "none recorded"
+        if len(run.skipped) > 10:
+            named += f", and {len(run.skipped) - 10} more"
+        raise EmbeddingIndexEmpty(
+            f"{run.index} holds no product vectors: the last re-embed (provider "
+            f"{run.provider!r}) read {run.products} product(s) and embedded none of them. "
+            f"Every vector query against it returns an empty shortlist, which reads as "
+            f"'nothing matched your query' when the truth is 'nothing is in the index'. "
+            f"The pass named the rows it could not embed: {named}. Give them embeddable "
+            f"text — `products_missing_embeddings(session)` is that same list — and re-run "
+            f"`python -m ingest.graph.reembed --provider {run.provider}`. ONE embeddable "
+            f"product reopens the vector path: this refusal is the whole-catalog case only, "
+            f"never the one-bad-row case."
         )
     if run.provider != provider_name:
         raise EmbeddingProviderMismatch(
@@ -527,6 +570,10 @@ def candidate_products(
             skipped products it could not embed does **not** raise: those products carry no
             vector at all (:func:`products_missing_embeddings` names them) and the rest of
             the catalog stays retrievable.
+        EmbeddingIndexEmpty: the recorded pass read products and embedded **none** of them,
+            so the index is empty and ``[]`` would read as "nothing matched" rather than
+            "nothing is indexed". One embeddable product is enough to keep the vector path
+            open; this is the whole-catalog case only.
     """
     if limit <= 0 or oversample <= 0:
         raise ValueError(f"limit and oversample must be positive, got {limit} / {oversample}")
@@ -670,6 +717,7 @@ __all__ = [
     "MAX_INDEX_FETCH",
     "AttributeFilter",
     "Candidate",
+    "EmbeddingIndexEmpty",
     "EmbeddingProviderMismatch",
     "EmbeddingRunIncomplete",
     "UnretrievableQuery",
