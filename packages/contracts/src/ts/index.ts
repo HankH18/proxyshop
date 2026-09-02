@@ -51,13 +51,16 @@ export {
   SIGNED_FIELDS,
   canonicalJson,
   canonicalSigningBytes,
+  canonicalSigningBytesFromJson,
   isSignedBidSubmission,
   keyringSecret,
   missingSigningFields,
   parseSignableJson,
   payloadHash,
+  payloadHashFromJson,
   signingEnvelopeErrors,
 } from "./signing.js";
+export type {Payload, SigningNumberOptions} from "./signing.js";
 
 export {
   DEFAULT_PENALTIES_PER_KIND,

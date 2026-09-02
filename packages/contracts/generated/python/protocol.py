@@ -342,20 +342,46 @@ class SigningEnvelope(BaseModel):
     alone admits `"   "`, which `contracts.signing.missing_signing_fields` strips and calls
     MISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,
     so the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no
-    schema should admit one. The class is spelled `[^\\s\\u001c-\\u001f]` rather than `\\S`
-    because Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as
-    whitespace: `\\S` alone would leave those four characters disagreeing with the very
-    function this pattern exists to match.
+    schema should admit one. The class ENUMERATES every blank character instead of spelling `\\s`, and that is the whole
+    point of this artifact. `\\s` is engine-dependent: Rust's regex crate (what pydantic compiles)
+    and Python's `re` read it as Unicode White_Space, which INCLUDES U+0085; ECMAScript (what Ajv
+    compiles) reads it as a fixed list that EXCLUDES U+0085 and includes U+FEFF. The one file both
+    languages read therefore stated two different rules, and Python and TypeScript disagreed about
+    U+0085 and U+FEFF. The set below is the union of both readings plus U+001C-U+001F, which
+    Python's `str.strip()` removes and Unicode does not classify as whitespace - so it is at least
+    as strict as either gate was and relaxes neither. `contracts.signing.is_blank` and `isBlank`
+    in `src/ts/signing.ts` implement exactly this set; a property test in each suite walks every
+    code point in Unicode and fails if the compiled pattern and the function ever disagree.
     """
 
     model_config = ConfigDict(
         extra="forbid",
     )
-    signer_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    key_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    issued_at: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    nonce: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    schema_version: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    signer_id: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    key_id: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    issued_at: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    nonce: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    schema_version: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
 
 
 class SignedBidSubmission(BaseModel):
@@ -372,10 +398,16 @@ class SignedBidSubmission(BaseModel):
     alone admits `"   "`, which `contracts.signing.missing_signing_fields` strips and calls
     MISSING - two gates on one rule, disagreeing. `canonical_signing_bytes` sits on the strict gate,
     so the asymmetry pointed the safe way, but a whitespace-only `nonce` is a constant nonce and no
-    schema should admit one. The class is spelled `[^\\s\\u001c-\\u001f]` rather than `\\S`
-    because Python's `str.strip()` also strips U+001C-U+001F, which Unicode does not classify as
-    whitespace: `\\S` alone would leave those four characters disagreeing with the very
-    function this pattern exists to match.
+    schema should admit one. The class ENUMERATES every blank character instead of spelling `\\s`, and that is the whole
+    point of this artifact. `\\s` is engine-dependent: Rust's regex crate (what pydantic compiles)
+    and Python's `re` read it as Unicode White_Space, which INCLUDES U+0085; ECMAScript (what Ajv
+    compiles) reads it as a fixed list that EXCLUDES U+0085 and includes U+FEFF. The one file both
+    languages read therefore stated two different rules, and Python and TypeScript disagreed about
+    U+0085 and U+FEFF. The set below is the union of both readings plus U+001C-U+001F, which
+    Python's `str.strip()` removes and Unicode does not classify as whitespace - so it is at least
+    as strict as either gate was and relaxes neither. `contracts.signing.is_blank` and `isBlank`
+    in `src/ts/signing.ts` implement exactly this set; a property test in each suite walks every
+    code point in Unicode and fails if the compiled pattern and the function ever disagree.
     """
 
     model_config = ConfigDict(
@@ -389,11 +421,31 @@ class SignedBidSubmission(BaseModel):
     message: str | None = None
     agent_version: str = Field(..., min_length=1)
     signature: str | None = None
-    schema_version: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    signer_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    key_id: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    issued_at: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
-    nonce: str = Field(..., min_length=1, pattern="[^\\s\\u001c-\\u001f]")
+    schema_version: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    signer_id: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    key_id: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    issued_at: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
+    nonce: str = Field(
+        ...,
+        min_length=1,
+        pattern="[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]",
+    )
 
 
 class HardConstraint(BaseModel):

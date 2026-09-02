@@ -15,15 +15,17 @@ import {
   SIGNED_FIELDS,
   canonicalJson,
   canonicalSigningBytes,
+  canonicalSigningBytesFromJson,
   isSignedBidSubmission,
   keyringSecret,
   missingSigningFields,
   parseSignableJson,
   payloadHash,
+  payloadHashFromJson,
   signingEnvelopeErrors,
 } from "../src/ts/signing.js";
 import type {Payload} from "../src/ts/signing.js";
-import {isValid} from "../src/ts/schemas.js";
+import {isValid, protocolSchema} from "../src/ts/schemas.js";
 import {makeBid, makeOffer, makeSubmission} from "./fixtures.js";
 
 /** Pinned identically in the Python suite. Changing one without the other is the bug. */
@@ -711,3 +713,287 @@ describe("T-108 — both envelope gates refuse a whitespace-only value", () => {
 function envelopeOf(payload: Payload): Payload {
   return Object.fromEntries(REQUIRED_SIGNING_FIELDS.map((field) => [field, payload[field]]));
 }
+
+// --- T-113: the guard is on the DEFAULT path, not an opt-in nobody calls -------------------
+//
+// T-103 built `parseSignableJson`, and its verifier found the thing that makes a guard
+// worthless: nothing called it. `JSON.parse` → `canonicalSigningBytes` was still the default,
+// still coerced 9007199254740993 to …992, and still signed it. These cases drive the DEFAULT
+// entry points — never `parseSignableJson` — and every one of them would pass on main.
+
+/** A submission whose `quantity` is the literal `wire` says, as `JSON.parse` delivers it. */
+function submissionFromWire(literal: string, key = "quantity"): Payload {
+  const text = JSON.stringify({...makeSubmission(), [key]: 0}).replace(
+    `"${key}":0`,
+    `"${key}":${literal}`,
+  );
+  return JSON.parse(text) as Payload;
+}
+
+/** The same submission as raw wire text, for the text-taking doors. */
+function wireFor(literal: string, key = "quantity"): string {
+  return JSON.stringify({...makeSubmission(), [key]: 0}).replace(
+    `"${key}":0`,
+    `"${key}":${literal}`,
+  );
+}
+
+describe("T-113 — the default signing path refuses an integer the wire cannot state", () => {
+  it.each(NON_DOUBLE_INTEGER_WIRE)(
+    "canonicalSigningBytes refuses %s with no opt-in at all",
+    (literal) => {
+      // THE ticket. `JSON.parse` has already coerced by the time this value exists, and the
+      // default path used to sign the coercion without a word.
+      expect(() => canonicalSigningBytes(submissionFromWire(literal))).toThrow(
+        CanonicalisationError,
+      );
+    },
+  );
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("payloadHash refuses %s with no opt-in at all", (literal) => {
+    expect(() => payloadHash(submissionFromWire(literal))).toThrow(CanonicalisationError);
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s nested inside the offer", (literal) => {
+    const payload = makeSubmission();
+    const text = JSON.stringify(payload).replace('"unit_price":49', `"unit_price":${literal}`);
+    expect(text).toContain(literal);
+    expect(() => canonicalSigningBytes(JSON.parse(text) as Payload)).toThrow(
+      CanonicalisationError,
+    );
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s in a COVERED field, not only the body", (literal) => {
+    // `auction_id` and `store_id` are only checked non-empty by `missingSigningFields`, so a
+    // numeric one reaches `canonicalJson` through `covered` and never through `payloadHash`.
+    expect(() => canonicalSigningBytes(submissionFromWire(literal, "auction_id"))).toThrow(
+      CanonicalisationError,
+    );
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("the text door names the literal it refused: %s", (literal) => {
+    expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(CanonicalisationError);
+    expect(() => canonicalSigningBytesFromJson(wireFor(literal))).toThrow(
+      new RegExp(`cannot accept the integer ${literal}`),
+    );
+    expect(() => payloadHashFromJson(wireFor(literal))).toThrow(CanonicalisationError);
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)(
+    "would have signed %s as %s before this ticket, and the digest proves it",
+    (literal, coerced) => {
+      // The defect held still. `canonicalJson` — the RFC-8785 RENDERER, which the conformance
+      // gate pins against both Python implementations — happily writes the coerced value; it is
+      // the signing doors that now refuse to carry it into a signature.
+      const payload = submissionFromWire(literal);
+      expect(canonicalJson(payload["quantity"])).toBe(coerced);
+      expect(String(payload["quantity"])).not.toBe(literal);
+    },
+  );
+});
+
+describe("T-113 — the opt-out is explicit, named, and does exactly what it says", () => {
+  it.each(NON_DOUBLE_INTEGER_WIRE)("signs %s only when allowUnsafeIntegers is passed", (literal) => {
+    const payload = submissionFromWire(literal);
+    expect(() => canonicalSigningBytes(payload)).toThrow(CanonicalisationError);
+    const bytes = canonicalSigningBytes(payload, {allowUnsafeIntegers: true});
+    expect(bytes.length).toBeGreaterThan(0);
+    // And it buys exactly what the flag's name says: the COERCED value gets signed. The flag is
+    // an admission, not a fix, which is why the wire doors never need it.
+    expect(payloadHash(payload, {allowUnsafeIntegers: true})).toBe(
+      payloadHash(JSON.parse(JSON.stringify(payload)) as Payload, {allowUnsafeIntegers: true}),
+    );
+  });
+
+  it("refuses an exact large double on the value path too, because the value cannot say", () => {
+    // 9007199254740992 IS an exact double and the Python peer signs it. TypeScript, handed only
+    // the number, cannot distinguish it from 9007199254740993 — so the value path fails closed
+    // and the caller must either say `allowUnsafeIntegers` or hand over the text.
+    const payload = submissionFromWire("9007199254740992");
+    expect(() => canonicalSigningBytes(payload)).toThrow(CanonicalisationError);
+    expect(canonicalSigningBytes(payload, {allowUnsafeIntegers: true}).length).toBeGreaterThan(0);
+  });
+
+  it.each(EXACT_DOUBLE_INTEGER_WIRE)("the TEXT door signs the exact double %s unaided", (literal) => {
+    // The control that stops "refuse everything large" from passing this suite. The text door
+    // reads the literal, so it can tell an exact double from a coerced one — no flag, no
+    // opt-in, and the same answer the Python peer gives.
+    expect(canonicalSigningBytesFromJson(wireFor(literal)).length).toBeGreaterThan(0);
+    expect(payloadHashFromJson(wireFor(literal))).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("the text door reproduces the pinned bytes for a legal submission", () => {
+    // The other control: the guard must not move the bytes of anything that already signed.
+    const wire = JSON.stringify(makeSubmission());
+    expect(decode(canonicalSigningBytesFromJson(wire))).toBe(EXPECTED_CANONICAL_BYTES);
+    expect(payloadHashFromJson(wire)).toBe(payloadHash(makeSubmission()));
+  });
+
+  it("still refuses malformed wire text as a SyntaxError, not a signing failure", () => {
+    expect(() => canonicalSigningBytesFromJson('{"a":')).toThrow(SyntaxError);
+    expect(() => payloadHashFromJson('{"a":')).toThrow(SyntaxError);
+  });
+
+  it("leaves the RFC-8785 renderer alone, and that split is deliberate", () => {
+    // `canonicalJson` MUST keep rendering exact large doubles: `e2e/test_jcs_conformance.py`
+    // requires it to agree byte for byte with both Python canonicalizers, and both render
+    // these. The refusal belongs to the D52 signing doors, which is what a signature covers.
+    expect(canonicalJson({n: 2 ** 53})).toBe('{"n":9007199254740992}');
+    expect(canonicalJson({n: 1e16})).toBe('{"n":10000000000000000}');
+    expect(canonicalJson({n: 1e21})).toBe('{"n":1e+21}');
+    expect(() => payloadHash({n: 1e21})).toThrow(CanonicalisationError);
+  });
+
+  it("does not refuse anything a real bid actually carries", () => {
+    // Fractions, safe integers and negative zero all sign with no flag. A guard that refused
+    // 44.1 would satisfy every rejection above and break the protocol.
+    expect(canonicalSigningBytes(makeSubmission()).length).toBeGreaterThan(0);
+    for (const n of [0, -0, 1, -42, 44.1, 1e-5, 1.5, Number.MAX_SAFE_INTEGER, -9007199254740991]) {
+      expect(() => payloadHash({...makeSubmission(), quantity: n}), String(n)).not.toThrow();
+    }
+  });
+});
+
+// --- T-115: the blank rule is engine-independent, and asserted as a PROPERTY ---------------
+//
+// T-108 put a `\s`-based class in `protocol.schema.json`. That shorthand is ENGINE-DEPENDENT:
+// Unicode White_Space to Rust's regex crate (what pydantic compiles) and to Python's `re`, a
+// different fixed list to ECMAScript (what Ajv compiles). The single artifact whose whole purpose
+// is that both languages read the SAME contract therefore stated two rules, and they split on
+// U+0085 (blank in Python only) and U+FEFF (blank in TypeScript only).
+//
+// The guarantee was also pinned against WHITESPACE_ONLY above — ~20 spellings someone thought of,
+// which says nothing about the 1,114,092 code points not on it. These walk every code point.
+
+/**
+ * The one class, spelled out. The SAME literal `tests/test_signing_envelope.py::BLANK_PATTERN`
+ * pins, which is what makes the two languages one rule: each suite proves its own gate agrees
+ * with this string over all of Unicode, so the two gates agree with each other.
+ */
+const BLANK_PATTERN =
+  "[^\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680" +
+  "\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]";
+
+/** The spelling T-115 removed, kept so the property can prove it would have caught it. */
+const SUPERSEDED_SHORTHAND_PATTERN = ["[^", "\\s", "\\u001c-\\u001f", "]"].join("");
+
+/** Every code point the blank class covers. The twin of `contracts.signing.BLANK_CODE_POINTS`. */
+const EXPECTED_BLANK_CODE_POINTS: ReadonlySet<number> = new Set<number>([
+  ...[0x09, 0x0a, 0x0b, 0x0c, 0x0d],
+  ...[0x1c, 0x1d, 0x1e, 0x1f, 0x20],
+  0x85,
+  0xa0,
+  0x1680,
+  ...Array.from({length: 11}, (_unused, index) => 0x2000 + index),
+  0x2028,
+  0x2029,
+  0x202f,
+  0x205f,
+  0x3000,
+  0xfeff,
+]);
+
+/** Every code point there is, minus the surrogates, which are not characters. */
+function* allCodePoints(): Generator<number> {
+  for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    yield cp;
+  }
+}
+
+describe("T-115 — one blank rule, stated so both regex engines read it the same way", () => {
+  it("spells the class identically in all ten places, with no engine-dependent shorthand", () => {
+    const defs = protocolSchema.$defs as unknown as Record<
+      string,
+      {properties: Record<string, {minLength?: number; pattern?: string}>}
+    >;
+    let seen = 0;
+    for (const name of ["SigningEnvelope", "SignedBidSubmission"]) {
+      for (const field of REQUIRED_SIGNING_FIELDS) {
+        const spec = defs[name]!.properties[field]!;
+        expect(spec.minLength, `${name}.${field}`).toBe(1);
+        expect(spec.pattern, `${name}.${field}`).toBe(BLANK_PATTERN);
+        for (const shorthand of ["\\s", "\\S", "\\w", "\\W", "\\d", "\\D", "\\p", "\\P", "\\b"]) {
+          expect(spec.pattern, `${name}.${field} still carries ${shorthand}`).not.toContain(
+            shorthand,
+          );
+        }
+        seen += 1;
+      }
+    }
+    expect(seen).toBe(10);
+  });
+
+  it("agrees with the code-level blank check on every code point in Unicode", () => {
+    // The property, under the engine that actually gates data on this side. `isValid` is Ajv
+    // compiling the bundle; `missingSigningFields` is the function `canonicalSigningBytes` stands
+    // on. Two gates on one rule that disagree is one gate, and it is whichever one the caller
+    // happens to be standing on — so they are compared over ALL of Unicode, not over a list.
+    const base = {
+      signer_id: "store-external-1",
+      key_id: "key-2026-01",
+      issued_at: "2026-01-01T00:00:00Z",
+      nonce: "nonce-ext-0001",
+      schema_version: "1.0.0",
+    };
+    const disagreements: string[] = [];
+    for (const cp of allCodePoints()) {
+      const payload = {...base, nonce: String.fromCodePoint(cp)};
+      const schemaSaysPresent = isValid("SigningEnvelope", payload);
+      const functionSaysPresent = !missingSigningFields(payload).includes("nonce");
+      const shouldBeBlank = EXPECTED_BLANK_CODE_POINTS.has(cp);
+      if (schemaSaysPresent !== functionSaysPresent || schemaSaysPresent === shouldBeBlank) {
+        disagreements.push(
+          `U+${cp.toString(16).toUpperCase()} schema=${schemaSaysPresent} ` +
+            `fn=${functionSaysPresent} expectedBlank=${shouldBeBlank}`,
+        );
+        if (disagreements.length > 20) break;
+      }
+    }
+    expect(disagreements).toEqual([]);
+  });
+
+  it("agrees with the pinned pattern compiled directly, with and without the u flag", () => {
+    // Ajv chooses the flags; the rule must not depend on that choice either.
+    for (const flags of ["", "u"]) {
+      const compiled = new RegExp(BLANK_PATTERN, flags);
+      const wrong: string[] = [];
+      for (const cp of allCodePoints()) {
+        const hasContent = compiled.test(String.fromCodePoint(cp));
+        if (hasContent === EXPECTED_BLANK_CODE_POINTS.has(cp)) {
+          wrong.push(`U+${cp.toString(16).toUpperCase()}`);
+          if (wrong.length > 20) break;
+        }
+      }
+      expect(wrong, `flags="${flags}"`).toEqual([]);
+    }
+  });
+
+  it("would have failed for the shorthand spelling the ticket removed", () => {
+    // What makes the properties above mean something: they must not be satisfiable by the OLD
+    // pattern. ECMAScript's `\s` excludes U+0085 and includes U+FEFF; Rust's and Python's include
+    // U+0085 and exclude U+FEFF. Same file, two rules — which is the whole finding.
+    const old = new RegExp(SUPERSEDED_SHORTHAND_PATTERN, "u");
+    expect(old.test(String.fromCodePoint(0x85)), "U+0085 was content under ECMAScript").toBe(true);
+    expect(old.test(String.fromCodePoint(0xfeff)), "U+FEFF was blank under ECMAScript").toBe(false);
+    const divergent: string[] = [];
+    for (const cp of allCodePoints()) {
+      if (old.test(String.fromCodePoint(cp)) === EXPECTED_BLANK_CODE_POINTS.has(cp)) {
+        divergent.push(`U+${cp.toString(16).toUpperCase()}`);
+      }
+    }
+    expect(divergent).toEqual(["U+85"]);
+  });
+
+  it("still calls a real value content", () => {
+    // The control. A class that swallowed everything would satisfy every property above.
+    const compiled = new RegExp(BLANK_PATTERN, "u");
+    for (const value of ["x", " padded ", "\ttabbed", "nonce-ext-0001", "é", "\u{1F600}"]) {
+      expect(compiled.test(value), value).toBe(true);
+      const payload = makeSubmission({nonce: value});
+      expect(missingSigningFields(payload), value).toEqual([]);
+      expect(isValid("SigningEnvelope", envelopeOf(payload)), value).toBe(true);
+      expect(isValid("SignedBidSubmission", payload), value).toBe(true);
+    }
+  });
+});
