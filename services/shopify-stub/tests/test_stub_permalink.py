@@ -139,3 +139,126 @@ def test_empty_seller_domain_never_matches() -> None:
     url = build_permalink(shop_domain=SELLER_DOMAIN, variant_id=1)
     assert not host_matches(url, "")
     assert not host_matches(url, "   ")
+
+
+# ---------------------------------------------------------------------------------------
+# The builder's host validation, and the port the parser used to swallow
+# ---------------------------------------------------------------------------------------
+
+#: Every delimiter the original two-substring check (``"://"`` and ``"/"``) let through.
+#: The first two are the ones that matter: they render a *live* checkout link whose real host
+#: is ``attacker.tld`` while the builder reports success, contradicting its own docstring.
+NON_BARE_HOSTS = {
+    "userinfo": "good.example.com@attacker.tld",
+    "escaped userinfo": "store-a.example.com\\@attacker.tld",
+    "explicit port": "store-a.example.com:8443",
+    "query": "store-a.example.com?x",
+    "fragment": "store-a.example.com#f",
+    "space": "store-a.example.com evil.tld",
+    "leading dot": ".store-a.example.com",
+    "empty label": "store-a..example.com",
+    "trailing hyphen label": "store-a-.example.com",
+    "underscore": "store_a.example.com",
+    "ipv6 brackets": "[::1]",
+}
+
+
+@pytest.mark.parametrize(("label", "domain"), sorted(NON_BARE_HOSTS.items()))
+def test_build_refuses_a_shop_domain_that_is_not_a_bare_dns_name(label: str, domain: str) -> None:
+    """One allow-list, one error, for every character that is not part of a DNS name.
+
+    The check this replaces tested for two substrings and therefore passed ``@``, ``\\``,
+    ``:``, ``?`` and ``#``. ``?`` was the tell: it did eventually fail, but as *"permalink
+    path must start with /cart/"* — a host bug reported as a path bug, in a different
+    function, one call later.
+    """
+    with pytest.raises(PermalinkError, match="bare host"):
+        build_permalink(shop_domain=domain, variant_id=1, code=CODE)
+
+
+def test_build_never_emits_a_link_whose_real_host_is_somebody_else() -> None:
+    """The defect in one assertion: the builder must not *succeed* at building an attack.
+
+    ``https://good.example.com@attacker.tld/cart/1:1`` is a well-formed URL whose host is
+    ``attacker.tld``; everything before the ``@`` is userinfo and is ignored by every client.
+    Building it and returning it is worse than crashing, because the caller has no reason to
+    look.
+    """
+    from urllib.parse import urlsplit
+
+    hostile = "good.example.com@attacker.tld"
+    assert urlsplit(f"https://{hostile}/cart/1:1").hostname == "attacker.tld", (
+        "premise of this test: the userinfo form really does relocate the host"
+    )
+    with pytest.raises(PermalinkError, match="bare host"):
+        build_permalink(shop_domain=hostile, variant_id=1, code=CODE)
+
+
+def test_build_accepts_the_hosts_a_real_store_actually_has() -> None:
+    """Negative control for the allow-list: it must not reject legitimate names.
+
+    Hyphens inside a label, a single-character label, digits, mixed case and a trailing root
+    dot are all legal DNS, and an over-eager host check that refused them would be a worse
+    bug than the one it fixed.
+    """
+    for good in (
+        "demo-store.myshopify.com",
+        "store-a.example.com",
+        "a.co",
+        "shop123.example.co.uk",
+        "Store-A.Example.COM",
+        "store-a.example.com.",
+    ):
+        assert build_permalink(shop_domain=good, variant_id=1).startswith(f"https://{good}/cart/")
+
+
+def test_build_rejects_a_host_longer_than_dns_allows() -> None:
+    with pytest.raises(PermalinkError, match="253"):
+        build_permalink(shop_domain=".".join(["abcdefghij"] * 26), variant_id=1)
+
+
+@pytest.mark.parametrize(
+    "bad_port_url",
+    [
+        f"https://{SELLER_DOMAIN}:8443/cart/1:1?discount={CODE}",
+        f"https://{SELLER_DOMAIN}:443/cart/1:1?discount={CODE}",
+        f"https://{SELLER_DOMAIN}:notaport/cart/1:1",
+    ],
+)
+def test_parse_refuses_a_port_bearing_permalink(bad_port_url: str) -> None:
+    """D22's template carries no port, so a port is structural breakage, not detail.
+
+    ``urlsplit(...).port`` raises ``ValueError`` — not ``PermalinkError`` — on ``:notaport``,
+    which would have escaped every ``pytest.raises(PermalinkError)`` in this file and reached
+    a caller as an unrelated exception type. It is translated at the boundary.
+    """
+    with pytest.raises(PermalinkError):
+        parse_permalink(bad_port_url)
+
+
+def test_a_port_can_never_be_silently_rewritten_to_implicit_443() -> None:
+    """The unambiguous half of the port defect: a *lossy* round-trip.
+
+    :class:`CartPermalink` keeps only ``parts.hostname``, which drops the port, so parsing
+    ``…:8443`` and re-rendering it used to yield ``https://store-a.example.com/cart/1:1`` —
+    the same link pointed at a different listener. A buyer sent there checks out somewhere
+    the merchant never published. Refusing the parse is the only answer that cannot lose the
+    port, since the template has nowhere to put it.
+    """
+    with pytest.raises(PermalinkError, match="port"):
+        parse_permalink(f"https://{SELLER_DOMAIN}:8443/cart/1:1?discount={CODE}")
+    # And the builder cannot manufacture one for the parser to swallow.
+    with pytest.raises(PermalinkError, match="bare host"):
+        build_permalink(shop_domain=f"{SELLER_DOMAIN}:8443", variant_id=1)
+
+
+def test_host_matches_does_not_report_a_port_bearing_host_as_the_registered_domain() -> None:
+    """``host_matches`` compared ``parts.hostname``, which is the domain with the port cut off.
+
+    So ``https://store-a.example.com:8443/cart/1:1`` matched ``store-a.example.com`` — the
+    check said "this is the seller's own store" about a link aimed at a different listener.
+    It must not answer ``True``; it now refuses the link outright, which is what
+    ``host_matches`` already does for every other malformed permalink.
+    """
+    with pytest.raises(PermalinkError):
+        host_matches(f"https://{SELLER_DOMAIN}:8443/cart/1:1?discount={CODE}", SELLER_DOMAIN)
