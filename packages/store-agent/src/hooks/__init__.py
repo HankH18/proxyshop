@@ -19,6 +19,7 @@ here; every import below is relative so both spellings work.
 from __future__ import annotations
 
 from .lint import (
+    CONSTRUCTOR_METHODS,
     EXEMPT_DIRECTORIES,
     GUARDED_CONSTRUCTORS,
     MINTING_SITE,
@@ -29,13 +30,19 @@ from .lint import (
 from .provenance import (
     CLAIM_FINGERPRINT_ALGORITHM,
     CLAIM_FINGERPRINT_PREFIX,
+    CLAIM_SCOPE_SEPARATOR,
+    PRODUCT_SCOPED_CLAIM_KEYS,
     UNKNOWN_OBSERVED_AT,
+    ClaimScopeError,
     HookProvenanceError,
     NotAClaimError,
     claim_fingerprint,
+    claim_is_scoped_to,
+    claim_scope,
     enforce_hook_provenance,
     mint_claim,
     mint_provenance,
+    scoped_ref,
 )
 from .tools import (
     CLAIM_TYPE_BY_KEY,
@@ -65,18 +72,22 @@ HOOK_SOURCE_CLASSES: dict[str, str] = {
 __all__ = [
     "CLAIM_FINGERPRINT_ALGORITHM",
     "CLAIM_FINGERPRINT_PREFIX",
+    "CLAIM_SCOPE_SEPARATOR",
     "CLAIM_TYPE_BY_KEY",
     "COLD_START_POLICY_VERSION",
+    "CONSTRUCTOR_METHODS",
     "EXEMPT_DIRECTORIES",
     "GUARDED_CONSTRUCTORS",
     "HOOK_SOURCE_CLASSES",
     "MINTING_SITE",
+    "PRODUCT_SCOPED_CLAIM_KEYS",
     "REASON_BELOW_PRICE_FLOOR",
     "REASON_NEGATIVE_DISCOUNT",
     "REASON_OVER_MAX_DISCOUNT",
     "REASON_UNKNOWN_PRODUCT",
     "UNKNOWN_OBSERVED_AT",
     "WALL_TOLERANCE",
+    "ClaimScopeError",
     "Denied",
     "HookCall",
     "HookInputError",
@@ -85,9 +96,12 @@ __all__ = [
     "Offence",
     "ToolHooks",
     "claim_fingerprint",
+    "claim_is_scoped_to",
+    "claim_scope",
     "enforce_hook_provenance",
     "format_offences",
     "hosted_claim_construction_offenders",
     "mint_claim",
     "mint_provenance",
+    "scoped_ref",
 ]

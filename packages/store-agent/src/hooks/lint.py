@@ -40,6 +40,15 @@ from pathlib import Path
 #: fine — annotations do not put a fact into a bid.
 GUARDED_CONSTRUCTORS: frozenset[str] = frozenset({"Claim", "Provenance"})
 
+#: Class methods that build a guarded object as surely as calling the class does.
+#: ``Claim(key=..., provenance=...)`` and ``Claim.model_validate({"key": ..., ...})`` differ only
+#: in where the field names are written; a rule that caught the first and not the second would be
+#: a rule about punctuation. Only flagged when the receiver is itself a guarded name, so an
+#: ordinary ``Envelope.model_validate(row)`` — or any other model's — is untouched.
+CONSTRUCTOR_METHODS: frozenset[str] = frozenset(
+    {"model_construct", "model_validate", "model_validate_json", "construct", "parse_obj"}
+)
+
 #: The one module allowed to call them: every hook goes through its `mint_claim`.
 MINTING_SITE = "hooks/provenance.py"
 
@@ -63,13 +72,57 @@ class Offence:
         )
 
 
-def _called_name(node: ast.Call) -> str | None:
-    """The bare name a call targets: `Claim(...)` and `protocol.Claim(...)` both read `Claim`."""
+def _guarded_names(tree: ast.Module) -> dict[str, str]:
+    """Every local name in `tree` bound to a guarded class, mapped to which class it is.
+
+    Matching the bare callee name alone makes the rule about the token `Claim` rather than about
+    the object: ``from contracts import Claim as Fact`` and ``P = Provenance`` both bind a guarded
+    class to a name the token test never sees, and neither is an exotic spelling. Resolving the
+    bindings first is what turns this into a rule about constructing the thing.
+
+    Assignments are resolved to a fixed point rather than in source order, so a rebinding written
+    above its own source (inside a function defined before the module-level alias, say) is still
+    followed. Modules are small; this converges in a pass or two.
+    """
+    names = {name: name for name in GUARDED_CONSTRUCTORS}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for imported in node.names:
+                if imported.name in GUARDED_CONSTRUCTORS and imported.asname:
+                    names[imported.asname] = imported.name
+
+    assignments = [
+        (target.id, node.value.id)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for bound, source in assignments:
+            guarded = names.get(source)
+            if guarded is not None and names.get(bound) != guarded:
+                names[bound] = guarded
+                changed = True
+    return names
+
+
+def _guarded_target(node: ast.Call, names: dict[str, str]) -> str | None:
+    """Which guarded class `node` builds, or `None` if it builds none.
+
+    Three shapes reach the same object: calling a name bound to the class (`Claim(...)`, or any
+    alias of it), calling it off a module (`protocol.Claim(...)`), and calling one of its
+    constructor class methods (`Claim.model_validate(...)`).
+    """
     func = node.func
     if isinstance(func, ast.Name):
-        return func.id
+        return names.get(func.id)
     if isinstance(func, ast.Attribute):
-        return func.attr
+        if func.attr in CONSTRUCTOR_METHODS and isinstance(func.value, ast.Name):
+            return names.get(func.value.id)
+        return func.attr if func.attr in GUARDED_CONSTRUCTORS else None
     return None
 
 
@@ -99,11 +152,12 @@ def hosted_claim_construction_offenders(source_root: str | Path) -> list[Offence
         if _is_exempt(relative):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        names = _guarded_names(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            name = _called_name(node)
-            if name in GUARDED_CONSTRUCTORS:
+            name = _guarded_target(node, names)
+            if name is not None:
                 offences.append(Offence(path=relative.as_posix(), line=node.lineno, name=name))
     return offences
 
@@ -123,6 +177,7 @@ def format_offences(offences: Iterable[Offence]) -> str:
 
 
 __all__ = [
+    "CONSTRUCTOR_METHODS",
     "EXEMPT_DIRECTORIES",
     "GUARDED_CONSTRUCTORS",
     "MINTING_SITE",

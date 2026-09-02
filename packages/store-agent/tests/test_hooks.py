@@ -31,14 +31,19 @@ import pytest
 from contracts import Envelope, ProvenanceSource
 from store_agent.hooks import (
     HOOK_SOURCE_CLASSES,
+    REASON_BELOW_PRICE_FLOOR,
+    ClaimScopeError,
     Denied,
     HookInputError,
     HookProvenanceError,
     ToolHooks,
+    claim_fingerprint,
+    claim_scope,
     enforce_hook_provenance,
     format_offences,
     hosted_claim_construction_offenders,
     mint_claim,
+    scoped_ref,
 )
 from store_agent.hooks.lint import MINTING_SITE, Offence
 
@@ -460,6 +465,10 @@ def test_a_bid_claim_set_assembled_only_from_hooks_passes_the_boundary_it_is_gra
     function the hosted bid boundary calls. The green says the honest path survives the boundary;
     the second half says the boundary is not merely waving everything through, by re-running it
     with a single claim's value edited and requiring a refusal.
+
+    The bid is about `prod-cap`, and the boundary is told so. That is not ceremony: the claim set
+    carries an authorization, and an authorization is only valid for the product whose walls were
+    checked to grant it.
     """
     fixture = _load(ENVELOPE_FIXTURES / "store-alpha.approved.json")
     hooks = ToolHooks(
@@ -475,7 +484,7 @@ def test_a_bid_claim_set_assembled_only_from_hooks_passes_the_boundary_it_is_gra
     assert not isinstance(authorized, Denied)
     claims.append(authorized)
 
-    assert enforce_hook_provenance(claims, hooks) == claims
+    assert enforce_hook_provenance(claims, hooks, product_ref="prod-cap") == claims
     assert {str(c.provenance.source) for c in claims} == {
         "owner_statement",
         "scraped",
@@ -487,4 +496,227 @@ def test_a_bid_claim_set_assembled_only_from_hooks_passes_the_boundary_it_is_gra
     tampered = [claim.model_dump() for claim in claims]
     tampered[-1]["value"] = 40.0  # the depth the envelope refused, under the ref that allowed 15
     with pytest.raises(HookProvenanceError):
-        enforce_hook_provenance(tampered, hooks)
+        enforce_hook_provenance(tampered, hooks, product_ref="prod-cap")
+
+    # The same honest claim set, offered as evidence in a bid about the other product, is the
+    # replay this ticket's hardening exists to stop — every claim in it is genuine.
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance(claims, hooks, product_ref="prod-floor")
+
+
+# ---------------------------------------------------------------------------------------------
+# A grant is an authorization for ONE product — the envelope's walls are per product
+# ---------------------------------------------------------------------------------------------
+#
+# `authorize_discount` is the only hook whose answer depends on a wall that differs between
+# products, and the only one whose citation did not name its subject. `prod-cap` and `prod-floor`
+# both list at 100.00; the same 20% request clears the first (80.00 over a 10.00 floor) and
+# breaches the second (80.00 under a 95.00 floor). A grant that cites only the store-wide
+# `#max_discount_pct` rule is therefore the *same claim* in both worlds, and the refusal is one
+# dictionary lookup away from being undone. These tests are about the difference between "a hook
+# authorized 20%" and "a hook authorized 20% here".
+
+
+def test_an_authorized_discount_cites_the_product_whose_walls_were_checked(
+    alpha_hooks: ToolHooks,
+) -> None:
+    """The grant's ref must name the product, because the floor it cleared belongs to one."""
+    granted = alpha_hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted, Denied)
+
+    refused = alpha_hooks.authorize_discount("prod-floor", 20.0)
+    assert isinstance(refused, Denied), "the 95.00 floor must refuse 20% off a 100.00 list price"
+    assert refused.reason == REASON_BELOW_PRICE_FLOOR
+
+    assert claim_scope(granted) == "prod-cap"
+    assert granted.provenance.ref == scoped_ref(
+        alpha_hooks.envelope_ref("max_discount_pct"), "prod-cap"
+    ), "the ref must cite both the rule that was applied and the product it was applied to"
+
+
+def test_two_products_granted_the_same_depth_are_not_one_ledger_entry(
+    alpha_hooks: ToolHooks,
+) -> None:
+    """The ledger's unit of admission is a fingerprint, so two grants must not share one.
+
+    5% is granted on both products — on `prod-floor` it lands exactly on the 95.00 floor. They
+    are still different authorizations: different walls were checked to reach them. If they
+    fingerprint alike, the ledger holds one entry that redeems either.
+    """
+    on_cap = alpha_hooks.authorize_discount("prod-cap", 5.0)
+    on_floor = alpha_hooks.authorize_discount("prod-floor", 5.0)
+    assert not isinstance(on_cap, Denied) and not isinstance(on_floor, Denied)
+
+    assert claim_fingerprint(on_cap) != claim_fingerprint(on_floor)
+    assert len(alpha_hooks.emitted_fingerprints) == 2, (
+        "two distinct grants must leave two distinct entries in the audit ledger"
+    )
+
+
+def test_a_grant_minted_for_product_a_cannot_be_used_for_product_b(
+    alpha_hooks: ToolHooks,
+) -> None:
+    """The defect this hardening exists for: replay, not forgery. Mint for A, spend on B.
+
+    Written as an attack, not as a format check. Asserting that the ref *string* now contains a
+    product would pass while a cross-product replay still worked — the guard-that-rejects-nothing
+    shape — so every step here is behavioural:
+
+    1. the envelope really does refuse this depth on B (otherwise the replay wins nothing);
+    2. the claim really is genuine — minted by a real hook, fingerprint really in the ledger —
+       so the ledger wall cannot refuse it and never could;
+    3. presented in a bid about B it is refused anyway;
+    4. and the same claim in a bid about A is admitted, so the wall refuses something specific
+       rather than refusing everything.
+    """
+    # (1) B's own answer for this depth is a denial. The replay is worth attempting.
+    refused_on_b = alpha_hooks.authorize_discount("prod-floor", 20.0)
+    assert isinstance(refused_on_b, Denied)
+    assert refused_on_b.reason == REASON_BELOW_PRICE_FLOOR
+    assert alpha_hooks.emitted_claims == [], "a denial must mint nothing"
+
+    # (2) A's grant is entirely legitimate.
+    granted_on_a = alpha_hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted_on_a, Denied)
+    assert claim_fingerprint(granted_on_a) in alpha_hooks.emitted_fingerprints, (
+        "the replay is only interesting because the claim is real"
+    )
+
+    # (3) Spending A's grant on B is refused.
+    with pytest.raises(ClaimScopeError) as raised:
+        enforce_hook_provenance([granted_on_a], alpha_hooks, product_ref="prod-floor")
+    assert "prod-cap" in str(raised.value) and "prod-floor" in str(raised.value)
+
+    # (4) The very same claim, in the bid it was actually granted for, is admitted.
+    assert enforce_hook_provenance([granted_on_a], alpha_hooks, product_ref="prod-cap") == [
+        granted_on_a
+    ]
+
+
+def test_a_transferred_grant_is_refused_by_the_same_except_clause(alpha_hooks: ToolHooks) -> None:
+    """A caller already refusing un-hooked claims must refuse transferred ones without a change."""
+    granted = alpha_hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted, Denied)
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance([granted], alpha_hooks, product_ref="prod-floor")
+
+
+def test_an_authorization_presented_without_naming_the_bid_product_is_refused(
+    alpha_hooks: ToolHooks,
+) -> None:
+    """Fail closed: "which product is this bid about" has no safe default.
+
+    A boundary that let the question go unanswered would restore the whole defect — the grant
+    would be admitted precisely because nobody said what it was being spent on.
+    """
+    granted = alpha_hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted, Denied)
+    with pytest.raises(ClaimScopeError):
+        enforce_hook_provenance([granted], alpha_hooks)
+
+    # A claim set carrying no authorization needs no product: only grants are per product.
+    commitments = alpha_hooks.get_owner_commitments(CLUSTER)
+    assert enforce_hook_provenance(commitments, alpha_hooks) == commitments
+
+
+def test_the_scope_check_reads_the_ref_the_hook_minted_not_a_field_beside_it(
+    alpha_hooks: ToolHooks,
+) -> None:
+    """Editing the scope onto a claim must break the fingerprint, or the wall is decorative."""
+    granted = alpha_hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted, Denied)
+
+    relabelled = granted.model_dump()
+    relabelled["provenance"] = dict(relabelled["provenance"])
+    relabelled["provenance"]["ref"] = scoped_ref(
+        alpha_hooks.envelope_ref("max_discount_pct"), "prod-floor"
+    )
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance([relabelled], alpha_hooks, product_ref="prod-floor")
+
+
+# ---------------------------------------------------------------------------------------------
+# The fingerprint must cover everything that decides what a claim means downstream
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_source_span_bolted_onto_a_hooked_claim_is_refused(alpha_hooks: ToolHooks) -> None:
+    """`source_span` decides the claim's downstream identity, so the fingerprint must cover it.
+
+    `contracts.claim_id_for` reads `source_span.pitch_ref` to compute a claim's id. A claim the
+    hooks minted from the envelope carries no span at all; bolting one on re-attributes the
+    merchant's own words to a pitch they were never in, while every visible provenance field
+    still matches the genuine article exactly.
+    """
+    genuine = alpha_hooks.get_owner_commitments(CLUSTER)
+    tampered = [claim.model_dump() for claim in genuine]
+    tampered[0]["source_span"] = {"pitch_ref": "pitch:not-this-one", "start": 0, "end": 7}
+    assert tampered[0]["provenance"] == genuine[0].model_dump()["provenance"], (
+        "the tampering must be invisible in the provenance, or it proves nothing"
+    )
+
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance(tampered, alpha_hooks)
+
+    # The untouched dict view still passes, so the new material did not break the model/dict
+    # equivalence the guard depends on.
+    untouched = [claim.model_dump() for claim in genuine]
+    assert enforce_hook_provenance(untouched, alpha_hooks) == untouched
+
+
+# ---------------------------------------------------------------------------------------------
+# The static half must be a rule about forging a Claim, not a rule about typing "Claim"
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_lint_refuses_the_ordinary_aliases_of_a_forbidden_construction(
+    tmp_path: Path,
+) -> None:
+    """Each module below builds a guarded object without writing the guarded name as the callee.
+
+    None of these is exotic; every one is a spelling an ordinary Python author reaches for. A
+    lint that matches only the bare callee name lets all three through, which makes it a rule
+    about spelling rather than a rule about putting a fact into a bid.
+    """
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "aliased.py").write_text(
+        "from contracts import Claim as Fact\n\ndef make():\n    return Fact(key='k', value='v')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "runtime" / "rebound.py").write_text(
+        "from contracts import Provenance\n\nP = Provenance\n\n"
+        "def make():\n    return P(source='owner_statement', ref='r')\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "runtime" / "validated.py").write_text(
+        "from contracts import Claim\n\ndef make(row):\n    return Claim.model_validate(row)\n",
+        encoding="utf-8",
+    )
+
+    offences = hosted_claim_construction_offenders(tmp_path)
+    assert {(o.path, o.name) for o in offences} == {
+        ("runtime/aliased.py", "Claim"),
+        ("runtime/rebound.py", "Provenance"),
+        ("runtime/validated.py", "Claim"),
+    }, format_offences(offences)
+
+
+def test_the_lint_does_not_fire_on_things_that_are_not_constructions(tmp_path: Path) -> None:
+    """The other direction, so the strengthened rule is not simply matching more of everything.
+
+    Annotating with `Claim`, importing it, dumping one, and calling an unrelated
+    `model_validate` on something that is not a guarded class are all legitimate.
+    """
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "innocent.py").write_text(
+        "from contracts import Claim, ClaimType, Envelope\n"
+        "\n"
+        "def dump(claim: Claim) -> dict:\n"
+        "    kind = ClaimType('price')\n"
+        "    return claim.model_dump()\n"
+        "\n"
+        "def load(row) -> Envelope:\n"
+        "    return Envelope.model_validate(row)\n",
+        encoding="utf-8",
+    )
+    assert hosted_claim_construction_offenders(tmp_path) == []

@@ -18,15 +18,26 @@ That distinction is the whole point. A guard that inspected ``provenance.source`
 through anything that *says* ``owner_statement``, and a model that can write a bid can write
 that string. The ledger cannot be written by the thing being guarded: it is appended to inside
 :class:`~store_agent.hooks.tools.ToolHooks` at the moment a hook returns, and the fingerprint
-covers the claim's key, value, type, unit and full provenance. Change any of them — say
-"30 days" to "90 days" while keeping the envelope ref that made "30 days" true — and the
+covers the claim's key, value, type, unit, source span and full provenance. Change any of them —
+say "30 days" to "90 days" while keeping the envelope ref that made "30 days" true — and the
 fingerprint misses.
 
-What the guard therefore does NOT claim: a forgery that is bit-identical to a claim the hooks
-really did emit passes. It should. Identical content under identical provenance is the same
-fact from the same evidence; there is nothing smuggled about restating it. The property on
-offer is "every claim in this bid is one the hooks emitted", and that is exactly what is
-checked.
+A bit-identical restatement of a claim the hooks really did emit passes, and should: identical
+content under identical provenance is the same fact from the same evidence, and there is nothing
+smuggled about saying it twice.
+
+**The second wall, for the claims that are not facts.** That reasoning holds for a *fact* and
+fails for an *authorization*. "This store offers 30-day returns" is true of the store however
+the bid was assembled; "15% is approved here" was only ever true of the product whose price
+floor was actually checked to grant it — `prod-cap` clears 20% off 100.00 against a 10.00 floor
+while `prod-floor` refuses the identical request against a 95.00 one. A grant is therefore not
+restatable, only spendable, and exactly once. The ledger cannot see the difference — the claim
+really was emitted by a real hook — so :func:`enforce_hook_provenance` takes the product the bid
+is about and refuses a grant minted for a different one, and the hook binds the product into the
+`ref` (:func:`scoped_ref`) so the two grants are not one ledger entry to begin with.
+
+The property on offer is therefore "every claim in this bid is one the hooks emitted, and every
+authorization in it was granted for this bid" — which is what is checked.
 
 Nothing here reads a wall clock. `observed_at` comes from the evidence or from an explicit
 ``as_of``, falling back to :data:`UNKNOWN_OBSERVED_AT` — a hosted bid has to be reproducible
@@ -131,6 +142,14 @@ def scoped_ref(rule_ref: str, product_ref: str) -> str:
     return f"{rule_ref}{CLAIM_SCOPE_SEPARATOR}{product_ref}"
 
 
+def _claim_ref(claim: Any) -> str:
+    """A claim's provenance `ref`, or the empty string when it has no structured provenance."""
+    provenance = _read(claim, "provenance")
+    if provenance is None or isinstance(provenance, (str, bytes)):
+        return ""
+    return str(_enum_value(_read(provenance, "ref")) or "")
+
+
 def claim_scope(claim: Any) -> str | None:
     """The product a claim's ref is bound to, or `None` when the ref names no product.
 
@@ -138,13 +157,28 @@ def claim_scope(claim: Any) -> str | None:
     citation, and "which product this grant was evaluated for" is part of the citation, not
     metadata beside it. It is covered by :func:`claim_fingerprint`, so a scope cannot be edited
     onto a claim without the ledger noticing.
+
+    Reported, not decided with: a `product_ref` containing the separator would split here in a
+    place the minting hook never chose. :func:`claim_is_scoped_to` is what the guard asks, and it
+    constructs rather than parses. This one names the scope in an error message.
     """
-    provenance = _read(claim, "provenance")
-    if provenance is None or isinstance(provenance, (str, bytes)):
-        return None
-    ref = str(_enum_value(_read(provenance, "ref")) or "")
+    ref = _claim_ref(claim)
     rule, separator, scope = ref.rpartition(CLAIM_SCOPE_SEPARATOR)
     return scope if separator and rule and scope else None
+
+
+def claim_is_scoped_to(claim: Any, product_ref: str) -> bool:
+    """Whether `claim`'s ref is a rule citation bound to exactly `product_ref`.
+
+    Asked by construction — does the ref end in the suffix :func:`scoped_ref` would have
+    appended? — rather than by splitting the ref and comparing halves. A `product_ref` that
+    itself contains the separator then still matches exactly, where a split would guess which
+    separator was the minting one. The length test keeps the rule half non-empty, so a ref that
+    is *only* a scope cites no rule and matches nothing.
+    """
+    suffix = f"{CLAIM_SCOPE_SEPARATOR}{product_ref}"
+    ref = _claim_ref(claim)
+    return len(ref) > len(suffix) and ref.endswith(suffix)
 
 
 def mint_provenance(
@@ -196,12 +230,38 @@ def mint_claim(
     )
 
 
+def _canonical_span(span: Any) -> Any:
+    """`source_span` in one shape, whether it arrived as a model or as its `model_dump()` form.
+
+    Both spellings must hash alike for the same reason the rest of the material does: the frozen
+    suite hands the guard dicts where the hooks emit models, and a fingerprint that differed
+    between them would refuse honest claims at random.
+    """
+    if span is None:
+        return None
+    if isinstance(span, Mapping):
+        return {str(name): _enum_value(value) for name, value in span.items()}
+    dump = getattr(span, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        if isinstance(dumped, Mapping):
+            return {str(name): _enum_value(value) for name, value in dumped.items()}
+    return str(span)
+
+
 def claim_fingerprint(claim: Any) -> str:
     """A content hash identifying a claim, computed the same for a model or a plain dict.
 
-    Covers key, value, claim type, unit and the whole provenance — source, ref, observed_at and
-    authority rank. `claim_id` is deliberately excluded: it is derived from a subset of the same
-    material and a consumer is free to attach one after the fact.
+    Covers key, value, claim type, unit, `source_span` and the whole provenance — source, ref,
+    observed_at and authority rank. `claim_id` is the one excluded field, and only because it is
+    *derived*: `contracts.claim_id` hashes a subset of the material already covered here, and a
+    consumer is free to attach one after the fact without changing what the claim asserts.
+
+    `source_span` is covered precisely because it is not derived. `contracts.claim_id_for` reads
+    `source_span.pitch_ref` to decide a claim's downstream identity, so a span bolted onto a
+    hook-minted claim re-attributes the merchant's own words to a pitch they were never in —
+    with every visible provenance field still matching the genuine article. Leaving it out of
+    the material would leave that edit invisible to the ledger.
 
     Serialized with `contracts.signing.canonical_json` (RFC 8785) rather than
     `json.dumps(sort_keys=True)`, so the fingerprint of a claim does not depend on which of the
@@ -220,6 +280,7 @@ def claim_fingerprint(claim: Any) -> str:
         "value": _enum_value(_read(claim, "value")),
         "claim_type": str(_enum_value(_read(claim, "claim_type")) or ""),
         "unit": str(_enum_value(_read(claim, "unit")) or ""),
+        "source_span": _canonical_span(_read(claim, "source_span")),
         "source": str(_enum_value(_read(provenance, "source")) or ""),
         "ref": str(_enum_value(_read(provenance, "ref")) or ""),
         "observed_at": str(_enum_value(_read(provenance, "observed_at")) or ""),
@@ -245,10 +306,15 @@ def _as_claim_list(claims: Any) -> list[Any]:
 def _refusal(claim: Any, ledger: Any) -> str | None:
     """Why `claim` is inadmissible, or `None` when it is admissible.
 
-    There is exactly ONE wall: the claim's fingerprint must be in the ledger of what the hooks
-    emitted. The branches below add no second wall — every one of them describes a claim the
-    ledger test would refuse anyway — they exist so the raised error names the actual problem
-    instead of saying "not found" about a claim that has no provenance at all.
+    This is the *provenance* wall, and there is exactly one of it: the claim's fingerprint must
+    be in the ledger of what the hooks emitted. The branches below add nothing to it — every one
+    of them describes a claim the ledger test would refuse anyway — they exist so the raised
+    error names the actual problem instead of saying "not found" about a claim that has no
+    provenance at all.
+
+    Admissible here means "a hook emitted this", which for an authorization is not yet "this bid
+    may spend it": that question belongs to :func:`_scope_refusal`, and deliberately does not
+    live in this function, because the ledger genuinely does contain the replayed grant.
     """
     try:
         fingerprint = claim_fingerprint(claim)
@@ -272,13 +338,58 @@ def _refusal(claim: Any, ledger: Any) -> str | None:
     )
 
 
-def enforce_hook_provenance(claims: Any, hooks: Any) -> list[Any]:
-    """Admit `claims` only if `hooks` actually emitted every one of them. Returns them.
+def _scope_refusal(claim: Any, product_ref: str | None) -> str | None:
+    """Why a hook-emitted claim is not spendable in *this* bid, or `None`.
+
+    The second wall, and the only one the ledger cannot stand in for. A claim in
+    :data:`PRODUCT_SCOPED_CLAIM_KEYS` is an authorization rather than a fact: it was granted by
+    checking walls that belong to one product. The ledger says a hook emitted it — which is true,
+    and says nothing about *where* it may be spent.
+
+    Fails closed on an unnamed bid. "Which product is this about" has no safe default: answering
+    it with "any" would restore the whole defect, admitting a grant precisely because nobody said
+    what it was being spent on.
+    """
+    key = _read(claim, "key")
+    if key not in PRODUCT_SCOPED_CLAIM_KEYS:
+        return None
+    granted_for = claim_scope(claim)
+    if product_ref is None:
+        return (
+            f"claim {key!r} authorizes one product (granted for {granted_for!r}), but the "
+            "boundary was not told which product this bid is about; pass product_ref=... — "
+            "refusing rather than assuming an authorization transfers"
+        )
+    if not claim_is_scoped_to(claim, str(product_ref)):
+        return (
+            f"claim {key!r} was granted for {granted_for!r} and cannot be spent on "
+            f"{str(product_ref)!r}: the envelope's price floors are per product, so the walls "
+            "cleared for one product were never checked for the other"
+        )
+    return None
+
+
+def enforce_hook_provenance(
+    claims: Any, hooks: Any, *, product_ref: str | None = None
+) -> list[Any]:
+    """Admit `claims` only if `hooks` emitted every one of them *for this bid*. Returns them.
 
     Raises :class:`HookProvenanceError` naming every offender otherwise. `hooks` must expose
     `emitted_fingerprints`; a facade without one is refused rather than trusted, because "no
     ledger" and "an empty ledger" would otherwise be the same answer, and the first one would
     admit everything.
+
+    `product_ref` is the product the bid is about. It is only consulted for claims that are
+    authorizations rather than facts (:data:`PRODUCT_SCOPED_CLAIM_KEYS`) — a scraped material or
+    an owner's returns policy is true of the store however the bid is assembled. For a grant it
+    is required, and a claim set carrying one without it is refused: see :func:`_scope_refusal`.
+    Keyword-only so the two-argument call the frozen boundary already makes keeps working, and
+    so a caller cannot pass a product by accident into the `hooks` position.
+
+    A refusal that is *only* about scope raises :class:`ClaimScopeError`, which subclasses
+    :class:`HookProvenanceError` — the claim did come from a hook, so "no tool hook emitted this"
+    would be a false explanation, while an existing ``except HookProvenanceError`` still catches
+    it without being touched.
     """
     ledger = getattr(hooks, "emitted_fingerprints", None)
     if ledger is None:
@@ -288,13 +399,27 @@ def enforce_hook_provenance(claims: Any, hooks: Any) -> list[Any]:
         )
 
     presented = _as_claim_list(claims)
-    offenders = [
-        (index, reason)
-        for index, claim in enumerate(presented)
-        if (reason := _refusal(claim, ledger)) is not None
-    ]
+    offenders: list[tuple[int, str]] = []
+    unhooked = 0
+    for index, claim in enumerate(presented):
+        reason = _refusal(claim, ledger)
+        if reason is not None:
+            offenders.append((index, reason))
+            unhooked += 1
+            continue
+        reason = _scope_refusal(claim, product_ref)
+        if reason is not None:
+            offenders.append((index, reason))
+
     if offenders:
         detail = "; ".join(f"[{index}] {reason}" for index, reason in offenders)
+        if unhooked == 0:
+            raise ClaimScopeError(
+                f"{len(offenders)} of {len(presented)} claim(s) are hook-emitted authorizations "
+                f"that were not granted for this bid (R8: a discount clears the walls of the "
+                f"product it was checked against, and of no other) — {detail}",
+                offenders,
+            )
         raise HookProvenanceError(
             f"{len(offenders)} of {len(presented)} claim(s) did not come from a tool hook "
             f"(R8: the hooks are the only way a fact enters a hosted bid) — {detail}",
@@ -306,11 +431,17 @@ def enforce_hook_provenance(claims: Any, hooks: Any) -> list[Any]:
 __all__ = [
     "CLAIM_FINGERPRINT_ALGORITHM",
     "CLAIM_FINGERPRINT_PREFIX",
+    "CLAIM_SCOPE_SEPARATOR",
+    "PRODUCT_SCOPED_CLAIM_KEYS",
     "UNKNOWN_OBSERVED_AT",
+    "ClaimScopeError",
     "HookProvenanceError",
     "NotAClaimError",
     "claim_fingerprint",
+    "claim_is_scoped_to",
+    "claim_scope",
     "enforce_hook_provenance",
     "mint_claim",
     "mint_provenance",
+    "scoped_ref",
 ]

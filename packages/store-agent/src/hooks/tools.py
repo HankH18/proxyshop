@@ -33,7 +33,7 @@ from typing import Any
 
 from contracts import Claim, ClaimType, ProvenanceSource
 
-from .provenance import UNKNOWN_OBSERVED_AT, claim_fingerprint, mint_claim
+from .provenance import UNKNOWN_OBSERVED_AT, claim_fingerprint, mint_claim, scoped_ref
 
 #: Slack allowed when comparing a requested discount against a wall. Percentages arrive as
 #: binary floats; without this a request of exactly `max_discount_pct` could be refused (or a
@@ -422,6 +422,15 @@ class ToolHooks:
 
         A request exactly at the cap, or landing exactly on the floor, is authorized: the
         envelope states a limit the merchant approved, not a limit to stay below.
+
+        The granted claim cites **both** walls it cleared: `#max_discount_pct@<product_ref>`, the
+        rule and the product it was evaluated against. That is not decoration. The floors are per
+        product — `prod-cap` clears 20% off 100.00 against a 10.00 floor while `prod-floor`
+        refuses the identical request against a 95.00 one — so a grant that cited only the
+        store-wide rule would be the same claim in both worlds, carry the same fingerprint into
+        :attr:`emitted_fingerprints`, and let the refused product spend the other's grant. Naming
+        the product is what makes an authorization non-transferable; the matching wall lives in
+        :func:`~.provenance.enforce_hook_provenance`.
         """
         ref = str(product_ref)
         try:
@@ -458,7 +467,7 @@ class ToolHooks:
             unit="percent",
             claim_type=ClaimType.discount,
             source=ProvenanceSource.envelope_rule,
-            ref=self.envelope_ref("max_discount_pct"),
+            ref=scoped_ref(self.envelope_ref("max_discount_pct"), ref),
             observed_at=self._observed_at(),
         )
         emitted = self._emit([claim])
