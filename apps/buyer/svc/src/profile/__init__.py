@@ -717,7 +717,7 @@ def buckets_at_level(account: Mapping[str, Any], level: int) -> ProfileBuckets:
         )
 
     band = coarsen_budget_band(account)
-    tier = coarsen_frequency_tier(account)
+    tier: str | None = coarsen_frequency_tier(account)
     region = generalise_region(coarsen_region(account.get("region")))
     affinity = taxonomy_affinity(account, limit=2)
 

@@ -420,7 +420,7 @@ def extract_policy_page(
     # the one the crawl just computed over this page's bytes.
     cached = ledger.cached(page_ref, document.content_hash)
     if cached is not None:
-        return cached.reused_as(floor=confidence_floor)  # type: ignore[union-attr]
+        return cached.reused_as(floor=confidence_floor)
 
     result = extract_claims(
         document.text,

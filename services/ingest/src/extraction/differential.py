@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..adapters.hashing import content_hash, has_changed, snapshot_ref
+from .claims import ExtractionResult
 
 __all__ = [
     "ExtractionLedger",
@@ -62,7 +63,7 @@ class ExtractionLedger:
     """
 
     hashes: dict[str, str] = field(default_factory=dict)
-    results: dict[str, object] = field(default_factory=dict)
+    results: dict[str, ExtractionResult] = field(default_factory=dict)
 
     def known_hash(self, page_ref: str) -> str | None:
         """The digest last recorded for ``page_ref``, or ``None``."""
@@ -72,7 +73,7 @@ class ExtractionLedger:
         """Whether ``content`` differs from what was last recorded for ``page_ref``."""
         return needs_extraction(self.known_hash(page_ref), content)
 
-    def cached(self, page_ref: str, digest: str) -> object | None:
+    def cached(self, page_ref: str, digest: str) -> ExtractionResult | None:
         """The recorded result for ``page_ref``, but only if ``digest`` still matches.
 
         Guarding on the digest is what stops a stale cache from answering for changed
@@ -82,7 +83,7 @@ class ExtractionLedger:
             return None
         return self.results.get(str(page_ref))
 
-    def record(self, page_ref: str, digest: str, result: object | None = None) -> None:
+    def record(self, page_ref: str, digest: str, result: ExtractionResult | None = None) -> None:
         """Record that ``page_ref`` was extracted at ``digest``."""
         self.hashes[str(page_ref)] = str(digest)
         if result is not None:
