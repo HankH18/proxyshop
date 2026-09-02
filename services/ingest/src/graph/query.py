@@ -34,6 +34,7 @@ from .model import (
     category_id,
     embedding_vector_defect,
     ingredient_id,
+    slug,
 )
 from .schema import VECTOR_INDEX_NAME, embedding_run
 
@@ -116,10 +117,14 @@ class AttributeFilter:
 
         Returns:
             A plain mapping; ``key``/``value_string``/``unit`` are canonicalised so that
-            ``"SPF"`` matches an attribute stored as ``"spf"``.
+            ``"SPF"`` matches an attribute stored as ``"spf"``. The key fold is
+            :func:`~ingest.graph.model.slug` — the same fold
+            :func:`~ingest.graph.model.attribute_value_id` hashes and
+            ``AttributeValue.as_properties`` writes to ``canonical_key`` — so a filter for
+            ``"fragrance free"`` reaches the node ``"fragrance_free"`` wrote.
         """
         return {
-            "key": canonical_text(self.key),
+            "key": slug(self.key),
             "value_string": None
             if self.value_string is None
             else canonical_text(self.value_string),

@@ -267,11 +267,17 @@ def attribute_value_id(
             f"or value_bool"
         )
     bool_token = "" if value_bool is None else ("true" if value_bool else "false")
+    # THE DIGEST HASHES THE SAME FOLD THE PREFIX SHOWS. It used to hash
+    # `canonical_text(key)` while the prefix rendered `slug(key)`, and the two folds do not
+    # agree on separators: "fragrance_free" and "fragrance free" both render the prefix
+    # `av_fragrance-free_` and produced *different* digests, so one fact became two nodes
+    # and an attribute filter partitioned the catalog by separator. The case/whitespace half
+    # converged correctly, which is why only a same-prefix/different-id assertion catches it.
     return "av_{}_{}".format(
         slug(key),
         _digest(
             "attribute",
-            canonical_text(key),
+            slug(key),
             canonical_text(value_string or ""),
             _number_token(value_number),
             bool_token,
@@ -577,7 +583,10 @@ class AttributeValue:
         return {
             "attr_id": self.attr_id,
             "key": self.key,
-            "canonical_key": canonical_text(self.key),
+            # `slug`, not `canonical_text`: this is the property the candidate query
+            # compares an AttributeFilter's folded key against, and it must be the *same*
+            # fold `attribute_value_id` hashes or reads and writes go out of symmetry.
+            "canonical_key": slug(self.key),
             "value_string": self.value_string,
             # Canonicalised alongside the raw reading so the candidate query can compare
             # against exactly what attribute_value_id() hashed. Folding inside Cypher with

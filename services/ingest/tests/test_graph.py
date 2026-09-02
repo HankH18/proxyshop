@@ -92,6 +92,7 @@ from ingest.graph import (
     schema_statements,
     seed_products,
     set_product_embedding,
+    slug,
     upsert_attribute,
     upsert_offer,
     upsert_policy_page,
@@ -1727,15 +1728,35 @@ def test_the_whole_pipeline_is_provenanced_end_to_end(
 #: AttributeValue / Category / Ingredient node is orphaned while the graph still looks
 #: healthy. Three separate mutations of the digest (always-``repr`` numbers, a different
 #: prefix, a reordered digest tuple) passed the entire suite before these existed.
+#:
+#: TWO OF THESE VALUES CHANGED, DELIBERATELY (W1-32). ``attribute_value_id`` built its
+#: readable prefix from ``slug(key)`` and its digest from ``canonical_text(key)``, and those
+#: two folds disagree on separators. ``"fragrance_free"`` and ``"fragrance free"`` therefore
+#: produced the *same* prefix ``av_fragrance-free_`` and *different* digests: one fact became
+#: two nodes and an attribute filter partitioned the catalog by separator
+#: (``'fragrance_free' -> ['p-under']``, ``'fragrance free' -> ['p-space']``). The digest now
+#: hashes ``slug(key)``, so prefix and digest agree, and the two keys converge on one node —
+#: pinned by ``test_a_separator_variant_of_a_key_converges_on_one_node`` below.
+#:
+#: The old values encoded a generator that split one fact in two, so they were wrong before
+#: this change and would still be wrong if it were reverted. **Existing graphs need a
+#: re-ingest, not a migration**: the pre-change ids are not recoverable from the post-change
+#: ones (the fold is lossy), so there is nothing to rewrite them *to* — re-run the adapters.
+#: Only the two keys whose ``slug`` differs from their ``canonical_text`` moved; ``spf``,
+#: ``volume``, and every Category/Ingredient id are byte-for-byte unchanged, which is itself
+#: the evidence that only the separator half of the fold was broken.
 GOLDEN_IDS = (
     (lambda: attribute_value_id("spf", value_number=50), "av_spf_28ad4f935b11a89e782fad898c0bb8cd"),
     (
+        # was av_fragrance-free_a98d914b39260a515c3cf4c8638cdc22 — a digest over
+        # canonical_text("fragrance_free"), i.e. over a fold the prefix never showed.
         lambda: attribute_value_id("fragrance_free", value_bool=True),
-        "av_fragrance-free_a98d914b39260a515c3cf4c8638cdc22",
+        "av_fragrance-free_4107460e89d3dc7c080b1744ff5bb31f",
     ),
     (
+        # was av_skin-type_0d80ebc63724e24211d495207b37dea6 — same defect.
         lambda: attribute_value_id("skin_type", value_string="Sensitive"),
-        "av_skin-type_0d80ebc63724e24211d495207b37dea6",
+        "av_skin-type_1cc8559076bf559096d8f4eb5e68f29f",
     ),
     (
         lambda: attribute_value_id("volume", value_number=30, unit="ml"),
@@ -2309,3 +2330,70 @@ def test_one_definition_of_a_legitimate_vector_serves_both_entry_points() -> Non
     # The bound the length check is taken against is a parameter, not D6's 1024, so a
     # rebuilt index of another width validates against *its* width.
     assert embedding_vector_defect([0.1] * 512, dimensions=512) is None
+
+
+def test_the_attribute_id_prefix_and_digest_hash_the_same_fold() -> None:
+    """W1-32: same prefix, different digest — one fact stored as two nodes.
+
+    ``slug`` folds separators (``_``, spaces, punctuation) to ``-``; ``canonical_text`` does
+    not. Building the readable prefix from one and the digest from the other made
+    ``"fragrance_free"`` and ``"fragrance free"`` render identically and hash differently,
+    which is the worst shape a stable id can have: a human reading the graph sees one id and
+    the database holds two nodes. The case/whitespace half converged correctly all along,
+    so only a same-prefix/different-id assertion catches it.
+    """
+    variants = ["fragrance_free", "fragrance free", "Fragrance-Free", "fragrance   FREE"]
+    ids = {attribute_value_id(key, value_bool=True) for key in variants}
+    assert len(ids) == 1, f"one fact, {len(ids)} ids: {sorted(ids)}"
+    only = ids.pop()
+    assert only.startswith("av_fragrance-free_")
+    # And the digest is taken over the fold the prefix shows.
+    assert only == f"av_{slug('fragrance_free')}_{only.rsplit('_', 1)[1]}"
+    # Genuinely different keys must still be different nodes.
+    assert attribute_value_id("fragrance_free", value_bool=True) != attribute_value_id(
+        "fragrance_freedom", value_bool=True
+    )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_separator_variant_of_a_key_converges_on_one_node(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """The write and read sides fold the key the same way, so the catalog is not partitioned.
+
+    Before the fix this returned ``'fragrance_free' -> ['p-under']`` and
+    ``'fragrance free' -> ['p-space']``: two AttributeValue nodes for one fact, and a filter
+    that could only ever see the half spelled the way the caller happened to spell it.
+    """
+    seed_products(
+        graph_schema_session,
+        [
+            {
+                "product_id": "p-under",
+                "canonical_name": "Underscore Spelling",
+                "attributes": [AttributeValue("fragrance_free", value_bool=True)],
+            },
+            {
+                "product_id": "p-space",
+                "canonical_name": "Space Spelling",
+                "attributes": [AttributeValue("fragrance free", value_bool=True)],
+            },
+        ],
+        source=graph_source,
+    )
+    attribute_nodes = graph_schema_session.run(
+        "MATCH (a:AttributeValue) RETURN count(a) AS c"
+    ).single()["c"]
+    assert attribute_nodes == 1, "one stated fact must be one node, however it was spelled"
+
+    for spelling in ("fragrance_free", "fragrance free", "Fragrance-Free"):
+        found = {
+            c.product_id
+            for c in candidate_products(
+                graph_schema_session,
+                attribute_filters=[AttributeFilter(spelling, value_bool=True)],
+                limit=10,
+            )
+        }
+        assert found == {"p-under", "p-space"}, f"{spelling!r} saw only {sorted(found)}"
