@@ -20,6 +20,21 @@
 -- the key is unique, the link is valid, and a written row is never rewritten.
 
 -- ---------------------------------------------------------------------------------------
+-- Bounded waits, first statement in the file.
+--
+-- The runner executes each migration inside ONE transaction and holds every lock it takes
+-- until end-of-file, so one blocked statement stalls the whole file -- and with no
+-- `lock_timeout` set anywhere in this repo, "stalls" meant FOREVER rather than for a bounded
+-- interval. That is the shape of failure this project has already lost real time to, so it
+-- is bounded here rather than diagnosed again. `SET LOCAL` scopes both settings to this
+-- file's transaction and restores whatever the session had on COMMIT, so a migration can
+-- never leave a timeout behind on a pooled connection. Applying a file by hand: wrap it in
+-- BEGIN/COMMIT, or psql warns that SET LOCAL outside a transaction block does nothing.
+-- ---------------------------------------------------------------------------------------
+SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '60s';
+
+-- ---------------------------------------------------------------------------------------
 -- commerce_events -- the chain
 -- ---------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ledger.commerce_events (
@@ -161,6 +176,117 @@ INSERT INTO ledger.chain_head (chain, head_hash, length, last_seq)
   VALUES ('commerce_events', repeat('0', 64), 0, 0)
   ON CONFLICT (chain) DO NOTHING;
 
+-- ---------------------------------------------------------------------------------------
+-- The anchor is not re-authorable by the roles it constrains.
+--
+-- `chain_head` is the ONLY thing that can detect tail truncation, so an attacker who can
+-- write it arbitrarily has defeated the mechanism rather than tripped it. Three concrete
+-- attacks, every one of them proven live against this schema before this guard existed:
+--
+--   (B) denial-of-integrity  `UPDATE chain_head SET length = 99` -- a flawless ledger then
+--       permanently self-reports {'ok': False, 'reason': 'truncated'}. Unfalsifiable
+--       repudiation: the ledger accuses itself and cannot be cleared.
+--   (C) silent unanchored appends  `DELETE FROM chain_head` -- the advance function below
+--       matched zero rows and returned NULL, so appends kept succeeding with no anchor and
+--       no error, and the verifier then RAISED instead of reporting.
+--   (D) anchor laundering  re-INSERT an anchor recomputed over the SURVIVORS of a
+--       truncation, and the truncated chain verifies {'ok': True, 'anchor_ok': True}.
+--
+-- 0004 revokes INSERT and DELETE from `trust_rw` and `app`; this trigger is the half that
+-- does not depend on a grant being right. The rules:
+--
+--   DELETE  refused outright. There is no legitimate delete -- the sanctioned reset is an
+--           UPDATE, issued by the AFTER TRUNCATE trigger below.
+--   INSERT  only the genesis seed row (all-zero head, length 0, last_seq 0), which is what
+--           this file's own `ON CONFLICT DO NOTHING` seed inserts, so re-running the
+--           migration stays a no-op. (D) is refused because a laundered anchor by
+--           definition carries a real head hash and a non-zero length.
+--   UPDATE  either the genesis reset -- permitted ONLY while `commerce_events` is actually
+--           empty, which outside TRUNCATE nobody can arrange, since the table is
+--           append-only and TRUNCATE is owner-only -- or a single-step advance: length
+--           exactly +1, last_seq strictly increasing, and `head_hash` equal to the
+--           `event_hash` ACTUALLY STORED at `last_seq`. That last clause is a primary-key
+--           lookup, so it costs one index probe per append, and it is what binds the
+--           commitment to the rows rather than to the writer's say-so. (B) fails the
+--           length rule; a forged head fails the row-binding rule.
+-- ---------------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ledger.chain_head_guard() RETURNS trigger
+LANGUAGE plpgsql AS $head_guard$
+DECLARE
+  chain_is_empty boolean;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION
+      'ledger.chain_head is the ledger''s only truncation detector: DELETE is not permitted'
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.chain <> 'commerce_events'
+       OR NEW.head_hash <> repeat('0', 64)
+       OR NEW.length <> 0
+       OR NEW.last_seq <> 0 THEN
+      RAISE EXCEPTION
+        'ledger.chain_head accepts only the genesis seed row on INSERT; an anchor '
+        'recomputed over the survivors of a truncation would launder it clean '
+        '(offered: head=%, length=%, last_seq=%)', NEW.head_hash, NEW.length, NEW.last_seq
+        USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.chain <> OLD.chain THEN
+    RAISE EXCEPTION 'ledger.chain_head.chain is the discriminator and may not be rewritten'
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  -- The sanctioned reset (AFTER TRUNCATE, below). Allowed only when the chain really is
+  -- empty, so "the anchor says empty" and "the table is empty" can never disagree.
+  IF NEW.length = 0 AND NEW.last_seq = 0 AND NEW.head_hash = repeat('0', 64) THEN
+    SELECT NOT EXISTS (SELECT 1 FROM ledger.commerce_events) INTO chain_is_empty;
+    IF chain_is_empty THEN
+      RETURN NEW;
+    END IF;
+    RAISE EXCEPTION
+      'ledger.chain_head cannot be reset to genesis while ledger.commerce_events still '
+      'holds rows: that would make a populated chain report as empty'
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF NEW.length <> OLD.length + 1 THEN
+    RAISE EXCEPTION
+      'ledger.chain_head.length advances by exactly one per appended event: % -> % is not '
+      'an append. Rewriting it either fakes events that never happened or makes an intact '
+      'ledger report itself truncated.', OLD.length, NEW.length
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF NEW.last_seq <= OLD.last_seq THEN
+    RAISE EXCEPTION
+      'ledger.chain_head.last_seq is monotonic: % -> % moves the anchor backwards',
+      OLD.last_seq, NEW.last_seq
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM ledger.commerce_events
+     WHERE seq = NEW.last_seq AND event_hash = NEW.head_hash
+  ) THEN
+    RAISE EXCEPTION
+      'ledger.chain_head.head_hash % is not the event_hash stored at seq %: the anchor must '
+      'commit to a row that exists, not to a value the writer chose', NEW.head_hash,
+      NEW.last_seq
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+
+  RETURN NEW;
+END;
+$head_guard$;
+
+CREATE OR REPLACE TRIGGER chain_head_guard_trigger
+  BEFORE INSERT OR UPDATE OR DELETE ON ledger.chain_head
+  FOR EACH ROW EXECUTE FUNCTION ledger.chain_head_guard();
+
 CREATE OR REPLACE FUNCTION ledger.commerce_events_advance_anchor() RETURNS trigger
 LANGUAGE plpgsql AS $anchor$
 BEGIN
@@ -170,6 +296,17 @@ BEGIN
          last_seq   = NEW.seq,
          updated_at = now()
    WHERE chain = 'commerce_events';
+  -- NOT FOUND is the whole of attack (C). Without this check the UPDATE simply matched no
+  -- rows, returned NULL, and the append committed UNANCHORED -- `inserted = True`, no
+  -- error, and the one mechanism that can detect truncation quietly not running. An
+  -- append that cannot advance the anchor is an append that must not happen.
+  IF NOT FOUND THEN
+    RAISE EXCEPTION
+      'ledger.chain_head holds no row for the commerce_events chain, so this append could '
+      'not advance the anchor. Appending unanchored would leave the ledger with no way to '
+      'detect its own tail being cut off; the append is refused instead.'
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
   RETURN NULL;
 END;
 $anchor$;
