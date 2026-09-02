@@ -27,7 +27,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..embeddings import EmbeddingProvider, get_embedding_provider
-from .model import canonical_text, category_id, ingredient_id
+from .model import (
+    EMBEDDING_DIMENSIONS,
+    InvalidEmbeddingVector,
+    canonical_text,
+    category_id,
+    embedding_vector_defect,
+    ingredient_id,
+)
 from .schema import VECTOR_INDEX_NAME, embedding_run
 
 #: How many rows to pull out of the vector index per requested result before the structured
@@ -251,11 +258,25 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
         provider_name: the name of the provider whose space ``vector`` lives in.
 
     Raises:
+        InvalidEmbeddingVector: the vector is the wrong width, non-finite, or zero-length.
+            Checked *here*, before any parameter is built, because the raw path answered a
+            512-d vector with ``neo4j.exceptions.ClientError`` — neither of the exceptions
+            the docstring declares, and not even a ``ValueError``.
         EmbeddingRunIncomplete: the recorded pass never finished, so the index holds two
             vector spaces and every cosine across them is noise.
         EmbeddingProviderMismatch: the vectors were written by another provider.
     """
     run = embedding_run(session)
+    # The marker records the width the vectors were actually written at, which is what a
+    # query vector has to match — that is the live index's width after a
+    # `rebuild_vector_index`, not necessarily D6's. With no marker, D6 is the only claim
+    # available.
+    dimensions = EMBEDDING_DIMENSIONS if run is None else run.dimension
+    defect = embedding_vector_defect(vector, dimensions=dimensions)
+    if defect is not None:
+        raise InvalidEmbeddingVector(
+            f"refusing to run a vector query with a vector that {defect[1]}"
+        )
     if run is None:
         # No pass recorded. A graph seeded straight through `set_product_embedding` — which
         # is what the adapter tickets do — has vectors of genuinely unknown provenance, and
@@ -330,6 +351,9 @@ def candidate_products(
     Raises:
         UnretrievableQuery: no vector and no structured predicate was supplied.
         ValueError: ``limit`` or ``oversample`` is not positive.
+        InvalidEmbeddingVector: ``embedding`` (or the vector ``query_text`` embeds to) is
+            the wrong width, carries a non-finite component, or has a zero L2 norm. Also a
+            ``ValueError``, so the declaration above stays true.
         EmbeddingProviderMismatch: the vectors in the index were written by a different
             provider than the one this query embeds with.
         EmbeddingRunIncomplete: the recorded re-embed pass never finished, so the index
@@ -369,6 +393,9 @@ def candidate_products(
             "forbidden by DESIGN, so there is no third option."
         )
 
+    if vector is not None:
+        _check_vector_path(session, vector, provider_name=provider_name)
+
     parameters: dict[str, Any] = {
         "brand": brand,
         "status": status,
@@ -380,7 +407,6 @@ def candidate_products(
     }
     if vector is None:
         return _run(session, _STRUCTURED_HEAD, parameters=parameters)
-    _check_vector_path(session, vector, provider_name=provider_name)
     parameters["embedding"] = vector
     parameters["fetch"] = min(max(limit * oversample, limit), MAX_INDEX_FETCH)
     return _run(session, _VECTOR_HEAD, parameters=parameters)

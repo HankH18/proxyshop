@@ -53,12 +53,14 @@ from .model import (
     Category,
     Ingredient,
     IntentCluster,
+    InvalidEmbeddingVector,
     Offer,
     PolicyPage,
     Product,
     Source,
     Store,
     Variant,
+    embedding_vector_defect,
 )
 
 
@@ -66,8 +68,14 @@ class ProvenanceRequired(ValueError):
     """A material fact was offered without a resolvable :class:`~ingest.graph.model.Source`."""
 
 
-class EmbeddingDimensionMismatch(ValueError):
-    """A vector was offered whose width the ``product_embedding`` index cannot match."""
+class EmbeddingDimensionMismatch(InvalidEmbeddingVector):
+    """A vector was offered whose width the ``product_embedding`` index cannot match.
+
+    The narrow, dimension-shaped case of
+    :class:`~ingest.graph.model.InvalidEmbeddingVector`, kept as its own name because
+    :func:`ingest.graph.reembed.main` reports it with its own exit status and its own advice
+    (rebuild the index), which none of the other defects share.
+    """
 
 
 # ---------------------------------------------------------------------------------------
@@ -608,6 +616,27 @@ def link_states(session: Any, *, page_id: str, attribute: AttributeValue, source
 # ---------------------------------------------------------------------------------------
 
 
+_PRODUCT_EXISTS = "MATCH (p:Product {product_id: $product_id}) RETURN count(p) AS found"
+
+
+def _require_product(session: Any, product_id: str) -> None:
+    """Raise unless a ``Product`` with this id already exists.
+
+    Args:
+        session: an open ``neo4j.Session`` or transaction.
+        product_id: the id to probe for.
+
+    Raises:
+        ProvenanceRequired: no such product.
+    """
+    row = session.run(_PRODUCT_EXISTS, product_id=product_id).single()
+    if not (row or {"found": 0})["found"]:
+        raise ProvenanceRequired(
+            f"no Product with product_id={product_id!r}; embeddings are derived from facts "
+            f"and never create them"
+        )
+
+
 def set_product_embedding(
     session: Any,
     *,
@@ -641,16 +670,29 @@ def set_product_embedding(
 
     Raises:
         EmbeddingDimensionMismatch: ``embedding`` is not ``dimensions`` long.
+        InvalidEmbeddingVector: ``embedding`` is the right width but carries a non-finite
+            component or has a zero L2 norm — ``hash_embed("")`` is exactly the all-zero
+            1024-d vector, and writing it made the product permanently unreachable while
+            ``products_missing_embeddings()`` still reported it as embedded. That is
+            verbatim the failure the paragraph above says this guard exists to prevent;
+            ``reembed_products`` guarded it in the *caller* instead of here.
         ProvenanceRequired: the product does not exist. An embedding is a derived value,
             not an independent fact, so it never creates a node — and a ``MERGE`` here would
-            create an unsourced ``Product`` out of a typo'd id.
+            create an unsourced ``Product`` out of a typo'd id. An unknown product is
+            reported as an unknown product whatever the vector looks like: the id is the
+            more fundamental mistake, and the extra probe costs a round trip only on the
+            error path.
     """
     vector = [float(component) for component in embedding]
-    if len(vector) != dimensions:
-        raise EmbeddingDimensionMismatch(
-            f"refusing to write a {len(vector)}-d vector for product_id={product_id!r}: the "
-            f"product_embedding index is {dimensions}-d, and Neo4j would accept the write "
-            f"silently and then never return this product from any vector query"
+    defect = embedding_vector_defect(vector, dimensions=dimensions)
+    if defect is not None:
+        _require_product(session, product_id)
+        kind, reason = defect
+        error = EmbeddingDimensionMismatch if kind == "dimension" else InvalidEmbeddingVector
+        raise error(
+            f"refusing to write a vector for product_id={product_id!r} that {reason}. "
+            f"Neo4j accepts such a write without error and then never returns this product "
+            f"from any vector query, which looks exactly like a correct catalog."
         )
     result = session.run(
         f"""

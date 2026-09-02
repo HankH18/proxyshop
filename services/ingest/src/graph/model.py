@@ -34,6 +34,7 @@ import hashlib
 import math
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -277,6 +278,59 @@ def attribute_value_id(
             canonical_text(unit or ""),
         ),
     )
+
+
+# ---------------------------------------------------------------------------------------
+# What counts as a legitimate embedding vector
+# ---------------------------------------------------------------------------------------
+
+
+class InvalidEmbeddingVector(ValueError):
+    """A vector that the ``product_embedding`` index would store and then never return."""
+
+
+def embedding_vector_defect(
+    vector: Sequence[float], *, dimensions: int = EMBEDDING_DIMENSIONS
+) -> tuple[str, str] | None:
+    """The single definition of "a legitimate embedding vector", shared by every entry point.
+
+    One definition, in one place, because there are two doors into the vector index — the
+    write side (:func:`ingest.graph.upsert.set_product_embedding`) and the read side
+    (:func:`ingest.graph.query.candidate_products`) — and each had a *different* idea of what
+    it would accept. The write side checked only the length, so ``hash_embed("")``, which is
+    exactly the all-zero 1024-d vector, was stored without complaint and the product then
+    vanished from every vector query permanently while ``products_missing_embeddings()``
+    still reported ``[]``. The read side checked nothing at all.
+
+    Three components, and the third is not ``not any(vector)``. A vector of 1024 components
+    of ``1e-200`` is non-zero by ``any()``, but every square underflows to ``0.0`` and its L2
+    norm is exactly ``0.0`` — cosine against it is a division by zero, which Neo4j resolves
+    to "never matches" rather than to an error. So the norm is what is measured.
+
+    Args:
+        vector: the candidate vector.
+        dimensions: the width the live index was built for.
+
+    Returns:
+        ``None`` when the vector is usable. Otherwise ``(kind, reason)`` where ``kind`` is
+        ``"dimension"`` or ``"value"`` — the caller picks its exception from the kind — and
+        ``reason`` is a phrase that completes "refusing a vector that …".
+    """
+    if len(vector) != dimensions:
+        return (
+            "dimension",
+            f"is {len(vector)}-d, but the {EMBEDDING_PROPERTY} index is {dimensions}-d",
+        )
+    if not all(math.isfinite(float(component)) for component in vector):
+        return ("value", "contains a non-finite component; NaN and inf have no cosine")
+    norm = math.sqrt(math.fsum(float(component) ** 2 for component in vector))
+    if norm <= 0.0:
+        return (
+            "value",
+            f"has an L2 norm of {norm}; a zero-length vector is orthogonal to everything, so "
+            f"the index would store it and then never return it from any query",
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------------------
@@ -583,6 +637,7 @@ __all__ = [
     "SUPPORTED_BY",
     "AttributeValue",
     "Category",
+    "InvalidEmbeddingVector",
     "Ingredient",
     "IntentCluster",
     "Offer",
@@ -594,6 +649,7 @@ __all__ = [
     "attribute_value_id",
     "canonical_text",
     "category_id",
+    "embedding_vector_defect",
     "ingredient_id",
     "slug",
 ]

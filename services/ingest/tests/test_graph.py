@@ -2227,3 +2227,85 @@ def test_vectors_of_unrecorded_provenance_are_still_queryable(
         c.product_id
         for c in candidate_products(graph_schema_session, query_text="Directly Seeded", limit=5)
     ] == ["p-seeded"]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+@pytest.mark.parametrize(
+    ("vector", "fragment"),
+    [
+        pytest.param(lambda: hash_embed(""), "L2 norm", id="the-empty-text-vector"),
+        pytest.param(lambda: [0.0] * EMBEDDING_DIM, "L2 norm", id="all-zero"),
+        pytest.param(lambda: [1e-200] * EMBEDDING_DIM, "L2 norm", id="denormal-underflow"),
+        pytest.param(lambda: [float("nan")] + [0.1] * (EMBEDDING_DIM - 1), "non-finite", id="nan"),
+        pytest.param(lambda: [float("inf")] + [0.1] * (EMBEDDING_DIM - 1), "non-finite", id="inf"),
+    ],
+)
+def test_a_degenerate_vector_is_refused_by_the_write_path(
+    graph_schema_session: Any, graph_source: Source, vector: Any, fragment: str
+) -> None:
+    """W1-30: ``hash_embed("")`` is exactly the all-zero 1024-d vector, and it was stored.
+
+    Measured before the fix: ``set_product_embedding`` wrote it without complaint, the
+    product then disappeared from ``candidate_products`` permanently, and
+    ``products_missing_embeddings()`` still reported ``[]`` because the product *has* an
+    embedding. That is verbatim the failure this function's own docstring says the guard
+    exists to prevent — ``reembed_products`` guarded it in the caller instead.
+
+    ``[1e-200] * 1024`` is the case a ``not any(vector)`` guard misses: every component is
+    non-zero, every square underflows to 0.0, and the L2 norm is exactly 0.0.
+    """
+    from ingest.graph import InvalidEmbeddingVector
+
+    upsert_product(graph_schema_session, Product("p-degen", "Degenerate"), source=graph_source)
+    with pytest.raises(InvalidEmbeddingVector, match=fragment):
+        set_product_embedding(graph_schema_session, product_id="p-degen", embedding=vector())
+    assert products_missing_embeddings(graph_schema_session) == ["p-degen"], (
+        "a refused write must leave the product visibly unembedded"
+    )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+@pytest.mark.parametrize(
+    ("vector", "fragment"),
+    [
+        pytest.param(lambda: [0.1] * 512, "512-d", id="too-short"),
+        pytest.param(lambda: [0.0] * EMBEDDING_DIM, "L2 norm", id="all-zero"),
+        pytest.param(lambda: [1e-200] * EMBEDDING_DIM, "L2 norm", id="denormal-underflow"),
+        pytest.param(lambda: [float("nan")] + [0.1] * (EMBEDDING_DIM - 1), "non-finite", id="nan"),
+    ],
+)
+def test_a_degenerate_vector_is_refused_by_the_read_path(
+    graph_seeded_catalog: dict[str, Any], vector: Any, fragment: str
+) -> None:
+    """W1-31: the ``embedding=`` entry point took precedence and was completely unguarded.
+
+    Measured before the fix, ``candidate_products(embedding=[0.1] * 512)`` raised
+    ``neo4j.exceptions.ClientError`` — neither of the two exceptions the docstring declares,
+    and ``isinstance(exc, ValueError)`` was ``False``, so the ``Raises:`` block was
+    machine-contradicted. The ``query_text`` half was guarded; the half a caller is likelier
+    to use was not.
+    """
+    from ingest.graph import InvalidEmbeddingVector
+
+    with pytest.raises(InvalidEmbeddingVector, match=fragment) as caught:
+        candidate_products(graph_seeded_catalog["session"], embedding=vector(), limit=5)
+    assert isinstance(caught.value, ValueError), "the docstring declares ValueError"
+
+
+def test_one_definition_of_a_legitimate_vector_serves_both_entry_points() -> None:
+    """Both doors into the index consult the same predicate, so they cannot drift apart."""
+    from ingest.graph import embedding_vector_defect
+    from ingest.graph import query as query_module
+    from ingest.graph import upsert as upsert_module_local
+
+    assert query_module.embedding_vector_defect is embedding_vector_defect
+    assert upsert_module_local.embedding_vector_defect is embedding_vector_defect
+    assert embedding_vector_defect([0.1] * EMBEDDING_DIM) is None
+    assert embedding_vector_defect(hash_embed("real text")) is None
+    assert embedding_vector_defect([0.1] * 512)[0] == "dimension"
+    assert embedding_vector_defect([0.0] * EMBEDDING_DIM)[0] == "value"
+    # The bound the length check is taken against is a parameter, not D6's 1024, so a
+    # rebuilt index of another width validates against *its* width.
+    assert embedding_vector_defect([0.1] * 512, dimensions=512) is None
