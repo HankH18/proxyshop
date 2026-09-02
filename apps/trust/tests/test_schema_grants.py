@@ -23,9 +23,14 @@ DDL then blocks until ``lock_timeout`` -- a hang, not an error. See
 from __future__ import annotations
 
 import configparser
+import contextlib
 import os
 import re
+import shutil
 import subprocess
+import time
+import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import psycopg
@@ -35,6 +40,8 @@ from apps.trust.src.ledger import migrations as migration_lib
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LINT_FIXTURES = REPO_ROOT / "apps" / "trust" / "tests" / "lint_fixtures"
+DB_INIT_ROLES_SQL = REPO_ROOT / "db" / "init" / "00-roles.sql"
+COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 
 #: The partner-reconciled table set, by schema (DESIGN §Data models).
 EXPECTED_TABLES = {
@@ -1423,3 +1430,318 @@ def test_a_bare_database_locks_down_all_eight_advisory_lock_overloads(
                 assert cur.fetchall() == [], (
                     f"{role} cannot take the chain lock and so cannot append"
                 )
+
+
+# =======================================================================================
+# T-110 -- the role password has ONE source of truth
+# =======================================================================================
+#
+# ``db/init/00-roles.sql`` and ``db/migrations/0001`` are the two halves of D39's split
+# schema and both create the four LOGIN roles. 0001 sources the password from
+# ``$PROXYSHOP_ROLE_PASSWORD``; ``00-roles.sql`` pinned all four to the literal ``'x'``
+# unconditionally on its else-branch, so a fresh volume produced roles the environment
+# variable could not reach -- two sources of truth, with the literal winning. Reproduced
+# against a throwaway container before the fix: with
+# ``PROXYSHOP_ROLE_PASSWORD=t110-not-the-default`` set, ``exchange`` authenticated with
+# ``'x'`` and was REFUSED the value the environment asked for.
+#
+# The two static tests grade the file's text. The three docker tests grade a REAL fresh
+# volume, because that is the only state in which the initdb hook runs at all: each spins a
+# private, port-less postgres container from the image docker-compose.yml pins, mounts
+# ``db/init`` where the entrypoint reads it, and removes it at teardown. The shared stack is
+# never contacted and no cluster-global role on it is created, altered or dropped.
+
+#: The four LOGIN roles ``db/init/00-roles.sql`` creates, in the order it creates them.
+_INIT_ROLES = ("exchange", "trust_rw", "buyer_vault", "app")
+
+#: The documented dev default -- and the literal every role used to be pinned to.
+_HISTORICAL_DEV_PASSWORD = "x"
+
+
+def _strip_whitespace(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def _sql_statements_only(text: str) -> str:
+    """``text`` with every ``--`` comment removed, so assertions grade code and not prose."""
+    return "\n".join(line.split("--", 1)[0] for line in text.splitlines())
+
+
+def _compose_postgres_settings() -> dict[str, str]:
+    """The image and ``POSTGRES_*`` values the real stack uses, read from docker-compose.yml.
+
+    Hard-coding them here would let the throwaway container drift away from the container
+    the project actually runs, and then prove something about neither. Compose is frozen
+    (T-000), so it is the source of truth for both.
+    """
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    settings: dict[str, str] = {}
+    for key, pattern in (
+        ("image", r"^\s*image:\s*(postgres:[^\s#]+)"),
+        ("user", r"POSTGRES_USER:\s*([^\s,}#]+)"),
+        ("password", r"POSTGRES_PASSWORD:\s*([^\s,}#]+)"),
+        ("database", r"POSTGRES_DB:\s*([^\s,}#]+)"),
+    ):
+        match = re.search(pattern, text, re.MULTILINE)
+        assert match is not None, f"docker-compose.yml no longer declares the postgres {key}"
+        settings[key] = match.group(1)
+    return settings
+
+
+def _docker(*argv: str, timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", *argv], capture_output=True, text=True, timeout=timeout, check=False
+    )
+
+
+def _require_docker_cli() -> None:
+    """Skip only when there is no docker daemon to talk to -- never for a failing container."""
+    if shutil.which("docker") is None:
+        pytest.skip("the docker CLI is not on PATH")
+    probe = _docker("info", "--format", "{{.ServerVersion}}", timeout=60)
+    if probe.returncode != 0:
+        pytest.skip(f"the docker daemon is not reachable: {probe.stderr.strip()[:200]}")
+
+
+@contextlib.contextmanager
+def _fresh_volume_postgres(
+    worker_index: int, environment: dict[str, str]
+) -> Iterator[tuple[str, dict[str, str]]]:
+    """A private postgres container that has just run ``db/init`` on a genuinely fresh volume.
+
+    Everything about it is scoped to this test: a name carrying this worker's index and a
+    random suffix, **no published ports** (so it cannot collide with the shared stack's
+    5432 or be reached from outside), its own anonymous volume, and ``docker rm -f`` at
+    teardown. It is the only honest way to exercise the initdb hook: on the shared cluster
+    that hook ran when its volume was created and never runs again, and the roles it makes
+    are cluster-global -- so proving anything there would mean rewriting credentials the
+    other live lanes are connected with.
+    """
+    _require_docker_cli()
+    settings = _compose_postgres_settings()
+    name = f"proxyshop_w{worker_index}_t110_{uuid.uuid4().hex[:8]}"
+    argv = [
+        "run", "-d", "--name", name, "--memory", "512m",
+        "-e", f"POSTGRES_USER={settings['user']}",
+        "-e", f"POSTGRES_PASSWORD={settings['password']}",
+        "-e", f"POSTGRES_DB={settings['database']}",
+    ]  # fmt: skip
+    for key, value in environment.items():
+        argv += ["-e", f"{key}={value}"]
+    argv += ["-v", f"{REPO_ROOT / 'db' / 'init'}:/docker-entrypoint-initdb.d:ro", settings["image"]]
+
+    created = _docker(*argv)
+    assert created.returncode == 0, f"could not start the throwaway postgres: {created.stderr}"
+    try:
+        deadline = time.monotonic() + 120
+        while True:
+            ready = _docker(
+                "exec", name, "pg_isready", "-h", "127.0.0.1",
+                "-U", settings["user"], "-d", settings["database"], timeout=60,
+            )  # fmt: skip
+            if ready.returncode == 0:
+                break
+            state = _docker("inspect", "-f", "{{.State.Running}}", name, timeout=60)
+            assert state.stdout.strip() == "true", (
+                f"the throwaway postgres exited during init:\n{_docker('logs', name).stderr}"
+            )
+            assert time.monotonic() < deadline, (
+                f"the throwaway postgres never accepted TCP:\n{_docker('logs', name).stderr}"
+            )
+            time.sleep(0.5)
+
+        # The mount is load-bearing: a container that silently ignored db/init would make
+        # every assertion below pass for the wrong reason.
+        logs = _docker("logs", name)
+        assert "/docker-entrypoint-initdb.d/00-roles.sql" in logs.stdout + logs.stderr, (
+            "the initdb hook never ran 00-roles.sql -- the db/init mount did not take"
+        )
+        yield name, settings
+    finally:
+        _docker("rm", "-f", name, timeout=120)
+
+
+def _login_attempt(container: str, role: str, password: str, database: str) -> tuple[bool, str]:
+    """Try a password-authenticated connection as ``role``, from inside ``container``.
+
+    Over the container's own routable address and never ``127.0.0.1``: the postgres image
+    ships a ``pg_hba.conf`` whose loopback lines are ``trust``, so a loopback connection
+    succeeds with *any* password and proves nothing. ``hostname -i`` lands on the
+    ``scram-sha-256`` line, where the stored verifier is what decides.
+    """
+    proc = _docker(
+        "exec", "-e", f"PGPASSWORD={password}", "-e", f"T110_ROLE={role}",
+        "-e", f"T110_DB={database}", container, "sh", "-c",
+        'psql -h "$(hostname -i)" -U "$T110_ROLE" -d "$T110_DB" -tAc "select 1"',
+    )  # fmt: skip
+    return proc.returncode == 0, f"{proc.stdout}{proc.stderr}".strip()
+
+
+def _assert_accepts(container: str, role: str, password: str, database: str, why: str) -> None:
+    accepted, output = _login_attempt(container, role, password, database)
+    assert accepted, f"{why}: {output}"
+
+
+def _assert_refuses(container: str, role: str, password: str, database: str, why: str) -> None:
+    accepted, output = _login_attempt(container, role, password, database)
+    assert not accepted, why
+    assert "password authentication failed" in output, (
+        f"{role} refused {password!r} for the wrong reason -- this is not evidence about "
+        f"the password at all: {output}"
+    )
+
+
+def test_db_init_reads_the_role_password_from_the_same_source_as_the_migrations() -> None:
+    r"""T-110 acceptance 1: the same environment variable, GUC and default as ``0001``.
+
+    Not "it mentions the variable somewhere" -- the *default expression itself* is compared
+    between the two files with whitespace removed, so either half drifting to a different
+    fallback (or dropping the fallback) fails here rather than on someone's fresh volume.
+    """
+    init_sql = DB_INIT_ROLES_SQL.read_text(encoding="utf-8")
+    migration = (migration_lib.migrations_dir() / "0001_schemas_roles_grants.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert f"\\getenv proxyshop_role_password {migration_lib.ROLE_PASSWORD_ENV}" in init_sql, (
+        f"db/init/00-roles.sql does not read ${migration_lib.ROLE_PASSWORD_ENV}; the initdb "
+        f"hook is the only thing that runs on a fresh volume, so a password set there and "
+        f"nowhere else is a password no fresh volume will ever have"
+    )
+    assert migration_lib.ROLE_PASSWORD_SETTING in init_sql
+
+    shared_default = _strip_whitespace(
+        f"coalesce(nullif(current_setting('{migration_lib.ROLE_PASSWORD_SETTING}',true),''),"
+        f"'{_HISTORICAL_DEV_PASSWORD}')"
+    )
+    for name, text in (("db/init/00-roles.sql", init_sql), ("0001", migration)):
+        assert shared_default in _strip_whitespace(text), (
+            f"{name} no longer resolves the role password with the shared expression "
+            f"{shared_default!r}. Two files that create the same cluster-global roles with "
+            f"two different defaults is the defect T-110 exists to close."
+        )
+
+
+def test_db_init_holds_no_password_literal_beyond_the_documented_dev_default() -> None:
+    """T-110 acceptance 3: one literal in the file, and it is the documented default.
+
+    The old shape was ``ALTER ROLE <r> LOGIN PASSWORD 'x' ...`` on the else-branch of four
+    separate blocks -- eight literals, any of which could drift. Both halves are asserted:
+    no statement pairs ``PASSWORD`` with a literal, and no ``ALTER ROLE`` mentions a
+    password at all (these roles are cluster-global, so re-running this file must never
+    reset a credential another worker's live connections are authenticating with).
+    """
+    code = _sql_statements_only(DB_INIT_ROLES_SQL.read_text(encoding="utf-8"))
+
+    # The keyword, not the tail of an identifier: `\set proxyshop_role_password ''` is the
+    # mechanism, and a lookbehind is what separates it from `PASSWORD 'x'`.
+    literal = re.search(r"(?<![A-Za-z0-9_])PASSWORD\s+'", code, re.IGNORECASE)
+    if literal is not None:
+        context = code[max(0, literal.start() - 60) : literal.start() + 60]
+        raise AssertionError(
+            f"db/init/00-roles.sql pairs the PASSWORD keyword with a literal: ...{context}..."
+            f" The password has one source of truth ($PROXYSHOP_ROLE_PASSWORD, defaulting to "
+            f"the documented dev value), and it reaches CREATE ROLE through format(%L)."
+        )
+
+    alters = re.findall(r"ALTER\s+ROLE[^';]*", code, re.IGNORECASE)
+    assert alters, "the else-branch that keeps this file idempotent has gone missing"
+    for statement in alters:
+        assert "PASSWORD" not in statement.upper(), (
+            f"an ALTER ROLE in db/init/00-roles.sql still writes a password: {statement!r}. "
+            f"The roles are cluster-global; re-running this file would cut every live "
+            f"connection that authenticated with the old one."
+        )
+
+    quoted = re.findall(r"'([^']*)'", code)
+    assert quoted.count(_HISTORICAL_DEV_PASSWORD) == 1, (
+        f"expected exactly one {_HISTORICAL_DEV_PASSWORD!r} literal (the documented dev "
+        f"default in the coalesce), found {quoted.count(_HISTORICAL_DEV_PASSWORD)}: {quoted}"
+    )
+
+
+@pytest.mark.docker
+def test_a_fresh_volume_init_keeps_a_non_default_role_password(worker_index: int) -> None:
+    """T-110 acceptance 2, on a real fresh volume rather than on the file's text.
+
+    ``$PROXYSHOP_ROLE_PASSWORD`` is set to a value that is not the default, the initdb hook
+    runs ``db/init/00-roles.sql``, and every one of the four roles then authenticates with
+    that value -- and is refused the historical literal. Both directions, because "the role
+    can log in" is also true of a role that ignored the environment entirely.
+    """
+    password = f"t110-{uuid.uuid4().hex}"
+    assert password != _HISTORICAL_DEV_PASSWORD
+    with _fresh_volume_postgres(worker_index, {"PROXYSHOP_ROLE_PASSWORD": password}) as (
+        container,
+        settings,
+    ):
+        for role in _INIT_ROLES:
+            _assert_accepts(
+                container, role, password, settings["database"],
+                f"{role} was created on a fresh volume with PROXYSHOP_ROLE_PASSWORD set, "
+                f"but does not accept that password",
+            )  # fmt: skip
+            _assert_refuses(
+                container, role, _HISTORICAL_DEV_PASSWORD, settings["database"],
+                f"{role} still accepts the literal {_HISTORICAL_DEV_PASSWORD!r} -- the "
+                f"environment variable is not the only source of truth",
+            )  # fmt: skip
+
+
+@pytest.mark.docker
+def test_a_fresh_volume_init_without_the_variable_keeps_the_documented_dev_default(
+    worker_index: int,
+) -> None:
+    """T-110 acceptance 1's other half: a checkout with no environment behaves as before.
+
+    ``.env.example`` and ``proxyshop_support.postgres.ROLES`` both still carry ``'x'``, so a
+    default that silently changed would break every role connection in the repo.
+    """
+    with _fresh_volume_postgres(worker_index, {}) as (container, settings):
+        for role in _INIT_ROLES:
+            _assert_accepts(
+                container, role, _HISTORICAL_DEV_PASSWORD, settings["database"],
+                f"with no PROXYSHOP_ROLE_PASSWORD set, {role} must keep the documented dev "
+                f"default -- .env.example and proxyshop_support.postgres depend on it",
+            )  # fmt: skip
+
+
+@pytest.mark.docker
+def test_re_running_db_init_by_hand_never_resets_a_live_role_password(worker_index: int) -> None:
+    """The else-branch, which is the half that actually shipped broken.
+
+    The file promises it can be re-run by hand without erroring. It must ALSO not rewrite
+    the credentials of roles that already exist: they are cluster-global, shared by every
+    ``proxyshop_w<n>``, and a reset cuts every live connection using the old password. So
+    the file is re-run inside the container with a *different* ``$PROXYSHOP_ROLE_PASSWORD``,
+    and the password the roles were created with has to survive -- as must its exit status.
+    """
+    created_with = f"t110-init-{uuid.uuid4().hex}"
+    rerun_with = f"t110-rerun-{uuid.uuid4().hex}"
+    with _fresh_volume_postgres(worker_index, {"PROXYSHOP_ROLE_PASSWORD": created_with}) as (
+        container,
+        settings,
+    ):
+        rerun = _docker(
+            "exec", "-e", f"PROXYSHOP_ROLE_PASSWORD={rerun_with}", container,
+            "psql", "-v", "ON_ERROR_STOP=1", "-U", settings["user"], "-d", settings["database"],
+            "-f", "/docker-entrypoint-initdb.d/00-roles.sql",
+        )  # fmt: skip
+        assert rerun.returncode == 0, (
+            f"db/init/00-roles.sql is not re-runnable by hand any more: {rerun.stderr}"
+        )
+        for role in _INIT_ROLES:
+            _assert_accepts(
+                container, role, created_with, settings["database"],
+                f"re-running db/init/00-roles.sql reset {role}'s password. These roles are "
+                f"cluster-global: that cuts every worker holding a live connection",
+            )  # fmt: skip
+            _assert_refuses(
+                container, role, rerun_with, settings["database"],
+                f"the re-run rewrote {role}'s password to the new environment value",
+            )  # fmt: skip
+            _assert_refuses(
+                container, role, _HISTORICAL_DEV_PASSWORD, settings["database"],
+                f"the re-run reset {role} to the literal {_HISTORICAL_DEV_PASSWORD!r} -- "
+                f"this is the T-110 defect itself",
+            )  # fmt: skip

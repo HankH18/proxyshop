@@ -1,4 +1,4 @@
--- Cluster-global role creation. Orchestrator-owned (T-000), frozen.
+-- Cluster-global role creation. Orchestrator-owned (T-000); the password plumbing is T-110.
 --
 -- Why this file exists at all (D38): Postgres roles are cluster-global
 -- (pg_authid.relisshared = true), so they cannot live in db/migrations, which runs once per
@@ -17,36 +17,71 @@
 --     app          the general application role.
 --
 -- Idempotent on purpose: `docker compose up` on an existing volume skips initdb entirely,
--- but a human re-running this file by hand (psql -f) must not error. Passwords are the
--- development placeholders from .env.example; nothing here is a real credential.
+-- but a human re-running this file by hand (psql -f) must not error.
+--
+-- ---------------------------------------------------------------------------------------
+-- THE PASSWORD HAS ONE SOURCE OF TRUTH (T-110)
+-- ---------------------------------------------------------------------------------------
+-- It is dev-only, it is read from $PROXYSHOP_ROLE_PASSWORD, and the historical literal 'x'
+-- is the documented default so a checkout with no environment behaves exactly as it always
+-- has. That is the same environment variable, through the same custom GUC, with the same
+-- default expression that db/migrations/0001_schemas_roles_grants.sql uses -- see
+-- ROLE_PASSWORD_ENV / ROLE_PASSWORD_SETTING in apps/trust/src/ledger/migrations.py -- so
+-- the two halves of D39's split schema can no longer disagree about the credential. They
+-- previously did, and this file won: its else-branch reset all four roles to the literal
+-- 'x' unconditionally, so setting the environment variable changed nothing on a fresh
+-- volume and produced two sources of truth for one password.
+--
+-- The password applies at CREATE ONLY. These roles are cluster-global and shared by every
+-- worker database, so re-running this file must never reset a password that another
+-- worker's live connections are authenticating with; the else-branch below normalises the
+-- role ATTRIBUTES and deliberately leaves the password alone. That is the same rule
+-- migrations.py states for 0001, for the same reason.
+--
+-- Requires psql: `\getenv` is a psql metacommand (psql 14 or newer; the image is
+-- postgres:16-alpine). The initdb hook runs .sql files through psql, and `psql -f` is the
+-- documented by-hand path, so both callers have it.
+--
+-- WIRING NOTE, for whoever owns the stack: docker-compose.yml's postgres `environment:`
+-- block does not forward PROXYSHOP_ROLE_PASSWORD into the container, so `make deps-up`
+-- gets the 'x' default no matter what the host environment says. Forwarding it there is
+-- what lets a non-default password reach a real fresh volume; that file is frozen and
+-- outside T-110's scope, which is why this note exists instead of the edit.
 
-DO $$
+-- `\set` first so an ABSENT variable is empty rather than undefined: `\getenv` leaves its
+-- target untouched when the environment variable does not exist, and an undefined psql
+-- variable would interpolate as literal text below rather than as a value.
+\set proxyshop_role_password ''
+\getenv proxyshop_role_password PROXYSHOP_ROLE_PASSWORD
+-- `SET`, not `SELECT set_config(...)`: it hands the value to the server without echoing it
+-- into the container's init log. `:'...'` is psql's quoting form, so a password containing
+-- a quote is escaped rather than injected.
+SET proxyshop.role_password = :'proxyshop_role_password';
+
+DO $roles$
+DECLARE
+  role_name text;
+  -- The only password literal in this file: the documented dev default, applied when the
+  -- environment says nothing. Identical expression to db/migrations/0001.
+  role_password text := coalesce(
+    nullif(current_setting('proxyshop.role_password', true), ''), 'x'
+  );
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'exchange') THEN
-    CREATE ROLE exchange LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  ELSE
-    ALTER ROLE exchange LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trust_rw') THEN
-    CREATE ROLE trust_rw LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  ELSE
-    ALTER ROLE trust_rw LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'buyer_vault') THEN
-    CREATE ROLE buyer_vault LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  ELSE
-    ALTER ROLE buyer_vault LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  END IF;
-
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app') THEN
-    CREATE ROLE app LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  ELSE
-    ALTER ROLE app LOGIN PASSWORD 'x' NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT;
-  END IF;
+  FOREACH role_name IN ARRAY ARRAY['exchange', 'trust_rw', 'buyer_vault', 'app'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format(
+        'CREATE ROLE %I LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT',
+        role_name, role_password
+      );
+    ELSE
+      -- Attributes only. Never PASSWORD: see the block comment above.
+      EXECUTE format(
+        'ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT', role_name
+      );
+    END IF;
+  END LOOP;
 END
-$$;
+$roles$;
 
 -- No role may create objects in `public` of any database it can connect to; every schema a
 -- role needs is granted explicitly by the migrations.
