@@ -783,13 +783,53 @@ def test_both_envelope_gates_refuse_every_whitespace_only_value(field: str, blan
         canonical_signing_bytes(payload)
 
 
+def control_values_for(field: str) -> tuple[str, ...]:
+    """Four legal, DISTINCT spellings of `field` for the positive control below.
+
+    A function rather than an inline loop because T-118(e) found the inline form silently broken:
+    it reassigned the loop variable in its own body for `issued_at`, so all four iterations tested
+    the same string and the control collapsed to one case for the only field carrying a `format`.
+    Pulling the table out makes that failure mode assertable on its own, which
+    `test_the_positive_control_covers_four_distinct_values_for_every_field` does.
+    """
+    if field == "issued_at":
+        # RFC-3339 spellings that differ in offset, sub-second precision and century, so the
+        # control cannot be satisfied by one timestamp repeated four times.
+        return (
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00+00:00",
+            "2026-06-15T12:34:56.789Z",
+            "1999-12-31T23:59:59-08:00",
+        )
+    return ("x", " padded ", chr(0x09) + "tabbed", "nonce-ext-0001")
+
+
+@pytest.mark.parametrize("field", REQUIRED_SIGNING_FIELDS)
+def test_the_positive_control_covers_four_distinct_values_for_every_field(field: str) -> None:
+    """T-118(e). The control below proves nothing about a field it only exercises once.
+
+    This is the assertion the inline loop could not make about itself: whatever the table says for
+    `field`, it must be four values and they must be four DIFFERENT values.
+    """
+    values = control_values_for(field)
+    assert len(values) == 4, (field, values)
+    assert len(set(values)) == 4, (
+        f"{field} control collapsed to {len(set(values))} case(s): {values}"
+    )
+
+
 @pytest.mark.parametrize("field", REQUIRED_SIGNING_FIELDS)
 def test_a_value_with_real_content_still_passes_both_gates(field: str) -> None:
     """The control. A pattern that rejected everything would satisfy the test above and break
-    every legal submission, including the padded-but-non-empty spellings that are still valid."""
-    for value in ("x", " padded ", chr(0x09) + "tabbed", "nonce-ext-0001"):
-        if field == "issued_at":
-            value = "2026-01-01T00:00:00Z"
+    every legal submission, including the padded-but-non-empty spellings that are still valid.
+
+    T-118(e): the loop used to REASSIGN `value` inside its own body for `issued_at`, so all four
+    iterations tested the identical string and the control silently collapsed to one case for the
+    one field with a `format` on it. `issued_at` now gets four DISTINCT RFC-3339 spellings instead
+    — different offsets, sub-second precision, a different century — so every field really is
+    exercised four ways.
+    """
+    for value in control_values_for(field):
         payload = make_submission(**{field: value})
         assert missing_signing_fields(payload) == []
         assert getattr(envelope_of(payload), field) == value
