@@ -10,9 +10,20 @@ re-implementing anything, so ``packages.llm.RecordedLLM is llm.RecordedLLM`` and
 ``except llm.errors.UnrecordedPromptError`` written by one ticket catches what another
 ticket's ``packages.llm`` double raises.
 
-``.pkgroot`` is on ``sys.path`` for every consumer: the root distribution's editable
-install puts it there (``dev-mode-dirs``), and pytest adds it via the root ``pythonpath``
-setting.
+``.pkgroot`` reaches ``sys.path`` by one of three mechanisms, in that order of preference:
+
+1. the venv's editable install of the root distribution, whose ``dev-mode-dirs`` puts
+   ``.pkgroot`` on the path for everything run inside the venv — this is the normal one;
+2. the root ``pyproject.toml``'s pytest ``pythonpath`` setting, for a plain ``pytest`` run;
+3. failing both, the insertion below, from ``parents[2]`` — the repo root.
+
+The fallback is not decoration. The frozen acceptance suite runs pytest with
+``-o pythonpath=`` deliberately (a worker could otherwise prepend a stub directory and
+shadow the real tree with hand-written fakes), and it bootstraps itself with only the repo
+root on ``sys.path``. Mechanism 2 is therefore false for the single most important
+consumer, and if the venv's ``.pth`` is missing or stale, mechanism 1 goes with it. The
+loud ``ImportError`` below stays as the fallback-of-the-fallback: it fires only when even
+``.pkgroot`` itself is absent, and then it says exactly what to look at.
 """
 
 from __future__ import annotations
@@ -20,6 +31,11 @@ from __future__ import annotations
 import importlib
 import pkgutil
 import sys
+from pathlib import Path as _Path
+
+_PKGROOT = _Path(__file__).resolve().parents[2] / ".pkgroot"
+if _PKGROOT.is_dir() and str(_PKGROOT) not in sys.path:
+    sys.path.insert(0, str(_PKGROOT))
 
 try:
     import llm as _llm
@@ -30,7 +46,9 @@ except ImportError as _exc:  # pragma: no cover - only reachable with a broken s
         "`.pkgroot/llm` -> packages/llm/src (D42's flat layout). `llm` did not import, "
         "which almost always means the repo's `.pkgroot` directory is not on sys.path. "
         "The editable install (`dev-mode-dirs`) and the root pytest `pythonpath` both "
-        f"put it there, so run inside the project venv. Original error: {_exc}"
+        f"put it there, and this module inserts {_PKGROOT} itself as a fallback, so "
+        f"either that directory is missing or the venv is not the project's. "
+        f"Original error: {_exc}"
     ) from _exc
 
 __all__ = list(_llm.__all__)
