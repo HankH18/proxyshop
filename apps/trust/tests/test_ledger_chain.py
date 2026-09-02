@@ -2366,8 +2366,51 @@ def _chain_head_guard_body(connection: Any) -> tuple[str, str]:
 
     without_comments = re.sub(r"--[^\n]*", " ", prosrc)
     normalised = " ".join(without_comments.split())
-    declare, separator, body = normalised.partition(" BEGIN ")
-    assert separator, f"chain_head_guard has no BEGIN block: {normalised!r}"
+
+    # The split is ANCHORED AT THE START of the source. It used to be
+    # `normalised.partition(" BEGIN ")`, which takes the FIRST ` BEGIN ` anywhere in the
+    # function -- and that is not the outermost one. A function with no top-level DECLARE
+    # section opens with `BEGIN`, which cannot match a delimiter that requires a leading
+    # space, so the outer block header was swallowed into the declare half (it came out as
+    # the literal 'BEGIN ...', which passes the ":=" check below because there is no
+    # initialiser in it) and `body` was read from the NESTED block instead. The whole
+    # unconditional DELETE arm can then sit verbatim inside an inner block with the
+    # exemption written ahead of it in the OUTER one, and the property passes. Measured on
+    # the live catalog, worker 52, in a rolled-back transaction:
+    #
+    #     declare = "BEGIN IF current_setting('proxyshop.anchor_maintenance', true) = 'on'
+    #                AND TG_OP = 'DELETE' THEN RETURN OLD; END IF; DECLARE chain_is_empty
+    #                boolean;"
+    #     body    = "IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'ledger.chain_head is the ..."
+    #     SET LOCAL proxyshop.anchor_maintenance = 'on';
+    #     DELETE FROM ledger.chain_head;      -- SUCCEEDED, rowcount = 1
+    #
+    # and the property test PASSED -- the conditional-exemption hole it exists to close.
+    # `test_a_nested_block_cannot_hide_the_delete_arm_from_the_property` installs exactly
+    # that function and requires this helper to refuse it.
+    #
+    # So the shape is decided by what the source STARTS with, not by where a delimiter
+    # happens to fall, and anything that is neither shape is a failure rather than a guess.
+    if normalised.startswith("DECLARE "):
+        declare, separator, body = normalised.partition(" BEGIN ")
+        assert separator, f"chain_head_guard has a DECLARE and no BEGIN: {normalised!r}"
+        assert "BEGIN" not in declare, (
+            f"chain_head_guard's declare section appears to contain the word BEGIN, so the "
+            f"split above may not have found the OUTERMOST block header and the body below "
+            f"may not be the outer body: {declare!r}"
+        )
+    elif normalised.startswith("BEGIN "):
+        # No declare section at all: the body is everything after the outer block header,
+        # nested blocks included. A nested `BEGIN` is then part of `body`, where the
+        # assertion that the DELETE arm comes FIRST can see it.
+        declare, body = "", normalised[len("BEGIN ") :]
+    else:
+        raise AssertionError(
+            f"chain_head_guard's source opens with neither DECLARE nor BEGIN, so this test "
+            f"cannot tell its declare section from its body. Refusing rather than guessing: "
+            f"a guess is how the outer block came to be read as a declare section in the "
+            f"first place. Source: {normalised!r}"
+        )
     return declare, body
 
 
@@ -2565,6 +2608,225 @@ def test_an_exemption_injected_into_the_delete_branch_turns_this_file_red(
     )
     test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(connection)
     _anchor_delete_is_refused_by_the_trigger(connection, "delete from ledger.chain_head")
+
+
+# ---------------------------------------------------------------------------------------
+# The exemption the FIRST version of this property could not see: a nested block
+# ---------------------------------------------------------------------------------------
+# Every exemption above is injected INTO the DELETE branch, so the branch itself changes
+# and any reading of the body catches it. An exemption does not have to go there. plpgsql
+# blocks nest, and the arm can be moved wholesale into an inner one with the exemption
+# written ahead of it in the outer block -- the DELETE branch is then byte-identical to the
+# migration's, and only the block STRUCTURE has changed.
+#
+# `_chain_head_guard_body` split the source with `normalised.partition(" BEGIN ")`, which
+# takes the first ` BEGIN ` anywhere in the function rather than the outermost one, so it
+# read the inner block as the body and the outer one as the declare section. Measured on
+# the live catalog with the function below installed: the property test PASSED and
+# `DELETE FROM ledger.chain_head` succeeded with rowcount 1.
+#
+# Both shapes are driven, because the two halves of the old split failed differently: with
+# no top-level DECLARE the outer `BEGIN` was swallowed into the declare half, and with one
+# kept the outer body was skipped past. The fixed helper anchors the split at the START of
+# the source, so a nested block is part of the body and the "the DELETE arm comes FIRST"
+# assertion sees whatever precedes it.
+
+#: The exemption written into the OUTER block. Deliberately the same GUC as the first entry
+#: of :data:`DELETE_ARM_EXEMPTIONS`: what changes here is where it is written, not what it
+#: keys on, so a pass here could not be explained by the condition being an easier one.
+NESTED_BLOCK_EXEMPTION = "current_setting('proxyshop.anchor_maintenance', true) = 'on'"
+
+
+def _chain_head_guard_source() -> tuple[str, str, str]:
+    """``ledger.chain_head_guard()`` split into ``(header, declare_section, block)``.
+
+    ``header`` is everything up to and including the opening ``$head_guard$`` dollar quote,
+    ``declare_section`` is the top-level ``DECLARE ...`` the migration writes, and ``block``
+    is the ``BEGIN ... END;`` that follows it. Read out of the migration so the statements
+    inside the block are the real ones and the only thing this file invents is the nesting.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = (repo_root / "db" / "migrations" / "0002_ledger_tables.sql").read_text()
+    start = migration.index("CREATE OR REPLACE FUNCTION ledger.chain_head_guard()")
+    end = migration.index("$head_guard$;", start)
+    opener = "AS $head_guard$"
+    header, _, body = migration[start:end].partition(opener)
+    declare_section, separator, block = body.partition("BEGIN\n")
+    assert declare_section.strip() == "DECLARE\n  chain_is_empty boolean;".strip(), (
+        f"ledger.chain_head_guard()'s declare section is not what this test expects in "
+        f"db/migrations/0002_ledger_tables.sql, so the nesting below would not be the "
+        f"function under test: {declare_section!r}"
+    )
+    assert separator and block.lstrip().startswith("IF TG_OP = 'DELETE' THEN"), (
+        f"the DELETE arm is not the first statement of the migration's block, so this test "
+        f"would nest something other than the arm it is about: {block[:120]!r}"
+    )
+    return header + opener, declare_section, separator + block
+
+
+def _nest_the_chain_head_guard_block(cursor: Any, *, keep_top_level_declare: bool) -> None:
+    """Install ``chain_head_guard()`` with its whole block moved into a NESTED one.
+
+    The DELETE arm, the INSERT arm and every UPDATE rule are copied through verbatim -- the
+    inner block is the migration's block, unmodified -- so the only difference from the real
+    function is the outer block wrapped around it and the exemption written inside that.
+    """
+    header, declare_section, block = _chain_head_guard_source()
+    exemption = (
+        f"  IF {NESTED_BLOCK_EXEMPTION} AND TG_OP = 'DELETE' THEN\n    RETURN OLD;\n  END IF;\n"
+    )
+    if keep_top_level_declare:
+        # The declare section stays where it was, so the source still opens with DECLARE;
+        # the exemption is the outer block's first statement and the arm is one block down.
+        inner = "BEGIN\n" + block + "END;\n"
+        nested = f"{declare_section}BEGIN\n{exemption}{inner}END;\n"
+    else:
+        # No top-level DECLARE at all: the source opens with the outer BEGIN, and the
+        # migration's own DECLARE ... BEGIN ... END; becomes the nested block.
+        nested = f"\nBEGIN\n{exemption}{declare_section}{block}END;\n"
+    cursor.execute(f"{header}{nested}$head_guard$;")
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize(
+    "keep_top_level_declare",
+    [False, True],
+    ids=["no top-level DECLARE", "top-level DECLARE kept"],
+)
+def test_a_nested_block_cannot_hide_the_delete_arm_from_the_property(
+    ledger_clean, keep_top_level_declare: bool
+) -> None:
+    """The DELETE arm verbatim, one block deeper, with the exemption above it.
+
+    Graded exactly like the injected exemptions next door, and for the same reason: the
+    exemption has to really work, or a refusal from the property test proves nothing about
+    what it can refuse. So the identical ``DELETE FROM ledger.chain_head`` that is refused
+    everywhere else in this file must succeed with rowcount 1 first.
+
+    This is the input that separates "the DELETE branch is unconditional" from "the DELETE
+    branch is the first thing the function does". Only the second is a property; the first
+    is satisfied by a branch nothing ever reaches.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    before_declare, before_body = _chain_head_guard_body(connection)
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as probe:
+        try:
+            with probe.cursor() as cur:
+                _nest_the_chain_head_guard_block(cur, keep_top_level_declare=keep_top_level_declare)
+
+                # The DELETE arm is still there, character for character. If the only thing
+                # that changed were the nesting, and the nesting were harmless, this would
+                # be refused like every other DELETE in this file.
+                _, nested_body = _chain_head_guard_body(probe)
+                assert UNCONDITIONAL_DELETE_BRANCH in nested_body, (
+                    "the nesting did not preserve the DELETE arm verbatim, so this test is "
+                    "grading a different function than the one it claims to"
+                )
+
+                cur.execute("set local proxyshop.anchor_maintenance = 'on'")
+                cur.execute("delete from ledger.chain_head")
+                assert cur.rowcount == 1, (
+                    f"the nested-block exemption did not actually let the DELETE through "
+                    f"(rowcount={cur.rowcount}), so this proves nothing about what the "
+                    f"property test can refuse."
+                )
+                cur.execute("select count(*) from ledger.chain_head")
+                assert cur.fetchone() == (0,), "the anchor row survived"
+
+            with pytest.raises(AssertionError) as refused:
+                test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(probe)
+            assert "not the unconditional first statement" in str(refused.value), (
+                f"the property test failed for some other reason: {refused.value}"
+            )
+        finally:
+            probe.rollback()
+
+    after_declare, after_body = _chain_head_guard_body(connection)
+    assert (after_declare, after_body) == (before_declare, before_body), (
+        "the nested-block exemption OUTLIVED its transaction: the anchor guard is now "
+        "disarmed for every test that runs after this one"
+    )
+    test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(connection)
+    _anchor_delete_is_refused_by_the_trigger(connection, "delete from ledger.chain_head")
+
+
+class _OneRowCatalog:
+    """The smallest thing :func:`_chain_head_guard_body` can read a ``prosrc`` out of.
+
+    Enough of psycopg's connection/cursor shape to answer the one query the helper runs, so
+    the SPLIT can be graded without a database. The docker test above proves the same thing
+    against the live catalog; this one keeps it graded in an environment where the compose
+    stack is unreachable and the ``docker`` mark is skipped.
+    """
+
+    def __init__(self, prosrc: str) -> None:
+        self._prosrc = prosrc
+
+    def cursor(self) -> Any:
+        catalog = self
+
+        class _Cursor:
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+            def execute(self, statement: str) -> None:
+                assert "pg_trigger" in statement, statement
+
+            def fetchall(self) -> list[tuple[str, bool, str]]:
+                return [(catalog._prosrc, True, "ledger.chain_head_guard")]
+
+        return _Cursor()
+
+
+def test_the_body_split_takes_the_outermost_block_and_not_the_first_one() -> None:
+    """The split itself, over four sources, with no database in the way.
+
+    ``partition(" BEGIN ")`` answers the last two of these the same way it answers the
+    first two, which is the whole defect: it returns the INNER block as the body.
+    """
+    real = "DECLARE chain_is_empty boolean; BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END;"
+    assert _chain_head_guard_body(_OneRowCatalog(real)) == (
+        "DECLARE chain_is_empty boolean;",
+        "IF TG_OP = 'DELETE' THEN RAISE; END IF; END;",
+    )
+
+    no_declare = "BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END;"
+    assert _chain_head_guard_body(_OneRowCatalog(no_declare)) == (
+        "",
+        "IF TG_OP = 'DELETE' THEN RAISE; END IF; END;",
+    )
+
+    # The two nested shapes. The exemption is in the OUTER block, so it must come back as
+    # part of the body -- if it comes back as the declare section, or is dropped entirely,
+    # the property test above cannot see it.
+    nested_without_declare = (
+        "BEGIN IF exempt() THEN RETURN OLD; END IF; "
+        "DECLARE chain_is_empty boolean; BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END; END;"
+    )
+    declare, body = _chain_head_guard_body(_OneRowCatalog(nested_without_declare))
+    assert declare == ""
+    assert body.startswith("IF exempt() THEN RETURN OLD; END IF;"), body
+
+    nested_with_declare = (
+        "DECLARE chain_is_empty boolean; BEGIN IF exempt() THEN RETURN OLD; END IF; "
+        "BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END; END;"
+    )
+    declare, body = _chain_head_guard_body(_OneRowCatalog(nested_with_declare))
+    assert declare == "DECLARE chain_is_empty boolean;"
+    assert body.startswith("IF exempt() THEN RETURN OLD; END IF;"), body
+
+    # Neither shape: refused rather than guessed at.
+    with pytest.raises(AssertionError, match="opens with neither DECLARE nor BEGIN"):
+        _chain_head_guard_body(_OneRowCatalog("IF TG_OP = 'DELETE' THEN RAISE; END IF;"))
 
 
 # ---------------------------------------------------------------------------------------
