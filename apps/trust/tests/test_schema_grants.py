@@ -22,6 +22,7 @@ DDL then blocks until ``lock_timeout`` -- a hang, not an error. See
 
 from __future__ import annotations
 
+import configparser
 import os
 import re
 import subprocess
@@ -508,11 +509,47 @@ def test_exchange_cannot_take_the_ledgers_write_lock(ledger_clean, ledger_roles)
 
     ledger_roles.denied("exchange", "select pg_advisory_xact_lock(%s)", (CHAIN_LOCK_KEY,))
     ledger_roles.denied("exchange", "select pg_try_advisory_lock(%s)", (CHAIN_LOCK_KEY,))
-    # ...while the roles that actually append still can.
+
+    # ALL EIGHT bigint overloads, not the two above and not the four 0004 originally
+    # revoked. Postgres has ONE 8-byte advisory-lock space and every one of these functions
+    # takes a lock in it; `ShareLock` conflicts with `ExclusiveLock`, so the four `_shared`
+    # forms stall an append exactly as the exclusive forms do. They were EXECUTE-to-PUBLIC,
+    # and proven live: `exchange` took `pg_advisory_lock_shared(776167449)` -- a published
+    # constant -- and `app`'s next append BLOCKED. With no `lock_timeout` anywhere in the
+    # repo that block was unbounded, so one SELECT from the internet-facing read path halted
+    # every ledger append in the database, permanently. Enumerated rather than spot-checked,
+    # because a missing name is silent.
+    advisory_lock_functions = (
+        "pg_advisory_lock",
+        "pg_advisory_xact_lock",
+        "pg_try_advisory_lock",
+        "pg_try_advisory_xact_lock",
+        "pg_advisory_lock_shared",
+        "pg_advisory_xact_lock_shared",
+        "pg_try_advisory_lock_shared",
+        "pg_try_advisory_xact_lock_shared",
+    )
+    assert len(advisory_lock_functions) == 8
+    for function in advisory_lock_functions:
+        ledger_roles.denied("exchange", f"select {function}(%s)", (CHAIN_LOCK_KEY,))
+        assert ledger_roles.fetch(
+            "exchange",
+            "select has_function_privilege('exchange', %s, 'EXECUTE')",
+            (f"{function}(bigint)",),
+        ) == [(False,)], f"the exchange role may execute {function}(bigint)"
+
+    # ...while the roles that actually append still can. Only the transaction-scoped `try`
+    # form is exercised: a session-scoped lock taken here would outlive the rollback.
     for role in ("trust_rw", "app"):
         assert ledger_roles.fetch(role, "select pg_try_advisory_xact_lock(%s)", (CHAIN_LOCK_KEY,))[
             0
         ] == (True,)
+        for function in advisory_lock_functions:
+            assert ledger_roles.fetch(
+                role,
+                "select has_function_privilege(%s, %s, 'EXECUTE')",
+                (role, f"{function}(bigint)"),
+            ) == [(True,)], f"{role} lost EXECUTE on {function}(bigint) and cannot append"
 
 
 @pytest.mark.docker
@@ -1052,3 +1089,337 @@ def test_the_lint_fixture_lives_outside_every_real_root_package() -> None:
     assert LINT_FIXTURES.is_dir()
     assert (REPO_ROOT / ".pkgroot" / "trust").resolve() == (REPO_ROOT / "apps/trust/src").resolve()
     assert "src" not in LINT_FIXTURES.relative_to(REPO_ROOT).parts
+
+
+# =======================================================================================
+# Wave-1 verification findings 4, 6, 7 and 9 -- the suite's own blind spots, closed.
+# =======================================================================================
+
+#: The C3/S7 contract's forbidden list, pinned EXACTLY. `.importlinter` is a root-manifest
+#: file this ticket does not own, so the contract cannot be defended by editing it -- it is
+#: defended by asserting on its content from here. Pinning the exact list is what makes a
+#: deletion, an emptying, a reordering-to-nothing and a typo all fail loudly; the D35 proof
+#: below runs against a two-package toy fixture in which the word `exchange` never appears,
+#: and its positive control asserts only `returncode == 0` and `"0 broken" in stdout` -- both
+#: of which get EASIER to satisfy as contracts are removed. Deleting the real contract left
+#: that gate green.
+#:
+#: `trust.ledger.sealed` is KNOWN-VACUOUS TODAY: `apps/trust/src/ledger/` holds only
+#: __init__, canonical, chain, errors, migrations, replay and store. import-linter tolerates
+#: a forbidden module that does not exist yet, so the clause is protection that switches on
+#: when sealed-state trust work lands. It is pinned, deliberately NOT removed, and not
+#: required to be importable.
+EXPECTED_C3_FORBIDDEN_MODULES = (
+    "store_agent.modes",
+    "merchant_svc.envelope",
+    "merchant_svc.onboarding",
+    "trust.ledger.sealed",
+)
+
+#: The contract names `lint-imports` must report on the shipped configuration.
+EXPECTED_CONTRACT_NAMES = (
+    "C3/S7: exchange must never import sealed-state or envelope modules",
+    "D39: only proxyshop_support may construct a Redis client",
+)
+
+
+def _importlinter_config() -> configparser.ConfigParser:
+    parser = configparser.ConfigParser()
+    read = parser.read(REPO_ROOT / ".importlinter", encoding="utf-8")
+    assert read, f"{REPO_ROOT / '.importlinter'} is missing or unreadable"
+    return parser
+
+
+def test_the_c3_s7_import_contract_is_still_declared_and_still_names_every_module() -> None:
+    """Finding 4: deleting the release-blocking C3/S7 contract shipped 100% green.
+
+    Nothing in the suite read the *real* configuration. This does, and pins the three things
+    a silent removal would move: the root package, the contract's existence and source, and
+    the exact forbidden list.
+    """
+    parser = _importlinter_config()
+    roots = parser["importlinter"]["root_packages"].split()
+    assert "exchange" in roots, (
+        "`exchange` is no longer a root package, so every contract sourced from it is "
+        "vacuous and lint-imports still exits 0"
+    )
+    assert "trust" in roots
+
+    forbidden = {
+        section: parser[section]
+        for section in parser.sections()
+        if section.startswith("importlinter:contract:")
+        and parser[section].get("type", "").strip() == "forbidden"
+        and "exchange" in parser[section].get("source_modules", "").split()
+    }
+    assert forbidden, "no `forbidden` contract is sourced from `exchange` any more (C3/S7)"
+
+    matching = {
+        section: config
+        for section, config in forbidden.items()
+        if tuple(config["forbidden_modules"].split()) == EXPECTED_C3_FORBIDDEN_MODULES
+    }
+    assert len(matching) == 1, (
+        "the C3/S7 forbidden list is not what it was. Expected exactly\n  "
+        + "\n  ".join(EXPECTED_C3_FORBIDDEN_MODULES)
+        + "\nfound:\n  "
+        + "\n  ".join(
+            f"[{section}] {config.get('forbidden_modules', '').split()}"
+            for section, config in forbidden.items()
+        )
+    )
+    section = next(iter(matching))
+    assert parser[section]["name"].strip() == EXPECTED_CONTRACT_NAMES[0]
+
+
+def test_the_shipped_import_contracts_are_reported_as_kept_by_name() -> None:
+    """The positive control, strengthened so removal makes it HARDER to pass, not easier.
+
+    ``returncode == 0`` and ``"0 broken"`` are both satisfied by a configuration with no
+    contracts at all. Naming the contracts is what makes a deletion red.
+    """
+    result = _run_lint_imports(REPO_ROOT / ".importlinter", pythonpath=REPO_ROOT / ".pkgroot")
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    for name in EXPECTED_CONTRACT_NAMES:
+        assert f"{name} KEPT" in result.stdout, (
+            f"lint-imports did not report {name!r} as KEPT -- the contract is gone, renamed "
+            f"or no longer evaluated:\n{result.stdout}"
+        )
+    assert "Contracts: 2 kept, 0 broken." in result.stdout, result.stdout
+
+
+def test_the_ledger_package_has_no_sealed_module_yet_and_that_is_reported_not_hidden() -> None:
+    """The pinned `trust.ledger.sealed` clause is vacuous TODAY, on purpose.
+
+    import-linter tolerates a forbidden module that does not exist, so the clause costs
+    nothing and switches on the moment sealed-state trust work lands. Asserted here so the
+    vacuity is a recorded fact rather than a surprise -- and so that the day the module DOES
+    land, this test is the one that says the contract just became live.
+    """
+    from apps.trust.src import ledger
+
+    modules = sorted(
+        path.stem
+        for path in Path(ledger.__file__).parent.glob("*.py")
+        if not path.stem.startswith("__")
+    )
+    assert modules == ["canonical", "chain", "errors", "migrations", "replay", "store"]
+    assert "sealed" not in modules
+    assert "trust.ledger.sealed" in EXPECTED_C3_FORBIDDEN_MODULES, (
+        "the clause was removed rather than left dormant; it is protection that is supposed "
+        "to exist when the module lands"
+    )
+
+
+def test_every_migration_bounds_its_own_lock_and_statement_waits() -> None:
+    """Finding 6: no ``lock_timeout`` existed anywhere in the repo.
+
+    The runner holds every lock a file takes until end-of-file, so one blocked statement
+    stalls the whole migration -- and unbounded, "stalls" means forever. This project has
+    already lost 600 seconds to a lock-shaped stall.
+    """
+    files = migration_lib.migration_files()
+    assert files
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        assert re.search(r"set\s+local\s+lock_timeout\s*=", text, re.IGNORECASE), (
+            f"{path.name} sets no lock_timeout: a blocked statement waits forever"
+        )
+        assert re.search(r"set\s+local\s+statement_timeout\s*=", text, re.IGNORECASE), (
+            f"{path.name} sets no statement_timeout"
+        )
+
+
+def test_the_concurrent_role_creation_guard_catches_the_sqlstate_the_race_raises() -> None:
+    """Finding 9: the guard caught the wrong SQLSTATE.
+
+    ``duplicate_object`` (42710) comes from ``CREATE ROLE``'s own pre-insert catalog lookup
+    -- the sequential re-run case, where no guard is needed. In the genuinely concurrent case
+    the loser blocks on ``pg_authid_rolname_index`` and raises ``unique_violation`` (23505),
+    which was not caught. The guard missed the exact race it was written for.
+    """
+    creators = [
+        path
+        for path in migration_lib.migration_files()
+        if re.search(r"create\s+role", path.read_text(encoding="utf-8"), re.IGNORECASE)
+    ]
+    assert creators, "no migration creates the least-privilege roles"
+    for path in creators:
+        text = path.read_text(encoding="utf-8")
+        assert re.search(
+            r"exception\s+when\s+duplicate_object\s+or\s+unique_violation",
+            text,
+            re.IGNORECASE,
+        ), (
+            f"{path.name} does not catch unique_violation, so the CONCURRENT CREATE ROLE "
+            f"race -- the only one the guard exists for -- still fails the loser"
+        )
+
+
+@pytest.mark.docker
+def test_re_running_the_migrations_does_not_rebuild_the_two_check_constraints(
+    ledger_migrated: str, pg_admin
+) -> None:
+    """Finding 6: every run re-validated two constraints under ``ACCESS EXCLUSIVE``.
+
+    ``DROP CONSTRAINT IF EXISTS`` + ``ADD CONSTRAINT ... CHECK`` without ``NOT VALID`` is a
+    full sequential scan under ``ACCESS EXCLUSIVE``, held to end-of-file, on every single
+    run -- and ``app.bid_nonces`` grows with every signed bid the system ever receives. The
+    constraint's OID is the evidence: an unconditional drop-and-recreate assigns a new one,
+    a genuine no-op keeps it.
+    """
+    names = [
+        "seller_endpoints_retirement_matches_status",
+        "bid_nonces_retained_past_the_auction",
+    ]
+
+    def constraint_rows() -> list[tuple]:
+        with pg_admin.cursor() as cur:
+            cur.execute(
+                "select c.conname, c.oid, c.convalidated from pg_constraint c "
+                "  join pg_class t on t.oid = c.conrelid "
+                "  join pg_namespace n on n.oid = t.relnamespace "
+                " where n.nspname = 'app' and c.conname = any(%s) order by c.conname",
+                (names,),
+            )
+            return list(cur.fetchall())
+
+    before = constraint_rows()
+    assert [row[0] for row in before] == sorted(names), before
+    assert all(row[2] for row in before), "a constraint was left NOT VALID: it enforces nothing"
+
+    migration_lib.apply_migrations(pg_admin)
+    after = constraint_rows()
+    assert after == before, (
+        "re-running the migrations dropped and rebuilt a CHECK constraint (the OID moved). "
+        "That is a full table scan under ACCESS EXCLUSIVE on every run.\n"
+        f"  before: {before}\n  after:  {after}"
+    )
+
+
+@pytest.mark.docker
+def test_drift_detection_fails_loudly_rather_than_reporting_no_drift(
+    ledger_migrated: str, worker_index: int
+) -> None:
+    """Finding 7: ``strict=True`` failed OPEN.
+
+    ``except Exception: return []`` made "permission denied for ledger.schema_migrations", a
+    dropped connection and a renamed column indistinguishable from "the table does not exist
+    yet" -- so ``strict`` passed **vacuously** and applied an edited migration, which is the
+    exact opposite of what it was asked to do. ``[]`` here is read as permission to proceed,
+    so it must mean "I looked and found nothing", never "I could not look".
+    """
+    from proxyshop_support.postgres import role_dsn
+
+    dead = psycopg.connect(role_dsn("admin", worker_index), connect_timeout=5)
+    dead.close()
+    with pytest.raises(psycopg.Error):
+        migration_lib.drifted_migrations(dead)
+
+
+def test_drift_detection_still_treats_an_absent_bookkeeping_table_as_no_drift() -> None:
+    """The one error that genuinely does mean "nothing can have drifted here yet"."""
+
+    class _NoBookkeepingTable:
+        rolled_back = False
+
+        def cursor(self):
+            raise psycopg.errors.UndefinedTable(
+                'relation "ledger.schema_migrations" does not exist'
+            )
+
+        def rollback(self) -> None:
+            self.rolled_back = True
+
+    connection = _NoBookkeepingTable()
+    assert migration_lib.drifted_migrations(connection, files=[]) == []
+    assert connection.rolled_back, "the aborted transaction must be cleared"
+
+
+def test_drift_detection_propagates_a_privilege_denial_instead_of_swallowing_it() -> None:
+    """The precise shape the old ``except Exception`` hid: evidence the subject can deny."""
+
+    class _Denied:
+        def cursor(self):
+            raise psycopg.errors.InsufficientPrivilege(
+                "permission denied for table schema_migrations"
+            )
+
+        def rollback(self) -> None:  # pragma: no cover - must not be reached
+            raise AssertionError("a privilege denial must propagate, not be rolled back away")
+
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        migration_lib.drifted_migrations(_Denied(), files=[])
+
+
+@pytest.mark.docker
+def test_a_bare_database_locks_down_all_eight_advisory_lock_overloads(
+    ledger_second_database: str, worker_index: int
+) -> None:
+    """Finding 1, asserted where the migration's own text is the only thing that decides.
+
+    Function ACLs live in ``pg_proc.proacl``. They are per-database like every other grant,
+    but -- unlike table grants -- they are NOT cleared by ``DROP SCHEMA``, because
+    ``pg_advisory_lock`` lives in ``pg_catalog``. So on this worker's long-lived database a
+    REVOKE issued by an *earlier* run survives the deletion of the statement that issued it,
+    and the session tests above would stay green against a 0004 that had stopped revoking.
+    Measured: deleting the four ``*_shared`` REVOKE lines left every session-database
+    assertion passing.
+
+    A database created from bare ``template1`` has the stock ``EXECUTE`` to PUBLIC on all
+    eight overloads, so here the migration is the only thing that can take them away.
+    """
+    from proxyshop_support.postgres import role_dsn
+
+    overloads = [
+        f"{name}(bigint)"
+        for name in (
+            "pg_advisory_lock",
+            "pg_advisory_xact_lock",
+            "pg_try_advisory_lock",
+            "pg_try_advisory_xact_lock",
+            "pg_advisory_lock_shared",
+            "pg_advisory_xact_lock_shared",
+            "pg_try_advisory_lock_shared",
+            "pg_try_advisory_xact_lock_shared",
+        )
+    ]
+    dsn = role_dsn("admin", worker_index, database=ledger_second_database)
+    with psycopg.connect(dsn, autocommit=True, connect_timeout=5) as fresh:
+        with fresh.cursor() as cur:
+            cur.execute(
+                "select bool_and(has_function_privilege('exchange', f, 'EXECUTE')) "
+                "  from unnest(%s::text[]) as f",
+                (overloads,),
+            )
+            assert cur.fetchone() == (True,), (
+                "the premise of this test is wrong: a bare database is supposed to start "
+                "with EXECUTE to PUBLIC on the advisory-lock functions"
+            )
+
+        migration_lib.apply_migrations(fresh)
+
+        with fresh.cursor() as cur:
+            cur.execute(
+                "select f, has_function_privilege('exchange', f, 'EXECUTE') "
+                "  from unnest(%s::text[]) as f order by f",
+                (overloads,),
+            )
+            still_public = [name for name, allowed in cur.fetchall() if allowed]
+        assert still_public == [], (
+            f"the read-only auction role may still execute {still_public} in a freshly "
+            f"migrated database. Every one of these takes a lock in the SAME 8-byte space as "
+            f"CHAIN_LOCK_KEY, and ShareLock conflicts with ExclusiveLock -- so holding any "
+            f"one of them halts every append in the database."
+        )
+
+        with fresh.cursor() as cur:
+            for role in ("trust_rw", "app"):
+                cur.execute(
+                    "select f from unnest(%s::text[]) as f "
+                    " where not has_function_privilege(%s, f, 'EXECUTE')",
+                    (overloads, role),
+                )
+                assert cur.fetchall() == [], (
+                    f"{role} cannot take the chain lock and so cannot append"
+                )

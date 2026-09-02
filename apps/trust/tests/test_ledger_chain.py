@@ -429,13 +429,34 @@ def test_verify_chain_refuses_an_unsealed_stream_rather_than_passing_it() -> Non
         "head_hash": GENESIS_HASH,
         "verified": 0,
     }
+    # CONTRACT CHANGED -- justify-test-edit, wave-1 verification finding 8.
+    #
+    # This block asserted `ok: True, reason: None`, on the strength of an inline comment
+    # ("...but an empty stream is intact") written in this ticket's own test commit
+    # (edb1845). Nothing in SPEC.md or DESIGN.md ever said it; it was a self-asserted
+    # contract, and it is a fail-open. `read_events` returns `[]` for reasons that have
+    # nothing to do with integrity -- a bad `after_seq`, a missing SELECT grant, the wrong
+    # database, a store that has not loaded -- and every one of them then read as a healthy
+    # chain. Truncation-to-empty read as a healthy chain too. "Nothing to check" and "checked
+    # and intact" must not be the same answer, so an empty stream is now reported
+    # `ok: False, reason: "empty"` unless the caller explicitly says empty is expected
+    # (`allow_empty=True`, or `expected_length=0`). The two permitted forms are asserted
+    # immediately below, so this is a change of contract rather than a loss of coverage.
     assert verify_chain([]) == {
-        "ok": True,  # ...but an empty stream is intact
+        "ok": False,
+        "broken_at": 0,
+        "reason": "empty",
+        "head_hash": GENESIS_HASH,
+        "verified": 0,
+    }
+    assert verify_chain([], allow_empty=True) == {
+        "ok": True,
         "broken_at": None,
         "reason": None,
         "head_hash": GENESIS_HASH,
         "verified": 0,
     }
+    assert verify_chain([], expected_length=0)["ok"] is True
 
 
 def test_verify_chain_returns_the_same_keys_whatever_the_outcome() -> None:
@@ -1137,3 +1158,344 @@ def test_the_ledger_verifier_is_not_the_claim_verifier() -> None:
 
     assert ledger.verify_chain.__module__.endswith("ledger.chain")
     assert not hasattr(ledger, "verify")
+
+
+# =======================================================================================
+# Wave-1 verification findings 2, 3, 5 and 8 -- regression guards for defects that shipped
+# with a 110-green gate. Each one was re-verified by re-applying the exact sabotage.
+# =======================================================================================
+
+
+def _refused(runner, role: str, sql: str, params=None) -> Exception:
+    """Assert ``sql`` is refused for ``role`` **by a trigger**, and return the exception.
+
+    The sibling of ``ledger_roles.denied``, which asserts a *privilege* denial. Some of the
+    anchor's rules cannot be expressed as a grant -- ``trust_rw`` and ``app`` must keep
+    UPDATE on ``ledger.chain_head`` because the append trigger runs as them -- so those are
+    enforced by ``ledger.chain_head_guard()`` and arrive as an integrity violation instead.
+    Rolls the role connection back before returning (CF-4).
+    """
+    connection = runner.connection(role)
+    try:
+        with connection.cursor() as cur:
+            cur.execute(sql, params)
+    except psycopg.errors.IntegrityConstraintViolation as exc:
+        return exc
+    except psycopg.Error as exc:
+        raise AssertionError(
+            f"as {role!r}, {sql!r} failed with {type(exc).__name__} rather than an integrity "
+            f"violation from the anchor guard: {exc}"
+        ) from exc
+    else:
+        raise AssertionError(
+            f"as {role!r}, {sql!r} SUCCEEDED. The chain's anchor is the only mechanism that "
+            f"can detect tail truncation, and a role that can rewrite it has defeated the "
+            f"mechanism rather than tripped it."
+        )
+    finally:
+        connection.rollback()
+
+
+@pytest.mark.docker
+def test_the_anchor_is_not_rewritable_by_the_two_roles_that_append(
+    ledger_clean, ledger_roles
+) -> None:
+    """Finding 2, attacks (B) and the grant half of (C) and (D).
+
+    ``ledger.chain_head`` is the ONLY mechanism that can detect tail truncation, so the roles
+    it constrains must not be able to re-author it. All three were ALLOWED before this guard,
+    proven live:
+
+    * ``UPDATE chain_head SET length = 99`` -- a flawless ledger then permanently
+      self-reports ``{'ok': False, 'reason': 'truncated'}``. Unfalsifiable repudiation: the
+      ledger accuses itself and no one can clear it.
+    * ``DELETE FROM chain_head`` -- appends then kept succeeding with no anchor at all.
+    * re-INSERT a forged anchor -- a truncated chain then verified ``{'ok': True}``.
+
+    The append path itself keeps working; that is asserted at the end, because a grant model
+    that closes a hole by breaking the writer has not closed anything.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    forged_insert = (
+        "insert into ledger.chain_head (chain, head_hash, length, last_seq) "
+        "values ('commerce_events', repeat('a', 64), 3, 3)"
+    )
+    for role in ("trust_rw", "app"):
+        # (C) and (D): gone at the GRANT level. There is no legitimate INSERT or DELETE on
+        # this table for either role -- the seed row is the migration's, and the reset is an
+        # UPDATE issued by the AFTER TRUNCATE trigger.
+        ledger_roles.denied(role, "delete from ledger.chain_head")
+        ledger_roles.denied(role, forged_insert)
+        ledger_roles.denied(role, "truncate table ledger.chain_head")
+
+        # (B): UPDATE they must keep, because the append trigger runs as them -- so the
+        # bound is the trigger, not the grant.
+        assert "advances by exactly one" in str(
+            _refused(ledger_roles, role, "update ledger.chain_head set length = 99")
+        )
+        assert "monotonic" in str(
+            _refused(
+                ledger_roles,
+                role,
+                "update ledger.chain_head set length = length + 1, last_seq = 0",
+            )
+        )
+        assert "not the event_hash stored at seq" in str(
+            _refused(
+                ledger_roles,
+                role,
+                "update ledger.chain_head set head_hash = repeat('b', 64), "
+                "length = length + 1, last_seq = last_seq + 1",
+            )
+        )
+        assert "still holds rows" in str(
+            _refused(
+                ledger_roles,
+                role,
+                "update ledger.chain_head set head_hash = repeat('0', 64), length = 0, "
+                "last_seq = 0",
+            )
+        )
+        # ...and it can still read the anchor it is supposed to maintain.
+        assert ledger_roles.fetch(role, "select length from ledger.chain_head")[0] == (3,)
+
+    # The writer still writes. This is the assertion that keeps the fix honest.
+    appender = ledger_roles.connection("app")
+    appender.autocommit = True
+    try:
+        assert append_event(appender, observation_event(3)).inserted is True
+    finally:
+        appender.autocommit = False
+    assert chain_anchor_of(connection)["length"] == 4
+    assert verify_chain_in_db(connection)["ok"] is True
+
+
+def chain_anchor_of(connection):
+    """``chain_anchor`` under a name that cannot shadow another ticket's fixture."""
+    from apps.trust.src.ledger import chain_anchor
+
+    return chain_anchor(connection)
+
+
+@pytest.mark.docker
+def test_an_append_that_cannot_advance_the_anchor_is_refused_rather_than_silent(
+    ledger_clean,
+) -> None:
+    """Finding 2, attack (C), and the reporting half of it.
+
+    ``commerce_events_advance_anchor()`` never checked ``FOUND``: with the anchor row gone
+    its ``UPDATE ... WHERE chain = 'commerce_events'`` matched zero rows and returned NULL,
+    so appends kept committing UNANCHORED -- ``inserted = True``, no error, and the one
+    mechanism that can detect truncation quietly not running. ``verify_chain_in_db`` then
+    *raised* instead of returning its documented result, so a caller writing
+    ``verify_chain_in_db(conn)["ok"]`` got an exception on the one path that matters most.
+
+    Staged the way an owner-level attacker would: disable the guard, delete, re-enable.
+    Everything happens in a transaction that is always rolled back.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as probe:
+        try:
+            with probe.cursor() as cur:
+                cur.execute(
+                    "alter table ledger.chain_head disable trigger chain_head_guard_trigger"
+                )
+                cur.execute("delete from ledger.chain_head")
+                cur.execute("alter table ledger.chain_head enable trigger chain_head_guard_trigger")
+                cur.execute("select count(*) from ledger.chain_head")
+                assert cur.fetchone() == (0,)
+
+            with pytest.raises(psycopg.errors.IntegrityConstraintViolation) as unanchored:
+                append_event(probe, observation_event(3), join_open_transaction=True)
+            assert "could not advance the anchor" in str(unanchored.value)
+            assert len(read_events(probe)) == 3, "the unanchored append must not have landed"
+
+            # ...and the verifier REPORTS the missing anchor rather than raising on it.
+            missing = verify_chain_in_db(probe)
+            assert missing["ok"] is False
+            assert missing["reason"] == "anchor_missing"
+            assert missing["anchor"] is None and missing["anchor_ok"] is False
+            assert set(missing) >= {"ok", "broken_at", "reason", "head_hash", "verified"}
+
+            # (D) anchor laundering: re-INSERT an anchor recomputed over the survivors.
+            # Before the guard this returned {'ok': True, 'anchor_ok': True} over a chain
+            # whose tail had been cut off.
+            try:
+                with probe.transaction():
+                    with probe.cursor() as cur:
+                        cur.execute(
+                            "insert into ledger.chain_head "
+                            "  (chain, head_hash, length, last_seq) "
+                            "values ('commerce_events', %s, %s, 3)",
+                            (db_stream_hash(probe), len(read_events(probe))),
+                        )
+            except psycopg.errors.IntegrityConstraintViolation as exc:
+                assert "genesis seed row" in str(exc)
+            else:
+                raise AssertionError(
+                    "a laundered anchor was accepted: any prior truncation can now be made "
+                    "to verify clean"
+                )
+        finally:
+            probe.rollback()
+
+    assert verify_chain_in_db(connection)["ok"] is True, "the rollback restored the anchor"
+
+
+@pytest.mark.docker
+def test_a_length_only_divergence_is_caught_although_the_head_hash_still_matches(
+    ledger_clean,
+) -> None:
+    """Finding 5: the truncation detector's load-bearing half, isolated.
+
+    ``anchor_ok`` is ``recomputed == anchor.head_hash AND len(events) == anchor.length``, and
+    the single truncation test moves head and length TOGETHER, so it cannot tell the two
+    clauses apart -- deleting the length clause left the gate at 110 green. The head clause
+    is the redundant one: a chain whose links all verify necessarily folds to its own last
+    stored digest, so it passes on any prefix that was cut. Only the ROW COUNT catches a
+    divergence the links cannot see.
+
+    Here the head half is asserted to AGREE, so the length half is the only thing that can
+    fail. Re-apply the sabotage and this goes red on its own.
+    """
+    connection = ledger_clean
+    for index in range(6):
+        append_event(connection, observation_event(index))
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as probe:
+        try:
+            with probe.cursor() as cur:
+                cur.execute(
+                    "alter table ledger.chain_head disable trigger chain_head_guard_trigger"
+                )
+                cur.execute("update ledger.chain_head set length = length + 1")
+                cur.execute("alter table ledger.chain_head enable trigger chain_head_guard_trigger")
+
+            events = read_events(probe)
+            assert verify_chain(events)["ok"] is True, "every link still verifies"
+            result = verify_chain_in_db(probe)
+            assert result["recomputed"] == result["anchor"]["head_hash"], (
+                "the head half of anchor_ok AGREES here -- so only the length half can be "
+                "what fails, which is the whole point of this test"
+            )
+            assert result["anchor"]["length"] == len(events) + 1
+            assert result["ok"] is False
+            assert result["anchor_ok"] is False
+            assert result["reason"] == "truncated"
+        finally:
+            probe.rollback()
+
+    assert verify_chain_in_db(connection)["ok"] is True
+
+
+def test_verify_chain_detects_a_digest_that_differs_only_in_its_tail() -> None:
+    """Finding 3: a 32-bit hash comparison shipped 100% green.
+
+    Replacing ``compute_event_hash(prev, event) != str(stored_hash)`` with
+    ``[:8] != str(stored_hash)[:8]`` -- 256 bits of integrity cut to 32 -- left the gate at
+    110 passed. Every existing tamper test mutates event CONTENT, which changes the digest
+    from character 0, so nothing ever presented a hash differing only in its tail.
+
+    Under that sabotage the corrupted event's prefix matches, index 2 passes, ``prev``
+    becomes the corrupted digest, and the break surfaces at index 3 as ``broken_link`` -- so
+    both assertions below fail. That is what makes this a regression test rather than a
+    restatement.
+    """
+    sealed = chain_events(observation_event(i, dim=DIMS[i % len(DIMS)]) for i in range(5))
+    corrupted = copy.deepcopy(sealed)
+    genuine = str(corrupted[2]["event_hash"])
+    corrupted[2]["event_hash"] = genuine[:-1] + ("0" if genuine[-1] != "0" else "1")
+
+    assert corrupted[2]["event_hash"][:8] == genuine[:8], "the first 32 bits are IDENTICAL"
+    assert corrupted[2]["event_hash"] != genuine
+    result = verify_chain(corrupted)
+    assert result["ok"] is False
+    assert result["broken_at"] == 2
+    assert result["reason"] == "tampered"
+
+
+@pytest.mark.parametrize("position", [8, 16, 32, 48, 63])
+def test_verify_chain_compares_every_character_of_the_digest(position: int) -> None:
+    """The same defect at every prefix length a truncated comparison might have used."""
+    sealed = chain_events(observation_event(i) for i in range(4))
+    corrupted = copy.deepcopy(sealed)
+    genuine = str(corrupted[1]["event_hash"])
+    flipped = "0" if genuine[position] != "0" else "1"
+    corrupted[1]["event_hash"] = genuine[:position] + flipped + genuine[position + 1 :]
+    assert corrupted[1]["event_hash"] != genuine
+    result = verify_chain(corrupted)
+    assert (result["broken_at"], result["reason"]) == (1, "tampered")
+
+
+def test_verify_chain_needs_a_witness_from_outside_the_stream_to_see_truncation() -> None:
+    """Finding 8: what a bare hash chain cannot see, and the parameters that fix it.
+
+    Truncate-the-tail and rewrite-the-whole-stream both leave every link intact, so
+    ``verify_chain`` alone reports them ``ok``. That is inherent, not a bug -- but the frozen
+    acceptance contract imports ``verify_chain``, not ``verify_chain_in_db``, and in-memory
+    consumers have no ``ledger.chain_head`` to consult. ``expected_length`` /
+    ``expected_head`` are how they supply the witness.
+    """
+    sealed = chain_events(observation_event(i) for i in range(5))
+    committed_head = chain_head(sealed)
+
+    truncated = sealed[:3]
+    assert verify_chain(truncated)["ok"] is True, "the links cannot see it -- that is the point"
+    assert verify_chain(truncated, expected_length=5)["ok"] is False
+    assert verify_chain(truncated, expected_length=5)["reason"] == "truncated"
+    assert verify_chain(truncated, expected_head=committed_head)["reason"] == "head_mismatch"
+
+    rewritten = chain_events({**observation_event(i), "store_id": "s-impostor"} for i in range(5))
+    assert verify_chain(rewritten)["ok"] is True, "the forgery is internally self-consistent"
+    assert verify_chain(rewritten, expected_head=committed_head)["ok"] is False
+    assert verify_chain(rewritten, expected_length=5)["ok"] is True, (
+        "length alone cannot see a rewrite -- the head is the half that does"
+    )
+
+    assert verify_chain(sealed, expected_length=5, expected_head=committed_head)["ok"] is True
+
+
+def test_an_empty_stream_is_reported_rather_than_passed() -> None:
+    """Finding 8: "nothing to check" and "checked and intact" must not be one answer.
+
+    ``read_events`` returns ``[]`` for reasons that have nothing to do with integrity -- a
+    bad ``after_seq``, a missing SELECT grant, the wrong database, a store that has not
+    loaded -- and truncation-to-empty returns it too. Every one of those read as a healthy
+    chain.
+    """
+    assert verify_chain([])["ok"] is False
+    assert verify_chain([])["reason"] == "empty"
+    assert verify_chain([], allow_empty=True)["ok"] is True
+    assert verify_chain([], expected_length=0)["ok"] is True
+    # "empty" wins over "truncated" when there is nothing at all: it is the more
+    # specific fact, and it is the one a caller can act on.
+    assert verify_chain([], expected_length=3)["reason"] == "empty"
+
+
+def test_verify_chain_keeps_the_frozen_call_signature_it_is_imported_under() -> None:
+    """26 downstream tickets and the frozen acceptance suite call ``verify_chain(events)``.
+
+    The new arguments are keyword-only, so the one-positional call the frozen contract makes
+    (``.swarm-loop/acceptance/test_e6_trust.py``) cannot be broken by adding to them, and the
+    five-key result shape is unchanged on every outcome.
+    """
+    import inspect
+
+    parameters = list(inspect.signature(verify_chain).parameters.values())
+    assert parameters[0].name == "events"
+    assert parameters[0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters[1:]), (
+        "a new positional parameter would break every frozen one-positional call site"
+    )
+    five = {"ok", "broken_at", "reason", "head_hash", "verified"}
+    sealed = chain_events(observation_event(i) for i in range(3))
+    assert set(verify_chain(sealed)) == five
+    assert set(verify_chain([])) == five
+    assert set(verify_chain(sealed, expected_length=9)) == five
+    assert set(verify_chain(sealed, expected_head="f" * 64)) == five
