@@ -11,13 +11,22 @@ R3 / A5 / C11 / D45, ticket T-036.
         auction_id=auction["auction_id"],
         bid_ref=bid["bid_id"],
         store_id=bid["store_id"],
-        store_domain=bid["store_domain"],        # the REGISTERED domain — the trusted half
+        store_domain=bid["store_domain"],        # the bid's CLAIM about its own domain
+        registered_domains=sellers,              # the platform's lookup — the trusted half
         offer=bid["offer"],                      # carries checkout_url — the untrusted half
         mode=mode,
         code_creator=code_creator,               # used by the Shopify adapter only
         now=auction["now"],
     ))
     result.permalink_url, result.code, result.events
+
+``sellers`` there is a :class:`~apps.exchange.src.checkout.provider.RegisteredDomains` — the
+platform's own ``store_id -> registered domain`` lookup. **Pass it.** Without it the port
+falls back to ``bid["store_domain"]``, and a bid is a store's own reply: a store that writes
+``store_domain: "attacker.tld"`` next to ``checkout_url: "https://attacker.tld/…"`` has
+written both halves of the host comparison, so the check passes and the buyer is redirected
+off-domain with a real discount code. The exact-host comparison in :mod:`.domain` is only as
+trustworthy as the domain it is handed.
 
 What the layout buys, module by module:
 
@@ -42,9 +51,12 @@ from .codes import (
     CODE_BODY_LENGTH,
     CODE_PREFIX,
     MAX_CODE_TTL_SECONDS,
+    UnusableOffer,
+    assert_offer_is_mintable,
     build_cart_permalink,
     code_expiry,
     mint_code,
+    offer_quantity,
 )
 from .domain import OffDomainCheckout, assert_on_domain, is_on_domain
 from .lint import MINTING_CALLEES, MintingCallSite, code_minting_call_sites
@@ -55,7 +67,9 @@ from .provider import (
     CheckoutResult,
     MintedCheckout,
     PortMethodIsFinal,
+    RegisteredDomains,
     default_permalink,
+    registered_domain_for,
 )
 from .providers import (
     CheckoutCreatorError,
@@ -87,10 +101,13 @@ __all__ = [
     "MintedCheckout",
     "MintingCallSite",
     "OffDomainCheckout",
+    "RegisteredDomains",
     "PortMethodIsFinal",
     "ShopifyCheckoutProvider",
     "SimulatedRedirectProvider",
     "UnknownCheckoutMode",
+    "UnusableOffer",
+    "assert_offer_is_mintable",
     "assert_on_domain",
     "build_cart_permalink",
     "code_expiry",
@@ -98,7 +115,9 @@ __all__ = [
     "default_permalink",
     "is_on_domain",
     "mint_code",
+    "offer_quantity",
     "register_provider",
+    "registered_domain_for",
     "registered_modes",
     "resolve_provider",
 ]

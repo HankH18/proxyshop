@@ -38,6 +38,7 @@ from exchange.checkout import (
     ShopifyCheckoutProvider,
     SimulatedRedirectProvider,
     UnknownCheckoutMode,
+    UnusableOffer,
     code_expiry,
     code_minting_call_sites,
     is_on_domain,
@@ -437,3 +438,217 @@ def test_the_shopify_adapter_is_a_normal_provider_behind_the_same_port() -> None
     """T-052 replaces what is behind the injected client; nothing about the port moves."""
     assert isinstance(ShopifyCheckoutProvider(), CheckoutProvider)
     assert ShopifyCheckoutProvider.checkout is CheckoutProvider.checkout
+
+
+# =====================================================================================
+# The trusted half of the host comparison must not come from the untrusted half's author
+# =====================================================================================
+class SellerDomains:
+    """The platform's registered-domain lookup — ``app.sellers``, in process."""
+
+    def __init__(self, rows: dict[str, str]) -> None:
+        self.rows = dict(rows)
+
+    def domain_for(self, store_id: str) -> str | None:
+        return self.rows.get(store_id)
+
+
+SELLERS = SellerDomains({"store-a": SELLER_DOMAIN})
+
+
+def hostile_request(
+    *, domain: str, url: str, store_id: str = "store-a", sellers: Any = SELLERS, creator: Any = None
+) -> CheckoutRequest:
+    """A bid that writes BOTH halves of the comparison, as a store's own reply can."""
+    return CheckoutRequest(
+        auction_id="auction-1",
+        bid_ref="bid-a",
+        store_id=store_id,
+        store_domain=domain,
+        offer=offer(url),
+        mode="redirect",
+        code_creator=creator,
+        now=T_NOW,
+        registered_domains=sellers,
+    )
+
+
+@pytest.mark.parametrize("mode", list(CHECKOUT_MODES))
+def test_a_store_cannot_supply_the_domain_it_is_checked_against(mode: str) -> None:
+    """The exact-host check is only as good as the domain it is handed.
+
+    ``bid["store_domain"]`` is a field in the store's own reply. A store that writes
+    ``attacker.tld`` into it and ``https://attacker.tld/cart/...`` into ``checkout_url``
+    agrees with itself, so the comparison passes and the buyer is redirected off-domain with
+    a live discount code. Given the platform's lookup, the bid's claim is discarded.
+    """
+    creator = RecordingCodeCreator()
+    request_ = hostile_request(
+        domain="attacker.tld", url="https://attacker.tld/cart/1:1?discount=X", creator=creator
+    )
+    with pytest.raises(OffDomainCheckout):
+        resolve_provider(mode).checkout(request_)
+    assert creator.calls == [], "a code was minted for a domain the store named itself"
+
+
+def test_the_platform_domain_wins_over_the_bids_claim_in_both_directions() -> None:
+    """The positive control: the lookup is consulted, not merely used to refuse things."""
+    creator = RecordingCodeCreator()
+    result = resolve_provider("redirect").checkout(
+        hostile_request(
+            # The bid lies about its domain, but the URL is on the domain the PLATFORM holds.
+            domain="attacker.tld",
+            url=f"https://{SELLER_DOMAIN}/cart/1:1?discount=NET",
+            creator=creator,
+        )
+    )
+    assert urlsplit(result.permalink_url).hostname == SELLER_DOMAIN
+    assert result.code
+
+
+def test_an_unknown_seller_mints_nothing_rather_than_falling_back_to_the_bid() -> None:
+    creator = RecordingCodeCreator()
+    with pytest.raises(OffDomainCheckout):
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-ghost",
+                store_domain="ghost.tld",
+                offer=offer("https://ghost.tld/cart/1:1"),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+    assert creator.calls == []
+
+
+def test_a_registered_domain_lookup_that_raises_fails_closed() -> None:
+    """Otherwise a store gets its own claim honoured by making the lookup fail."""
+
+    class Down:
+        def domain_for(self, store_id: str) -> str:
+            raise RuntimeError("sellers table unreachable")
+
+    creator = RecordingCodeCreator()
+    with pytest.raises(OffDomainCheckout):
+        resolve_provider("shopify").checkout(
+            hostile_request(
+                domain="attacker.tld",
+                url="https://attacker.tld/cart/1:1",
+                sellers=Down(),
+                creator=creator,
+            )
+        )
+    assert creator.calls == []
+
+
+# =====================================================================================
+# "No checkout_url" is not "off-domain": R10's list-price fallback must stay buyable
+# =====================================================================================
+def test_a_list_price_fallback_offer_can_be_checked_out(monkeypatch: Any) -> None:
+    """The fallback offer the exchange builds for itself carries no checkout_url (R10).
+
+    Refusing it as if it were a spoof made every Tier-0 and every silent store rankable but
+    unbuyable — the entries T-030 manufactures could win an auction that then could not
+    complete. The offer is built here by ``collect_bids`` itself, not hand-rolled, so this
+    test breaks if that shape ever changes.
+    """
+    from exchange.auction import collect_bids  # noqa: PLC0415
+
+    entry = collect_bids(
+        [{"store_id": "store-a", "tier": 0, "product_ref": "product-1", "list_price": 160.0}],
+        [],
+        T_NOW,
+    )[0]
+    assert entry.fallback is True
+    assert "checkout_url" not in entry.offer, "the fixture must be a real fallback offer"
+
+    result = resolve_provider("redirect").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id=entry.store_id,
+            store_domain=SELLER_DOMAIN,
+            offer=entry.offer,
+            mode="redirect",
+            now=T_NOW,
+            registered_domains=SELLERS,
+        )
+    )
+    assert urlsplit(result.permalink_url).hostname == SELLER_DOMAIN
+    assert result.code.startswith(CODE_PREFIX)
+
+
+def test_an_absent_checkout_url_still_cannot_reach_a_seller_with_no_registered_domain() -> None:
+    """Relaxing "absent" must not relax "unknown seller" — the permalink check catches it."""
+    creator = RecordingCodeCreator()
+    with pytest.raises(OffDomainCheckout):
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain="",
+                offer={"product_ref": "product-1", "unit_price": 100.0, "total_price": 100.0},
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+            )
+        )
+    assert creator.calls == []
+
+
+# =====================================================================================
+# A malformed offer field must be refused BEFORE the merchant issues a real code
+# =====================================================================================
+@pytest.mark.parametrize(
+    "bad_field", [{"expires_at": "whenever"}, {"quantity": "lots"}, {"quantity": 0}]
+)
+def test_an_unusable_offer_field_is_refused_before_anything_is_minted(
+    bad_field: dict[str, Any],
+) -> None:
+    """The failure used to land *after* ``POST /codes`` had issued a live single-use code.
+
+    That leaves a real discount loose in the merchant's account with no ``code_created``
+    event recorded for it — a discount the exchange cannot see, cannot expire and never
+    agreed to. The port validates first, so nothing is minted at all.
+    """
+    creator = RecordingCodeCreator()
+    hostile_offer = offer()
+    hostile_offer.update(bad_field)
+
+    with pytest.raises(UnusableOffer):
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=hostile_offer,
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+            )
+        )
+    assert creator.calls == [], "the merchant minted a code the exchange then threw away"
+
+
+def test_the_positive_control_a_well_formed_quantity_and_expiry_still_complete() -> None:
+    good = offer()
+    good.update({"quantity": 3, "expires_at": T_FUTURE})
+    result = resolve_provider("redirect").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer=good,
+            mode="redirect",
+            now=T_NOW,
+        )
+    )
+    assert ":3?" in result.permalink_url
+    assert result.expires_at == code_expiry(T_NOW, good)

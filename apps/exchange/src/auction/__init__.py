@@ -18,7 +18,14 @@ handed an already-eligible roster and takes no eligibility argument (D54).
 from __future__ import annotations
 
 from .collect import FALLBACK_REASONS, BidEntry, collect_bids
-from .fanout import FanOut, ask_store, parallel_fan_out, sequential_fan_out
+from .fanout import (
+    DEFAULT_BID_WINDOW_SECONDS,
+    ArrivalClock,
+    FanOut,
+    ask_store,
+    parallel_fan_out,
+    sequential_fan_out,
+)
 from .ledger import (
     InMemoryLedgerSink,
     LedgerRecorder,
@@ -50,10 +57,12 @@ __all__ = [
     "AUCTION_TTL_SECONDS",
     "CLOSED",
     "CREATED",
+    "DEFAULT_BID_WINDOW_SECONDS",
     "EXPIRED",
     "FALLBACK_REASONS",
     "OPEN",
     "TRANSITIONS",
+    "ArrivalClock",
     "AuctionRecord",
     "AuctionStateMachine",
     "AuctionStore",

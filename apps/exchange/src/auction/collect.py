@@ -14,10 +14,17 @@ a response stamped after the deadline   a late bid is not a bid (R10)
 ======================================  ===========================================
 
 The late-bid rule is the one worth being blunt about: the deadline is enforced on the
-response's own ``received_at``, so a bid that arrives at any price after the deadline is
+response's ``received_at``, so a bid that arrives at any price after the deadline is
 discarded and its store falls back to its **list price**. An implementation that merely
 sorted by arrival, or that trusted the last response to win, would let a slow store bid
 1.00 after seeing everyone else and take every auction.
+
+That makes ``received_at`` a **privileged field**, and this module is pure: it cannot tell
+where the value came from. The stamp must therefore be applied by the exchange, upstream, in
+:func:`apps.exchange.src.auction.fanout._stamped`, which overwrites whatever the bidder
+sent. Nothing here re-checks that, so a caller assembling ``responses`` by hand is asserting
+the stamps are its own — hand this function a store's raw reply and the deadline becomes
+advisory.
 
 ``collect_bids`` is a pure function of three positional arguments and takes **no eligibility
 argument** — D54 is explicit that the R12 gate lives in the orchestration layer above,
@@ -90,14 +97,27 @@ def _list_price_bid(entry: Mapping[str, Any], auction_id: str | None) -> dict[st
 
 
 def _usable_response(response: Mapping[str, Any], deadline: float) -> bool:
-    """A response counts only if it arrived at or before the deadline and carries a bid."""
+    """A response counts only if it arrived at or before the deadline and carries a bid.
+
+    An arrival stamp that will not parse as a number is treated as *not on time*, never as
+    an exception. This function is fed store-shaped data, and ``float("whenever")`` raises
+    ``ValueError`` — which used to escape ``collect_bids``, ``solicit_bids`` and the route,
+    so one malformed reply took down an auction every other store was bidding in. Fail
+    closed instead: an answer the exchange cannot date is an answer it cannot certify
+    arrived in time, so the store falls back to its list price. (``nan`` already fails the
+    comparison; this makes the string and ``None``-ish cases agree with it.)
+    """
     bid = response.get("bid")
     if not isinstance(bid, Mapping):
         return False
     received_at = response.get("received_at")
     if received_at is None:
         return False
-    return float(received_at) <= float(deadline)
+    try:
+        arrived = float(received_at)
+    except (TypeError, ValueError):
+        return False
+    return arrived <= float(deadline)
 
 
 def collect_bids(

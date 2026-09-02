@@ -23,6 +23,15 @@ Comparing the *raw URL* — the mistake this module exists to prevent — sees
 The scheme is checked too. A ``javascript:`` or ``data:`` "checkout URL" has no host at all,
 so a host comparison alone would have to decide what ``None == "seller.example.com"`` means;
 here it is refused explicitly, with a reason, instead.
+
+**"Absent" and "off-domain" are different conditions, and this module only answers the
+second.** :func:`is_on_domain` is a question about a URL, so an empty URL is not on-domain —
+there is no host to be on the domain. That is *not* the same as "this offer must be refused":
+a list-price fallback offer (R10, built by ``collect_bids`` for every Tier-0 and silent
+store) carries no ``checkout_url`` at all, and treating its absence as a spoof refused every
+fallback bid the exchange had manufactured for itself. The caller decides — see
+``CheckoutProvider.checkout``, which validates the offer's URL only when the offer has one
+and validates the *provider's* permalink unconditionally.
 """
 
 from __future__ import annotations

@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from exchange.auction import (
+    ArrivalClock,
     AuctionStateMachine,
     IllegalAuctionTransition,
     InMemoryAuctionStore,
@@ -510,8 +511,13 @@ def test_a_store_whose_solicitation_raises_simply_does_not_bid() -> None:
         return response(store["store_id"], 80.0, T_NOW - 1.0)
 
     roster = [rostered("store-ok", 120.0), rostered("store-broken", 130.0)]
-    responses = parallel_fan_out(roster, solicitor, deadline=time.time() + 2.0)
-    entries = {e.store_id: e for e in collect_bids(roster, responses, T_NOW)}
+    # One deadline, used by both halves. This used to fan out against a wall-clock deadline
+    # and then collect against the logical `T_NOW`; the two only agreed because the
+    # solicitor's own `received_at` bridged them — which is precisely the forgery the
+    # exchange now overwrites. The assertion being made here is about the raising store.
+    deadline = time.time() + 2.0
+    responses = parallel_fan_out(roster, solicitor, deadline=deadline)
+    entries = {e.store_id: e for e in collect_bids(roster, responses, deadline)}
 
     assert entries["store-ok"].fallback is False
     assert entries["store-broken"].fallback is True
@@ -612,3 +618,197 @@ def test_an_unwired_exchange_denies_every_store_rather_than_admitting_every_stor
     assert body["entries"] == []
     assert [d["store_id"] for d in body["denied"]] == ["store-a"]
     assert "unavailable" in body["denied"][0]["reason"].lower()
+
+
+# =====================================================================================
+# The arrival stamp is the exchange's, never the bidder's (R10)
+#
+# `collect_bids` enforces the deadline on `received_at`. A store that can set that field is
+# a store that sets its own deadline, and `store_id` decides whose bid a reply even is —
+# so both are stamped by the exchange, over the top of whatever the payload carried.
+# =====================================================================================
+class Ticker:
+    """A monotonic source the test advances by hand. Nothing sleeps; nothing is patched."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+class StallingSolicitor:
+    """Answers after ``delays[store_id]`` seconds of the exchange's clock, and lies about it.
+
+    Every reply claims ``received_at = T_NOW - 1.0`` — "I answered a second before the
+    close" — whatever the truth was. That is the forgery.
+    """
+
+    def __init__(
+        self, prices: dict[str, float], tick: Ticker, delays: dict[str, float] | None = None
+    ) -> None:
+        self.prices = dict(prices)
+        self.tick = tick
+        self.delays = dict(delays or {})
+        self.asked: list[str] = []
+
+    def solicit(self, store: dict[str, Any]) -> dict[str, Any]:
+        store_id = store["store_id"]
+        self.asked.append(store_id)
+        self.tick.advance(self.delays.get(store_id, 0.0))
+        return response(store_id, self.prices[store_id], T_NOW - 1.0)
+
+    __call__ = solicit
+
+
+def test_the_exchange_overwrites_a_store_supplied_arrival_stamp() -> None:
+    """The store's claim is kept for audit and used for nothing."""
+
+    def solicitor(store: dict[str, Any]) -> dict[str, Any]:
+        return response(store["store_id"], 1.0, T_NOW - 1.0)  # "I was early", says the store
+
+    answered = sequential_fan_out(
+        [rostered("store-a", 120.0)], solicitor, clock=lambda: T_NOW + 7.0
+    )
+    assert answered[0]["received_at"] == T_NOW + 7.0, "the exchange's clock must win"
+    assert answered[0]["store_reported_received_at"] == T_NOW - 1.0
+
+
+def test_a_store_that_answered_late_cannot_forge_its_way_back_inside_the_window() -> None:
+    """The confirmed exploit: stall past the close, stamp yourself on time, win at 1.00.
+
+    Deterministic — the window is real seconds but the clock behind it is driven by the
+    test, so nothing here sleeps and nothing depends on machine speed.
+    """
+    tick = Ticker()
+    solicitor = StallingSolicitor(
+        {"store-honest": 90.0, "store-cheat": 1.0, "store-last": 95.0},
+        tick,
+        delays={"store-cheat": 5.0},  # five seconds inside a one-second window
+    )
+    roster = [
+        rostered("store-honest", 120.0),
+        rostered("store-cheat", 999.0),
+        rostered("store-last", 140.0),
+    ]
+
+    result = solicit_bids(
+        roster=roster,
+        solicitor=solicitor,
+        eligibility=StaticSellerEligibility(
+            dict.fromkeys((r["store_id"] for r in roster), ELIGIBLE)
+        ),
+        now=T_NOW,
+        clock=ArrivalClock(T_NOW, window=1.0, monotonic=tick),
+    )
+    by_store = {entry.store_id: entry for entry in result.entries}
+
+    # The forged stamp buys nothing: the cheat is late and falls back to its own list price.
+    assert by_store["store-cheat"].fallback is True
+    assert by_store["store-cheat"].fallback_reason == "response_after_deadline"
+    assert by_store["store-cheat"].unit_price == 999.0, "the 1.00 bid must not survive"
+
+    # And the window really closed: nobody after the straggler is asked at all.
+    assert solicitor.asked == ["store-honest", "store-cheat"]
+    assert by_store["store-last"].fallback is True
+    assert by_store["store-last"].fallback_reason == "no_response"
+
+    # The positive control: an on-time bidder is still a bidder, or this proves nothing.
+    assert by_store["store-honest"].fallback is False
+    assert by_store["store-honest"].unit_price == 90.0
+
+
+def test_the_default_solicitation_path_measures_real_elapsed_time() -> None:
+    """No clock injected: the exploit must fail against the wiring a deployment gets.
+
+    Wall-clock by nature (it is the only way to show the *default* clock is authoritative),
+    so the window is short and the stall only has to beat it.
+    """
+
+    class LateLiar:
+        def solicit(self, store: dict[str, Any]) -> dict[str, Any]:
+            if store["store_id"] == "store-cheat":
+                time.sleep(0.3)
+            return response(store["store_id"], 1.0, T_NOW - 1.0)
+
+        __call__ = solicit
+
+    result = solicit_bids(
+        roster=[rostered("store-cheat", 999.0)],
+        solicitor=LateLiar(),
+        eligibility=StaticSellerEligibility({"store-cheat": ELIGIBLE}),
+        now=T_NOW,
+        window=0.05,
+    )
+    assert result.entries[0].fallback is True
+    assert result.entries[0].unit_price == 999.0
+
+
+def test_a_store_cannot_answer_under_a_rivals_name() -> None:
+    """One reply, attributed to the store that was ASKED — not the store the reply names.
+
+    Without that, the first store on the roster posts a ruinous bid as its rival: the rival's
+    real bid is discarded as a duplicate, and the impersonator wins at its own list price an
+    auction it had comfortably lost.
+    """
+
+    class Impersonator:
+        def solicit(self, store: dict[str, Any]) -> dict[str, Any]:
+            if store["store_id"] == "store-cheat":
+                return response("store-rival", 500.0, T_NOW - 2.0)  # "signed", store-rival
+            return response(store["store_id"], 50.0, T_NOW - 1.0)
+
+        __call__ = solicit
+
+    roster = [rostered("store-cheat", 120.0), rostered("store-rival", 130.0)]
+    result = solicit_bids(
+        roster=roster,
+        solicitor=Impersonator(),
+        eligibility=StaticSellerEligibility({"store-cheat": ELIGIBLE, "store-rival": ELIGIBLE}),
+        now=T_NOW,
+    )
+    by_store = {entry.store_id: entry for entry in result.entries}
+
+    assert by_store["store-rival"].unit_price == 50.0, "the rival's real bid was displaced"
+    assert by_store["store-cheat"].unit_price == 500.0, "the forged bid is the cheat's own"
+    # The bid body is re-attributed too: everything downstream reads it to name the seller.
+    assert by_store["store-cheat"].bid["store_id"] == "store-cheat"
+
+
+def test_the_forged_identity_is_recorded_for_the_operator() -> None:
+    def solicitor(store: dict[str, Any]) -> dict[str, Any]:
+        return response("store-somebody-else", 1.0, T_NOW - 1.0)
+
+    answered = sequential_fan_out([rostered("store-a", 120.0)], solicitor, clock=lambda: T_NOW)
+    assert answered[0]["store_id"] == "store-a"
+    assert answered[0]["store_reported_store_id"] == "store-somebody-else"
+    assert answered[0]["bid"]["store_id"] == "store-a"
+
+
+def test_an_arrival_stamp_that_will_not_parse_is_late_rather_than_a_crash() -> None:
+    """One malformed reply used to take down the auction every other store was bidding in."""
+    roster = [rostered("store-junk", 150.0), rostered("store-ok", 120.0)]
+    junk = response("store-junk", 1.0, T_NOW - 1.0)
+    junk["received_at"] = "whenever"
+
+    by_store = {
+        entry.store_id: entry
+        for entry in collect_bids(roster, [junk, response("store-ok", 80.0, T_NOW)], T_NOW)
+    }
+    assert by_store["store-junk"].fallback is True
+    assert by_store["store-junk"].unit_price == 150.0
+    assert by_store["store-ok"].fallback is False, "the rest of the field still bid"
+
+
+def test_the_arrival_clock_reports_elapsed_time_in_the_deadlines_own_frame() -> None:
+    """What makes an authoritative stamp compatible with a frozen/logical deadline."""
+    tick = Ticker()
+    clock = ArrivalClock(T_NOW, window=2.0, monotonic=tick)
+    assert clock() == T_NOW - 2.0
+    tick.advance(1.5)
+    assert clock() == T_NOW - 0.5, "still inside the window"
+    tick.advance(1.0)
+    assert clock() == T_NOW + 0.5, "past it, and detectably so"

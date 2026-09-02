@@ -22,6 +22,13 @@ Fail closed means three things, and all three land in ``denied``: ``BLACKLISTED`
 even as a list-price fallback, because a fallback entry is still a bid a blacklisted store
 could win with.
 
+The gate decides *who* is asked; it also owns the clock the answers are judged by. The
+arrival stamp ``collect_bids`` enforces the deadline on is taken by the exchange, from the
+:class:`~apps.exchange.src.auction.fanout.ArrivalClock` this function builds — never from
+the bidder's payload. A store that could stamp its own reply would be choosing its own
+deadline, and would win every auction by answering after the window with a price picked
+once the field was visible.
+
 Tier-0 stores are never solicited: Tier-0 means catalog-only, with no bidding agent to
 answer. An **eligible** Tier-0 store is still represented, at list price, by
 ``collect_bids`` — that is R10 — it just is not asked a question nobody is home to hear.
@@ -34,7 +41,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..auction.collect import BidEntry, collect_bids
-from ..auction.fanout import FanOut, sequential_fan_out
+from ..auction.fanout import (
+    DEFAULT_BID_WINDOW_SECONDS,
+    ArrivalClock,
+    FanOut,
+    sequential_fan_out,
+)
 from ..eligibility import (
     ELIGIBLE,
     UNAVAILABLE,
@@ -92,6 +104,8 @@ def solicit_bids(
     eligibility: Any,
     now: float,
     fan_out: FanOut | None = None,
+    window: float = DEFAULT_BID_WINDOW_SECONDS,
+    clock: Any | None = None,
 ) -> SolicitationResult:
     """Run the R12 gate over ``roster``, then fan out to whoever survives it.
 
@@ -111,6 +125,18 @@ def solicit_bids(
             :func:`~apps.exchange.src.auction.fanout.parallel_fan_out` instead; the gate
             above is identical either way, which is why the strategy is a parameter rather
             than a branch.
+        window: how long the bidding window really lasts, in wall-clock seconds. ``now`` is
+            the *logical* instant the window ends; this is the *real* duration it lasts, and
+            the two together are what let the exchange stamp arrivals itself without
+            breaking a frozen clock. A caller that knows its own timeout (the route does —
+            it is ``bid_timeout_seconds``) should pass it; otherwise the platform default
+            applies.
+        clock: the authoritative arrival clock, injected into the fan-out. Defaults to an
+            :class:`~apps.exchange.src.auction.fanout.ArrivalClock` over ``now``/``window``.
+            **This is the exchange's clock, never a bidder's.** A solicited store's own
+            ``received_at`` is discarded by the fan-out precisely because the deadline is
+            enforced on that field: a store that set it would be choosing when its own
+            auction closed.
 
     Returns:
         :class:`SolicitationResult` — ``solicited`` (store ids actually asked, in roster
@@ -152,7 +178,8 @@ def solicit_bids(
     result.solicited = [str(store["store_id"]) for store in askable]
 
     strategy: FanOut = fan_out if fan_out is not None else sequential_fan_out
-    responses = strategy(askable, solicitor, deadline=now)
+    arrival = clock if clock is not None else ArrivalClock(now, window=window)
+    responses = strategy(askable, solicitor, deadline=now, clock=arrival)
 
     result.entries = collect_bids(eligible, responses, now)
     return result

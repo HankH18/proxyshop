@@ -167,7 +167,8 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     roster = [entry.model_dump() for entry in body.roster]
 
     opened_at = time.time()
-    deadline = opened_at + max(0.0, float(body.bid_timeout_seconds))
+    window = max(0.0, float(body.bid_timeout_seconds))
+    deadline = opened_at + window
 
     machine.create(
         auction_id,
@@ -184,6 +185,11 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         eligibility=_eligibility(request),
         now=deadline,
         fan_out=parallel_fan_out,
+        # The real duration of the window, so the exchange's arrival clock and this
+        # request's deadline are the same window measured two ways. Without it a store
+        # answering after `bid_timeout_seconds` would be stamped against the platform
+        # default instead of the timeout this auction actually granted.
+        window=window,
     )
 
     record = machine.close(auction_id, now=time.time())

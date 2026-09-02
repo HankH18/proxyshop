@@ -33,10 +33,18 @@ __all__ = [
     "CODE_PREFIX",
     "MAX_CODE_TTL_SECONDS",
     "RandomSource",
+    "UnusableOffer",
+    "assert_offer_is_mintable",
     "build_cart_permalink",
     "code_expiry",
     "mint_code",
+    "offer_quantity",
 ]
+
+
+class UnusableOffer(ValueError):
+    """An offer field a code cannot be built from — caught *before* anything is minted."""
+
 
 #: Crockford base32: no I, L, O or U — no transcription ambiguity, and no accidental words.
 CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -68,12 +76,57 @@ def code_expiry(now: float, offer: Mapping[str, Any] | None = None) -> float:
     """D22: the code dies at ``min(now + 48h, offer.expires_at)``.
 
     A code outliving the offer it discounts is a discount the seller never agreed to.
+
+    Raises:
+        UnusableOffer: ``expires_at`` is present but not a number. The offer is a bidder's
+            own JSON, so this is reachable input, and it must be refused **before** minting
+            — see :func:`assert_offer_is_mintable`, which the port runs ahead of every
+            provider for exactly this reason.
     """
     ceiling = float(now) + MAX_CODE_TTL_SECONDS
     expires_at = (offer or {}).get("expires_at")
     if expires_at is None:
         return ceiling
-    return min(ceiling, float(expires_at))
+    try:
+        return min(ceiling, float(expires_at))
+    except (TypeError, ValueError) as exc:
+        raise UnusableOffer(
+            f"offer expires_at {expires_at!r} is not a float epoch, so the code's D22 "
+            f"expiry cannot be computed"
+        ) from exc
+
+
+def offer_quantity(offer: Mapping[str, Any] | None = None) -> int:
+    """The permalink's quantity: a positive integer, or 1 when the offer does not say.
+
+    Raises:
+        UnusableOffer: ``quantity`` is present but is not a positive whole number.
+    """
+    quantity = (offer or {}).get("quantity")
+    if quantity is None or quantity == "":
+        return 1
+    try:
+        value = int(quantity)
+    except (TypeError, ValueError) as exc:
+        raise UnusableOffer(f"offer quantity {quantity!r} is not a whole number") from exc
+    if value < 1:
+        raise UnusableOffer(f"offer quantity {quantity!r} is not a positive quantity")
+    return value
+
+
+def assert_offer_is_mintable(offer: Mapping[str, Any] | None) -> None:
+    """Refuse an offer whose code-shaping fields will not parse, before a code exists.
+
+    The order this runs in is the whole point. ``code_expiry`` and the permalink builder are
+    both reached *after* the provider has minted — after the merchant's ``POST /codes`` has
+    already issued a real single-use discount, in the Shopify adapter's case. A malformed
+    ``expires_at`` therefore used to raise with a live code loose in the merchant's account
+    and no ``code_created`` event recorded for it: the exchange had handed out a discount it
+    had no record of and no way to expire. Validating here makes that unreachable — the
+    request is refused with nothing minted anywhere.
+    """
+    code_expiry(0.0, offer)
+    offer_quantity(offer)
 
 
 def build_cart_permalink(

@@ -35,11 +35,11 @@ from __future__ import annotations
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from ..auction.ledger import build_event
-from .codes import build_cart_permalink, code_expiry
-from .domain import assert_on_domain
+from .codes import assert_offer_is_mintable, build_cart_permalink, code_expiry, offer_quantity
+from .domain import OffDomainCheckout, assert_on_domain
 
 __all__ = [
     "CHECKOUT_EVENT_KINDS",
@@ -48,8 +48,21 @@ __all__ = [
     "CheckoutResult",
     "MintedCheckout",
     "PortMethodIsFinal",
+    "RegisteredDomains",
     "default_permalink",
+    "registered_domain_for",
 ]
+
+
+class RegisteredDomains(Protocol):
+    """The platform's own answer to "what domain is this seller registered at?".
+
+    Implementations read ``app.sellers`` (or whatever holds the registration) and return
+    ``None`` for a store they do not know. A callable taking ``store_id`` works too.
+    """
+
+    def domain_for(self, store_id: str) -> str | None: ...
+
 
 #: C11: the ordered `LedgerEvent` kinds every checkout emits, whichever provider ran.
 CHECKOUT_EVENT_KINDS: tuple[str, str, str] = ("accepted", "code_created", "checkout_redirect")
@@ -63,9 +76,19 @@ class PortMethodIsFinal(TypeError):
 class CheckoutRequest:
     """Everything a provider is allowed to see about a won offer.
 
-    ``store_domain`` is the seller's **registered** domain — the one the platform holds in
-    ``app.sellers``, reached on a bid as ``bid["store_domain"]``. It is the trusted half of
-    the comparison; ``offer["checkout_url"]`` is the untrusted half.
+    ``store_domain`` is *supposed* to be the seller's **registered** domain — the one the
+    platform holds in ``app.sellers``. On a bid it is read as ``bid["store_domain"]``, and
+    that is where the sharp edge is: **a bid is a store's own reply**, so a store that writes
+    ``store_domain: "attacker.tld"`` beside ``checkout_url: "https://attacker.tld/…"``
+    supplies both halves of the comparison and the host check admits its own domain. The
+    check then rejects only a store that contradicts *itself*, which no attacker does.
+
+    :attr:`registered_domains` is the fix and the reason this field exists: give the request
+    the platform's own lookup and the port compares against **that**, ignoring whatever the
+    bid claimed. Leave it unset and the legacy behaviour stands — the bid's word is taken —
+    which is what the frozen contract (``bid['store_domain']``) currently pins, so wiring the
+    source is a one-line change at the call site that builds this request rather than a
+    change to any provider.
     """
 
     auction_id: str
@@ -79,6 +102,10 @@ class CheckoutRequest:
     #: further provider adds no parameter to ``accept()``.
     code_creator: Any | None = None
     now: float = 0.0
+    #: The platform's registered-domain lookup (:class:`RegisteredDomains`), when the caller
+    #: has one. Present, it overrides :attr:`store_domain` entirely and a store it has never
+    #: heard of mints nothing — fail closed. Absent, :attr:`store_domain` is used as-is.
+    registered_domains: Any | None = None
 
     @property
     def checkout_url(self) -> str:
@@ -141,17 +168,38 @@ class CheckoutProvider:
         so a refused offer has no code created for it anywhere — not by this provider, not
         by an injected merchant client, not by Shopify.
         """
-        # 1. Untrusted input, checked against the registered domain, before anything else.
-        assert_on_domain(request.checkout_url, request.store_domain, what="offer checkout_url")
+        # 1. Resolve the trusted half FIRST. If the caller wired a registered-domain
+        #    source, the bid's claim about its own domain is discarded here.
+        registered = registered_domain_for(request)
 
-        # 2. The provider's only job.
+        # 2. Untrusted input, checked against the registered domain, before anything else.
+        #
+        #    Only when there IS one. "No checkout_url" and "a checkout_url pointing at
+        #    attacker.tld" are not the same condition and must not get the same answer:
+        #    `collect_bids` manufactures a list-price fallback offer for every Tier-0 and
+        #    silent store (R10), and that offer carries no checkout_url by construction —
+        #    it is catalog data, not a store's reply. Refusing an absent URL therefore
+        #    refused every fallback bid the exchange had just built for itself, so a Tier-0
+        #    store could be ranked and shortlisted but never bought from.
+        #
+        #    Nothing is relaxed by allowing it: with no URL there is no untrusted host in
+        #    play at all, the provider builds the permalink from `registered` below, and
+        #    step 5 validates that. A seller with no registered domain still cannot get a
+        #    code — the permalink it would be built from has no host to match.
+        if request.checkout_url:
+            assert_on_domain(request.checkout_url, registered, what="offer checkout_url")
+
+        # 3. The rest of the offer must be usable too, and this has to happen before the
+        #    mint: the Shopify adapter's mint issues a real merchant discount, and a field
+        #    that only blows up afterwards leaves that code live and unrecorded.
+        assert_offer_is_mintable(request.offer)
+
+        # 4. The provider's only job.
         minted = self.mint(request)
 
-        # 3. The provider's OWN output is untrusted too: a buggy or hostile adapter that
+        # 5. The provider's OWN output is untrusted too: a buggy or hostile adapter that
         #    returns a permalink on another host must not be able to hand the buyer over.
-        assert_on_domain(
-            minted.permalink_url, request.store_domain, what=f"{self.name} permalink_url"
-        )
+        assert_on_domain(minted.permalink_url, registered, what=f"{self.name} permalink_url")
 
         checkout_token = secrets.token_hex(16)
         return CheckoutResult(
@@ -214,12 +262,69 @@ class CheckoutProvider:
         ]
 
 
+def _usable(domain: Any, request: CheckoutRequest) -> str:
+    """A registered domain a permalink can actually be built on, or an explicit refusal."""
+    if not domain or not str(domain).strip():
+        raise OffDomainCheckout(
+            f"no registered domain is on file for {request.store_id!r}, so there is no host "
+            f"a checkout for it could be on (C10/D22)"
+        )
+    return str(domain)
+
+
+def registered_domain_for(request: CheckoutRequest) -> str:
+    """The domain the port compares against: the platform's, when the caller wired one.
+
+    With no :attr:`CheckoutRequest.registered_domains` source this returns
+    ``request.store_domain`` — the legacy behaviour the frozen contract pins, in which the
+    bid supplies the domain it is checked against.
+
+    With a source, the source wins outright and there is no falling back to the bid's claim:
+    a lookup that raises, or that does not know the store, refuses the checkout. That is the
+    only order that is safe — falling back on a lookup failure would mean a store could get
+    its own claim honoured by making the lookup fail.
+
+    Either way the result is a **usable** domain or an exception. It is called before
+    ``mint``, so "there is no domain here" is settled while refusing still costs nothing;
+    discovering it afterwards, when the permalink is checked, would mean the merchant had
+    already issued a real code for a seller the platform cannot place.
+    """
+    source = request.registered_domains
+    if source is None:
+        return _usable(request.store_domain, request)
+
+    lookup = getattr(source, "domain_for", None)
+    if not callable(lookup):
+        if not callable(source):
+            raise TypeError(
+                f"registered_domains {source!r} exposes neither domain_for(store_id) "
+                f"nor __call__(store_id)"
+            )
+        lookup = source
+
+    try:
+        domain = lookup(request.store_id)
+    except Exception as exc:
+        raise OffDomainCheckout(
+            f"registered domain lookup for {request.store_id!r} failed "
+            f"({type(exc).__name__}: {exc}); refusing to check out against the bid's own "
+            f"claim {request.store_domain!r}"
+        ) from exc
+
+    if not domain or not str(domain).strip():
+        raise OffDomainCheckout(
+            f"the platform holds no registered domain for {request.store_id!r}; the bid's "
+            f"claim {request.store_domain!r} is not evidence of one"
+        )
+    return _usable(domain, request)
+
+
 def default_permalink(request: CheckoutRequest, code: str) -> str:
     """The D22 cart permalink on the seller's registered domain, for providers that build one."""
     offer = request.offer
     return build_cart_permalink(
-        shop_domain=request.store_domain,
+        shop_domain=registered_domain_for(request),
         code=code,
         variant_id=offer.get("variant_ref") or offer.get("variant_id") or 1,
-        quantity=int(offer.get("quantity") or 1),
+        quantity=offer_quantity(offer),
     )
