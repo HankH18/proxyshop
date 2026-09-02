@@ -3836,3 +3836,53 @@ def test_no_shipped_module_promises_degraded_is_queryable_without_naming_the_ref
             f"refusal that state produces when nothing embedded, or it is describing a "
             f"reachable state it says cannot happen"
         )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_empty_index_refusal_still_names_a_remediation_when_the_marker_lists_no_rows(
+    graph_schema_session: Any,
+) -> None:
+    """T-129 close-out (ingest LOW, fourth of its kind): the ``or "none recorded"`` fallback.
+
+    ``EmbeddingIndexEmpty`` builds its list as ``", ".join(run.skipped[:10]) or "none
+    recorded"``. Every test that reached this refusal got there through ``reembed_products``,
+    which always records a non-empty skip list when it embedded nothing — so the ``or`` arm
+    had never executed, exactly like the ``and N more`` arm beside it, and deleting it changed
+    nothing any test could see.
+
+    It is reachable all the same, and by the one marker most likely to be in a real graph
+    during an upgrade: ``embedding_run`` reads ``r.skipped`` as ``row["skipped"] or ()``
+    precisely because a marker written before ``skipped`` existed carries none. Such a marker
+    with ``products > 0`` and ``embedded == 0`` lands here with an empty list, and without the
+    fallback the operator reads "the rows it could not embed: ." — an empty sentence where the
+    remediation should be, in the message whose whole job is to say what to do next.
+    """
+    from ingest.graph import EMBEDDING_RUN_DEGRADED, EmbeddingIndexEmpty, record_embedding_run
+
+    session = graph_schema_session
+    record_embedding_run(
+        session,
+        provider="hash",
+        dimension=EMBEDDING_DIM,
+        state=EMBEDDING_RUN_DEGRADED,
+        products=3,
+        embedded=0,
+        skipped=(),
+    )
+
+    with pytest.raises(EmbeddingIndexEmpty) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    message = str(refused.value)
+
+    assert "none recorded" in message, (
+        f"the marker names no rows, so the message has to say so rather than leave the gap "
+        f"blank: {message}"
+    )
+    assert "could not embed: ." not in message, (
+        f"the un-fallen-back form, which reads as a truncated sentence: {message}"
+    )
+    assert "products_missing_embeddings" in message, (
+        f"and the pointer to the live list is what makes this refusal actionable when the "
+        f"marker itself lists nothing: {message}"
+    )
