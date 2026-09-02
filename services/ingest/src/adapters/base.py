@@ -30,11 +30,11 @@ Nothing in this module interpolates fetched text into a query, a prompt or a URL
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from ..graph.model import Offer, PolicyPage, Product, Source, Store, Variant
+from ..graph.model import PolicyPage, Source
 from .budgets import BudgetUsage, CrawlBudget
 from .netguard import FetchPolicy
 
@@ -269,8 +269,3 @@ def apply_upserts(session: Any, ops: Iterable[UpsertOp]) -> list[str]:
         else:
             raise ValueError(f"unknown UpsertOp kind: {op.kind!r}")
     return written
-
-
-# Re-exported so callers building snapshots by hand (fixtures, the MCP adapter) do not have
-# to reach past this module into `ingest.graph.model` for the node payloads.
-_GRAPH_NODES: Sequence[type] = (Store, Product, Variant, Offer, PolicyPage, Source)

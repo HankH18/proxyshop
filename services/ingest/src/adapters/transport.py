@@ -64,7 +64,6 @@ __all__ = [
 
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _CHUNK = 64 * 1024
-_MAX_HEADER_BYTES = 64 * 1024
 
 
 class TransportError(RuntimeError):
