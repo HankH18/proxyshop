@@ -259,6 +259,93 @@ def test_an_offer_discount_deeper_than_the_grant_that_backs_it_is_refused(
         enforce_hook_provenance(bid, hooks, product_ref="prod-cap")
 
 
+def test_a_claim_under_a_key_the_protocol_never_defined_is_still_checked(
+    hooks: ToolHooks,
+) -> None:
+    """`Bid` forbids extra fields; a bid built as a *dict* does not, and that is the next level.
+
+    The whole ticket is one lesson about what a boundary may assume about the shape it is
+    handed. Having taught it to walk `offer.commitments`, the obvious next payload goes under a
+    key the walker has never heard of — nested as deeply as it takes.
+    """
+    from store_agent.hooks import enforce_bid_provenance
+
+    grant = hooks.authorize_discount("prod-cap", 15.0)
+    assert not isinstance(grant, Denied)
+    smuggled = {
+        "key": "free_returns",
+        "value": "90 days",
+        "provenance": {
+            "source": "owner_statement",
+            "ref": "envelope:store-alpha:v3#free_returns",
+            "observed_at": "2026-01-01T00:00:00Z",
+            "authority_rank": 1,
+        },
+    }
+    skeleton: dict[str, Any] = {
+        "offer": {"product_ref": "prod-cap", "discount": None},
+        "claims": [grant],
+    }
+
+    with pytest.raises(HookProvenanceError):
+        enforce_bid_provenance({**skeleton, "extra_claims": [smuggled]}, hooks)
+
+    grant_b = hooks.authorize_discount("prod-cap", 15.0)
+    assert not isinstance(grant_b, Denied)
+    with pytest.raises(HookProvenanceError):
+        enforce_bid_provenance(
+            {
+                "offer": {"product_ref": "prod-cap", "discount": None},
+                "claims": [grant_b],
+                "notes": {"deep": {"deeper": [smuggled]}},
+            },
+            hooks,
+        )
+
+
+def test_the_sweep_ignores_material_that_is_not_claim_shaped(hooks: ToolHooks) -> None:
+    """The other half: looking under every key must not mean refusing every key.
+
+    A bid carrying free text and an unrelated metadata blob is an ordinary bid. A boundary that
+    refused it would be swapped out for one that did not, and the swap would take the walls with
+    it.
+    """
+    from store_agent.hooks import enforce_bid_provenance
+
+    grant = hooks.authorize_discount("prod-cap", 15.0)
+    assert not isinstance(grant, Denied)
+    assert enforce_bid_provenance(
+        {
+            "auction_id": "a1",
+            "store_id": "store-alpha",
+            "offer": {"product_ref": "prod-cap", "discount": None},
+            "claims": [grant],
+            "message": "we can ship this today",
+            "metadata": {"trace": {"span": [1, 2, {"note": "nothing claim-shaped here"}]}},
+            "agent_version": "v",
+            "schema_version": "1.0.0",
+        },
+        hooks,
+    ) == [grant]
+
+
+def test_a_self_referential_bid_terminates_instead_of_hanging(hooks: ToolHooks) -> None:
+    """Looking under unknown keys means a cycle is reachable. A boundary that hangs is a boundary
+    that gets bypassed."""
+    from store_agent.hooks import enforce_bid_provenance
+
+    grant = hooks.authorize_discount("prod-cap", 15.0)
+    assert not isinstance(grant, Denied)
+    cyclic: dict[str, Any] = {
+        "offer": {"product_ref": "prod-cap", "discount": None},
+        "claims": [grant],
+    }
+    cyclic["itself"] = cyclic
+
+    with pytest.raises(HookProvenanceError):
+        enforce_bid_provenance(cyclic, hooks)
+
+
 def test_the_bid_boundary_reads_the_product_off_the_bid_it_is_given(hooks: ToolHooks) -> None:
     """`enforce_bid_provenance` exists so "which product is this bid about" is not a caller's job.
 

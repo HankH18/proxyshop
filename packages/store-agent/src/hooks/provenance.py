@@ -410,9 +410,31 @@ def _is_sequence(node: Any) -> bool:
     return isinstance(node, Iterable)
 
 
-def _walk(node: Any, path: str, claims: list[Any], discounts: list[tuple[str, Any]]) -> None:
-    """Collect every claim and every discount reachable in `node`, depth first."""
-    if node is None:
+#: How deep the sweep of unrecognized keys goes before giving up. A bid is a shallow JSON
+#: document; anything deeper than this is not a bid, and a bound keeps a self-referential dict
+#: from turning the boundary into a hang.
+MAX_SWEEP_DEPTH = 12
+
+
+def _walk(
+    node: Any,
+    path: str,
+    claims: list[Any],
+    discounts: list[tuple[str, Any]],
+    *,
+    strict: bool = True,
+    depth: int = 0,
+) -> None:
+    """Collect every claim and every discount reachable in `node`, depth first.
+
+    `strict` says what to do with something that is neither a claim, a container nor a
+    collection. Where the contract says claims live — the argument itself, `claims`,
+    `commitments` — an unrecognized object is collected anyway, so `_refusal` refuses it and
+    says why; dropping it silently is the difference between a guard and a filter. In the sweep
+    of keys the contract does *not* define, the same object is ignored, because a bid carrying an
+    unrelated `metadata` blob must not be refused for carrying it.
+    """
+    if node is None or depth > MAX_SWEEP_DEPTH:
         return
     if _is_claim_shaped(node):
         # A claim is a leaf. Its `value` is arbitrary data covered by the fingerprint, so a
@@ -425,25 +447,46 @@ def _walk(node: Any, path: str, claims: list[Any], discounts: list[tuple[str, An
     if fields:
         for field in CLAIM_BEARING_FIELDS:
             if field in fields:
-                _walk(_read(node, field), f"{path}.{field}", claims, discounts)
+                _walk(_read(node, field), f"{path}.{field}", claims, discounts, depth=depth + 1)
         for field in NESTED_OBJECT_FIELDS:
             if field in fields:
-                _walk(_read(node, field), f"{path}.{field}", claims, discounts)
+                _walk(_read(node, field), f"{path}.{field}", claims, discounts, depth=depth + 1)
         if DISCOUNT_FIELD in fields:
             discount = _read(node, DISCOUNT_FIELD)
             if discount is not None:
                 discounts.append((f"{path}.{DISCOUNT_FIELD}", discount))
+        _sweep(node, path, claims, discounts, depth)
         return
 
     if _is_sequence(node):
         for index, item in enumerate(node):
-            _walk(item, f"{path}[{index}]", claims, discounts)
+            _walk(item, f"{path}[{index}]", claims, discounts, strict=strict, depth=depth + 1)
         return
 
-    # Not claim-shaped, not a container, not a collection: a claim candidate that `_refusal`
-    # will refuse with a message about what is wrong with it. Failing closed here rather than
-    # dropping it silently is the whole difference between a guard and a filter.
-    claims.append(node)
+    if strict:
+        claims.append(node)
+    elif isinstance(node, Mapping):
+        _sweep(node, path, claims, discounts, depth)
+
+
+def _sweep(
+    node: Any, path: str, claims: list[Any], discounts: list[tuple[str, Any]], depth: int
+) -> None:
+    """Look for claims under keys the protocol does not define, and refuse to assume there are none.
+
+    `Bid` and `Offer` forbid extra fields, so a bid built as a model cannot carry a claim
+    anywhere but the four places above. A bid built as a *dict* can, and the whole of this
+    ticket is one lesson about what a boundary may assume about the shape it is handed: an
+    unrecognized key is exactly where the next payload goes. Claim-shaped material found here is
+    checked like any other; everything else is left alone, because refusing a bid for carrying a
+    `metadata` blob would be a boundary that fails on honest traffic.
+    """
+    if not isinstance(node, Mapping):
+        return
+    known = {*CLAIM_BEARING_FIELDS, *NESTED_OBJECT_FIELDS, DISCOUNT_FIELD}
+    for name, value in node.items():
+        if str(name) not in known:
+            _walk(value, f"{path}.{name}", claims, discounts, strict=False, depth=depth + 1)
 
 
 def collect_claim_material(presented: Any) -> tuple[list[Any], list[tuple[str, Any]]]:
