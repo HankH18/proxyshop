@@ -42,11 +42,20 @@
 -- postgres:16-alpine). The initdb hook runs .sql files through psql, and `psql -f` is the
 -- documented by-hand path, so both callers have it.
 --
--- WIRING NOTE, for whoever owns the stack: docker-compose.yml's postgres `environment:`
--- block does not forward PROXYSHOP_ROLE_PASSWORD into the container, so `make deps-up`
--- gets the 'x' default no matter what the host environment says. Forwarding it there is
--- what lets a non-default password reach a real fresh volume; that file is frozen and
--- outside T-110's scope, which is why this note exists instead of the edit.
+-- WIRING (T-112, and the note this replaces). This file runs INSIDE the postgres container,
+-- so it can only read what the container has. T-110 left docker-compose.yml forwarding
+-- nothing, which meant `make deps-up` got the 'x' default no matter what the host
+-- environment said -- T-110's own defect, one layer down, on the only volume the project
+-- actually creates. docker-compose.yml's postgres service now forwards
+-- PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}", with a deliberately EMPTY
+-- compose-side default so the coalesce below stays the single home of the literal. The
+-- CONNECT side reads the same variable in proxyshop_support/postgres.py (role_dsn), so a
+-- seeded cluster is also a reachable one; proxyshop_support/tests/test_role_password_
+-- end_to_end.py proves both halves against a real fresh volume.
+--
+-- The hook runs ONCE, when the pgdata volume is created: setting the variable after that
+-- changes nothing on an existing volume, by design (these roles are cluster-global and
+-- shared by every live worker).
 
 -- `\set` first so an ABSENT variable is empty rather than undefined: `\getenv` leaves its
 -- target untouched when the environment variable does not exist, and an undefined psql
