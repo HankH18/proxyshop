@@ -3334,3 +3334,555 @@ def test_the_degraded_state_is_checked_against_the_graph_not_merely_claimed(
     )
     with pytest.raises(EmbeddingRunIncomplete):
         candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_read_back_refusal_does_not_send_the_operator_into_the_removed_loop(
+    graph_schema_session: Any, graph_source: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-129 (ingest 2): T-118(c) fixed the message on one ``running`` branch, not both.
+
+    ``reembed_products`` records ``running`` twice. The opening stamp, before the first
+    batch, is the interrupted-pass case T-118(c) rewrote the remediation for: "re-run the
+    pass, it always records an end state". The *closing* stamp records ``running`` too,
+    when the read-back finds a product the pass skipped still carrying a vector — and there
+    the same message is false twice over. The pass reached its end, so "it started writing
+    and never reached its end" is wrong; and re-running it skips the same product for the
+    same reason, fails the same read-back and records ``running`` again, so "that
+    remediation terminates" is wrong. The no-op loop T-118(c) removed from one branch was
+    still being handed to the operator on the other.
+
+    The loop is demonstrated here rather than argued: one full extra pass, followed
+    literally, leaves the refusal exactly where it was.
+    """
+    from ingest.graph import EMBEDDING_RUN_RUNNING, EmbeddingRunIncomplete, embedding_run
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-keeps", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-sticky", "About To Lose Its Name"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).complete
+
+    session.run("MATCH (p:Product {product_id: 'p-sticky'}) SET p.canonical_name = ''").consume()
+    # The removal stops taking. Not hypothetical: it is the single point of failure the
+    # whole `degraded` narrowing rests on, which is why the read-back exists at all.
+    monkeypatch.setattr(
+        "ingest.graph.reembed.clear_product_embedding",
+        lambda session, *, product_id: False,
+    )
+    assert reembed_products(session, _SecondProvider()).skipped == ["p-sticky"]
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_RUNNING
+    assert run.skipped == ("p-sticky",), "the closing `running` stamp carries the skip list"
+
+    with pytest.raises(EmbeddingRunIncomplete) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+    message = str(refused.value)
+
+    # Follow the old remediation literally: same provider, one whole pass, no catalog edit.
+    # It is a fixed point — which is exactly what T-118(c) claimed it had removed.
+    assert reembed_products(session, _SecondProvider()).skipped == ["p-sticky"]
+    assert embedding_run(session).state == EMBEDDING_RUN_RUNNING, (
+        "re-running the pass cannot clear this refusal, so the message must not name it"
+    )
+    with pytest.raises(EmbeddingRunIncomplete):
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+
+    assert "remediation terminates" not in message, (
+        "this branch's re-run is a fixed point; promising it terminates is the loop "
+        f"T-118(c) reported closed: {message}"
+    )
+    assert "p-sticky" in message, (
+        "and the operator gets the finite list of vectors to remove — the marker already "
+        f"carries it, so withholding it is a choice: {message}"
+    )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_remediation_command_exits_zero_on_the_state_the_refusal_sends_it_to(
+    graph_schema_session: Any, graph_source: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-129 (ingest 3): the message promised an end state the CLI reported as a failure.
+
+    ``EmbeddingRunIncomplete`` names ``python -m ingest.graph.reembed --provider X`` and
+    tells the operator the pass "always records an end state — ``complete`` ... or
+    ``degraded`` ... and both are queryable". Following it on the catalog that message is
+    written for — one product with no embeddable text — reached ``degraded``, the catalog
+    became queryable, and the command exited **1**. An operator, or a CI step, reading a
+    non-zero status as "it failed, run it again" is back in the fixed point T-118(c)
+    removed from the prose, re-entered through the exit code.
+
+    ``degraded`` is a success of the pass: one vector space, an end state recorded, and the
+    rows it could not embed named. What remains is a catalog edit. So the status is now read
+    back out of the marker — the same node every vector query consults — and the one state
+    that really is a failure keeps its non-zero.
+    """
+    from ingest.graph import EMBEDDING_RUN_DEGRADED, EmbeddingRunIncomplete, embedding_run
+    from ingest.graph.reembed import main as reembed_main
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-cli-named", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-cli-hollow", ""), source=graph_source)
+
+    status = reembed_main(["--provider", "hash"])
+
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED
+    assert run.skipped == ("p-cli-hollow",)
+    assert [
+        c.product_id
+        for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    ] == ["p-cli-named"], "the remediation really did leave the catalog queryable"
+    assert status == 0, (
+        "the pass reached the terminal state its own refusal message promises and the "
+        f"catalog is queryable; exiting {status} tells the operator to run it again"
+    )
+
+    # And the message and the command now agree, which is the whole point of the finding.
+    session.run("MATCH (r:EmbeddingRun) SET r.state = 'running', r.skipped = []").consume()
+    with pytest.raises(EmbeddingRunIncomplete) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    assert "exits 0" in str(refused.value), (
+        "the remediation has to say what a successful run looks like, or a non-zero status "
+        f"is read as 'run it again': {refused.value}"
+    )
+
+    # The one outcome that IS a failure keeps its non-zero: the read-back caught a skipped
+    # product still carrying a vector, so the index is not single-space and queries refuse.
+    monkeypatch.setattr(
+        "ingest.graph.reembed.clear_product_embedding",
+        lambda session, *, product_id: False,
+    )
+    session.run(
+        "MATCH (p:Product {product_id: 'p-cli-hollow'}) SET p.embedding = $v",
+        v=hash_embed("stale", dim=EMBEDDING_DIM),
+    ).consume()
+    assert reembed_main(["--provider", "hash"]) == 1, (
+        "a pass whose read-back failed leaves the index unqueryable; that is a real failure"
+    )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_catalog_with_nothing_embeddable_says_so_instead_of_answering_nothing(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """T-129 (ingest 4): the whole-catalog end of the T-116 narrowing, decided and pinned.
+
+    T-116 made one unembeddable product degrade itself rather than the catalog, and it was
+    right to. But the narrowing has no floor: when EVERY product is unembeddable the marker
+    is still ``degraded``, ``_check_vector_path`` still passes, and ``queryNodes`` over an
+    index holding zero vectors hands the caller ``[]``. That is the same value a healthy
+    index returns for "your query matched nothing" — the one reading that is certainly
+    wrong — and before T-116 this state raised and named its cause.
+
+    The decision, taken deliberately: ``[]`` is refused here, because at
+    ``embedded == 0`` the degradation has stopped being per-product. There is no vector path
+    left to degrade, so there is nothing the caller can be told by an empty result.
+    ``products > 0`` keeps this off a genuinely empty catalog, and the test below proves the
+    floor is exactly one product: T-116 is not walked back an inch.
+    """
+    from ingest.graph import (
+        EMBEDDING_RUN_COMPLETE,
+        EMBEDDING_RUN_DEGRADED,
+        EmbeddingIndexEmpty,
+        embedding_run,
+    )
+
+    session = graph_schema_session
+
+    # 1. A genuinely empty catalog: `[]` is the whole truth, and must stay unrefused.
+    assert reembed_products(session, HashEmbedding()).complete
+    assert embedding_run(session).state == EMBEDDING_RUN_COMPLETE
+    assert candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5) == []
+
+    # 2. Every product unembeddable. The marker knows exactly why; the caller did not.
+    upsert_product(session, Product("p-void-a", ""), source=graph_source)
+    upsert_product(session, Product("p-void-b", ""), source=graph_source)
+    report = reembed_products(session, HashEmbedding())
+    assert report.products == 2 and report.embedded == 0
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED
+    assert products_missing_embeddings(session) == ["p-void-a", "p-void-b"]
+
+    with pytest.raises(EmbeddingIndexEmpty) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=10)
+    message = str(refused.value)
+    assert "p-void-a" in message and "p-void-b" in message, (
+        f"the marker carries the finite list of rows to fix, so the refusal must too: {message}"
+    )
+
+    # 3. The structured path never consults the index, so it is untouched — a caller with a
+    #    real predicate still gets its answer out of a catalog with no vectors at all.
+    assert [c.product_id for c in candidate_products(session, brand="", limit=10, status=None)] == [
+        "p-void-a",
+        "p-void-b",
+    ]
+
+    # 4. THE FLOOR. One embeddable product reopens the vector path for the whole catalog —
+    #    the other row is still unembeddable and still degrades only itself (T-116).
+    upsert_product(session, Product("p-void-a", "Gentle Vitamin C Serum"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).skipped == ["p-void-b"]
+    assert embedding_run(session).state == EMBEDDING_RUN_DEGRADED
+    assert [
+        c.product_id
+        for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    ] == ["p-void-a"], "one embeddable product must be enough; T-116 is not walked back"
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_read_back_checks_every_id_it_claims_to_not_just_the_first(
+    graph_schema_session: Any, graph_source: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-129 (ingest 1): the backstop is graded — this widens the grade to the whole list.
+
+    Deleting ``unresolved = _still_embedded(session, report.skipped)`` outright already
+    turns ``test_the_degraded_state_is_checked_against_the_graph_not_merely_claimed`` red,
+    so the claim that the backstop is ungraded does not survive contact with the tree (the
+    RED is quoted in this commit's message). What that test cannot see is a backstop that
+    *runs* but checks less than it claims: it skips exactly one product, so reading back
+    only the first id is indistinguishable from reading back all of them.
+
+    Here two products are skipped and only the SECOND keeps its vector, which no partial
+    read-back can find. ``degraded`` asserts "every product this pass skipped now has no
+    vector"; a check over a prefix of that list is a claim about a prefix, and the marker
+    does not make a claim about a prefix.
+    """
+    from ingest.graph import EMBEDDING_RUN_RUNNING, EmbeddingRunIncomplete, embedding_run
+    from ingest.graph.upsert import clear_product_embedding as _real_clear
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-keeper", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-aa-clears", "Loses Its Name Cleanly"), source=graph_source)
+    upsert_product(session, Product("p-zz-sticks", "Loses Its Name Messily"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).complete
+
+    session.run(
+        "MATCH (p:Product) WHERE p.product_id IN ['p-aa-clears', 'p-zz-sticks'] "
+        "SET p.canonical_name = ''"
+    ).consume()
+
+    def _clears_all_but_the_last(session: Any, *, product_id: str) -> bool:
+        """Remove every vector except the last skipped product's."""
+        if product_id == "p-zz-sticks":
+            return False
+        return _real_clear(session, product_id=product_id)
+
+    monkeypatch.setattr("ingest.graph.reembed.clear_product_embedding", _clears_all_but_the_last)
+
+    report = reembed_products(session, _SecondProvider())
+    assert report.skipped == ["p-aa-clears", "p-zz-sticks"], "sorted: the stale one is second"
+    assert products_missing_embeddings(session) == ["p-aa-clears"], (
+        "only the first skip really lost its vector; the second is stale in a foreign space"
+    )
+
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_RUNNING, (
+        "a read-back that stops before the end of the skip list certifies a lie about the "
+        f"rest of it; got {run.state!r}"
+    )
+    with pytest.raises(EmbeddingRunIncomplete):
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_an_all_unembeddable_catalog_gets_one_answer_from_the_cli_and_the_query(
+    graph_schema_session: Any,
+    graph_source: Source,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T-129 close-out (ingest HIGH 1 + HIGH 2): the two commits disagreed, and the prose lied.
+
+    ``2778e0e`` made ``degraded`` **not** queryable when ``embedded == 0`` —
+    ``candidate_products`` raises ``EmbeddingIndexEmpty`` for every vector query. ``22aeb21``
+    wrote operator-facing text promising the opposite, in three places at once:
+
+    * ``main()`` exited **0** on an all-unembeddable catalog and printed "The index is
+      single-space and queryable without them; fixing them is a catalog edit, not another
+      re-embed" — about an index that answers nothing at all;
+    * the interrupted-pass refusal promised ``degraded`` "and both are queryable — the
+      command exits 0 for either, so a non-zero status ... never means 'run it again'";
+    * the stale-vector refusal promised "the next pass then records ``degraded`` and the
+      index is queryable".
+
+    All three are read by an operator who is *already* being told a vector query refused, so
+    each one sends them to a state they will be refused in again, by a different exception,
+    with no warning that it is coming. This drives the real entry point against the real
+    database and requires the CLI's words, the CLI's exit status, and the exception a query
+    on that identical graph raises to be the same story.
+    """
+    from ingest.graph import (
+        EMBEDDING_RUN_DEGRADED,
+        EMBEDDING_RUN_RUNNING,
+        EmbeddingIndexEmpty,
+        EmbeddingRunIncomplete,
+        embedding_run,
+        record_embedding_run,
+    )
+    from ingest.graph.reembed import main as reembed_main
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-mute-a", ""), source=graph_source)
+    upsert_product(session, Product("p-mute-b", ""), source=graph_source)
+
+    status = reembed_main(["--provider", "hash"])
+    printed = capsys.readouterr()
+
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED
+    assert (run.products, run.embedded) == (2, 0), "the state this whole test is about"
+
+    # 1. What a vector query on this identical graph actually does. Everything below is
+    #    graded against THIS, not against a description of it.
+    with pytest.raises(EmbeddingIndexEmpty) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+
+    # 2. The CLI must not promise the opposite. "queryable" is the word the removed advisory
+    #    turned on, and there is no true sentence containing it for this catalog.
+    assert "queryable" not in printed.err, (
+        "the pass left an index nothing can query; telling the operator it is queryable is "
+        f"the contradiction this test exists for: {printed.err}"
+    )
+    assert "EmbeddingIndexEmpty" in printed.err, (
+        "and it has to name what a query will actually raise, or the operator learns it "
+        f"from the traceback instead: {printed.err}"
+    )
+    assert "state=degraded" in printed.out, "the marker is still reported, unchanged"
+
+    # 3. And the exit status carries the same fact, because a CI step reads only that.
+    assert status != 0, (
+        "rc 0 is documented as 'a terminal state the vector path really can be queried "
+        f"under'; every vector query here refuses, so {status} may not be 0"
+    )
+    assert status == 3, f"the all-unembeddable outcome has its own status; got {status}"
+
+    # 4. The interrupted-pass refusal — the message the operator reads BEFORE running the
+    #    command above — must not promise a queryable end state unconditionally.
+    record_embedding_run(
+        session, provider="hash", dimension=EMBEDDING_DIM, state=EMBEDDING_RUN_RUNNING
+    )
+    with pytest.raises(EmbeddingRunIncomplete) as interrupted:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    message = str(interrupted.value)
+    assert "and both are queryable" not in message, (
+        "on this very catalog the promised `degraded` is NOT queryable; the objective "
+        f"clause 'the message promises it cannot happen', re-entered verbatim: {message}"
+    )
+    assert "EmbeddingIndexEmpty" in message and "at least one product embedded" in message, (
+        f"the promise has to carry its own exception: {message}"
+    )
+
+    # 5. Same for the stale-vector branch, which lands the operator on `degraded` too.
+    record_embedding_run(
+        session,
+        provider="hash",
+        dimension=EMBEDDING_DIM,
+        state=EMBEDDING_RUN_RUNNING,
+        products=2,
+        embedded=1,
+        skipped=["p-mute-a"],
+    )
+    with pytest.raises(EmbeddingRunIncomplete) as stale:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    stale_message = str(stale.value)
+    assert "and the index is queryable." not in stale_message, (
+        f"the same unconditional promise, one branch over: {stale_message}"
+    )
+    assert "EmbeddingIndexEmpty" in stale_message, (
+        f"so this branch's `degraded` carries the caveat too: {stale_message}"
+    )
+
+    # 6. The floor is still exactly one product: T-116 is not walked back by any of this.
+    upsert_product(session, Product("p-mute-a", "Gentle Vitamin C Serum"), source=graph_source)
+    assert reembed_main(["--provider", "hash"]) == 0, (
+        "one embeddable product makes `degraded` queryable again, and rc 0 says so"
+    )
+    assert [
+        c.product_id
+        for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    ] == ["p-mute-a"]
+    assert "p-void" not in str(refused.value), "sanity: the refusal named this test's rows"
+    assert "p-mute-a" in str(refused.value) and "p-mute-b" in str(refused.value)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_an_empty_index_does_not_mask_a_provider_mismatch(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """T-129 close-out (ingest LOW): the two refusals are independent, and order misdirected.
+
+    ``EmbeddingIndexEmpty`` was checked before ``EmbeddingProviderMismatch``. A catalog whose
+    every row is unembeddable satisfies both when the reader is on a different provider than
+    the marker records — and the empty-index message won. It says "give them embeddable text
+    ... and re-run ``--provider <the recorded one>``", which is a complete and correct
+    remediation *for the catalog* and says nothing at all about the read path being in
+    another vector space. Follow it and you get a fully-populated index and the silently
+    re-ranked shortlist ``EmbeddingProviderMismatch`` exists to refuse.
+
+    Whose space the index holds is answerable whether or not anything is in it, so it is
+    answered first.
+    """
+    from ingest.graph import (
+        EMBEDDING_RUN_DEGRADED,
+        EmbeddingIndexEmpty,
+        EmbeddingProviderMismatch,
+        embedding_run,
+    )
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-blank-only", ""), source=graph_source)
+    report = reembed_products(session, HashEmbedding())
+    assert (report.products, report.embedded) == (1, 0)
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED and run.provider == "hash"
+
+    with pytest.raises(EmbeddingProviderMismatch) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=5)
+    message = str(refused.value)
+    assert "'hash'" in message and "'second'" in message, (
+        f"the mismatch has to name both spaces, which the empty-index message cannot: {message}"
+    )
+
+    # The empty-index refusal is not weakened — it is simply second. On the matching
+    # provider it is still exactly what comes back.
+    with pytest.raises(EmbeddingIndexEmpty):
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_empty_index_refusal_truncates_a_long_skip_list_and_says_how_many_it_dropped(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """T-129 close-out (ingest LOW): the ``and N more`` branch, graded rather than assumed.
+
+    ``EmbeddingIndexEmpty`` names ``run.skipped[:10]`` and appends ``", and N more"`` past
+    ten. Every test that reached this refusal used two rows, so the truncation had never once
+    executed: deleting both lines, or the ``[:10]``, or the arithmetic, changed nothing any
+    test could see. A truncation nothing exercises is a promise about the operator's message
+    that the suite does not hold anybody to.
+
+    Twelve unembeddable rows: ten are named, two are not, and the message says how many it
+    withheld — so an operator can tell a prefix from the whole set.
+    """
+    from ingest.graph import EmbeddingIndexEmpty, embedding_run
+
+    session = graph_schema_session
+    ids = [f"p-many-{n:02d}" for n in range(1, 13)]
+    for product_id in ids:
+        upsert_product(session, Product(product_id, ""), source=graph_source)
+    report = reembed_products(session, HashEmbedding())
+    assert (report.products, report.embedded) == (12, 0)
+    run = embedding_run(session)
+    assert run is not None and list(run.skipped) == ids, "sorted, so the prefix is knowable"
+
+    with pytest.raises(EmbeddingIndexEmpty) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    message = str(refused.value)
+
+    for named in ids[:10]:
+        assert named in message, f"the first ten are named: {message}"
+    for withheld in ids[10:]:
+        assert withheld not in message, (
+            f"past ten the message stops naming rows, or a 5000-row catalog makes a refusal "
+            f"nobody reads: {message}"
+        )
+    assert "and 2 more" in message, (
+        f"and it says how many it withheld, so the ten read as a prefix: {message}"
+    )
+    assert "products_missing_embeddings" in message, (
+        f"with a pointer to the unbounded list: {message}"
+    )
+
+
+def test_no_shipped_module_promises_degraded_is_queryable_without_naming_the_refusal() -> None:
+    """T-129 close-out (ingest LOW): the prose claim, held to the code that contradicts it.
+
+    ``EMBEDDING_RUN_DEGRADED``'s own docstring said the index is "single-space and honest"
+    and the skipped products "simply absent from it" — written when ``degraded`` really was
+    always queryable, and left in place by the commit that made it conditional. The same
+    sentence had been copied into ``main()``'s advisory and into both
+    ``EmbeddingRunIncomplete`` messages.
+
+    A docstring cannot be graded by behaviour, so it is graded here: the two clauses that
+    were false are forbidden by their exact text, and every module that names the state has
+    to also name the exception that fires when the state is *not* queryable. Restoring any of
+    the three original sentences, or dropping the caveat from the schema constant, turns this
+    red without any Neo4j at all.
+    """
+    forbidden = {
+        "and both are queryable": (
+            "`degraded` is queryable only when the pass embedded at least one product"
+        ),
+        "The index is single-space and queryable": (
+            "single-space is not the same claim as queryable; at embedded == 0 the index is "
+            "single-space and holds nothing"
+        ),
+    }
+    for path in SCANNED_SOURCES:
+        text = path.read_text(encoding="utf-8")
+        for clause, why in forbidden.items():
+            assert clause not in text, f"{path.name} claims {clause!r}, but {why}"
+
+    for module in ("reembed.py", "query.py", "schema.py"):
+        text = (GRAPH_SRC / module).read_text(encoding="utf-8")
+        assert "EMBEDDING_RUN_DEGRADED" in text, "each of these describes the state"
+        assert "EmbeddingIndexEmpty" in text, (
+            f"{module} tells the operator what `degraded` means; it must also name the "
+            f"refusal that state produces when nothing embedded, or it is describing a "
+            f"reachable state it says cannot happen"
+        )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_empty_index_refusal_still_names_a_remediation_when_the_marker_lists_no_rows(
+    graph_schema_session: Any,
+) -> None:
+    """T-129 close-out (ingest LOW, fourth of its kind): the ``or "none recorded"`` fallback.
+
+    ``EmbeddingIndexEmpty`` builds its list as ``", ".join(run.skipped[:10]) or "none
+    recorded"``. Every test that reached this refusal got there through ``reembed_products``,
+    which always records a non-empty skip list when it embedded nothing — so the ``or`` arm
+    had never executed, exactly like the ``and N more`` arm beside it, and deleting it changed
+    nothing any test could see.
+
+    It is reachable all the same, and by the one marker most likely to be in a real graph
+    during an upgrade: ``embedding_run`` reads ``r.skipped`` as ``row["skipped"] or ()``
+    precisely because a marker written before ``skipped`` existed carries none. Such a marker
+    with ``products > 0`` and ``embedded == 0`` lands here with an empty list, and without the
+    fallback the operator reads "the rows it could not embed: ." — an empty sentence where the
+    remediation should be, in the message whose whole job is to say what to do next.
+    """
+    from ingest.graph import EMBEDDING_RUN_DEGRADED, EmbeddingIndexEmpty, record_embedding_run
+
+    session = graph_schema_session
+    record_embedding_run(
+        session,
+        provider="hash",
+        dimension=EMBEDDING_DIM,
+        state=EMBEDDING_RUN_DEGRADED,
+        products=3,
+        embedded=0,
+        skipped=(),
+    )
+
+    with pytest.raises(EmbeddingIndexEmpty) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    message = str(refused.value)
+
+    assert "none recorded" in message, (
+        f"the marker names no rows, so the message has to say so rather than leave the gap "
+        f"blank: {message}"
+    )
+    assert "could not embed: ." not in message, (
+        f"the un-fallen-back form, which reads as a truncated sentence: {message}"
+    )
+    assert "products_missing_embeddings" in message, (
+        f"and the pointer to the live list is what makes this refusal actionable when the "
+        f"marker itself lists nothing: {message}"
+    )

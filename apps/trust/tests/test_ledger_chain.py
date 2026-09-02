@@ -1407,7 +1407,15 @@ def test_an_append_that_cannot_advance_the_anchor_is_refused_rather_than_silent(
                     "alter table ledger.chain_head disable trigger chain_head_guard_trigger"
                 )
                 cur.execute("delete from ledger.chain_head")
-                cur.execute("alter table ledger.chain_head enable trigger chain_head_guard_trigger")
+                # ALWAYS, not the plain spelling (T-127). Written under T-011, when the
+                # migration installed this trigger at the CREATE TRIGGER default
+                # tgenabled = 'O'; T-114 moved it to 'A', and Postgres has no "put it back
+                # to whatever it was" -- the state has to be named. Rolled back here, so
+                # the plain spelling was latent rather than live; naming the wrong state in
+                # a teardown is a hazard whether or not this particular transaction commits.
+                cur.execute(
+                    "alter table ledger.chain_head enable always trigger chain_head_guard_trigger"
+                )
                 cur.execute("select count(*) from ledger.chain_head")
                 assert cur.fetchone() == (0,)
 
@@ -1475,7 +1483,11 @@ def test_a_length_only_divergence_is_caught_although_the_head_hash_still_matches
                     "alter table ledger.chain_head disable trigger chain_head_guard_trigger"
                 )
                 cur.execute("update ledger.chain_head set length = length + 1")
-                cur.execute("alter table ledger.chain_head enable trigger chain_head_guard_trigger")
+                # ALWAYS, not the plain spelling -- see the note at the identical teardown
+                # in the attack-(C) test above (T-127).
+                cur.execute(
+                    "alter table ledger.chain_head enable always trigger chain_head_guard_trigger"
+                )
 
             events = read_events(probe)
             assert verify_chain(events)["ok"] is True, "every link still verifies"
@@ -2276,3 +2288,718 @@ def test_the_anchor_guard_does_not_depend_on_who_is_connected_or_how(ledger_clea
     assert len(pids) == 3, f"the three probes shared a backend: {pids}"
     assert chain_anchor_of(connection)["length"] == 2
     assert verify_chain_in_db(connection)["ok"] is True
+
+
+# =======================================================================================
+# T-127 -- the DELETE arm graded as a PROPERTY, and the trigger state named correctly
+# =======================================================================================
+# T-114 closed the statement-shape half of "one fixed statement from one connection"
+# properly: ten spellings of "remove the anchor row" in two replication roles, twenty
+# assertions, one arm. It closed the session-state half by ENUMERATING three identities --
+# a default connection, one with an application_name, one with three GUCs set. Three is a
+# list, not a property, and the hole a list leaves is the whole point of the exercise: an
+# exemption keyed on any state nobody listed goes straight through.
+#
+# Measured in this tree, worker 52, on the migration as it stands. Inserted as the first
+# statement of `ledger.chain_head_guard()`'s DELETE branch:
+#
+#     IF current_setting('proxyshop.anchor_maintenance', true) = 'on' THEN
+#       RETURN OLD;
+#     END IF;
+#
+# Then, on the live schema:
+#
+#     SET LOCAL proxyshop.anchor_maintenance = 'on';
+#     DELETE FROM ledger.chain_head;      -- SUCCEEDED, rowcount = 1
+#
+# and `pytest apps/trust -q` reported `197 passed`. The GUC name is one character-class
+# away from the `proxyshop.maintenance` the identity test happens to set, which is exactly
+# how much distance an enumeration needs to be useless.
+#
+# You cannot enumerate session state. `current_user`, `application_name`,
+# `pg_backend_pid()`, `inet_client_addr()`, `txid_current()`, `now()` and every
+# `current_setting('<anything>')` are all in reach of a plpgsql trigger, and the last of
+# those is an unbounded namespace. So the assertion below is not about states at all: it is
+# that the DELETE branch CONTAINS NO CODE that could read one. The refusal is the first
+# thing the function does and the only thing that branch does.
+
+
+def _chain_head_guard_body(connection: Any) -> tuple[str, str]:
+    """The source of the function ``chain_head_guard_trigger`` actually calls.
+
+    Read from ``pg_proc`` through ``pg_trigger.tgfoid`` rather than by name, so pointing the
+    trigger at a differently-named copy does not route around this. Returns
+    ``(declare_section, body)``, both with ``--`` comments removed and whitespace collapsed.
+
+    Comment removal is what lets the RAISE carry an annotation without turning this red;
+    it cannot hide anything, because a comment does not execute and everything outside one
+    still has to match the expected text exactly.
+    """
+    import re
+
+    with connection.cursor() as cur:
+        cur.execute(
+            "select p.prosrc, t.tgqual is null, ns.nspname || '.' || p.proname "
+            "  from pg_trigger t "
+            "  join pg_class cl on cl.oid = t.tgrelid "
+            "  join pg_namespace cn on cn.oid = cl.relnamespace "
+            "  join pg_proc p on p.oid = t.tgfoid "
+            "  join pg_namespace ns on ns.oid = p.pronamespace "
+            " where cn.nspname = 'ledger' and cl.relname = 'chain_head' "
+            "   and t.tgname = 'chain_head_guard_trigger'"
+        )
+        rows = cur.fetchall()
+
+    assert len(rows) == 1, "chain_head_guard_trigger is not installed on ledger.chain_head"
+    prosrc, has_no_when_clause, proname = rows[0]
+
+    # A WHEN clause is a conditional exemption the function body cannot see: Postgres
+    # evaluates it BEFORE calling the trigger function, it may call any function it likes
+    # (`current_setting`, `current_user`, ...), and a body that is unconditional inside is
+    # simply never reached. Everything below reads the body, so this has to be closed here.
+    assert has_no_when_clause, (
+        "chain_head_guard_trigger carries a WHEN clause. That is evaluated before the "
+        "trigger function runs and can key on any session state there is, so the "
+        "unconditional body asserted below would never be consulted."
+    )
+    assert proname == "ledger.chain_head_guard", proname
+
+    without_comments = re.sub(r"--[^\n]*", " ", prosrc)
+    normalised = " ".join(without_comments.split())
+
+    # The split is ANCHORED AT THE START of the source. It used to be
+    # `normalised.partition(" BEGIN ")`, which takes the FIRST ` BEGIN ` anywhere in the
+    # function -- and that is not the outermost one. A function with no top-level DECLARE
+    # section opens with `BEGIN`, which cannot match a delimiter that requires a leading
+    # space, so the outer block header was swallowed into the declare half (it came out as
+    # the literal 'BEGIN ...', which passes the ":=" check below because there is no
+    # initialiser in it) and `body` was read from the NESTED block instead. The whole
+    # unconditional DELETE arm can then sit verbatim inside an inner block with the
+    # exemption written ahead of it in the OUTER one, and the property passes. Measured on
+    # the live catalog, worker 52, in a rolled-back transaction:
+    #
+    #     declare = "BEGIN IF current_setting('proxyshop.anchor_maintenance', true) = 'on'
+    #                AND TG_OP = 'DELETE' THEN RETURN OLD; END IF; DECLARE chain_is_empty
+    #                boolean;"
+    #     body    = "IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'ledger.chain_head is the ..."
+    #     SET LOCAL proxyshop.anchor_maintenance = 'on';
+    #     DELETE FROM ledger.chain_head;      -- SUCCEEDED, rowcount = 1
+    #
+    # and the property test PASSED -- the conditional-exemption hole it exists to close.
+    # `test_a_nested_block_cannot_hide_the_delete_arm_from_the_property` installs exactly
+    # that function and requires this helper to refuse it.
+    #
+    # So the shape is decided by what the source STARTS with, not by where a delimiter
+    # happens to fall, and anything that is neither shape is a failure rather than a guess.
+    if normalised.startswith("DECLARE "):
+        declare, separator, body = normalised.partition(" BEGIN ")
+        assert separator, f"chain_head_guard has a DECLARE and no BEGIN: {normalised!r}"
+        assert "BEGIN" not in declare, (
+            f"chain_head_guard's declare section appears to contain the word BEGIN, so the "
+            f"split above may not have found the OUTERMOST block header and the body below "
+            f"may not be the outer body: {declare!r}"
+        )
+    elif normalised.startswith("BEGIN "):
+        # No declare section at all: the body is everything after the outer block header,
+        # nested blocks included. A nested `BEGIN` is then part of `body`, where the
+        # assertion that the DELETE arm comes FIRST can see it.
+        declare, body = "", normalised[len("BEGIN ") :]
+    else:
+        raise AssertionError(
+            f"chain_head_guard's source opens with neither DECLARE nor BEGIN, so this test "
+            f"cannot tell its declare section from its body. Refusing rather than guessing: "
+            f"a guess is how the outer block came to be read as a declare section in the "
+            f"first place. Source: {normalised!r}"
+        )
+    return declare, body
+
+
+#: The DELETE branch, whole, as the migration writes it. Built from
+#: :data:`ANCHOR_DELETE_REFUSAL` rather than typed a second time, so the message stays one
+#: fact: the behavioural tests match it in the exception, this one matches it in the source.
+UNCONDITIONAL_DELETE_BRANCH = (
+    "IF TG_OP = 'DELETE' THEN "
+    "RAISE EXCEPTION '{message}' "
+    "USING ERRCODE = 'integrity_constraint_violation'; "
+    "END IF;"
+).format(message=ANCHOR_DELETE_REFUSAL.replace("'", "''"))
+
+
+@pytest.mark.docker
+def test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(ledger_clean) -> None:
+    """T-127 acceptance 1: the arm asserted unconditional, not sampled over three sessions.
+
+    ``test_the_anchor_guard_does_not_depend_on_who_is_connected_or_how`` drives three
+    connection identities. Three is a sample. This is the property those three were a
+    sample OF, and it is stated once, over the function's own source as the live catalog
+    holds it:
+
+        the first thing ``chain_head_guard()`` does is test ``TG_OP = 'DELETE'``, and the
+        whole of that branch is the RAISE.
+
+    Everything an exemption could key on -- ``current_user``, ``application_name``,
+    ``pg_backend_pid()``, ``inet_client_addr()``, any ``current_setting('...')``, or
+    nothing at all -- has to appear as CODE inside that branch or ahead of it, and there is
+    room for neither. So this refuses every exemption without knowing what any of them key
+    on, which is the difference between a property and a list.
+
+    Read from the live database rather than from ``db/migrations/0002_ledger_tables.sql``
+    on purpose: what guards the anchor is the function that is installed, and
+    ``CREATE OR REPLACE FUNCTION`` needs no migration. The trigger's own ``WHEN`` clause is
+    closed in the helper, because a condition there is never visible in the body at all.
+    """
+    declare, body = _chain_head_guard_body(ledger_clean)
+
+    assert body.startswith(UNCONDITIONAL_DELETE_BRANCH), (
+        "the DELETE arm of ledger.chain_head_guard() is not the unconditional first "
+        "statement of the function any more.\n"
+        f"expected the body to start with:\n  {UNCONDITIONAL_DELETE_BRANCH}\n"
+        f"got:\n  {body[: len(UNCONDITIONAL_DELETE_BRANCH) + 200]}\n"
+        "Anything between BEGIN and the RAISE -- a guard clause, an early RETURN, an added "
+        "conjunct on the IF, a CASE -- is a session-conditional exemption, and there is no "
+        "session state that is allowed to make deleting the anchor legitimate."
+    )
+
+    # ...and nothing runs on the way in, either. A DECLARE with an initialiser executes
+    # before the first statement of the body, so a `maintenance boolean := current_setting(
+    # 'proxyshop.x', true) = 'on'` would run ahead of everything asserted above.
+    assert ":=" not in declare and "DEFAULT" not in declare.upper(), (
+        f"ledger.chain_head_guard() declares an initialised variable: {declare!r}. That "
+        f"expression runs before the DELETE arm, so it can read session state the arm is "
+        f"asserted not to read."
+    )
+
+
+#: Exemptions to inject into the DELETE branch, each keyed on something the enumerated
+#: identity test cannot cover. ``(label, session prelude, plpgsql condition)``.
+DELETE_ARM_EXEMPTIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    (
+        "a custom GUC nobody listed",
+        ("set local proxyshop.anchor_maintenance = 'on'",),
+        "current_setting('proxyshop.anchor_maintenance', true) = 'on'",
+    ),
+    (
+        "the connected role",
+        (),
+        "current_user = session_user",
+    ),
+    (
+        "an application_name nobody listed",
+        ("set local application_name = 'pg_restore'",),
+        "current_setting('application_name') = 'pg_restore'",
+    ),
+    (
+        "the backend pid -- unenumerable by construction",
+        (),
+        "pg_backend_pid() = pg_backend_pid()",
+    ),
+    (
+        "nothing at all",
+        (),
+        "true",
+    ),
+)
+
+
+def _replace_chain_head_guard_delete_branch(cursor: Any, condition: str) -> None:
+    """Rewrite ``ledger.chain_head_guard()``'s DELETE branch to exempt ``condition``.
+
+    Only the DELETE branch changes; every other arm is copied through verbatim, so the
+    UPDATE and INSERT rules -- and therefore the rest of this file -- keep working and the
+    only thing under test is the exemption.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = (repo_root / "db" / "migrations" / "0002_ledger_tables.sql").read_text()
+    start = migration.index("CREATE OR REPLACE FUNCTION ledger.chain_head_guard()")
+    end = migration.index("$head_guard$;", start) + len("$head_guard$;")
+    definition = migration[start:end]
+
+    original = (
+        "  IF TG_OP = 'DELETE' THEN\n"
+        "    RAISE EXCEPTION\n"
+        "      'ledger.chain_head is the ledger''s only truncation detector: "
+        "DELETE is not permitted'\n"
+        "      USING ERRCODE = 'integrity_constraint_violation';\n"
+        "  END IF;\n"
+    )
+    assert original in definition, (
+        "the DELETE branch is not where this test expects it in "
+        "db/migrations/0002_ledger_tables.sql; the injection below would be a no-op, and a "
+        "no-op sabotage proves nothing"
+    )
+    exempted = (
+        "  IF TG_OP = 'DELETE' THEN\n"
+        f"    IF {condition} THEN\n"
+        "      RETURN OLD;\n"
+        "    END IF;\n"
+        "    RAISE EXCEPTION\n"
+        "      'ledger.chain_head is the ledger''s only truncation detector: "
+        "DELETE is not permitted'\n"
+        "      USING ERRCODE = 'integrity_constraint_violation';\n"
+        "  END IF;\n"
+    )
+    cursor.execute(definition.replace(original, exempted))
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize(("label", "prelude", "condition"), DELETE_ARM_EXEMPTIONS)
+def test_an_exemption_injected_into_the_delete_branch_turns_this_file_red(
+    ledger_clean, label: str, prelude: tuple[str, ...], condition: str
+) -> None:
+    """T-127 acceptance 3: the property's blast radius, driven rather than argued.
+
+    A guard that cannot refuse anything is dead code, and the only way to know which kind
+    this is, is to hand it something it must refuse. So the exemption is really installed,
+    on the live schema, inside a transaction that is always rolled back -- ``CREATE OR
+    REPLACE FUNCTION`` is transactional, which is what makes this safe to do in-suite
+    rather than by hand in a commit message.
+
+    Two halves, and both are load-bearing:
+
+    * the exemption WORKS. The identical ``DELETE FROM ledger.chain_head`` that is refused
+      everywhere else in this file succeeds, rowcount 1, with the anchor gone. Without this
+      the test could pass over an injection that changed nothing.
+    * the property test REFUSES it. Whatever it keys on -- a GUC name nobody wrote down,
+      the connected role, an application_name, the backend pid, or nothing at all -- the
+      body no longer starts with the unconditional branch.
+
+    The transaction is rolled back on every path and the function is re-read afterwards, so
+    a leak is a failure here rather than a silently disarmed anchor for the rest of the
+    session.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    before_declare, before_body = _chain_head_guard_body(connection)
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as probe:
+        try:
+            with probe.cursor() as cur:
+                for statement in prelude:
+                    cur.execute(statement)
+                _replace_chain_head_guard_delete_branch(cur, condition)
+
+                cur.execute("delete from ledger.chain_head")
+                assert cur.rowcount == 1, (
+                    f"[{label}] the injected exemption did not actually let the DELETE "
+                    f"through (rowcount={cur.rowcount}), so this proves nothing about what "
+                    f"the property test can refuse."
+                )
+                cur.execute("select count(*) from ledger.chain_head")
+                assert cur.fetchone() == (0,), f"[{label}] the anchor row survived"
+
+            # ...and the property test says no. Called on the same open transaction, where
+            # the exemption is the installed definition.
+            with pytest.raises(AssertionError) as refused:
+                test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(probe)
+            assert "not the unconditional first statement" in str(refused.value), (
+                f"[{label}] the property test failed for some other reason: {refused.value}"
+            )
+        finally:
+            probe.rollback()
+
+    after_declare, after_body = _chain_head_guard_body(connection)
+    assert (after_declare, after_body) == (before_declare, before_body), (
+        f"[{label}] the injected exemption OUTLIVED its transaction: the anchor guard is "
+        f"now disarmed for every test that runs after this one"
+    )
+    test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(connection)
+    _anchor_delete_is_refused_by_the_trigger(connection, "delete from ledger.chain_head")
+
+
+# ---------------------------------------------------------------------------------------
+# The exemption the FIRST version of this property could not see: a nested block
+# ---------------------------------------------------------------------------------------
+# Every exemption above is injected INTO the DELETE branch, so the branch itself changes
+# and any reading of the body catches it. An exemption does not have to go there. plpgsql
+# blocks nest, and the arm can be moved wholesale into an inner one with the exemption
+# written ahead of it in the outer block -- the DELETE branch is then byte-identical to the
+# migration's, and only the block STRUCTURE has changed.
+#
+# `_chain_head_guard_body` split the source with `normalised.partition(" BEGIN ")`, which
+# takes the first ` BEGIN ` anywhere in the function rather than the outermost one, so it
+# read the inner block as the body and the outer one as the declare section. Measured on
+# the live catalog with the function below installed: the property test PASSED and
+# `DELETE FROM ledger.chain_head` succeeded with rowcount 1.
+#
+# Both shapes are driven, because the two halves of the old split failed differently: with
+# no top-level DECLARE the outer `BEGIN` was swallowed into the declare half, and with one
+# kept the outer body was skipped past. The fixed helper anchors the split at the START of
+# the source, so a nested block is part of the body and the "the DELETE arm comes FIRST"
+# assertion sees whatever precedes it.
+
+#: The exemption written into the OUTER block. Deliberately the same GUC as the first entry
+#: of :data:`DELETE_ARM_EXEMPTIONS`: what changes here is where it is written, not what it
+#: keys on, so a pass here could not be explained by the condition being an easier one.
+NESTED_BLOCK_EXEMPTION = "current_setting('proxyshop.anchor_maintenance', true) = 'on'"
+
+
+def _chain_head_guard_source() -> tuple[str, str, str]:
+    """``ledger.chain_head_guard()`` split into ``(header, declare_section, block)``.
+
+    ``header`` is everything up to and including the opening ``$head_guard$`` dollar quote,
+    ``declare_section`` is the top-level ``DECLARE ...`` the migration writes, and ``block``
+    is the ``BEGIN ... END;`` that follows it. Read out of the migration so the statements
+    inside the block are the real ones and the only thing this file invents is the nesting.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = (repo_root / "db" / "migrations" / "0002_ledger_tables.sql").read_text()
+    start = migration.index("CREATE OR REPLACE FUNCTION ledger.chain_head_guard()")
+    end = migration.index("$head_guard$;", start)
+    opener = "AS $head_guard$"
+    header, _, body = migration[start:end].partition(opener)
+    declare_section, separator, block = body.partition("BEGIN\n")
+    assert declare_section.strip() == "DECLARE\n  chain_is_empty boolean;".strip(), (
+        f"ledger.chain_head_guard()'s declare section is not what this test expects in "
+        f"db/migrations/0002_ledger_tables.sql, so the nesting below would not be the "
+        f"function under test: {declare_section!r}"
+    )
+    assert separator and block.lstrip().startswith("IF TG_OP = 'DELETE' THEN"), (
+        f"the DELETE arm is not the first statement of the migration's block, so this test "
+        f"would nest something other than the arm it is about: {block[:120]!r}"
+    )
+    return header + opener, declare_section, separator + block
+
+
+def _nest_the_chain_head_guard_block(cursor: Any, *, keep_top_level_declare: bool) -> None:
+    """Install ``chain_head_guard()`` with its whole block moved into a NESTED one.
+
+    The DELETE arm, the INSERT arm and every UPDATE rule are copied through verbatim -- the
+    inner block is the migration's block, unmodified -- so the only difference from the real
+    function is the outer block wrapped around it and the exemption written inside that.
+    """
+    header, declare_section, block = _chain_head_guard_source()
+    exemption = (
+        f"  IF {NESTED_BLOCK_EXEMPTION} AND TG_OP = 'DELETE' THEN\n    RETURN OLD;\n  END IF;\n"
+    )
+    if keep_top_level_declare:
+        # The declare section stays where it was, so the source still opens with DECLARE;
+        # the exemption is the outer block's first statement and the arm is one block down.
+        inner = "BEGIN\n" + block + "END;\n"
+        nested = f"{declare_section}BEGIN\n{exemption}{inner}END;\n"
+    else:
+        # No top-level DECLARE at all: the source opens with the outer BEGIN, and the
+        # migration's own DECLARE ... BEGIN ... END; becomes the nested block.
+        nested = f"\nBEGIN\n{exemption}{declare_section}{block}END;\n"
+    cursor.execute(f"{header}{nested}$head_guard$;")
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize(
+    "keep_top_level_declare",
+    [False, True],
+    ids=["no top-level DECLARE", "top-level DECLARE kept"],
+)
+def test_a_nested_block_cannot_hide_the_delete_arm_from_the_property(
+    ledger_clean, keep_top_level_declare: bool
+) -> None:
+    """The DELETE arm verbatim, one block deeper, with the exemption above it.
+
+    Graded exactly like the injected exemptions next door, and for the same reason: the
+    exemption has to really work, or a refusal from the property test proves nothing about
+    what it can refuse. So the identical ``DELETE FROM ledger.chain_head`` that is refused
+    everywhere else in this file must succeed with rowcount 1 first.
+
+    This is the input that separates "the DELETE branch is unconditional" from "the DELETE
+    branch is the first thing the function does". Only the second is a property; the first
+    is satisfied by a branch nothing ever reaches.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    before_declare, before_body = _chain_head_guard_body(connection)
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as probe:
+        try:
+            with probe.cursor() as cur:
+                _nest_the_chain_head_guard_block(cur, keep_top_level_declare=keep_top_level_declare)
+
+                # The DELETE arm is still there, character for character. If the only thing
+                # that changed were the nesting, and the nesting were harmless, this would
+                # be refused like every other DELETE in this file.
+                _, nested_body = _chain_head_guard_body(probe)
+                assert UNCONDITIONAL_DELETE_BRANCH in nested_body, (
+                    "the nesting did not preserve the DELETE arm verbatim, so this test is "
+                    "grading a different function than the one it claims to"
+                )
+
+                cur.execute("set local proxyshop.anchor_maintenance = 'on'")
+                cur.execute("delete from ledger.chain_head")
+                assert cur.rowcount == 1, (
+                    f"the nested-block exemption did not actually let the DELETE through "
+                    f"(rowcount={cur.rowcount}), so this proves nothing about what the "
+                    f"property test can refuse."
+                )
+                cur.execute("select count(*) from ledger.chain_head")
+                assert cur.fetchone() == (0,), "the anchor row survived"
+
+            with pytest.raises(AssertionError) as refused:
+                test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(probe)
+            assert "not the unconditional first statement" in str(refused.value), (
+                f"the property test failed for some other reason: {refused.value}"
+            )
+        finally:
+            probe.rollback()
+
+    after_declare, after_body = _chain_head_guard_body(connection)
+    assert (after_declare, after_body) == (before_declare, before_body), (
+        "the nested-block exemption OUTLIVED its transaction: the anchor guard is now "
+        "disarmed for every test that runs after this one"
+    )
+    test_the_anchor_guards_delete_arm_is_unconditional_as_a_property(connection)
+    _anchor_delete_is_refused_by_the_trigger(connection, "delete from ledger.chain_head")
+
+
+class _OneRowCatalog:
+    """The smallest thing :func:`_chain_head_guard_body` can read a ``prosrc`` out of.
+
+    Enough of psycopg's connection/cursor shape to answer the one query the helper runs, so
+    the SPLIT can be graded without a database. The docker test above proves the same thing
+    against the live catalog; this one keeps it graded in an environment where the compose
+    stack is unreachable and the ``docker`` mark is skipped.
+    """
+
+    def __init__(self, prosrc: str) -> None:
+        self._prosrc = prosrc
+
+    def cursor(self) -> Any:
+        catalog = self
+
+        class _Cursor:
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+            def execute(self, statement: str) -> None:
+                assert "pg_trigger" in statement, statement
+
+            def fetchall(self) -> list[tuple[str, bool, str]]:
+                return [(catalog._prosrc, True, "ledger.chain_head_guard")]
+
+        return _Cursor()
+
+
+def test_the_body_split_takes_the_outermost_block_and_not_the_first_one() -> None:
+    """The split itself, over four sources, with no database in the way.
+
+    ``partition(" BEGIN ")`` answers the last two of these the same way it answers the
+    first two, which is the whole defect: it returns the INNER block as the body.
+    """
+    real = "DECLARE chain_is_empty boolean; BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END;"
+    assert _chain_head_guard_body(_OneRowCatalog(real)) == (
+        "DECLARE chain_is_empty boolean;",
+        "IF TG_OP = 'DELETE' THEN RAISE; END IF; END;",
+    )
+
+    no_declare = "BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END;"
+    assert _chain_head_guard_body(_OneRowCatalog(no_declare)) == (
+        "",
+        "IF TG_OP = 'DELETE' THEN RAISE; END IF; END;",
+    )
+
+    # The two nested shapes. The exemption is in the OUTER block, so it must come back as
+    # part of the body -- if it comes back as the declare section, or is dropped entirely,
+    # the property test above cannot see it.
+    nested_without_declare = (
+        "BEGIN IF exempt() THEN RETURN OLD; END IF; "
+        "DECLARE chain_is_empty boolean; BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END; END;"
+    )
+    declare, body = _chain_head_guard_body(_OneRowCatalog(nested_without_declare))
+    assert declare == ""
+    assert body.startswith("IF exempt() THEN RETURN OLD; END IF;"), body
+
+    nested_with_declare = (
+        "DECLARE chain_is_empty boolean; BEGIN IF exempt() THEN RETURN OLD; END IF; "
+        "BEGIN IF TG_OP = 'DELETE' THEN RAISE; END IF; END; END;"
+    )
+    declare, body = _chain_head_guard_body(_OneRowCatalog(nested_with_declare))
+    assert declare == "DECLARE chain_is_empty boolean;"
+    assert body.startswith("IF exempt() THEN RETURN OLD; END IF;"), body
+
+    # Neither shape: refused rather than guessed at.
+    with pytest.raises(AssertionError, match="opens with neither DECLARE nor BEGIN"):
+        _chain_head_guard_body(_OneRowCatalog("IF TG_OP = 'DELETE' THEN RAISE; END IF;"))
+
+
+# ---------------------------------------------------------------------------------------
+# T-127 acceptance 2 -- the trigger-state spelling, in the source rather than the catalog
+# ---------------------------------------------------------------------------------------
+# `CREATE TRIGGER` installs at tgenabled = 'O' and the migration moves all five to 'A'.
+# Postgres has no "restore whatever it was" spelling, so a teardown that re-enables a
+# trigger has to NAME the state, and the plain spelling names the wrong one: it silently
+# downgrades the trigger to 'O', where `SET session_replication_role = 'replica'` skips it.
+#
+# T-114 found that, wrote it up at the teardown in
+# `test_a_fork_is_refused_before_the_unique_index_is_reached`, fixed that one site -- and
+# left the two in the attack-(C) and length-divergence tests spelled the dangerous way.
+# `test_every_ledger_integrity_trigger_is_installed_enable_always` could not catch those:
+# both sit inside transactions that are always rolled back, so the wrong state never
+# reaches the catalog for a catalog test to see. It is latent, not live, and the thing that
+# makes it latent is a `finally` two lines further down. The check that catches it has to
+# read the SOURCE, so that is what this one does.
+
+
+def _sql_statements_that_enable_a_trigger(path: Any) -> list[str]:
+    """Every SQL statement in ``path`` that re-enables a trigger, whitespace-collapsed.
+
+    Python is read through :mod:`ast`, so only real string literals are considered and
+    ``#`` comments cannot trip it; SQL has its ``--`` comments stripped for the same
+    reason. Adjacent-literal concatenation is resolved by the parser, so a statement split
+    across source lines arrives here whole.
+
+    A docstring that spells out a statement is scanned like any other literal. That is
+    deliberate rather than a limitation: the dangerous spelling should not be written down
+    as an example either.
+    """
+    import ast
+    import re
+
+    source = path.read_text()
+    if path.suffix == ".py":
+        haystacks = [
+            " ".join(node.value.split())
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+    else:
+        haystacks = [" ".join(re.sub(r"--[^\n]*", " ", source).split())]
+
+    pattern = re.compile(
+        r"\balter\s+table\s+[\w.\"]+\s+enable\s+(?:\w+\s+)?trigger\s+[\w.\"]+", re.I
+    )
+    return [match.group(0) for text in haystacks for match in pattern.finditer(text)]
+
+
+#: Built by concatenation on purpose: written as one literal, this example would be found
+#: by the very scan it is an example for, and this file would fail its own test.
+_PLAIN_SPELLING = "alter table ledger.chain_head enable " + "trigger chain_head_guard_trigger"
+_ALWAYS_SPELLING = "alter table ledger.chain_head enable always trigger chain_head_guard_trigger"
+
+
+def _plainly_enabled_triggers(statements: list[str]) -> list[str]:
+    """The subset of ``statements`` that enable a trigger without saying ALWAYS."""
+    import re
+
+    plain = re.compile(r"\balter\s+table\s+[\w.\"]+\s+enable\s+trigger\b", re.I)
+    return [text for text in statements if plain.search(text)]
+
+
+def test_the_plain_enable_spelling_is_what_this_scan_is_looking_for() -> None:
+    """The positive control. A scan that cannot flag anything flags nothing for a reason.
+
+    Two statements that differ in one word: the scan has to separate them, or the test
+    below is a test of an empty list.
+    """
+    assert _plainly_enabled_triggers([_PLAIN_SPELLING]) == [_PLAIN_SPELLING]
+    assert _plainly_enabled_triggers([_ALWAYS_SPELLING]) == []
+    assert _plainly_enabled_triggers(["alter table ledger.chain_head disable trigger t"]) == []
+
+
+def test_no_ledger_source_re_enables_a_trigger_without_saying_always() -> None:
+    """T-127 acceptance 2: every site, not the two this ticket happened to name.
+
+    Scanning beats fixing two lines, because the next one will be written by someone who
+    read the catalog test, saw it green, and reasonably assumed the catalog test was the
+    guard. It is not: a teardown inside a rolled-back transaction never reaches the
+    catalog.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = repo_root / "db" / "migrations" / "0002_ledger_tables.sql"
+    scanned: list[Any] = sorted((repo_root / "apps" / "trust").rglob("*.py"))
+    scanned += sorted((repo_root / "db" / "migrations").glob("*.sql"))
+    assert scanned, "the scan found no files, so it graded nothing"
+
+    offenders: list[str] = []
+    found: list[str] = []
+    for path in scanned:
+        statements = _sql_statements_that_enable_a_trigger(path)
+        found += statements
+        offenders += [
+            f"{path.relative_to(repo_root)}: {text}"
+            for text in _plainly_enabled_triggers(statements)
+        ]
+
+    # Liveness. An offender list is only meaningful if the scan is still matching, and the
+    # migration is the fixed point to measure that against: it installs exactly the five
+    # integrity triggers `test_every_ledger_integrity_trigger_is_installed_enable_always`
+    # pins, each with its own ALTER TABLE.
+    assert len(_sql_statements_that_enable_a_trigger(migration)) == 5, (
+        f"the scan found {len(_sql_statements_that_enable_a_trigger(migration))} "
+        f"trigger-enabling statements in {migration.name}, not the five the migration "
+        f"writes; it has stopped matching, so an empty offender list means nothing"
+    )
+    assert len(found) > 5, "no test source enables a trigger at all; the scan graded only SQL"
+    assert offenders == [], (
+        "these statements re-enable a ledger trigger with the plain spelling, which "
+        "restores pg_trigger.tgenabled to 'O' rather than the 'A' the migration installs -- "
+        "and at 'O' a single `SET session_replication_role = 'replica'` skips the trigger "
+        "entirely:\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.docker
+def test_a_when_clause_on_the_trigger_is_an_exemption_the_body_cannot_see(ledger_clean) -> None:
+    """The other place an exemption can live, and the only assertion that can refuse it.
+
+    ``CREATE TRIGGER ... WHEN (<condition>)`` is evaluated by Postgres *before* the trigger
+    function is called, and the condition may read anything a function can --
+    ``current_setting``, ``current_user``, ``inet_client_addr()``. An arm whose body is
+    unconditional is no defence at all if the body is never reached, and nothing in
+    ``prosrc`` records that it was not.
+
+    So this installs exactly that: the same trigger, the same unmodified function, plus a
+    ``WHEN`` that a single ``SET LOCAL`` turns off. It is the input that ONLY the
+    ``tgqual is null`` assertion can reject -- the source-level property test next door
+    passes on it, because the source it reads is untouched.
+
+    Rolled back, and the arm is re-driven afterwards.
+    """
+    connection = ledger_clean
+    for index in range(3):
+        append_event(connection, observation_event(index))
+
+    with psycopg.connect(_admin_dsn(connection), connect_timeout=5) as probe:
+        try:
+            with probe.cursor() as cur:
+                cur.execute("set local proxyshop.anchor_maintenance = 'on'")
+                cur.execute(
+                    "create or replace trigger chain_head_guard_trigger "
+                    "  before insert or update or delete on ledger.chain_head "
+                    "  for each row "
+                    "  when (current_setting('proxyshop.anchor_maintenance', true) "
+                    "        is distinct from 'on') "
+                    "  execute function ledger.chain_head_guard()"
+                )
+
+                cur.execute("delete from ledger.chain_head")
+                assert cur.rowcount == 1, (
+                    f"the WHEN clause did not actually skip the arm (rowcount="
+                    f"{cur.rowcount}); this proves nothing about what tgqual catches"
+                )
+
+                # The body is untouched, so the source-level property still holds...
+                declare, body = _chain_head_guard_body(connection)
+                assert body.startswith(UNCONDITIONAL_DELETE_BRANCH), (
+                    "the function body changed; then this test is no longer isolating the "
+                    "WHEN clause"
+                )
+
+            # ...and the WHEN clause is what has to catch it.
+            with pytest.raises(AssertionError) as refused:
+                _chain_head_guard_body(probe)
+            assert "carries a WHEN clause" in str(refused.value), refused.value
+        finally:
+            probe.rollback()
+
+    _chain_head_guard_body(connection)
+    _anchor_delete_is_refused_by_the_trigger(connection, "delete from ledger.chain_head")

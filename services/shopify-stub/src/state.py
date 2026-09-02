@@ -31,8 +31,17 @@ from shopify_stub.permalink import _assert_bare_host
 DEFAULT_SHOP_DOMAIN = "proxyshop-demo.myshopify.com"
 
 #: The Admin API version the stub answers on: the current stable version at the time the
-#: recorded fixtures were authored. Callers may use any version segment in the URL; the stub
-#: echoes the configured one in webhook headers.
+#: recorded fixtures were authored, and the value echoed in every webhook's
+#: ``X-Shopify-API-Version`` header and in ``webPixelCreate``'s ``apiVersion.handle``.
+#:
+#: It is also the **only** version segment ``/admin/api/{version}/graphql.json`` answers on.
+#: A request naming any other one — a retired version, a future one, a typo — is refused
+#: with **404**, the status real Shopify uses for a version outside its published set. This
+#: comment used to say "callers may use any version segment in the URL", which was true of
+#: the route that captured ``{version}`` and discarded it and has not been true since
+#: ``shopify_stub.app.admin_graphql`` started gating on it; ``2025-01`` answered ``200``
+#: with real data then and answers ``404`` now. Held to the code by
+#: ``test_stub_contract.test_the_documented_version_refusal_is_the_one_the_route_gives``.
 DEFAULT_API_VERSION = "2026-07"
 
 #: Fake Admin API access token. Requests must present it in ``X-Shopify-Access-Token``.

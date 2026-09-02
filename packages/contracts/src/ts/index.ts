@@ -60,7 +60,10 @@ export {
   payloadHashFromJson,
   signingEnvelopeErrors,
 } from "./signing.js";
-export type {Payload, SigningNumberOptions} from "./signing.js";
+// `SigningNumberOptions` is gone with the value-domain guard it configured (T-125/T-129): the
+// signing doors now accept every integer that satisfies `float(v) == v`, exactly as
+// `canonicalJson` and the Python peer do, so there is nothing left for a caller to opt out of.
+export type {Payload} from "./signing.js";
 
 export {
   DEFAULT_PENALTIES_PER_KIND,

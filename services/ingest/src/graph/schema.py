@@ -368,6 +368,15 @@ EMBEDDING_RUN_COMPLETE = "complete"
 #: skips the same product again and so never terminates. The degradation belongs to that
 #: product: it has no vector, :func:`ingest.graph.query.products_missing_embeddings` names
 #: it, and the rest of the catalog stays retrievable.
+#:
+#: SINGLE-SPACE IS NOT THE SAME CLAIM AS QUERYABLE, and this state carries only the first.
+#: When :attr:`EmbeddingRun.embedded` is 0 — every product read was unembeddable — the two
+#: sentences above are still true (one space, and it is this provider's) and yet there is no
+#: vector in the index to rank at all. :func:`ingest.graph.query.candidate_products` refuses
+#: with :class:`ingest.graph.query.EmbeddingIndexEmpty` there rather than answering ``[]``,
+#: and ``python -m ingest.graph.reembed`` exits non-zero. Read this constant as "reached its
+#: end, one vector space", never as "safe to query": the queryable claim needs
+#: ``products == 0 or embedded > 0`` alongside it.
 EMBEDDING_RUN_DEGRADED = "degraded"
 
 #: The states that mean "this pass reached its end", i.e. every vector in the index was
@@ -403,10 +412,16 @@ class EmbeddingRun:
     state: str
     products: int = 0
     embedded: int = 0
-    #: The product ids the pass read but could not embed, sorted. Non-empty exactly when
-    #: :data:`state` is :data:`EMBEDDING_RUN_DEGRADED`. Recorded rather than counted so the
-    #: operator is handed the finite list of catalog rows to fix, which is what makes the
-    #: remediation terminate.
+    #: The product ids the pass read but could not embed, sorted. Recorded rather than
+    #: counted so the operator is handed the finite list of catalog rows to fix, which is
+    #: what makes the remediation terminate.
+    #:
+    #: Non-empty under :data:`EMBEDDING_RUN_DEGRADED` — and also under the *closing*
+    #: :data:`EMBEDDING_RUN_RUNNING` stamp, which is written only when the read-back caught a
+    #: skipped product still carrying a vector. That is not an inconsistency to tidy away: it
+    #: is the discriminator ``ingest.graph.query._check_vector_path`` uses to tell an
+    #: interrupted pass (opening stamp, empty list) from a failed read-back (closing stamp,
+    #: non-empty list), whose remediations are opposites.
     skipped: tuple[str, ...] = ()
 
     @property

@@ -22,7 +22,7 @@ import pathlib
 import re
 
 import pytest
-from packages.contracts.signing import BLANK_CODE_POINTS, is_blank
+from packages.contracts.signing import BLANK_CODE_POINTS, CanonicalisationError, is_blank
 from pydantic import ValidationError
 
 from packages.contracts import (
@@ -982,3 +982,87 @@ def test_a_real_value_is_still_content_under_the_new_class() -> None:
         assert compiled.search(value), repr(value)
         assert not is_blank(value), repr(value)
         assert missing_signing_fields(make_submission(nonce=value)) == []
+
+
+# --- T-125: the Python signing door, and the constant the TypeScript peer pins -------------
+#
+# The Python half of T-125's acceptance 3. Nothing here changed behaviour — `canonical_json`
+# has enforced `float(v) == v` since T-010 and `canonical_signing_bytes` inherits it — but
+# nothing pinned the SIGNING door's answer for these magnitudes either, so the TypeScript side
+# was free to diverge from it for a whole wave with every suite green. It is pinned now, and
+# `e2e/test_jcs_conformance.py` drives both doors over the same corpus.
+
+#: The bytes `canonical_signing_bytes` produces for a submission carrying `quantity: 10**16`,
+#: pinned identically by `tests/signing.test.ts::EXPECTED_TEN_16_CANONICAL_BYTES`.
+#:
+#: `EXPECTED_CANONICAL_BYTES` could not have caught this: its fixture carries only safe
+#: integers, so it stayed green through the whole of T-113 while the TypeScript signing door
+#: refused every exact double at or beyond 2**53 that this one accepts.
+EXPECTED_TEN_16_CANONICAL_BYTES = (
+    '{"auction_id":"auc-0100","issued_at":"2026-01-01T00:00:00Z","key_id":"key-2026-01",'
+    '"nonce":"nonce-ext-0001",'
+    '"payload_hash":"sha256:6f5022c55463964c26b49be49e428ef0804edc4c31b9a9b8795c4d96454ba2f1",'
+    '"schema_version":"1.0.0","signer_id":"store-external-1","store_id":"store-external-1"}'
+)
+
+#: Integers strictly above the safe-integer bound that ARE exact doubles. RFC 8785 §3.1 requires
+#: every one of them to be signable; a magnitude bound refuses all of them.
+EXACT_DOUBLES_ABOVE_2_53 = (
+    2**53,
+    2**53 + 2,
+    10**16,
+    2**63,
+    2**64,
+    -(2**64),
+    2**1023,
+)
+
+#: Integers with no exact double. The refusal T-125 must NOT relax, `2**53 + 1` first.
+NON_DOUBLE_INTEGERS = (
+    2**53 + 1,
+    2**53 + 3,
+    10**17 + 1,
+    -(2**53) - 1,
+    10**400,
+    2**1024,
+)
+
+
+def test_the_signing_door_produces_the_bytes_the_typescript_peer_pins_for_ten_16() -> None:
+    """10**16 satisfies `float(v) == v`, so §3.1 requires it, and these are the bytes."""
+    assert (
+        canonical_signing_bytes(make_submission(quantity=10**16)).decode("utf-8")
+        == EXPECTED_TEN_16_CANONICAL_BYTES
+    )
+
+
+def test_the_typescript_suite_pins_the_same_ten_16_constant() -> None:
+    """The constant is only a cross-language pin if both files really carry the same string.
+
+    Asserted rather than promised in a comment, because the comment on
+    `EXPECTED_CANONICAL_BYTES` made exactly this promise and nothing checked it.
+    """
+    peer = (pathlib.Path(__file__).parent / "signing.test.ts").read_text(encoding="utf-8")
+    assert "EXPECTED_TEN_16_CANONICAL_BYTES" in peer
+    digest = "sha256:6f5022c55463964c26b49be49e428ef0804edc4c31b9a9b8795c4d96454ba2f1"
+    assert digest in EXPECTED_TEN_16_CANONICAL_BYTES
+    assert digest in peer, "signing.test.ts no longer pins the same 10**16 payload hash"
+
+
+@pytest.mark.parametrize("value", EXACT_DOUBLES_ABOVE_2_53, ids=repr)
+def test_the_signing_door_signs_every_exact_double_above_the_safe_bound(value: int) -> None:
+    """Acceptance 1, Python side: the door's number domain is `float(v) == v`, not `2**53`."""
+    assert float(value) == value
+    signed = canonical_signing_bytes(make_submission(quantity=value)).decode("utf-8")
+    assert signed.startswith('{"auction_id":"auc-0100"')
+    # And the digest actually moved: the number is covered, not merely tolerated.
+    assert payload_hash(make_submission(quantity=value)) != payload_hash(make_submission())
+
+
+@pytest.mark.parametrize("value", NON_DOUBLE_INTEGERS, ids=repr)
+def test_the_signing_door_still_refuses_every_integer_with_no_exact_double(value: int) -> None:
+    """T-125's non-goal, Python side: the `2**53 + 1` refusal is not relaxed."""
+    with pytest.raises(CanonicalisationError):
+        canonical_signing_bytes(make_submission(quantity=value))
+    with pytest.raises(CanonicalisationError):
+        payload_hash(make_submission(quantity=value))
