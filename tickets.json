@@ -1993,6 +1993,127 @@
         "Do not switch them to a shared volume; the point is that the volume is fresh"
       ],
       "parallel_safe": false
+    },
+    {
+      "id": "T-125",
+      "title": "The signing door and the canonicalizer agree, and the gate watches both",
+      "objective": "T-113 over-corrected and re-opened the divergence class T-106 exists to close, in the one door the gate does not watch. Verified by the orchestrator: 10**16 is an EXACT double (float(v)==v is True), so RFC 8785 3.1 requires it to render. Python canonical_json renders {\"n\":10000000000000000}; TS canonicalJson AGREES and the T-106 gate passes; but TS canonicalSigningBytes REFUSES it \u2014 'cannot sign the integer 10000000000000000'. So a Node seller cannot sign a bid a Python exchange signs happily. `grep -c canonicalSigningBytes e2e/test_jcs_conformance.py` is 0: the gate drives canonical_json only, so it is structurally blind to the signing door. Two defects, one ticket: the over-rejection, and the gate's blind spot that let it through.",
+      "refs": [
+        "D52",
+        "RFC8785#3.1",
+        "T-106",
+        "T-113",
+        "W3-verify-contracts"
+      ],
+      "acceptance": [
+        "1. canonicalSigningBytes accepts every integer that satisfies float(v)==v, matching canonical_json and the Python side",
+        "2. The T-106 conformance gate drives the SIGNING door as well as canonical_json, in all three implementations",
+        "3. A case at 10**16 and one at 2**53+1 pin accept-and-refuse respectively, across Python and TypeScript",
+        "4. Reverting the fix turns the extended gate red"
+      ],
+      "verify": "pytest e2e/test_jcs_conformance.py -q && npx vitest run packages/contracts",
+      "scope": "packages/contracts/**, e2e/**",
+      "depends_on": [
+        "T-113"
+      ],
+      "non_goals": [
+        "Do not relax the 2**53+1 refusal; the bug is over-rejection of exact doubles, not under-rejection"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-126",
+      "title": "The ledger spelling binding survives a concurrent first import",
+      "objective": "T-119's REJECT. The binding runs at the BOTTOM of apps/trust/src/ledger/__init__.py, after the eager `from .canonical import (...)` at the top, so it depends on the two spellings' module executions being strictly sequenced. When both spellings are first imported CONCURRENTLY, both execute and the binding does not hold \u2014 the property T-119 was written to guarantee fails under the one condition nobody tested. Also: _publish's docstring says 'both halves matter' and that the sys.modules entry alone is insufficient for `import apps.trust.src.ledger.store` plus attribute access; that claim is correct and the setattr half is completely ungraded \u2014 deleting it keeps the suite green.",
+      "refs": [
+        "T-119",
+        "W3-verify-trust-HIGH"
+      ],
+      "acceptance": [
+        "1. The binding holds when both spellings are first imported concurrently, proven by a test that races them",
+        "2. Deleting the setattr half of _publish turns a test red",
+        "3. The sys.path.append fallback's global side effect on the interpreter is either removed or documented and tested"
+      ],
+      "verify": "pytest apps/trust -q && pytest e2e/test_jcs_conformance.py -q",
+      "scope": "apps/trust/**",
+      "depends_on": [
+        "T-119"
+      ],
+      "non_goals": [
+        "Do not weaken the T-106 conformance gate to accommodate this"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-127",
+      "title": "The chain_head DELETE arm is graded by property, not by enumeration",
+      "objective": "T-114's REJECT, clause 3. The lane closed the statement-shape half well \u2014 ten DELETE shapes across two replication roles \u2014 but the session-state half is still graded by ENUMERATING three states, so a conditional exemption inside the DELETE branch that keys on any state nobody listed would pass. The ticket's own objective clause 3 ('a conditional exemption inside the DELETE branch would pass') therefore still reproduces. Also: the lane found, documented at length and fixed the hazard that plain `ALTER TABLE ... ENABLE TRIGGER` restores tgenabled to 'O' rather than the 'A' the migration installs \u2014 then left two other sites (test_ledger_chain.py:1410, :1478) spelled the dangerous way.",
+      "refs": [
+        "D16",
+        "T-114",
+        "W3-verify-trust-HIGH"
+      ],
+      "acceptance": [
+        "1. The DELETE arm is asserted unconditional as a property rather than over an enumerated state list",
+        "2. Both remaining ENABLE TRIGGER sites use the ALWAYS spelling, with a test that catches the plain one",
+        "3. A conditional exemption injected into the DELETE branch turns a test red whatever it keys on"
+      ],
+      "verify": "pytest apps/trust/tests/test_ledger_chain.py -q",
+      "scope": "apps/trust/**, db/migrations/**",
+      "depends_on": [
+        "T-114"
+      ],
+      "non_goals": [
+        "Do not weaken the ten-shape coverage the lane added"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-128",
+      "title": "Guards that cannot refuse anything are removed, not tested tautologically",
+      "objective": "The wave's signature failure mode, reproduced INSIDE the fix meant to correct it. T-113 added `assertSignableNumbers(covered, options, \"submission\")` at ts/signing.ts:470 and five vitest cases to prove it. Deleting the guard leaves ALL 586 vitest tests green. The commit message and the test comment both claim auction_id and store_id reach canonicalJson through `covered` and never through payloadHash \u2014 that is false: NON_BODY_KEYS is exactly {signer_id, key_id, issued_at, nonce, signature}, so payloadHash's body already contains them and already walks them. The only SIGNED_FIELDS outside body are the four missingSigningFields has already forced to be non-blank strings, which can never hold a number. The guard cannot refuse anything the body check does not already refuse.",
+      "refs": [
+        "T-113",
+        "W3-verify-contracts"
+      ],
+      "acceptance": [
+        "1. The dead guard is removed, or a case is produced that ONLY it can refuse",
+        "2. The five tautological tests are replaced by ones that fail when the guard is deleted",
+        "3. The false claim is corrected in both the commit-adjacent comment and the docstring"
+      ],
+      "verify": "npx vitest run packages/contracts",
+      "scope": "packages/contracts/**",
+      "depends_on": [
+        "T-113"
+      ],
+      "non_goals": [
+        "Do not delete the tests without replacing the coverage"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-129",
+      "title": "Wave-3 verification residue: nine findings across four lanes",
+      "objective": "Batched from the four re-run adversarial verifications; each is real and reproduced, individually too small for its own ticket. CONTRACTS: both text doors unconditionally pass {allowUnsafeIntegers: true}, switching the value-domain guard OFF for the whole payload on a stated justification that is false; and ts/signing.ts's module header still asserts Python/TS equivalence unqualified after T-113 introduced a split. INGEST: the read-back backstop is the only thing keeping `degraded` from becoming T-101's silent-complete marker under a new name and is itself ungraded; T-118(c) removed the no-op loop from one branch and left it live on the other while the message promises it cannot happen; the remediation names a CLI that still exits non-zero; an all-unembeddable catalog now returns [] with no exception where it used to raise. STUB: the anti-drift test reads __doc__ only to assert two substrings are present; the delivery-log fix added a last-attempt claim with no fixture that distinguishes last from first; the module route table omits GET /_stub/codes; the replacement prose contains a new inaccuracy about U+0085. TRUST: two ENABLE TRIGGER sites (covered by T-127).",
+      "refs": [
+        "W3-verify-all"
+      ],
+      "acceptance": [
+        "1. Each finding is fixed or dismissed with a one-line reason recorded in the commit",
+        "2. Every fix carries a test that fails without it",
+        "3. No fix widens the scope of the lane it came from"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "scope": "packages/contracts/**, services/ingest/**, services/shopify-stub/**, apps/trust/**",
+      "depends_on": [
+        "T-113",
+        "T-116",
+        "T-118"
+      ],
+      "non_goals": [
+        "Do not batch these into one commit; one concern per commit"
+      ],
+      "parallel_safe": false
     }
   ]
 }
