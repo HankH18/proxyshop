@@ -18,9 +18,11 @@ import {
   isSignedBidSubmission,
   keyringSecret,
   missingSigningFields,
+  parseSignableJson,
   payloadHash,
   signingEnvelopeErrors,
 } from "../src/ts/signing.js";
+import type {Payload} from "../src/ts/signing.js";
 import {isValid} from "../src/ts/schemas.js";
 import {makeBid, makeOffer, makeSubmission} from "./fixtures.js";
 
@@ -480,5 +482,130 @@ describe("RFC 8785 §3.2.2.2 — lone surrogates", () => {
     for (const wire of LONE_SURROGATE_WIRE) {
       expect(() => canonicalJson({s: JSON.parse(wire)})).toThrow(CanonicalisationError);
     }
+  });
+});
+
+// --- T-103: RFC 8785 §3.1 at the door JavaScript actually loses precision at -------------
+
+/**
+ * Integer literals that have NO exact double, paired with what `JSON.parse` silently delivers
+ * instead. Written as wire text, never as JS literals: the whole defect is that the literal form
+ * is already the wrong number by the time it is a value, so a test written with literals could
+ * not state the input it means.
+ *
+ * The Python peer refuses all of these inside `canonical_json`
+ * (`tests/test_signing_envelope.py`), and refused them while TypeScript signed the coercion —
+ * which is a Node seller signing a quantity its own submission does not state.
+ */
+const NON_DOUBLE_INTEGER_WIRE: ReadonlyArray<readonly [string, string]> = [
+  ["9007199254740993", "9007199254740992"], // 2**53 + 1
+  ["18446744073709551617", "18446744073709552000"], // 2**64 + 1
+  ["100000000000000000000000", "1e+23"], // 10**23
+  ["-9007199254740993", "-9007199254740992"],
+  ["123456789012345678901234567890", "1.2345678901234568e+29"],
+];
+
+/** Integers that ARE exact doubles and must keep parsing. Without these the rule could be
+ * satisfied by refusing every large integer, which would break real bids. */
+const EXACT_DOUBLE_INTEGER_WIRE: readonly string[] = [
+  "0",
+  "-0",
+  "1",
+  "-42",
+  "9007199254740992", // 2**53 — outside the safe-integer range and still exact
+  "18446744073709551616", // 2**64
+  "10000000000000000", // 10**16, which a safe-integer bound wrongly rejects
+];
+
+describe("RFC 8785 §3.1 — parsing refuses integers the wire cannot state", () => {
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses the integer literal %s", (literal) => {
+    expect(() => parseSignableJson(`{"quantity":${literal}}`)).toThrow(CanonicalisationError);
+    expect(() => parseSignableJson(`{"quantity":${literal}}`)).toThrow(/IEEE-754 double/);
+  });
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)(
+    "would otherwise have signed %s as %s",
+    (literal, coerced) => {
+      // The defect, pinned as the reason the guard exists: plain `JSON.parse` hands back a
+      // DIFFERENT number and `canonicalJson` writes it into the signed bytes without complaint.
+      const parsed = JSON.parse(`{"quantity":${literal}}`) as {quantity: number};
+      expect(canonicalJson(parsed)).toBe(`{"quantity":${coerced}}`);
+      expect(String(parsed.quantity)).not.toBe(literal);
+    },
+  );
+
+  it.each(NON_DOUBLE_INTEGER_WIRE)("refuses %s nested anywhere in the payload", (literal) => {
+    expect(() => parseSignableJson(`[{"offer":{"quantity":${literal}}}]`)).toThrow(
+      CanonicalisationError,
+    );
+    expect(() => parseSignableJson(`[1,[2,[${literal}]]]`)).toThrow(CanonicalisationError);
+    expect(() => parseSignableJson(literal)).toThrow(CanonicalisationError);
+  });
+
+  it.each(EXACT_DOUBLE_INTEGER_WIRE)("still parses the exact double %s", (literal) => {
+    const parsed = parseSignableJson(`{"quantity":${literal}}`) as {quantity: number};
+    expect(parsed.quantity).toBe(Number(literal));
+  });
+
+  it("does not mistake digits inside strings for numbers", () => {
+    // The scan walks raw text, so it has to know where strings end — including a string whose
+    // last character is an escaped quote, and one holding an escaped backslash.
+    const wire =
+      '{"note":"9007199254740993","escaped":"a\\"9007199254740993","tail":"b\\\\","n":1}';
+    expect(parseSignableJson(wire)).toEqual({
+      note: "9007199254740993",
+      escaped: 'a"9007199254740993',
+      tail: "b\\",
+      n: 1,
+    });
+  });
+
+  it("leaves fractional and exponential literals to the float rules both sides share", () => {
+    // `json.loads` gives Python a `float` for these too, so there is nothing to disagree about:
+    // 0.1 is the same double in both languages, and `1e400` is Infinity in both.
+    expect(parseSignableJson('{"a":0.1,"b":1e-5,"c":1.5e300}')).toEqual({
+      a: 0.1,
+      b: 1e-5,
+      c: 1.5e300,
+    });
+    expect(canonicalJson(parseSignableJson('{"b":1e-5}'))).toBe('{"b":0.00001}');
+  });
+
+  it("refuses an integer too large for a double at all", () => {
+    expect(() => parseSignableJson(`{"n":${"9".repeat(400)}}`)).toThrow(CanonicalisationError);
+  });
+
+  it("still reports malformed JSON as a SyntaxError, not a canonicalisation failure", () => {
+    // A parse failure is not a signing failure, and collapsing the two would tell a caller the
+    // wrong thing about a truncated request body.
+    expect(() => parseSignableJson('{"a":')).toThrow(SyntaxError);
+    expect(() => parseSignableJson('{"a":')).not.toThrow(CanonicalisationError);
+  });
+
+  it("refuses a non-string argument rather than parsing its coercion", () => {
+    expect(() => parseSignableJson(42 as never)).toThrow(CanonicalisationError);
+  });
+
+  it("round-trips a real submission unchanged", () => {
+    // The positive control: the guard must not change what a legal submission parses to, or the
+    // canonical bytes would move and every existing signature with them.
+    const payload = makeSubmission();
+    const wire = JSON.stringify(payload);
+    expect(canonicalSigningBytes(parseSignableJson(wire) as Payload)).toEqual(
+      canonicalSigningBytes(payload),
+    );
+    expect(decode(canonicalSigningBytes(parseSignableJson(wire) as Payload))).toBe(
+      EXPECTED_CANONICAL_BYTES,
+    );
+  });
+
+  it("keeps the coerced quantity out of the payload hash entirely", () => {
+    // The end-to-end consequence. Without the guard `payloadHash` digests 9007199254740992 and
+    // the signature covers a quantity the seller never wrote.
+    const wire = JSON.stringify({...makeSubmission(), quantity: 0}).replace(
+      '"quantity":0',
+      '"quantity":9007199254740993',
+    );
+    expect(() => parseSignableJson(wire)).toThrow(CanonicalisationError);
   });
 });

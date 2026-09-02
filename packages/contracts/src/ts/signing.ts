@@ -75,6 +75,106 @@ function assertDoubleRepresentable(value: bigint): never {
 }
 
 /**
+ * RFC 8785 §3.1, enforced where JavaScript can still see the truth: at PARSE time.
+ *
+ * `assertDoubleRepresentable` only ever sees a `bigint`, and `JSON.parse` never produces one. By
+ * the time a wire integer is a `number` the damage is already done and silent —
+ * `JSON.parse('{"quantity":9007199254740993}')` yields `9007199254740992`, `2**64+1` yields
+ * `18446744073709552000` and `10**23` yields `1e+23` — so `canonicalJson` would sign, and
+ * `payloadHash` would digest, a value the submission does not state. The Python peer refuses all
+ * three, because its `int` is arbitrary precision and `float(v) == v` is checkable after parsing.
+ *
+ * The only place TypeScript can still apply the same rule is the literal text. This walks the
+ * raw JSON, skipping string contents, and round-trips every INTEGER literal through the double
+ * it would become. Fractional and exponential literals are deliberately not checked: Python's
+ * `json.loads` gives those to `float` too, so both sides already agree on them.
+ */
+function assertIntegerLiteralsAreDoubles(text: string): void {
+  const QUOTE = 0x22;
+  const BACKSLASH = 0x5c;
+  const MINUS = 0x2d;
+  const isDigit = (unit: number): boolean => unit >= 0x30 && unit <= 0x39;
+
+  let index = 0;
+  while (index < text.length) {
+    const unit = text.charCodeAt(index);
+    if (unit === QUOTE) {
+      index += 1;
+      while (index < text.length) {
+        const inner = text.charCodeAt(index);
+        if (inner === BACKSLASH) {
+          index += 2; // an escape never ends a string, whatever it escapes
+          continue;
+        }
+        index += 1;
+        if (inner === QUOTE) break;
+      }
+      continue;
+    }
+    if (unit !== MINUS && !isDigit(unit)) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    let integral = true;
+    index += 1;
+    while (index < text.length) {
+      const next = text.charCodeAt(index);
+      if (isDigit(next)) {
+        index += 1;
+        continue;
+      }
+      // `.`, `e`, `E` and the sign of an exponent are the only other characters a JSON number
+      // may carry, and any one of them means this literal parses as a float on BOTH sides.
+      if (next === 0x2e || next === 0x65 || next === 0x45 || next === 0x2b || next === MINUS) {
+        integral = false;
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    if (integral) assertIntegerLiteralRoundTrips(text.slice(start, index));
+  }
+}
+
+/** One integer literal, checked against the double `JSON.parse` would hand back. */
+function assertIntegerLiteralRoundTrips(literal: string): void {
+  const asDouble = Number(literal);
+  if (Number.isFinite(asDouble) && Number.isInteger(asDouble) && BigInt(asDouble) === BigInt(literal)) {
+    return;
+  }
+  const delivered = Number.isFinite(asDouble) ? String(asDouble) : "Infinity";
+  throw new CanonicalisationError(
+    `parseSignableJson cannot accept the integer ${literal}: RFC 8785 §3.1 requires a JSON ` +
+      "number to be expressible as an IEEE-754 double, and this one is not. JSON.parse would " +
+      `deliver ${delivered}, and signing that would cover a value the submission does not state.`,
+  );
+}
+
+/**
+ * Parse wire JSON that is about to be signed or verified, refusing what the wire cannot state.
+ *
+ * Use this instead of `JSON.parse` on anything heading for `canonicalSigningBytes`,
+ * `payloadHash` or `canonicalJson`. It is the TypeScript half of the RFC 8785 §3.1 rule the
+ * Python peer enforces inside `canonical_json`: an integer with no exact double is refused with
+ * `CanonicalisationError` — the same error type, so a caller's one `catch` still covers it —
+ * rather than quietly becoming a different number.
+ *
+ * Malformed JSON is still a `SyntaxError`, unchanged: that is a parse failure, not a signing one.
+ */
+export function parseSignableJson(text: string): unknown {
+  if (typeof text !== "string") {
+    throw new CanonicalisationError(
+      `parseSignableJson expects the raw JSON text, got ${typeof text}; the check it performs ` +
+        "is only possible on the literal, which an already-parsed value has thrown away",
+    );
+  }
+  const value: unknown = JSON.parse(text);
+  assertIntegerLiteralsAreDoubles(text);
+  return value;
+}
+
+/**
  * RFC 8785 §3.2.2.2: a lone surrogate MUST terminate canonicalisation with an error.
  *
  * A JS string is a sequence of UTF-16 code units, so a well-formed astral character is a HIGH
