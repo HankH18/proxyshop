@@ -2114,6 +2114,39 @@
         "Do not batch these into one commit; one concern per commit"
       ],
       "parallel_safe": false
+    },
+    {
+      "id": "T-130",
+      "title": "Sub-HIGH findings from the feature-wave checkers (backlog sweep, not a wave)",
+      "objective": "Recorded so nothing is lost, per the user's standing instruction: report every severity, but only HIGH and above interrupts the build. These are the MEDIUM findings the five feature-lane checkers raised against T-030/T-036, T-040, T-050, T-070 and T-080. Sweep them in ONE batch when the feature frontier is built out \u2014 do NOT spawn a wave per finding, and do not let them displace unbuilt features.\n\n  [MEDIUM] storeagent: provenance.py:167-176 (`claim_fingerprint`'s `material` dict \u2014 The fingerprint covers key, value, claim_type, unit and the full provenance, but silently omits `Claim.source_span`. The docstring justifies excluding `claim_id` and does\n  [MEDIUM] storeagent: lint.py:41 and 66-73 (`GUARDED_CONSTRUCTORS`, `_called_name` \u2014 The static half of acceptance criterion 3 matches only the bare callee name `Claim`/`Provenance`, so three ordinary spellings of the same forgery pass it: an aliased impo\n  [MEDIUM] merchant: oauth.py:121 \u2014 Both signature verifiers call `hmac.compare_digest` with two `str` arguments, one of which is fully attacker-controlled. CPython's `compare_digest` raises `TypeError: com\n  [MEDIUM] merchant: webhooks.py:154-156 (WebhookInbox.record) \u2014 The webhook-id replay guard is evicted in lockstep with the bounded event ring: when the inbox exceeds `INBOX_CAPACITY` (512) it pops the oldest event and does `self._see\n  [MEDIUM] buyer: magic_link.py:172 (`_pending` field), 176-190 (request_login \u2014 `_pending` is an unbounded dict that is only ever written to. `request_login` inserts one `_PendingLink` per call and nothing ever removes an entry: expiry is only checke\n  [MEDIUM] fixtures: __init__.py:175 \u2014 sku = f\"{_slug(store_id)[:6].upper()}-{_sl \u2014 The [:6] truncation erases the store discriminator completely. Every store_id in the manifest roster begins with the literal prefix 'store-' (store-brightbean, store-nort\n  [MEDIUM] exchange: fanout.py:82-104 \u2014 R10 is \"solicited synchronously and in parallel with a hard timeout\", and `solicit_bids` is the public orchestration boundary D54 puts that guarantee on \u2014 but its default\n  [MEDIUM] exchange: collect.py:73-89 (`_list_price_bid`) \u2014 The port conflates \"absent checkout_url\" with \"off-domain checkout_url\" and refuses both. Every list-price fallback bid T-030 manufactures \u2014 `_list_price_bid` builds `off",
+      "refs": [
+        "F1-checkers"
+      ],
+      "acceptance": [
+        "1. Each listed finding is fixed or dismissed with a one-line reason recorded in the commit",
+        "2. Every fix carries a test that fails without it",
+        "3. Swept in one batch, after the ready feature frontier is built"
+      ],
+      "verify": "./scripts/verify.sh check",
+      "scope": [
+        "apps/exchange/**",
+        "packages/store-agent/**",
+        "apps/merchant/**",
+        "apps/buyer/**",
+        "fixtures/**"
+      ],
+      "depends_on": [
+        "T-030",
+        "T-040",
+        "T-050",
+        "T-070",
+        "T-080"
+      ],
+      "non_goals": [
+        "Do not spawn a wave for these",
+        "Do not let these displace unbuilt feature tickets"
+      ],
+      "parallel_safe": false
     }
   ]
 }
