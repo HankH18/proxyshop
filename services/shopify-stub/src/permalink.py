@@ -38,12 +38,26 @@ PERMALINK_TEMPLATE = "https://{shop_domain}/cart/{variant_id}:{quantity}?discoun
 #: absolute end of the string and has no such newline exception.
 _LABEL = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
-#: Anything that must never reach a URL this module renders into an HTTP header. CR and LF
-#: are the response-splitting characters; the rest of C0, DEL and the space are refused with
-#: them because a header value has no legitimate use for any of them and an allow-list that
-#: enumerates "the control characters we thought of" is the mistake ``_LABEL`` exists to
-#: avoid repeating.
-_FORBIDDEN_IN_PATH = re.compile(r"[\x00-\x20\x7f]")
+#: Anything that must never reach a URL this module renders into an HTTP header. Written as
+#: an **allow-list** — only the printable ASCII graphic characters, ``!`` through ``~``
+#: (0x21-0x7E), may appear in a path — for exactly the reason ``_LABEL`` is one.
+#:
+#: CR and LF are the response-splitting characters; the rest of C0, DEL and the space are
+#: refused with them because a header value has no legitimate use for any of them. So is
+#: everything outside ASCII, because a URL path is ASCII by RFC 3986 and anything else is
+#: either a percent-encoding the caller forgot or a byte that cannot survive the trip.
+#:
+#: The deny-list this replaces, ``[\x00-\x20\x7f]``, enumerated "the control characters we
+#: thought of" and missed the whole C1 block — the mistake ``_LABEL`` exists to avoid
+#: repeating, made one line below it. ``U+0085`` NEL is a control character by every
+#: definition (Unicode category ``Cc``), and it passed straight through into a ``Location``
+#: header, where Starlette's latin-1 header encoding put a bare ``0x85`` byte on the wire.
+#: ``U+2028``, ``U+2029`` and every other character above ``U+00FF`` were worse: they passed
+#: the guard and then died inside the ASGI server with ``UnicodeEncodeError`` — a 500 raised
+#: three layers away from the call that caused it, which is the precise failure mode
+#: :func:`store_url` says raising here is meant to replace. See
+#: ``test_stub_domain_guard.test_a_c1_control_slipped_the_old_deny_list``.
+_FORBIDDEN_IN_PATH = re.compile(r"[^\x21-\x7e]")
 
 #: RFC 1035's limit on a fully-qualified name.
 MAX_HOST_LENGTH = 253
@@ -118,17 +132,30 @@ def store_url(*, shop_domain: str, path: str) -> str:
         ``https://{shop_domain}{path}``.
 
     Raises:
-        PermalinkError: the host is not a bare DNS name, or the path is relative or carries
-            a control character. Raising is deliberately preferred to rendering: a stub that
-            500s is a loud bug, whereas a stub that returns a well-formed redirect to
-            somebody else's checkout is a silent one that its consumers will copy.
+        PermalinkError: the host is not a bare DNS name, or the path is relative, or the
+            path carries any character outside printable ASCII ``0x21``-``0x7E``. That set
+            is stated exhaustively rather than as "a control character", because the two are
+            not the same set in either direction and the prose used to claim both halves
+            wrongly: the **space** ``U+0020`` is refused and is not a control character,
+            while the **C1 controls** ``U+0080``-``U+009F`` are control characters and used
+            to be accepted. What is refused is CR, LF, the rest of C0, DEL, the space, and
+            every non-ASCII character — C1 controls, ``U+00A0``, the Unicode separators
+            ``U+2028``/``U+2029``, the format characters and everything above them included
+            (:data:`_FORBIDDEN_IN_PATH`). The set is pinned character by character by
+            ``test_stub_domain_guard.test_store_url_refuses_every_c0_control_the_space_and_del``
+            and its two companions, so this clause cannot drift from the behaviour again.
+
+            Raising is deliberately preferred to rendering: a stub that 500s is a loud bug,
+            whereas a stub that returns a well-formed redirect to somebody else's checkout
+            is a silent one that its consumers will copy.
     """
     _assert_bare_host(shop_domain)
     if not path.startswith("/"):
         raise PermalinkError(f"store URL path must be absolute (start with '/'), got {path!r}")
     if _FORBIDDEN_IN_PATH.search(path):
         raise PermalinkError(
-            f"store URL path must not contain control characters or spaces, got {path!r}"
+            "store URL path must be printable ASCII (no control characters, no spaces, "
+            f"nothing above U+007E), got {path!r}"
         )
     return f"https://{shop_domain}{path}"
 

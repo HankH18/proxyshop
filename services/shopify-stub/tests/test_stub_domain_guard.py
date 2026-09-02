@@ -32,6 +32,8 @@ was a legal host. A bare LF in a ``Location`` header ends the header.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -42,7 +44,13 @@ import httpx
 import pytest
 from shopify_stub.app import create_app
 from shopify_stub.orders import create_order_from_checkout, order_webhook_payload
-from shopify_stub.permalink import PermalinkError, _assert_bare_host, build_permalink, store_url
+from shopify_stub.permalink import (
+    _FORBIDDEN_IN_PATH,
+    PermalinkError,
+    _assert_bare_host,
+    build_permalink,
+    store_url,
+)
 from shopify_stub.state import (
     DEFAULT_SHOP_DOMAIN,
     Checkout,
@@ -364,3 +372,105 @@ def test_store_url_refuses_a_path_that_could_split_the_response(path: str) -> No
     """The host is not the only way a control character reaches a header value."""
     with pytest.raises(PermalinkError):
         store_url(shop_domain=OTHER_DOMAIN, path=path)
+
+
+# ---------------------------------------------------------------------------------------
+# T-118 (d): the Raises clause, pinned character by character
+# ---------------------------------------------------------------------------------------
+#
+# The five cases above are a *sample*. A sample is what let `store_url`'s docstring and
+# `_FORBIDDEN_IN_PATH` drift apart in two directions at once while every test stayed green:
+#
+#   * the docstring said the path raises when it "carries a control character", and said
+#     nothing about the space — but the space (U+0020, Unicode category `Zs`, not a control
+#     character at all) was refused; and
+#   * `[\x00-\x20\x7f]` covered the C0 block and stopped there, so U+0085 NEL — a control
+#     character by every definition — was *accepted*, and Starlette's latin-1 header
+#     encoding put a bare 0x85 byte into a live `Location`.
+#
+# The three parametrizations below are the whole ASCII range plus the characters that used
+# to escape, one case each, so the prose can only drift again by turning a test red.
+
+#: Everything the constant's comment claims is refused alongside CR and LF: the C0 block,
+#: the space, and DEL. Written as code points so no raw control byte appears in this file.
+_C0_SPACE_AND_DEL = [chr(cp) for cp in range(0x00, 0x21)] + ["\x7f"]
+
+#: The characters the old deny-list missed, written as escapes so no exotic byte sits
+#: literally in this source file. Every one of them was ACCEPTED by ``[\x00-\x20\x7f]``.
+_OLD_DENY_LIST_ESCAPEES = [
+    "\u0080",  # C1 PAD
+    "\u0085",  # C1 NEL - historically a line terminator to some parsers
+    "\u009f",  # C1 APC
+    "\u00a0",  # NBSP
+    "\u2028",  # LINE SEPARATOR - a JS line terminator inside a <script> JSON literal
+    "\u2029",  # PARAGRAPH SEPARATOR
+    "\u202e",  # RIGHT-TO-LEFT OVERRIDE - display spoofing in a live link
+    "\u200b",  # ZERO WIDTH SPACE
+    "\ufeff",  # BOM / ZWNBSP
+    "\u4e2d",  # a plain CJK ideograph: legal text, but not latin-1, so the ASGI
+    #            server raised UnicodeEncodeError three layers from the caller
+    #            instead of this function raising PermalinkError at the call site
+]
+
+#: The positive control. Every printable ASCII graphic character is still legal in a path,
+#: so the guard cannot be "fixed" by refusing everything.
+_PRINTABLE_ASCII = [chr(cp) for cp in range(0x21, 0x7F)]
+
+
+@pytest.mark.parametrize("char", _C0_SPACE_AND_DEL, ids=lambda c: f"U+{ord(c):04X}")
+def test_store_url_refuses_every_c0_control_the_space_and_del(char: str) -> None:
+    """The full set `_FORBIDDEN_IN_PATH`'s comment claims, not a sample of it."""
+    with pytest.raises(PermalinkError):
+        store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{char}")
+
+
+@pytest.mark.parametrize("char", _OLD_DENY_LIST_ESCAPEES, ids=lambda c: f"U+{ord(c):04X}")
+def test_store_url_refuses_the_characters_outside_ascii(char: str) -> None:
+    """The other half of the drift: the docstring promised these and the code allowed them."""
+    assert re.compile(r"[\x00-\x20\x7f]").search(char) is None, (
+        "this case is only interesting because the old deny-list let it through"
+    )
+    with pytest.raises(PermalinkError):
+        store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{char}")
+
+
+@pytest.mark.parametrize("char", _PRINTABLE_ASCII, ids=lambda c: f"U+{ord(c):04X}")
+def test_store_url_accepts_every_printable_ascii_character(char: str) -> None:
+    """The positive control: refusing everything is not a fix."""
+    assert store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{char}") == (
+        f"https://{OTHER_DOMAIN}/checkouts/abc{char}"
+    )
+
+
+def test_a_c1_control_slipped_the_old_deny_list() -> None:
+    """The reproduction, kept executable so the regression is a fact and not a memory.
+
+    ``U+0085`` is Unicode category ``Cc`` — a control character — and the old
+    ``[\\x00-\\x20\\x7f]`` did not match it. The rendered URL then went into a ``Location``
+    header, which Starlette encodes latin-1, so a raw ``0x85`` byte reached the wire.
+    """
+    escaped = "/checkouts/abc\x85"
+    assert unicodedata.category("\x85") == "Cc", "U+0085 is a control character"
+    assert re.compile(r"[\x00-\x20\x7f]").search(escaped) is None, (
+        "the old deny-list did not match U+0085 — this is the defect"
+    )
+    rendered_by_the_old_code = f"https://{OTHER_DOMAIN}{escaped}"
+    assert rendered_by_the_old_code.encode("latin-1").endswith(b"\x85"), (
+        "and a bare 0x85 is what a latin-1 header encoding would have put on the wire"
+    )
+    with pytest.raises(PermalinkError, match="printable ASCII"):
+        store_url(shop_domain=OTHER_DOMAIN, path=escaped)
+
+
+def test_the_raises_clause_and_the_guard_describe_the_same_set() -> None:
+    """Anti-drift: the docstring must keep naming the boundary the code enforces."""
+    doc = store_url.__doc__ or ""
+    assert "0x21" in doc and "0x7E" in doc, (
+        "store_url's Raises clause must state the printable-ASCII boundary it enforces"
+    )
+    for code_point in (0x20, 0x7F, 0x85, 0x2028):
+        char = chr(code_point)
+        assert _FORBIDDEN_IN_PATH.search(char), f"U+{code_point:04X} must be forbidden"
+    for code_point in (0x21, 0x2F, 0x7E):
+        char = chr(code_point)
+        assert not _FORBIDDEN_IN_PATH.search(char), f"U+{code_point:04X} must be allowed"
