@@ -2206,3 +2206,73 @@ def test_every_ledger_integrity_trigger_is_installed_enable_always(ledger_clean)
         f"skips them. Measured with all five at 'O': DELETE FROM ledger.chain_head "
         f"succeeded with rowcount 1."
     )
+
+
+@pytest.mark.docker
+def test_the_anchor_guard_does_not_depend_on_who_is_connected_or_how(ledger_clean) -> None:
+    """The other half of "one fixed statement shape from ONE connection".
+
+    A conditional exemption does not have to key on the statement. ``current_user``,
+    ``application_name``, ``pg_backend_pid()``, ``inet_client_addr()`` and any
+    ``current_setting('...')`` are all in reach of a plpgsql trigger, and every test in this
+    block until now drove the arm from one admin connection with default session settings --
+    so an exemption written against connection-level state would have gone straight through
+    the whole file. Three connections, three identities, one arm.
+
+    The DELETE arm is unconditional. There is no legitimate delete of the anchor row from
+    any session, so there is nothing here that a session can say about itself that should
+    change the answer.
+    """
+    connection = ledger_clean
+    for index in range(2):
+        append_event(connection, observation_event(index))
+
+    dsn = _admin_dsn(connection)
+    identities = (
+        ("default", {}, ()),
+        ("named application", {"application_name": "proxyshop-t114-probe"}, ()),
+        (
+            "custom GUCs set",
+            {"application_name": "pg_dump"},
+            (
+                "set local proxyshop.maintenance = 'on'",
+                "set local statement_timeout = '30s'",
+                "set local search_path to ledger, public",
+            ),
+        ),
+    )
+
+    pids = set()
+    for label, kwargs, prelude in identities:
+        with psycopg.connect(dsn, connect_timeout=5, **kwargs) as owner:
+            try:
+                with owner.cursor() as cur:
+                    for statement in prelude:
+                        cur.execute(statement)
+                    cur.execute("select pg_backend_pid()")
+                    pids.add(cur.fetchone()[0])
+                    cur.execute(
+                        "select has_table_privilege(current_user, 'ledger.chain_head', 'DELETE')"
+                    )
+                    assert cur.fetchone() == (True,), label
+                    # The prelude has to survive into the statement's own transaction, so it
+                    # is re-run there rather than trusted to persist across the rollback.
+                    for statement in prelude:
+                        cur.execute(statement)
+                    try:
+                        cur.execute("delete from ledger.chain_head")
+                    except psycopg.errors.IntegrityConstraintViolation as exc:
+                        assert ANCHOR_DELETE_REFUSAL in str(exc), f"{label}: {exc}"
+                    else:
+                        raise AssertionError(
+                            f"[{label}] deleting the anchor SUCCEEDED "
+                            f"(rowcount={cur.rowcount}). The arm is conditional on something "
+                            f"about the session, which is not a distinction it is allowed to "
+                            f"make: there is no legitimate DELETE of this row."
+                        )
+            finally:
+                owner.rollback()
+
+    assert len(pids) == 3, f"the three probes shared a backend: {pids}"
+    assert chain_anchor_of(connection)["length"] == 2
+    assert verify_chain_in_db(connection)["ok"] is True
