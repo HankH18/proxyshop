@@ -203,3 +203,15 @@ cycle,metric_id,value,error,timestamp,source
 8,e6_trust_passing,2.0,24.0,2026-09-02T16:04:52,measure
 8,e7_buyer_passing,2.0,7.0,2026-09-02T16:04:52,measure
 8,e8_proofs_passing,5.0,3.0,2026-09-02T16:04:52,measure
+9,acceptance_pass_rate,35.83,64.17,2026-09-02T17:49:09,measure
+9,acceptance_collected,120.0,0.0,2026-09-02T17:49:09,measure
+9,build_succeeds,1.0,0.0,2026-09-02T17:49:09,measure
+9,spec_criteria_passing,8.0,0.0,2026-09-02T17:49:09,measure
+9,e1_foundation_passing,10.0,0.0,2026-09-02T17:49:09,measure
+9,e2_ingestion_passing,6.0,2.0,2026-09-02T17:49:09,measure
+9,e3_exchange_passing,3.0,18.0,2026-09-02T17:49:09,measure
+9,e4_store_agent_passing,3.0,17.0,2026-09-02T17:49:09,measure
+9,e5_merchant_passing,4.0,6.0,2026-09-02T17:49:09,measure
+9,e6_trust_passing,2.0,24.0,2026-09-02T17:49:09,measure
+9,e7_buyer_passing,2.0,7.0,2026-09-02T17:49:09,measure
+9,e8_proofs_passing,5.0,3.0,2026-09-02T17:49:09,measure
