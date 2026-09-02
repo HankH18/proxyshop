@@ -39,6 +39,7 @@ from .model import (
 from .schema import (
     EMBEDDING_RUN_COMPLETE,
     EMBEDDING_RUN_DEGRADED,
+    EMBEDDING_RUN_RUNNING,
     VECTOR_INDEX_NAME,
     embedding_run,
 )
@@ -92,11 +93,21 @@ class EmbeddingProviderMismatch(VectorIndexUnusable):
 
 
 class EmbeddingRunIncomplete(VectorIndexUnusable):
-    """The recorded re-embed pass never reached its end.
+    """The recorded re-embed pass left the index holding more than one vector space.
 
     The per-product writes auto-commit, so an interruption part-way leaves two vector spaces
     inside one index while ``products_missing_embeddings()`` still reports ``[]``. Cosine
     across two spaces is noise, so the query refuses rather than ranks.
+
+    Two graph states raise this, and their remediations are opposites — the message says
+    which one it is, and ``EmbeddingRun.skipped`` is the discriminator:
+
+    * an **interrupted** pass (the opening ``running`` stamp, empty skip list): re-running
+      the pass fixes it, and always terminates;
+    * a pass that **reached its end** and whose read-back found products it skipped still
+      carrying a vector (the closing ``running`` stamp, non-empty skip list): re-running is
+      a fixed point — it skips the same products for the same reason. The named vectors
+      have to be removed, or the reason the removal did not take found.
 
     Deliberately **not** raised for a pass that reached its end having skipped products it
     could not embed (:data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED`). That pass left one
@@ -362,9 +373,12 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             Checked *here*, before any parameter is built, because the raw path answered a
             512-d vector with ``neo4j.exceptions.ClientError`` — neither of the exceptions
             the docstring declares, and not even a ``ValueError``.
-        EmbeddingRunIncomplete: the recorded pass never reached its end, so the index holds
-            two vector spaces and every cosine across them is noise. A pass that reached its
-            end having *skipped* products does not raise: see the class docstring.
+        EmbeddingRunIncomplete: the index holds two vector spaces — either because the pass
+            never reached its end, or because it did and its read-back caught skipped
+            products still carrying a vector. The message distinguishes them, because the
+            remediations are opposites. A pass that reached its end having *skipped*
+            products whose vectors were really removed does not raise: see the class
+            docstring.
         EmbeddingProviderMismatch: the vectors were written by another provider.
     """
     run = embedding_run(session)
@@ -392,6 +406,35 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
     # `products_missing_embeddings()` names them. That is a per-product degradation and it
     # is already visible without refusing anybody else's query.
     if not run.finished:
+        # TWO different graph states reach this line, and they need OPPOSITE remediations.
+        #
+        # `reembed_products` writes `running` twice: once as the opening stamp, with an
+        # empty skip list, and once from the closing stamp when its read-back found a
+        # product it skipped *still carrying a vector*. So `run.skipped` is the
+        # discriminator, and it is exact: the opening stamp always writes `skipped=[]`, and
+        # the closing `running` is only ever reached with a non-empty skip list.
+        #
+        # T-118(c) rewrote this message for the first state — an interrupted pass — and
+        # promised, unconditionally, that re-running the pass "always records an end state".
+        # For the second state that promise is false twice over: the pass *did* reach its
+        # end, and re-running it skips the same products for the same reason, fails the same
+        # read-back and records `running` again. The message T-118(c) removed from one
+        # branch was still being handed to the operator on the other, which is the same
+        # no-op loop wearing the fixed message.
+        if run.skipped:
+            raise EmbeddingRunIncomplete(
+                f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded "
+                f"as {run.state!r}: the pass DID reach its end, but its read-back found "
+                f"{len(run.skipped)} product(s) it skipped still carrying a vector — "
+                f"{', '.join(run.skipped)} — written by an earlier pass into a space this "
+                f"one did not fill, so every cosine across the index is noise. "
+                f"Re-running `python -m ingest.graph.reembed` is NOT the remediation here: "
+                f"it skips the same products for the same reason, its read-back fails "
+                f"again and it records {EMBEDDING_RUN_RUNNING!r} again. Remove those "
+                f"vectors first — `clear_product_embedding(session, product_id=...)` for "
+                f"each id above — or find out why the removal did not take; the next pass "
+                f"then records {EMBEDDING_RUN_DEGRADED!r} and the index is queryable."
+            )
         raise EmbeddingRunIncomplete(
             f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded as "
             f"{run.state!r}: it started writing and never reached its end, so the index "

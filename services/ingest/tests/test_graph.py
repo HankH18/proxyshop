@@ -3334,3 +3334,65 @@ def test_the_degraded_state_is_checked_against_the_graph_not_merely_claimed(
     )
     with pytest.raises(EmbeddingRunIncomplete):
         candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_read_back_refusal_does_not_send_the_operator_into_the_removed_loop(
+    graph_schema_session: Any, graph_source: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-129 (ingest 2): T-118(c) fixed the message on one ``running`` branch, not both.
+
+    ``reembed_products`` records ``running`` twice. The opening stamp, before the first
+    batch, is the interrupted-pass case T-118(c) rewrote the remediation for: "re-run the
+    pass, it always records an end state". The *closing* stamp records ``running`` too,
+    when the read-back finds a product the pass skipped still carrying a vector — and there
+    the same message is false twice over. The pass reached its end, so "it started writing
+    and never reached its end" is wrong; and re-running it skips the same product for the
+    same reason, fails the same read-back and records ``running`` again, so "that
+    remediation terminates" is wrong. The no-op loop T-118(c) removed from one branch was
+    still being handed to the operator on the other.
+
+    The loop is demonstrated here rather than argued: one full extra pass, followed
+    literally, leaves the refusal exactly where it was.
+    """
+    from ingest.graph import EMBEDDING_RUN_RUNNING, EmbeddingRunIncomplete, embedding_run
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-keeps", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-sticky", "About To Lose Its Name"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).complete
+
+    session.run("MATCH (p:Product {product_id: 'p-sticky'}) SET p.canonical_name = ''").consume()
+    # The removal stops taking. Not hypothetical: it is the single point of failure the
+    # whole `degraded` narrowing rests on, which is why the read-back exists at all.
+    monkeypatch.setattr(
+        "ingest.graph.reembed.clear_product_embedding",
+        lambda session, *, product_id: False,
+    )
+    assert reembed_products(session, _SecondProvider()).skipped == ["p-sticky"]
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_RUNNING
+    assert run.skipped == ("p-sticky",), "the closing `running` stamp carries the skip list"
+
+    with pytest.raises(EmbeddingRunIncomplete) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+    message = str(refused.value)
+
+    # Follow the old remediation literally: same provider, one whole pass, no catalog edit.
+    # It is a fixed point — which is exactly what T-118(c) claimed it had removed.
+    assert reembed_products(session, _SecondProvider()).skipped == ["p-sticky"]
+    assert embedding_run(session).state == EMBEDDING_RUN_RUNNING, (
+        "re-running the pass cannot clear this refusal, so the message must not name it"
+    )
+    with pytest.raises(EmbeddingRunIncomplete):
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+
+    assert "remediation terminates" not in message, (
+        "this branch's re-run is a fixed point; promising it terminates is the loop "
+        f"T-118(c) reported closed: {message}"
+    )
+    assert "p-sticky" in message, (
+        "and the operator gets the finite list of vectors to remove — the marker already "
+        f"carries it, so withholding it is a choice: {message}"
+    )
