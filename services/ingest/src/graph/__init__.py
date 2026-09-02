@@ -64,6 +64,7 @@ from .query import (
     candidate_products,
     cosine_from_score,
     products_missing_embeddings,
+    products_missing_status,
 )
 from .reembed import ReembedReport, embedding_text, graph_driver, reembed_products
 from .schema import (
@@ -182,6 +183,7 @@ __all__ = [
     "link_states",
     "lookup_index_statements",
     "products_missing_embeddings",
+    "products_missing_status",
     "provenance_violations",
     "rebuild_vector_index",
     "record_embedding_run",

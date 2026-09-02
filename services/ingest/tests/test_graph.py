@@ -85,6 +85,7 @@ from ingest.graph import (
     link_states,
     lookup_index_statements,
     products_missing_embeddings,
+    products_missing_status,
     provenance_violations,
     rebuild_vector_index,
     reembed_products,
@@ -2789,3 +2790,94 @@ def test_every_pinned_predicate_combination_answers_the_same_question(
         )
     }
     assert found == expected
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_product_with_no_status_is_invisible_but_detectable(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """X3: ``p.status = $status`` is null-valued, not false, for a status-less Product.
+
+    Such a product looks perfectly healthy — sourced, embedded, attributed — and is absent
+    from every shortlist in the system. ``upsert_product`` always writes a status, so it is
+    only reachable from raw Cypher, another library, or an adapter that bypassed this
+    package: the same threat model ``provenance_violations`` covers, and the reason this is
+    a detector rather than a comment.
+    """
+    session = graph_schema_session
+    upsert_product(session, Product("p-normal", "Normal Product"), source=graph_source)
+    session.run(
+        "MATCH (src:Source {source_id: $sid}) "
+        "CREATE (p:Product {product_id: 'p-statusless', canonical_name: 'No Status'}) "
+        "CREATE (p)-[:SUPPORTED_BY]->(src)",
+        sid=graph_source.source_id,
+    ).consume()
+    reembed_products(session, HashEmbedding())
+
+    assert provenance_violations(session) == [], "it is sourced — the provenance audit is clean"
+    assert products_missing_embeddings(session) == [], "and embedded"
+    assert products_missing_status(session) == ["p-statusless"], "but invisible, and now said so"
+
+    default_query = {
+        c.product_id for c in candidate_products(session, query_text=PROBE_A, limit=10)
+    }
+    assert default_query == {"p-normal"}, "the status-less product is absent by default"
+    unfiltered = {
+        c.product_id for c in candidate_products(session, query_text=PROBE_A, status=None, limit=10)
+    }
+    assert unfiltered == {"p-normal", "p-statusless"}, "status=None must reach it"
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_surviving_casing_on_a_shared_attribute_does_not_depend_on_ingest_order(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """X4: ``AttributeValue`` is the one shared material-fact node, and it was last-writer-wins.
+
+    Two products asserting ``skin_type="Sensitive"`` and ``skin_type="sensitive"`` correctly
+    MERGE onto one node — the identity is the canonicalised content. But the raw reading kept
+    for display was overwritten by whoever wrote last, so ``Candidate.attributes`` differed
+    between two re-ingests of the same pages. Neither spelling is more correct, so the tie is
+    broken by a rule that does not depend on order at all.
+
+    The assertion is the *invariant* (both orders agree), not a hard-coded winner, so it does
+    not quietly encode Neo4j's string collation.
+    """
+    session = graph_schema_session
+
+    def ingest(order: tuple[str, ...]) -> tuple[str, list[str]]:
+        session.run("MATCH (n) DETACH DELETE n").consume()
+        apply_schema(session)
+        for index, spelling in enumerate(order):
+            upsert_product(session, Product(f"p-{index}", f"Product {index}"), source=graph_source)
+            upsert_attribute(
+                session,
+                product_id=f"p-{index}",
+                attribute=AttributeValue("Skin_Type", value_string=spelling),
+                source=graph_source,
+            )
+        rows = session.run(
+            "MATCH (a:AttributeValue) RETURN a.value_string AS value, a.key AS key"
+        ).data()
+        assert len(rows) == 1, f"one fact, {len(rows)} nodes"
+        return rows[0]["value"], [rows[0]["key"]]
+
+    forwards, forwards_key = ingest(("Sensitive", "sensitive"))
+    backwards, backwards_key = ingest(("sensitive", "Sensitive"))
+    assert forwards == backwards, (
+        f"the surviving casing depends on ingest order: {forwards!r} vs {backwards!r}"
+    )
+    assert forwards in {"Sensitive", "sensitive"}, "and it is still one of the observed readings"
+    assert forwards_key == backwards_key, "the raw key must be order-independent too"
+
+    # And the value the retrieval layer hands downstream is the same one.
+    reembed_products(session, HashEmbedding())
+    candidates = candidate_products(
+        session,
+        attribute_filters=[AttributeFilter("skin_type", value_string="sensitive")],
+        limit=10,
+    )
+    assert candidates
+    assert {a["value_string"] for c in candidates for a in c.attributes} == {forwards}

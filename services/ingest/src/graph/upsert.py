@@ -63,6 +63,11 @@ from .model import (
     embedding_vector_defect,
 )
 
+#: The raw, human-facing properties of the shared ``AttributeValue`` node — the ones two
+#: observers of the same fact can legitimately disagree about, since the identity is taken
+#: over the *canonicalised* content. Folded order-independently by :func:`_fact_node`.
+ATTRIBUTE_DISPLAY_PROPERTIES: tuple[str, ...] = ("key", "value_string", "unit")
+
 
 class ProvenanceRequired(ValueError):
     """A material fact was offered without a resolvable :class:`~ingest.graph.model.Source`."""
@@ -122,6 +127,34 @@ def _require_source(source: Source | None) -> Source:
     return source
 
 
+def _least_of(property_name: str) -> str:
+    """A ``SET`` clause keeping the lexicographically smallest of two readings of one property.
+
+    X4. A content-hashed node is *shared*: two products asserting ``skin_type="Sensitive"``
+    and ``skin_type="sensitive"`` correctly MERGE onto one ``AttributeValue``, because the
+    identity is the canonicalised content. But the raw reading kept for display was plain
+    last-writer-wins, so which casing survived depended on ingest order — and
+    ``Candidate.attributes`` was therefore not reproducible across two re-ingests of the same
+    pages. Neither observation is more correct than the other, so the tie is broken by a rule
+    that does not depend on order at all.
+
+    Args:
+        property_name: the property to fold. Must be a raw *display* property (never a
+            canonical or identity one, which agree by construction).
+
+    Returns:
+        A Cypher assignment for use after ``SET n += $props``, referencing ``prior_<name>``.
+    """
+    prior = f"prior_{property_name}"
+    return (
+        f"n.{property_name} = CASE "
+        f"WHEN {prior} IS NULL THEN n.{property_name} "
+        f"WHEN n.{property_name} IS NULL THEN {prior} "
+        f"WHEN {prior} < n.{property_name} THEN {prior} "
+        f"ELSE n.{property_name} END"
+    )
+
+
 def _fact_node(
     session: Any,
     label: str,
@@ -129,6 +162,8 @@ def _fact_node(
     id_value: str,
     props: dict[str, Any],
     source: Source,
+    *,
+    order_independent_properties: Sequence[str] = (),
 ) -> str:
     """MERGE a material-fact node and its ``SUPPORTED_BY`` edge in one statement.
 
@@ -143,6 +178,10 @@ def _fact_node(
         id_value: the stable ID.
         props: properties to set on the node.
         source: the provenance record; upserted first so the edge always resolves.
+        order_independent_properties: raw display properties on a *shared* node whose value
+            must not depend on which observer wrote last. See :func:`_least_of`. Empty for
+            every label whose node is private to one observation, which is all of them
+            except ``AttributeValue``.
 
     Returns:
         ``id_value``.
@@ -156,11 +195,21 @@ def _fact_node(
             f"{label} is not a material-fact label; got {sorted(MATERIAL_FACT_LABELS)}"
         )
     upsert_source(session, source)
+    # Read the pre-MERGE values before `SET n += $props` overwrites them. On a freshly
+    # created node they are all NULL, so the incoming reading wins unopposed.
+    carried = "".join(f", n.{name} AS prior_{name}" for name in order_independent_properties)
+    fold = (
+        ""
+        if not order_independent_properties
+        else "SET " + ", ".join(_least_of(name) for name in order_independent_properties)
+    )
     session.run(
         f"""
         MATCH (src:Source {{source_id: $source_id}})
         MERGE (n:{label} {{{id_property}: $id_value}})
+        WITH n, src{carried}
         SET n += $props
+        {fold}
         MERGE (n)-[r:{SUPPORTED_BY}]->(src)
         SET r.observed_at = src.observed_at, r.confidence = src.confidence
         """,
@@ -504,7 +553,19 @@ def upsert_attribute(
     """
     resolved = _require_source(source)
     _fact_node(
-        session, "AttributeValue", "attr_id", attribute.attr_id, attribute.as_properties(), resolved
+        session,
+        "AttributeValue",
+        "attr_id",
+        attribute.attr_id,
+        attribute.as_properties(),
+        resolved,
+        # X4: the only shared material-fact node in the model. Its identity is the
+        # canonicalised content, so two observers legitimately land on it with different raw
+        # casing for `key`/`value_string`/`unit`; without a tie-break the survivor was
+        # whoever wrote last, and `Candidate.attributes` changed between two re-ingests of
+        # the same pages. The canonical_* properties are excluded because they agree by
+        # construction.
+        order_independent_properties=ATTRIBUTE_DISPLAY_PROPERTIES,
     )
     _fact_edge(
         session,
@@ -876,6 +937,7 @@ def seed_products(session: Any, records: Iterable[dict[str, Any]], *, source: So
 
 
 __all__ = [
+    "ATTRIBUTE_DISPLAY_PROPERTIES",
     "EmbeddingDimensionMismatch",
     "ProvenanceRequired",
     "ProvenanceViolation",

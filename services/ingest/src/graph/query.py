@@ -420,7 +420,11 @@ def candidate_products(
             "fragrance-free", "no parabens" half of a real query.
         brand: exact brand match, when the intent pins one.
         status: exact product status; ``None`` disables the filter. Defaults to ``active``
-            so discontinued products do not silently enter a shortlist.
+            so discontinued products do not silently enter a shortlist. NOTE (X3): the
+            comparison is ``p.status = $status``, which is *null-valued* for a ``Product``
+            carrying no ``status`` property at all — such a product is invisible to every
+            default query. ``upsert_product`` always writes one, so this is only reachable
+            from raw Cypher; :func:`products_missing_status` is the detector for it.
         limit: how many candidates to return.
         oversample: how many index rows to fetch per requested result before filtering.
 
@@ -548,6 +552,42 @@ def products_missing_embeddings(session: Any) -> list[str]:
     ]
 
 
+_PRODUCTS_MISSING_STATUS = """
+MATCH (p:Product)
+WHERE p.status IS NULL
+RETURN p.product_id AS product_id
+ORDER BY product_id
+"""
+
+
+def products_missing_status(session: Any) -> list[str]:
+    """Product ids with no ``status`` property — invisible to every default query.
+
+    X3. :func:`candidate_products` defaults to ``status="active"`` and the comparison is
+    ``p.status = $status``, which is **null-valued**, not false, for a product that has no
+    ``status`` at all. Such a product is silently absent from every shortlist in the system
+    while looking perfectly healthy: it is embedded, it is sourced, it has attributes, and
+    ``products_missing_embeddings()`` reports nothing.
+
+    :func:`ingest.graph.upsert.upsert_product` always writes a ``status`` (``Product.status``
+    defaults to ``"active"``), so this is only reachable from raw Cypher, another library, or
+    an adapter that bypassed this package — which is exactly the threat model
+    :func:`ingest.graph.upsert.provenance_violations` exists for, and the reason this is a
+    graph-reading detector rather than a comment. It is deliberately a *sibling* of
+    :func:`products_missing_embeddings` rather than a new
+    :class:`~ingest.graph.upsert.ProvenanceViolation` kind: a missing status is not an
+    unsourced claim, and folding it into the provenance audit would blur what that audit
+    means.
+
+    Args:
+        session: an open ``neo4j.Session``.
+
+    Returns:
+        The ids, sorted. Empty is the healthy answer.
+    """
+    return [row["product_id"] for row in session.run(_PRODUCTS_MISSING_STATUS).data()]
+
+
 __all__ = [
     "DEFAULT_OVERSAMPLE",
     "MAX_INDEX_FETCH",
@@ -560,4 +600,5 @@ __all__ = [
     "candidate_products",
     "cosine_from_score",
     "products_missing_embeddings",
+    "products_missing_status",
 ]
