@@ -60,6 +60,7 @@ from llm.config import (
 )
 from llm.doubles import (
     DeterministicLLM,
+    KeyedLLMCall,
     LLMCall,
     RecordedLLM,
     normalize_recording_key,
@@ -85,6 +86,7 @@ from llm.prompting import (
     assemble_prompt,
     canonical_system_key,
     compose_request,
+    system_key_blocks,
     system_key_text,
     wire_key,
 )
@@ -131,6 +133,7 @@ __all__ = [
     "CachedPrompt",
     "DeterministicLLM",
     "EmptyReplyError",
+    "KeyedLLMCall",
     "LLMCall",
     "LLMClient",
     "LLMError",
@@ -165,6 +168,7 @@ __all__ = [
     "resolve_provider",
     "resolve_timeout",
     "response_text",
+    "system_key_blocks",
     "system_key_text",
     "wire_key",
 ]

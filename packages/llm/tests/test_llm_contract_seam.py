@@ -19,12 +19,16 @@ from packages.llm import (
     AnthropicLLM,
     CachedPrompt,
     DeterministicLLM,
+    KeyedLLMCall,
+    LLMCall,
+    PromptAssemblyError,
     RecordedLLM,
     UnrecordedPromptError,
     assemble_prompt,
     canonical_system_key,
     compose_request,
     load_recording_file,
+    system_key_blocks,
     system_key_text,
     wire_key,
 )
@@ -590,3 +594,187 @@ def test_the_deterministic_double_also_tells_the_block_structures_apart(no_netwo
     assert DeterministicLLM().complete("q", system="A") == DeterministicLLM().complete(
         CachedPrompt("A", "q")
     )
+
+
+# --------------------------------------------------------------------------------------
+# T-118 (b): canonical_system_key enforces its OWN injectivity precondition
+# --------------------------------------------------------------------------------------
+
+
+def test_canonical_system_key_refuses_the_empty_block_it_cannot_encode() -> None:
+    """The single-element collapse is injective only if a block is never empty.
+
+    ``canonical_system_key([x]) -> x`` is what lets a one-block recording be spelled the
+    obvious way, but it means ``[""]`` lands on ``""`` — the key for NO system blocks at
+    all. ``to_system_blocks`` never emits an empty block, so nothing *composed* collides;
+    a direct caller (a hand-written recording key, a consumer building blocks itself) was
+    not covered by that, and got a silent alias instead of an error.
+    """
+    # The three spellings of "no system contract" are untouched: they mean zero blocks.
+    assert canonical_system_key(None) == ""
+    assert canonical_system_key("") == ""
+    assert canonical_system_key(()) == ""
+    assert canonical_system_key([]) == ""
+
+    # One EMPTY block is not "no blocks", and there is no key that can say so.
+    for empty_block in ([""], ("",), ["", "B"], ("A", ""), ("A", "", "B")):
+        with pytest.raises(PromptAssemblyError) as excinfo:
+            canonical_system_key(empty_block)
+        assert "empty" in str(excinfo.value)
+
+    # The keys that do exist stay exactly as they were.
+    assert canonical_system_key(["A"]) == "A"
+    assert canonical_system_key(["A", "B"]) == ("A", "B")
+
+
+def test_a_recording_key_cannot_alias_the_no_system_call_with_an_empty_block() -> None:
+    """The collision, at the surface where it would actually have hurt.
+
+    ``RecordedLLM({(("",), "p"): reply})`` used to normalise to ``("", "p")``, so a call
+    passing NO system contract replayed a reply authored for a call that carried one.
+    """
+    with pytest.raises(PromptAssemblyError):
+        RecordedLLM({(("",), "p"): "reply reviewed for a one-empty-block contract"})
+
+    # The plain-string path — what the frozen acceptance suite uses — is unaffected: it
+    # still keys on exactly ("", prompt), and ("", prompt) is still writable as a tuple.
+    assert wire_key("p") == ("", "p")
+    assert RecordedLLM({"p": "no contract"}).complete("p") == "no contract"
+    assert RecordedLLM({("", "p"): "no contract"}).complete("p") == "no contract"
+
+
+def test_composed_calls_never_reach_the_empty_block_guard() -> None:
+    """The guard must be unreachable through assembly, or it would break real calls."""
+    assert wire_key(CachedPrompt("", "q")) == ("", "q")
+    assert wire_key(CachedPrompt("", "q"), "") == ("", "q")
+    assert wire_key("q", "") == ("", "q")
+    assert wire_key(CachedPrompt("A", "q")) == ("A", "q")
+    assert wire_key(CachedPrompt("A", "q"), "B") == (("A", "B"), "q")
+    assert DeterministicLLM().complete(CachedPrompt("", "q"), system="")
+
+
+# --------------------------------------------------------------------------------------
+# T-118 (a): the OBSERVABLE recording surface must not flatten the block structure
+# --------------------------------------------------------------------------------------
+
+# The pair that collides under any join. Genuinely different requests — two system blocks
+# versus one — whose `system_key_text` renderings are byte-identical.
+TWO_BLOCK = (CachedPrompt("A", "q"), "B")
+ONE_BLOCK = (CachedPrompt("A\n\nB", "q"), None)
+
+
+def test_the_recorded_call_tells_two_block_structures_apart(no_network) -> None:
+    """The defect: two different calls recorded byte-identical `LLMCall`s.
+
+    `wire_key` has kept them apart since T-104, but `.calls` — the surface a test actually
+    asserts on — flattened the key back into one joined string, so a test asking "did the
+    per-call system arrive as its own block?" could not tell and would pass either way.
+    """
+    for double in (DeterministicLLM(), RecordedLLM({})):
+        recorded = []
+        for prompt, system in (TWO_BLOCK, ONE_BLOCK):
+            try:
+                double.complete(prompt, system=system)
+            except UnrecordedPromptError:
+                pass  # RecordedLLM({}) misses; the call is recorded before the lookup
+            recorded.append(double.calls[-1])
+        two, one = recorded
+
+        # The rendering is still the join, unchanged and still a str (downstream tickets
+        # and the frozen LLMDouble both read it) — so it still cannot separate them.
+        assert two.system == one.system == "A\n\nB"
+        assert isinstance(two.system, str)
+
+        # The structure can, and the whole call record no longer compares equal.
+        assert two.system_key == ("A", "B")
+        assert one.system_key == "A\n\nB"
+        assert two.system_blocks == ("A", "B")
+        assert one.system_blocks == ("A\n\nB",)
+        assert two != one, "two different calls must not present as the same record"
+
+
+def test_the_recorded_key_is_the_key_the_lookup_actually_used(no_network) -> None:
+    """Anti-drift: the record is derived from the lookup key, not composed a second time.
+
+    A record built independently could disagree with the key — which is exactly the class
+    of defect `wire_key` was centralised to remove — and then `.calls` would be evidence
+    about a call that never happened.
+    """
+    for prompt, system in (TWO_BLOCK, ONE_BLOCK, ("plain prompt", None), ("p", "one block")):
+        double = DeterministicLLM()
+        double.complete(prompt, system=system)
+        call = double.calls[-1]
+        expected_key, expected_prompt = wire_key(prompt, system)
+        assert call.system_key == expected_key
+        assert call.prompt == expected_prompt
+        # ...and `.system` is that key rendered, never a separately assembled string.
+        assert call.system == (system_key_text(expected_key) or None)
+        assert call.system_blocks == system_key_blocks(expected_key)
+        assert canonical_system_key(call.system_blocks) == call.system_key
+
+
+def test_the_call_record_keeps_the_frozen_doubles_four_fields(no_network) -> None:
+    """The structure is added BESIDE `LLMCall`, never folded into `system`.
+
+    `LLMCall` mirrors the orchestrator-frozen `proxyshop_support.llm_double.LLMCall`
+    field for field, so a fifth field there would break positional parity. The extra one
+    lives on the subclass the doubles actually record.
+    """
+    import dataclasses
+
+    from proxyshop_support.llm_double import LLMCall as FrozenCall
+
+    assert [f.name for f in dataclasses.fields(LLMCall)] == [
+        f.name for f in dataclasses.fields(FrozenCall)
+    ]
+    assert [f.name for f in dataclasses.fields(KeyedLLMCall)] == [
+        f.name for f in dataclasses.fields(FrozenCall)
+    ] + ["system_key"]
+
+    double = DeterministicLLM()
+    double.complete("p")
+    call = double.calls[-1]
+    assert isinstance(call, KeyedLLMCall)
+    assert isinstance(call, LLMCall), "everything reading .calls as LLMCalls keeps working"
+
+    # A call with no system contract: `.system` stays None, exactly as the frozen double.
+    assert call.system is None
+    assert call.system_key == ""
+    assert call.system_blocks == ()
+
+
+def test_the_contract_miss_message_never_prints_two_identical_contracts(no_network) -> None:
+    """The same defect at the error surface, where it read as a bug in the double.
+
+    A two-block call missing against a one-block recording whose text joins identically is
+    a real and correct miss — but the message announced "a DIFFERENT system contract" and
+    then printed the same string twice, which is the most confusing thing it could say.
+    """
+    joined = RecordedLLM({("STORE ENVELOPE\n\nturn 3 of 9", "quote me"): "reviewed"})
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        joined.complete(CachedPrompt("STORE ENVELOPE", "quote me"), system="turn 3 of 9")
+    message = str(excinfo.value)
+    assert "DIFFERENT" in message
+
+    # Compare what each line SAYS about the contract, not the "sent:"/"recorded:" labels.
+    sent, recorded = (
+        line.split(":", 1)[1].strip() for line in message.splitlines() if line.startswith("system ")
+    )
+    assert sent != recorded, f"the message printed the same contract twice:\n{message}"
+    assert "2 separate blocks" in sent
+    assert "('STORE ENVELOPE', 'turn 3 of 9')" in sent
+    assert "separate blocks" not in recorded, "one block has nothing to disambiguate"
+
+    # The reverse miss — a one-block call against a two-block recording — reads too.
+    two = RecordedLLM({(("STORE ENVELOPE", "turn 3 of 9"), "quote me"): "reviewed"})
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        two.complete(CachedPrompt("STORE ENVELOPE\n\nturn 3 of 9", "quote me"))
+    lines = [line for line in str(excinfo.value).splitlines() if line.startswith("system ")]
+    assert lines[0] != lines[1]
+    assert "2 separate blocks" in lines[1]
+
+    # A single-block miss is unchanged: no structure noise where there is no ambiguity.
+    with pytest.raises(UnrecordedPromptError) as excinfo:
+        RecordedLLM({}).complete("nothing recorded", system="one block")
+    assert "separate blocks" not in str(excinfo.value)
+    assert "'one block'" in str(excinfo.value)
