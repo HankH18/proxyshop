@@ -77,6 +77,7 @@ import random
 import uuid
 from datetime import UTC, datetime
 
+from shopify_stub.permalink import store_url
 from shopify_stub.state import (
     Checkout,
     Order,
@@ -261,7 +262,13 @@ def checkout_completed_payload(
         "context": {
             "document": {
                 "location": {
-                    "href": f"https://{shop_domain}/checkouts/{checkout.token}/thank_you",
+                    # `store_url`, not an f-string — same bare-host guarantee as the cart
+                    # redirect and `order_status_url`. This href is what a collector
+                    # attributes a session by, so an off-domain one is a poisoned join key
+                    # as well as a bad link.
+                    "href": store_url(
+                        shop_domain=shop_domain, path=f"/checkouts/{checkout.token}/thank_you"
+                    ),
                 }
             }
         },

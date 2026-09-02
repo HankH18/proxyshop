@@ -29,6 +29,38 @@ SEED_VARIANT: dict[str, Any] = {
     "sku": "TR-42",
 }
 
+#: Every host that is **not** a bare DNS name, keyed by the attack or malformation it
+#: represents. Lives in the package rather than in a test module because two test modules
+#: need it — ``test_stub_permalink.py`` holds :func:`~shopify_stub.permalink.build_permalink`
+#: to it and ``test_stub_domain_guard.py`` holds :class:`~shopify_stub.state.StubConfig`,
+#: ``PUT /_stub/config`` and the three live-URL emit sites to the same table — and a test
+#: module under pytest's ``importlib`` import mode cannot import a sibling.
+#:
+#: The first two entries are the ones that cost something: they render a *live* checkout link
+#: whose real host is ``attacker.tld``. The last two are the response-splitting pair — a bare
+#: LF in a ``Location`` header ends the header, and Python's ``$`` anchor (which
+#: :data:`~shopify_stub.permalink._LABEL` used to use) matches immediately before one.
+NON_BARE_HOSTS: dict[str, str] = {
+    "userinfo": "good.example.com@attacker.tld",
+    "escaped userinfo": "store-a.example.com\\@attacker.tld",
+    "explicit port": "store-a.example.com:8443",
+    "scheme": "https://store-a.example.com",
+    "path": "store-a.example.com/evil",
+    "query": "store-a.example.com?x",
+    "fragment": "store-a.example.com#f",
+    "space": "store-a.example.com evil.tld",
+    "leading dot": ".store-a.example.com",
+    "empty label": "store-a..example.com",
+    "trailing hyphen label": "store-a-.example.com",
+    "underscore": "store_a.example.com",
+    "ipv6 brackets": "[::1]",
+    "empty": "",
+    "trailing lf": "store-a.example.com\n",
+    "trailing crlf": "store-a.example.com\r\n",
+    "embedded lf": "store-a\n.example.com",
+    "header injection": "evil.tld\nX-Injected: yes",
+}
+
 #: The ``discountCodeBasicCreate`` document, written as a real caller writes it: a named
 #: operation with variables and an explicit selection set, so the stub's parser meets the
 #: shape it will actually be sent rather than a convenient one.
@@ -308,6 +340,7 @@ class StubClient:
 
 __all__ = [
     "DISCOUNT_MUTATION",
+    "NON_BARE_HOSTS",
     "ORDERS_QUERY",
     "SEED_VARIANT",
     "SUBSCRIBE_MUTATION",

@@ -27,7 +27,23 @@ PERMALINK_TEMPLATE = "https://{shop_domain}/cart/{variant_id}:{quantity}?discoun
 #: One DNS label: letters, digits and hyphens, 1-63 characters, no leading or trailing
 #: hyphen. Deliberately an allow-list — a deny-list of "the delimiters we thought of" is how
 #: ``@``, ``\``, ``:``, ``?`` and ``#`` all walked past the original two-character check.
-_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+#:
+#: **Anchored with** ``\A``/``\Z``, **not** ``^``/``$``. Python's ``$`` also matches *just
+#: before a trailing newline*, so ``^…$`` accepted ``"com\n"`` and :func:`build_permalink`
+#: happily rendered ``https://example.com\n/cart/1:1``. Interpolated into a ``Location``
+#: header that is a response-splitting primitive: the LF terminates the header and every
+#: byte after it is parsed by the client as a fresh header (or, in front of a stricter
+#: server, kills the connection outright — see
+#: ``test_stub_domain_guard.test_a_host_ending_in_lf_is_refused``). ``\Z`` in Python is the
+#: absolute end of the string and has no such newline exception.
+_LABEL = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+
+#: Anything that must never reach a URL this module renders into an HTTP header. CR and LF
+#: are the response-splitting characters; the rest of C0, DEL and the space are refused with
+#: them because a header value has no legitimate use for any of them and an allow-list that
+#: enumerates "the control characters we thought of" is the mistake ``_LABEL`` exists to
+#: avoid repeating.
+_FORBIDDEN_IN_PATH = re.compile(r"[\x00-\x20\x7f]")
 
 #: RFC 1035's limit on a fully-qualified name.
 MAX_HOST_LENGTH = 253
@@ -68,6 +84,53 @@ def _assert_bare_host(shop_domain: str) -> None:
         raise PermalinkError(
             f"shop_domain must be a bare host (dotted DNS labels only), got {shop_domain!r}"
         )
+
+
+def store_url(*, shop_domain: str, path: str) -> str:
+    """Render ``https://{shop_domain}{path}`` — the **only** way this service builds one.
+
+    :func:`build_permalink` used to be the only function that interpolated a shop domain
+    into a live ``https://`` URL, so hardening it (T-013) hardened one of four call sites and
+    left three. The other three each wrote their own f-string:
+
+    * ``app.py``'s cart route — the ``Location`` of the 303 into checkout;
+    * ``orders.py``'s ``order_status_url`` on the ``orders/paid`` webhook body;
+    * ``telemetry.py``'s ``context.document.location.href`` on the pixel event.
+
+    With ``shop_domain`` set to ``good.example.com@attacker.tld`` — which
+    ``PUT /_stub/config`` accepted, because :meth:`StubConfig.validate` only checked for
+    emptiness — the first of those answered a real ``303`` over real HTTP whose ``location``
+    was ``https://good.example.com@attacker.tld/checkouts/<token>``. Everything before the
+    ``@`` is userinfo; the browser goes to ``attacker.tld``. The builder refusing to *build*
+    that URL is worth nothing while the server will *serve* it.
+
+    So the interpolation lives here, once, behind :func:`_assert_bare_host`. A caller cannot
+    emit an off-domain host without deleting this call, which is the point: the guarantee is
+    structural rather than a rule three modules have to remember.
+
+    Args:
+        shop_domain: the store's host. Must be a bare DNS name — see
+            :func:`_assert_bare_host`.
+        path: the absolute path (and optional query/fragment) to hang off it, leading ``/``
+            included.
+
+    Returns:
+        ``https://{shop_domain}{path}``.
+
+    Raises:
+        PermalinkError: the host is not a bare DNS name, or the path is relative or carries
+            a control character. Raising is deliberately preferred to rendering: a stub that
+            500s is a loud bug, whereas a stub that returns a well-formed redirect to
+            somebody else's checkout is a silent one that its consumers will copy.
+    """
+    _assert_bare_host(shop_domain)
+    if not path.startswith("/"):
+        raise PermalinkError(f"store URL path must be absolute (start with '/'), got {path!r}")
+    if _FORBIDDEN_IN_PATH.search(path):
+        raise PermalinkError(
+            f"store URL path must not contain control characters or spaces, got {path!r}"
+        )
+    return f"https://{shop_domain}{path}"
 
 
 @dataclass(frozen=True)
@@ -121,13 +184,15 @@ def build_permalink(
     Raises:
         PermalinkError: the arguments cannot produce a well-formed permalink.
     """
+    # Asserted here as well as inside `store_url` so the *error precedence* is unchanged: a
+    # call that is wrong about both the host and the quantity still reports the host.
     _assert_bare_host(shop_domain)
     if quantity < 1:
         raise PermalinkError(f"quantity must be >= 1, got {quantity}")
     variant = str(variant_id)
     if not variant.isdigit():
         raise PermalinkError(f"variant_id must be numeric, got {variant!r}")
-    base = f"https://{shop_domain}/cart/{variant}:{quantity}"
+    base = store_url(shop_domain=shop_domain, path=f"/cart/{variant}:{quantity}")
     if code is None:
         return base
     return f"{base}?discount={quote(code, safe='')}"
