@@ -33,10 +33,17 @@ Neither the header nor the path is authenticated, so the residual is stated rath
 implied: an attacker holding a validly-signed body can still present it under a topic of
 their choice, and if they win the race against Shopify's own delivery the genuine one is
 refused as the cross-topic replay of theirs. What is closed is the free version of that
-attack — no header at all — and the fabrication half: :meth:`WebhookInbox.bound_topic`
-binds a signed body to the first topic it was recorded under, so the same body can never
-become a second event under a second topic, and a collision is reported rather than
-silently answered like an honest retry.
+attack — no header at all — and the *multiplication*: :meth:`WebhookInbox.bound_topic` binds
+a signed body to the first topic it was recorded under, so one captured body can never become
+a second event under a second topic, and a collision is reported rather than answered exactly
+like an honest retry.
+
+Stated plainly, because the distinction matters and the test names now say so: an attacker
+who holds a signed body AND supplies a matching topic header AND arrives *before* Shopify's
+own delivery still files that body under their topic, and the genuine delivery is then
+refused as the cross-topic replay of theirs. Closing that needs a topic the signature covers,
+which Shopify does not provide. ``test_merchant_hardening.py`` pins this residual as a test
+so it is a known limit rather than a rediscovery.
 
 Header casing is read case-insensitively on purpose: shopify.dev prints the HMAC header
 three different ways across its own pages, and HTTP/2 lower-cases header names anyway.
@@ -470,7 +477,13 @@ def handle_delivery(
         inbox: where to record; defaults to the module :data:`INBOX`.
         now: receipt instant.
     """
-    lower = {str(key).lower(): value for key, value in headers.items()}
+    # FIRST occurrence wins for a duplicated header name. That is the rule Starlette's
+    # `dict(request.headers)` already applies at the route, so pinning it here keeps the two
+    # layers of one path from disagreeing about which `X-Shopify-Topic` a delivery carried —
+    # a desync that is harmless today only because the sender controls the URL too.
+    lower: dict[str, str] = {}
+    for key, value in headers.items():
+        lower.setdefault(str(key).lower(), value)
     target = inbox if inbox is not None else INBOX
 
     header_topic = lower.get(HEADER_TOPIC.lower())

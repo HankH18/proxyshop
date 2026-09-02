@@ -47,6 +47,7 @@ from merchant_svc.install.flow import (
 from merchant_svc.install.oauth import (
     ACCESS_TOKEN_PATH,
     AUTHORIZE_PATH,
+    INSTALL_STATE_CLOCK_SKEW_SECONDS,
     INSTALL_STATE_TTL_SECONDS,
     InstallStateRejected,
     OAuthCallback,
@@ -126,6 +127,7 @@ __all__ = [
     "HEADER_WEBHOOK_ID",
     "INBOX",
     "INBOX_CAPACITY",
+    "INSTALL_STATE_CLOCK_SKEW_SECONDS",
     "INSTALL_STATE_TTL_SECONDS",
     "LEDGER_KIND_FOR_TOPIC",
     "MYSHOPIFY_SUFFIX",
