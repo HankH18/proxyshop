@@ -1893,3 +1893,149 @@ def test_the_login_probe_still_authenticates_on_a_multi_homed_container(
         finally:
             _docker("network", "disconnect", "-f", network, container, timeout=120)
             _docker("network", "rm", network, timeout=120)
+
+
+# =======================================================================================
+# T-118 (h) -- the ELSE arm's attribute normalisation is graded
+# =======================================================================================
+#
+# After T-110 the else-branch of db/init/00-roles.sql does exactly one thing:
+#
+#     ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT
+#
+# and nothing tested it. Every T-110 test grades the PASSWORD half -- that the arm does not
+# reset one -- so the arm could have been deleted outright, or drifted to a weaker attribute
+# set, with the whole block still green. That matters because the attributes are the
+# privilege model's floor: a drifted `exchange` with SUPERUSER bypasses every GRANT and
+# every REVOKE in the repo, and C3/S7's "exchange must never read sealed or vault" becomes
+# unenforceable no matter what the migrations say.
+
+#: The attributes the file normalises, and what each must be in ``pg_roles`` afterwards.
+_NORMALISED_ATTRIBUTES = {
+    "rolcanlogin": True,
+    "rolsuper": False,
+    "rolcreatedb": False,
+    "rolcreaterole": False,
+    "rolinherit": True,
+}
+
+#: How to drift each one away from its normal value, as ALTER ROLE keywords.
+_DRIFTED_ATTRIBUTES = "NOLOGIN SUPERUSER CREATEDB CREATEROLE NOINHERIT"
+
+
+def _attribute_keywords(statement: str) -> set[str]:
+    """The role-attribute keywords named in a CREATE/ALTER ROLE format string."""
+    vocabulary = {
+        "LOGIN", "NOLOGIN", "SUPERUSER", "NOSUPERUSER", "CREATEDB", "NOCREATEDB",
+        "CREATEROLE", "NOCREATEROLE", "INHERIT", "NOINHERIT",
+    }  # fmt: skip
+    return {word for word in re.findall(r"[A-Z]+", statement.upper()) if word in vocabulary}
+
+
+def test_db_init_normalises_the_same_attributes_it_creates() -> None:
+    """A role that already exists must end up identical to one created fresh today.
+
+    Two arms that name two different attribute sets means the privileges a role has depend
+    on whether its volume happened to be new -- which is not a property anybody can reason
+    about, and is invisible to every other test in this file because they all grade the
+    password.
+    """
+    code = _sql_statements_only(DB_INIT_ROLES_SQL.read_text(encoding="utf-8"))
+    creates = re.findall(r"'CREATE ROLE[^']*'", code, re.IGNORECASE)
+    alters = re.findall(r"'ALTER ROLE[^']*'", code, re.IGNORECASE)
+    assert len(creates) == 1 and len(alters) == 1, (
+        f"expected one CREATE ROLE and one ALTER ROLE statement template, found "
+        f"{len(creates)} and {len(alters)}"
+    )
+
+    created = _attribute_keywords(creates[0])
+    altered = _attribute_keywords(alters[0])
+    assert created == altered, (
+        f"db/init/00-roles.sql creates roles with {sorted(created)} but normalises existing "
+        f"ones to {sorted(altered)}. The difference is a privilege a role keeps or loses "
+        f"depending only on whether the pgdata volume was fresh."
+    )
+    assert altered == {"LOGIN", "NOSUPERUSER", "NOCREATEDB", "NOCREATEROLE", "INHERIT"}, (
+        f"the else-branch normalises {sorted(altered)}. Dropping NOSUPERUSER in particular "
+        f"makes every GRANT and REVOKE in db/migrations unenforceable: a superuser role "
+        f"bypasses all privilege checks, so C3/S7's sealed/vault isolation would be a "
+        f"comment rather than a control."
+    )
+
+
+def _role_attributes(container: str, settings: dict[str, str]) -> dict[str, dict[str, bool]]:
+    """``{role: {rolcanlogin: bool, ...}}`` straight out of ``pg_roles`` in the container."""
+    columns = sorted(_NORMALISED_ATTRIBUTES)
+    proc = _docker(
+        "exec", container, "psql", "-U", settings["user"], "-d", settings["database"],
+        "-t", "-A", "-F", ",", "-c",
+        f"select rolname, {', '.join(columns)} from pg_roles "
+        f"where rolname = any(array{list(_INIT_ROLES)}::text[]) order by rolname",
+    )  # fmt: skip
+    assert proc.returncode == 0, f"could not read pg_roles: {proc.stderr}"
+    attributes: dict[str, dict[str, bool]] = {}
+    for line in proc.stdout.strip().splitlines():
+        name, *values = line.split(",")
+        attributes[name] = dict(zip(columns, [v == "t" for v in values], strict=True))
+    assert sorted(attributes) == sorted(_INIT_ROLES), (
+        f"expected every role in {_INIT_ROLES} to exist, found {sorted(attributes)}"
+    )
+    return attributes
+
+
+@pytest.mark.docker
+def test_re_running_db_init_normalises_role_attributes_that_have_drifted(
+    worker_index: int,
+) -> None:
+    """The else-branch's one remaining job, graded on a real cluster.
+
+    All four roles are deliberately driven to the WORST attribute set they can have --
+    superuser, unable to log in, able to create roles and databases, not inheriting -- and
+    db/init/00-roles.sql is then re-run by hand, which is the documented repair path. Every
+    attribute must come back, and the password must still NOT be reset, because those two
+    requirements pull in opposite directions and only testing one of them is how the arm
+    ended up untested.
+    """
+    created_with = f"t118h-{uuid.uuid4().hex}"
+    with _fresh_volume_postgres(worker_index, {"PROXYSHOP_ROLE_PASSWORD": created_with}) as (
+        container,
+        settings,
+    ):
+        for role, values in _role_attributes(container, settings).items():
+            assert values == _NORMALISED_ATTRIBUTES, (
+                f"the premise of this test is wrong: a freshly created {role} is supposed "
+                f"to start normalised, got {values}"
+            )
+
+        drift = "; ".join(f'ALTER ROLE "{role}" {_DRIFTED_ATTRIBUTES}' for role in _INIT_ROLES)
+        broken = _docker(
+            "exec", container, "psql", "-v", "ON_ERROR_STOP=1",
+            "-U", settings["user"], "-d", settings["database"], "-c", drift,
+        )  # fmt: skip
+        assert broken.returncode == 0, f"could not drift the attributes: {broken.stderr}"
+        drifted = _role_attributes(container, settings)
+        assert all(values != _NORMALISED_ATTRIBUTES for values in drifted.values()), (
+            f"the drift did not take, so the repair below would prove nothing: {drifted}"
+        )
+
+        rerun = _docker(
+            "exec", "-e", f"PROXYSHOP_ROLE_PASSWORD={created_with}", container,
+            "psql", "-v", "ON_ERROR_STOP=1", "-U", settings["user"], "-d", settings["database"],
+            "-f", "/docker-entrypoint-initdb.d/00-roles.sql",
+        )  # fmt: skip
+        assert rerun.returncode == 0, f"re-running db/init/00-roles.sql failed: {rerun.stderr}"
+
+        for role, values in _role_attributes(container, settings).items():
+            assert values == _NORMALISED_ATTRIBUTES, (
+                f"re-running db/init/00-roles.sql left {role} with {values}. The else-branch "
+                f"exists to normalise exactly these attributes; SUPERUSER surviving it makes "
+                f"every GRANT in db/migrations advisory."
+            )
+
+        for role in _INIT_ROLES:
+            _assert_accepts(
+                container, role, created_with, settings["database"],
+                f"{role}'s attributes were repaired but its password was reset -- these "
+                f"roles are cluster-global, so that cuts every worker holding a live "
+                f"connection. The arm must normalise attributes and ONLY attributes",
+            )  # fmt: skip
