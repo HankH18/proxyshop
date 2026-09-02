@@ -46,6 +46,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -305,6 +306,54 @@ def test_only_one_dev_password_literal_survives_on_the_connect_side() -> None:
         f"expected exactly one {DEV_ROLE_PASSWORD!r} literal in proxyshop_support/postgres.py "
         f"(the DEV_ROLE_PASSWORD constant), found {len(literals)}. Four independent copies "
         f"in the ROLES table is the defect T-112 exists to close."
+    )
+
+
+def test_env_example_carries_no_postgres_password_at_all() -> None:
+    """T-112 acceptance 4, stated as the file-level property it actually is.
+
+    ``.env.example`` is copied into every worktree, so any credential spelled here becomes
+    as many independent sources of truth as there are checkouts. All five ``PROXYSHOP_PG_DSN_*``
+    values therefore carry a user and no password: the four seeded roles get theirs from
+    ``$PROXYSHOP_ROLE_PASSWORD``, and ``admin`` from :data:`ROLES`, which the test below pins
+    to compose's own ``POSTGRES_PASSWORD``.
+    """
+    offenders = []
+    for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("PROXYSHOP_PG_DSN_"):
+            continue
+        _, _, dsn = line.partition("=")
+        if urlsplit(dsn).password:
+            offenders.append(line)
+    assert offenders == [], (
+        f".env.example spells a Postgres password in {offenders}. proxyshop_support.postgres "
+        f"supplies every one of them from a single place; a copy here only creates something "
+        f"for that place to disagree with."
+    )
+
+
+def test_the_admin_password_is_pinned_to_composes_superuser_password() -> None:
+    """The cluster superuser is a *different* credential, and it also has two copies.
+
+    ``admin`` is not one of ``db/init/00-roles.sql``'s four roles: it is created by initdb
+    from compose's ``POSTGRES_PASSWORD``, so ``$PROXYSHOP_ROLE_PASSWORD`` deliberately does
+    not govern it. That leaves the literal in exactly two places — the compose file that
+    seeds it and the ``ROLES`` table that connects with it — for the same reason the dev role
+    password is in two: a library cannot read the deployment. Two copies that cannot drift
+    are one source of truth, so pin them, rather than leave a changed compose password to be
+    discovered as every admin connection failing at once.
+    """
+    block = _postgres_service_block()
+    user = re.search(r"POSTGRES_USER\s*:\s*([^\s,}]+)", block)
+    password = re.search(r"POSTGRES_PASSWORD\s*:\s*([^\s,}]+)", block)
+    assert user is not None and password is not None, (
+        "docker-compose.yml's postgres service no longer declares POSTGRES_USER/PASSWORD"
+    )
+    assert (ROLES["admin"][1], ROLES["admin"][2]) == (user.group(1), password.group(1)), (
+        f"proxyshop_support.postgres connects as "
+        f"{ROLES['admin'][1]}/{ROLES['admin'][2]} but docker-compose.yml creates the "
+        f"superuser as {user.group(1)}/{password.group(1)}. Every admin connection in the "
+        f"repo — including the one that CREATEs each worker database — goes through ROLES."
     )
 
 
