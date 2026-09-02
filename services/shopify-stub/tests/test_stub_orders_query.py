@@ -12,6 +12,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+from shopify_stub.orders import cursor as cursor_for
+from shopify_stub.orders import is_cursor
 from shopify_stub.testing import SEED_VARIANT, StubClient
 
 VARIANT_ID = int(SEED_VARIANT["variant_id"])
@@ -184,3 +187,68 @@ async def test_reverse_flips_the_order(stub: StubClient) -> None:
         await stub.graphql("query { orders(first: 10, reverse: true) { edges { node { id } } } }")
     ).json()
     assert [node["id"] for node in _nodes(body)] == list(reversed(forward))
+
+
+# ---------------------------------------------------------------------------------------
+# A malformed cursor is an error, not a silent empty page
+# ---------------------------------------------------------------------------------------
+
+#: The two ways a cursor actually arrives broken in the field.
+MALFORMED_CURSORS = {
+    # The single most common Relay paging mistake: node.id where edge.cursor belongs.
+    "an order gid": "gid://shopify/Order/5500000000001",
+    "a legacy id": "5500000000001",
+    "not base64 at all": "!!!not-base64!!!",
+    # Padding lost to a URL round-trip or a hand-edited config.
+    "truncated": "b3JkZXI6NTUwMDAwMDAwMDAwMQ",
+    "empty string": "",
+}
+
+
+@pytest.mark.parametrize(("label", "bad"), sorted(MALFORMED_CURSORS.items()))
+async def test_a_malformed_cursor_is_an_error_not_a_no_op(
+    stub: StubClient, label: str, bad: str
+) -> None:
+    """The principle ``test_an_unsupported_filter_is_an_error_not_a_no_op`` already states.
+
+    A malformed ``after`` answered ``hasNextPage: false, endCursor: null`` — which a consumer
+    reads as *"no more results"*. The paging loop ends early, quietly, with rows missing and
+    nothing logged, which is strictly worse than the unsupported filter this module already
+    refuses: that one at least returns too much rather than too little. Real Shopify answers
+    an ``INVALID`` error here.
+    """
+    await stub.buy(VARIANT_ID)
+    body = (await stub.orders(first=10, after=bad)).json()
+    assert "data" not in body, label
+    assert "not a valid cursor" in body["errors"][0]["message"], label
+
+
+async def test_a_well_formed_cursor_naming_no_row_is_still_an_empty_page(
+    stub: StubClient,
+) -> None:
+    """The deliberate line between "malformed" and "past the end", pinned in both directions.
+
+    A cursor is opaque by contract, so the stub validates that it *is* a cursor and not what
+    is inside it. A syntactically valid cursor naming no current row is what paging against a
+    shrinking collection looks like, and erroring on it would break correct consumers. This is
+    the same behaviour ``test_an_unknown_cursor_returns_an_empty_page`` already asserts, kept
+    honest against the new validation.
+    """
+    await stub.buy(VARIANT_ID)
+    past_the_end = cursor_for("order:9999999999999")
+    body = (await stub.orders(first=10, after=past_the_end)).json()
+    assert body["data"]["orders"]["edges"] == []
+    assert body["data"]["orders"]["pageInfo"]["hasNextPage"] is False
+
+
+async def test_a_cursor_the_stub_itself_issued_always_survives_validation(
+    stub: StubClient,
+) -> None:
+    """Negative control for the validator: it must not reject the stub's own cursors."""
+    for _ in range(3):
+        await stub.buy(VARIANT_ID)
+    first_page = (await stub.orders(first=2)).json()["data"]["orders"]
+    for edge in first_page["edges"]:
+        assert is_cursor(edge["cursor"])
+    second = (await stub.orders(first=2, after=first_page["pageInfo"]["endCursor"])).json()
+    assert len(second["data"]["orders"]["edges"]) == 1

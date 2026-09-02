@@ -147,11 +147,39 @@ def _shopify_router(stub: Stub) -> APIRouter:
     ) -> Response:
         """The Admin GraphQL endpoint.
 
-        ``version`` is accepted but not enforced: Shopify serves several versions at once
-        and rejecting an unknown one would make this stub stricter than the thing it
-        stands in for. The configured version is what the webhook headers report.
+        ``version`` must be the configured one. It used to be captured and immediately
+        discarded on the reasoning that "Shopify serves several versions at once and
+        rejecting an unknown one would make this stub stricter than the thing it stands in
+        for". That has it backwards. Shopify serves a *fixed, published set* of versions and
+        answers **404** for anything outside it; accepting every string makes the stub
+        **looser** than the real API, in the direction that costs the most: a consumer pinned
+        to ``2019-04``, or carrying a typo, gets ``200`` and real data here and a ``404`` in
+        production, with nothing in between to tell it.
+
+        The version is not incidental either — it is a configured value the stub already
+        treats as first-class, echoed in every webhook's ``X-Shopify-API-Version`` header and
+        in ``webPixelCreate``'s ``apiVersion.handle``. Answering on a version the stub then
+        contradicts in its own headers is the kind of quiet disagreement this whole ticket
+        exists to eliminate.
+
+        The refusal uses Shopify's HTTP-layer error shape: ``{"errors": "<string>"}`` — a
+        bare string, not the list of error objects a GraphQL-level failure produces. See
+        :class:`shopify_stub.graphql_admin.GraphQLHTTPError`.
         """
-        del version
+        configured = stub.state.config.api_version
+        if version != configured:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "errors": (
+                        f"Not Found: this stub answers the Admin API at version "
+                        f"{configured!r}, and the request asked for {version!r}. The stub "
+                        f"models exactly the version its recorded fixtures were derived "
+                        f"from; a consumer pinned to any other version would pass here and "
+                        f"404 against Shopify."
+                    )
+                },
+            )
         try:
             body = await request.json()
         except ValueError:

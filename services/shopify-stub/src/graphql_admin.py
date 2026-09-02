@@ -34,7 +34,7 @@ from typing import Any
 
 from shopify_stub.codes import CombinesWith, DiscountCode
 from shopify_stub.graphql_lite import GraphQLSyntaxError, parse_operation
-from shopify_stub.orders import iso, orders_connection
+from shopify_stub.orders import is_cursor, iso, orders_connection
 from shopify_stub.state import (
     StubState,
     WebhookSubscription,
@@ -392,6 +392,14 @@ def _resolve_orders(state: StubState, arguments: dict[str, Any], now: datetime) 
     restricted to the two filters this system needs. An unsupported filter is a **request
     error**, not a silently ignored token: Shopify itself rejects unknown filter keys, and a
     stub that ignored them would let a consumer ship a filter that never filtered.
+
+    ``after`` is held to the same standard, and was not. A malformed cursor — most often
+    ``node.id`` passed where ``edge.cursor`` belongs — produced ``hasNextPage: false`` and
+    ``endCursor: null``, which a consumer reads as "no more results". The paging loop ends
+    early, quietly, with data missing, which is the exact failure the filter check exists to
+    prevent, one argument along. Real Shopify answers an ``INVALID`` error for a malformed
+    cursor. A *well-formed* cursor naming no current row stays an empty page — see
+    :func:`shopify_stub.orders.is_cursor`.
     """
     del now
     first = arguments.get("first")
@@ -402,6 +410,12 @@ def _resolve_orders(state: StubState, arguments: dict[str, Any], now: datetime) 
     after = arguments.get("after")
     if after is not None and not isinstance(after, str):
         raise _FieldError("Argument 'after' must be a String")
+    if after is not None and not is_cursor(after):
+        raise _FieldError(
+            f"Argument 'after' is not a valid cursor: {after!r}. Cursors are opaque and must "
+            f"be passed back exactly as issued in edges[].cursor or pageInfo.endCursor — an "
+            f"order id is not a cursor."
+        )
     reverse = bool(arguments.get("reverse", False))
     selected = _apply_search(list(state.orders.values()), arguments.get("query"), state)
     return orders_connection(selected, state, first=first, after=after, reverse=reverse)

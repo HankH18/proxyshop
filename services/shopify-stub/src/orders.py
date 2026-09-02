@@ -31,6 +31,7 @@ that is what ``tests/test_stub_recordings.py`` checks in both directions.
 from __future__ import annotations
 
 import base64
+import binascii
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -403,6 +404,37 @@ def _money_bag(amount: Decimal, currency: str) -> dict[str, object]:
 def cursor(raw: str) -> str:
     """An opaque, base64-looking cursor. Shopify's are opaque; consumers must not parse."""
     return base64.b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def is_cursor(value: str) -> bool:
+    """``True`` iff ``value`` is syntactically a cursor at all.
+
+    The check is deliberately *syntactic* and not "is this one of the cursors I just
+    issued". A cursor is opaque by contract — consumers must not parse one, and symmetrically
+    the server has no business demanding a particular payload inside it. What it can insist
+    on is that the string is a well-formed encoding, which is exactly what catches the two
+    real caller bugs:
+
+    * passing ``node.id`` (``gid://shopify/Order/5500000000001``) where ``edge.cursor``
+      belongs — the single most common paging mistake against a Relay connection;
+    * a cursor that was truncated, re-wrapped, or lost its padding in transit.
+
+    Both used to return a silent empty page, which reads to a consumer as "no more results"
+    and ends the loop early with data missing and nothing logged. That is the same class of
+    defect as a filter that silently matches everything, which this module already refuses
+    (see ``_apply_search``).
+
+    A syntactically valid cursor that names no row in the current set is a **different**
+    thing and stays a normal empty page: it is what a cursor past the end of the set looks
+    like, and erroring on it would break correct paging against a shrinking collection.
+    """
+    if not value:
+        return False
+    try:
+        base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return True
 
 
 def order_graphql_node(order: Order, state: StubState) -> dict[str, object]:

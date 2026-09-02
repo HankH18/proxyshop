@@ -23,8 +23,9 @@ property of this stub, not of the seeder.
 from __future__ import annotations
 
 import httpx
+import pytest
 from shopify_stub.state import DEFAULT_ACCESS_TOKEN
-from shopify_stub.testing import SEED_VARIANT, StubClient
+from shopify_stub.testing import SEED_VARIANT, SUBSCRIBE_MUTATION, StubClient
 
 VARIANT_ID = int(SEED_VARIANT["variant_id"])
 
@@ -173,3 +174,71 @@ async def test_a_malformed_seed_is_refused_without_partial_application(
 async def test_seed_requires_a_variants_list(stub: StubClient) -> None:
     assert (await stub.http.post("/_stub/seed", json={})).status_code == 400
     assert (await stub.http.post("/_stub/seed", json={"variants": 3})).status_code == 400
+
+
+# ---------------------------------------------------------------------------------------
+# The Admin API version in the URL
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["2019-04", "2025-01", "9999-99", "not-a-version", "unstable", "v1"],
+)
+async def test_an_admin_api_version_the_stub_does_not_serve_is_a_404(
+    stub: StubClient, version: str
+) -> None:
+    """A version the stub does not model must not answer 200 with real data.
+
+    ``{version}`` was captured and immediately discarded, so a consumer pinned to a retired
+    version — or carrying a typo — got a full, plausible, correct-looking response here and a
+    404 from Shopify, with nothing in between to tell it. That is the stub being *looser*
+    than the API it stands in for, in the one direction that costs a production incident.
+    """
+    response = await stub.graphql(
+        "query { orders(first: 1) { edges { cursor } } }", version=version
+    )
+    assert response.status_code == 404, response.text
+    body = response.json()
+    assert "data" not in body
+    # Shopify's HTTP-layer errors are a bare string, not the list GraphQL-level errors use.
+    assert isinstance(body["errors"], str)
+    assert "2026-07" in body["errors"], "the message must name the version the stub does serve"
+
+
+async def test_the_configured_version_is_the_one_that_answers(stub: StubClient) -> None:
+    """Both directions: the configured version works, and moving it moves the door.
+
+    The version is a configured, first-class value — it is echoed in every webhook's
+    ``X-Shopify-API-Version`` header and in ``webPixelCreate``'s ``apiVersion.handle``. A
+    stub that answered on versions it then contradicts in its own headers is disagreeing with
+    itself.
+    """
+    configured = (await stub.config())["api_version"]
+    assert configured == "2026-07"
+    ok = await stub.graphql("query { orders(first: 1) { edges { cursor } } }", version=configured)
+    assert ok.status_code == 200
+
+    await stub.configure(api_version="2027-01")
+    assert (await stub.config())["api_version"] == "2027-01"
+    stale = await stub.graphql("query { orders(first: 1) { edges { cursor } } }", version="2026-07")
+    assert stale.status_code == 404
+    fresh = await stub.graphql("query { orders(first: 1) { edges { cursor } } }", version="2027-01")
+    assert fresh.status_code == 200
+    assert fresh.json()["data"]["orders"] is not None, (
+        "the version gate must not change what a valid request answers"
+    )
+
+
+async def test_the_version_that_answers_is_the_version_the_stub_stamps_on_its_output(
+    stub: StubClient,
+) -> None:
+    """The coherence the gate exists to protect, asserted end to end."""
+    await stub.configure(api_version="2027-01")
+    response = await stub.graphql(
+        SUBSCRIBE_MUTATION,
+        {"topic": "ORDERS_PAID", "sub": {"uri": "https://example.test/hook"}},
+        version="2027-01",
+    )
+    subscription = response.json()["data"]["webhookSubscriptionCreate"]["webhookSubscription"]
+    assert subscription["apiVersion"]["handle"] == "2027-01"
