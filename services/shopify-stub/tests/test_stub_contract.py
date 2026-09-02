@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import inspect
 import re
+from typing import Any
 
+import fastapi.routing as fastapi_routing
 import httpx
 import pytest
 from shopify_stub import app as app_module
@@ -260,38 +262,124 @@ async def test_the_version_that_answers_is_the_version_the_stub_stamps_on_its_ou
 # group of the table; the delivery-log commit edited that exact table and did not notice.
 #
 # The two tests below close the drift in both directions by comparing the prose to the
-# LIVE application rather than to another copy of the prose. `create_app().openapi()`
-# enumerates what is actually routable, so a documented route that is not served and a
-# served route that is not documented are each a red test.
+# LIVE application rather than to another copy of the prose, so a documented route that is
+# not served and a served route that is not documented are each a red test.
+#
+# W5 adversarial, both halves of that comparison were wrong in the same way — each could be
+# satisfied without the thing it claims to measure:
+#
+#   * the DOCUMENTED half scanned the whole docstring for any backticked ``METHOD /path``,
+#     so the narrative paragraph *underneath* the table — the one that names
+#     ``GET /_stub/codes`` as the route the table used to omit — counted as documentation.
+#     Deleting the table row left that sentence standing and both tests stayed green: the
+#     defect this section exists to prevent, reintroducible with no test noticing. The
+#     inline pattern is now anchored to the ``**Operational**:`` line, which is the only
+#     prose line that is allowed to declare a route; and
+#   * the SERVED half read `create_app().openapi()`, which enumerates the schema rather
+#     than the routing table. A route declared ``include_in_schema=False`` is served and
+#     absent from that schema, so one keyword argument made a route invisible to the very
+#     check that exists to notice undocumented routes. It now walks `application.routes`.
+#
+# `test_the_route_table_names_the_control_plane_route_that_was_missing` re-applies both
+# defects to a copy of the docstring / a copy of the app and asserts each derivation still
+# sees them, so neither hole can reopen quietly.
 
 #: A row of either reStructuredText table: ``` ``/path`` ``` then the method column.
 #: ``GET/PUT`` is one row with two methods, so the method cell is split on ``/``.
 _TABLE_ROW = re.compile(r"^``(?P<path>/[^`]+)``\s+(?P<methods>[A-Z]+(?:/[A-Z]+)*)(?:\s|$)", re.M)
 
-#: The "**Operational**: ``GET /healthz``." line, which is prose rather than a table row.
-_INLINE_ROUTE = re.compile(r"``(?P<methods>[A-Z]+) (?P<path>/[^`]+)``")
+#: The one prose line allowed to declare routes: "**Operational**: ``GET /healthz``.".
+#: The ``**Operational**:`` prefix is part of the pattern and must sit on the SAME line —
+#: without it this matched any backticked ``METHOD /path`` anywhere in the docstring,
+#: including the paragraph below the table that names ``GET /_stub/codes`` in prose.
+_OPERATIONAL_LINE = re.compile(r"^\*\*Operational\*\*:(?P<routes>.*)$", re.M)
+
+#: A ``METHOD /path`` pair inside the operational line. Applied ONLY to that line's text.
+_INLINE_ROUTE = re.compile(r"``(?P<methods>[A-Z]+(?:/[A-Z]+)*) (?P<path>/[^`]+)``")
+
+#: FastAPI mounts its own schema endpoint at ``application.openapi_url``. It is framework
+#: furniture rather than part of the surface this service designed, so it is excluded from
+#: the served set — by that attribute, never by ``include_in_schema``, which is the exact
+#: keyword this derivation exists to be blind-proof against.
 
 
-def _documented_surface() -> set[tuple[str, str]]:
-    """``(method, path)`` pairs named in ``shopify_stub.app``'s module docstring."""
-    doc = app_module.__doc__ or ""
+def _documented_surface(doc: str | None = None) -> set[tuple[str, str]]:
+    """``(method, path)`` pairs named in ``shopify_stub.app``'s module docstring.
+
+    ``doc`` defaults to the live docstring. It is a parameter so a test can hand the parser
+    a *mutated* docstring — the table row deleted, the prose left standing — and prove the
+    parser still reports the route as undocumented.
+    """
+    text = (app_module.__doc__ or "") if doc is None else doc
     documented: set[tuple[str, str]] = set()
-    for match in _TABLE_ROW.finditer(doc):
+    for match in _TABLE_ROW.finditer(text):
         for method in match.group("methods").split("/"):
             documented.add((method, match.group("path")))
-    for match in _INLINE_ROUTE.finditer(doc):
-        documented.add((match.group("methods"), match.group("path")))
+    for line in _OPERATIONAL_LINE.finditer(text):
+        for match in _INLINE_ROUTE.finditer(line.group("routes")):
+            for method in match.group("methods").split("/"):
+                documented.add((method, match.group("path")))
     return documented
 
 
-def _served_surface() -> set[tuple[str, str]]:
-    """``(method, path)`` pairs the freshly-built application actually routes."""
-    spec = app_module.create_app().openapi()
+def _schema_surface(application: Any) -> set[tuple[str, str]]:
+    """``(method, path)`` pairs ``openapi()`` reports. **Not** the served surface.
+
+    Kept only so :func:`test_the_module_route_table_is_the_served_surface` can assert the
+    containment that proves the routing walk below is not under-reporting.
+    """
     return {
         (method.upper(), path)
-        for path, operations in spec["paths"].items()
+        for path, operations in application.openapi()["paths"].items()
         for method in operations
     }
+
+
+def _served_surface(application: Any = None) -> set[tuple[str, str]]:
+    """``(method, path)`` pairs the freshly-built application actually routes.
+
+    Derived from the ROUTING TABLE, not from ``openapi()``: the schema omits every route
+    declared ``include_in_schema=False``, and those are served all the same, so a
+    schema-derived surface hides an undocumented route behind one keyword argument.
+
+    ``fastapi.routing.iter_route_contexts`` is the framework's own flattening of
+    ``app.routes`` — necessary because an ``include_router`` call no longer leaves the child
+    routes at the top level, it leaves an ``_IncludedRouter`` wrapper whose paths are not
+    reachable through ``route.path``. Falling back to a plain walk keeps this working if
+    that helper is ever withdrawn; the containment assertion in the test is what would
+    catch either walk going blind.
+    """
+    app_under_test = app_module.create_app() if application is None else application
+    schema_path = getattr(app_under_test, "openapi_url", None)
+
+    entries: list[tuple[str | None, Any]] = []
+    flatten = getattr(fastapi_routing, "iter_route_contexts", None)
+    if flatten is not None:
+        entries = [
+            (getattr(ctx, "path", None), getattr(ctx, "methods", None))
+            for ctx in flatten(app_under_test.routes)
+        ]
+    else:  # pragma: no cover - only on a FastAPI without the flattening helper
+        entries = [
+            (getattr(route, "path", None), getattr(route, "methods", None))
+            for route in app_under_test.routes
+        ]
+
+    served: set[tuple[str, str]] = set()
+    for path, methods in entries:
+        # FastAPI mounts its own schema endpoint at `openapi_url`; that is framework
+        # furniture, not part of the surface this service designed. Excluded by that
+        # attribute and never by `include_in_schema`, which is the keyword this derivation
+        # exists to be blind-proof against.
+        if path is None or methods is None or path == schema_path:
+            continue
+        for method in methods:
+            # HEAD and OPTIONS are synthesised by the framework for every GET route; the
+            # docstring documents the methods the service declares.
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            served.add((method, path))
+    return served
 
 
 def test_the_module_route_table_is_the_served_surface() -> None:
@@ -301,9 +389,18 @@ def test_the_module_route_table_is_the_served_surface() -> None:
     without a table row (the `/_stub/codes` defect) and containment in the other lets a
     row outlive the route it names.
     """
+    application = app_module.create_app()
     documented = _documented_surface()
-    served = _served_surface()
+    served = _served_surface(application)
     assert documented, "the docstring parser found no routes at all — it has stopped working"
+    # The routing walk must never report FEWER routes than the schema does. A walk that
+    # went blind — the `_IncludedRouter` wrapper this code had to learn about, a future
+    # nesting change — would otherwise make every undocumented route vanish silently,
+    # which is the same failure as reading `openapi()` in the first place.
+    schema = _schema_surface(application) - {("GET", application.openapi_url or "")}
+    assert schema <= served, (
+        f"the routing walk is missing routes the schema knows about: {sorted(schema - served)}"
+    )
     assert served - documented == set(), (
         f"served but undocumented in shopify_stub.app's route table: {sorted(served - documented)}"
     )
@@ -313,15 +410,61 @@ def test_the_module_route_table_is_the_served_surface() -> None:
 
 
 def test_the_route_table_names_the_control_plane_route_that_was_missing() -> None:
-    """The specific regression, named, so the set comparison above cannot be read as noise.
+    """The specific regression, named — and both derivations mutated to prove they see it.
 
-    ``GET /_stub/codes`` is what the drift hid. Asserted here against the live surface as
-    well as the prose, so this stays a fact about the service and not a fact about a
-    string.
+    ``GET /_stub/codes`` is what the drift hid. The first two assertions state the fact.
+    The rest are what stop this test from being dead weight beside the set comparison
+    above: they re-apply the original defect to a *copy* of each input and require the
+    derivation to still report it.
+
+    1. Delete only the table row from a copy of the docstring, leaving the narrative
+       paragraph that names ``GET /_stub/codes`` in prose. That is the exact state that
+       used to keep both tests green, because the docstring was scanned whole for any
+       backticked ``METHOD /path``. The route must now read as undocumented.
+    2. Register a route with ``include_in_schema=False`` on a copy of the app. It is
+       served; ``openapi()`` cannot see it. The served set must.
+
+    Both are copies — the live docstring and the live app are untouched.
     """
     assert ("GET", "/_stub/codes") in _served_surface(), "the route is registered and served"
     assert ("GET", "/_stub/codes") in _documented_surface(), (
         "and the control-plane table must name it"
+    )
+
+    doc = app_module.__doc__ or ""
+    table_row = next(
+        line for line in doc.splitlines() if line.startswith("``/_stub/codes``") and "GET" in line
+    )
+    without_the_row = doc.replace(table_row + "\n", "")
+    assert without_the_row != doc, "the mutation must actually remove the row"
+    assert "``GET /_stub/codes``" in without_the_row, (
+        "the narrative paragraph naming the route in prose must survive the mutation — "
+        "it is the input that used to satisfy this test on its own"
+    )
+    assert ("GET", "/_stub/codes") not in _documented_surface(without_the_row), (
+        "deleting the table row must make the route undocumented; prose below the table "
+        "is not the route table, and counting it is how the /_stub/codes drift stayed "
+        "invisible to its own regression test"
+    )
+    assert ("GET", "/_stub/config") in _documented_surface(without_the_row), (
+        "and the parser must still read the rest of the table — a mutation that breaks "
+        "the parser outright would satisfy the assertion above for the wrong reason"
+    )
+
+    hidden = app_module.create_app()
+
+    @hidden.get("/_stub/not-in-the-schema", include_in_schema=False)
+    async def _hidden() -> dict[str, str]:  # pragma: no cover - never called
+        return {}
+
+    assert ("GET", "/_stub/not-in-the-schema") not in {
+        (method.upper(), path)
+        for path, operations in hidden.openapi()["paths"].items()
+        for method in operations
+    }, "include_in_schema=False is what makes a served route invisible to openapi()"
+    assert ("GET", "/_stub/not-in-the-schema") in _served_surface(hidden), (
+        "the served surface must be the routing table, not the schema: a route hidden "
+        "from openapi() is still served, and would otherwise never need a table row"
     )
 
 

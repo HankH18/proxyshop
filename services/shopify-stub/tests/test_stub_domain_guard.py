@@ -34,6 +34,8 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import pathlib
+import pkgutil
 import re
 import traceback
 import unicodedata
@@ -422,9 +424,15 @@ _OLD_DENY_LIST_ESCAPEES = [
     "\u202e",  # RIGHT-TO-LEFT OVERRIDE - display spoofing in a live link
     "\u200b",  # ZERO WIDTH SPACE
     "\ufeff",  # BOM / ZWNBSP
-    "\u4e2d",  # a plain CJK ideograph: legal text, but not latin-1, so the ASGI
-    #            server raised UnicodeEncodeError three layers from the caller
-    #            instead of this function raising PermalinkError at the call site
+    "\u4e2d",  # a plain CJK ideograph: legal text, but not latin-1. Had one reached a
+    #            `Location` header, `starlette.responses.Response.__init__` would have
+    #            raised UnicodeEncodeError three layers from the caller instead of this
+    #            function raising PermalinkError at the call site. Conditional, not
+    #            historical, and not the ASGI server: nothing this service serves can put
+    #            a caller's byte into a `store_url` path
+    #            (`test_no_caller_supplied_value_reaches_a_store_url_path`), and the raise
+    #            comes from the response constructor
+    #            (`test_what_a_bad_byte_does_to_a_location_header` asserts the frame).
 ]
 
 #: The positive control. Every printable ASCII graphic character is still legal in a path,
@@ -637,6 +645,234 @@ def test_the_c1_range_the_clause_names_is_refused_and_really_is_c1() -> None:
 
 
 # ---------------------------------------------------------------------------------------
+# W5 adversarial: the REST of the Raises clause, which nothing was reading
+# ---------------------------------------------------------------------------------------
+#
+# The three tests above derive exactly two things from the prose — the `0xNN`-`0xNN`
+# boundary and the `U+0080`-`U+009F` range. Every other measurable sentence in
+# `store_url`'s Raises clause was unpinned, so it could be rewritten into something false
+# and stay green: "the space U+0020 is refused and is not a control character", the
+# individual code points it names, "every non-ASCII character", "the format characters",
+# "(:data:`_FORBIDDEN_IN_PATH`)", and "pinned character by character by <test name> and its
+# two companions". Each of those is checked below against the live code, the live Unicode
+# tables, or the live test module.
+
+#: A ``U+XXXX`` code point named on its own in the prose (the ``A``-``B`` ranges are read
+#: by `_STATED_UNICODE_RANGE` instead; this pattern sees each endpoint individually too,
+#: which is fine — every code point the clause spells in ``U+`` form is a refused one).
+_STATED_CODE_POINT = re.compile(r"U\+(?P<code_point>[0-9A-F]{4})")
+
+
+def test_every_code_point_the_raises_clause_spells_out_is_one_it_refuses() -> None:
+    """The clause's ``U+XXXX`` literals are examples of what is REFUSED. Held to that.
+
+    The convention is load-bearing and deliberate: the allowed set is stated once, as the
+    ``0x21``-``0x7E`` boundary, and every ``U+`` literal in the clause is an example on the
+    other side of it. So each one must fall outside the stated boundary *and* be refused by
+    the live guard. A future edit that adds a ``U+`` literal for an allowed character is
+    red on purpose — state it as a boundary, or the clause is naming an example that
+    contradicts the boundary two sentences above it.
+    """
+    doc = store_url.__doc__ or ""
+    stated = _stated_boundaries(doc)
+    assert len(stated) == 1, f"expected exactly one printable-ASCII boundary, found {stated}"
+    low, high = stated.pop()
+
+    code_points = {int(match.group("code_point"), 16) for match in _STATED_CODE_POINT.finditer(doc)}
+    assert code_points >= {0x0020, 0x0080, 0x009F, 0x00A0, 0x2028, 0x2029}, (
+        "the Raises clause has stopped naming the code points it used to name; found "
+        f"{sorted(hex(cp) for cp in code_points)}"
+    )
+    for code_point in sorted(code_points):
+        assert not low <= code_point <= high, (
+            f"U+{code_point:04X} is spelled out in the Raises clause as an example of what "
+            f"is refused, but it lies inside the clause's own allowed boundary "
+            f"0x{low:02X}-0x{high:02X}"
+        )
+        with pytest.raises(PermalinkError):
+            store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{chr(code_point)}")
+
+
+#: The clause's counterexample sentence: the space, named as refused AND as not a control
+#: character. Matched as a sentence rather than as two loose substrings — "space" survives
+#: elsewhere in the clause ("DEL, the space, and every non-ASCII character"), so a
+#: `"space" in doc` check stays green through the very rewrite this guards against.
+_SPACE_IS_NOT_A_CONTROL = re.compile(
+    r"\*\*space\*\*\s+``U\+0020``[^.]*?is not a control character", re.S
+)
+
+
+def test_the_clauses_claim_about_the_space_is_true_of_unicode_and_of_the_guard() -> None:
+    """Both halves of *the space U+0020 is refused and is not a control character*.
+
+    This sentence is the whole reason the clause stopped saying "a control character". The
+    prose the ticket removed — *"the path raises when it carries a control character"* — is
+    not a style preference to be restored: it is measurably wrong, because the refused set
+    contains characters that are not category ``Cc`` at all. Both the counterexample and the
+    measurement are asserted, so the old wording cannot come back green.
+    """
+    doc = store_url.__doc__ or ""
+    assert _SPACE_IS_NOT_A_CONTROL.search(doc), (
+        "the Raises clause must keep naming the space, as such, as the counterexample that "
+        "makes 'a control character' the wrong description of what this function refuses"
+    )
+    category = unicodedata.category(" ")
+    assert category != "Cc", f"U+0020 is category {category}; the clause calls it not a control"
+    assert category == "Zs", f"U+0020 should be a space separator, got {category}"
+    with pytest.raises(PermalinkError):
+        store_url(shop_domain=OTHER_DOMAIN, path="/checkouts/abc def")
+
+    # The measurement behind the counterexample: refused ≠ the control characters, by a
+    # wide margin, so describing the rule that way under-states it.
+    refused_non_controls = {
+        code_point
+        for code_point in _PROBE_CODE_POINTS
+        if code_point not in _enforced_allowed() and unicodedata.category(chr(code_point)) != "Cc"
+    }
+    assert 0x20 in refused_non_controls, "the space must be one of them"
+    assert len(refused_non_controls) > 1, (
+        "the clause's whole point is that the refused set is not the control characters; "
+        f"only {sorted(hex(cp) for cp in refused_non_controls)} distinguishes them"
+    )
+    assert "carries a control character" not in doc, (
+        "that is the description T-118 (d) removed, and it is false of this guard: "
+        f"{len(refused_non_controls)} refused code points in the probe range are not "
+        "category Cc, starting with the space"
+    )
+
+
+def test_the_categorical_claims_in_the_raises_clause_hold_over_the_probe_range() -> None:
+    """Four categorical claims: every non-ASCII character, the format characters, CR/LF/DEL.
+
+    Four claims that are categorical rather than about one code point, so each is measured
+    over the whole probe range instead of over an example. `_enforced_allowed` is the
+    measured set — it calls `store_url` and records what does not raise.
+    """
+    doc = store_url.__doc__ or ""
+    allowed = _enforced_allowed()
+
+    assert "every non-ASCII character" in doc, "the clause's broadest claim has been reworded"
+    non_ascii = {cp for cp in _PROBE_CODE_POINTS if cp >= 0x80}
+    assert non_ascii, "the probe range must reach past ASCII for this to mean anything"
+    assert not (allowed & non_ascii), (
+        f"the clause refuses every non-ASCII character; these were accepted: "
+        f"{sorted(hex(cp) for cp in sorted(allowed & non_ascii))}"
+    )
+
+    assert "format characters" in doc, "the clause's Cf claim has been reworded"
+    format_characters = {cp for cp in _PROBE_CODE_POINTS if unicodedata.category(chr(cp)) == "Cf"}
+    assert format_characters, "the probe range must contain a category-Cf character"
+    assert not (allowed & format_characters)
+
+    # "What is refused is CR, LF, the rest of C0, DEL, ..." — the three it names by acronym.
+    for acronym, char in (("CR", "\r"), ("LF", "\n"), ("DEL", "\x7f")):
+        assert acronym in doc, f"the clause no longer names {acronym}"
+        with pytest.raises(PermalinkError):
+            store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{char}")
+
+    # "(:data:`_FORBIDDEN_IN_PATH`)" — the clause points the reader at a name, and a name
+    # that no longer resolves sends them nowhere.
+    assert "_FORBIDDEN_IN_PATH" in doc
+    assert getattr(permalink_module, "_FORBIDDEN_IN_PATH", None) is _FORBIDDEN_IN_PATH, (
+        "the Raises clause cites _FORBIDDEN_IN_PATH as the constant that holds this set"
+    )
+
+
+def test_pinned_character_by_character_means_the_whole_of_ascii_and_two_companions() -> None:
+    """The clause's claim about its own tests: "character by character ... two companions".
+
+    Measured, because it is the sentence a reader trusts instead of counting the cases
+    themselves. "Character by character" is only true if the parametrized lists leave no
+    gap in ASCII, and "two companions" is only true if there really are three such tests.
+    """
+    doc = store_url.__doc__ or ""
+    assert "character by character" in doc and "two companions" in doc, (
+        "the clause no longer makes this claim about its own coverage"
+    )
+
+    refused = {ord(char) for char in _C0_SPACE_AND_DEL}
+    accepted = {ord(char) for char in _PRINTABLE_ASCII}
+    assert not (refused & accepted), (
+        f"a code point is in both the refused and the accepted list: {sorted(refused & accepted)}"
+    )
+    assert refused | accepted == set(range(0x00, 0x80)), (
+        "'character by character' means no gap in ASCII; the two lists together miss "
+        f"{sorted(hex(cp) for cp in sorted(set(range(0x00, 0x80)) - (refused | accepted)))}"
+    )
+
+    # "and its two companions": three tests in this module parametrized over a character.
+    tree = ast.parse(pathlib.Path(__file__).resolve().read_text(encoding="utf-8"))
+    parametrized_over_a_character = [
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        for decorator in node.decorator_list
+        if isinstance(decorator, ast.Call)
+        and ast.unparse(decorator.func).endswith("parametrize")
+        and decorator.args
+        and isinstance(decorator.args[0], ast.Constant)
+        and decorator.args[0].value == "char"
+    ]
+    assert len(parametrized_over_a_character) == 3, (
+        f"the clause promises one named test 'and its two companions'; this module has "
+        f"{len(parametrized_over_a_character)}: {parametrized_over_a_character}"
+    )
+    assert "test_store_url_refuses_every_c0_control_the_space_and_del" in doc
+    assert "test_store_url_refuses_every_c0_control_the_space_and_del" in (
+        parametrized_over_a_character
+    )
+
+
+def test_every_test_this_package_cites_in_its_prose_actually_exists() -> None:
+    """A citation that no longer resolves is prose asserting something nothing checks.
+
+    Twelve-plus places in ``shopify_stub`` end an explanation with "pinned by
+    ``test_stub_x.test_y``". Every one of those is load-bearing — it is the sentence that
+    lets a reader stop verifying — and a rename or deletion turns it into a dangling
+    pointer with nothing red. Resolved against the test FILES rather than by importing
+    them, so this works regardless of how pytest names the module.
+    """
+    tests_dir = pathlib.Path(__file__).resolve().parent
+    sources = {path: path.read_text(encoding="utf-8") for path in _package_source_files()}
+
+    qualified = re.compile(r"(?P<module>test_stub_[a-z0-9_]+)\.(?P<test>test_[a-z0-9_]+)")
+    bare = re.compile(r"`{1,2}(?P<test>test_[a-z0-9_]+)`{1,2}")
+
+    definitions: dict[pathlib.Path, str] = {
+        path: path.read_text(encoding="utf-8") for path in sorted(tests_dir.glob("test_*.py"))
+    }
+    assert definitions, f"no test modules found under {tests_dir}"
+
+    def defines(text: str, name: str) -> bool:
+        return re.search(rf"^(?:async )?def {re.escape(name)}\(", text, re.M) is not None
+
+    citations = 0
+    for path, text in sources.items():
+        where = f"shopify_stub/{path.relative_to(_PACKAGE_ROOT).as_posix()}"
+        for match in qualified.finditer(text):
+            citations += 1
+            module_file = tests_dir / f"{match.group('module')}.py"
+            assert module_file in definitions, (
+                f"{where} cites {match.group(0)}, but {module_file.name} does not exist"
+            )
+            assert defines(definitions[module_file], match.group("test")), (
+                f"{where} cites {match.group(0)}, but {module_file.name} defines no such test"
+            )
+        for match in bare.finditer(text):
+            name = match.group("test")
+            if qualified.search(match.group(0)):
+                continue
+            citations += 1
+            assert any(defines(body, name) for body in definitions.values()), (
+                f"{where} cites `{name}`, which no test module in {tests_dir.name}/ defines"
+            )
+    assert citations >= 10, (
+        f"only {citations} test citations found in the package source — the scan has "
+        "stopped seeing them, and this guard has become vacuous"
+    )
+
+
+# ---------------------------------------------------------------------------------------
 # T-129 (stub 4): what the C1 gap actually was, and what it actually would have done
 # ---------------------------------------------------------------------------------------
 #
@@ -658,16 +894,43 @@ _SAFE_PATH_INTERPOLATIONS = {
     "quantity": "build_permalink refuses it unless >= 1, and it is an int",
 }
 
-#: The modules that call ``store_url``. Named rather than discovered so that a new caller
-#: in a module nobody added here is caught by the count assertion below.
-_STORE_URL_CALLERS = (app_module, orders_module, permalink_module, telemetry_module)
+#: The root of the ``shopify_stub`` package on disk, taken from a module inside it rather
+#: than from a path literal, so a move of the source tree does not silently empty the scan.
+_PACKAGE_ROOT = pathlib.Path(permalink_module.__file__).resolve().parent
+
+
+def _package_source_files() -> list[pathlib.Path]:
+    """Every ``.py`` file in the ``shopify_stub`` package. **Discovered, never named.**
+
+    W5 adversarial: this used to be a four-module tuple —
+    ``(app, orders, permalink, telemetry)`` — under a comment claiming the exact opposite
+    of what it did: *"Named rather than discovered so that a new caller in a module nobody
+    added here is caught by the count assertion below."* It was not caught. A
+    ``store_url(path=f"...{caller_value}")`` in `graphql_admin` — or in any other module of
+    the package — was simply not parsed, so it contributed nothing to the census and
+    ``len(call_sites) == 4`` went on holding while an off-domain, caller-reachable path was
+    live. `permalink.store_url` cites that census as the proof of "nothing a client sends
+    reaches a ``path``", which made a hardcoded list a load-bearing one.
+
+    Scanning the directory rather than importing modules is deliberate: a module that fails
+    to import, or that nothing imports, still ships and still gets read by the AST walk.
+    :func:`test_the_caller_scan_covers_the_whole_package` pins the scan against
+    ``pkgutil.iter_modules`` so it cannot go blind either.
+    """
+    files = sorted(path for path in _PACKAGE_ROOT.rglob("*.py") if "__pycache__" not in path.parts)
+    assert files, (
+        f"the package source scan found no files under {_PACKAGE_ROOT} — it has stopped "
+        "working, and every claim derived from it is now vacuous"
+    )
+    return files
 
 
 def _store_url_path_arguments() -> list[tuple[str, int, ast.expr]]:
     """Every ``path=`` argument passed to ``store_url`` anywhere in the package."""
     found: list[tuple[str, int, ast.expr]] = []
-    for module in _STORE_URL_CALLERS:
-        tree = ast.parse(inspect.getsource(module))
+    for source_file in _package_source_files():
+        where = f"shopify_stub/{source_file.relative_to(_PACKAGE_ROOT).as_posix()}"
+        tree = ast.parse(source_file.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -677,11 +940,45 @@ def _store_url_path_arguments() -> list[tuple[str, int, ast.expr]]:
                 continue
             keywords = {keyword.arg: keyword.value for keyword in node.keywords}
             assert "path" in keywords, (
-                f"{module.__name__}:{node.lineno} calls store_url without a keyword path; "
+                f"{where}:{node.lineno} calls store_url without a keyword path; "
                 "this test can no longer see what it renders"
             )
-            found.append((module.__name__, node.lineno, keywords["path"]))
+            found.append((where, node.lineno, keywords["path"]))
     return found
+
+
+def test_the_caller_scan_covers_the_whole_package() -> None:
+    """The discovery itself, pinned — a census is worth only what its scan covers.
+
+    Two independent enumerations of the package must agree: the directory walk that
+    :func:`_package_source_files` performs, and ``pkgutil.iter_modules`` over
+    ``shopify_stub.__path__``. If the walk ever stops seeing a module, the store_url census
+    below silently stops covering it, which is precisely the failure the hardcoded
+    four-module tuple had.
+    """
+    import shopify_stub
+
+    files = _package_source_files()
+    scanned = {path.relative_to(_PACKAGE_ROOT).with_suffix("").as_posix() for path in files}
+    discovered = {info.name for info in pkgutil.iter_modules(shopify_stub.__path__)}
+    assert discovered, "pkgutil found no modules in shopify_stub — the package is not importable"
+    assert discovered <= scanned, (
+        f"the directory walk misses importable modules: {sorted(discovered - scanned)}"
+    )
+
+    # The four modules the old hardcoded tuple named must still be covered...
+    for module in (app_module, orders_module, permalink_module, telemetry_module):
+        assert pathlib.Path(module.__file__ or "").resolve() in files, (
+            f"{module.__name__} is no longer reached by the scan"
+        )
+    # ...and so must at least one module it did NOT name. `graphql_admin` is the module the
+    # W5 reproduction put an off-domain `store_url` call into; under the old tuple it was
+    # not parsed at all.
+    assert "graphql_admin" in scanned, "shopify_stub.graphql_admin is not being scanned"
+    assert len(scanned) > 4, (
+        f"the scan covers only {sorted(scanned)} — a census of four modules is what this "
+        "test exists to stop being possible"
+    )
 
 
 def _raw_location_header_sites(module: Any) -> int:
@@ -721,11 +1018,21 @@ def test_no_caller_supplied_value_reaches_a_store_url_path() -> None:
     Checked structurally rather than by driving inputs, because "no input reaches it" is a
     claim about every input. A route added tomorrow that interpolates a query parameter
     would make the comment's original sentence true; that route is what turns this red.
+
+    The call sites are **discovered** across the whole package
+    (:func:`_package_source_files`), not read off a list. The list this replaced named four
+    modules, so the assertions below ran over four modules and the count still read 4 no
+    matter what any other module in the package did — a call in `graphql_admin` reached a
+    live off-domain path with this test green. The count is now a statement about the
+    package; the per-site loop under it is the real guard, and it now runs over every
+    module there is.
     """
     call_sites = _store_url_path_arguments()
     assert len(call_sites) == 4, (
-        f"the comment names four call sites; found {len(call_sites)}: "
-        f"{[(module, line) for module, line, _ in call_sites]}"
+        f"the package contains {len(call_sites)} store_url call sites, not the four this "
+        f"census vouches for: {[(module, line) for module, line, _ in call_sites]}. A new "
+        "one is not automatically wrong — read it, satisfy yourself that its path cannot "
+        "carry anything a client sent, and then update this count."
     )
     for module_name, lineno, path in call_sites:
         where = f"{module_name}:{lineno}"
