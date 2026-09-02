@@ -133,6 +133,7 @@ from contracts.registry import (
 from contracts.signing import (
     REQUIRED_SIGNING_FIELDS,
     SIGNED_FIELDS,
+    CanonicalisationError,
     canonical_json,
     canonical_signing_bytes,
     envelope_of,
@@ -208,6 +209,7 @@ __all__ = [
     # signing
     "REQUIRED_SIGNING_FIELDS",
     "SIGNED_FIELDS",
+    "CanonicalisationError",
     "canonical_json",
     "canonical_signing_bytes",
     "envelope_of",

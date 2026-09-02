@@ -10,6 +10,7 @@
 import {describe, expect, it} from "vitest";
 
 import {
+  CanonicalisationError,
   REQUIRED_SIGNING_FIELDS,
   SIGNED_FIELDS,
   canonicalJson,
@@ -339,5 +340,88 @@ describe("F7 — a non-mapping is not an acceptable envelope", () => {
 
   it("reports zero errors for a complete submission", () => {
     expect(signingEnvelopeErrors(makeSubmission())).toEqual([]);
+  });
+});
+
+describe("RFC 8785 §3.1 — the number rule", () => {
+  it.each([
+    [Number(2n ** 53n - 1n), "9007199254740991"],
+    [Number(2n ** 53n), "9007199254740992"],
+    [1e16, "10000000000000000"],
+    [Number(2n ** 63n), "9223372036854776000"],
+    [1e21, "1e+21"],
+    [-(2 ** 53), "-9007199254740992"],
+  ])("canonicalizes the exact double %s as %s", (value, expected) => {
+    // A JS `number` IS a double, so every finite one is representable by construction. These are
+    // the same six values the Python peer pins, so the two land on ONE rule rather than two
+    // bounds that happen to agree in the middle.
+    expect(canonicalJson({n: value})).toBe(`{"n":${expected}}`);
+  });
+
+  it.each([2n ** 53n + 1n, 12345678901234567890n, 10n ** 400n, -(2n ** 53n) - 1n, 0n])(
+    "refuses the bigint %s",
+    (value) => {
+      // `bigint` is the only way a non-double integer can reach this function in JS. Writing one
+      // into signed bytes would cover a value the submission does not state — the same defect the
+      // Python peer had when it silently coerced past 2**53-1.
+      expect(() => canonicalJson({n: value})).toThrow(CanonicalisationError);
+    },
+  );
+
+  it("has no way to express a non-representable integer as a number", () => {
+    // The structural reason TS needed no coercion fix: the literal 9007199254740993 IS
+    // 9007199254740992 by the time it is a value. The rule still has to be pinned, because the
+    // bigint door is open.
+    expect(9007199254740993).toBe(9007199254740992);
+    expect(Number.isSafeInteger(2 ** 53)).toBe(false);
+    // ...and 2**53 is nonetheless an exact double that must canonicalize, which is exactly what
+    // a safe-integer bound gets wrong.
+    expect(canonicalJson({n: 2 ** 53})).toBe('{"n":9007199254740992}');
+  });
+});
+
+describe("one exception type for every canonicalisation failure", () => {
+  it.each([
+    ["a function", () => canonicalJson({n: () => 1})],
+    ["a symbol", () => canonicalJson({n: Symbol("x")})],
+    ["undefined at the root", () => canonicalJson(undefined)],
+    ["NaN", () => canonicalJson({n: Number.NaN})],
+    ["Infinity", () => canonicalJson({n: Number.POSITIVE_INFINITY})],
+    ["a bigint", () => canonicalJson({n: 2n ** 53n + 1n})],
+    ["payloadHash of a non-object", () => payloadHash("nope" as never)],
+    ["an incomplete envelope", () => canonicalSigningBytes(makeBid())],
+  ])("raises CanonicalisationError for %s", (_label, call) => {
+    expect(call).toThrow(CanonicalisationError);
+  });
+
+  it("still matches the catch clauses callers already wrote", () => {
+    // Narrowing a public exception type is a breaking change; the Python peer derives from both
+    // ValueError and TypeError for the same reason.
+    expect(new CanonicalisationError("x")).toBeInstanceOf(TypeError);
+    expect(new CanonicalisationError("x")).toBeInstanceOf(Error);
+  });
+});
+
+describe("the corpus itself", () => {
+  it("has 27 cases and 27 distinct inputs", () => {
+    // The file advertised 27 and had 26 distinct: entries 3 and 4 were both `{"n": 0}`, because
+    // the intended `-0` case round-tripped through JSON as `0` when the file was written. `-0`
+    // was therefore untested in BOTH languages, and `length >= 25` could not see it.
+    // The replacer is load-bearing: `JSON.stringify(-0)` is "0", so a plain stringify would
+    // report the fixed corpus as still holding a duplicate.
+    const rendered = corpus.map((c) =>
+      JSON.stringify(c.input, (_key, value) => (Object.is(value, -0) ? "-0" : value)),
+    );
+    expect(new Set(rendered).size).toBe(corpus.length);
+    expect(corpus.length).toBe(27);
+  });
+
+  it("contains a real negative zero", () => {
+    const negativeZeros = corpus.filter((c) => {
+      const n = (c.input as Record<string, unknown>)["n"];
+      return typeof n === "number" && Object.is(n, -0);
+    });
+    expect(negativeZeros).toHaveLength(1);
+    expect(canonicalJson(negativeZeros[0]!.input)).toBe('{"n":0}');
   });
 });

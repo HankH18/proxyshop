@@ -47,6 +47,34 @@ export const PAYLOAD_HASH_ALGORITHM = "sha256";
 export type Payload = Record<string, unknown>;
 
 /**
+ * The one error a caller has to catch around the canonicalizer.
+ *
+ * The peer of `contracts.signing.CanonicalisationError`. Both languages raise exactly this for
+ * every way a payload can fail to be canonicalizable, so a caller writing one `catch` is not
+ * quietly missing four of the five failure modes.
+ */
+export class CanonicalisationError extends TypeError {
+  override readonly name = "CanonicalisationError";
+}
+
+/**
+ * RFC 8785 §3.1: a signable JSON number MUST be expressible as an IEEE-754 double.
+ *
+ * In JavaScript a `number` IS a double, so every finite `number` passes by construction and only
+ * `bigint` can carry an integer this rule excludes — `9007199254740993n` has no double, and
+ * writing it into signed bytes would cover a value the submission does not state. The Python peer
+ * needs the explicit `float(v) == v` test because its `int` is arbitrary precision.
+ */
+function assertDoubleRepresentable(value: bigint): never {
+  const asDouble = Number(value);
+  const detail =
+    BigInt(Number.isFinite(asDouble) ? Math.trunc(asDouble) : 0) === value
+      ? `it would have to be written as the number ${String(asDouble)}, and a bigint is not a JSON number`
+      : `${value.toString()} is not expressible as an IEEE-754 double (RFC 8785 §3.1)`;
+  throw new CanonicalisationError(`canonicalJson cannot sign a bigint: ${detail}`);
+}
+
+/**
  * RFC-8785 canonical JSON: UTF-16-ordered keys, ECMAScript numbers, no insignificant whitespace.
  *
  * Written by hand rather than with `JSON.stringify(value, Object.keys(value).sort())`, because
@@ -68,14 +96,17 @@ export function canonicalJson(value: unknown): string {
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
   }
+  if (typeof value === "bigint") assertDoubleRepresentable(value);
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("canonicalJson: non-finite numbers are not signable");
+    if (!Number.isFinite(value)) {
+      throw new CanonicalisationError("canonicalJson: non-finite numbers are not signable");
+    }
     // RFC 8785 §3.2.2.3 defines number serialization as ECMAScript's, which is exactly `String`.
     // The Python side reimplements `Number::toString` for the same reason — `repr` is NOT it.
     return String(value);
   }
   if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
-  throw new TypeError(
+  throw new CanonicalisationError(
     `canonicalJson cannot sign a ${typeof value}; a signed payload must be plain JSON so both ` +
       "sides can reproduce the bytes from the wire form alone",
   );
@@ -84,7 +115,7 @@ export function canonicalJson(value: unknown): string {
 /** A digest over the bid BODY — everything except the envelope and the signature itself. */
 export function payloadHash(payload: Payload): string {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    throw new TypeError("payloadHash expects an object");
+    throw new CanonicalisationError("payloadHash expects an object");
   }
   const body: Payload = {};
   for (const [key, value] of Object.entries(payload)) {
@@ -122,7 +153,7 @@ export function missingSigningFields(payload: unknown): string[] {
 export function canonicalSigningBytes(payload: Payload): Uint8Array {
   const missing = missingSigningFields(payload);
   if (missing.length > 0) {
-    throw new Error(
+    throw new CanonicalisationError(
       `cannot canonicalize a submission with an incomplete signing envelope; missing ` +
         `${missing.join(", ")} (D52: all of ${REQUIRED_SIGNING_FIELDS.join(", ")} are required)`,
     );
@@ -130,7 +161,7 @@ export function canonicalSigningBytes(payload: Payload): Uint8Array {
   for (const field of ["auction_id", "store_id"] as const) {
     const value = payload[field];
     if (value === null || value === undefined || value === "") {
-      throw new Error(
+      throw new CanonicalisationError(
         `cannot canonicalize a submission without ${field} — it is a covered field, so a ` +
           "signature that omitted it could be lifted across auctions",
       );

@@ -62,9 +62,37 @@ _NON_BODY_KEYS: frozenset[str] = frozenset(
 PAYLOAD_HASH_ALGORITHM = "sha256"
 
 
-#: JavaScript's exact-integer range. Beyond it a JSON integer is not representable as an
-#: ECMAScript number, so the two sides would read different values out of the same bytes.
-_MAX_SAFE_INTEGER = 2**53 - 1
+class CanonicalisationError(ValueError, TypeError):
+    """The one error a caller has to catch around the canonicalizer.
+
+    Before this existed the module raised `TypeError`, `ValueError`, `AttributeError` and
+    `OverflowError` depending on which way the input was wrong — including a bare
+    `AttributeError: 'int' object has no attribute 'encode'` for a non-string key, which is a
+    latent 500 at a public door. A caller writing `except SomeError` around `canonical_json`
+    missed four of the five failure modes.
+
+    It derives from BOTH `ValueError` and `TypeError` so that existing callers (and tests) which
+    catch either keep working: narrowing a public exception type is a breaking change, and there
+    is no version of this where a caller's `except` clause silently stops matching.
+    """
+
+
+def _representable_as_double(value: int) -> bool:
+    """RFC 8785 §3.1: a signable JSON number MUST be expressible as an IEEE-754 double.
+
+    The predicate is `float(v) == v` and nothing else. A safe-integer bound (`abs(v) <= 2**53-1`)
+    is the wrong test in BOTH directions: it rejects `10**16` and `2**63`, which are exact
+    doubles, and it admits nothing above the bound at all — the old code did not reject those, it
+    silently COERCED them, so `{"quantity": 9007199254740993}` signed bytes covering
+    `…992`. The signature verified and the exchange acted on a quantity the signature did not
+    bind.
+    """
+    try:
+        return float(value) == value
+    except OverflowError:
+        # `10**400` and friends: too large for a double at all, so not expressible, so not
+        # signable. An exception here is the answer, not an error to propagate.
+        return False
 
 
 def _ecmascript_number(value: float) -> str:
@@ -83,7 +111,7 @@ def _ecmascript_number(value: float) -> str:
     the spec'd algorithm is the only way the two canonicalizers stay one protocol.
     """
     if value != value or value in (float("inf"), float("-inf")):
-        raise ValueError("canonical_json: non-finite numbers are not signable")
+        raise CanonicalisationError("canonical_json: non-finite numbers are not signable")
     if value == 0:
         return "0"  # ECMAScript prints -0 as "0"
     if value < 0:
@@ -152,14 +180,29 @@ def _write_canonical(value: Any, out: list[str]) -> None:
         # `ensure_ascii=False` so non-ASCII stays literal, matching `JSON.stringify`.
         out.append(json.dumps(value, ensure_ascii=False))
     elif isinstance(value, int):
-        # An integer beyond JavaScript's exact range would be READ BACK as a different number on
-        # the other side, so it is canonicalized through the double it will become there.
-        out.append(
-            str(value) if abs(value) <= _MAX_SAFE_INTEGER else _ecmascript_number(float(value))
-        )
+        # RFC 8785 §3.1: the number MUST be expressible as an IEEE-754 double. If it is not, the
+        # other side reads a DIFFERENT value out of the same bytes, so there is no honest way to
+        # sign it — refusing is the only correct answer, and coercing (what this used to do) is
+        # the dangerous one: it produced bytes covering a quantity the seller never wrote.
+        if not _representable_as_double(value):
+            raise CanonicalisationError(
+                f"canonical_json cannot sign the integer {value}: RFC 8785 §3.1 requires a JSON "
+                "number to be expressible as an IEEE-754 double, and this one is not. Signing "
+                "the nearest double would cover a value the submission does not state."
+            )
+        out.append(_ecmascript_number(float(value)))
     elif isinstance(value, float):
         out.append(_ecmascript_number(value))
     elif isinstance(value, Mapping):
+        # A non-string key is not JSON. Sorting one used to raise `AttributeError: 'int' object
+        # has no attribute 'encode'` out of `_utf16_key` — a latent 500 rather than a refusal.
+        for key in value:
+            if not isinstance(key, str):
+                raise CanonicalisationError(
+                    f"canonical_json cannot sign a {type(key).__name__} key ({key!r}); JSON "
+                    "object members are strings, and coercing one would let two different "
+                    "payloads sign identically"
+                )
         out.append("{")
         for index, key in enumerate(sorted(value, key=_utf16_key)):
             if index:
@@ -176,7 +219,7 @@ def _write_canonical(value: Any, out: list[str]) -> None:
             _write_canonical(item, out)
         out.append("]")
     else:
-        raise TypeError(
+        raise CanonicalisationError(
             f"canonical_json cannot sign a {type(value).__name__}; a signed payload must be "
             "plain JSON so both sides can reproduce the bytes from the wire form alone"
         )
@@ -190,7 +233,9 @@ def payload_hash(payload: Mapping[str, Any]) -> str:
     thing the seller is actually promising, rather than only the metadata around it.
     """
     if not isinstance(payload, Mapping):
-        raise TypeError(f"payload_hash expects a mapping, got {type(payload).__name__}")
+        raise CanonicalisationError(
+            f"payload_hash expects a mapping, got {type(payload).__name__}"
+        )
     body = {key: value for key, value in payload.items() if key not in _NON_BODY_KEYS}
     digest = hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
     return f"{PAYLOAD_HASH_ALGORITHM}:{digest}"
@@ -219,20 +264,23 @@ def missing_signing_fields(payload: Mapping[str, Any]) -> list[str]:
 def canonical_signing_bytes(payload: Mapping[str, Any]) -> bytes:
     """The exact bytes a submission's `signature` covers.
 
-    Raises `ValueError` when the envelope is incomplete: refusing to produce signing input for a
-    submission that cannot legally exist is better than producing bytes nobody can verify.
+    Raises `CanonicalisationError` when the envelope is incomplete: refusing to produce signing
+    input for a submission that cannot legally exist is better than producing bytes nobody can
+    verify.
     """
     if not isinstance(payload, Mapping):
-        raise TypeError(f"canonical_signing_bytes expects a mapping, got {type(payload).__name__}")
+        raise CanonicalisationError(
+            f"canonical_signing_bytes expects a mapping, got {type(payload).__name__}"
+        )
 
     missing = missing_signing_fields(payload)
     if missing:
-        raise ValueError(
+        raise CanonicalisationError(
             "cannot canonicalize a submission with an incomplete signing envelope; "
             f"missing {missing} (D52: all of {list(REQUIRED_SIGNING_FIELDS)} are required)"
         )
     if payload.get("auction_id") in (None, "") or payload.get("store_id") in (None, ""):
-        raise ValueError(
+        raise CanonicalisationError(
             "cannot canonicalize a submission without auction_id and store_id — both are "
             "covered fields, so a signature that omitted them could be lifted across auctions"
         )
@@ -298,6 +346,7 @@ def signing_envelope_errors(payload: Mapping[str, Any]) -> Sequence[str]:
 
 __all__ = [
     "PAYLOAD_HASH_ALGORITHM",
+    "CanonicalisationError",
     "REQUIRED_SIGNING_FIELDS",
     "SIGNED_FIELDS",
     "SignedBidSubmission",

@@ -315,11 +315,31 @@ def test_numbers_serialize_the_way_ecmascript_does(value: float, expected: str) 
     assert canonical_json({"n": value}) == f'{{"n":{expected}}}'
 
 
-def test_an_integer_beyond_javascript_s_exact_range_is_signed_as_the_double_it_becomes() -> None:
-    """The other side reads JSON numbers as doubles. Signing the exact integer would mean the two
-    ends canonicalize different values out of identical bytes."""
-    assert canonical_json({"n": 12345678901234567890}) == '{"n":12345678901234567000}'
+def test_an_integer_that_is_not_a_double_is_REFUSED_not_silently_coerced() -> None:
+    """RFC 8785 §3.1: "JSON number data MUST be expressible as IEEE 754 double-precision values."
+
+    This assertion replaces one that required the opposite — see the `justify-test-edit` ritual in
+    the commit that changed it. It read:
+
+        assert canonical_json({"n": 12345678901234567890}) == '{"n":12345678901234567000}'
+
+    i.e. it REQUIRED the canonicalizer to silently rewrite a non-representable integer as the
+    nearest double. That is a defect encoded as a contract: a seller signing
+    `{"quantity": 9007199254740993}` produced bytes covering `…992`, the signature verified, and
+    the exchange acted on a quantity the signature did not bind. Coercion has to be a refusal.
+    """
+    for value in (2**53 + 1, 12345678901234567890, 10**400, -(2**53) - 1):
+        with pytest.raises(Exception) as excinfo:
+            canonical_json({"n": value})
+        assert "IEEE-754" in str(excinfo.value) or "double" in str(excinfo.value)
+
+    # Controls, so this is not "refuse every large integer". Each of these IS an exact double and
+    # must still canonicalize — the old safe-integer bound was wrong in this direction too.
     assert canonical_json({"n": 2**53 - 1}) == '{"n":9007199254740991}'
+    assert canonical_json({"n": 2**53}) == '{"n":9007199254740992}'
+    assert canonical_json({"n": 10**16}) == '{"n":10000000000000000}'
+    assert canonical_json({"n": 2**63}) == '{"n":9223372036854776000}'
+    assert canonical_json({"n": 10**21}) == '{"n":1e+21}'
 
 
 def test_keys_are_ordered_by_utf16_code_unit_not_code_point() -> None:
@@ -478,3 +498,159 @@ def test_a_non_mapping_envelope_is_five_errors_not_zero(payload: object) -> None
 
     # Control: a complete mapping is zero errors.
     assert list(signing_envelope_errors(make_submission())) == []
+
+
+# --- RFC 8785 §3.1: the number rule is `float(v) == v`, not a safe-integer bound ------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (2**53 - 1, "9007199254740991"),  # the old bound's last accepted value
+        (2**53, "9007199254740992"),  # one past it, and still an exact double
+        (10**16, "10000000000000000"),  # an exact double; T-011's bound rejects this one
+        (2**63, "9223372036854776000"),  # exact double; ES prints the shortest round trip
+        (10**21, "1e+21"),
+        (-(2**53), "-9007199254740992"),
+        (0, "0"),
+        (89, "89"),
+    ],
+)
+def test_an_integer_that_is_an_exact_double_is_canonicalized(value: int, expected: str) -> None:
+    """`float(v) == v` is the whole predicate. The old `abs(v) <= 2**53-1` bound was wrong in
+    BOTH directions — it treats `10**16` and `2**63` as out of range even though every JS engine
+    reads them back bit-for-bit, and it silently coerced everything above it."""
+    assert canonical_json({"n": value}) == f'{{"n":{expected}}}'
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        2**53 + 1,  # 9007199254740993 — the first integer with no double
+        2**53 + 3,
+        -(2**53) - 1,
+        12345678901234567890,
+        123456789012345680000,
+        12345678901234567001,
+        10**400,  # no double at all: `float()` raises OverflowError
+        -(10**400),
+    ],
+)
+def test_an_integer_that_is_not_an_exact_double_is_refused(value: int) -> None:
+    """The security case, independent of any cross-language question: a seller signing
+    `{"quantity": 9007199254740993}` used to produce bytes covering `…992`. The signature
+    verifies and the exchange acts on a quantity the signature does not bind."""
+    from packages.contracts import CanonicalisationError
+
+    with pytest.raises(CanonicalisationError):
+        canonical_json({"n": value})
+    with pytest.raises(CanonicalisationError):
+        canonical_json([value])
+
+
+def test_the_number_rule_is_exactly_float_equality() -> None:
+    """Stated as a property rather than a table, so the rule cannot drift to some other bound
+    that happens to agree on the sampled values. This is the predicate to hand any peer
+    implementation: `float(v) == v`, with `OverflowError` counting as False."""
+    from packages.contracts import CanonicalisationError
+
+    interesting = [
+        0,
+        1,
+        -1,
+        10**15,
+        10**16,
+        10**17,
+        2**53 - 1,
+        2**53,
+        2**53 + 1,
+        2**53 + 2,
+        2**62,
+        2**63,
+        2**63 + 1,
+        10**21,
+        10**22,
+        10**308,
+        10**309,
+        10**400,
+    ]
+    for value in interesting + [-v for v in interesting]:
+        try:
+            representable = float(value) == value
+        except OverflowError:
+            representable = False
+        if representable:
+            canonical_json({"n": value})  # must not raise
+        else:
+            with pytest.raises(CanonicalisationError):
+                canonical_json({"n": value})
+
+
+# --- one exception type for every canonicalisation failure ----------------------------------
+
+
+def test_every_canonicalisation_failure_raises_the_one_error() -> None:
+    """The module used to raise `TypeError`, `ValueError`, `AttributeError` and `OverflowError`
+    depending on which way the input was wrong — including a bare `AttributeError: 'int' object
+    has no attribute 'encode'` for a non-string key, a latent 500. A caller writing one `except`
+    around the canonicalizer missed four of the five failure modes."""
+    from packages.contracts import CanonicalisationError
+
+    failures = {
+        "a set": lambda: canonical_json({"n": {1, 2, 3}}),
+        "an object": lambda: canonical_json({"n": object()}),
+        "a non-string key": lambda: canonical_json({1: 2}),
+        "a tuple key": lambda: canonical_json({(1, 2): "x"}),
+        "nan": lambda: canonical_json({"n": float("nan")}),
+        "inf": lambda: canonical_json({"n": float("inf")}),
+        "a non-double integer": lambda: canonical_json({"n": 2**53 + 1}),
+        "an integer with no double at all": lambda: canonical_json({"n": 10**400}),
+        "payload_hash of a non-mapping": lambda: payload_hash("not a mapping"),
+        "canonical_signing_bytes of a non-mapping": lambda: canonical_signing_bytes(["a", "b"]),
+        "an incomplete envelope": lambda: canonical_signing_bytes(make_bid()),
+    }
+    for label, call in failures.items():
+        with pytest.raises(CanonicalisationError, match=r".") as excinfo:
+            call()
+        assert type(excinfo.value) is CanonicalisationError, (
+            f"{label} raised {type(excinfo.value).__name__}, not the one canonicalisation error"
+        )
+
+
+def test_the_one_error_still_matches_the_except_clauses_callers_already_wrote() -> None:
+    """Narrowing a public exception type is a breaking change. `CanonicalisationError` derives
+    from both `ValueError` and `TypeError` so no existing `except` silently stops matching."""
+    from packages.contracts import CanonicalisationError
+
+    assert issubclass(CanonicalisationError, ValueError)
+    assert issubclass(CanonicalisationError, TypeError)
+
+
+# --- the corpus itself ----------------------------------------------------------------------
+
+
+def test_the_corpus_cases_are_distinct() -> None:
+    """The file advertised 27 cases and had 26 distinct inputs: entries 3 and 4 were both
+    `{"n": 0}`, because the intended `-0` case round-tripped through JSON as `0` when the file
+    was written. `-0` was therefore untested in BOTH languages. `len(_CORPUS) >= 25` could not
+    see that, which is why nobody noticed."""
+    rendered = [json.dumps(case["input"], sort_keys=True) for case in _CORPUS]
+    duplicates = {text for text in rendered if rendered.count(text) > 1}
+    assert duplicates == set(), f"the corpus repeats these inputs: {duplicates}"
+    assert len(_CORPUS) == 27
+
+
+def test_negative_zero_is_actually_in_the_corpus_and_actually_negative() -> None:
+    """Stored as a float literal so `json.loads` preserves the sign bit — as an integer `0` it
+    silently became the positive-zero case that was already there."""
+    import math
+
+    negative_zeros = [
+        case
+        for case in _CORPUS
+        if isinstance(case["input"].get("n"), float)
+        and case["input"]["n"] == 0
+        and math.copysign(1, case["input"]["n"]) < 0
+    ]
+    assert len(negative_zeros) == 1, "the corpus does not contain a real -0 case"
+    assert canonical_json(negative_zeros[0]["input"]) == '{"n":0}'

@@ -45,6 +45,7 @@ export {
 export type {BidPathName, TrustSnapshotMap, TrustSnapshotRow, ValidateBidOptions} from "./boundary.js";
 
 export {
+  CanonicalisationError,
   PAYLOAD_HASH_ALGORITHM,
   REQUIRED_SIGNING_FIELDS,
   SIGNED_FIELDS,
