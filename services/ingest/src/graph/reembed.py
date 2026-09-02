@@ -32,6 +32,7 @@ from typing import Any
 from ..embeddings import EmbeddingProvider, get_embedding_provider
 from .schema import (
     EMBEDDING_RUN_COMPLETE,
+    EMBEDDING_RUN_DEGRADED,
     EMBEDDING_RUN_RUNNING,
     VECTOR_INDEX_NAME,
     apply_schema,
@@ -154,6 +155,38 @@ def embedding_text(row: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part)
 
 
+_STILL_EMBEDDED = """
+MATCH (p:Product)
+WHERE p.product_id IN $product_ids AND p.embedding IS NOT NULL
+RETURN p.product_id AS product_id
+ORDER BY product_id
+"""
+
+
+def _still_embedded(session: Any, product_ids: Sequence[str]) -> list[str]:
+    """Which of ``product_ids`` still carry a vector.
+
+    The read-back behind :data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED`. That state
+    tells every vector query "one space in this index, go ahead", and the only thing making
+    that true for a pass that skipped products is that the skipped products' vectors were
+    actually removed. This asks the graph instead of trusting the loop.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        product_ids: the ids to check. An empty sequence short-circuits without a round trip.
+
+    Returns:
+        The ids that still have an ``embedding`` property, sorted. Empty is the healthy
+        answer after a pass that skipped them.
+    """
+    if not product_ids:
+        return []
+    return [
+        row["product_id"]
+        for row in session.run(_STILL_EMBEDDED, product_ids=list(product_ids)).data()
+    ]
+
+
 def reembed_products(
     session: Any,
     provider: EmbeddingProvider | None = None,
@@ -163,15 +196,25 @@ def reembed_products(
 ) -> ReembedReport:
     """Recompute and store ``Product.embedding`` for every product in the graph.
 
-    Records an :class:`~ingest.graph.schema.EmbeddingRun` marker against the vector index —
-    ``running`` before the first batch, and ``complete`` after the last **only when the pass
-    embedded every product it read** — so that both "which provider wrote these vectors" and
-    "did the pass cover the whole catalog" are readable from the graph rather than assumed.
-    :func:`ingest.graph.query.candidate_products` refuses to answer a vector query that
-    disagrees with it.
+    Records an :class:`~ingest.graph.schema.EmbeddingRun` marker against the vector index so
+    that both "which provider wrote these vectors" and "did the pass cover the whole
+    catalog" are readable from the graph rather than assumed. Three states, and the
+    distinction between the last two is load-bearing:
+
+    * ``running`` before the first batch — and still ``running`` if the pass never returns,
+      which is the only evidence that an interrupted pass mixed two vector spaces into one
+      index. :func:`ingest.graph.query.candidate_products` refuses every vector query here.
+    * ``complete`` after the last batch when the pass embedded **every** product it read.
+    * ``degraded`` after the last batch when it could not, naming the products it skipped.
+      The index still holds exactly one vector space, so vector queries are answered; the
+      skipped products simply have no vector and
+      :func:`ingest.graph.query.products_missing_embeddings` names them. One unembeddable
+      product degrades itself, not the catalog (T-116).
 
     A product whose composed text is empty is skipped, and any vector a previous pass left
-    on it is *removed* rather than left behind in that pass's vector space.
+    on it is *removed* rather than left behind in that pass's vector space. That removal is
+    what makes ``degraded`` honest: it is the reason the index is single-space even when the
+    pass did not cover everything.
 
     Args:
         session: an open ``neo4j.Session``.
@@ -281,13 +324,39 @@ def reembed_products(
     # been the honest reading of the same pass — the marker is now derived from it, so the
     # two cannot disagree, and `main()`'s non-zero exit and the graph's own state say the
     # same thing to an operator who reads only one of them.
+    #
+    # But `not complete` is NOT `running`, and conflating them (T-116) cost far more than
+    # the defect it closed. Reaching this line means the pass walked the whole catalog and
+    # every vector now in the index came from `resolved` — including for the skipped
+    # products, whose stale vectors were REMOVED above rather than left in a foreign space.
+    # There is exactly one vector space in the index either way, which is the only question
+    # a vector query has to ask. `running` means the opposite: the pass never got here, and
+    # two spaces may be interleaved. So a finished-but-partial pass gets its own terminal
+    # state, carrying the ids it could not embed. `complete` still means what T-101 made it
+    # mean — the whole catalog — and `EmbeddingRun.complete` is still False here.
+    #
+    # And the "one vector space" claim is CHECKED rather than asserted. Narrowing the refusal
+    # to `running` moves the entire weight of it onto the removal above: if a skipped product
+    # kept a vector, `degraded` would be a lie of exactly the kind T-101 closed, and the
+    # index really would hold two spaces behind a marker that says it is safe to query. So
+    # the pass reads back what it claims. Where the claim does not hold, `running` is the
+    # honest state and the refusal is the right outcome — the one place T-101's blanket
+    # backstop was actually earning its cost.
+    unresolved = _still_embedded(session, report.skipped)
+    if unresolved:
+        state = EMBEDDING_RUN_RUNNING
+    elif report.complete:
+        state = EMBEDDING_RUN_COMPLETE
+    else:
+        state = EMBEDDING_RUN_DEGRADED
     record_embedding_run(
         session,
         provider=resolved.name,
         dimension=index_dimensions,
-        state=EMBEDDING_RUN_COMPLETE if report.complete else EMBEDDING_RUN_RUNNING,
+        state=state,
         products=products,
         embedded=embedded,
+        skipped=report.skipped,
     )
     if await_index:
         await_indexes(session)

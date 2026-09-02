@@ -2914,11 +2914,20 @@ def test_a_partial_reembed_is_never_certified_as_complete(
     So every detector in the system reported health while one row of the index lived in a
     foreign vector space, and cosine against it is noise that looks like a similarity.
 
-    Two independent closures are asserted here, because either one alone can be reverted:
-    the marker is left ``running``, and the stale vector is removed so the *existing*
-    ``products_missing_embeddings`` detector — which needs no marker at all — names it.
+    Two closures are asserted here, because either one alone can be reverted: the marker
+    records a terminal state that is *not* ``complete`` and names what it skipped, and the
+    stale vector is removed so the *existing* ``products_missing_embeddings`` detector —
+    which needs no marker at all — names it.
+
+    T-116 AMENDS THIS TEST. It originally asserted the marker was left ``running`` and that
+    the query path then refused. Both are edited below, each with its reasoning at the
+    assertion: leaving the marker ``running`` made a *catalog-wide* vector outage out of one
+    product losing its name, and the refusal's remediation (re-run the pass) skipped the
+    same product again and so never terminated. The requirement the two assertions were
+    reaching for — the marker never certifies a partial pass as whole, and nothing ever
+    ranks across two vector spaces — is asserted here more precisely than before, not less.
     """
-    from ingest.graph import EMBEDDING_RUN_RUNNING, EmbeddingRunIncomplete, embedding_run
+    from ingest.graph import EMBEDDING_RUN_COMPLETE, EMBEDDING_RUN_DEGRADED, embedding_run
 
     session = graph_schema_session
     upsert_product(session, Product("p-keeps", "Gentle Vitamin C Serum"), source=graph_source)
@@ -2942,10 +2951,23 @@ def test_a_partial_reembed_is_never_certified_as_complete(
     run = embedding_run(session)
     assert run is not None
     assert run.provider == "second"
-    assert run.state == EMBEDDING_RUN_RUNNING, (
-        f"a pass that skipped {second.skipped} certified itself {run.state!r}"
+    # T-116, amendment 1 of 2. Was: `assert run.state == EMBEDDING_RUN_RUNNING`, which
+    # encoded "a pass that skipped a product is indistinguishable from a pass that died
+    # mid-write". That conflation is the defect T-116 names — `_check_vector_path` read it
+    # and refused every vector query in the catalog. `running` still means "died mid-write"
+    # and is still asserted, unedited, by
+    # `test_an_interrupted_reembed_is_visible_rather_than_silent`. The requirement THIS test
+    # is named for is that the marker never certifies a partial pass as whole, and that is
+    # asserted more tightly here than the old line managed: a distinct terminal state, not
+    # `complete`, carrying the finite list of products an operator has to fix.
+    assert run.state == EMBEDDING_RUN_DEGRADED, (
+        f"a pass that skipped {second.skipped} recorded itself {run.state!r}"
     )
+    assert run.state != EMBEDDING_RUN_COMPLETE, "T-101's silent-complete marker must not return"
     assert run.complete is False
+    assert run.skipped == ("p-fades",), (
+        "the marker must name what it skipped, or the remediation has nothing finite to act on"
+    )
 
     assert products_missing_embeddings(session) == ["p-fades"], (
         "the stale hash-space vector must be gone, so the marker-free detector sees it too"
@@ -2953,9 +2975,22 @@ def test_a_partial_reembed_is_never_certified_as_complete(
     assert products_missing_status(session) == [], "the product is otherwise healthy"
     assert provenance_violations(session) == [], "and still fully sourced"
 
-    # And the query path refuses rather than ranking across two spaces.
-    with pytest.raises(EmbeddingRunIncomplete, match="running"):
-        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)
+    # T-116, amendment 2 of 2. Was: `with pytest.raises(EmbeddingRunIncomplete,
+    # match="running")`, i.e. a catalog-wide vector outage was the contract for one product
+    # losing its name. The requirement behind it — never rank across two vector spaces — is
+    # delivered by the removal asserted just above: p-fades' hash-space vector is gone, so
+    # the index holds only `second`-space vectors and there is no second space to rank
+    # across. That is asserted directly here, by the skipped product's absence from a
+    # shortlist the rest of the catalog still answers.
+    ranked = [
+        c.product_id
+        for c in candidate_products(
+            session, query_text=PROBE_A, provider=_SecondProvider(), limit=10
+        )
+    ]
+    assert ranked == ["p-keeps"], (
+        f"one nameless product must degrade itself, not black out the catalog; ranked {ranked}"
+    )
 
 
 @pytest.mark.docker
@@ -3021,3 +3056,281 @@ def test_clearing_an_embedding_refuses_an_unknown_product(graph_schema_session: 
 
     with pytest.raises(ProvenanceRequired, match="p-nonexistent"):
         clear_product_embedding(graph_schema_session, product_id="p-nonexistent")
+
+
+# =======================================================================================
+# 15. Findings from the wave-3 review of the wave-2 fixes. T-116 and T-118(c): the fix for
+#     W2-03 satisfied its acceptance criteria and left its objective true by another route,
+#     so every test below drives the *combination* of the two closures T-101 shipped rather
+#     than either one on its own.
+# =======================================================================================
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_one_unembeddable_product_degrades_itself_not_the_catalog_vector_path(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """T-116, acceptance 1 and 3: the SAME-provider skip, which nothing covered before.
+
+    T-101 closed W2-03 twice over: the skipped product's stale vector is removed, *and* the
+    ``EmbeddingRun`` marker is left ``running`` so ``_check_vector_path`` refuses. Each
+    closure was pinned only in the provider-swap scenario, where the refusal looks
+    proportionate because a second vector space really is in play.
+
+    Nothing swaps a provider here. One upstream page stops publishing a name — the single
+    most ordinary thing that can happen to a catalog of five products — and the same
+    ``hash`` provider re-embeds. Reproduced in this tree before the fix: four products
+    perfectly embedded in one space, the fifth correctly reported and stripped of its
+    vector, and then ``candidate_products`` raising ``EmbeddingRunIncomplete`` for **every**
+    vector query in the system. A one-product problem became a catalog-wide outage.
+
+    Both of T-101's closures still have to hold — the marker must not certify the pass as
+    complete, and the stale vector must be gone — and this test pins the second in the
+    same-provider case too, so narrowing the removal to "only when the provider changed"
+    would fail here.
+    """
+    from ingest.graph import EMBEDDING_RUN_COMPLETE, EMBEDDING_RUN_DEGRADED, embedding_run
+
+    session = graph_schema_session
+    ids = [f"p-cat-{n}" for n in range(5)]
+    for product_id in ids:
+        upsert_product(
+            session,
+            Product(product_id, f"Gentle Vitamin C Serum {product_id}"),
+            source=graph_source,
+        )
+    first = reembed_products(session, HashEmbedding())
+    assert first.complete and first.embedded == 5, "the setup pass must itself be complete"
+    assert embedding_run(session).state == EMBEDDING_RUN_COMPLETE
+
+    # One product's name goes away upstream. Same provider, same space, nothing swapped.
+    session.run("MATCH (p:Product {product_id: 'p-cat-3'}) SET p.canonical_name = ''").consume()
+    second = reembed_products(session, HashEmbedding())
+    assert second.skipped == ["p-cat-3"] and second.embedded == 4
+    assert second.complete is False, "the report is honest about not covering the catalog"
+
+    # T-101's second closure, pinned for the same-provider case: the vector is really gone.
+    assert products_missing_embeddings(session) == ["p-cat-3"], (
+        "the skipped product's vector must be removed whether or not the provider changed"
+    )
+
+    # T-101's first closure, in the form that does not take the catalog down with it.
+    run = embedding_run(session)
+    assert run is not None
+    assert run.state == EMBEDDING_RUN_DEGRADED
+    assert run.complete is False, "a partial pass is still never certified as whole"
+    assert run.skipped == ("p-cat-3",)
+    assert run.finished is True, "but it did reach its end, so the index holds ONE space"
+
+    # T-116 acceptance 1. This raised EmbeddingRunIncomplete before the fix.
+    ranked = [
+        c.product_id
+        for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=10)
+    ]
+    assert ranked, "four healthy products must still be retrievable by vector"
+    assert set(ranked) == {"p-cat-0", "p-cat-1", "p-cat-2", "p-cat-4"}
+    assert "p-cat-3" not in ranked, "and the degraded product is absent, not silently ranked"
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_incomplete_reembed_remediation_actually_terminates(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """T-118 (c): the ``EmbeddingRunIncomplete`` message used to name a no-op loop.
+
+    The old text told the operator to "re-run ``python -m ingest.graph.reembed`` **to
+    completion** before querying it". In a catalog holding one product with no embeddable
+    text, no re-run can reach completion: every pass skips the same product, every pass
+    leaves the marker open, and the operator's remediation returns them to the state they
+    started in. That is not a slow fix, it is a fixed point.
+
+    So the remediation is followed here literally — the same provider, the whole pass — and
+    the refusal has to be gone afterwards even though the unembeddable product is still
+    unembeddable. Before the fix this test's second ``candidate_products`` call raised the
+    same exception as the first, which is the loop.
+    """
+    from ingest.graph import EMBEDDING_RUN_DEGRADED, EmbeddingRunIncomplete, embedding_run
+
+    session = graph_schema_session
+    for product_id in ("p-alpha", "p-beta", "p-gamma"):
+        upsert_product(
+            session,
+            Product(product_id, f"Gentle Vitamin C Serum {product_id}"),
+            source=graph_source,
+        )
+    assert reembed_products(session, HashEmbedding()).complete
+
+    # p-gamma loses its name permanently, and then a pass dies half-way through re-embedding
+    # into a second space. Two spaces in the index AND a product that can never be embedded.
+    session.run("MATCH (p:Product {product_id: 'p-gamma'}) SET p.canonical_name = ''").consume()
+    with pytest.raises(ConnectionError):
+        reembed_products(session, _DiesPartWayThrough(fail_after=1), batch_size=1)
+
+    with pytest.raises(EmbeddingRunIncomplete) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=_DiesPartWayThrough(), limit=10)
+    message = str(refused.value)
+
+    # The message has to describe an exit that exists. Naming only "completion" describes an
+    # exit this catalog cannot reach.
+    assert "python -m ingest.graph.reembed" in message, "the remediation must be a command"
+    assert EMBEDDING_RUN_DEGRADED in message, (
+        "the message must admit the terminal state a catalog with an unembeddable product "
+        f"actually reaches, or the remediation it names never terminates: {message}"
+    )
+    assert "products_missing_embeddings" in message, (
+        "and it must point at the finite list of catalog rows to fix, not at another re-embed"
+    )
+
+    # Now follow it. Same provider, one whole pass — no catalog edit, p-gamma still nameless.
+    repaired = reembed_products(session, _DiesPartWayThrough(fail_after=99))
+    assert repaired.skipped == ["p-gamma"] and repaired.complete is False
+
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED
+    assert run.skipped == ("p-gamma",), "and it names the row an operator has to fix"
+
+    ranked = [
+        c.product_id
+        for c in candidate_products(
+            session, query_text=PROBE_A, provider=_DiesPartWayThrough(fail_after=99), limit=10
+        )
+    ]
+    assert set(ranked) == {"p-alpha", "p-beta"}, (
+        f"one pass had to clear the refusal, or the remediation is a loop; ranked {ranked}"
+    )
+    assert products_missing_embeddings(session) == ["p-gamma"]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_degraded_pass_still_refuses_a_query_from_another_provider(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """Narrowing the refusal must not punch a hole in the provider guard.
+
+    ``degraded`` says "one vector space, and it is *this* provider's". A query embedded with
+    a different provider is exactly as wrong against a degraded index as against a complete
+    one, and reading the state instead of the provider would be the same mistake in the
+    opposite direction.
+    """
+    from ingest.graph import EMBEDDING_RUN_DEGRADED, EmbeddingProviderMismatch, embedding_run
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-named", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-nameless", ""), source=graph_source)
+    report = reembed_products(session, _SecondProvider())
+    assert report.skipped == ["p-nameless"]
+    assert embedding_run(session).state == EMBEDDING_RUN_DEGRADED
+
+    with pytest.raises(EmbeddingProviderMismatch, match="second"):
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=10)
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_pass_that_returns_never_leaves_the_marker_open(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """``running`` must mean one thing only: the pass did not come back.
+
+    The whole T-116 fix rests on that reading, so it is asserted as a property of both
+    outcomes rather than inferred from the two scenarios above. A returned pass is finished;
+    only an exception leaves the marker open.
+    """
+    from ingest.graph import EMBEDDING_RUN_COMPLETE, EMBEDDING_RUN_DEGRADED, embedding_run
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-whole", "Gentle Vitamin C Serum"), source=graph_source)
+    whole = reembed_products(session, HashEmbedding())
+    assert whole.complete
+    run = embedding_run(session)
+    assert run.finished and run.state == EMBEDDING_RUN_COMPLETE and run.skipped == ()
+
+    upsert_product(session, Product("p-hollow", ""), source=graph_source)
+    partial = reembed_products(session, HashEmbedding())
+    assert partial.complete is False
+    run = embedding_run(session)
+    assert run.finished and run.state == EMBEDDING_RUN_DEGRADED and run.skipped == ("p-hollow",)
+
+    # And the previous pass's skip list does not survive into a later clean one.
+    session.run(
+        "MATCH (p:Product {product_id: 'p-hollow'}) SET p.canonical_name = 'Named'"
+    ).consume()
+    assert reembed_products(session, HashEmbedding()).complete
+    run = embedding_run(session)
+    assert run.state == EMBEDDING_RUN_COMPLETE and run.skipped == (), (
+        "a stale skip list would name a product this pass embedded perfectly well"
+    )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_marker_written_before_the_skip_list_existed_is_still_readable(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """``r.skipped`` is new, and every vector query in the system reads this marker.
+
+    A graph stamped by an older build has no ``skipped`` property at all. Reading it must
+    degrade to "no skips recorded" rather than raise out of ``_check_vector_path``, which
+    every vector query goes through.
+    """
+    from ingest.graph import embedding_run
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-legacy", "Gentle Vitamin C Serum"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).complete
+    session.run("MATCH (r:EmbeddingRun) REMOVE r.skipped").consume()
+
+    run = embedding_run(session)
+    assert run is not None and run.skipped == ()
+    assert [
+        c.product_id
+        for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    ] == ["p-legacy"]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_degraded_state_is_checked_against_the_graph_not_merely_claimed(
+    graph_schema_session: Any, graph_source: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole T-116 narrowing rests on the removal, so the pass reads it back.
+
+    ``degraded`` tells every vector query "one space in this index, go ahead". T-101's
+    marker-open state was a blanket backstop that made that question moot; narrowing it puts
+    the entire weight on ``clear_product_embedding`` having really run. If it ever stops
+    working, ``degraded`` becomes the silent-complete marker T-101 removed, wearing a
+    different name — the exact shape of defect the wave-3 review exists to catch.
+
+    So the removal is broken here on purpose and the pass must notice: with a skipped
+    product still carrying a foreign-space vector, the honest state is ``running`` and the
+    refusal is the correct outcome. This is the one place T-101's backstop earns its cost,
+    and it is kept exactly there and nowhere else.
+    """
+    from ingest.graph import EMBEDDING_RUN_RUNNING, EmbeddingRunIncomplete, embedding_run
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-holds", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-stale", "About To Lose Its Name"), source=graph_source)
+    assert reembed_products(session, HashEmbedding()).complete
+
+    session.run("MATCH (p:Product {product_id: 'p-stale'}) SET p.canonical_name = ''").consume()
+    # The removal silently stops working — a no-op that even reports "nothing to remove".
+    monkeypatch.setattr(
+        "ingest.graph.reembed.clear_product_embedding",
+        lambda session, *, product_id: False,
+    )
+    report = reembed_products(session, _SecondProvider())
+    assert report.skipped == ["p-stale"]
+
+    # Two spaces really are in the index now, so the marker must not certify one.
+    assert products_missing_embeddings(session) == [], "the sabotage left the stale vector"
+    run = embedding_run(session)
+    assert run is not None
+    assert run.state == EMBEDDING_RUN_RUNNING, (
+        f"a skipped product still carrying a vector makes 'degraded' a lie; got {run.state!r}"
+    )
+    with pytest.raises(EmbeddingRunIncomplete):
+        candidate_products(session, query_text=PROBE_A, provider=_SecondProvider(), limit=10)

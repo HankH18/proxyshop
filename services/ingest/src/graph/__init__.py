@@ -70,6 +70,8 @@ from .reembed import ReembedReport, embedding_text, graph_driver, reembed_produc
 from .schema import (
     ADAPTER_LOOKUP_INDEXES,
     EMBEDDING_RUN_COMPLETE,
+    EMBEDDING_RUN_DEGRADED,
+    EMBEDDING_RUN_FINISHED_STATES,
     EMBEDDING_RUN_LABEL,
     EMBEDDING_RUN_RUNNING,
     LOOKUP_INDEXES,
@@ -122,6 +124,8 @@ from .upsert import (
 __all__ = [
     "EMBEDDING_PROPERTY",
     "EMBEDDING_RUN_COMPLETE",
+    "EMBEDDING_RUN_DEGRADED",
+    "EMBEDDING_RUN_FINISHED_STATES",
     "EMBEDDING_RUN_LABEL",
     "EMBEDDING_RUN_RUNNING",
     "ADAPTER_LOOKUP_INDEXES",

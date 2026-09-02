@@ -36,7 +36,12 @@ from .model import (
     ingredient_id,
     slug,
 )
-from .schema import VECTOR_INDEX_NAME, embedding_run
+from .schema import (
+    EMBEDDING_RUN_COMPLETE,
+    EMBEDDING_RUN_DEGRADED,
+    VECTOR_INDEX_NAME,
+    embedding_run,
+)
 
 #: How many rows to pull out of the vector index per requested result before the structured
 #: filters are applied. A product excluded by an attribute filter still occupies a slot in
@@ -87,15 +92,20 @@ class EmbeddingProviderMismatch(VectorIndexUnusable):
 
 
 class EmbeddingRunIncomplete(VectorIndexUnusable):
-    """The recorded re-embed pass never reported completion.
+    """The recorded re-embed pass never reached its end.
 
     The per-product writes auto-commit, so an interruption part-way leaves two vector spaces
     inside one index while ``products_missing_embeddings()`` still reports ``[]``. Cosine
     across two spaces is noise, so the query refuses rather than ranks.
 
-    A pass that ran to the end but *skipped* products is the same condition reported by a
-    different route (W2-03): it too covered only part of the catalog, and the marker is left
-    open until one pass has embedded all of it.
+    Deliberately **not** raised for a pass that reached its end having skipped products it
+    could not embed (:data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED`). That pass left one
+    vector space in the index — the skipped products' stale vectors are removed, not left
+    behind — so every cosine over it is honest, and the products it could not embed are
+    absent from the index and named by :func:`products_missing_embeddings`. Raising here for
+    that case (T-116) turned one Product with an empty ``canonical_name`` into a refusal of
+    every vector query in the catalog, under a remediation — re-run the pass — that skips
+    the same product again and so never terminates.
     """
 
 
@@ -352,8 +362,9 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             Checked *here*, before any parameter is built, because the raw path answered a
             512-d vector with ``neo4j.exceptions.ClientError`` — neither of the exceptions
             the docstring declares, and not even a ``ValueError``.
-        EmbeddingRunIncomplete: the recorded pass never finished, so the index holds two
-            vector spaces and every cosine across them is noise.
+        EmbeddingRunIncomplete: the recorded pass never reached its end, so the index holds
+            two vector spaces and every cosine across them is noise. A pass that reached its
+            end having *skipped* products does not raise: see the class docstring.
         EmbeddingProviderMismatch: the vectors were written by another provider.
     """
     run = embedding_run(session)
@@ -372,15 +383,26 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
         # is what the adapter tickets do — has vectors of genuinely unknown provenance, and
         # refusing every such query would break the seam this library exists to provide.
         return
-    if not run.complete:
+    # `finished`, NOT `complete`. The question a vector query has to ask is "does this index
+    # hold one vector space or two", and only an unfinished pass answers "two". `complete`
+    # answers the *stronger* question "did the pass cover every product", and reading it
+    # here (T-116) let one Product with an empty canonical_name black out vector search for
+    # the entire catalog. A finished-but-degraded pass removed the skipped products'
+    # vectors, so the index is single-space; those products are absent from it and
+    # `products_missing_embeddings()` names them. That is a per-product degradation and it
+    # is already visible without refusing anybody else's query.
+    if not run.finished:
         raise EmbeddingRunIncomplete(
             f"the last re-embed of {run.index} (provider {run.provider!r}) is recorded as "
-            f"{run.state!r}: it either died part-way, leaving vectors from more than one "
-            f"pass in the index, or it finished having skipped products it could not embed. "
-            f"Either way it covered only part of the catalog. Re-run "
-            f"`python -m ingest.graph.reembed --provider {run.provider}` to completion "
-            f"before querying it; a pass that keeps reporting skips is naming products with "
-            f"no embeddable text, which is a catalog problem, not an embedding one."
+            f"{run.state!r}: it started writing and never reached its end, so the index "
+            f"holds vectors from more than one pass and every cosine across them is noise. "
+            f"Re-run `python -m ingest.graph.reembed --provider {run.provider}`. That "
+            f"remediation terminates: the pass rewrites every product into one space and "
+            f"always records an end state — {EMBEDDING_RUN_COMPLETE!r} when it embedded them "
+            f"all, or {EMBEDDING_RUN_DEGRADED!r} listing the products it could not embed, "
+            f"and both are queryable. Products with no embeddable text no longer hold this "
+            f"refusal open; `products_missing_embeddings(session)` names that finite set, "
+            f"and fixing them is a catalog edit, not another re-embed."
         )
     if run.provider != provider_name:
         raise EmbeddingProviderMismatch(
@@ -455,8 +477,11 @@ def candidate_products(
             ``ValueError``, so the declaration above stays true.
         EmbeddingProviderMismatch: the vectors in the index were written by a different
             provider than the one this query embeds with.
-        EmbeddingRunIncomplete: the recorded re-embed pass never finished, so the index
-            holds more than one vector space.
+        EmbeddingRunIncomplete: the recorded re-embed pass never reached its end, so the
+            index holds more than one vector space. A pass that reached its end having
+            skipped products it could not embed does **not** raise: those products carry no
+            vector at all (:func:`products_missing_embeddings` names them) and the rest of
+            the catalog stays retrievable.
     """
     if limit <= 0 or oversample <= 0:
         raise ValueError(f"limit and oversample must be positive, got {limit} / {oversample}")
