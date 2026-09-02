@@ -2,10 +2,55 @@
 # empty stub so the root file's `include:` list is static from day one and no worker ever
 # edits it (B6(ii)). Owner: the trust lane.
 #
-# The trust-ledger API service.
+# The trust-ledger API service — C1's fourth of four separate deployables.
 #
-# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
-# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
-# only env-overridable ports (D40), and keep the service name unique across all nine
-# fragments.
-services: {}
+# It runs the FROZEN entrypoint apps/trust/src/main.py (`trust.main:app`), which globs
+# apps/trust/src/*/routes.py at import time, so a new ledger route needs a rebuild, not an
+# edit here.
+services:
+  trust:
+    build:
+      # Relative to THIS file's directory, so the context is the repo root.
+      context: ../..
+      dockerfile: apps/trust/Dockerfile
+    ports:
+      - "${TRUST_PORT:-8084}:8084"      # D40: env-overridable
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # T-112: PROXYSHOP_ROLE_PASSWORD is the ONE source of truth for the four
+      # least-privilege role passwords, so it is interpolated INTO the DSN rather than
+      # defaulted here. The default is deliberately EMPTY and not `:-x` for exactly the
+      # reason the postgres service in the root file gives: a value here would be a second
+      # copy of the dev password, and a second copy is a copy that stops agreeing with the
+      # cluster. Set it in the environment (or .env) before `docker compose up` — a
+      # password-less DSN reaches postgres and then sits in a 30s pool timeout, which is
+      # what an unset variable looked like the first time this was run.
+      #
+      # PROXYSHOP_LEDGER_DSN is set FIRST because it is what the writer actually reads
+      # first: trust/events/pg.py consults ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_APP")
+      # and never looks at PROXYSHOP_PG_DSN_TRUST_RW. Without this line a deployed ledger
+      # silently writes as the `app` role instead of the `trust_rw` role D5 gives it —
+      # observed here, not theorised.
+      PROXYSHOP_LEDGER_DSN: "postgresql://trust_rw:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      PROXYSHOP_PG_DSN_TRUST_RW: "postgresql://trust_rw:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      PROXYSHOP_PG_DSN_APP: "postgresql://app:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
+      REDIS_URL: "redis://redis:6379"                            # D39: no db component
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # /openapi.json, not /healthz — see the note in apps/exchange/compose.yaml: main.py is
+    # frozen and no router under it declares a health route, so a liveness probe that this
+    # lane is allowed to write has exactly one always-present endpoint to aim at.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8084/openapi.json').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    mem_limit: 256m       # D10
+    stop_grace_period: 10s
+    restart: unless-stopped

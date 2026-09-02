@@ -2,10 +2,69 @@
 # empty stub so the root file's `include:` list is static from day one and no worker ever
 # edits it (B6(ii)). Owner: the exchange lane.
 #
-# The exchange API service.
+# The exchange API service — C1's third of four separate deployables.
 #
-# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
-# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
-# only env-overridable ports (D40), and keep the service name unique across all nine
-# fragments.
-services: {}
+# It runs the FROZEN entrypoint apps/exchange/src/main.py (`exchange.main:app`), which globs
+# apps/exchange/src/*/routes.py at import time. A feature ticket that adds a router therefore
+# needs no change here: rebuild the image and the route is served.
+services:
+  exchange:
+    build:
+      # Relative to THIS file's directory, so the context is the repo root and the flat-src
+      # layout (D42) can be reproduced inside the image. See ../../.dockerignore for why the
+      # root context does not mean a 950 MiB upload.
+      context: ../..
+      dockerfile: apps/exchange/Dockerfile
+    # D40: env-overridable, never hard-coded, so a second checkout can move the whole block.
+    ports:
+      - "${EXCHANGE_PORT:-8083}:8083"
+    environment:
+      # D38: the per-worker database. The DSNs point at the compose service names, not at
+      # localhost — inside the network `postgres` and `redis` are the hosts, and a .env
+      # copied from .env.example (which is written for the HOST side) must not leak in here.
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # T-112: PROXYSHOP_ROLE_PASSWORD is the ONE source of truth for the four
+      # least-privilege role passwords, so it is interpolated INTO the DSN rather than
+      # defaulted here. The default is deliberately EMPTY and not `:-x` for exactly the
+      # reason the postgres service in the root file gives: a value here would be a second
+      # copy of the dev password, and a second copy is a copy that stops agreeing with the
+      # cluster. Set it in the environment (or .env) before `docker compose up` — a
+      # password-less DSN reaches postgres and then sits in a 30s pool timeout, which is
+      # what an unset variable looked like the first time this was run.
+      PROXYSHOP_PG_DSN_EXCHANGE: "postgresql://exchange:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      PROXYSHOP_PG_DSN_APP: "postgresql://app:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      # Forwarded as well as interpolated: proxyshop_support.postgres reads this variable
+      # directly when a component builds its own DSN instead of taking one from the env.
+      PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
+      # D39: no database component. The logical DB index is the worker index and
+      # proxyshop_support.redis_client sets it authoritatively.
+      REDIS_URL: "redis://redis:6379"
+      LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-hash}"
+      RANKING_WEIGHTS: "${RANKING_WEIGHTS:-w_m=0.35,w_e=0.20,w_t=0.20,w_v=0.15,w_d=0.10}"
+      CHECKOUT_MODE: "${CHECKOUT_MODE:-redirect}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # The probe is `/openapi.json` rather than `/healthz` because there IS no health route:
+    # apps/exchange/src/main.py is orchestrator-frozen (B6(iii)) and no feature router under
+    # it declares one, so this deploy lane cannot add one without editing another lane's
+    # source. /openapi.json is served by FastAPI itself and a 200 from it proves the real
+    # thing this ticket is about — the ASGI app imported, every discovered router mounted,
+    # and uvicorn is answering on the port. It does NOT prove the datastores are reachable;
+    # a readiness route that does is recorded as a NEEDS against the exchange lane.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8083/openapi.json').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    # D10: memory is the binding constraint. One uvicorn worker holding a FastAPI app and a
+    # psycopg pool measures well under this; the four service containers together add 1 GiB
+    # to the datastore stack's 3.125 GiB.
+    mem_limit: 256m
+    stop_grace_period: 10s
+    restart: unless-stopped
