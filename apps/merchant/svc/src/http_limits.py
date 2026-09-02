@@ -27,9 +27,7 @@ class BodyTooLarge(ValueError):
     """The request body exceeded :data:`MAX_REQUEST_BODY_BYTES`."""
 
 
-async def read_capped_body(
-    request: Request, *, limit: int = MAX_REQUEST_BODY_BYTES
-) -> bytes:
+async def read_capped_body(request: Request, *, limit: int = MAX_REQUEST_BODY_BYTES) -> bytes:
     """The request body, or :class:`BodyTooLarge` before ``limit`` bytes are exceeded.
 
     Reads from the stream and abandons it the moment the running total passes ``limit``, so

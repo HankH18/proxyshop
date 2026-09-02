@@ -171,9 +171,7 @@ def _validate_discount_applications(payload: dict[str, Any]) -> list[dict[str, A
     for entry in raw:
         if not isinstance(entry, dict):
             raise PixelEventRejected("each discountApplications entry must be an object")
-        unknown.extend(
-            str(key) for key in entry if str(key) not in DISCOUNT_APPLICATION_FIELDS
-        )
+        unknown.extend(str(key) for key in entry if str(key) not in DISCOUNT_APPLICATION_FIELDS)
         entries.append(entry)
     if unknown:
         raise PixelEventRejected(
