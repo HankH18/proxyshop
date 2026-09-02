@@ -80,10 +80,12 @@ from llm.errors import (
 from llm.prompting import (
     CACHE_CONTROL,
     SECTION_SEPARATOR,
-    SYSTEM_BLOCK_SEPARATOR,
     CachedPrompt,
+    SystemKey,
     assemble_prompt,
+    canonical_system_key,
     compose_request,
+    system_key_text,
     wire_key,
 )
 from llm.recordings import (
@@ -123,7 +125,6 @@ __all__ = [
     "ROLE_INTERVIEW",
     "ROLE_STORE_AGENT",
     "SECTION_SEPARATOR",
-    "SYSTEM_BLOCK_SEPARATOR",
     "SUPPORTED_PROVIDERS",
     "TIMEOUT_ENV_VAR",
     "AnthropicLLM",
@@ -139,12 +140,14 @@ __all__ = [
     "ProviderNotConfiguredError",
     "RecordedLLM",
     "RecordingError",
+    "SystemKey",
     "TruncatedReplyError",
     "UnknownRoleError",
     "UnrecordedPromptError",
     "assemble_prompt",
     "available_recordings",
     "build_llm",
+    "canonical_system_key",
     "compose_request",
     "default_model",
     "load_all_recordings",
@@ -162,5 +165,6 @@ __all__ = [
     "resolve_provider",
     "resolve_timeout",
     "response_text",
+    "system_key_text",
     "wire_key",
 ]
