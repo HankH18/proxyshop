@@ -29,6 +29,9 @@ def _import_without_any_pkgroot_help(statements: str) -> subprocess.CompletedPro
     site-packages is handed back through `PYTHONPATH` so third-party dependencies still
     import — without that this would only prove that `-S` hides pydantic. What is left is
     the repo root and nothing else about this repo, which is what the fallback is for.
+
+    T-122 sweep, explicitly: do NOT add ``.pkgroot`` to this environment. It is the one
+    thing the fallback exists to synthesise, so handing it to the child inverts the test.
     """
     env = {
         "PATH": "/usr/bin:/bin",

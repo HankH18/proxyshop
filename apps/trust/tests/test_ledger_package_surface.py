@@ -34,6 +34,7 @@ import os
 import pkgutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -51,21 +52,83 @@ SPELLINGS = ("trust.ledger", "apps.trust.src.ledger")
 SUBMODULES = tuple(sorted(info.name for info in pkgutil.iter_modules(trust_spelling.__path__)))
 
 
+def _child_env() -> dict[str, str]:
+    """The environment a spawned child needs in order to reach BOTH ledger spellings.
+
+    T-122. This used to be ``{**os.environ, "PYTHONPATH": str(REPO_ROOT), ...}``, which is
+    wrong twice over in the same expression:
+
+    * ``apps.trust.src.ledger`` is reachable from the repo root, but ``trust.ledger`` lives
+      under ``.pkgroot`` (a directory of symlinks into each package's ``src``), so a child
+      given only the repo root cannot import the very spelling these tests are about; and
+    * assigning to ``PYTHONPATH`` *replaces* whatever the parent had rather than extending
+      it, so a caller who had already put ``.pkgroot`` on the path lost it here.
+
+    It looked fine only because a developer checkout has ``.venv/.../_proxyshop.pth``, which
+    puts both directories on ``sys.path`` regardless of ``PYTHONPATH`` — so the defect was
+    invisible until a run where that ``.pth`` did not apply, and then it took ``make verify``
+    down with four ``ModuleNotFoundError: No module named 'trust'``. Both directories are
+    named explicitly, and anything inherited is appended rather than discarded.
+    """
+    return {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(REPO_ROOT), str(REPO_ROOT / ".pkgroot"), os.environ.get("PYTHONPATH", "")]
+        ),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
 def _run(statements: str) -> subprocess.CompletedProcess[str]:
-    """Run ``statements`` in a fresh interpreter with only the repo root added to the path.
+    """Run ``statements`` in a fresh interpreter that can reach both import spellings.
 
     A fresh process is the only way to control *which spelling is imported first*: inside
     this pytest session both are long since loaded, so an in-process test can only observe
     the order this session happened to use.
     """
-    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
     return subprocess.run(
         [sys.executable, "-c", statements],
+        env=_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_the_child_is_handed_pkgroot_and_not_only_the_repo_root() -> None:
+    """T-122. The guard for :func:`_child_env`, written so it cannot pass by accident.
+
+    Two halves, and the second is the one that matters. Asserting on the dictionary alone
+    would be a test of the literal that was typed one line above it; running the child with
+    ``-S`` disables ``site``, so ``_proxyshop.pth`` — the thing that hid the original defect
+    on every developer machine — contributes nothing, and the only reason the child can
+    import ``trust`` is that this function put ``.pkgroot`` in its environment.
+    ``purelib`` is handed back so third-party dependencies still resolve; without it this
+    would prove only that ``-S`` hides pydantic.
+    """
+    entries = _child_env()["PYTHONPATH"].split(os.pathsep)
+    assert str(REPO_ROOT) in entries, "the child cannot reach apps.trust.src.ledger"
+    assert str(REPO_ROOT / ".pkgroot") in entries, "the child cannot reach trust.ledger"
+
+    env = {
+        **_child_env(),
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": os.pathsep.join(
+            [str(REPO_ROOT), str(REPO_ROOT / ".pkgroot"), sysconfig.get_paths()["purelib"]]
+        ),
+    }
+    proc = subprocess.run(
+        [sys.executable, "-S", "-c", "import trust.ledger as m; print(m.__file__)"],
         env=env,
         capture_output=True,
         text=True,
         timeout=120,
         check=False,
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert Path(proc.stdout.strip()).resolve() == (
+        REPO_ROOT / "apps" / "trust" / "src" / "ledger" / "__init__.py"
     )
 
 

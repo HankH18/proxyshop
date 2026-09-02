@@ -154,6 +154,13 @@ def test_the_id_survives_a_different_process_hash_seed() -> None:
         "print(claim_id(pitch_ref='pitch:p-1', key='free_returns', value={'a', 'b', 'c', 'd'},"
         " claim_type='return_policy'))"
     )
+    # T-122 sweep: this child IS handed `.pkgroot` — by `sys.path.insert` in the script
+    # above rather than through PYTHONPATH, because the environment is deliberately
+    # hermetic (PYTHONHASHSEED is the variable under test and nothing else may leak in).
+    # The repo root is not handed over as well, on purpose: the statement imports the FLAT
+    # spelling `contracts.claims`, which lives entirely under `.pkgroot`, and adding the
+    # root would let the `packages.contracts.` spelling satisfy the import instead — a
+    # different module object, which is not what this test is measuring.
     ids = set()
     for seed in ("0", "1", "12345", "random"):
         result = subprocess.run(
