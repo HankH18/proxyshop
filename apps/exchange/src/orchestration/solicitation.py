@@ -106,6 +106,7 @@ def solicit_bids(
     fan_out: FanOut | None = None,
     window: float = DEFAULT_BID_WINDOW_SECONDS,
     clock: Any | None = None,
+    started_at: float | None = None,
 ) -> SolicitationResult:
     """Run the R12 gate over ``roster``, then fan out to whoever survives it.
 
@@ -137,6 +138,16 @@ def solicit_bids(
             ``received_at`` is discarded by the fan-out precisely because the deadline is
             enforced on that field: a store that set it would be choosing when its own
             auction closed.
+        started_at: the :func:`time.monotonic` reading taken **when ``now`` was computed** —
+            the real instant the window opened. This is what makes R10's timeout a bound on
+            the *request* rather than only on the fan-out. Everything this function does
+            before anyone is asked is I/O — the interface check, then an eligibility read
+            for every rostered store — and until this argument existed the arrival clock
+            was anchored to its own construction, so all of that time was spent *outside*
+            the window and the fan-out still got the full ``window`` of real seconds after
+            it. A slow eligibility backend could therefore double the request while R10
+            reported a hard timeout. Omitted, the window starts here (the old behaviour),
+            which is right only for a caller with nothing earlier to anchor to.
 
     Returns:
         :class:`SolicitationResult` — ``solicited`` (store ids actually asked, in roster
@@ -178,7 +189,11 @@ def solicit_bids(
     result.solicited = [str(store["store_id"]) for store in askable]
 
     strategy: FanOut = fan_out if fan_out is not None else sequential_fan_out
-    arrival = clock if clock is not None else ArrivalClock(now, window=window)
+    # Anchored to when the window OPENED, not to now: every eligibility read above happened
+    # inside the window, and the fan-out gets only what is left of it.
+    arrival = (
+        clock if clock is not None else ArrivalClock(now, window=window, started_at=started_at)
+    )
     responses = strategy(askable, solicitor, deadline=now, clock=arrival)
 
     result.entries = collect_bids(eligible, responses, now)

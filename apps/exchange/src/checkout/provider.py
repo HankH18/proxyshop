@@ -133,6 +133,23 @@ class CheckoutResult:
     provider: str
     checkout_token: str
     expires_at: float | None = None
+    #: Whether the host this checkout was checked against came from the **platform**.
+    #:
+    #: ``False`` means the caller wired no :attr:`CheckoutRequest.registered_domains`, so
+    #: :func:`registered_domain_for` fell back to ``request.store_domain`` — a field the
+    #: bidding store wrote. The domain guard then compared one store-authored value against
+    #: another and passed, which it always will: a store that writes ``attacker.tld`` into
+    #: both halves agrees with itself. The check is *decorative* in that case and this flag
+    #: is what says so, because a decorative pass and a real one are otherwise identical
+    #: from the outside — the permalink looks the same, the events look the same, and an
+    #: operator reading the ledger has no way to tell that nothing was verified.
+    #:
+    #: It is a flag rather than a refusal for one reason, and it is worth stating plainly:
+    #: with no external source there is *no information* that separates a legitimate bid
+    #: from a spoofed one, so the port cannot decide. Only the caller can, by passing the
+    #: platform's lookup. ``unbound_checkout_requests`` in :mod:`.lint` is what makes that
+    #: non-optional at the call sites, and :mod:`.sellers` is what they pass.
+    domain_verified: bool = False
 
     @property
     def kinds(self) -> list[str]:
@@ -169,7 +186,10 @@ class CheckoutProvider:
         by an injected merchant client, not by Shopify.
         """
         # 1. Resolve the trusted half FIRST. If the caller wired a registered-domain
-        #    source, the bid's claim about its own domain is discarded here.
+        #    source, the bid's claim about its own domain is discarded here. If it did not,
+        #    `registered` IS the bid's claim and everything below compares the store's word
+        #    against the store's word — recorded, so the result and the ledger say so.
+        verified = domain_is_platform_verified(request)
         registered = registered_domain_for(request)
 
         # 2. Untrusted input, checked against the registered domain, before anything else.
@@ -205,10 +225,11 @@ class CheckoutProvider:
         return CheckoutResult(
             code=minted.code,
             permalink_url=minted.permalink_url,
-            events=self._events(request, minted, checkout_token),
+            events=self._events(request, minted, checkout_token, verified=verified),
             mode=request.mode,
             provider=self.name,
             checkout_token=checkout_token,
+            domain_verified=verified,
             expires_at=(
                 minted.expires_at
                 if minted.expires_at is not None
@@ -227,6 +248,8 @@ class CheckoutProvider:
         request: CheckoutRequest,
         minted: MintedCheckout,
         checkout_token: str,
+        *,
+        verified: bool = False,
     ) -> list[Mapping[str, Any]]:
         offer = dict(request.offer)
         common = {"auction_id": request.auction_id, "store_id": request.store_id}
@@ -256,6 +279,10 @@ class CheckoutProvider:
                     "checkout_token": checkout_token,
                     "permalink_url": minted.permalink_url,
                     "discount_code": minted.code,
+                    # The one thing an auditor cannot reconstruct from the rest of this
+                    # event: whether the host the buyer is being sent to was checked
+                    # against the platform's registry or against the seller's own word.
+                    "domain_verified": verified,
                 },
                 **common,
             ),
@@ -270,6 +297,18 @@ def _usable(domain: Any, request: CheckoutRequest) -> str:
             f"a checkout for it could be on (C10/D22)"
         )
     return str(domain)
+
+
+def domain_is_platform_verified(request: CheckoutRequest) -> bool:
+    """True when the domain this checkout is checked against comes from the **platform**.
+
+    False means :func:`registered_domain_for` will fall back to ``request.store_domain``,
+    which the bidding store wrote — so the host check is comparing the store's claim to the
+    store's claim and cannot fail for a store that is consistent about its own lie. See
+    :attr:`CheckoutResult.domain_verified` for why that is recorded rather than refused, and
+    ``lint.unbound_checkout_requests`` for what stops a call site from getting here.
+    """
+    return request.registered_domains is not None
 
 
 def registered_domain_for(request: CheckoutRequest) -> str:
