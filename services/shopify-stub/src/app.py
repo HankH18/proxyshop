@@ -67,6 +67,7 @@ from shopify_stub.orders import (
     refund_order,
     refund_webhook_payload,
 )
+from shopify_stub.permalink import store_url
 from shopify_stub.state import (
     Checkout,
     PixelMode,
@@ -303,7 +304,15 @@ def _shopify_router(stub: Stub) -> APIRouter:
             status_code=303,
             content=body,
             headers={
-                "Location": (f"https://{state.config.shop_domain}/checkouts/{checkout.token}")
+                # Through `store_url`, never an f-string: this header is the one that
+                # actually moves a shopper's browser, and a `shop_domain` of
+                # `good.example.com@attacker.tld` interpolated raw here answered a real 303
+                # to `attacker.tld` over real HTTP. `StubConfig` now refuses such a domain,
+                # and this call refuses to render one even if it ever got past that.
+                "Location": store_url(
+                    shop_domain=state.config.shop_domain,
+                    path=f"/checkouts/{checkout.token}",
+                )
             },
         )
 

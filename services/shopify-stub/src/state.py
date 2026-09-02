@@ -25,6 +25,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 from shopify_stub.codes import DiscountCode, RejectionReason
+from shopify_stub.permalink import _assert_bare_host
 
 #: What the stub calls itself when nothing overrides it.
 DEFAULT_SHOP_DOMAIN = "proxyshop-demo.myshopify.com"
@@ -132,12 +133,39 @@ class StubConfig:
     pixel_seed: int | None = None
     has_active_automatic_discount: bool = False
 
+    def __post_init__(self) -> None:
+        """Refuse a configuration that cannot be *served* — not merely one that looks odd.
+
+        ``shop_domain`` is interpolated into four live ``https://`` URLs (the cart route's
+        303 ``Location``, ``order_status_url`` on the order webhook, the pixel event's
+        ``document.location.href``, and :func:`~shopify_stub.permalink.build_permalink`), so
+        the set of legal values here is exactly the set
+        :func:`~shopify_stub.permalink._assert_bare_host` allows and nothing wider. The check
+        this replaces tested ``if not self.shop_domain`` — non-emptiness — which admitted
+        ``good.example.com@attacker.tld`` and made the stub answer a real 303 to
+        ``attacker.tld``.
+
+        Validating in ``__post_init__`` rather than only in :meth:`validate` matters because
+        it makes an invalid :class:`StubConfig` **unconstructable**: a caller that builds one
+        directly, or a future control-plane route that forgets to call
+        :meth:`validate`, cannot get a bad domain into a running stub.
+        """
+        self.validate()
+
     def validate(self) -> None:
-        """Raise :class:`ValueError` on a nonsensical configuration."""
+        """Raise :class:`ValueError` on a nonsensical configuration.
+
+        Called again by ``PUT /_stub/config`` after it has mutated a *candidate* copy —
+        ``dataclasses.replace`` runs ``__post_init__`` on the copy while it still holds the
+        old (valid) domain, so the post-init check alone would not see the incoming one.
+
+        :class:`~shopify_stub.permalink.PermalinkError` is a :class:`ValueError`, so the
+        control plane's ``except ValueError`` turns a refused domain into the same 400 every
+        other bad knob gets.
+        """
         if not 0.0 <= self.pixel_drop_rate <= 1.0:
             raise ValueError(f"pixel_drop_rate must be in [0,1], got {self.pixel_drop_rate}")
-        if not self.shop_domain:
-            raise ValueError("shop_domain must not be empty")
+        _assert_bare_host(self.shop_domain)
 
 
 @dataclass

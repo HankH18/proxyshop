@@ -55,11 +55,21 @@ async def test_a_valid_code_applies(stub: StubClient) -> None:
 
 
 async def test_the_response_is_a_redirect_to_checkout(stub: StubClient) -> None:
-    """A cart permalink lands the shopper in checkout; the token is the join key."""
+    """A cart permalink lands the shopper in checkout; the token is the join key.
+
+    The ``Location`` is asserted **in full**, host included. It used to be asserted as
+    ``response.headers["location"].endswith(f"/checkouts/{token}")``, and that suffix check
+    is true of ``https://good.example.com@attacker.tld/checkouts/<token>`` — a URL whose real
+    host is ``attacker.tld`` — just as it is true of the store's own. The stub really did
+    serve that response (T-100: ``PUT /_stub/config`` accepted the domain and this route
+    redirected to it) and this test stayed green throughout, because "lands the shopper in
+    checkout" is a claim about *where*, and the host is the entire *where*.
+    """
     response = await stub.visit_cart(VARIANT_ID)
     assert response.status_code == 303
     token = response.json()["token"]
-    assert response.headers["location"].endswith(f"/checkouts/{token}")
+    domain = (await stub.config())["shop_domain"]
+    assert response.headers["location"] == f"https://{domain}/checkouts/{token}"
 
 
 async def test_no_code_at_all_is_the_reference_response(stub: StubClient) -> None:

@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from shopify_stub.codes import discount_amount_for
+from shopify_stub.permalink import store_url
 from shopify_stub.state import (
     Checkout,
     Fulfillment,
@@ -274,7 +275,12 @@ def order_webhook_payload(order: Order, *, shop_domain: str, state: StubState) -
         "current_total_price": money(order.total_price - order.total_refunded),
         "total_price_set": _money_set(order.total_price, order.currency),
         "subtotal_price_set": _money_set(order.subtotal_price, order.currency),
-        "order_status_url": (f"https://{shop_domain}/orders/{order.checkout_token}/authenticate"),
+        # `store_url`, not an f-string: this is a live link a merchant app may follow or
+        # hand to a buyer, so it is held to the same bare-host guarantee as the cart
+        # redirect. See `shopify_stub.permalink.store_url`.
+        "order_status_url": store_url(
+            shop_domain=shop_domain, path=f"/orders/{order.checkout_token}/authenticate"
+        ),
         "discount_codes": (
             [
                 {
