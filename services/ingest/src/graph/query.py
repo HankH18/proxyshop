@@ -252,6 +252,49 @@ WITH p, 0.0 AS score
 """
 
 
+def _structured_head(brand: str | None, status: str | None) -> str:
+    """The structured-only head, with ``brand``/``status`` pushed into the MATCH pattern.
+
+    X2, measured on this repo with a 40-product catalog and ``brand="Northlight",
+    status="active"`` (one match). With the bare ``MATCH (p:Product)`` head, ``PROFILE``
+    showed ``NodeByLabelScan`` over every product followed by three
+    ``OptionalExpand(All)``/``OrderedAggregation`` stages **all carrying 40 rows**, and only
+    then the ``Filter`` that applies ``brand``/``status`` (40→40→40→1): the whole catalog's
+    attributes, ingredients and categories were collected and aggregated before anything was
+    discarded, and ``product_brand``/``product_status`` were never touched. That is the
+    opposite of what :data:`DEFAULT_OVERSAMPLE`'s note recommends this path *for* — "a highly
+    selective structured query" was the case it handled worst. Total dbHits: **1284**.
+
+    Writing the predicates as a map in the pattern rather than as
+    ``WHERE ($brand IS NULL OR p.brand = $brand)`` is what makes the index usable: the
+    disjunction with a parameter cannot be planned as a seek, and merely lifting it above the
+    aggregations still left a ``NodeByLabelScan`` (dbHits 116). The map form plans as
+    ``NodeIndexSeek`` — dbHits **37**, and the aggregations carry one row instead of forty.
+
+    Only property *names* are interpolated, and only from this function's own literals, so
+    there is no injection surface; the values stay parameters. Four possible strings means at
+    most four cached plans rather than one, which is the whole cost.
+
+    Args:
+        brand: the brand predicate, or ``None`` when not filtering by brand. ``""`` is a real
+            predicate ("products with no brand"), not an absent one.
+        status: the status predicate, or ``None`` when not filtering by status.
+
+    Returns:
+        A retrieval head that binds ``p`` and ``score``, for concatenation with
+        :data:`_FILTER_AND_RETURN` (which re-checks both predicates, harmlessly, because the
+        vector head cannot push them).
+    """
+    pinned = [
+        f"{name}: ${name}"
+        for name, value in (("brand", brand), ("status", status))
+        if value is not None
+    ]
+    if not pinned:
+        return _STRUCTURED_HEAD
+    return f"\nMATCH (p:Product {{{', '.join(pinned)}}})\nWITH p, 0.0 AS score\n"
+
+
 def _run(
     session: Any,
     head: str,
@@ -451,7 +494,7 @@ def candidate_products(
         "limit": int(limit),
     }
     if vector is None:
-        return _run(session, _STRUCTURED_HEAD, parameters=parameters, scored=False)
+        return _run(session, _structured_head(brand, status), parameters=parameters, scored=False)
     parameters["embedding"] = vector
     parameters["fetch"] = min(max(limit * oversample, limit), MAX_INDEX_FETCH)
     return _run(session, _VECTOR_HEAD, parameters=parameters, scored=True)

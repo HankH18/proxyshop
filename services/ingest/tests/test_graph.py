@@ -106,6 +106,10 @@ from ingest.graph.reembed import build_parser, embedding_text, read_products
 from proxyshop_support.embedding import EMBEDDING_DIM as SUPPORT_EMBEDDING_DIM
 from proxyshop_support.embedding import cosine, hash_embed
 
+#: The ids the shared graph_seeded_catalog fixture seeds, in one place so a test can
+#: say "the whole catalog" without restating them.
+GRAPH_SAMPLE_IDS = ("prod-serum-c", "prod-cream-night", "prod-spf-daily", "prod-discontinued")
+
 INGEST_SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 GRAPH_SRC = INGEST_SRC / "graph"
 
@@ -2638,3 +2642,150 @@ def test_a_measured_zero_score_is_distinguishable_from_no_measurement(
     assert worst.scored != structured[0].scored
     with pytest.raises(ValueError, match="no similarity was measured"):
         cosine_from_score(structured[0].cosine)
+
+
+def _plan_operators(profile: Any) -> list[tuple[str, int]]:
+    """Flatten a Neo4j profile into ``(operatorType, rows)`` pairs.
+
+    Args:
+        profile: the ``ResultSummary.profile`` mapping.
+
+    Returns:
+        Every operator in the plan, with the row count it actually produced. The runtime
+        suffix Neo4j appends (``NodeByLabelScan@neo4j``) is stripped, so an assertion names
+        the operator rather than the runtime that happened to run it.
+    """
+    operators = [
+        (
+            str(profile["operatorType"]).split("@", 1)[0],
+            int(profile.get("args", {}).get("Rows", 0)),
+        )
+    ]
+    for child in profile.get("children") or ():
+        operators.extend(_plan_operators(child))
+    return operators
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_selective_structured_query_seeks_the_index_instead_of_scanning_the_label(
+    graph_schema_session: Any, graph_source: Source
+) -> None:
+    """X2: the structured path aggregated the whole ``:Product`` label before filtering.
+
+    ``test_the_query_predicate_indexes_match_what_the_query_actually_compares`` asserts only
+    that the index *names* exist in the database — it never profiles anything, so it was
+    green against a plan that never touched ``product_brand`` or ``product_status``.
+
+    Measured here, 30 products, one matching ``brand="Northlight", status="active"``:
+
+    * bare ``MATCH (p:Product)`` head — ``NodeByLabelScan`` over all 30, then three
+      ``OptionalExpand(All)``/``OrderedAggregation`` stages **each carrying 30 rows**, and
+      only then the ``Filter`` (30→30→30→1);
+    * predicates pinned in the MATCH pattern — ``NodeIndexSeek`` producing 1 row, and every
+      aggregation carries 1.
+
+    Lifting the predicates as ``WHERE ($brand IS NULL OR p.brand = $brand)`` is *not* enough:
+    a disjunction against a parameter cannot be planned as a seek, and that form still left a
+    ``NodeByLabelScan`` (measured 116 dbHits against the pattern form's 37). Hence the map.
+    """
+    from ingest.graph.query import _FILTER_AND_RETURN, _STRUCTURED_HEAD, _structured_head
+
+    session = graph_schema_session
+    seed_products(
+        session,
+        [
+            {
+                "product_id": f"p-{index:03d}",
+                "canonical_name": f"Product {index}",
+                "brand": "Northlight" if index == 0 else f"Brand{index}",
+                "status": "active" if index % 2 == 0 else "discontinued",
+                "attributes": [AttributeValue("spf", value_number=float(index))],
+                "ingredients": ["Glycerin"],
+            }
+            for index in range(30)
+        ],
+        source=graph_source,
+    )
+    parameters = {
+        "brand": "Northlight",
+        "status": "active",
+        "category_id": None,
+        "ingredients_all": [],
+        "ingredients_none": [],
+        "attribute_filters": [],
+        "limit": 10,
+    }
+
+    def profile(head: str) -> list[tuple[str, int]]:
+        result = session.run("PROFILE " + head + _FILTER_AND_RETURN, **parameters)
+        result.data()
+        return _plan_operators(result.consume().profile)
+
+    before = profile(_STRUCTURED_HEAD)
+    after = profile(_structured_head(parameters["brand"], parameters["status"]))
+
+    assert any(name == "NodeByLabelScan" for name, _rows in before), (
+        "the unfiltered head is expected to scan — it is the 'before' half of this comparison"
+    )
+    assert max(rows for name, rows in before if name == "OrderedAggregation") == 30, (
+        "the defect: every aggregation carried the whole catalog"
+    )
+
+    assert not any(name == "NodeByLabelScan" for name, _rows in after), (
+        f"a selective structured query still scans the whole :Product label: {after}"
+    )
+    assert any(name.startswith("NodeIndexSeek") for name, _rows in after), (
+        f"product_brand / product_status are still unused: {after}"
+    )
+    assert all(rows <= 1 for name, rows in after if "Aggregation" in name), (
+        f"the aggregations still carry more than the matching rows: {after}"
+    )
+
+    # The profiled query is the shipped one: same head, same answer.
+    assert [
+        c.product_id
+        for c in candidate_products(session, brand="Northlight", status="active", limit=10)
+    ] == ["p-000"]
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+@pytest.mark.parametrize(
+    ("brand", "status", "expected"),
+    [
+        pytest.param(
+            None, "active", {"prod-serum-c", "prod-cream-night", "prod-spf-daily"}, id="status-only"
+        ),
+        pytest.param("Bellmark", None, {"prod-cream-night", "prod-discontinued"}, id="brand-only"),
+        pytest.param("Bellmark", "discontinued", {"prod-discontinued"}, id="both"),
+        pytest.param(None, None, set(GRAPH_SAMPLE_IDS), id="neither"),
+    ],
+)
+def test_every_pinned_predicate_combination_answers_the_same_question(
+    graph_seeded_catalog: dict[str, Any],
+    brand: str | None,
+    status: str | None,
+    expected: set[str],
+) -> None:
+    """All four heads ``_structured_head`` can build return what the tail's WHERE would.
+
+    The pattern-map form is a *second* place ``brand``/``status`` are applied, so it has to
+    agree with the first exactly — including that ``brand=""`` and ``status=None`` mean
+    different things ("no brand" versus "any status"), which a truthiness test would confuse.
+    """
+    session = graph_seeded_catalog["session"]
+    found = {
+        c.product_id
+        for c in candidate_products(
+            session,
+            brand=brand,
+            status=status,
+            # `status` alone is not a structured predicate (a status-only query is
+            # "everything currently for sale", which is the scan DESIGN forbids), so every
+            # case carries a filter that matches the whole sample catalog.
+            attribute_filters=[AttributeFilter("fragrance_free")],
+            limit=20,
+        )
+    }
+    assert found == expected
