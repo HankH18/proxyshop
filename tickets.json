@@ -1801,7 +1801,7 @@
     {
       "id": "T-118",
       "title": "Wave-2 residue: eight low-severity findings from the lane verifiers",
-      "objective": "Batched from the six wave-2 adversarial verifications; each is real, reproduced, and individually too small for its own ticket. (a) llm doubles.py:346,:472 \u2014 LLMCall.system re-introduces a separator join on the OBSERVABLE recording surface even though the lookup key is now a tuple. (b) llm prompting.py:265 \u2014 canonical_system_key's single-element collapse is injective only if a block is never empty, which it does not enforce. (c) ingest query.py:377-386 \u2014 the EmbeddingRunIncomplete remediation loops. (d) stub permalink.py:39,:121-123 \u2014 the docstring's Raises clause does not match _FORBIDDEN_IN_PATH. (e) contracts test_signing_envelope.py:800-808 \u2014 a positive control collapses to one case for issued_at because the loop reassigns value. (f) trust test_ledger_chain.py:1687-1697 \u2014 the has_table_privilege precondition does not discriminate the grant layer from the trigger the way the test presents it. (g) dbinit test_schema_grants.py:1580 \u2014 `hostname -i` returns a LIST when the container has multiple addresses, so the login probe breaks under IPv6 or a second network. (h) dbinit db/init/00-roles.sql:76-80 \u2014 the rewritten ELSE arm's only job is attribute normalisation and nothing tests attributes.",
+      "objective": "Batched from the six wave-2 adversarial verifications; each is real, reproduced, and individually too small for its own ticket. (a) llm doubles.py:346,:472 \u2014 LLMCall.system re-introduces a separator join on the OBSERVABLE recording surface even though the lookup key is now a tuple. (b) llm prompting.py:265 \u2014 canonical_system_key's single-element collapse is injective only if a block is never empty, which it does not enforce. (c) ingest query.py:377-386 \u2014 the EmbeddingRunIncomplete remediation loops. (d) stub permalink.py:39,:121-123 \u2014 the docstring's Raises clause does not match _FORBIDDEN_IN_PATH. (e) contracts test_signing_envelope.py:800-808 \u2014 a positive control collapses to one case for issued_at because the loop reassigns value. (f) trust test_ledger_chain.py:1687-1697 \u2014 the has_table_privilege precondition does not discriminate the grant layer from the trigger the way the test presents it. (g) dbinit test_schema_grants.py:1580 \u2014 `hostname -i` returns a LIST when the container has multiple addresses, so the login probe breaks under IPv6 or a second network. (h) dbinit db/init/00-roles.sql:76-80 \u2014 the rewritten ELSE arm's only job is attribute normalisation and nothing tests attributes.\n\nORCHESTRATOR RULING on item (a), cycle 5: MITIGATED, NOT CLOSED, and it cannot be closed. Its lane reported this itself and the lane's verifier confirmed it as a REJECT. LLMCall.system is still SECTION_SEPARATOR.join(blocks), and no str-valued injective rendering can exist, because frozen tests pin both sides of the contradiction: test_llm_contract_seam.py:560 pins the TWO-block call (CachedPrompt('A','q'), system='B') to render exactly 'A\\n\\nB' and :561 pins it to be a `str`, while test_llm_doubles.py:150/:163/:318/:538 pin a ONE-block call to render its block text verbatim \u2014 so a one-block call whose text IS 'A\\n\\nB' must render the same string. Two different calls, one forced string. Separately `system: str | None` is a field on the orchestrator-frozen proxyshop_support.llm_double.LLMCall and test_llm_doubles.py:294 pins that field list, which is why the structure had to go on a KeyedLLMCall subclass. WHAT DID CHANGE and is real: .calls entries carry system_key/system_blocks and no longer compare equal, and the miss message no longer prints two identical contracts. A reader consulting ONLY .system is still blind, BY FROZEN CONSTRUCTION. Closing this needs a frozen-test amendment, which is the user's call, not a worker's.",
       "refs": [
         "W2-verify-all"
       ],
@@ -1821,7 +1821,8 @@
         "T-110"
       ],
       "non_goals": [
-        "Do not batch these into one commit; one concern per commit"
+        "Do not batch these into one commit; one concern per commit",
+        "Item (a) is not closable without a user-approved frozen-test amendment \u2014 do not attempt it"
       ],
       "parallel_safe": false
     },
@@ -1849,6 +1850,147 @@
       "non_goals": [
         "Do not unify the two canonicalizers",
         "Do not touch packages/contracts"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-120",
+      "title": "Using PROXYSHOP_ROLE_PASSWORD does not turn the repo gate red",
+      "objective": "Found by the T-112 lane's adversarial verifier and reproduced by the orchestrator: `PROXYSHOP_WORKER=24 PROXYSHOP_ROLE_PASSWORD=devpass pytest proxyshop_support/tests/test_shared_runtime.py -q` -> `FAILED test_role_dsns_default_without_any_env`, 1 failed / 32 passed, where the same command without the variable is 33 passed. So the repo-wide gate goes RED the moment anyone actually USES the feature T-112 was written to deliver. The test asserts the dev-default DSNs unconditionally, but T-112 deliberately made the DSN depend on the environment. A feature whose use breaks the build is not delivered.",
+      "refs": [
+        "D5",
+        "T-112",
+        "W3-verify-infra-HIGH"
+      ],
+      "acceptance": [
+        "1. The suite passes both with PROXYSHOP_ROLE_PASSWORD set and with it unset",
+        "2. The default-DSN assertion is scoped to the unset case explicitly rather than assuming it",
+        "3. A test covers the SET case so the two branches cannot drift again"
+      ],
+      "verify": "pytest proxyshop_support -q",
+      "scope": "proxyshop_support/**",
+      "depends_on": [
+        "T-112"
+      ],
+      "non_goals": [
+        "Do not weaken the default-DSN assertion; scope it"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-121",
+      "title": "The JCS conformance suite's prose matches the code T-119 changed",
+      "objective": "T-119 bound the two ledger import spellings to one module object. `e2e/test_jcs_conformance.py` still documents the opposite in two places \u2014 its module docstring (~:41-45) says `trust.ledger.canonical` is NOT `apps.trust.src.ledger.canonical`, and `test_both_spellings_of_the_ledger_canonicaliser_agree`'s docstring (~:1008-1010) says the two are separate module objects and that binding them is out of scope. Every ASSERTION in the file still passes (238 passed) because a shared module object satisfies them too \u2014 only the prose is false. The trust lane found this and correctly refused to fix it, since e2e/** is outside its scope.",
+      "refs": [
+        "T-106",
+        "T-119",
+        "W3-trust-report"
+      ],
+      "acceptance": [
+        "1. Both stale paragraphs describe the post-T-119 reality",
+        "2. The 238 assertions are unchanged and still pass",
+        "3. If a test's premise is now trivially satisfied, say so rather than deleting the test"
+      ],
+      "verify": "pytest e2e/test_jcs_conformance.py -q",
+      "scope": "e2e/**",
+      "depends_on": [
+        "T-119"
+      ],
+      "non_goals": [
+        "Do not delete or weaken any assertion; this is a prose fix"
+      ],
+      "parallel_safe": true
+    },
+    {
+      "id": "T-122",
+      "title": "Subprocess tests hand the child .pkgroot instead of clobbering PYTHONPATH",
+      "objective": "T-119's new tests break `make verify` \u2014 build_succeeds fell 1 -> 0 at cycle 5 with four failures in apps/trust/tests/test_ledger_package_surface.py, all `ModuleNotFoundError: No module named 'trust'` inside a spawned child. Line 61 builds the child env as `{**os.environ, \"PYTHONPATH\": str(REPO_ROOT), ...}`, which sets PYTHONPATH to the repo root ONLY and OVERRIDES anything inherited, so the flat `trust` namespace in .pkgroot is unreachable. Proven: a bare child raises ModuleNotFoundError, and the same child with PYTHONPATH=<root>/.pkgroot imports trust from .pkgroot/trust/__init__.py. This is the THIRD instance of one class: packages/llm/tests/test_llm_client_offline.py:101 already gets it right, packages/contracts/tests/test_schema_bundle.py was fixed for it this run, and this is the same defect again. Fix the class, not the instance: sweep every subprocess-spawning test in the repo.",
+      "refs": [
+        "T-119",
+        "D42",
+        "W3-build_succeeds"
+      ],
+      "acceptance": [
+        "1. The four failing tests pass in a whole-repo `make verify` run, with the venv .pth both active and dark",
+        "2. Every subprocess-spawning test in the repo either hands the child <root> AND <root>/.pkgroot, or deliberately does not and says why in a comment",
+        "3. Report the count of subprocess call sites swept and how many needed changing",
+        "4. build_succeeds returns to 1"
+      ],
+      "verify": "PROXYSHOP_WORKER=0 make verify",
+      "scope": [
+        "apps/trust/**",
+        "packages/**",
+        "services/**",
+        "e2e/**",
+        "proxyshop_support/**"
+      ],
+      "depends_on": [
+        "T-119"
+      ],
+      "non_goals": [
+        "Do not weaken any assertion",
+        "Do not touch scripts/verify.sh or any protected path"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-123",
+      "title": "The .pkgroot namespaces survive a pytest run (root cause: site-packages itself is flagged)",
+      "objective": "`_proxyshop.pth` in the primary checkout keeps reverting to macOS UF_HIDDEN, which `site.addpackage` silently skips, so every .pkgroot flat namespace (contracts, llm, trust, ...) becomes unimportable outside pytest. This has now bitten the run THREE times and cost two false metric readings (acceptance_pass_rate 5.00 instead of 13.33 at cycle 1; build_succeeds 1->0 twice). WHAT IS ESTABLISHED, measured: a bare `python -c` run does NOT re-hide it; `pytest --version` DOES; `pytest --collect-only --noconftest` did NOT; importing pytest, proxyshop_support, or any of conftest's eight imports individually does NOT. Those results are mutually inconsistent, so the deterministic trigger is NOT isolated and this ticket must not pretend otherwise \u2014 an earlier orchestrator claim that the root conftest.py was responsible is RETRACTED. WHAT IS CERTAIN: it recurs, it correlates with pytest invocations, and bootstrap.sh:26-33's one-shot `chflags nohidden ... || true` is a reset that decays and cannot fail loudly. The durable fix is to stop depending on the flag: assert the effect immediately before every measurement, and make anything that spawns a child hand it .pkgroot explicitly (see T-122, the same class).\n\nFURTHER EVIDENCE (cycle 5, orchestrator + watchdog, jointly): the watchdog ran nine probes (bare python, import pytest, import _pytest.config, pytest --version with and without plugin autoload, python -m pytest --version, import uv, a read-only ls) and NONE re-hid the flag; it also refuted the uv theory in an isolated scratch venv (uv 0.11.8 venv + editable install leaves site-packages and both .pth files at flags '-'). So it is NOT uv and NOT pytest in isolation. On the orchestrator's side `pytest --version` DOES re-hide, and it reproduces with no concurrent bootstrap running, so the concurrent-writer hypothesis does not explain it either. The datum that reframes it: the site-packages DIRECTORY itself carries UF_HIDDEN, and so do ALL THREE .pth files (_proxyshop, _virtualenv, a1_coverage) \u2014 not just ours. That is a directory-level property, which is why `chflags nohidden` on a single file is fragile. Trigger still NOT isolated; the two sessions' results genuinely disagree and neither has been able to make the other's reproduce.\n\nRESOLVED, cycle 5. The site-packages DIRECTORY carried UF_HIDDEN, not merely the .pth files, so `chflags nohidden <one file>` was always a partial repair that appeared to 'come back'. A RECURSIVE clear holds: after `chflags -R nohidden .venv/lib/python3.12/site-packages`, the flag survives `pytest --version`, survives a full `pytest packages/llm` suite, and a bare `python -c \"import contracts, llm, trust\"` succeeds AFTERWARDS. Measured, all four states. This also explains why the two sessions could not reproduce each other: the outcome depends on the directory's flag, which differed between the venvs each was probing. bootstrap.sh:26-33 should clear the directory as well as the file, and assert the effect loudly instead of `|| true`.\n\nMETHOD NOTE worth keeping, from both sessions' post-mortem: the directory flag was OBSERVED and REPORTED before either session used it \u2014 the follow-up bisect still cleared a single file, so nine 'clean' probes were partial repairs producing evidence about the method rather than about the trigger. Having a datum is not the same as designing the next experiment against it. What actually resolved this was each session running the check that could FALSIFY its own position: the uv refutation killed one theory, the flag-cleared test run killed the other. Neither defended.",
+      "refs": [
+        "T-111",
+        "T-122",
+        "D42"
+      ],
+      "acceptance": [
+        "1. A pytest run in the primary checkout leaves the .pkgroot namespaces importable by a bare child afterwards, or the provisioning asserts and repairs the flag immediately before each measurement",
+        "2. The assertion fails LOUDLY rather than warning \u2014 bootstrap.sh:48-51 currently ends in `|| echo WARNING >&2`",
+        "3. A regression test proves a bare `python -c \"import contracts, llm, trust\"` succeeds after a full pytest run",
+        "4. If the trigger is found, name it; if not, say so and defend the mitigation on its own terms",
+        "5. Whatever mitigation is chosen must survive a full pytest run, proven by a bare `python -c` import AFTER the suite, not before",
+        "6. bootstrap.sh:26-33 clears the flag RECURSIVELY on site-packages (it currently iterates one path and ends `|| true`, so it can neither cover the directory nor report failing), and then ASSERTS THE EFFECT \u2014 import one namespace, print its resolved path, fail loudly if it raises. This is the same 'assert the effect, never the exit code' rule this run already applies to installers, applied to the one provisioning step that was exempt from it."
+      ],
+      "verify": "./scripts/bootstrap.sh && ./.venv/bin/python -m pytest packages/llm -q && ./.venv/bin/python -c 'import contracts, llm, trust'",
+      "scope": [
+        "scripts/bootstrap.sh",
+        "conftest.py",
+        "proxyshop_support/**"
+      ],
+      "depends_on": [
+        "T-111"
+      ],
+      "non_goals": [
+        "Do not claim a cause that the measurements do not support",
+        "Do not touch scripts/verify.sh (protected)"
+      ],
+      "parallel_safe": false
+    },
+    {
+      "id": "T-124",
+      "title": "Fresh-volume tests remove the containers and volumes they create",
+      "objective": "The run exhausted its own infrastructure. The Docker VM's disk \u2014 where BOTH Postgres and Neo4j write \u2014 is 58.4G with 27.0M free (100%), while the macOS host has 398Gi free; measuring the host is measuring the wrong disk. 288 dangling volumes exist and 254 OF THEM WERE CREATED TODAY, by the fresh-volume tests T-112 and T-118 added this wave: each spins up a throwaway Postgres via `docker compose -p <name> up` and leaves its anonymous volume behind. That is a leak of one volume per test per run, and it took ~14GB. Symptom: seven tests fail with `FATAL: could not write to file \"base/4/2704\": No space left on device`, build_succeeds reads 0, and it presents INTERMITTENTLY rather than as a clean outage because small writes still fit in the remaining megabytes. Note this is a real cost of an otherwise good change \u2014 those tests are the ones that finally graded T-110's fresh-volume behaviour, and the answer is to make them clean up, not to delete them.",
+      "refs": [
+        "T-112",
+        "T-118",
+        "W3-verify-infra"
+      ],
+      "acceptance": [
+        "1. Every test that creates a throwaway compose project or container removes it AND its volumes on teardown, including on failure (fixture finalizer or try/finally, not a trailing statement)",
+        "2. `docker volume ls -qf dangling=true | wc -l` does not grow across a full `make verify` run \u2014 assert it in a test if practical, otherwise document the check",
+        "3. The teardown is proven by a test that fails if the finalizer is removed",
+        "4. A note records that the Docker VM disk, not the host disk, is the resource these tests consume"
+      ],
+      "verify": "pytest apps/trust/tests/test_schema_grants.py proxyshop_support/tests/test_role_password_end_to_end.py -q",
+      "scope": [
+        "apps/trust/**",
+        "proxyshop_support/**"
+      ],
+      "depends_on": [
+        "T-112"
+      ],
+      "non_goals": [
+        "Do not delete the fresh-volume tests; they are the only thing grading T-110",
+        "Do not switch them to a shared volume; the point is that the volume is fresh"
       ],
       "parallel_safe": false
     }
