@@ -402,3 +402,35 @@ async def test_the_cart_quote_equals_the_amount_the_order_charges(
     (node,) = [edge["node"] for edge in (await stub.orders()).json()["data"]["orders"]["edges"]]
     assert node["totalPriceSet"]["shopMoney"]["amount"] == cart["total_price"]
     assert node["totalDiscountsSet"]["shopMoney"]["amount"] == cart["total_discount"]
+
+
+async def test_a_multi_code_permalink_is_refused_the_same_way(stub: StubClient) -> None:
+    """The other comma. Shopify's format allows one in the path *and* one in ``discount``.
+
+    ``test_a_multi_variant_permalink_is_refused`` covers the path form. The query form was
+    silently accepted, treated as one nonexistent code, and answered ``303`` with
+    ``total_discount: 0.00`` at full price — while the README promises the stub "refuses the
+    multi form explicitly rather than half-handling it".
+
+    The direction of the divergence is what makes this worth a route change rather than a
+    documentation note. Everywhere else in this file a code the stub cannot honour is
+    silently dropped *because real Shopify drops it too*. Here production would apply the
+    codes and the stub applies nothing, so a consumer's link looks harmless in every test and
+    discounts a real order in production. Silence is only faithful when the real thing is
+    also silent.
+    """
+    await stub.create_code("PSX-AAAAAAAA", percentage=0.10, usage_limit=None)
+    await stub.create_code("PSX-BBBBBBBB", percentage=0.20, usage_limit=None)
+
+    response = await stub.http.get(f"/cart/{VARIANT_ID}:1?discount=PSX-AAAAAAAA,PSX-BBBBBBBB")
+    assert response.status_code == 404
+    assert "single-code" in response.json()["errors"]
+
+    # A trailing comma is the same shape and gets the same refusal, not a lucky parse.
+    trailing = await stub.http.get(f"/cart/{VARIANT_ID}:1?discount=PSX-AAAAAAAA,")
+    assert trailing.status_code == 404
+
+    # And the single form is untouched.
+    single = await stub.http.get(f"/cart/{VARIANT_ID}:1?discount=PSX-AAAAAAAA")
+    assert single.status_code == 303
+    assert single.json()["discount_code"] == "PSX-AAAAAAAA"

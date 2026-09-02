@@ -19,7 +19,7 @@ from shopify_stub.testing import StubClient  # a typed client for driving it
 
 | Route | Method | Notes |
 |---|---|---|
-| `/admin/api/{version}/graphql.json` | POST | Four root fields; anything else is `undefinedField` |
+| `/admin/api/{version}/graphql.json` | POST | Four root fields; anything else is `undefinedField`. `{version}` must be the configured one (`2026-07`) — any other is a 404, as it is against Shopify |
 | `/cart/{variant_id}:{quantity}?discount={code}` | GET | Cart-permalink redemption |
 
 The four root fields are `discountCodeBasicCreate`, `orders`, `webPixelCreate` and
@@ -40,7 +40,7 @@ something has coupled itself to the stub rather than to the API.
 | `/_stub/config` | GET/PUT | The knobs. An unknown key is a 400, never a silent no-op |
 | `/_stub/reset` | POST | Wipes data, keeps configuration |
 | `/_stub/seed` | POST | Idempotent catalog seeding → `{created, unchanged, updated}` |
-| `/_stub/codes` | GET | The code table plus D22's `offer_id` index |
+| `/_stub/codes` | GET | The code table plus D22's `offer_id` index: `by_offer` (latest code, always a key of `codes`) and `codes_by_offer` (every code, in creation order) |
 | `/_stub/checkouts/{token}` | GET | Introspection, including *why* a code was ignored |
 | `/_stub/checkouts/{token}/complete` | POST | Order + pixel event + `orders/paid` |
 | `/_stub/orders/{id}/fulfill` | POST | → `orders/fulfilled` |
@@ -199,13 +199,32 @@ those 57 names was mechanically checked to be a member of the real 93.
 
 ## Declared limitations
 
-* **The selection set is not honoured.** The stub returns the whole documented node shape
-  whatever fields were requested, so its response is a *superset* of a narrowed real
-  response, never a differently-shaped one. Implementing selection filtering needs a schema
-  and a GraphQL engine, and this repo's dependency manifest carries neither.
-* **Single-variant permalinks only.** Shopify's format allows comma-separated variants and
-  codes; D22 pins the single form and the stub refuses the multi form explicitly rather than
-  half-handling it.
+* **The selection set is not honoured, and that cuts both ways.** The stub returns the whole
+  documented node shape whatever fields were requested, so its response is a *superset* of a
+  narrowed real response, never a differently-shaped one. The other half of the same
+  limitation is easy to miss and matters just as much: because nothing reads the selection
+  set, an **unknown nested field is accepted**, not just an extra one returned. Asking for
+  `orders { edges { node { notAField } } }` succeeds here and is an `undefinedField` error
+  against Shopify. Only *root* fields are checked — that check is real, and it is the one
+  `graphql_admin`'s docstring is about. Catching a bogus nested field would need a
+  hand-written per-type allow-list, i.e. a schema in all but name, and there is no GraphQL
+  engine in this repo's dependency manifest.
+* **Single-variant, single-code permalinks only.** Shopify's format allows a comma in two
+  places — the variant path and the `discount` query parameter. D22 pins the single form and
+  the stub refuses **both** multi forms explicitly, with a 404 naming the reason, rather than
+  half-handling either. The query form used to be accepted silently and treated as one
+  nonexistent code, answering `303` with `total_discount: 0.00`; that is the wrong direction
+  to diverge in, because production would apply the codes where the stub applied nothing.
+* **`mint_code`, `is_well_formed` and `code_expiry` are a library for T-052, not stub-enforced
+  policy.** They implement D22's code shape (`PSX-` + 8 Crockford symbols) and its
+  `min(now + 48h, offer.expires_at)` expiry rule, and nothing in any shipped stub path calls
+  them. That is deliberate and not an oversight. `discountCodeBasicCreate` accepts an
+  arbitrary code string, a lowercase code, `usageLimit: null` and a 16-month `endsAt`,
+  because **real Shopify accepts all four** — a stub that rejected them would diverge from
+  the API it exists to mirror, and would teach T-052 that the platform enforces a rule the
+  platform does not have. D22 is the *app's* policy; these three functions are where a caller
+  gets it right, and the stub's job is to make a caller that gets it wrong visible rather
+  than impossible.
 * **No product→variant lookup** (D25). Permalinks are variant-scoped; variants arrive by
   seeding.
 * **Webhook delivery is synchronous**, awaited inside the request that triggers it. Real
@@ -219,7 +238,7 @@ those 57 names was mechanically checked to be a member of the real 93.
 ## Running it
 
 ```bash
-# The tests (149 of them). PROXYSHOP_WORKER is mandatory: the root conftest fails without it.
+# The tests (212 of them). PROXYSHOP_WORKER is mandatory: the root conftest fails without it.
 PROXYSHOP_WORKER=2 ./.venv/bin/python -m pytest services/shopify-stub -q
 
 # As a container — e2e profile only, and NOT verified offline (see compose.yaml).

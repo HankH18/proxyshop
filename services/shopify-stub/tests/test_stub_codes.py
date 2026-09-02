@@ -9,9 +9,11 @@ invisible in any end-to-end test: a derived code redeems perfectly.
 from __future__ import annotations
 
 import inspect
+import secrets
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from shopify_stub import codes
 from shopify_stub.codes import (
     CODE_BODY_LENGTH,
     CODE_PREFIX,
@@ -222,3 +224,61 @@ def test_combines_with_round_trips_through_the_wire_shape() -> None:
     assert CombinesWith.from_wire(wire) == original
     assert CombinesWith.from_wire(None) == CombinesWith(False, False, False)
     assert CombinesWith.from_wire({}) == CombinesWith(False, False, False)
+
+
+def test_mint_code_draws_from_the_cryptographic_source_not_a_seeded_prng() -> None:
+    """D22's "randomly generated" clause, given teeth it did not have.
+
+    Every other test in this file is behavioural, and behaviour cannot tell a
+    cryptographically random stream from a *predictable* one. Replacing
+    ``secrets.SystemRandom()`` with a module-level ``random.Random(20260901)`` — a fully
+    seeded, fully reproducible stream an attacker can run themselves — left the suite at 164
+    passed with the attacker's predicted codes identical to the server's, because a seeded
+    Mersenne Twister is uniform over the alphabet and non-monotone, which is everything
+    ``test_minted_codes_are_unpredictable`` checks. ``grep -rn "secrets\\|SystemRandom"`` over
+    this directory returned nothing at all.
+
+    So the property is asserted the same way non-derivability already is: structurally, on
+    the compiled function, where uniformity cannot stand in for unpredictability.
+    """
+    referenced: set[str] = set()
+    pending = [mint_code.__code__]
+    while pending:
+        code_object = pending.pop()
+        referenced.update(code_object.co_names)
+        pending.extend(c for c in code_object.co_consts if inspect.iscode(c))
+    assert "secrets" in referenced, (
+        "mint_code must draw from `secrets`; a seeded PRNG produces codes that are uniform, "
+        "distinct and non-monotone -- and perfectly predictable, which is the one property "
+        f"D22 actually requires. It references {sorted(referenced)}"
+    )
+    assert not {"random", "seed"} & referenced, (
+        "the `random` module is not a code source: a discount code is a single-use redeemable"
+    )
+
+
+def test_the_default_random_source_is_actually_consulted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Belt and braces: the import is not enough, the call has to happen.
+
+    ``import secrets`` satisfies a name check while the body quietly uses something else, so
+    the module's own ``secrets`` is replaced and the draw is observed. This also pins the
+    default: :func:`mint_code` called with no ``rng`` must not fall back to a shared,
+    seedable generator.
+    """
+    calls: list[str] = []
+
+    class _Watched(secrets.SystemRandom):
+        def choice(self, seq):  # type: ignore[no-untyped-def]
+            calls.append("choice")
+            return super().choice(seq)
+
+    class _Module:
+        SystemRandom = _Watched
+
+    monkeypatch.setattr(codes, "secrets", _Module)
+    minted = mint_code()
+    assert is_well_formed(minted)
+    assert len(calls) == CODE_BODY_LENGTH, (
+        "every symbol must come from the injected source; a body built any other way is a "
+        "body the seeded-PRNG sabotage would have produced unnoticed"
+    )

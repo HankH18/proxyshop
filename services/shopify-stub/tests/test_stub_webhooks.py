@@ -321,3 +321,38 @@ async def test_no_customer_pii_is_ever_delivered(
     ):
         assert forbidden not in raw, f"{forbidden} must never appear in a stub payload"
     assert json.loads(raw)["customer"] is None
+
+
+async def test_two_subscribers_on_one_topic_both_receive_the_same_body(
+    stub: StubClient,
+) -> None:
+    """Fan-out on a single topic — the case ``test_topics_are_isolated`` cannot see.
+
+    That test uses two *different* topics, so it passes unchanged against a
+    ``subscriptions_for`` that keys by topic and therefore returns at most one subscriber.
+    Sabotaging it exactly that way dropped a subscriber in silence: ``deliveries reported:
+    1``, receiver A got 0, receiver B got 1, suite fully green.
+
+    ``graphql_admin`` deliberately allows two URLs on one topic — it refuses only a duplicate
+    ``(topic, address)`` pair, which is Shopify's own rule — so fan-out is a supported
+    configuration with nothing asserting it worked. That is the whole defect: production
+    behaviour here is already correct, and it was correct by luck rather than by test.
+    """
+    first = RecordingReceiver()
+    second = RecordingReceiver()
+    from proxyshop_support.asgi_server import serve
+
+    with serve(first) as first_url, serve(second) as second_url:
+        await stub.subscribe("ORDERS_PAID", f"{first_url}/hook")
+        await stub.subscribe("ORDERS_PAID", f"{second_url}/hook")
+        await stub.buy(VARIANT_ID)
+
+        assert len(first.requests) == 1, "the first subscriber must not be dropped"
+        assert len(second.requests) == 1, "the second subscriber must not be dropped"
+        assert first.requests[0]["body"] == second.requests[0]["body"], (
+            "both subscribers see the same event; a per-subscriber body would mean the "
+            "signature covers different bytes for each"
+        )
+        assert len(await stub.deliveries()) == 2, (
+            "the delivery log must count both, not report one delivery for two subscribers"
+        )

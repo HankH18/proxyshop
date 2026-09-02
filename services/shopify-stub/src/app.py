@@ -214,6 +214,15 @@ def _shopify_router(stub: Stub) -> APIRouter:
         A **structurally** broken link is different and is not silent: an unknown variant is
         a 404, because that is a bug in whoever built the link rather than a shopper
         pasting a stale coupon.
+
+        Shopify's permalink format allows a comma in **two** places — a multi-variant path
+        and a multi-code ``discount`` — and the README promises the stub "refuses the multi
+        form explicitly rather than half-handling it". Only the path form kept that promise.
+        The query form was silently accepted, looked up as one nonexistent code, and answered
+        ``303`` with ``total_discount: 0.00`` — which is the worst available divergence
+        direction: the stub applies *nothing* where production would apply a code, so a
+        consumer's link looks fine here and discounts a real order. It is refused explicitly,
+        exactly like the path form.
         """
         state = stub.state
         if "," in items:
@@ -223,6 +232,18 @@ def _shopify_router(stub: Stub) -> APIRouter:
                     "errors": (
                         "This stub implements the single-variant cart permalink only "
                         "(D22); multi-variant permalinks are out of scope."
+                    )
+                },
+            )
+        if "," in (request.query_params.get("discount") or ""):
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "errors": (
+                        "This stub implements the single-code cart permalink only (D22); "
+                        "comma-separated multi-code discounts are out of scope. Accepting "
+                        "one silently would quote a 0.00 discount for a link that discounts "
+                        "a real order in production."
                     )
                 },
             )
