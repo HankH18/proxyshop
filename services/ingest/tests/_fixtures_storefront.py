@@ -144,6 +144,16 @@ class StorefrontStub:
         self.unlocked_sessions: set[str] = set()
         self.slow_chunk_seconds = 0.3
         self.endless_chunks = 512
+        #: Where ``/redirect/custom`` sends the crawler. Settable so a test can aim a
+        #: redirect at a host that is on the caller's allow-list yet resolves into private
+        #: space — the one target that only the per-hop SSRF re-check can refuse.
+        self.redirect_target = "https://elsewhere.example.com/"
+        #: How many 1 KiB dribbles ``/slow`` emits. Deliberately far more than any test's
+        #: time budget permits: a client that only checks its deadline once the *whole*
+        #: body has arrived would sit here for `slow_chunks * slow_chunk_seconds` seconds,
+        #: which is what makes the time-budget test able to tell a real deadline from one
+        #: that merely fires after the fact.
+        self.slow_chunks = 60
 
     # -- helpers -------------------------------------------------------------------------
 
@@ -254,6 +264,14 @@ class StorefrontStub:
             return await self._send(
                 send, 302, b"", "text/html", extra=[(b"location", b"/redirect/loop")]
             )
+        if path == "/redirect/custom":
+            return await self._send(
+                send,
+                302,
+                b"",
+                "text/html",
+                extra=[(b"location", self.redirect_target.encode())],
+            )
         if path.startswith("/redirect/chain/"):
             step = int(path.rsplit("/", 1)[-1])
             return await self._send(
@@ -294,7 +312,7 @@ class StorefrontStub:
                     "headers": [(b"content-type", b"application/json")],
                 }
             )
-            for _ in range(10):
+            for _ in range(self.slow_chunks):
                 # `asyncio.sleep`, not `time.sleep`: a blocking sleep inside a coroutine
                 # stops uvicorn's event loop, so nothing — not even the response headers
                 # already handed to `send` — reaches the socket until the handler returns.

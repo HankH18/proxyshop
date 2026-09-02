@@ -524,11 +524,47 @@ def test_the_transport_connects_to_the_address_the_guard_vetted_and_resolves_onc
 
 
 def test_a_redirect_into_cloud_metadata_is_refused_mid_chain(storefront):
-    """The chain starts on an allow-listed public-shaped host and tries to end on 169.254."""
+    """A chain that starts on an approved host and tries to end on 169.254 is cut.
+
+    The asserted reason is the *address* rule, not the allow-list. Both would refuse this
+    hop, and a test that accepted either could not tell whether the SSRF guard runs on
+    redirect targets at all.
+    """
     base_url, _ = storefront
     with pytest.raises(FetchRefused) as exc:
         _client().fetch(f"{base_url}/redirect/metadata")
-    assert "169.254.169.254" in str(exc.value) or "blocked-network" in exc.value.reason
+    assert exc.value.reason.startswith("blocked-network:169.254.169.254"), exc.value.reason
+
+
+def test_a_redirect_to_an_allow_listed_host_that_resolves_privately_is_still_refused(
+    monkeypatch, storefront
+):
+    """The hop is on the allow-list, so only the per-hop SSRF re-check can refuse it.
+
+    This is the case the allow-list cannot cover and the initial check cannot see: the
+    first hop is fine, the redirect target is a host the caller explicitly approved, and
+    the *only* thing wrong with it is where it resolves. If the guard ran once at the start
+    instead of on every hop, this would sail through to an internal address.
+    """
+    base_url, stub = storefront
+    stub.redirect_target = "http://internal.example.com/secrets"
+    _fake_dns(monkeypatch, {"internal.example.com": "10.0.0.5"})
+
+    with pytest.raises(FetchRefused) as exc:
+        _client().fetch(
+            f"{base_url}/redirect/custom",
+            allowed_hosts=("127.0.0.1", "internal.example.com"),
+        )
+    assert exc.value.reason.startswith("blocked-network:10.0.0.5"), exc.value.reason
+
+    # Control: the same allow-listed host, resolving publicly, is followed rather than
+    # refused — so the refusal above is about the address, not about the host name.
+    stub.redirect_target = f"{base_url}/robots.txt"
+    result = _client().fetch(
+        f"{base_url}/redirect/custom", allowed_hosts=("127.0.0.1", "internal.example.com")
+    )
+    assert result.status == 200
+    assert len(result.redirect_chain) == 2
 
 
 def test_a_redirect_loop_is_refused_rather_than_followed(storefront):
@@ -570,13 +606,34 @@ def test_an_unbounded_response_body_is_cut_at_the_byte_budget(storefront):
 
 
 def test_a_stalling_response_is_cut_at_the_time_budget(storefront_factory):
-    """A server that answers slowly forever must not hold the crawl open forever."""
+    """A server that dribbles must be abandoned *at* the deadline, not after it finishes.
+
+    The wall-clock assertion is the point of this test, not decoration. ``/slow`` emits far
+    more data than the budget allows time for, and every individual dribble arrives well
+    inside the socket timeout — so the socket timeout never fires and cannot save us. A
+    reader that asks for a full buffer (``read``) blocks until the *whole* body has arrived
+    and only then notices the deadline: still an exception, still ``resource == "time"``,
+    but ten deadlines late, which for a server that never stops dribbling means never. Only a
+    reader that takes what has arrived (``read1``) turns the budget into a real deadline,
+    and only the elapsed-time assertion can tell the two apart.
+    """
+    import time
+
     base_url, stub = storefront_factory()
-    stub.slow_chunk_seconds = 0.25
-    ledger = CrawlLedger(CrawlBudget(max_seconds=0.6, connect_timeout=5.0))
+    stub.slow_chunk_seconds = 0.1
+    stub.slow_chunks = 40  # 4s of dribble against a 0.4s budget
+    ledger = CrawlLedger(CrawlBudget(max_seconds=0.4, connect_timeout=5.0))
+
+    started = time.monotonic()
     with pytest.raises(BudgetExceeded) as exc:
         _client().fetch(f"{base_url}/slow", ledger=ledger)
+    elapsed = time.monotonic() - started
+
     assert exc.value.resource == "time"
+    assert elapsed < 2.0, (
+        f"the crawl was abandoned only after {elapsed:.1f}s against a 0.4s budget — the "
+        "deadline fired after the body finished arriving, not while it was arriving"
+    )
 
 
 def test_the_transport_refuses_a_host_outside_the_allow_list(storefront):
