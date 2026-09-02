@@ -18,10 +18,18 @@ published authority rank and cannot be talked into stamping another hook's.
 
 It is a rule about the *object*, not about the token. A checker that matched the callee's
 spelling would be evaded by ``getattr(protocol, 'Claim')(**row)``, by ``MODELS['Claim'](**row)``,
-by ``Fact = contracts.Claim`` and by ``p.Claim.model_validate(row)`` — four ways an ordinary
-author reaches the identical class, none of them written to be sneaky, all of them landing a
-forged claim on the hosted path with the lint silent. So the callee is *resolved* rather than
-matched: see :func:`_resolves_to_guarded`.
+by ``Fact = contracts.Claim``, by ``class Fake(Claim)``, by ``functools.partial(Claim)`` and by
+``p.Claim.model_validate(row)`` — six ways an ordinary author reaches the identical class, none
+of them written to be sneaky, all of them landing a forged claim on the hosted path with the lint
+silent. So the callee is *resolved* rather than matched: see :func:`_resolves_to_guarded`.
+
+**Two spellings it deliberately does not catch**, because catching them needs type inference and
+guessing would fire on honest code: ``type(existing_claim)(**row)``, and
+``existing_claim.model_copy(update={...})``. Both start from an object whose class this checker
+cannot know without running the program. Neither is a way past R8, only past this half of it —
+both produce a claim whose content differs from any the hooks emitted, so its fingerprint is not
+in the ledger and :func:`~.provenance.enforce_hook_provenance` refuses it at the boundary. A
+bit-identical rebuild is admitted, and should be: it is the same fact from the same evidence.
 
 **Why `src/external/` is exempt, and why that is not a hole.** The external door (T-044) receives
 Tier-2 submissions from agents this platform does not run. Their claims are `seller_asserted` —
@@ -79,6 +87,12 @@ class Offence:
         )
 
 
+#: Callables that defer a construction without performing it, so the guarded class rides in as
+#: an argument rather than as the callee. ``F = functools.partial(Claim)`` then ``F(**row)``
+#: builds exactly what ``Claim(**row)`` builds.
+DEFERRING_CALLABLES: frozenset[str] = frozenset({"partial", "partialmethod"})
+
+
 def _string_constants(tree: ast.Module) -> dict[str, str]:
     """Every local name bound to a string literal. ``WANTED = 'Claim'; MODELS[WANTED](...)``."""
     bindings: dict[str, str] = {}
@@ -89,6 +103,28 @@ def _string_constants(tree: ast.Module) -> dict[str, str]:
                     if isinstance(target, ast.Name):
                         bindings[target.id] = node.value.value
     return bindings
+
+
+def _is_deferring(func: ast.expr) -> bool:
+    """Whether `func` names `functools.partial` or a sibling, however it was imported."""
+    if isinstance(func, ast.Name):
+        return func.id in DEFERRING_CALLABLES
+    return isinstance(func, ast.Attribute) and func.attr in DEFERRING_CALLABLES
+
+
+def _binding_source(value: ast.expr) -> str | None:
+    """The guarded-class *name* an assignment or base-class expression binds, before resolution.
+
+    Returns a name to be resolved against the local bindings rather than the class itself, so
+    ``P = Provenance`` and ``Q = P`` both work through the fixed point below.
+    """
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute) and value.attr in GUARDED_CONSTRUCTORS:
+        return value.attr
+    if isinstance(value, ast.Call) and _is_deferring(value.func) and value.args:
+        return _binding_source(value.args[0])
+    return None
 
 
 def _guarded_names(tree: ast.Module) -> dict[str, str]:
@@ -114,13 +150,18 @@ def _guarded_names(tree: ast.Module) -> dict[str, str]:
 
     assignments: list[tuple[str, str]] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            # A subclass of a guarded class IS one: `class Fake(Claim)` then `Fake(**row)`
+            # builds a `Claim` with a different __name__ and nothing else different.
+            for base in node.bases:
+                source = _binding_source(base)
+                if source is not None:
+                    assignments.append((node.name, source))
+            continue
         if not isinstance(node, ast.Assign):
             continue
-        if isinstance(node.value, ast.Name):
-            source = node.value.id
-        elif isinstance(node.value, ast.Attribute) and node.value.attr in GUARDED_CONSTRUCTORS:
-            source = node.value.attr
-        else:
+        source = _binding_source(node.value)
+        if source is None:
             continue
         for target in node.targets:
             if isinstance(target, ast.Name):
@@ -172,6 +213,9 @@ def _resolves_to_guarded(
         if isinstance(callee, ast.Name) and callee.id == "getattr" and len(node.args) >= 2:
             wanted = _named_string(node.args[1], strings)
             return wanted if wanted in GUARDED_CONSTRUCTORS else None
+        if _is_deferring(callee) and node.args:
+            source = _binding_source(node.args[0])
+            return names.get(source) if source is not None else None
         return None
     if isinstance(node, ast.Subscript):
         wanted = _named_string(node.slice, strings)

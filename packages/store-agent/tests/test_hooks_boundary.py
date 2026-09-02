@@ -606,6 +606,78 @@ def test_the_lint_catches_the_dynamic_spellings_of_a_forbidden_construction(
     }, format_offences(offences)
 
 
+def test_the_lint_follows_a_guarded_class_through_a_subclass_and_a_partial(
+    tmp_path: Path,
+) -> None:
+    """Two more ordinary ways the class arrives somewhere other than the callee position.
+
+    `class Fake(Claim)` builds a `Claim` with a different `__name__` and nothing else different;
+    `functools.partial(Claim)` defers the construction so the guarded class rides in as an
+    argument. Both are followed to the class rather than matched as tokens.
+    """
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "by_subclass.py").write_text(
+        "from contracts import Claim\n\nclass Fact(Claim):\n    pass\n\n"
+        "def make(row):\n    return Fact(**row)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "runtime" / "by_dotted_subclass.py").write_text(
+        "import contracts\n\nclass Cite(contracts.Provenance):\n    pass\n\n"
+        "def make(row):\n    return Cite(**row)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "runtime" / "by_partial.py").write_text(
+        "import functools\nfrom contracts import Claim\n\nF = functools.partial(Claim)\n\n"
+        "def make(row):\n    return F(**row)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "runtime" / "by_direct_partial.py").write_text(
+        "from functools import partial\nfrom contracts import Provenance\n\n"
+        "def make(row):\n    return partial(Provenance)(**row)\n",
+        encoding="utf-8",
+    )
+
+    offences = hosted_claim_construction_offenders(tmp_path)
+    assert {(o.path, o.name) for o in offences} == {
+        ("runtime/by_subclass.py", "Claim"),
+        ("runtime/by_dotted_subclass.py", "Provenance"),
+        ("runtime/by_partial.py", "Claim"),
+        ("runtime/by_direct_partial.py", "Provenance"),
+    }, format_offences(offences)
+
+
+def test_the_two_spellings_the_lint_cannot_see_are_caught_at_runtime_instead(
+    tmp_path: Path, hooks: ToolHooks
+) -> None:
+    """`type(claim)(...)` and `claim.model_copy(update=...)` need type inference. Say so, and
+    show the boundary catching what the lint cannot.
+
+    Pinning the gap deliberately, rather than leaving it as an unstated hope: a checker that
+    guessed here would fire on any generic clone helper, and the guess is unnecessary because
+    both spellings produce a claim whose CONTENT differs from anything the hooks emitted — which
+    is exactly what the ledger is for.
+    """
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "inferred.py").write_text(
+        "def rebuild(existing, row):\n    return type(existing)(**row)\n\n"
+        "def edit(existing):\n    return existing.model_copy(update={'value': '90 days'})\n",
+        encoding="utf-8",
+    )
+    assert hosted_claim_construction_offenders(tmp_path) == [], (
+        "these need type inference; the docstring says so, and this pins that it still does"
+    )
+
+    genuine = hooks.get_owner_commitments(CLUSTER)[0]
+    edited = genuine.model_copy(update={"value": "90 days"})
+    rebuilt = type(genuine)(**{**genuine.model_dump(), "value": "90 days"})
+    for forged in (edited, rebuilt):
+        with pytest.raises(HookProvenanceError):
+            enforce_hook_provenance([forged], hooks)
+
+    # A bit-identical rebuild IS admitted, and should be: same fact, same evidence.
+    assert enforce_hook_provenance([type(genuine)(**genuine.model_dump())], hooks)
+
+
 def test_the_widened_lint_still_ignores_code_that_builds_nothing(tmp_path: Path) -> None:
     """A lint that fires on everything catches nothing: the widening must stay a rule about
     constructing a guarded object."""
