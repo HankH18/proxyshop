@@ -6,7 +6,11 @@ No agent may run this (EXECUTION.md rule 6). Nothing else in the repo calls it: 
 wired into any test, gate, Makefile target or build step, so it can only be reached by a
 person typing it.
 
-``--show`` prints what would be approved and writes nothing.
+``--show`` prints what would be approved, verifies the pinned digests, and writes nothing.
+
+Approving VERIFIES the digests the approval request published and REFUSES on any drift. It
+never refreshes them: re-hashing on the way in would bless a document nobody read. Re-pinning
+is a separate command, ``python -m fixtures.manifest --refresh-digests``.
 """
 
 from __future__ import annotations
@@ -14,12 +18,20 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 
-from fixtures.approval import ApprovalRefused, check_approver, record_approval
-from fixtures.manifest import body_digest, load_manifest
+from fixtures.approval import (
+    ApprovalRefused,
+    check_approver,
+    digest_report,
+    record_approval,
+    verify_pinned_digests,
+)
+from fixtures.manifest import ManifestError, body_digest, load_manifest
 
 
 def _summary() -> str:
-    manifest = load_manifest()
+    # check_digests=False on purpose: a drifted document must reach the explicit REFUSED
+    # below with its diff, not die here in a loader exception.
+    manifest = load_manifest(check_digests=False)
     store = manifest["dishonest_store"]
     trajectory = manifest["expected_trust_trajectory"]
     golden = manifest["golden_set"]
@@ -42,6 +54,18 @@ def _summary() -> str:
     )
 
 
+def _report() -> str:
+    rows = digest_report()
+    lines = ["", "Pinned-vs-on-disk check (what the approval request published):"]
+    for row in rows:
+        mark = "ok  " if row["ok"] == "yes" else "DRIFT"
+        lines.append(f"  {mark} {row['subject']}  [{row['field']}]")
+        if row["ok"] != "yes":
+            lines.append(f"        pinned  {row['pinned']}")
+            lines.append(f"        on disk {row['actual']}")
+    return "\n".join(lines)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     import argparse
 
@@ -58,7 +82,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    print(_summary())
+    try:
+        print(_summary())
+    except ManifestError as exc:
+        print(f"\nREFUSED: {exc}", file=sys.stderr)
+        return 3
+
+    # Verify BEFORE anything else is offered to the human: if the documents are not the ones
+    # the request pinned, there is nothing here worth confirming.
+    try:
+        print(_report())
+        verify_pinned_digests()
+    except ApprovalRefused as exc:
+        print(f"\nREFUSED: {exc}", file=sys.stderr)
+        return 3
+
     if args.show:
         return 0
     if not args.approver:

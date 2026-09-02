@@ -14,9 +14,18 @@ config are written and self-consistent, and the `approval` block is deliberately
 PROXYSHOP_WORKER=1 ./.venv/bin/python -m fixtures.approval --approver "Your Name"
 ```
 
-`--show` first if you want to see the summary and write nothing. The command writes
-`fixtures/approval/manifest-approval.md`, fills the `approval` block in
-`fixtures/manifest.json`, and prints what it wrote. Commit both.
+`--show` first if you want to see the summary, run the pinned-digest check, and write
+nothing. The command writes `fixtures/approval/manifest-approval.md`, fills the `approval`
+block in `fixtures/manifest.json`, and prints what it wrote. Commit both.
+
+**The command verifies; it never re-hashes.** Before it writes anything it recomputes every
+digest below and compares it against the pins published *in this document*. If any of them
+disagree it prints `REFUSED`, names the drifted file with a pinned-vs-on-disk diff, and
+writes nothing — because approving a document that changed after you read this request would
+record a digest proving only that the file had not changed in the last few milliseconds.
+Re-pinning drifted digests is a separate, deliberate command
+(`./.venv/bin/python -m fixtures.manifest --refresh-digests`), after which this request must
+be re-issued with the new pins and read again.
 
 ## What approving means
 
@@ -64,23 +73,34 @@ scored against, so its labels decide whether the verifier is right or wrong.
 
 Plus the persona scripts (`aggressive`, `honest`) and the fixture intent.
 
-## What the digest covers
+## The digests you are approving
 
-The manifest records a sha256 over its own body (the `approval` block excluded):
+These are the exact bytes. The approval command recomputes all three and refuses unless they
+still match, so what you read here is what gets approved — nothing more:
 
 ```
-87c49f8026f66b0f0f2fed55c65ce6cfce151b40921e00acaef03672cdd1bb43
+fixtures/manifest.json           87c49f8026f66b0f0f2fed55c65ce6cfce151b40921e00acaef03672cdd1bb43
+fixtures/golden/golden_set.json  dc94dbbb66ef70b08dec80da74be18ed7403a2766aab6285d8db0395baf09f60
+fixtures/catalog/coffee.json     4a94895f4209b30d2a96296072e44222245ee44c0fc7e556c700233258cb20d7
 ```
 
-`golden_set.sha256` and `seed_catalog.sha256` sit inside that body, so approving the manifest
-transitively approves the exact bytes of `fixtures/golden/golden_set.json` and
-`fixtures/catalog/coffee.json`. Editing any of the three afterwards breaks the digest and the
-acceptance suite fails until it is **re-approved** — re-approve, never re-hash.
+The first is the sha256 of the manifest **body** — the document with its own `approval` block
+removed, serialized `sort_keys=True, separators=(",", ":")`. `golden_set.sha256` and
+`seed_catalog.sha256` sit inside that body, so approving the manifest transitively approves
+the exact bytes of the other two. Editing any of the three afterwards breaks the digest and
+the acceptance suite fails until it is **re-approved** — re-approve, never re-hash.
+
+Check them yourself before you type the command, if you like:
+
+```
+./.venv/bin/python -m fixtures.manifest          # read-only: pinned vs on disk
+shasum -a 256 fixtures/golden/golden_set.json fixtures/catalog/coffee.json
+```
 
 ## What it does not mean
 
-It is not a claim that the numbers are optimal, and it is not irreversible: run the command
-again after an edit and the new document is approved instead. It is also not a guarantee a
+It is not a claim that the numbers are optimal, and it is not irreversible: re-pin, re-issue
+this request, read it, and approve the new document instead. It is also not a guarantee a
 human did it — no offline test can tell a signature from an agent typing a name. The
 authenticity of the artifact rests on this gate, not on any green test.
 
