@@ -3396,3 +3396,68 @@ def test_the_read_back_refusal_does_not_send_the_operator_into_the_removed_loop(
         "and the operator gets the finite list of vectors to remove — the marker already "
         f"carries it, so withholding it is a choice: {message}"
     )
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_the_remediation_command_exits_zero_on_the_state_the_refusal_sends_it_to(
+    graph_schema_session: Any, graph_source: Source, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-129 (ingest 3): the message promised an end state the CLI reported as a failure.
+
+    ``EmbeddingRunIncomplete`` names ``python -m ingest.graph.reembed --provider X`` and
+    tells the operator the pass "always records an end state — ``complete`` ... or
+    ``degraded`` ... and both are queryable". Following it on the catalog that message is
+    written for — one product with no embeddable text — reached ``degraded``, the catalog
+    became queryable, and the command exited **1**. An operator, or a CI step, reading a
+    non-zero status as "it failed, run it again" is back in the fixed point T-118(c)
+    removed from the prose, re-entered through the exit code.
+
+    ``degraded`` is a success of the pass: one vector space, an end state recorded, and the
+    rows it could not embed named. What remains is a catalog edit. So the status is now read
+    back out of the marker — the same node every vector query consults — and the one state
+    that really is a failure keeps its non-zero.
+    """
+    from ingest.graph import EMBEDDING_RUN_DEGRADED, EmbeddingRunIncomplete, embedding_run
+    from ingest.graph.reembed import main as reembed_main
+
+    session = graph_schema_session
+    upsert_product(session, Product("p-cli-named", "Gentle Vitamin C Serum"), source=graph_source)
+    upsert_product(session, Product("p-cli-hollow", ""), source=graph_source)
+
+    status = reembed_main(["--provider", "hash"])
+
+    run = embedding_run(session)
+    assert run is not None and run.state == EMBEDDING_RUN_DEGRADED
+    assert run.skipped == ("p-cli-hollow",)
+    assert [
+        c.product_id
+        for c in candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    ] == ["p-cli-named"], "the remediation really did leave the catalog queryable"
+    assert status == 0, (
+        "the pass reached the terminal state its own refusal message promises and the "
+        f"catalog is queryable; exiting {status} tells the operator to run it again"
+    )
+
+    # And the message and the command now agree, which is the whole point of the finding.
+    session.run("MATCH (r:EmbeddingRun) SET r.state = 'running', r.skipped = []").consume()
+    with pytest.raises(EmbeddingRunIncomplete) as refused:
+        candidate_products(session, query_text=PROBE_A, provider=HashEmbedding(), limit=5)
+    assert "exits 0" in str(refused.value), (
+        "the remediation has to say what a successful run looks like, or a non-zero status "
+        f"is read as 'run it again': {refused.value}"
+    )
+
+    # The one outcome that IS a failure keeps its non-zero: the read-back caught a skipped
+    # product still carrying a vector, so the index is not single-space and queries refuse.
+    monkeypatch.setattr(
+        "ingest.graph.reembed.clear_product_embedding",
+        lambda session, *, product_id: False,
+    )
+    session.run(
+        "MATCH (p:Product {product_id: 'p-cli-hollow'}) SET p.embedding = $v",
+        v=hash_embed("stale", dim=EMBEDDING_DIM),
+    ).consume()
+    assert reembed_main(["--provider", "hash"]) == 1, (
+        "a pass whose read-back failed leaves the index unqueryable; that is a real failure"
+    )

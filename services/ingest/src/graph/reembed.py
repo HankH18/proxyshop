@@ -37,6 +37,7 @@ from .schema import (
     VECTOR_INDEX_NAME,
     apply_schema,
     await_indexes,
+    embedding_run,
     rebuild_vector_index,
     record_embedding_run,
     schema_report,
@@ -429,7 +430,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv: command-line arguments; ``sys.argv[1:]`` when omitted.
 
     Returns:
-        ``0`` when every product was embedded, ``1`` when any product was skipped.
+        The status is read back out of the **graph** — the
+        :class:`~ingest.graph.schema.EmbeddingRun` marker every vector query consults —
+        rather than inferred from this process's report, so the operator's exit code and the
+        catalog's own state cannot disagree about the same pass.
+
+        * ``0`` — the pass reached a terminal, queryable state:
+          :data:`~ingest.graph.schema.EMBEDDING_RUN_COMPLETE` when it embedded every
+          product, :data:`~ingest.graph.schema.EMBEDDING_RUN_DEGRADED` when it could not and
+          said which on stderr. **Not** an error, and this is load-bearing: this command is
+          the remediation :class:`~ingest.graph.query.EmbeddingRunIncomplete` names, and it
+          used to return ``1`` for exactly the state that message sends the operator to.
+          An operator (or a CI step) reading a non-zero status as "it failed, run it again"
+          then re-ran a pass that had already done its job, which is the same fixed point
+          T-118(c) removed from the prose, re-entered through the exit code. Products with
+          no embeddable text are a catalog edit, and stderr says so.
+        * ``1`` — the pass reached its end but its read-back found products it skipped still
+          carrying a vector, so the marker is
+          :data:`~ingest.graph.schema.EMBEDDING_RUN_RUNNING` and vector queries refuse.
+          Re-running does not fix this; the stale vectors have to go.
+        * ``2`` — the provider's width does not match the live index. Nothing was written.
     """
     args = build_parser().parse_args(argv)
     provider = get_embedding_provider(args.provider)
@@ -456,13 +476,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             # silently unretrievable while the command reported success.
             print(f"FATAL: {exc}", file=sys.stderr)
             return 2
+        run = embedding_run(session)
+    state = "unrecorded" if run is None else run.state
     print(
         f"provider={report.provider} dim={report.dimension} "
-        f"products={report.products} embedded={report.embedded} skipped={len(report.skipped)}"
+        f"products={report.products} embedded={report.embedded} "
+        f"skipped={len(report.skipped)} state={state}"
     )
     for product_id in report.skipped:
         print(f"  skipped (no embeddable text): {product_id}", file=sys.stderr)
-    return 0 if report.complete else 1
+    if run is None or not run.finished:
+        # The one genuinely non-zero outcome of a pass that returned: the read-back caught
+        # skipped products that kept a vector, so the index holds a space this pass did not
+        # write and every vector query refuses. Re-running is a fixed point here — see
+        # `ingest.graph.query.EmbeddingRunIncomplete`.
+        print(
+            f"FATAL: the pass finished but {VECTOR_INDEX_NAME} is recorded as {state!r}: "
+            f"products it skipped still carry a vector. Remove those vectors before "
+            f"querying; re-running this command will reproduce the same state.",
+            file=sys.stderr,
+        )
+        return 1
+    if report.skipped:
+        print(
+            "  ^ these have no embeddable text. The index is single-space and queryable "
+            "without them; fixing them is a catalog edit, not another re-embed.",
+            file=sys.stderr,
+        )
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint

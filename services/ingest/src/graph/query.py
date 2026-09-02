@@ -443,9 +443,11 @@ def _check_vector_path(session: Any, vector: list[float], *, provider_name: str)
             f"remediation terminates: the pass rewrites every product into one space and "
             f"always records an end state — {EMBEDDING_RUN_COMPLETE!r} when it embedded them "
             f"all, or {EMBEDDING_RUN_DEGRADED!r} listing the products it could not embed, "
-            f"and both are queryable. Products with no embeddable text no longer hold this "
-            f"refusal open; `products_missing_embeddings(session)` names that finite set, "
-            f"and fixing them is a catalog edit, not another re-embed."
+            f"and both are queryable — the command exits 0 for either, so a non-zero status "
+            f"means something else went wrong and never means 'run it again'. Products with "
+            f"no embeddable text no longer hold this refusal open; "
+            f"`products_missing_embeddings(session)` names that finite set, and fixing them "
+            f"is a catalog edit, not another re-embed."
         )
     if run.provider != provider_name:
         raise EmbeddingProviderMismatch(
