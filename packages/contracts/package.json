@@ -3,9 +3,6 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
-  "scripts": {
-    "codegen": "json2ts -i schemas -o generated/ts"
-  },
   "dependencies": {
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1"

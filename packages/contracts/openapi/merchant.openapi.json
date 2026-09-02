@@ -1,0 +1,287 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ProxyShop merchant service",
+    "version": "1.0.0",
+    "description": "Code minting, Shopify webhooks, the pixel collector, and envelope administration. The envelope routes are SEALED state (C3/S7): the exchange has no grant to read them and `.importlinter` forbids the import."
+  },
+  "x-domain": "merchant",
+  "paths": {
+    "/codes": {
+      "post": {
+        "operationId": "createDiscountCode",
+        "summary": "Mint a single-use discount code and cart permalink for a winning offer.",
+        "description": "Creates a discountCodeBasicCreate with usageLimit 1 and an expiry no further out than 48h, and validates combinesWith before returning.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["store_id", "offer"],
+                "properties": {
+                  "store_id": { "type": "string" },
+                  "offer": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Offer" }
+                }
+              },
+              "example": {
+                "store_id": "store-1",
+                "offer": {
+                  "product_ref": "prod-1",
+                  "variant_ref": "44352913",
+                  "unit_price": 49.0,
+                  "currency": "USD",
+                  "discount": {
+                    "type": "percentage",
+                    "value": 10.0,
+                    "provenance": {
+                      "source": "envelope_rule",
+                      "ref": "envelope:store-1:v3#max_discount_pct",
+                      "observed_at": "2026-01-01T00:00:00Z",
+                      "authority_rank": 1
+                    }
+                  },
+                  "commitments": [],
+                  "total_price": 44.1,
+                  "expires_at": "2026-01-03T00:00:00Z",
+                  "checkout_url": "https://store-one.example.com/cart/44352913:1"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The code and the permalink the buyer follows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["code", "permalink_url"],
+                  "properties": {
+                    "code": { "type": "string" },
+                    "permalink_url": { "type": "string" },
+                    "expires_at": { "type": "string", "format": "date-time" }
+                  }
+                },
+                "example": {
+                  "code": "PS-ABC123",
+                  "permalink_url": "https://store-one.example.com/cart/44352913:1?discount=PS-ABC123",
+                  "expires_at": "2026-01-03T00:00:00Z"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/webhooks/shopify/{topic}": {
+      "post": {
+        "operationId": "receiveShopifyWebhook",
+        "summary": "Receive a Shopify webhook and record it as a LedgerEvent.",
+        "description": "The authoritative record for reconciliation (R4). `orders/paid` becomes an `order_paid` LedgerEvent joined to the pixel observation on `checkout_token` (D24).",
+        "parameters": [
+          {
+            "name": "topic",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "enum": ["orders_paid", "orders_fulfilled", "refunds_create"] }
+          },
+          {
+            "name": "X-Shopify-Hmac-Sha256",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object" },
+              "example": {
+                "checkout_token": "ck-0001",
+                "order_id": "ord-0001",
+                "total_price": 44.1,
+                "discountApplications": [{ "type": "percentage", "value": 10.0 }]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The LedgerEvent that was appended.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/LedgerEvent" },
+                "example": {
+                  "event_id": "ev-0002",
+                  "ts": "2026-01-01T00:10:00Z",
+                  "kind": "order_paid",
+                  "store_id": "store-1",
+                  "order_ref": "ord-0001",
+                  "payload": {
+                    "checkout_token": "ck-0001",
+                    "order_id": "ord-0001",
+                    "total_price": 44.1,
+                    "discountApplications": [{ "type": "percentage", "value": 10.0 }]
+                  }
+                },
+                "x-example-schema": "LedgerEvent"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/pixel/collect": {
+      "post": {
+        "operationId": "collectPixel",
+        "summary": "Receive one client-side checkout observation from the Web Pixel.",
+        "description": "Lossy and never authoritative (R4). It is joined to the webhook on `checkout_token`; the pixel spells its client id `clientId`, which is why `contracts.join_key_view()` is the only reader of these keys.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["checkout_token"],
+                "properties": {
+                  "checkout_token": { "type": "string" },
+                  "clientId": { "type": "string" },
+                  "total_price": { "type": "number" },
+                  "discountApplications": { "type": "array", "items": { "type": "object" } }
+                }
+              },
+              "example": {
+                "checkout_token": "ck-0001",
+                "clientId": "cid-0001",
+                "total_price": 44.1,
+                "discountApplications": [{ "type": "percentage", "value": 10.0 }]
+              }
+            }
+          }
+        },
+        "responses": { "204": { "description": "Recorded." } }
+      }
+    },
+    "/stores/{store_id}/envelope": {
+      "get": {
+        "operationId": "getEnvelope",
+        "summary": "Read a store's envelope. SEALED — no exchange grant (S7).",
+        "parameters": [
+          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current envelope version.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Envelope" },
+                "example": {
+                  "store_id": "store-1",
+                  "version": 3,
+                  "floors": [{ "product_ref": "prod-1", "min_price": 30.0 }],
+                  "max_discount_pct": 20.0,
+                  "budget_cap": 500.0,
+                  "pursue_clusters": ["cluster-serum"],
+                  "standing_commitments": [
+                    {
+                      "key": "free_returns",
+                      "value": "30 days",
+                      "provenance": {
+                        "source": "owner_statement",
+                        "ref": "envelope:store-1:v3#commitment-2",
+                        "observed_at": "2026-01-01T00:00:00Z",
+                        "authority_rank": 1
+                      }
+                    }
+                  ],
+                  "activation": "shadow"
+                },
+                "x-example-schema": "Envelope"
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "putEnvelope",
+        "summary": "Replace a store's envelope, creating a new version.",
+        "parameters": [
+          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Envelope" },
+              "example": {
+                "store_id": "store-1",
+                "version": 4,
+                "floors": [{ "product_ref": "prod-1", "min_price": 32.0 }],
+                "max_discount_pct": 15.0,
+                "budget_cap": 500.0,
+                "pursue_clusters": ["cluster-serum"],
+                "standing_commitments": [],
+                "activation": "active"
+              },
+              "x-example-schema": "Envelope"
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored envelope.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Envelope" },
+                "example": {
+                  "store_id": "store-1",
+                  "version": 4,
+                  "floors": [{ "product_ref": "prod-1", "min_price": 32.0 }],
+                  "max_discount_pct": 15.0,
+                  "budget_cap": 500.0,
+                  "pursue_clusters": ["cluster-serum"],
+                  "standing_commitments": [],
+                  "activation": "active"
+                },
+                "x-example-schema": "Envelope"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stores/{store_id}/kill": {
+      "post": {
+        "operationId": "killStoreAgent",
+        "summary": "Kill switch: move the envelope to `killed` immediately.",
+        "parameters": [
+          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The activation state after the kill.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["store_id", "activation"],
+                  "properties": {
+                    "store_id": { "type": "string" },
+                    "activation": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/EnvelopeActivation" }
+                  }
+                },
+                "example": { "store_id": "store-1", "activation": "killed" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

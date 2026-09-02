@@ -1,0 +1,186 @@
+[
+  {
+    "input": {
+      "n": 89
+    },
+    "expected": "{\"n\":89}"
+  },
+  {
+    "input": {
+      "n": 44.1
+    },
+    "expected": "{\"n\":44.1}"
+  },
+  {
+    "input": {
+      "n": 0
+    },
+    "expected": "{\"n\":0}"
+  },
+  {
+    "input": {
+      "n": -0.0
+    },
+    "expected": "{\"n\":0}"
+  },
+  {
+    "input": {
+      "n": 1
+    },
+    "expected": "{\"n\":1}"
+  },
+  {
+    "input": {
+      "n": 0.000001
+    },
+    "expected": "{\"n\":0.000001}"
+  },
+  {
+    "input": {
+      "n": 1e-7
+    },
+    "expected": "{\"n\":1e-7}"
+  },
+  {
+    "input": {
+      "n": 0.00001
+    },
+    "expected": "{\"n\":0.00001}"
+  },
+  {
+    "input": {
+      "n": 0.0001
+    },
+    "expected": "{\"n\":0.0001}"
+  },
+  {
+    "input": {
+      "n": 1e+21
+    },
+    "expected": "{\"n\":1e+21}"
+  },
+  {
+    "input": {
+      "n": 10000000000000000
+    },
+    "expected": "{\"n\":10000000000000000}"
+  },
+  {
+    "input": {
+      "n": 1.5e-10
+    },
+    "expected": "{\"n\":1.5e-10}"
+  },
+  {
+    "input": {
+      "n": 5e-324
+    },
+    "expected": "{\"n\":5e-324}"
+  },
+  {
+    "input": {
+      "n": 1.7976931348623157e+308
+    },
+    "expected": "{\"n\":1.7976931348623157e+308}"
+  },
+  {
+    "input": {
+      "n": 1.2345678901234568e+20
+    },
+    "expected": "{\"n\":123456789012345680000}"
+  },
+  {
+    "input": {
+      "n": 1.2345678901234567e+19
+    },
+    "expected": "{\"n\":12345678901234567000}"
+  },
+  {
+    "input": {
+      "n": -44.1
+    },
+    "expected": "{\"n\":-44.1}"
+  },
+  {
+    "input": {
+      "n": -1e+21
+    },
+    "expected": "{\"n\":-1e+21}"
+  },
+  {
+    "input": {
+      "b": [
+        1,
+        {
+          "c": 2
+        }
+      ]
+    },
+    "expected": "{\"b\":[1,{\"c\":2}]}"
+  },
+  {
+    "input": {
+      "z": 1,
+      "a": 2,
+      "M": 3,
+      "_": 4
+    },
+    "expected": "{\"M\":3,\"_\":4,\"a\":2,\"z\":1}"
+  },
+  {
+    "input": {
+      "Ｚ": 1,
+      "😀": 2
+    },
+    "expected": "{\"😀\":2,\"Ｚ\":1}"
+  },
+  {
+    "input": {
+      "e": [],
+      "o": {},
+      "nul": null,
+      "t": true,
+      "f": false
+    },
+    "expected": "{\"e\":[],\"f\":false,\"nul\":null,\"o\":{},\"t\":true}"
+  },
+  {
+    "input": {
+      "s": "café — “quoted”"
+    },
+    "expected": "{\"s\":\"café — “quoted”\"}"
+  },
+  {
+    "input": {
+      "s": "tab\there\nnewline\\backslash\"quote"
+    },
+    "expected": "{\"s\":\"tab\\there\\nnewline\\\\backslash\\\"quote\"}"
+  },
+  {
+    "input": {
+      "s": "\u0001\u001f "
+    },
+    "expected": "{\"s\":\"\\u0001\\u001f \"}"
+  },
+  {
+    "input": {
+      "nested": {
+        "b": {
+          "z": 1,
+          "a": 2
+        },
+        "a": 3
+      }
+    },
+    "expected": "{\"nested\":{\"a\":3,\"b\":{\"a\":2,\"z\":1}}}"
+  },
+  {
+    "input": {
+      "unit_price": 49,
+      "total_price": 44.1,
+      "commitments": [],
+      "discount": null
+    },
+    "expected": "{\"commitments\":[],\"discount\":null,\"total_price\":44.1,\"unit_price\":49}"
+  }
+]
