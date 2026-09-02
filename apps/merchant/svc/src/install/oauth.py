@@ -35,6 +35,7 @@ from urllib.parse import quote, urlencode
 import httpx
 from merchant_svc.install.scopes import REQUIRED_SCOPES, assert_scopes_allowed
 from merchant_svc.install.shop import InvalidShopDomain, normalize_shop_domain
+from merchant_svc.install.signatures import secure_equals
 
 AUTHORIZE_PATH = "/admin/oauth/authorize"
 ACCESS_TOKEN_PATH = "/admin/oauth/access_token"
@@ -111,14 +112,20 @@ def callback_signing_bytes(params: Mapping[str, str]) -> bytes:
 
 
 def verify_callback_hmac(params: Mapping[str, str], secret: str) -> bool:
-    """Constant-time check of the callback's ``hmac`` parameter."""
+    """Constant-time check of the callback's ``hmac`` parameter.
+
+    The comparison goes through :func:`~merchant_svc.install.signatures.secure_equals`
+    because ``hmac`` is a query parameter — fully attacker-chosen, and free to carry a
+    character ``hmac.compare_digest`` refuses to compare as ``str``. A malformed signature
+    is a refusal (``False``), never an exception the route answers with a 500.
+    """
     supplied = params.get("hmac")
     if not supplied or not secret:
         return False
     expected = hmac.new(
         secret.encode("utf-8"), callback_signing_bytes(params), hashlib.sha256
     ).hexdigest()
-    return hmac.compare_digest(expected, str(supplied))
+    return secure_equals(expected, supplied)
 
 
 def sign_callback(params: Mapping[str, str], secret: str) -> str:

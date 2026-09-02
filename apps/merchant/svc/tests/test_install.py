@@ -40,18 +40,23 @@ from merchant_svc.install import (
     OAuthCallbackRejected,
     OnlineTokenRefused,
     ProtectedScopeRequested,
+    ReceivedWebhook,
     ShopNotInstalled,
+    WebhookDecision,
     WebhookInbox,
     assert_scopes_allowed,
     assert_topics_allowed,
     authorize_url,
     exchange_code,
+    handle_delivery,
     install,
     normalize_shop_domain,
     read_callback,
+    set_webhook_sink,
     sign,
     sign_callback,
     verify,
+    verify_callback_hmac,
 )
 from shopify_stub.state import DEFAULT_ACCESS_TOKEN, DEFAULT_SHOP_DOMAIN, DEFAULT_WEBHOOK_SECRET
 from shopify_stub.testing import SEED_VARIANT, RecordingReceiver, StubClient
@@ -613,3 +618,229 @@ def test_an_explicit_collector_still_outranks_app_url(
     assert neither.pixel_settings["collectorUrl"] == (
         f"{install_env['MERCHANT_APP_URL']}/pixel/collect"
     )
+
+
+# ======================================================================================
+# Hardening — every guard below is stated as "what does only this reject, and what does it
+# still admit", because a guard that cannot name a rejected input is not a guard.
+# ======================================================================================
+async def test_a_non_ascii_signature_is_refused_rather_than_answered_with_a_500(
+    install_env: dict[str, str],
+    install_app_url: str,
+    install_inbox: WebhookInbox,
+) -> None:
+    """One non-ASCII byte in a signature must be a hard refusal, not an exception.
+
+    ``hmac.compare_digest`` raises ``TypeError`` when a ``str`` argument is not ASCII-only,
+    and both digests this app compares arrive from the network: the
+    ``X-Shopify-Hmac-Sha256`` header on a public webhook endpoint, and the ``hmac`` query
+    parameter on the install callback. Comparing them as ``str`` turned a one-byte
+    malformed signature into an unhandled exception that FastAPI answered with a 500 —
+    an unauthenticated crash on both of this app's trust boundaries, reachable by anyone
+    who can send an HTTP request.
+
+    Rejected here and only here: a signature carrying a byte outside ASCII. Still admitted:
+    the correct signature, asserted below so the fix cannot be "refuse everything".
+    """
+    body = json.dumps({"id": 4242, "checkout_token": "tok-crash"}).encode("utf-8")
+    good = sign(body, DEFAULT_WEBHOOK_SECRET)
+
+    assert verify(body, DEFAULT_WEBHOOK_SECRET, good) is True
+    assert verify(body, DEFAULT_WEBHOOK_SECRET, "é" + good[1:]) is False
+    assert verify(body, DEFAULT_WEBHOOK_SECRET, "\udcc3" + good[1:]) is False
+
+    signed = {"shop": SHOP, "code": "auth-code-1", "state": "nonce-1"}
+    signed["hmac"] = sign_callback(signed, DEFAULT_WEBHOOK_SECRET)
+    assert verify_callback_hmac(signed, DEFAULT_WEBHOOK_SECRET) is True
+    assert verify_callback_hmac(dict(signed, hmac="é" * 64), DEFAULT_WEBHOOK_SECRET) is False
+
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        # A raw non-ASCII byte on the wire, not a str httpx might sanitise for us.
+        delivery = await client.post(
+            f"{install_app_url}/webhooks/shopify/orders/paid",
+            content=body,
+            headers=[
+                (b"content-type", b"application/json"),
+                (b"x-shopify-topic", b"orders/paid"),
+                (b"x-shopify-hmac-sha256", b"\xc3\xa9not-a-signature"),
+                (b"x-shopify-shop-domain", SHOP.encode("ascii")),
+            ],
+        )
+        assert delivery.status_code == 401, delivery.text
+        assert delivery.json()["error"] == "bad-signature"
+        assert install_inbox.events() == ()
+
+        started = await client.get(f"{install_app_url}/install", params={"shop": SHOP})
+        state = parse_qs(urlparse(started.headers["location"]).query)["state"][0]
+        callback = await client.get(
+            f"{install_app_url}/install/callback",
+            params={"shop": SHOP, "code": "c", "state": state, "hmac": "é" * 64},
+        )
+        assert callback.status_code == 401, callback.text
+        assert callback.json()["error"] == "callback-rejected"
+
+
+async def test_a_replay_cannot_buy_a_second_count_by_renaming_its_unsigned_webhook_id(
+    install_env: dict[str, str],
+    install_app_url: str,
+    install_inbox: WebhookInbox,
+) -> None:
+    """The replay guard must key on something the sender cannot vary at will.
+
+    Shopify's HMAC covers the request **body** and nothing else, so every header on a
+    delivery — ``X-Shopify-Webhook-Id`` included — is chosen by whoever made the request.
+    De-duplicating on that id alone therefore refused only a replay that volunteered to
+    reuse its id: renaming it, or dropping the header entirely (which the id rule never
+    de-duplicated at all), got the same signed ``orders/paid`` counted again, once per
+    replay, and one purchase reconciled as many.
+
+    Rejected here and only here: the same signed body arriving again under any id, or none.
+    Still admitted: a different signed body, asserted at the end so the guard cannot be
+    "refuse the second delivery".
+    """
+    body = json.dumps({"id": 9001, "checkout_token": "tok-replay", "total_price": "119.00"})
+    encoded = body.encode("utf-8")
+    url = f"{install_app_url}/webhooks/shopify/orders/paid"
+
+    def headers(webhook_id: str | None, payload: bytes = encoded) -> dict[str, str]:
+        sent = {
+            "Content-Type": "application/json",
+            "X-Shopify-Topic": "orders/paid",
+            "X-Shopify-Hmac-Sha256": sign(payload, DEFAULT_WEBHOOK_SECRET),
+            "X-Shopify-Shop-Domain": SHOP,
+        }
+        if webhook_id is not None:
+            sent["X-Shopify-Webhook-Id"] = webhook_id
+        return sent
+
+    async with httpx.AsyncClient() as client:
+        first = await client.post(url, content=encoded, headers=headers("w-genuine"))
+        assert first.status_code == 200
+        assert first.json()["duplicate"] is False
+
+        for attempt in range(4):
+            renamed = await client.post(url, content=encoded, headers=headers(f"forged-{attempt}"))
+            assert renamed.status_code == 200
+            assert renamed.json()["duplicate"] is True, f"replay {attempt} was counted again"
+
+        for _ in range(4):
+            headerless = await client.post(url, content=encoded, headers=headers(None))
+            assert headerless.status_code == 200
+            assert headerless.json()["duplicate"] is True, "a replay with no id was counted"
+
+        # The shop a delivery is attributed to is an unsigned header too, so a replay was
+        # also a way to file a real order against somebody else's shop.
+        stolen = dict(headers("forged-shop"), **{"X-Shopify-Shop-Domain": "victim.myshopify.com"})
+        misattributed = await client.post(url, content=encoded, headers=stolen)
+        assert misattributed.json()["duplicate"] is True
+
+        assert len(install_inbox.events()) == 1
+        assert install_inbox.events()[0].shop_domain == SHOP
+
+        # Positive control: a genuinely different order is still a fresh delivery.
+        other = json.dumps({"id": 9002, "checkout_token": "tok-other"}).encode("utf-8")
+        fresh = await client.post(url, content=other, headers=headers("w-second", other))
+        assert fresh.json()["duplicate"] is False
+
+    assert len(install_inbox.events()) == 2
+
+
+def test_the_replay_guard_outlives_the_event_ring_rolling_over() -> None:
+    """Filling the bounded event log must not amnesty the deliveries it evicts.
+
+    The seen-set used to be pruned in lockstep with the ring: popping the oldest event
+    dropped its id, so a delivery older than ``INBOX_CAPACITY`` was accepted a second time.
+    The ring is a display buffer and an attacker fills it with traffic, which is the one
+    resource an attacker always has — so the replay window is now bounded on its own clock.
+
+    Rejected here and only here: a delivery that has already been recorded, however much
+    unrelated traffic arrived since. Still admitted: a delivery never seen before.
+    """
+    inbox = WebhookInbox(capacity=4)
+
+    def deliver(marker: str, webhook_id: str) -> WebhookDecision:
+        payload = json.dumps({"id": marker, "checkout_token": marker}).encode("utf-8")
+        return handle_delivery(
+            body=payload,
+            headers={
+                "X-Shopify-Topic": "orders/paid",
+                "X-Shopify-Hmac-Sha256": sign(payload, DEFAULT_WEBHOOK_SECRET),
+                "X-Shopify-Webhook-Id": webhook_id,
+                "X-Shopify-Shop-Domain": SHOP,
+            },
+            secret=DEFAULT_WEBHOOK_SECRET,
+            path_topic="orders/paid",
+            inbox=inbox,
+        )
+
+    assert deliver("order-1", "w-1").duplicate is False
+    for index in range(inbox.capacity + 3):
+        assert deliver(f"filler-{index}", f"w-f{index}").duplicate is False
+    assert len(inbox.events()) == inbox.capacity, "the event ring must still be bounded"
+
+    assert deliver("order-1", "w-1").duplicate is True
+    assert deliver("order-1", "w-1-renamed").duplicate is True
+    assert deliver("order-99", "w-99").duplicate is False
+
+
+def test_a_sink_that_refuses_a_delivery_gets_the_retry_not_a_duplicate() -> None:
+    """A delivery marked seen but never handed on is a delivery nobody will send again.
+
+    ``handle_delivery`` recorded first and called the downstream sink second, so a sink
+    that raised took the whole request down with it — and Shopify's retry then matched the
+    id that recording had already stored, was answered 2xx as a "duplicate", and the event
+    was lost for good. A transient ledger outage became permanent data loss on the topic
+    DESIGN calls authoritative for reconciliation.
+
+    Rejected here and only here: a delivery the sink could not accept — answered non-2xx,
+    left un-recorded, retried. Still admitted: the retry once the sink recovers, and a
+    second copy of that retry is still a duplicate.
+    """
+    inbox = WebhookInbox()
+    body = json.dumps({"id": 7, "checkout_token": "tok-sink"}).encode("utf-8")
+    headers = {
+        "X-Shopify-Topic": "orders/paid",
+        "X-Shopify-Hmac-Sha256": sign(body, DEFAULT_WEBHOOK_SECRET),
+        "X-Shopify-Webhook-Id": "w-retryable",
+        "X-Shopify-Shop-Domain": SHOP,
+    }
+    handed_on: list[ReceivedWebhook] = []
+    outage = {"down": True}
+
+    def ledger(event: ReceivedWebhook) -> None:
+        if outage["down"]:
+            raise RuntimeError("the ledger writer is down")
+        handed_on.append(event)
+
+    def deliver() -> WebhookDecision:
+        return handle_delivery(
+            body=body,
+            headers=headers,
+            secret=DEFAULT_WEBHOOK_SECRET,
+            path_topic="orders/paid",
+            inbox=inbox,
+        )
+
+    set_webhook_sink(ledger)
+    try:
+        refused = deliver()
+        assert refused.accepted is False, "a 2xx here tells Shopify to stop retrying"
+        assert refused.status_code == 500
+        assert refused.reason == "sink-failed"
+        assert handed_on == []
+        assert inbox.events() == (), "an un-handed-on delivery must not be marked seen"
+
+        outage["down"] = False
+        retry = deliver()
+        assert retry.accepted is True
+        assert retry.duplicate is False, "the retry was swallowed as a duplicate"
+        assert [event.payload["id"] for event in handed_on] == [7]
+        assert len(inbox.events()) == 1
+
+        # Positive control: once it is handed on, a further retry is a duplicate again.
+        again = deliver()
+        assert again.accepted is True
+        assert again.duplicate is True
+        assert len(handed_on) == 1
+    finally:
+        set_webhook_sink(None)

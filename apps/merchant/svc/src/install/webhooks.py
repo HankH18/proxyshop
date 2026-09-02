@@ -12,6 +12,12 @@ before hashing computes a different digest whenever key order or spacing differs
 single most common webhook-verification bug, and one that fails open. Everything here
 works on ``bytes``.
 
+**Only the body is signed, so only the body may identify a delivery.** Every header on an
+inbound delivery is chosen by whoever made the request, including the webhook id a receiver
+is tempted to de-duplicate on. :class:`WebhookInbox` therefore keys its replay guard on
+:func:`delivery_digest` of the signed body, and holds those identities in a window it
+evicts on its own clock rather than in step with the event ring.
+
 Header casing is read case-insensitively on purpose: shopify.dev prints the HMAC header
 three different ways across its own pages, and HTTP/2 lower-cases header names anyway.
 """
@@ -22,10 +28,15 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+from merchant_svc.install.signatures import secure_equals
+
+_log = logging.getLogger(__name__)
 
 #: The topics this app subscribes, in the order the install registers them.
 WEBHOOK_TOPICS: tuple[str, ...] = ("orders/paid", "orders/fulfilled", "refunds/create")
@@ -46,6 +57,12 @@ HEADER_TRIGGERED_AT = "X-Shopify-Triggered-At"
 
 #: How many delivered webhooks the default in-process sink keeps.
 INBOX_CAPACITY = 512
+
+#: How many delivery identities the replay guard remembers, evicted on its own clock. It is
+#: deliberately far larger than the event ring and deliberately **not** tied to it: a guard
+#: that forgets an identity the moment the ring rolls over is a guard an attacker empties by
+#: sending traffic, which is the one thing an attacker is always able to do.
+SEEN_CAPACITY = 65536
 
 
 class ForbiddenWebhookTopic(ValueError):
@@ -89,16 +106,28 @@ def sign(body: bytes, secret: str) -> str:
     return base64.b64encode(digest).decode("ascii")
 
 
+def delivery_digest(body: bytes) -> str:
+    """A stable identity for one delivery, derived from the material Shopify *signs*.
+
+    The raw body is the only part of a delivery that carries a signature. Every header —
+    ``X-Shopify-Webhook-Id`` included — is chosen freely by whoever made the request, so an
+    identity read out of a header identifies nothing an attacker has to keep constant.
+    """
+    return hashlib.sha256(body).hexdigest()
+
+
 def verify(body: bytes, secret: str, signature: str | None) -> bool:
     """Constant-time check of ``X-Shopify-Hmac-Sha256`` against the raw body.
 
-    A missing signature, a blank secret and a wrong digest are all ``False``. The blank
-    secret matters: an unconfigured deployment must refuse every delivery, never accept
-    every delivery.
+    A missing signature, a blank secret, a wrong digest and a digest that is not even
+    ASCII are all ``False``. The blank secret matters: an unconfigured deployment must
+    refuse every delivery, never accept every delivery. The non-ASCII case matters for the
+    same reason in the other direction: the header is attacker-chosen, and comparing it as
+    ``str`` would raise instead of refusing — see :mod:`merchant_svc.install.signatures`.
     """
     if not signature or not secret:
         return False
-    return hmac.compare_digest(sign(body, secret), signature)
+    return secure_equals(sign(body, secret), signature)
 
 
 @dataclass(frozen=True)
@@ -112,6 +141,10 @@ class ReceivedWebhook:
     received_at: datetime
     api_version: str = ""
     triggered_at: str = ""
+    #: :func:`delivery_digest` of the raw body this delivery was authenticated against.
+    #: The de-duplication identity that an attacker cannot vary without invalidating the
+    #: signature; empty only when a caller built the event by hand.
+    body_digest: str = ""
 
     @property
     def order_ref(self) -> str | None:
@@ -133,28 +166,75 @@ class ReceivedWebhook:
 class WebhookInbox:
     """A bounded, de-duplicated log of authenticated deliveries.
 
-    De-duplication is on ``X-Shopify-Webhook-Id``: Shopify retries a delivery it did not
-    see a 2xx for, and a receiver that double-counts a retried ``orders/paid`` reconciles
-    one purchase as two. A repeat is acknowledged (2xx, so the retries stop) and recorded
-    once.
+    De-duplication exists because Shopify retries a delivery it did not see a 2xx for, and
+    a receiver that double-counts a retried ``orders/paid`` reconciles one purchase as two.
+    A repeat is acknowledged (2xx, so the retries stop) and recorded once.
+
+    **What a delivery is identified by, and why it is not the webhook id alone.**
+    ``X-Shopify-Webhook-Id`` is an unsigned header: Shopify's HMAC covers the body and
+    nothing else, so anyone replaying a captured delivery can put a fresh id on it — or
+    drop the header, which the id-only rule never de-duplicated at all — and be counted
+    again, once per replay. The identity that cannot be varied is
+    :func:`delivery_digest` of the signed body, scoped to the topic it arrived under; the
+    webhook id is kept alongside it so an honest retry that Shopify re-bodies still
+    de-duplicates.
+
+    **The replay window is bounded on its own clock.** The event ring is a display buffer
+    and rolls over at ``capacity``; the seen-set holds :data:`SEEN_CAPACITY` identities and
+    is evicted independently. Discarding an identity because the ring rolled over would
+    hand an attacker the eviction for free — traffic is the one resource an attacker
+    always has.
     """
 
-    def __init__(self, capacity: int = INBOX_CAPACITY) -> None:
+    def __init__(
+        self, capacity: int = INBOX_CAPACITY, *, seen_capacity: int = SEEN_CAPACITY
+    ) -> None:
         self.capacity = capacity
+        self.seen_capacity = max(seen_capacity, capacity)
         self._events: list[ReceivedWebhook] = []
-        self._seen: set[str] = set()
+        #: Used as an insertion-ordered set: the value is never read.
+        self._seen: dict[str, None] = {}
+
+    @staticmethod
+    def _identities(event: ReceivedWebhook) -> tuple[str, ...]:
+        """Every key ``event`` is de-duplicated under, most trustworthy first."""
+        keys: list[str] = []
+        if event.body_digest:
+            keys.append(f"body:{event.topic}:{event.body_digest}")
+        if event.webhook_id:
+            keys.append(f"id:{event.webhook_id}")
+        return tuple(keys)
+
+    def seen(self, event: ReceivedWebhook) -> bool:
+        """Whether an equivalent delivery was already recorded."""
+        return any(key in self._seen for key in self._identities(event))
 
     def record(self, event: ReceivedWebhook) -> bool:
-        """Append ``event``. ``False`` when its webhook id was already recorded."""
-        if event.webhook_id and event.webhook_id in self._seen:
+        """Append ``event``. ``False`` when an equivalent delivery was already recorded."""
+        keys = self._identities(event)
+        if any(key in self._seen for key in keys):
             return False
-        if event.webhook_id:
-            self._seen.add(event.webhook_id)
+        for key in keys:
+            self._seen[key] = None
+        while len(self._seen) > self.seen_capacity:
+            self._seen.pop(next(iter(self._seen)))
         self._events.append(event)
         if len(self._events) > self.capacity:
-            dropped = self._events.pop(0)
-            self._seen.discard(dropped.webhook_id)
+            self._events.pop(0)
         return True
+
+    def forget(self, event: ReceivedWebhook) -> None:
+        """Undo :meth:`record` for ``event``.
+
+        Used when the delivery could not be handed on after all, so the sender's retry is
+        treated as the fresh delivery it is rather than swallowed as a duplicate.
+        """
+        for key in self._identities(event):
+            self._seen.pop(key, None)
+        for index in range(len(self._events) - 1, -1, -1):
+            if self._events[index] is event:
+                del self._events[index]
+                break
 
     def events(self, topic: str | None = None) -> tuple[ReceivedWebhook, ...]:
         """Everything recorded, optionally filtered to one topic, in arrival order."""
@@ -212,6 +292,9 @@ def handle_delivery(
     The four refusals, each with its own status so a misconfiguration is not mistaken for
     an attack: an unsubscribed topic (404), a topic header that disagrees with the route it
     arrived on (400), a bad or missing signature (401), and a body that is not JSON (400).
+    A fifth answer is not a refusal but a *retry request*: a sink that raises leaves the
+    delivery un-recorded and answers 500, because Shopify stops retrying on any 2xx and a
+    delivery that is marked seen but never handed on is a delivery nobody will send again.
 
     Args:
         body: the exact bytes received. Never a re-serialisation.
@@ -258,10 +341,23 @@ def handle_delivery(
         received_at=now or datetime.now(UTC),
         api_version=lower.get(HEADER_API_VERSION.lower(), ""),
         triggered_at=lower.get(HEADER_TRIGGERED_AT.lower(), ""),
+        body_digest=delivery_digest(body),
     )
     fresh = target.record(event)
     if fresh and _sink is not None:
-        _sink(event)
+        try:
+            _sink(event)
+        except Exception:  # noqa: BLE001 - the sink is a downstream lane's; own the failure
+            # Recording marked this delivery seen. Leaving that mark in place while
+            # answering non-2xx would make Shopify's retry a "duplicate" and the event
+            # would be lost for good — a transient ledger outage turned permanent.
+            target.forget(event)
+            _log.exception(
+                "webhook sink refused a %s delivery (%s); answering 500 so it is retried",
+                topic,
+                event.webhook_id or "<no webhook id>",
+            )
+            return WebhookDecision(500, "sink-failed", event=event, detail={"topic": topic})
     return WebhookDecision(
         200,
         "recorded" if fresh else "duplicate",
