@@ -28,7 +28,8 @@ Why this module and not ``apps/trust/tests/test_schema_grants.py``: T-112's ``sc
 executed by the same gate.
 
 The docker test spins a **private, throwaway** postgres container -- its own anonymous
-volume, an ephemeral loopback-only published port, ``docker rm -f`` at teardown -- because
+volume, an ephemeral loopback-only published port, ``docker rm -f -v`` at teardown -- the
+``-v`` is load-bearing, not decoration; see the teardown comment -- because
 a fresh volume is the only state in which the initdb hook runs at all, and the roles it
 creates are cluster-global: proving anything on the shared stack would mean rewriting
 credentials five other live lanes are authenticating with.
@@ -456,7 +457,15 @@ def _fresh_volume_from_compose(
         host_port = published.stdout.strip().splitlines()[0].rsplit(":", 1)[1]
         yield name, host_port, environment
     finally:
-        _docker("rm", "-f", name, timeout=120)
+        # `-v`, for the same reason as apps/trust/tests/test_schema_grants.py:1579 -- the
+        # postgres image declares a VOLUME on its data directory, so `docker run` without an
+        # explicit mount creates an ANONYMOUS volume, and `docker rm -f` does NOT remove it.
+        # This fixture's sibling was fixed; this one was missed, so it kept leaking ~200MB
+        # per use. That is the leak that filled this host's Docker VM disk (254 volumes
+        # reclaimed by hand once, 23 more pruned since). `-v` removes only the anonymous
+        # volumes the container owns -- the `db/init` bind mount is a host path, not a
+        # volume, so it is untouched.
+        _docker("rm", "-f", "-v", name, timeout=120)
 
 
 def _point_the_connect_side_at(monkeypatch, host_port: str, role_password: str | None) -> None:
