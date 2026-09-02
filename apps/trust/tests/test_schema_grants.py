@@ -1566,7 +1566,17 @@ def _fresh_volume_postgres(
         )
         yield name, settings
     finally:
-        _docker("rm", "-f", name, timeout=120)
+        # `-v`, and it is not decoration. The postgres image declares a VOLUME on its data
+        # directory, so `docker run` without an explicit mount creates an ANONYMOUS volume
+        # -- and `docker rm -f` does not remove it. Measured on this host: each full
+        # `pytest apps/trust` run left five orphaned ~200MB volumes behind, one per use of
+        # this fixture, and the docstring above says "its own anonymous volume, and
+        # `docker rm -f` at teardown" in the belief that the second clause disposes of the
+        # first. It does not. The VM disk had already been filled once by exactly this,
+        # with 254 volumes reclaimed by hand. `-v` removes the anonymous volumes the
+        # container owns and nothing else -- the `db/init` bind mount is a host path, not a
+        # volume, so it cannot be touched by this.
+        _docker("rm", "-f", "-v", name, timeout=120)
 
 
 #: POSIX sh that leaves ONE usable address in ``$addr``, or exits 64 saying why (T-118 g).
