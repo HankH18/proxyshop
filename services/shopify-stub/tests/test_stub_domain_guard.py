@@ -31,9 +31,11 @@ was a legal host. A bare LF in a ``Location`` header ends the header.
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
 import re
+import traceback
 import unicodedata
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -43,7 +45,11 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from fastapi.responses import JSONResponse, RedirectResponse
+from shopify_stub import app as app_module
+from shopify_stub import orders as orders_module
 from shopify_stub import permalink as permalink_module
+from shopify_stub import telemetry as telemetry_module
 from shopify_stub.app import create_app
 from shopify_stub.orders import create_order_from_checkout, order_webhook_payload
 from shopify_stub.permalink import (
@@ -392,8 +398,10 @@ def test_store_url_refuses_a_path_that_could_split_the_response(path: str) -> No
 #     nothing about the space — but the space (U+0020, Unicode category `Zs`, not a control
 #     character at all) was refused; and
 #   * `[\x00-\x20\x7f]` covered the C0 block and stopped there, so U+0085 NEL — a control
-#     character by every definition — was *accepted*, and Starlette's latin-1 header
-#     encoding put a bare 0x85 byte into a live `Location`.
+#     character by every definition — was *accepted*. Had one reached the cart route's
+#     `Location`, Starlette's latin-1 header encoding would have put a bare 0x85 byte on
+#     the wire; none could, because every `store_url` path is built from a hex UUID or a
+#     digit run (T-129, `test_no_caller_supplied_value_reaches_a_store_url_path`).
 #
 # The three parametrizations below are the whole ASCII range plus the characters that used
 # to escape, one case each, so the prose can only drift again by turning a test red.
@@ -453,8 +461,11 @@ def test_a_c1_control_slipped_the_old_deny_list() -> None:
     """The reproduction, kept executable so the regression is a fact and not a memory.
 
     ``U+0085`` is Unicode category ``Cc`` — a control character — and the old
-    ``[\\x00-\\x20\\x7f]`` did not match it. The rendered URL then went into a ``Location``
-    header, which Starlette encodes latin-1, so a raw ``0x85`` byte reached the wire.
+    ``[\\x00-\\x20\\x7f]`` did not match it. Had such a URL reached a ``Location`` header,
+    Starlette's latin-1 encoding would have put a raw ``0x85`` byte on the wire — the
+    ``rendered_by_the_old_code`` line below is that conditional, not a report of something
+    this service ever served. Nothing could reach it: see T-129's
+    ``test_no_caller_supplied_value_reaches_a_store_url_path``.
     """
     escaped = "/checkouts/abc\x85"
     assert unicodedata.category("\x85") == "Cc", "U+0085 is a control character"
@@ -623,3 +634,171 @@ def test_the_c1_range_the_clause_names_is_refused_and_really_is_c1() -> None:
         )
         with pytest.raises(PermalinkError):
             store_url(shop_domain=OTHER_DOMAIN, path=f"/checkouts/abc{char}")
+
+
+# ---------------------------------------------------------------------------------------
+# T-129 (stub 4): what the C1 gap actually was, and what it actually would have done
+# ---------------------------------------------------------------------------------------
+#
+# `_FORBIDDEN_IN_PATH`'s replacement comment asserted, as observed fact, that U+0085
+# "passed straight through into a `Location` header, where Starlette's latin-1 header
+# encoding put a bare 0x85 byte on the wire" — and that sentence is what turned a
+# documentation ticket into a behaviour change. It is not true of this service. The two
+# tests below hold the corrected sentence to the code: the gap was LATENT (no caller can
+# put anything into a `store_url` path), and the CONSEQUENCE is real but conditional
+# (measured against the live response class, not assumed).
+
+#: Every expression a ``store_url(path=...)`` f-string in this package is allowed to
+#: interpolate, with why each is safe. Anything else is a caller-reachable path, which is
+#: the situation `_FORBIDDEN_IN_PATH`'s comment used to claim already existed.
+_SAFE_PATH_INTERPOLATIONS = {
+    "checkout.token": "orders.new_token() -> uuid.uuid4().hex",
+    "order.checkout_token": "the same token, carried onto the order",
+    "variant": "build_permalink refuses it unless str.isdigit()",
+    "quantity": "build_permalink refuses it unless >= 1, and it is an int",
+}
+
+#: The modules that call ``store_url``. Named rather than discovered so that a new caller
+#: in a module nobody added here is caught by the count assertion below.
+_STORE_URL_CALLERS = (app_module, orders_module, permalink_module, telemetry_module)
+
+
+def _store_url_path_arguments() -> list[tuple[str, int, ast.expr]]:
+    """Every ``path=`` argument passed to ``store_url`` anywhere in the package."""
+    found: list[tuple[str, int, ast.expr]] = []
+    for module in _STORE_URL_CALLERS:
+        tree = ast.parse(inspect.getsource(module))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "store_url":
+                continue
+            keywords = {keyword.arg: keyword.value for keyword in node.keywords}
+            assert "path" in keywords, (
+                f"{module.__name__}:{node.lineno} calls store_url without a keyword path; "
+                "this test can no longer see what it renders"
+            )
+            found.append((module.__name__, node.lineno, keywords["path"]))
+    return found
+
+
+def _raw_location_header_sites(module: Any) -> int:
+    """How many responses in `module` are built with a literal ``Location`` header entry.
+
+    The distinction the prose turns on: a raw header dict is written to the wire latin-1,
+    while `RedirectResponse` percent-encodes the url it is given.
+    """
+    tree = ast.parse(inspect.getsource(module))
+    count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "headers" or not isinstance(keyword.value, ast.Dict):
+                continue
+            keys = [
+                key.value
+                for key in keyword.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            ]
+            if any(key.lower() == "location" for key in keys):
+                count += 1
+    return count
+
+
+def test_no_caller_supplied_value_reaches_a_store_url_path() -> None:
+    """The corrected claim: the C1 gap was latent, because no path is caller-supplied.
+
+    `store_url` renders ``https://{shop_domain}{path}``. `shop_domain` is guarded by
+    `_LABEL`, an allow-list of DNS labels, so a control character cannot arrive that way
+    whatever `_FORBIDDEN_IN_PATH` says. `path` is the other half, and every one of the
+    four call sites builds it from a hex UUID or a digit run — so a bad byte could not
+    reach a rendered URL through this service at all, under the old deny-list or the new
+    allow-list.
+
+    Checked structurally rather than by driving inputs, because "no input reaches it" is a
+    claim about every input. A route added tomorrow that interpolates a query parameter
+    would make the comment's original sentence true; that route is what turns this red.
+    """
+    call_sites = _store_url_path_arguments()
+    assert len(call_sites) == 4, (
+        f"the comment names four call sites; found {len(call_sites)}: "
+        f"{[(module, line) for module, line, _ in call_sites]}"
+    )
+    for module_name, lineno, path in call_sites:
+        where = f"{module_name}:{lineno}"
+        if isinstance(path, ast.Constant):
+            assert isinstance(path.value, str), f"{where}: a non-string constant path"
+            continue
+        assert isinstance(path, ast.JoinedStr), (
+            f"{where}: path is {ast.unparse(path)!r}, which this test cannot vouch for; "
+            "a store_url path must be a literal or an f-string over known-safe values"
+        )
+        for part in path.values:
+            if not isinstance(part, ast.FormattedValue):
+                continue
+            expression = ast.unparse(part.value)
+            assert expression in _SAFE_PATH_INTERPOLATIONS, (
+                f"{where} interpolates {expression!r} into a rendered URL path. If that "
+                "value can carry anything a client sent, the C1 gap stops being latent — "
+                f"add it here with a reason, or stop interpolating it. Known safe: "
+                f"{sorted(_SAFE_PATH_INTERPOLATIONS)}"
+            )
+
+
+def test_what_a_bad_byte_does_to_a_location_header() -> None:
+    """The consequence half, measured against the real response class, not assumed.
+
+    The comment states two outcomes for a character that got past the path guard: a
+    ``U+0085`` becomes a bare ``0x85`` byte, because Starlette encodes header values
+    latin-1, and anything above ``U+00FF`` raises ``UnicodeEncodeError`` from the response
+    constructor. Both are framework behaviour the prose cannot keep true on its own — a
+    Starlette that percent-encoded ``Location`` instead would silently falsify it, which
+    is how a comment ends up describing a world that no longer exists.
+    """
+    nel = chr(0x85)
+    response = JSONResponse(
+        status_code=303,
+        content={},
+        headers={"Location": f"https://{OTHER_DOMAIN}/checkouts/abc{nel}"},
+    )
+    location = dict(response.raw_headers)[b"location"]
+    assert location.endswith(b"\x85"), (
+        f"latin-1 header encoding must put the bare byte on the wire, got {location!r}"
+    )
+    assert location.decode("latin-1").endswith(nel)
+
+    # And the other half: above U+00FF there is no latin-1 byte at all, so the response
+    # constructor raises rather than rendering. `starlette/responses.py` is named in the
+    # assertion because "a 500 from somewhere" is the part the comment gets specific about
+    # — the old wording said "inside the ASGI server", which is a different place.
+    line_separator = chr(0x2028)
+    with pytest.raises(UnicodeEncodeError) as excinfo:
+        JSONResponse(
+            status_code=303,
+            content={},
+            headers={"Location": f"https://{OTHER_DOMAIN}/checkouts/abc{line_separator}"},
+        )
+    frames = [frame.filename for frame in traceback.extract_tb(excinfo.tb)]
+    assert any("starlette/responses.py" in filename for filename in frames), (
+        f"the raise is documented as coming from Response.__init__; frames were {frames}"
+    )
+    assert "latin-1" in str(excinfo.value)
+
+    # Both outcomes belong to the emission style app.py actually uses — a raw
+    # `headers={"Location": ...}`. `RedirectResponse` percent-encodes its url, so neither
+    # the bare byte nor the UnicodeEncodeError happens there. Asserting the contrast
+    # rather than only the outcome is what stops this test from reading as a fact about
+    # Starlette in general, which it is not.
+    quoted = RedirectResponse(url=f"https://{OTHER_DOMAIN}/checkouts/abc{nel}", status_code=303)
+    assert dict(quoted.raw_headers)[b"location"].endswith(b"%C2%85"), (
+        "RedirectResponse quotes; the claim is about the raw header the cart route sets"
+    )
+    assert b"\x85" not in dict(quoted.raw_headers)[b"location"]
+    assert _raw_location_header_sites(app_module) == 1, (
+        "the cart route must still set Location as a raw header dict for that claim to "
+        "hold; if it moves to RedirectResponse (which quotes) the comment in permalink.py "
+        "has to move with it"
+    )
