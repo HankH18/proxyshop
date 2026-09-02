@@ -313,7 +313,7 @@ def _refusal(claim: Any, ledger: Any) -> str | None:
     provenance at all.
 
     Admissible here means "a hook emitted this", which for an authorization is not yet "this bid
-    may spend it": that question belongs to :func:`_scope_refusal`, and deliberately does not
+    may spend it": that question belongs to :func:`_authorization_refusal`, and deliberately does not
     live in this function, because the ledger genuinely does contain the replayed grant.
     """
     try:
@@ -338,17 +338,26 @@ def _refusal(claim: Any, ledger: Any) -> str | None:
     )
 
 
-def _scope_refusal(claim: Any, product_ref: str | None) -> str | None:
-    """Why a hook-emitted claim is not spendable in *this* bid, or `None`.
+def _authorization_refusal(claim: Any, hooks: Any, product_ref: str | None) -> str | None:
+    """Why a hook-emitted authorization is not spendable in *this* bid, or `None`.
 
     The second wall, and the only one the ledger cannot stand in for. A claim in
     :data:`PRODUCT_SCOPED_CLAIM_KEYS` is an authorization rather than a fact: it was granted by
-    checking walls that belong to one product. The ledger says a hook emitted it — which is true,
-    and says nothing about *where* it may be spent.
+    checking walls that belong to one product at one moment. The ledger says a hook emitted it —
+    which is true, and says nothing about *where* or *when* it may be spent.
 
-    Fails closed on an unnamed bid. "Which product is this about" has no safe default: answering
-    it with "any" would restore the whole defect, admitting a grant precisely because nobody said
-    what it was being spent on.
+    Two questions, because a grant can go stale two different ways:
+
+    **Whose is it?** Fails closed on an unnamed bid. "Which product is this about" has no safe
+    default: answering it with "any" would restore the whole defect, admitting a grant precisely
+    because nobody said what it was being spent on.
+
+    **Is it still true?** The ledger records what *was* authorized. A merchant who tightens the
+    envelope is changing what *is*, and a grant obtained under a 20% cap must not survive a drop
+    to 5% on the strength of a ledger entry. So the walls are re-asked live, through
+    :meth:`~store_agent.hooks.tools.ToolHooks.would_authorize`, which computes the same
+    arithmetic the hook did without minting anything. A facade that cannot answer is refused
+    rather than trusted, for the same reason a facade with no ledger is.
     """
     key = _read(claim, "key")
     if key not in PRODUCT_SCOPED_CLAIM_KEYS:
@@ -366,6 +375,20 @@ def _scope_refusal(claim: Any, product_ref: str | None) -> str | None:
             f"{str(product_ref)!r}: the envelope's price floors are per product, so the walls "
             "cleared for one product were never checked for the other"
         )
+
+    recheck = getattr(hooks, "would_authorize", None)
+    if not callable(recheck):
+        return (
+            f"{type(hooks).__name__} cannot re-check an authorization (no `would_authorize`), "
+            f"so whether the envelope still grants {key!r} is unknowable here; refusing"
+        )
+    value = _enum_value(_read(claim, "value"))
+    if not recheck(str(product_ref), value):
+        return (
+            f"claim {key!r} is in the ledger but the envelope no longer authorizes it for "
+            f"{str(product_ref)!r} at {value!r}: a grant does not outlive the rule that granted "
+            "it, and the ledger records what was authorized rather than what is"
+        )
     return None
 
 
@@ -382,7 +405,9 @@ def enforce_hook_provenance(
     `product_ref` is the product the bid is about. It is only consulted for claims that are
     authorizations rather than facts (:data:`PRODUCT_SCOPED_CLAIM_KEYS`) — a scraped material or
     an owner's returns policy is true of the store however the bid is assembled. For a grant it
-    is required, and a claim set carrying one without it is refused: see :func:`_scope_refusal`.
+    is required, and a claim set carrying one without it is refused. The same wall re-asks
+    the envelope live, so a grant does not outlive the rule that granted it: see
+    :func:`_authorization_refusal`.
     Keyword-only so the two-argument call the frozen boundary already makes keeps working, and
     so a caller cannot pass a product by accident into the `hooks` position.
 
@@ -407,7 +432,7 @@ def enforce_hook_provenance(
             offenders.append((index, reason))
             unhooked += 1
             continue
-        reason = _scope_refusal(claim, product_ref)
+        reason = _authorization_refusal(claim, hooks, product_ref)
         if reason is not None:
             offenders.append((index, reason))
 

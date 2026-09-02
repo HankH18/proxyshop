@@ -32,6 +32,7 @@ from contracts import Envelope, ProvenanceSource
 from store_agent.hooks import (
     HOOK_SOURCE_CLASSES,
     REASON_BELOW_PRICE_FLOOR,
+    REASON_OVER_MAX_DISCOUNT,
     ClaimScopeError,
     Denied,
     HookInputError,
@@ -720,3 +721,107 @@ def test_the_lint_does_not_fire_on_things_that_are_not_constructions(tmp_path: P
         encoding="utf-8",
     )
     assert hosted_claim_construction_offenders(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------------------------
+# A grant is spendable in the bid it was granted for, and not for the life of the object
+# ---------------------------------------------------------------------------------------------
+#
+# Binding a grant to its product stops it being spent on a *different* product. It does not stop
+# it being spent again, on the same product, in a *later* bid — the ledger only ever grows, so a
+# grant obtained once stays redeemable for as long as the facade lives. Two distinct attacks
+# follow from that, and they need different walls: one replays a grant whose rule has since been
+# revoked, the other replays a still-valid grant into an auction that never asked for it.
+
+
+def test_a_banked_grant_does_not_outlive_the_rule_that_granted_it(alpha: dict[str, Any]) -> None:
+    """The envelope is the merchant's control surface; tightening it must bind claims already held.
+
+    The attack is a real replay, not a field check: a grant legitimately obtained at a 20% cap is
+    presented after the merchant has lowered that cap to 5%. The hook itself now refuses the very
+    same request — so the ledger is the only thing still vouching for it, and the ledger records
+    what *was* authorized rather than what *is*.
+    """
+    hooks = ToolHooks(_context_from(alpha))
+    granted = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted, Denied)
+    assert enforce_hook_provenance([granted], hooks, product_ref="prod-cap") == [granted]
+
+    hooks.envelope["max_discount_pct"] = 5.0  # the merchant tightens the approved envelope
+
+    refused_now = hooks.authorize_discount("prod-cap", 20.0)
+    assert isinstance(refused_now, Denied), "the hook must refuse the depth under the new cap"
+    assert refused_now.reason == REASON_OVER_MAX_DISCOUNT
+
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance([granted], hooks, product_ref="prod-cap")
+
+    # A depth the tightened envelope still allows is still spendable, so the wall refuses the
+    # revoked grant rather than every grant.
+    still_fine = hooks.authorize_discount("prod-cap", 5.0)
+    assert not isinstance(still_fine, Denied)
+    assert enforce_hook_provenance([still_fine], hooks, product_ref="prod-cap") == [still_fine]
+
+
+def test_a_grant_from_an_earlier_bid_is_not_spendable_in_a_later_one(
+    alpha: dict[str, Any],
+) -> None:
+    """One `authorize_discount` call must not furnish a discount to two auctions.
+
+    Bid 2 calls no hook at all — it presents the claim banked during bid 1. The envelope is
+    unchanged and would grant the same depth again on request, so nothing about the *price* is
+    unauthorized; what is unauthorized is spending one authorization twice, which is exactly what
+    S5's "every claim in the bid traces to a hook call" forbids.
+    """
+    hooks = ToolHooks(_context_from(alpha))
+
+    hooks.start_bid("auction-1")
+    granted = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(granted, Denied)
+    assert enforce_hook_provenance([granted], hooks, product_ref="prod-cap") == [granted]
+
+    hooks.start_bid("auction-2")
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance([granted], hooks, product_ref="prod-cap")
+
+    # Asking the hook again inside bid 2 is all it takes; the wall is about spending a grant
+    # twice, not about the depth.
+    regranted = hooks.authorize_discount("prod-cap", 20.0)
+    assert not isinstance(regranted, Denied)
+    assert enforce_hook_provenance([regranted], hooks, product_ref="prod-cap") == [regranted]
+
+
+def test_opening_a_bid_scopes_admission_without_erasing_the_audit_trail(
+    alpha: dict[str, Any],
+) -> None:
+    """S5 wants both: admission scoped to this bid, and a record that spans every bid."""
+    hooks = ToolHooks(_context_from(alpha))
+    hooks.start_bid("auction-1")
+    first = hooks.authorize_discount("prod-cap", 20.0)
+    hooks.start_bid("auction-2")
+    second = hooks.authorize_discount("prod-cap", 10.0)
+    assert not isinstance(first, Denied) and not isinstance(second, Denied)
+
+    assert hooks.emitted_fingerprints == {claim_fingerprint(second)}, (
+        "only the current bid's emissions are admissible"
+    )
+    assert [c.value for c in hooks.emitted_claims] == [20.0, 10.0], (
+        "the audit trail must span bids — scoping admission is not licence to forget"
+    )
+    assert len(hooks.call_log) == 2
+    assert hooks.bid_ref == "auction-2"
+
+
+def test_facts_are_re_read_per_bid_rather_than_carried_over(alpha: dict[str, Any]) -> None:
+    """The scope is the bid, not the grant: an ordinary fact from bid 1 is not bid 2's evidence."""
+    hooks = ToolHooks(_context_from(alpha))
+    hooks.start_bid("auction-1")
+    fact = hooks.get_product_fact("prod-cap", "material")
+    assert enforce_hook_provenance([fact], hooks) == [fact]
+
+    hooks.start_bid("auction-2")
+    with pytest.raises(HookProvenanceError):
+        enforce_hook_provenance([fact], hooks)
+
+    reread = hooks.get_product_fact("prod-cap", "material")
+    assert enforce_hook_provenance([reread], hooks) == [reread]

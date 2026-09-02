@@ -185,12 +185,17 @@ class ToolHooks:
         rather than a clock read, so two runs on identical inputs are byte-identical (S4).
     """
 
-    #: Every claim this facade has emitted, in emission order (S5's audit trail).
+    #: Every claim this facade has emitted, in emission order, across every bid (S5's audit
+    #: trail). Never reset — see :meth:`start_bid`.
     emitted_claims: list[Claim]
-    #: Content fingerprints of the same claims — what `enforce_hook_provenance` checks against.
+    #: Content fingerprints of what was emitted **for the current bid** — what
+    #: `enforce_hook_provenance` checks against. Reset by :meth:`start_bid`, so a grant is
+    #: spendable in the bid it was granted for rather than for the life of the object.
     emitted_fingerprints: set[str]
-    #: One :class:`HookCall` per hook invocation, refusals included.
+    #: One :class:`HookCall` per hook invocation, refusals included. Never reset.
     call_log: list[HookCall]
+    #: The bid currently open, as passed to :meth:`start_bid`. Empty before the first one.
+    bid_ref: str
 
     def __init__(self, context: Any = None, /, **overrides: Any) -> None:
         merged: dict[str, Any] = {}
@@ -215,6 +220,31 @@ class ToolHooks:
 
         self.call_log = []
         self.emitted_claims = []
+        self.emitted_fingerprints = set()
+        self.bid_ref = ""
+
+    def start_bid(self, bid_ref: str = "") -> None:
+        """Open a new bid: nothing emitted for the previous one stays admissible.
+
+        :attr:`emitted_fingerprints` is an admission ledger, and without this it is also
+        unbounded in time — a grant obtained once would stay redeemable for as long as the facade
+        lives, so one `authorize_discount` call could furnish a discount to every later auction.
+        S5 asks that every claim in *this* bid trace to a hook call, which is a statement about
+        one bid; a ledger that spans all of them cannot answer it.
+
+        The audit trail is deliberately NOT reset. :attr:`emitted_claims` and :attr:`call_log`
+        keep growing across bids, because "what did this facade ever emit, and when" is the
+        question an audit asks. Scoping admission is not licence to forget.
+
+        **The contract, stated so it is a decision rather than an omission.** Constructing a
+        facade opens its first bid — a fresh :class:`ToolHooks` starts with an empty ledger — so
+        a runtime that builds one per auction is already correct and needs none of this. A facade
+        REUSED across auctions must call this between them; there is no way for the harness to
+        detect a new auction on its own, and a grant is spendable until it is told. The safe
+        pattern is therefore "one facade per bid, or `start_bid()` per bid", and the unsafe one
+        is a long-lived facade that never says when a bid ended.
+        """
+        self.bid_ref = str(bid_ref)
         self.emitted_fingerprints = set()
 
     # -- provenance refs -----------------------------------------------------------------
@@ -438,28 +468,10 @@ class ToolHooks:
         except (TypeError, ValueError) as exc:
             raise HookInputError(f"requested discount {requested_pct!r} is not a number") from exc
 
-        cap = float(self.envelope.get("max_discount_pct") or 0.0)
-        listing = self.catalog.get(ref)
-        if listing is None:
-            return self._deny(ref, pct, REASON_UNKNOWN_PRODUCT, 0.0, self.envelope_ref("floors"))
-        if pct < 0.0:
-            return self._deny(
-                ref, pct, REASON_NEGATIVE_DISCOUNT, 0.0, self.envelope_ref("max_discount_pct")
-            )
-        if pct > cap + WALL_TOLERANCE:
-            return self._deny(
-                ref, pct, REASON_OVER_MAX_DISCOUNT, cap, self.envelope_ref("max_discount_pct")
-            )
-
-        list_price = float(listing.get("list_price") or 0.0)
-        # `list_price * (100 - pct) / 100` rather than `list_price * (1 - pct/100)`: the first
-        # keeps whole percentages exact (100 * 97 / 100 == 97.0), the second does not.
-        resulting_price = list_price * (100.0 - pct) / 100.0
-        floor = self.price_floor(ref)
-        if resulting_price + WALL_TOLERANCE < floor:
-            return self._deny(
-                ref, pct, REASON_BELOW_PRICE_FLOOR, floor, self.envelope_ref(f"floors#{ref}")
-            )
+        denial, resulting_price, floor, cap = self._evaluate_discount(ref, pct)
+        if denial is not None:
+            reason, limit, rule_ref = denial
+            return self._deny(ref, pct, reason, limit, rule_ref)
 
         claim = mint_claim(
             key="authorized_discount_pct",
@@ -479,6 +491,56 @@ class ToolHooks:
             detail=f"{pct}% -> {resulting_price} (floor {floor}, cap {cap})",
         )
         return emitted[0]
+
+    def _evaluate_discount(
+        self, product_ref: str, pct: float
+    ) -> tuple[tuple[str, float, str] | None, float, float, float]:
+        """The envelope's verdict on a depth: ``(denial | None, price, floor, cap)``. Pure.
+
+        Split out of :meth:`authorize_discount` so the walls can be re-asked without minting a
+        second claim or writing a second call-log entry. One arithmetic, two callers — the hook
+        that grants, and :meth:`would_authorize`, which the bid boundary uses to re-check a grant
+        it is being handed. Two copies of this arithmetic would be two chances to disagree about
+        what the merchant approved.
+        """
+        cap = float(self.envelope.get("max_discount_pct") or 0.0)
+        listing = self.catalog.get(product_ref)
+        if listing is None:
+            return (REASON_UNKNOWN_PRODUCT, 0.0, self.envelope_ref("floors")), 0.0, 0.0, cap
+        if pct < 0.0:
+            rule = self.envelope_ref("max_discount_pct")
+            return (REASON_NEGATIVE_DISCOUNT, 0.0, rule), 0.0, 0.0, cap
+        if pct > cap + WALL_TOLERANCE:
+            rule = self.envelope_ref("max_discount_pct")
+            return (REASON_OVER_MAX_DISCOUNT, cap, rule), 0.0, 0.0, cap
+
+        list_price = float(listing.get("list_price") or 0.0)
+        # `list_price * (100 - pct) / 100` rather than `list_price * (1 - pct/100)`: the first
+        # keeps whole percentages exact (100 * 97 / 100 == 97.0), the second does not.
+        resulting_price = list_price * (100.0 - pct) / 100.0
+        floor = self.price_floor(product_ref)
+        if resulting_price + WALL_TOLERANCE < floor:
+            rule = self.envelope_ref(f"floors#{product_ref}")
+            return (REASON_BELOW_PRICE_FLOOR, floor, rule), resulting_price, floor, cap
+        return None, resulting_price, floor, cap
+
+    def would_authorize(self, product_ref: str, requested_pct: Any) -> bool:
+        """Whether the envelope authorizes this depth *right now*, minting and logging nothing.
+
+        The bid boundary asks this before admitting a grant it did not watch being minted. The
+        ledger records what *was* authorized; a merchant who tightens the envelope is changing
+        what *is*, and a grant obtained under the old cap must not survive the new one on the
+        strength of a ledger entry alone.
+
+        Read-only on purpose: a re-check that emitted would put a claim in the ledger every time
+        the guard ran, which is the opposite of a guard.
+        """
+        try:
+            pct = float(requested_pct)
+        except (TypeError, ValueError):
+            return False
+        denial, _price, _floor, _cap = self._evaluate_discount(str(product_ref), pct)
+        return denial is None
 
     def _deny(
         self, product_ref: str, pct: float, reason: str, limit: float, rule_ref: str
