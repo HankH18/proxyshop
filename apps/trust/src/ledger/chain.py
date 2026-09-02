@@ -16,10 +16,26 @@ it against. The stored ``event_hash`` is the anchor, so an event store that keep
 running head hash and does not stamp its events has nothing for a verifier to check. That is
 why D16 puts the hashing here and forbids a second implementation: ``apps.trust.src.events``
 (T-060) appends by calling :func:`seal_event`, and gets ``verify_chain`` for free.
+
+**What "for free" does NOT include, stated plainly.** :func:`verify_chain` checks the links
+*inside* a stream, and a hash chain cannot see anything that leaves its links intact:
+
+* **truncation from the tail** -- cut the last forty of a hundred events and the remaining
+  sixty verify perfectly;
+* **a wholesale rewrite** -- re-seal every event behind its neighbour and the forgery is
+  internally flawless;
+* **an empty stream** -- there is nothing to check, which is not the same as nothing wrong.
+
+Every one of those needs a witness recorded OUTSIDE the stream. In Postgres that witness is
+``ledger.chain_head`` and :func:`~.store.verify_chain_in_db` consults it. In memory it is
+whatever the caller recorded at write time, handed in as :func:`verify_chain`'s
+``expected_length`` / ``expected_head``. A caller that passes neither, and treats ``ok`` as
+"the ledger is intact", is asking a question this function does not answer.
 """
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -134,12 +150,24 @@ def stream_hash(events: Iterable[Mapping[str, Any]]) -> str:
     return prev
 
 
-def verify_chain(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def verify_chain(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    expected_length: int | None = None,
+    expected_head: str | None = None,
+    allow_empty: bool = False,
+) -> dict[str, Any]:
     """Verify a sealed stream link by link.
 
     Args:
         events: the stream in insertion order. Each event is expected to carry the
             ``prev_hash`` / ``event_hash`` fields :func:`seal_event` writes.
+        expected_length: how many events the stream is supposed to hold, from a commitment
+            recorded at write time. A shorter stream that is otherwise flawless is reported
+            ``truncated`` rather than ``ok``.
+        expected_head: the head hash recorded at write time. A stream that folds to some
+            other head is reported ``head_mismatch``.
+        allow_empty: accept a stream of zero events as intact. Off by default; see below.
 
     Returns:
         ``{"ok", "broken_at", "reason", "head_hash", "verified"}`` -- **the same five keys
@@ -156,6 +184,25 @@ def verify_chain(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     * ``broken_link`` -- the event's stored ``prev_hash`` is not the previous event's
       ``event_hash``: the stream has been reordered, spliced or truncated in the middle.
     * ``tampered`` -- the event's content no longer hashes to its stored ``event_hash``.
+
+    ...and two the links alone cannot see, which is why the keyword arguments exist:
+
+    * ``empty`` -- there are no events at all. Verifying nothing is not verifying, and an
+      empty stream arrives for reasons that have nothing to do with integrity: a bad
+      ``after_seq``, a missing SELECT grant, the wrong database, a store that has not
+      loaded. Reporting that as ``ok`` makes "the ledger was wiped" and "the ledger is fine"
+      the same answer. Pass ``allow_empty=True`` -- or an ``expected_length`` of 0 -- where
+      empty genuinely is the expected state.
+    * ``truncated`` / ``head_mismatch`` -- the stream verifies but is not the stream that
+      was committed to.
+
+    **This function is truncation-blind without an anchor, and that is inherent.** Cut the
+    last forty of a hundred events and the remaining sixty verify perfectly: a truncated
+    chain's digest is a valid chain digest. So are a wholesale rewrite (every event re-sealed
+    behind its neighbour) and a delete-the-middle-and-relink. None of them break a link, and
+    nothing *inside* the stream can tell you they happened. ``expected_length`` /
+    ``expected_head`` are how an in-memory caller supplies the outside witness;
+    :func:`~.store.verify_chain_in_db` supplies it from ``ledger.chain_head``.
     """
 
     def broken(index: int, reason: str, head: str) -> dict[str, Any]:
@@ -174,15 +221,46 @@ def verify_chain(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if not stored_hash:
             return broken(index, "unsealed", prev)
         stored_prev = event.get("prev_hash")
-        if stored_prev is not None and str(stored_prev) != prev:
+        if stored_prev is not None and not hmac.compare_digest(str(stored_prev), prev):
             return broken(index, "broken_link", prev)
-        if compute_event_hash(prev, event) != str(stored_hash):
+        # Full-digest, constant-time. `!=` on two 64-character strings was correct but
+        # unguarded: replacing it with a `[:8]` prefix comparison -- 256 bits of integrity
+        # cut to 32 -- left the whole suite green, because every tamper test mutates event
+        # CONTENT, which changes the digest from character 0. compare_digest compares all
+        # of it, and does so without a length-dependent early exit.
+        if not hmac.compare_digest(compute_event_hash(prev, event), str(stored_hash)):
             return broken(index, "tampered", prev)
         prev = str(stored_hash)
+
+    verified = index + 1
+    if verified == 0 and not (allow_empty or expected_length == 0):
+        return {
+            "ok": False,
+            "broken_at": 0,
+            "reason": "empty",
+            "head_hash": GENESIS_HASH,
+            "verified": 0,
+        }
+    if expected_length is not None and verified != int(expected_length):
+        return {
+            "ok": False,
+            "broken_at": verified,
+            "reason": "truncated",
+            "head_hash": prev,
+            "verified": verified,
+        }
+    if expected_head is not None and not hmac.compare_digest(prev, str(expected_head)):
+        return {
+            "ok": False,
+            "broken_at": verified,
+            "reason": "head_mismatch",
+            "head_hash": prev,
+            "verified": verified,
+        }
     return {
         "ok": True,
         "broken_at": None,
         "reason": None,
         "head_hash": prev,
-        "verified": index + 1,
+        "verified": verified,
     }

@@ -26,6 +26,7 @@ without a re-seal.
 
 from __future__ import annotations
 
+import hmac
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -388,18 +389,48 @@ def verify_chain_in_db(connection: psycopg.Connection) -> dict[str, Any]:
     nothing to check its length against. ``ledger.chain_head`` is that something.
 
     Returns:
-        The :func:`~.chain.verify_chain` result plus ``anchor`` (the stored commitment),
-        ``recomputed`` (:func:`~.chain.stream_hash` over the rows) and ``anchor_ok``. ``ok``
-        is ``True`` only when the links verify **and** the recomputed head and the row count
-        both match the anchor -- so ``reason`` may be ``"truncated"`` for a stream that is
-        internally flawless.
+        The :func:`~.chain.verify_chain` result plus ``anchor`` (the stored commitment, or
+        ``None`` when there is no anchor row at all), ``recomputed``
+        (:func:`~.chain.stream_hash` over the rows) and ``anchor_ok``. ``ok`` is ``True``
+        only when the links verify **and** the recomputed head and the row count both match
+        the anchor -- so ``reason`` may be ``"truncated"`` for a stream that is internally
+        flawless.
+
+    **It reports; it does not raise.** A missing anchor row used to come back as a
+    :class:`~.errors.LedgerError` out of :func:`chain_anchor`, so a caller writing
+    ``verify_chain_in_db(conn)["ok"]`` got an exception on the one path that matters most --
+    the path where the commitment has been deleted. That is now ``reason ==
+    "anchor_missing"``, reported like every other way the chain can be wrong.
+
+    The length half of ``anchor_ok`` is load-bearing on its own and is not redundant with
+    the head half: a chain whose links all verify necessarily folds to its own last stored
+    digest, so ``recomputed == anchor["head_hash"]`` alone passes on any prefix that was cut
+    and then re-anchored. It is the ROW COUNT that catches a divergence the links cannot.
     """
     events = read_events(connection)
-    result = verify_chain(events)
-    anchor = chain_anchor(connection)
     recomputed = stream_hash(events)
+    try:
+        anchor: dict[str, Any] | None = chain_anchor(connection)
+    except LedgerError:
+        anchor = None
+    if anchor is None:
+        result = verify_chain(events)
+        result["anchor"] = None
+        result["recomputed"] = recomputed
+        result["anchor_ok"] = False
+        if result["ok"]:
+            result["ok"] = False
+            result["reason"] = "anchor_missing"
+            result["broken_at"] = len(events)
+        return result
+
+    # `allow_empty` is the explicit permission verify_chain asks for: an empty stream is
+    # only "intact" when something outside it says it is supposed to be empty, and the
+    # anchor is that something. With an anchor claiming rows, an empty table is a wipe.
+    result = verify_chain(events, allow_empty=int(anchor["length"]) == 0)
     anchor_ok = bool(
-        recomputed == str(anchor["head_hash"]) and len(events) == int(anchor["length"])
+        hmac.compare_digest(recomputed, str(anchor["head_hash"]))
+        and len(events) == int(anchor["length"])
     )
     result["anchor"] = anchor
     result["recomputed"] = recomputed
