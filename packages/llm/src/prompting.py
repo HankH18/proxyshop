@@ -63,8 +63,11 @@ CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 #:   is written the obvious way;
 #: * **two or more** -> the tuple of their texts, in the order they are sent.
 #:
-#: That is injective because :meth:`CachedPrompt.to_system_blocks` never emits an empty
-#: block (so a one-block key is never ``""``) and no ``str`` ever equals a ``tuple``.
+#: That is injective because a block is never empty (so a one-block key is never ``""``,
+#: the zero-block key) and no ``str`` ever equals a ``tuple``. The emptiness precondition
+#: is enforced by :func:`canonical_system_key` itself — every key is built there — and not
+#: merely by :meth:`CachedPrompt.to_system_blocks` declining to emit one, because a direct
+#: caller never goes through ``to_system_blocks`` (W2/T-118 (b)).
 type SystemKey = str | tuple[str, ...]
 
 
@@ -254,6 +257,16 @@ def canonical_system_key(system: str | Sequence[str] | None) -> SystemKey:
     A ``str`` is returned unchanged rather than wrapped: it is already one block's text,
     and wrapping it would make ``("", prompt)`` — the key the frozen acceptance suite's
     plain-string path composes to — unreachable.
+
+    Raises:
+        PromptAssemblyError: if any block in the sequence is empty. The single-element
+            collapse returns the block's text verbatim, so ``[""]`` would key on ``""`` —
+            which is the key for *no system blocks at all* — and a call carrying one empty
+            contract block would replay the reply reviewed for a call carrying no contract.
+            :meth:`CachedPrompt.to_system_blocks` never emits an empty block, so nothing
+            composed can hit this; a **direct** caller could, and used to (T-118 (b)). A
+            bare ``""`` (or ``None``, or ``()``) is untouched: those spell "no system", not
+            "one empty block".
     """
     if system is None:
         return ""
@@ -262,6 +275,15 @@ def canonical_system_key(system: str | Sequence[str] | None) -> SystemKey:
     texts = tuple(str(part) for part in system)
     if not texts:
         return ""
+    if "" in texts:
+        raise PromptAssemblyError(
+            f"a system block may not be empty (block {texts.index('')} of {len(texts)} "
+            f"is): the one-block collapse returns a block's text verbatim, so an empty "
+            f"block would canonicalise to '' — the key for NO system blocks — and two "
+            f"structurally different calls would share one recording. Drop the block "
+            f"instead of sending it, exactly as CachedPrompt.to_system_blocks does. "
+            f"Got {texts!r}."
+        )
     if len(texts) == 1:
         return texts[0]
     return texts

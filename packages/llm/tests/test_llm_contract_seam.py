@@ -19,6 +19,7 @@ from packages.llm import (
     AnthropicLLM,
     CachedPrompt,
     DeterministicLLM,
+    PromptAssemblyError,
     RecordedLLM,
     UnrecordedPromptError,
     assemble_prompt,
@@ -590,3 +591,60 @@ def test_the_deterministic_double_also_tells_the_block_structures_apart(no_netwo
     assert DeterministicLLM().complete("q", system="A") == DeterministicLLM().complete(
         CachedPrompt("A", "q")
     )
+
+
+# --------------------------------------------------------------------------------------
+# T-118 (b): canonical_system_key enforces its OWN injectivity precondition
+# --------------------------------------------------------------------------------------
+
+
+def test_canonical_system_key_refuses_the_empty_block_it_cannot_encode() -> None:
+    """The single-element collapse is injective only if a block is never empty.
+
+    ``canonical_system_key([x]) -> x`` is what lets a one-block recording be spelled the
+    obvious way, but it means ``[""]`` lands on ``""`` — the key for NO system blocks at
+    all. ``to_system_blocks`` never emits an empty block, so nothing *composed* collides;
+    a direct caller (a hand-written recording key, a consumer building blocks itself) was
+    not covered by that, and got a silent alias instead of an error.
+    """
+    # The three spellings of "no system contract" are untouched: they mean zero blocks.
+    assert canonical_system_key(None) == ""
+    assert canonical_system_key("") == ""
+    assert canonical_system_key(()) == ""
+    assert canonical_system_key([]) == ""
+
+    # One EMPTY block is not "no blocks", and there is no key that can say so.
+    for empty_block in ([""], ("",), ["", "B"], ("A", ""), ("A", "", "B")):
+        with pytest.raises(PromptAssemblyError) as excinfo:
+            canonical_system_key(empty_block)
+        assert "empty" in str(excinfo.value)
+
+    # The keys that do exist stay exactly as they were.
+    assert canonical_system_key(["A"]) == "A"
+    assert canonical_system_key(["A", "B"]) == ("A", "B")
+
+
+def test_a_recording_key_cannot_alias_the_no_system_call_with_an_empty_block() -> None:
+    """The collision, at the surface where it would actually have hurt.
+
+    ``RecordedLLM({(("",), "p"): reply})`` used to normalise to ``("", "p")``, so a call
+    passing NO system contract replayed a reply authored for a call that carried one.
+    """
+    with pytest.raises(PromptAssemblyError):
+        RecordedLLM({(("",), "p"): "reply reviewed for a one-empty-block contract"})
+
+    # The plain-string path — what the frozen acceptance suite uses — is unaffected: it
+    # still keys on exactly ("", prompt), and ("", prompt) is still writable as a tuple.
+    assert wire_key("p") == ("", "p")
+    assert RecordedLLM({"p": "no contract"}).complete("p") == "no contract"
+    assert RecordedLLM({("", "p"): "no contract"}).complete("p") == "no contract"
+
+
+def test_composed_calls_never_reach_the_empty_block_guard() -> None:
+    """The guard must be unreachable through assembly, or it would break real calls."""
+    assert wire_key(CachedPrompt("", "q")) == ("", "q")
+    assert wire_key(CachedPrompt("", "q"), "") == ("", "q")
+    assert wire_key("q", "") == ("", "q")
+    assert wire_key(CachedPrompt("A", "q")) == ("A", "q")
+    assert wire_key(CachedPrompt("A", "q"), "B") == (("A", "B"), "q")
+    assert DeterministicLLM().complete(CachedPrompt("", "q"), system="")
