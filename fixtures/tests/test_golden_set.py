@@ -124,24 +124,102 @@ def test_each_pitch_carries_the_catalog_snapshot_its_labels_were_derived_from() 
             )
 
 
-def test_verified_and_contradicted_claims_are_decidable_from_their_snapshot() -> None:
-    """Every decided label must have an attribute in the snapshot to decide it against.
+#: Unit spellings that denote the same unit on either side of a comparison.
+_UNIT_ALIASES = {"%": "percent"}
 
-    Without this the golden set could ask the verifier for an answer no evidence supports,
-    and T-065 would be graded against an unreachable target.
+#: How a boolean attribute is asserted in prose.
+_TRUTHY = {"true", "yes", "eligible", "included", "supported"}
+_FALSY = {"false", "no", "ineligible", "excluded", "not supported"}
+
+_NUMBER_UNIT = re.compile(r"^\s*\$?(?P<number>-?\d+(?:\.\d+)?)\s*(?P<unit>[a-zA-Z%µ°/]+)?\s*$")
+
+
+def _norm_unit(unit: object) -> str | None:
+    if unit is None:
+        return None
+    text = str(unit).strip().lower()
+    return _UNIT_ALIASES.get(text, text)
+
+
+def _norm(value: object) -> str:
+    return str(value).strip().lower()
+
+
+def _claim_agrees_with_evidence(claimed: object, evidence: object) -> bool | None:
+    """Does the claim's asserted value agree with the snapshot's recorded one?
+
+    ``None`` means *not comparable* — the caller treats that as a failure, never as a pass.
+    A comparator that returned "can't tell" as "fine" would be the same fake guard again.
     """
+    if isinstance(evidence, dict):
+        actual, unit = evidence.get("value"), _norm_unit(evidence.get("unit"))
+    else:
+        actual, unit = evidence, None
+
+    if isinstance(actual, bool):
+        text = _norm(claimed)
+        if text in _TRUTHY:
+            return actual is True
+        if text in _FALSY:
+            return actual is False
+        return None
+    if isinstance(actual, list):
+        return _norm(claimed) in {_norm(item) for item in actual}
+    if isinstance(actual, (int, float)):
+        match = _NUMBER_UNIT.match(str(claimed))
+        if match is None:
+            return None
+        # A number in the wrong unit is a MISMATCH, not a match: "120 g" against 120 mg is
+        # precisely the wrong_units gate, and it must not compare equal on the digits.
+        if _norm_unit(match.group("unit")) != unit:
+            return False
+        return float(match.group("number")) == float(actual)
+    if isinstance(actual, str):
+        return _norm(claimed) == _norm(actual)
+    return None
+
+
+def test_verified_and_contradicted_claims_actually_agree_with_their_snapshot() -> None:
+    """The answer key's labels must be TRUE of the evidence, not merely adjacent to it.
+
+    This used to assert only that ``claim["key"]`` appeared somewhere in the snapshot. That
+    guard could refuse nothing that matters: every ``verified``/``contradicted`` label in the
+    document could be inverted — `gp-004-c-caffeine`'s "120 g" against 120 mg relabelled
+    ``verified``, `gp-010-c-total`'s "$24.00" against 31.00 relabelled ``verified``,
+    `gp-011`'s two true claims relabelled ``contradicted`` — and the whole suite stayed green.
+    Since `packages/verification` (T-065) is graded against exactly these labels and never
+    authors them (D11), an unguarded answer key mis-grades the verifier silently and forever.
+
+    So: resolve each claim's key to its snapshot value and require agreement iff the label
+    says ``verified``. A claim whose value cannot be compared to its evidence at all fails
+    here too — an answer key nobody can check is not an answer key.
+    """
+    checked = 0
     for pitch in PITCHES:
         products = {p["product_ref"]: p for p in pitch["catalog_snapshot"]["products"]}
         for claim in pitch["claims"]:
             if claim["expected_status"] not in {"verified", "contradicted"}:
                 continue
-            attributes = products[claim["product_ref"]]["attributes"]
-            offer = products[claim["product_ref"]].get("offer", {})
+            product = products[claim["product_ref"]]
+            where = f"{pitch['pitch_id']}#{claim['claim_ref']}"
+            attributes, offer = product["attributes"], product.get("offer", {})
             assert claim["key"] in attributes or claim["key"] in offer, (
-                f"{pitch['pitch_id']}#{claim['claim_ref']} is labelled "
-                f"{claim['expected_status']!r} on key {claim['key']!r}, but the snapshot "
-                f"carries neither that attribute nor that offer field"
+                f"{where} is labelled {claim['expected_status']!r} on key {claim['key']!r}, "
+                "but the snapshot carries neither that attribute nor that offer field"
             )
+            evidence = attributes.get(claim["key"], offer.get(claim["key"]))
+            agrees = _claim_agrees_with_evidence(claim["value"], evidence)
+            assert agrees is not None, (
+                f"{where} claims {claim['value']!r} but its evidence {evidence!r} cannot be "
+                "compared to it, so the label rests on nothing a reader can check"
+            )
+            assert agrees is (claim["expected_status"] == "verified"), (
+                f"{where} is labelled {claim['expected_status']!r}, but its claimed value "
+                f"{claim['value']!r} {'agrees with' if agrees else 'disagrees with'} the "
+                f"snapshot evidence {evidence!r}. The answer key is wrong."
+            )
+            checked += 1
+    assert checked >= 20, f"only {checked} decided claims were value-checked"
 
 
 def test_unsupported_claims_have_no_evidence_to_decide_them() -> None:
@@ -153,11 +231,15 @@ def test_unsupported_claims_have_no_evidence_to_decide_them() -> None:
                 continue
             product = products[claim["product_ref"]]
             attribute = product["attributes"].get(claim["key"])
+            # `partial` is deliberately NOT in this disjunction. A snapshot flagged partial
+            # would excuse `unsupported` on every attribute it does carry — `gp-008-c-burrs`
+            # (64 mm, present and fresh) could be relabelled unsupported and stay green. What
+            # makes a claim unsupported is that ITS evidence is absent or stale, so that is
+            # what is checked; no committed claim needs the looser rule.
             stale = bool(
                 (attribute or {}).get("stale")
                 or product.get("stale")
                 or pitch["catalog_snapshot"].get("stale")
-                or pitch["catalog_snapshot"].get("partial")
             )
             assert attribute is None or stale, (
                 f"{pitch['pitch_id']}#{claim['claim_ref']} is labelled unsupported, but the "

@@ -10,9 +10,14 @@ pinned digests and refuses on drift rather than refreshing them on the way in �
 that re-hashed first would silently bless a golden set edited after the request was written,
 and its recorded digest would then evidence nothing at all.
 
-So the honest sequence, when ground truth really did change, is: refresh here → re-issue
-``fixtures/approval/REQUEST-manifest-approval.md`` with the new pins → the human reads it →
-the human approves. Never refresh as a step *inside* approving.
+So the honest sequence, when ground truth really did change, is::
+
+    ./.venv/bin/python -m fixtures.manifest --refresh-digests          # re-pin
+    ./.venv/bin/python -m fixtures.approval --emit-request --write     # re-issue the request
+    # the human reads the re-issued request, and `git diff` on it
+    ./.venv/bin/python -m fixtures.approval --approver "Their Name"    # the human approves
+
+Never refresh as a step *inside* approving.
 """
 
 from __future__ import annotations
@@ -50,7 +55,11 @@ def _report() -> tuple[str, bool]:
     catalog = manifest.get("seed_catalog")
     if isinstance(catalog, dict) and catalog.get("path"):
         rows.append(
-            (catalog["path"], str(catalog.get("sha256", "")), file_digest(REPO_ROOT / catalog["path"]))
+            (
+                catalog["path"],
+                str(catalog.get("sha256", "")),
+                file_digest(REPO_ROOT / catalog["path"]),
+            )
         )
     approval = manifest.get("approval") or {}
     rows.append(
@@ -118,8 +127,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"  golden_set.sha256   {result['golden_set_sha256']}\n"
         f"  seed_catalog.sha256 {result['seed_catalog_sha256']}\n"
         f"  content_hash        {result['content_hash']}\n"
-        "This is NOT an approval. Re-issue the approval request with these digests, then a "
-        "human reads it and runs python -m fixtures.approval."
+        "This is NOT an approval, and any approval recorded against the old pins is now void.\n"
+        "Next:  ./.venv/bin/python -m fixtures.approval --emit-request --write\n"
+        "then a human reads the re-issued request and runs "
+        '`python -m fixtures.approval --approver "Their Name"`.'
     )
     return 0
 

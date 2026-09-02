@@ -11,6 +11,12 @@ person typing it.
 Approving VERIFIES the digests the approval request published and REFUSES on any drift. It
 never refreshes them: re-hashing on the way in would bless a document nobody read. Re-pinning
 is a separate command, ``python -m fixtures.manifest --refresh-digests``.
+
+``--emit-request`` prints the request re-issued against the documents currently on disk, and
+``--emit-request --write`` saves it. It rewrites *only* the fenced block of pins, so the prose
+saying what approving means stays as its author wrote it. It exists because the sanctioned
+recovery from drift ends in "…then re-issue the request", and a human re-issuing 64-hex
+digests by hand mistypes one, or pastes the new block above the old and leaves both.
 """
 
 from __future__ import annotations
@@ -19,10 +25,14 @@ import sys
 from collections.abc import Sequence
 
 from fixtures.approval import (
+    REQUEST_PATH,
+    REQUEST_REL,
     ApprovalRefused,
     check_approver,
+    covered_documents,
     digest_report,
     record_approval,
+    reissue_request,
     verify_pinned_digests,
 )
 from fixtures.manifest import ManifestError, body_digest, load_manifest
@@ -80,7 +90,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--yes", action="store_true", help="Skip the interactive confirmation prompt."
     )
+    parser.add_argument(
+        "--emit-request",
+        action="store_true",
+        help="Print the approval request re-issued against the documents on disk. Approves "
+        "nothing and, without --write, writes nothing.",
+    )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help=f"With --emit-request, save the re-issued request to {REQUEST_REL}.",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.emit_request:
+        try:
+            reissued = reissue_request(
+                REQUEST_PATH.read_text(encoding="utf-8"), covered_documents()
+            )
+        except ApprovalRefused as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 3
+        if not args.write:
+            print(reissued, end="")
+            print(
+                f"\n(nothing written — re-run with --write to save this to {REQUEST_REL})",
+                file=sys.stderr,
+            )
+            return 0
+        REQUEST_PATH.write_text(reissued, encoding="utf-8")
+        print(
+            f"Re-issued {REQUEST_REL} against the documents on disk. This is NOT an approval "
+            "and it is not a review:\nthe digests changed because the documents did, so read "
+            "the request again — and read `git diff` on what it now pins —\nbefore anyone runs "
+            "--approver."
+        )
+        return 0
 
     try:
         print(_summary())

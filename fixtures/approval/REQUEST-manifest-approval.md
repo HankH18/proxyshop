@@ -23,9 +23,16 @@ digest below and compares it against the pins published *in this document*. If a
 disagree it prints `REFUSED`, names the drifted file with a pinned-vs-on-disk diff, and
 writes nothing — because approving a document that changed after you read this request would
 record a digest proving only that the file had not changed in the last few milliseconds.
-Re-pinning drifted digests is a separate, deliberate command
-(`./.venv/bin/python -m fixtures.manifest --refresh-digests`), after which this request must
-be re-issued with the new pins and read again.
+
+Re-pinning drifted digests is a separate, deliberate pair of commands:
+
+```
+./.venv/bin/python -m fixtures.manifest --refresh-digests          # re-pin
+./.venv/bin/python -m fixtures.approval --emit-request --write     # re-issue this document
+```
+
+The second rewrites only the fenced digest block below — never this prose — so after running
+it, read this request again, and read `git diff` on it, before approving.
 
 ## What approving means
 

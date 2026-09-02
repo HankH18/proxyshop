@@ -137,6 +137,68 @@ def test_generate_seeds_n_stores_including_the_manifests_dishonest_one() -> None
     )
 
 
+def test_every_variant_sku_carries_a_store_discriminator() -> None:
+    """The SKU is the ONLY field that carries a store identity into the shopify-stub.
+
+    The stub's ``Variant`` has no store field and ``StubState`` has no store collection, so
+    once the payload is posted, the SKU string is all that distinguishes the dishonest
+    store's goods from the honest control's. It was
+    ``f"{_slug(store_id)[:6].upper()}-..."`` — and every roster ``store_id`` starts with the
+    six-character literal ``store-``, so the discriminator was the constant ``"STORE-"``:
+    30 variants collapsed onto 12 SKUs, nine of them shared across two to four different
+    stores, and all six of the dishonest store's SKUs collided with an honest store's.
+    """
+    payload = generate(SEED_CATEGORY, SEED)
+    by_store: dict[str, set[str]] = {}
+    for product in payload["catalog"]:
+        for variant in product["variants"]:
+            sku = next(
+                v["sku"] for v in payload["variants"] if v["variant_id"] == variant["variant_id"]
+            )
+            by_store.setdefault(product["store_id"], set()).add(sku)
+
+    assert len(by_store) == len(MANIFEST["stores"]) >= 2
+
+    prefixes = {store: {sku.split("-")[0] for sku in skus} for store, skus in by_store.items()}
+    assert all(len(p) == 1 for p in prefixes.values()), f"a store's SKUs disagree: {prefixes}"
+    codes = [next(iter(p)) for p in prefixes.values()]
+    assert len(set(codes)) == len(codes), (
+        f"stores share a SKU prefix {sorted(codes)} — the discriminator is not discriminating"
+    )
+
+    for store, skus in by_store.items():
+        others = set().union(*(s for k, s in by_store.items() if k != store))
+        assert not (skus & others), (
+            f"{store} shares SKU(s) {sorted(skus & others)} with another store; the dishonest "
+            "store must not be SKU-indistinguishable from an honest one"
+        )
+
+    dishonest = by_store[DISHONEST_ID]
+    honest = set().union(*(s for k, s in by_store.items() if k != DISHONEST_ID))
+    assert not (dishonest & honest)
+
+
+def test_a_roster_whose_stores_collapse_to_one_sku_code_is_refused(monkeypatch) -> None:
+    """The truncation length is arbitrary, so it must fail loudly, not silently, next time.
+
+    Rejected: a roster holding ``store-abcdefg1`` and ``store-abcdefg2``, whose slugs agree
+    for more than the code length. Admitted: the committed roster (every other test here).
+    """
+    import fixtures.generator as generator_module
+
+    doctored = json.loads(json.dumps(MANIFEST))
+    doctored["stores"] = [
+        {"store_id": "store-x"},
+        {"store_id": "store-abcdefg1"},
+        {"store_id": "store-abcdefg2"},
+    ]
+    doctored["dishonest_store"] = dict(doctored["dishonest_store"], store_id="store-x")
+    monkeypatch.setattr(generator_module, "load_manifest", lambda: doctored)
+
+    with pytest.raises(GeneratorError, match="SKU codes"):
+        generate(SEED_CATEGORY, SEED)
+
+
 def test_generated_payload_is_plain_json_data() -> None:
     """`default=None` installs no fallback encoder, so a dataclass anywhere raises."""
     payload = generate(SEED_CATEGORY, SEED)

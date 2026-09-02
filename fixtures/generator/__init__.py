@@ -11,11 +11,20 @@ Two pure functions, and the split between them is the whole design:
 
 ``apply(payload, target)``
     Upserts that payload into ``target`` **in place** and reports ``{created, unchanged,
-    updated}``. The second application of the same payload creates nothing — which is what
-    ``make demo-seed`` idempotence means, expressed at a surface that needs no service
-    running. The report shape and the upsert rule are deliberately identical to the
-    shopify-stub's own ``POST /_stub/seed``, so the offline assertion and the over-HTTP
-    behaviour are the same contract rather than two similar ones.
+    updated, total}``. The second application of the same payload creates nothing.
+
+    It is an offline *analogue* of the shopify-stub's ``POST /_stub/seed``, not a
+    reimplementation of it, and it is deliberately stricter: it compares records by exact
+    JSON equality, so ``"16.94"`` → ``"16.940"``, an int id restated as a string, a dropped
+    ``currency`` key or an added unknown field all count as ``updated`` here while the stub —
+    which parses each row into a typed ``Variant`` first — calls every one of them
+    ``unchanged``. It also carries ``store:`` and ``product:`` records the stub has no
+    concept of, and reports a fourth key (``total``) that the stub does not.
+
+    **So a green ``apply()`` assertion is not evidence about ``make demo-seed``.** The
+    idempotence of the real thing is proved where it has to be — against a real shopify-stub
+    over real HTTP, in ``fixtures/tests/test_seed.py`` — and this function exists for the
+    offline callers that only need a payload-shaped upsert.
 
 Store roster ground truth
 -------------------------
@@ -31,6 +40,7 @@ __all__ = ["CATALOG_DIR", "GeneratorError", "apply", "category_config_path", "ge
 
 import hashlib
 import json
+import os.path
 import pathlib
 import random
 from decimal import ROUND_HALF_UP, Decimal
@@ -114,6 +124,45 @@ def _slug(text: str) -> str:
     return out.strip("-")
 
 
+#: How many characters of a store's distinguishing slug go into its SKU code.
+_STORE_CODE_LEN = 6
+
+
+def _store_codes(store_ids: list[str]) -> dict[str, str]:
+    """A **distinct** SKU discriminator per store.
+
+    Truncating the raw slug is what broke this. Every roster ``store_id`` begins ``store-``,
+    which is exactly six characters, so ``_slug(store_id)[:6].upper()`` was the constant
+    ``"STORE-"`` for all five stores: 30 variants collapsed onto 12 SKU strings, nine of them
+    shared by two to four *different* stores, and every one of the dishonest store's SKUs
+    collided with an honest store's. The SKU is the only field carrying a store discriminator
+    into the stub, so the fixture corpus made the liar indistinguishable from the control.
+
+    The code is therefore taken from the part of each slug that actually differs, and a
+    roster that still collapses is REFUSED rather than quietly emitting duplicate SKUs — the
+    truncation length is an arbitrary choice, so it must not be allowed to fail silently
+    again the next time the roster changes.
+    """
+    slugs = {store_id: _slug(store_id) for store_id in store_ids}
+    shared = os.path.commonprefix(list(slugs.values())) if len(slugs) > 1 else ""
+    codes: dict[str, str] = {}
+    for store_id, slug in slugs.items():
+        tail = slug[len(shared) :].replace("-", "") or slug.replace("-", "")
+        codes[store_id] = tail[:_STORE_CODE_LEN].upper()
+    collisions = {
+        code: sorted(s for s, c in codes.items() if c == code)
+        for code in set(codes.values())
+        if list(codes.values()).count(code) > 1
+    }
+    if collisions:
+        raise GeneratorError(
+            f"the store roster does not survive {_STORE_CODE_LEN}-character SKU codes — "
+            f"{collisions} — so different stores would ship identical SKUs and the dishonest "
+            "store would be indistinguishable from an honest one in the seeded catalog"
+        )
+    return codes
+
+
 def generate(seed_category: str, seed: int) -> dict[str, Any]:
     """Build the seed payload for one ``(SEED_CATEGORY, seed)`` pair.
 
@@ -145,6 +194,7 @@ def generate(seed_category: str, seed: int) -> dict[str, Any]:
     catalog: list[dict[str, Any]] = []
     variants: list[dict[str, Any]] = []
     counter = 0
+    store_codes = _store_codes([str(store["store_id"]) for store in roster])
 
     for store in roster:
         store_id = str(store["store_id"])
@@ -172,7 +222,7 @@ def generate(seed_category: str, seed: int) -> dict[str, Any]:
                 suffix = str(variant.get("suffix", "")).strip()
                 title = f"{name} - {suffix}" if suffix else name
                 variant_id = _VARIANT_ID_BASE + counter
-                sku = f"{_slug(store_id)[:6].upper()}-{_slug(name)[:12].upper()}-{variant_index}"
+                sku = f"{store_codes[store_id]}-{_slug(name)[:12].upper()}-{variant_index}"
                 row = {
                     "variant_id": variant_id,
                     "product_id": product_id,
@@ -276,13 +326,16 @@ def _records(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def apply(payload: dict[str, Any], target: dict[str, Any]) -> dict[str, int]:
     """Idempotently upsert ``payload`` into ``target``, **mutating it in place**.
 
-    Returns ``{"created", "unchanged", "updated", "total"}`` — the same report shape and the
-    same rule the shopify-stub's ``POST /_stub/seed`` uses: a record whose stored value is
-    already equal to the incoming one counts as *unchanged* and is not rewritten.
+    Returns ``{"created", "unchanged", "updated", "total"}``: a record whose stored value is
+    already *exactly* equal to the incoming one counts as ``unchanged`` and is not rewritten.
 
     Applying the same payload to the same target twice therefore reports ``created == 0``
-    the second time, with every previously-created record reported as ``unchanged``. That is
-    ``make demo-seed`` idempotence (T-080 acceptance 3) at a surface that needs no service.
+    the second time, with every previously-created record reported as ``unchanged``.
+
+    This is an offline analogue of the stub's ``POST /_stub/seed``, and a strictly tighter
+    one — see the module docstring for the measured divergences. It is **not** a proof about
+    ``make demo-seed``; ``fixtures/tests/test_seed.py`` proves that against a real stub over
+    real HTTP, which is the only place T-080 acceptance 3 can honestly be established.
     """
     if not isinstance(target, dict):
         raise GeneratorError(f"apply() target must be a dict, got {type(target).__name__}")

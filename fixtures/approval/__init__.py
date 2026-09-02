@@ -32,8 +32,19 @@ first would silently re-hash whatever happened to be on disk at the moment it ra
 golden set edited between "here is what I am asking you to approve" and "approved" would be
 blessed rather than caught, and the recorded digest would prove only that the file had not
 changed *since the approval command read it* — which is nothing. Re-pinning drifted digests
-is a separate, explicitly-named operation (``python -m fixtures.manifest --refresh-digests``)
-that a human runs deliberately, after which the request must be re-issued and re-read.
+is a separate, explicitly-named operation that a human runs deliberately::
+
+    ./.venv/bin/python -m fixtures.manifest --refresh-digests          # re-pin
+    ./.venv/bin/python -m fixtures.approval --emit-request --write     # re-issue the request
+
+after which the request must be read again — ``git diff`` on it included — before anyone
+approves. :func:`reissue_request` rewrites only the fenced block of digests, so re-issuing
+cannot quietly rewrite the prose describing what the approval means.
+
+The request is addressed by :data:`REQUEST_REL`, never by a path read out of the manifest.
+Letting the audited document nominate the document it is audited against is the same
+circularity A3 forbids: point ``approval.request`` at a file you wrote and every check passes
+by construction.
 
 What it does NOT mean: it is not a claim that the numbers are optimal, and it is not
 irreversible. Re-running it after a re-pinned, re-issued request re-approves the new document.
@@ -48,9 +59,11 @@ __all__ = [
     "REQUEST_REL",
     "ApprovalRefused",
     "check_approver",
+    "covered_documents",
     "digest_report",
     "format_drift",
     "record_approval",
+    "reissue_request",
     "render_record",
     "request_pins",
     "verify_pinned_digests",
@@ -90,6 +103,11 @@ _AUTOMATION = re.compile(r"(claude|gpt|llm|\bagent\b|\bbot\b|swarm|automat|\bai\
 #: request is prose a human reads, so the pins are parsed out of it rather than kept in a
 #: second machine file nobody would look at.
 _PIN = re.compile(r"(?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*\.json)\s+(?P<digest>[0-9a-f]{64})")
+
+#: One ```-fenced block. :func:`reissue_request` rewrites the *one* such block that carries
+#: pins and nothing else in the document, so re-issuing can never touch the prose describing
+#: what is being approved — only the machine-computed digests.
+_FENCED = re.compile(r"^```[^\n]*\n(?P<body>.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
 
 
 class ApprovalRefused(Exception):
@@ -144,11 +162,107 @@ def request_pins(text: str) -> dict[str, str]:
 
     These are the digests a human actually saw before typing the approve command. They are
     the *expectation*; the bytes on disk are the thing being checked against it.
+
+    A request that pins the **same document at two different digests is refused**, not
+    resolved. That is not a hypothetical input: the sanctioned recovery from drift is
+    "re-pin, then re-issue this request", and a human doing that by hand pastes the new pin
+    block in and leaves the old one above it. Taking whichever pin came first would then
+    verify against a digest the reader did not read — the reader looks at the bottom block,
+    the checker at the top one — which is the entire failure this gate exists to prevent.
+    Repeating the *same* digest for a document is harmless and stays legal.
     """
     pins: dict[str, str] = {}
+    conflicts: dict[str, set[str]] = {}
     for match in _PIN.finditer(text.lower()):
-        pins.setdefault(match.group("path"), match.group("digest"))
+        path, digest = match.group("path"), match.group("digest")
+        seen = pins.setdefault(path, digest)
+        if seen != digest:
+            conflicts.setdefault(path, {seen}).add(digest)
+    if conflicts:
+        detail = "; ".join(
+            f"{path} pinned at {sorted(digests)}" for path, digests in sorted(conflicts.items())
+        )
+        raise ApprovalRefused(
+            "the approval request pins the same document at more than one digest, so there is "
+            "no single set of bytes it asks anyone to approve: "
+            + detail
+            + ". Re-issue it with one pin per document "
+            "(./.venv/bin/python -m fixtures.approval --emit-request --write)."
+        )
     return pins
+
+
+def _digest(path: pathlib.Path) -> str:
+    """:func:`fixtures.manifest.file_digest`, but a missing/unreadable covered document is an
+    :class:`ApprovalRefused` rather than an ``OSError`` traceback.
+
+    The CLI reports ``REFUSED: <reason>`` by catching :class:`ApprovalRefused`; a document
+    that vanished has to arrive there as a refusal like any other drift, not as a stack trace
+    that reads like the tool is broken.
+    """
+    try:
+        return file_digest(path)
+    except OSError as exc:
+        raise ApprovalRefused(
+            f"cannot read the covered document {path}: {exc}. A document the approval covers "
+            "cannot be approved while it is missing or unreadable."
+        ) from exc
+
+
+def _covered_rel_paths(manifest: Mapping[str, Any]) -> list[str]:
+    """The repo-relative paths of every document besides the manifest that it covers."""
+    golden_ref = manifest.get("golden_set")
+    if not isinstance(golden_ref, Mapping) or not isinstance(golden_ref.get("path"), str):
+        raise ApprovalRefused(
+            "manifest.golden_set must reference the golden set by {path, sha256, count}"
+        )
+    rels = [golden_ref["path"]]
+    catalog_ref = manifest.get("seed_catalog")
+    if isinstance(catalog_ref, Mapping) and isinstance(catalog_ref.get("path"), str):
+        rels.append(catalog_ref["path"])
+    return rels
+
+
+def covered_documents(root: pathlib.Path | str | None = None) -> dict[str, str]:
+    """``{repo-relative path: sha256}`` for every document this approval covers, computed
+    from the bytes on disk right now.
+
+    This is the single definition of "what the request must publish". :func:`reissue_request`
+    writes exactly these pins into the request and :func:`digest_report` checks the request
+    against exactly these values, so the emitter and the checker cannot drift apart into two
+    similar-looking rules.
+    """
+    base = pathlib.Path(root) if root is not None else REPO_ROOT
+    manifest = _read_json(base / MANIFEST_REL)
+    if not isinstance(manifest, Mapping):
+        raise ApprovalRefused(f"{MANIFEST_REL} must be a JSON object")
+    covered = {MANIFEST_REL: body_digest(manifest)}
+    for rel in _covered_rel_paths(manifest):
+        covered[rel] = _digest(base / rel)
+    return covered
+
+
+def reissue_request(text: str, covered: Mapping[str, str]) -> str:
+    """``text`` with its pinned-digest block replaced by ``covered``; everything else kept.
+
+    Only the one fenced block that already carries pins is touched, so re-issuing can never
+    rewrite the prose stating *what* is being approved — a machine may recompute the digests,
+    but the description of the decision stays under the authorship of whoever wrote it.
+
+    Refuses a document with no pin block, and one with two (which of them is the pin block is
+    not a question a tool gets to guess at).
+    """
+    blocks = [m for m in _FENCED.finditer(text) if _PIN.search(m.group("body").lower())]
+    if len(blocks) != 1:
+        raise ApprovalRefused(
+            f"the approval request must carry exactly ONE ```-fenced block of "
+            f"'<repo-relative path> <sha256>' pins; found {len(blocks)}. Re-issuing rewrites "
+            "that block and nothing else, so it cannot proceed without knowing which block it is."
+        )
+    block = blocks[0]
+    width = max((len(path) for path in covered), default=0) + 2
+    body = "".join(f"{path.ljust(width)}{digest}\n" for path, digest in covered.items())
+    return text[: block.start("body")] + body + text[block.end("body") :]
 
 
 def digest_report(root: pathlib.Path | str | None = None) -> list[dict[str, str]]:
@@ -176,49 +290,53 @@ def digest_report(root: pathlib.Path | str | None = None) -> list[dict[str, str]
             }
         )
 
+    covered = covered_documents(base)
+
     # 1 — the manifest's own references against the bytes they name.
-    golden_ref = manifest.get("golden_set")
-    if not isinstance(golden_ref, Mapping) or not isinstance(golden_ref.get("path"), str):
-        raise ApprovalRefused(
-            "manifest.golden_set must reference the golden set by {path, sha256, count}"
-        )
+    golden_ref = manifest["golden_set"]
     golden_rel = golden_ref["path"]
-    golden_path = base / golden_rel
-    add(golden_rel, "manifest.golden_set.sha256", golden_ref.get("sha256"), file_digest(golden_path))
-    pitches = _read_json(golden_path).get("pitches") or []
+    add(golden_rel, "manifest.golden_set.sha256", golden_ref.get("sha256"), covered[golden_rel])
+    pitches = _read_json(base / golden_rel).get("pitches") or []
     add(golden_rel, "manifest.golden_set.count", golden_ref.get("count"), len(pitches))
 
     catalog_ref = manifest.get("seed_catalog")
-    catalog_rel = None
     if isinstance(catalog_ref, Mapping) and isinstance(catalog_ref.get("path"), str):
         catalog_rel = catalog_ref["path"]
         add(
             catalog_rel,
             "manifest.seed_catalog.sha256",
             catalog_ref.get("sha256"),
-            file_digest(base / catalog_rel),
+            covered[catalog_rel],
         )
 
     # 2 — the manifest body against the digest published for it.
-    body = body_digest(manifest)
     approval = manifest.get("approval")
     approval = approval if isinstance(approval, Mapping) else {}
     add(
         f"{MANIFEST_REL} (body, `approval` excluded)",
         "manifest.approval.content_hash",
         str(approval.get("content_hash") or "").strip().lower(),
-        body,
+        covered[MANIFEST_REL],
     )
 
     # 3 — everything above against what the request published to the human. This is the
     #     check the whole gate rests on: the request is the document the approver read.
-    request_rel = str(approval.get("request") or REQUEST_REL)
-    pins = request_pins(_read_text(base / request_rel))
-    wanted = [(MANIFEST_REL, body), (golden_rel, file_digest(golden_path))]
-    if catalog_rel is not None:
-        wanted.append((catalog_rel, file_digest(base / catalog_rel)))
-    for rel, actual in wanted:
-        add(rel, f"{request_rel} pins", pins.get(rel.lower(), "<not published>"), actual)
+    #
+    #     The request is addressed by the module constant, NEVER by a path read out of the
+    #     manifest. Letting the document under audit nominate the document it is audited
+    #     against is the same circularity SPEC A3 forbids: point `approval.request` at a file
+    #     you wrote yourself and every check below passes by construction. A manifest that
+    #     names some other request is therefore refused outright rather than quietly ignored.
+    declared = approval.get("request")
+    if declared is not None and str(declared) != REQUEST_REL:
+        raise ApprovalRefused(
+            f"manifest.approval.request names {str(declared)!r}, but the approval is always "
+            f"verified against the committed request {REQUEST_REL!r}. A manifest that chooses "
+            "which document publishes the digests it is checked against is checking itself."
+        )
+    pins = request_pins(_read_text(base / REQUEST_REL))
+    for rel, actual in covered.items():
+        add(rel, f"{REQUEST_REL} pins", pins.get(rel.lower(), "<not published>"), actual)
 
     return rows
 
@@ -255,9 +373,10 @@ def verify_pinned_digests(root: pathlib.Path | str | None = None) -> list[dict[s
         + "\n"
         + format_drift(rows)
         + "\n  Nothing was written. Either restore the drifted document(s), or — if the "
-        "change is intended — re-pin and re-issue the request:\n"
+        "change is intended — re-pin, re-issue, and read it again:\n"
         "      ./.venv/bin/python -m fixtures.manifest --refresh-digests\n"
-        "  then update the request's pinned-digest block, read it, and approve that."
+        "      ./.venv/bin/python -m fixtures.approval --emit-request --write\n"
+        "  then read the re-issued request (and `git diff` on it) and approve THAT."
     )
 
 

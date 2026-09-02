@@ -23,9 +23,12 @@ from fixtures import FIXTURES_DIR, REPO_ROOT
 from fixtures.approval import (
     APPROVAL_RECORD_REL,
     REQUEST_PATH,
+    REQUEST_REL,
     ApprovalRefused,
+    covered_documents,
     digest_report,
     record_approval,
+    reissue_request,
     request_pins,
     verify_pinned_digests,
 )
@@ -141,6 +144,119 @@ def test_record_approval_refuses_when_the_request_pins_a_different_golden_set(tm
     with pytest.raises(ApprovalRefused) as excinfo:
         record_approval("Ada Lovelace", root=root)
     assert "REQUEST-manifest-approval.md pins" in str(excinfo.value)
+
+
+# ------------------------------------------------------------------------------------
+# The second escape: verifying against a document the manifest itself chose
+# ------------------------------------------------------------------------------------
+def test_record_approval_refuses_a_manifest_that_nominates_its_own_approval_request(tmp_path):
+    """A3 circularity, one level up: the audited document must not pick its own auditor.
+
+    Before this was closed, `digest_report` addressed the request through
+    `manifest.approval.request`. So: tamper with the golden set, re-pin the manifest to the
+    tampered bytes, drop a request file of your own beside it pinning the same tampered
+    bytes, and point `approval.request` at that file. Every check then agreed with every
+    other check and the approval was RECORDED — and it wrote back
+    `"request": "fixtures/approval/REQUEST-manifest-approval.md"`, so the committed artifact
+    affirmatively claimed it had been verified against a document it never opened.
+    """
+    root = _sandbox(tmp_path)
+    _mutate_golden_label(root)
+    manifest = _read(root, MANIFEST_REL)
+    manifest["golden_set"]["sha256"] = file_digest(root / GOLDEN_REL)
+    manifest["approval"]["request"] = "fixtures/approval/REQUEST-forged.md"
+    manifest["approval"]["content_hash"] = body_digest(manifest)
+    _write(root, MANIFEST_REL, manifest)
+    (root / "fixtures/approval/REQUEST-forged.md").write_text(
+        "```\n"
+        f"{MANIFEST_REL}  {body_digest(manifest)}\n"
+        f"{GOLDEN_REL}  {file_digest(root / GOLDEN_REL)}\n"
+        f"{CATALOG_REL}  {file_digest(root / CATALOG_REL)}\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ApprovalRefused, match="REQUEST-forged"):
+        record_approval("Ada Lovelace", root=root)
+
+    assert _read(root, MANIFEST_REL)["approval"]["approver"] is None
+    assert not (root / APPROVAL_RECORD_REL).exists()
+
+
+def test_a_request_pinning_one_document_at_two_digests_is_refused_not_resolved():
+    """The realistic bad re-issue: the new pin block pasted in above the old one.
+
+    First-match-wins would have the checker verify the top block while the human reads the
+    bottom one. Neither is more correct than the other, so the request is ambiguous and the
+    only honest answer is to refuse it.
+    """
+    with pytest.raises(ApprovalRefused, match="more than one digest"):
+        request_pins(f"{GOLDEN_REL} {'0' * 64}\n{GOLDEN_REL} {'1' * 64}\n")
+
+    # ...and repeating the SAME digest is not ambiguous, so it stays legal.
+    assert request_pins(f"{GOLDEN_REL} {'0' * 64}\n{GOLDEN_REL} {'0' * 64}\n") == {
+        GOLDEN_REL: "0" * 64
+    }
+
+
+def test_a_covered_document_that_is_missing_is_refused_not_a_traceback(tmp_path):
+    """The CLI reports refusals by catching ApprovalRefused; an OSError bypasses that."""
+    root = _sandbox(tmp_path)
+    (root / GOLDEN_REL).unlink()
+    with pytest.raises(ApprovalRefused, match="cannot read the covered document"):
+        record_approval("Ada Lovelace", root=root)
+
+
+# ------------------------------------------------------------------------------------
+# Re-issuing the request: the documented recovery path, made executable
+# ------------------------------------------------------------------------------------
+def test_reissuing_the_request_replaces_only_the_pins_and_keeps_the_prose(tmp_path):
+    root = _sandbox(tmp_path)
+    before = (root / REQUEST_REL).read_text(encoding="utf-8")
+    _mutate_golden_label(root)
+    manifest = _read(root, MANIFEST_REL)
+    manifest["golden_set"]["sha256"] = file_digest(root / GOLDEN_REL)
+    manifest["approval"]["content_hash"] = body_digest(manifest)
+    _write(root, MANIFEST_REL, manifest)
+
+    after = reissue_request(before, covered_documents(root))
+
+    # Every line that is not a pin is untouched: re-issuing may recompute digests, never
+    # rewrite the description of what approving means.
+    def prose(text):
+        return [ln for ln in text.splitlines() if not _PIN_LINE(ln)]
+
+    assert prose(after) == prose(before)
+    assert request_pins(after) == covered_documents(root)
+    assert request_pins(after) != request_pins(before)
+
+    (root / REQUEST_REL).write_text(after, encoding="utf-8")
+    assert record_approval("Ada Lovelace", root=root)["content_hash"] == body_digest(
+        _read(root, MANIFEST_REL)
+    )
+
+
+def _PIN_LINE(line: str) -> bool:
+    import re
+
+    return bool(re.search(r"[0-9a-f]{64}", line))
+
+
+def test_reissue_refuses_a_request_with_no_pin_block_to_rewrite(tmp_path):
+    root = _sandbox(tmp_path)
+    with pytest.raises(ApprovalRefused, match="exactly ONE"):
+        reissue_request("# a request with no pins at all\n", covered_documents(root))
+
+
+def test_the_committed_request_is_byte_identical_to_what_reissue_would_emit() -> None:
+    """Keeps the committed request in step with the tree by construction.
+
+    This fails the moment someone hand-edits a pin, or re-pins the manifest and forgets to
+    re-issue — which is exactly the state in which the request stops being what the human
+    reads.
+    """
+    text = REQUEST_PATH.read_text(encoding="utf-8")
+    assert reissue_request(text, covered_documents()) == text
 
 
 # ------------------------------------------------------------------------------------
