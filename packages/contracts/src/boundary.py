@@ -217,17 +217,19 @@ def _js_truthy(value: Any) -> bool:
     return True
 
 
-def _offer_record(offer: Any) -> Any:
-    """`offer` when it is an object with fields, else `None`.
+def _record(value: Any) -> Any:
+    """`value` when it is an object with FIELDS, else `None`.
 
-    The mirror of `readRecord` in `boundary.ts`: a string, a number, a boolean or a list is not
-    an offer, and reading `unit_price` off one would produce a refusal on this door that the
-    TypeScript door does not produce. Such a payload is refused anyway — `Offer` is an object by
-    schema — but it must be refused for the same reasons on both sides.
+    The mirror of `readRecord` in `boundary.ts`. A string, a number, a boolean or a list has no
+    fields, and `getattr(1, "blacklisted", False)` answers `False` — which is the fail-OPEN
+    direction on a wall, and it is exactly how a trust-snapshot row of `1`, `"x"`, `[]`, `True`
+    or `3.5` was ADMITTED here while the TypeScript door refused every one of them. Reading a
+    field off something that has none is not "the field is absent"; it is "this is not the
+    object you thought", and both doors now say so.
     """
-    if offer is None or isinstance(offer, (str, bytes, bool, int, float, list, tuple, set)):
+    if value is None or isinstance(value, (str, bytes, bool, int, float, list, tuple, set)):
         return None
-    return offer
+    return value
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -513,7 +515,7 @@ def _price_reasons(bid: Any, offer: Any) -> list[str]:
     discounted offer that omits the claim would instead refuse most honest bids, which is not
     fail-closed, it is closed.
     """
-    record = _offer_record(offer)
+    record = _record(offer)
     if record is None:
         return []
 
@@ -580,7 +582,12 @@ def _eligibility_reasons(store_id: Any, trust_snapshot: Any) -> list[str]:
         # letting the lookup raise would turn a rejectable bid into a crash at the public
         # boundary. It is not a store we know about, so it is denied like any other unknown one.
         return [f"{REASON_TRUST_SNAPSHOT_UNAVAILABLE}:{store_id!r}"]
-    if row is None:
+    # A row that is not an OBJECT is not a row. `getattr(1, "blacklisted", False)` is `False`,
+    # so `{"store-1": 1}` — a snapshot mangled in transit, or half-decoded — read as "present and
+    # not blacklisted" and ADMITTED the store, on the one check R12 exists to make fail closed.
+    # `readRecord` in the TypeScript peer has always refused these, so this was also the widest
+    # remaining ok-divergence between the two doors: five row shapes, both paths.
+    if _record(row) is None:
         return [f"{REASON_TRUST_SNAPSHOT_UNAVAILABLE}:{store_id}"]
     # Truthy, not `is True`: a snapshot row that spells the flag `1` or `"yes"` is still a
     # blacklisted store, and R12 says the fail-closed direction is the one to take on doubt.

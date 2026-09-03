@@ -1338,3 +1338,29 @@ def test_the_boundary_refuses_rather_than_raising_on_an_object_that_fights_back(
         result = check(payload, path)
         assert result.ok is False
         assert result.reasons, "a refusal must still say why"
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_trust_snapshot_row_that_is_not_an_object_is_an_unavailable_read(path: str) -> None:
+    """R12's widest remaining hole, and the widest measured ok-divergence between the two doors.
+
+    A row that is not an object is not a row: `getattr(1, "blacklisted", False)` answers `False`,
+    so `{"store-1": 1}` — a snapshot mangled in transit, or half-decoded — read as "present and
+    not blacklisted" and ADMITTED the store, on the one check R12 exists to make fail closed.
+    The TypeScript peer's `readRecord` refused every one of these all along; a seller who could
+    shape the snapshot row simply submitted at the door that said yes.
+
+    Note this is the ROW, not the snapshot. A non-mapping SNAPSHOT was always refused, which is
+    what made the row case easy to mistake for covered.
+    """
+    for row in (1, "x", [], True, 3.5, 0, "", 0.0, ["blacklisted"], None):
+        snapshot = {"store-1": row}
+        result = check(make_bid(), path, snapshot=snapshot)
+        assert result.ok is False, f"a trust row of {row!r} admitted the store"
+        assert any("trust_snapshot_unavailable" in reason for reason in result.reasons)
+
+    # Control: a real row still admits, and a real blacklisted row still denies for its own
+    # reason rather than being swept up as unavailable.
+    assert check(make_bid(), path, snapshot=make_snapshot_table()).ok is True
+    denied = check(make_bid(store_id="store-bad"), path)
+    assert any("store_blacklisted" in reason for reason in denied.reasons)

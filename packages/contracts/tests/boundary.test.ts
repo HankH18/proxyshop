@@ -1024,3 +1024,23 @@ describe("claims lists — the shapes the Python peer now refuses too", () => {
     expect(check(makeBid({claims: [makeClaim()]}), path).ok).toBe(true);
   });
 });
+
+describe("R12 — a trust-snapshot row that is not an object is an unavailable read", () => {
+  // This door's `readRecord` has always refused these; the Python peer read `blacklisted` off
+  // them with `getattr`, got `False`, and ADMITTED the store. Pinned here so the two doors
+  // cannot drift apart on it again.
+  it.each(BOTH_PATHS)("refuses a non-object row on %s", (path) => {
+    for (const row of [1, "x", [], true, 3.5, 0, "", 0.0, ["blacklisted"], null, undefined]) {
+      const snapshot = {"store-1": row};
+      const result = check(makeBid(), path, snapshot as never);
+      expect(result.ok, `a trust row of ${JSON.stringify(row)} admitted the store`).toBe(false);
+      expect(result.reasons.join(" ")).toContain(REASON_TRUST_SNAPSHOT_UNAVAILABLE);
+    }
+
+    // Controls: a real row admits; a real blacklisted row denies for its own reason.
+    expect(check(makeBid(), path).ok).toBe(true);
+    expect(check(makeBid({store_id: "store-bad"}), path).reasons.join(" ")).toContain(
+      REASON_STORE_BLACKLISTED,
+    );
+  });
+});
