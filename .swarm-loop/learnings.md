@@ -395,23 +395,30 @@ your worktree use `git grep` and direct reads, and if you run `codegraph explore
 the returned paths are inside your tree before believing a word of it. The orchestrator keeps
 CodeGraph for its own primary-tree work, where it is correct.
 
-## Pass --worktree-root at init, or `retire` reclaims nothing and `resume` sees no trees
+## CORRECTED — `retire` finds worktrees outside the recorded root; the idle guard is what holds them
 
-Cycle 10. `state.json` has NO `worktree_root` key — the run was initialised without the flag —
-so every tool that looks for the run's worktrees looks under the default
-`<repo>/.swarm-loop/worktrees`, which does not exist. The trees actually live beside the repo at
-`../proxyshop-worktrees`, which is the correct LOCATION; only the record of it is missing.
+**This entry previously said the opposite and was wrong.** It claimed that a missing
+`worktree_root` in state.json made `retire` unable to find the run's worktrees. An adversarial
+audit refuted that at the source: `retire` and `resume` BOTH find worktrees outside the recorded
+root, through an ownership union built for exactly this case — a tree counts as the run's if its
+branch is under `refs/heads/task/`, regardless of where it sits on disk. So the trees were found
+and reported all along.
 
-Two measured consequences, both silent. `checkpoint` correctly warned that four landed worktrees
-were overdue for teardown, but `retire --dry-run` then reported **0 retired · 5 kept** and
-"worktree root size: unmeasured (no worktree root on disk)" — it could name the branches to
-delete but could not find a single tree to reclaim, so ~4 GB stayed on disk and the operator has
-to fall back to `git worktree remove` by hand. And a resumed session would report ZERO live
-worktrees no matter how many exist, then re-dispatch every in-flight ticket into a second set.
+The real reason `retire --dry-run` printed "0 retired · 5 kept" was the **900-second idle guard**
+plus one branch that had not landed — and both reasons were printed on the kept lines, which the
+orchestrator did not read before diagnosing. The bare `retire` the checkpoint banner recommends
+scans at idle 0 while the subcommand defaults to 900, so the banner names a command that will
+reclaim nothing at the moment it fires.
 
-APPLY: pass `--worktree-root ../<repo>-worktrees` at `init`. When inheriting a run that lacks it,
-say so in the handoff and in the cycle report — `state.json` is guard-protected against in-place
-rewrites, so it cannot simply be patched, and the gap silently survives every later session.
+What IS true and worth keeping: with no `worktree_root` recorded, `retire` and `checkpoint`
+print a worktree-root path that does not exist and report the root's size as unmeasured, which
+reads like "found nothing" and is what misled the diagnosis.
+
+APPLY: pass `--worktree-root` at init for accurate reporting — but when teardown reclaims
+nothing, READ THE KEPT LINES before concluding anything: they state the reason per tree. Prefer
+`retire --idle-seconds 0` when acting on the checkpoint's own banner. And treat this entry as
+the standing example of the failure it describes: a confident diagnosis written from a summary
+line instead of from the tool's own explanation of itself.
 
 ## "Zero production callers": the discriminator is whether a FROZEN TEST already counts it
 
