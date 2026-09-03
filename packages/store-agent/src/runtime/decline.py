@@ -48,9 +48,12 @@ class DeclineReason(StrEnum):
     #: The offer cannot state an expiry that anyone can read, and an offer with no readable
     #: expiry is one `contracts.boundary.validate_bid` refuses outright.
     unstatable_offer_expiry = "unstatable_offer_expiry"
-    #: The hook-provenance boundary refused the assembled bid (R8/T-152). This one is a DEFECT
-    #: in the runtime rather than a business condition — a hosted agent that cannot prove its
-    #: own bid must not emit it — so the detail carries the boundary's full refusal.
+    #: The hook-provenance boundary refused the assembled bid (R8/T-152). Usually a DEFECT in
+    #: the runtime rather than a business condition — a hosted agent that cannot prove its own
+    #: bid must not emit it — but not always: a catalog list price that already sits under the
+    #: envelope's own floor is refused here too, and that is a merchant misconfiguration the
+    #: advocate cannot bid its way out of. Either way the detail carries the boundary's full
+    #: refusal, which is what distinguishes the two.
     provenance_refused = "provenance_refused"
 
 
