@@ -437,3 +437,81 @@ def test_a_session_still_carries_no_identity_after_the_ceiling_landed() -> None:
     blob = _blob(vars(session))
     for secret in ("dana", "reyes", "example.com"):
         assert secret not in blob
+
+
+# =======================================================================================
+# T-189 — one merchandise token must not launder an unbounded pile of identity
+# =======================================================================================
+
+
+def test_a_name_less_account_cannot_publish_its_name_beside_one_merchandise_word() -> None:
+    """The recorded T-189 repro: append ``gear`` and the T-139 fix stops applying.
+
+    ``_exempt_category_slugs`` rule 3 asks whether the slug has *at least one* token that is
+    merchandise rather than the buyer. It never asks how many tokens are the buyer. So the
+    account ``MagicLinkAuth.redeem`` creates on a first login — ``{"email": email}``, no
+    ``first_name``, no ``last_name``, which is the shape T-071/072/073 hangs orders off —
+    publishes ``dana-reyes-gear`` to the store and ``identity_leaks`` reports clean:
+
+    * rule 2 has nothing to work with, because ``"dana"`` and ``"reyes"`` reach the account
+      only through ``email``, which is deliberately not a naming key;
+    * rule 3 is satisfied by ``"gear"`` alone, and the two name tokens ride out beside it.
+
+    ``dana-reyes`` on the very same account is refused (asserted above). Appending one
+    innocuous word is the whole of the bypass.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile
+
+    redeemed = {
+        "email": "dana.reyes@example.com",
+        "orders": [
+            {"order_ref": f"o{n}", "total": 30.0, "category": "Dana Reyes gear"} for n in range(3)
+        ],
+    }
+    with pytest.raises(IdentityLeak) as caught:
+        build_profile(redeemed, PSEUDONYM)
+    assert caught.value.account_keys == ("email",)
+
+
+def test_padding_identity_with_merchandise_is_refused_on_every_route_it_reaches() -> None:
+    """The same bypass, driven through the four shapes an adversarial pass found.
+
+    Each is a well-formed merchandising slug — under the character cap, under the token cap,
+    no digit run — carrying **two or more** of the account's own identity fragments plus at
+    least one word that is not one. Rule 3 waves every one of them through today.
+
+    * ``dana reyes running shoes`` — the repro at the token cap rather than at three tokens;
+    * ``danareyes gear`` — the same two fragments run together, so no *token* equals either
+      of them and a token-wise rule never fires;
+    * ``espresso fan gear`` — the email local part of the very account the one-token
+      leniency exists for, reassembled;
+    * ``Alder Way Portland gear`` — not a name-less account at all: on the fully populated
+      T-139 record, ``Alder Way Portland`` is refused (asserted above) and appending
+      ``gear`` publishes the buyer's street and city.
+
+    A single collision is the coincidence the exemption exists for. Two is an assembly, and
+    no number of merchandise words beside it makes it one again.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile
+
+    named = {
+        "email": "dana.reyes@example.com",
+        "first_name": "Dana",
+        "last_name": "Reyes",
+        "address": "44 Alder Way, Portland OR 97205",
+        "postal_code": "97205",
+        "region": "US-OR",
+    }
+    for account, category in (
+        ({"email": "dana.reyes@example.com"}, "dana reyes running shoes"),
+        ({"email": "dana.reyes@example.com"}, "danareyes gear"),
+        ({"email": "espresso.fan@example.com"}, "espresso fan gear"),
+        (named, "Alder Way Portland gear"),
+        (PARK_LANE, "park lane gear"),
+    ):
+        record = dict(account)
+        record["orders"] = [
+            {"order_ref": f"o{n}", "total": 30.0, "category": category} for n in range(3)
+        ]
+        with pytest.raises(IdentityLeak, match="R5"):
+            build_profile(record, PSEUDONYM)
