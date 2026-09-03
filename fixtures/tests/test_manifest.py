@@ -427,20 +427,50 @@ def test_a_half_written_approval_is_refused() -> None:
     This adds nothing to the human gate's authenticity — no offline check can — but it means
     an agent that wrote a name into a pending manifest breaks the loader for every consumer,
     not only the one test that reads the block.
+
+    Every state below is built by REPLACING the approval block outright rather than by
+    nudging one field of whatever the committed one happens to say. "Half-written" is a
+    claim about a block relative to a known starting state, so nudging only produces one
+    while the committed manifest is unapproved: the moment a human approved it,
+    ``approver = "Grace Hopper"`` stopped being half a decision (it is a whole one,
+    misattributed) and ``status = "approved"`` stopped changing anything at all. Both then
+    validated, and this test went red while the guard it grades was working perfectly.
     """
-    from fixtures.manifest import validate_manifest
+    from fixtures.manifest import APPROVAL_DECISION_FIELDS, PENDING_APPROVAL, validate_manifest
 
-    doctored = _doctored()
-    doctored["approval"]["approver"] = "Grace Hopper"
-    with pytest.raises(ManifestError, match="half-written approval|approver"):
-        validate_manifest(doctored)
+    filled = {
+        "approver": "Grace Hopper",
+        "approved_at": "2026-09-03T00:00:00Z",
+        "artifact": "fixtures/approval/manifest-approval.md",
+    }
 
-    doctored = _doctored()
-    doctored["approval"]["status"] = "approved"
-    with pytest.raises(ManifestError, match="approved"):
-        validate_manifest(doctored)
+    def staged(**approval) -> dict:
+        """The committed manifest carrying exactly the approval block described."""
+        doctored = _doctored()
+        doctored["approval"] = {
+            "status": PENDING_APPROVAL,
+            **dict.fromkeys(APPROVAL_DECISION_FIELDS),
+            "content_hash": doctored["approval"]["content_hash"],
+            "request": doctored["approval"]["request"],
+            **approval,
+        }
+        return doctored
 
-    doctored = _doctored()
-    doctored["approval"]["status"] = "looks_fine_to_me"
+    # The two coherent states, first: a test that refused every input would refuse these too.
+    validate_manifest(staged())
+    validate_manifest(staged(status="approved", **filled))
+
+    # Pending, with any ONE decision field filled: an approval caught mid-fabrication.
+    for field, value in filled.items():
+        with pytest.raises(ManifestError, match="half-written approval"):
+            validate_manifest(staged(**{field: value}))
+
+    # Approved, with any ONE decision field missing or blank: a decision with a hole in it.
+    for field in APPROVAL_DECISION_FIELDS:
+        for hole in (None, "   "):
+            with pytest.raises(ManifestError, match=field):
+                validate_manifest(staged(status="approved", **{**filled, field: hole}))
+
+    # ...and a status nobody knows how to grade is refused however complete the rest is.
     with pytest.raises(ManifestError, match="status"):
-        validate_manifest(doctored)
+        validate_manifest(staged(status="looks_fine_to_me", **filled))
