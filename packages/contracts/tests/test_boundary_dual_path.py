@@ -539,3 +539,347 @@ def test_the_offset_decides_admit_versus_reject_for_an_offer_at_the_edge() -> No
     dead = check(make_bid(offer=offer), EXTERNAL_PATH, now="2026-01-01T09:00:00Z")
     assert dead.ok is False
     assert any("offer_expired" in reason for reason in dead.reasons)
+
+
+# ---------------------------------------------------------------------------------------------
+# T-135: the exclusivity property must not be defeated by MOVING the claim.
+#
+# `_claim_provenance_reasons` walked `bid.claims` and nothing else. But the Offer is INSIDE the
+# bid boundary and carries claim material of its own: `offer.commitments` is a list of claims,
+# and `offer.discount` is stamped with a `provenance` block exactly like a claim is. So a
+# store-agent that put its seller-asserted claim in `offer.commitments` instead of `bid.claims`
+# — or stamped `seller_asserted` on the discount that prices the offer — walked straight past
+# R8. Same claim, same source, same bid; only the field moved.
+#
+# Measured before the fix, on the hosted path:
+#     claim in bid.claims        -> ok=False ['hosted_non_hook_provenance:1:seller_asserted']
+#     the SAME claim in the offer-> ok=True  []                      (with a 25% discount on it)
+#
+# The store-agent's own hook guard closes this for a Tier-1 seller, but the exchange does not
+# hold the seller's ToolHooks facade and can never call it. `validate_bid` is the only door the
+# exchange can run, so if the walk is not exhaustive here, it is not enforced anywhere.
+# ---------------------------------------------------------------------------------------------
+
+
+def _smuggling_offer(**overrides):
+    """An offer carrying the relocated claim and the discount it was smuggled in to justify."""
+    payload = dict(
+        commitments=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))],
+        discount={"type": "percentage", "value": 25.0, "provenance": dict(ASSERTED_PROVENANCE)},
+    )
+    payload.update(overrides)
+    return make_offer(**payload)
+
+
+def test_a_seller_asserted_claim_relocated_into_the_offer_is_still_refused() -> None:
+    """THE exploit. A hosted bid whose only hook-clean field is `bid.claims`."""
+    smuggled = make_bid(
+        claims=[make_claim("free_returns", "30 days", dict(HOOK_PROVENANCE))],
+        offer=_smuggling_offer(),
+    )
+    result = check(smuggled, HOSTED_PATH)
+    assert result.ok is False, (
+        "a hosted bid carrying a seller_asserted claim in offer.commitments and an unauthorised "
+        "25% discount was ADMITTED — moving the claim out of bid.claims defeated R8 entirely"
+    )
+    assert any(reason.startswith("hosted_non_hook_provenance") for reason in result.reasons), (
+        "the refusal must be the PROVENANCE refusal, not an incidental schema complaint: "
+        f"got {list(result.reasons)}"
+    )
+
+    # Positive control: the identical bid with hook provenance everywhere is admitted, so this
+    # is not "reject every offer that has commitments".
+    control = make_bid(
+        claims=[make_claim("free_returns", "30 days", dict(HOOK_PROVENANCE))],
+        offer=make_offer(
+            commitments=[make_claim("spf", 30, dict(HOOK_PROVENANCE))],
+            discount={
+                "type": "percentage",
+                "value": 25.0,
+                "provenance": dict(HOOK_PROVENANCE),
+            },
+        ),
+    )
+    assert check(control, HOSTED_PATH).ok is True, check(control, HOSTED_PATH).reasons
+
+
+def test_an_offer_commitment_is_walked_on_its_own() -> None:
+    """Isolate the site: the commitment alone rejects, with the discount left hook-clean."""
+    bid = make_bid(offer=make_offer(commitments=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))]))
+    result = check(bid, HOSTED_PATH)
+    assert result.ok is False, f"offer.commitments is not walked: {list(result.reasons)}"
+    assert any(reason.startswith("hosted_non_hook_provenance") for reason in result.reasons)
+
+    control = make_bid(offer=make_offer(commitments=[make_claim("spf", 30, dict(HOOK_PROVENANCE))]))
+    assert check(control, HOSTED_PATH).ok is True
+
+
+def test_the_offer_discount_provenance_is_walked_on_its_own() -> None:
+    """The THIRD claim-bearing site, and the one that actually moves money.
+
+    `offer.discount` is not a claim in the `bid.claims` sense, but it carries the same
+    `provenance` block, and `seller_asserted` on it means exactly what it means anywhere else:
+    no hook minted this. A 25% discount the seller simply asserted is the payload the whole
+    R8 exclusivity property exists to stop.
+    """
+    bid = make_bid(
+        offer=make_offer(
+            discount={
+                "type": "percentage",
+                "value": 25.0,
+                "provenance": dict(ASSERTED_PROVENANCE),
+            }
+        )
+    )
+    result = check(bid, HOSTED_PATH)
+    assert result.ok is False, f"offer.discount.provenance is not walked: {list(result.reasons)}"
+    assert any(reason.startswith("hosted_non_hook_provenance") for reason in result.reasons)
+
+    # Control: the same discount, hook-minted, is admitted. The refusal is about the SOURCE.
+    assert check(make_bid(), HOSTED_PATH).ok is True
+
+
+# ---------------------------------------------------------------------------------------------
+# The CROSS-LANGUAGE parity table for the claim-bearing sites.
+#
+# `boundary.ts` is the second implementation of this door, and two doors that admit different
+# bids are worse than one door with a hole — the seller picks whichever one lets the bid through.
+# So the verdicts below are asserted VERBATIM here and, case for case and string for string, in
+# `boundary.test.ts::T-135 parity`. Changing one side alone turns the other side red.
+#
+# `schema_invalid` reasons are filtered out of the comparison and only there: pydantic spells a
+# location `offer.commitments.0.provenance` and ajv spells it its own way, and that text was
+# never a cross-language contract. Every provenance reason IS.
+# ---------------------------------------------------------------------------------------------
+
+PARITY_TABLE: dict[str, dict] = {
+    "claims_seller_asserted/hosted": {
+        "ok": False,
+        "reasons": ["hosted_non_hook_provenance:0:seller_asserted"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "claims_seller_asserted/external": {
+        "ok": True,
+        "reasons": [],
+        "requires_verification": True,
+        # R18 still routes a bid.claims assertion to verification, by index. Untouched.
+        "unverified_claim_indexes": [0],
+    },
+    "offer_commitment_seller_asserted/hosted": {
+        "ok": False,
+        "reasons": ["hosted_non_hook_provenance:offer.commitments[0]:seller_asserted"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "offer_commitment_seller_asserted/external": {
+        "ok": False,
+        # NOT flagged: `unverified_claim_indexes` addresses `bid.claims`, so there is no handle
+        # to hand the verification queue for this site. Refused, with the site named.
+        "reasons": ["unverifiable_claim_site:offer.commitments[0]:seller_asserted"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "offer_commitment_unknown_source/hosted": {
+        "ok": False,
+        "reasons": ["claim_provenance_unknown_source:offer.commitments[0]:vibes"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "offer_commitment_without_provenance/hosted": {
+        "ok": False,
+        "reasons": ["claim_without_provenance:offer.commitments[0]"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "offer_discount_seller_asserted/hosted": {
+        "ok": False,
+        "reasons": ["hosted_non_hook_provenance:offer.discount:seller_asserted"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "offer_discount_seller_asserted/external": {
+        "ok": False,
+        "reasons": ["unverifiable_claim_site:offer.discount:seller_asserted"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "offer_discount_without_provenance/hosted": {
+        "ok": False,
+        # `Discount.provenance` is optional by schema, so this payload is schema-VALID. It is
+        # still refused: the discount is the field that moves money, and "no provenance at all"
+        # is not a weaker version of `seller_asserted`, it is the same statement with the label
+        # torn off. Leaving it unjudged would reopen the relocation exploit one step further
+        # down — drop the block instead of relabelling it and the 25% walks again.
+        "reasons": ["claim_without_provenance:offer.discount"],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "offer_without_a_discount/hosted": {
+        "ok": True,
+        "reasons": [],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "all_hook_provenanced/hosted": {
+        "ok": True,
+        "reasons": [],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+    "all_hook_provenanced/external": {
+        "ok": True,
+        "reasons": [],
+        "requires_verification": False,
+        "unverified_claim_indexes": [],
+    },
+}
+
+
+def parity_bid(name: str) -> dict:
+    """The payload for one parity case. Mirrored by `parityBid` in `boundary.test.ts`."""
+    if name == "claims_seller_asserted":
+        return make_bid(claims=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))])
+    if name == "offer_commitment_seller_asserted":
+        return make_bid(
+            offer=make_offer(commitments=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))])
+        )
+    if name == "offer_commitment_unknown_source":
+        return make_bid(
+            offer=make_offer(
+                commitments=[make_claim("spf", 30, {**HOOK_PROVENANCE, "source": "vibes"})]
+            )
+        )
+    if name == "offer_commitment_without_provenance":
+        return make_bid(offer=make_offer(commitments=[make_claim("spf", 30, None)]))
+    if name == "offer_discount_seller_asserted":
+        return make_bid(
+            offer=make_offer(
+                discount={
+                    "type": "percentage",
+                    "value": 25.0,
+                    "provenance": dict(ASSERTED_PROVENANCE),
+                }
+            )
+        )
+    if name == "offer_discount_without_provenance":
+        return make_bid(offer=make_offer(discount={"type": "percentage", "value": 25.0}))
+    if name == "offer_without_a_discount":
+        return make_bid(offer=make_offer(discount=None))
+    if name == "all_hook_provenanced":
+        return make_bid(
+            offer=make_offer(commitments=[make_claim("spf", 30, dict(HOOK_PROVENANCE))])
+        )
+    raise AssertionError(f"unknown parity case {name!r}")
+
+
+@pytest.mark.parametrize("case", sorted(PARITY_TABLE))
+def test_the_claim_site_verdicts_match_the_typescript_peer(case: str) -> None:
+    name, _, path = case.rpartition("/")
+    expected = PARITY_TABLE[case]
+    result = check(parity_bid(name), path)
+
+    provenance_reasons = [r for r in result.reasons if not r.startswith("schema_invalid")]
+    assert provenance_reasons == expected["reasons"], case
+    assert result.ok is expected["ok"], (case, list(result.reasons))
+    assert result.requires_verification is expected["requires_verification"], case
+    assert list(result.unverified_claim_indexes) == expected["unverified_claim_indexes"], case
+
+
+def test_the_parity_table_covers_every_claim_bearing_site_on_both_paths() -> None:
+    """Guards the parametrization: a table someone quietly emptied would register zero cases,
+    which pytest reports as neither a pass nor a failure and nobody reads."""
+    from contracts import boundary
+
+    assert len(PARITY_TABLE) == 12
+    sites = {case.split("/")[0] for case in PARITY_TABLE}
+    assert {
+        "claims_seller_asserted",
+        "offer_commitment_seller_asserted",
+        "offer_discount_seller_asserted",
+    } <= sites
+    for path in BOTH_PATHS:
+        assert any(case.endswith(f"/{path}") for case in PARITY_TABLE), path
+
+    # The site labels the reasons are built from are the contract the table pins.
+    assert boundary.OFFER_COMMITMENTS_SITE == "offer.commitments"
+    assert boundary.OFFER_DISCOUNT_SITE == "offer.discount"
+    assert boundary.REASON_UNVERIFIABLE_CLAIM_SITE == "unverifiable_claim_site"
+
+
+def test_the_walk_reaches_the_offer_through_a_pydantic_model_too() -> None:
+    """`validate_bid` accepts a `Bid` instance, not only a mapping, and the offer sites must be
+    walked through attribute access exactly as they are through `dict.get`. A walk that only
+    worked on wire dicts would be blind to every caller holding an extracted model."""
+    from packages.contracts import Bid
+
+    model = Bid.model_validate(
+        make_bid(offer=make_offer(commitments=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))]))
+    )
+    result = validate_bid(model, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW)
+    assert result.ok is False, "the offer walk does not survive attribute access"
+    assert "hosted_non_hook_provenance:offer.commitments[0]:seller_asserted" in list(result.reasons)
+
+    clean = Bid.model_validate(make_bid())
+    assert (
+        validate_bid(clean, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW).ok
+        is True
+    )
+
+
+HOSTILE_OFFER_SHAPES: dict[str, dict] = {
+    "commitments as a mapping": make_offer(
+        commitments={"0": make_claim("x", 1, dict(ASSERTED_PROVENANCE))}
+    ),
+    "commitments as a string": make_offer(commitments="free_returns"),
+    "discount as a list": make_offer(
+        discount=[{"type": "percentage", "value": 25.0, "provenance": dict(ASSERTED_PROVENANCE)}]
+    ),
+    "discount as a bare number": make_offer(discount=25.0),
+    "discount with a null provenance": make_offer(
+        discount={"type": "percentage", "value": 25.0, "provenance": None}
+    ),
+    "discount with an empty provenance source": make_offer(
+        discount={
+            "type": "percentage",
+            "value": 25.0,
+            "provenance": {**HOOK_PROVENANCE, "source": ""},
+        }
+    ),
+    "discount with an unknown provenance source": make_offer(
+        discount={
+            "type": "percentage",
+            "value": 25.0,
+            "provenance": {**HOOK_PROVENANCE, "source": "vibes"},
+        }
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_OFFER_SHAPES))
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_offer_walk_refuses_hostile_shapes_rather_than_raising(name: str, path: str) -> None:
+    """The relocation exploit's next move is a MALFORMED relocation — put the claim somewhere the
+    walk has to guess at. Every one of these is refused on both paths, and none of them raises.
+
+    Mirrored in `boundary.test.ts`. Only `ok` is compared across the two languages here, not the
+    reason text: pydantic enumerates a mapping's keys where ajv calls it a shape error, and that
+    spelling was never a cross-language contract. "Is this bid admitted" is, and it is the only
+    thing an attacker cares about.
+    """
+    result = check(make_bid(offer=HOSTILE_OFFER_SHAPES[name]), path)
+    assert result.ok is False, f"{name}/{path} was admitted"
+    assert result.reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_offer_shapes_that_are_legitimately_quiet_still_admit(path: str) -> None:
+    """The positive controls, so the block above is not "reject every offer"."""
+    for offer in (
+        make_offer(discount=None),
+        make_offer(commitments=[]),
+        make_offer(commitments=[make_claim("x", 1, dict(HOOK_PROVENANCE))]),
+        make_offer(),
+    ):
+        result = check(make_bid(offer=offer), path)
+        assert result.ok is True, (offer, path, list(result.reasons))

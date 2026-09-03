@@ -16,6 +16,14 @@ What this file guarantees for every pytest run in the repo:
 * ``@pytest.mark.docker`` tests **skip with an explicit message** when the compose stack is
   unreachable. The reachability probe is a bounded TCP connect run at collection time, so
   a down stack can never hang the session.
+* **T-109** — that skip is decided **per service**, not per session. Each item's required
+  datastores come from its ``docker`` marker argument (``@pytest.mark.docker("postgres")``)
+  or, for the bare marks every merged suite carries, from the datastore fixtures it
+  requests; see :mod:`proxyshop_support.service_markers`. Before this, one combined reason
+  was stamped on every ``docker`` item as soon as any one endpoint failed to answer, so a
+  one-second Redis blip skipped all 47 of them — T-011's whole S7 role-isolation gate —
+  and the run exited 0 with nothing red. A skipped datastore test is indistinguishable
+  from a passing one in the frozen metrics, which is what made that silent.
 * ``@pytest.mark.needs_model`` tests skip unless ``PROXYSHOP_ALLOW_MODEL=1``. D18 keeps
   ``torch``/``sentence-transformers`` uninstalled by default, so those tests cannot pass
   here; ``make verify`` additionally deselects them with ``-m "not needs_model"``.
@@ -56,7 +64,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from proxyshop_support import reachability
+from proxyshop_support import reachability, service_markers
 from proxyshop_support.clock import EPOCH, ManualClock
 from proxyshop_support.embedding import EMBEDDING_DIM, hash_embed
 from proxyshop_support.llm_double import LLMDouble
@@ -98,13 +106,33 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Mark ``docker`` and ``needs_model`` tests for skipping, before any socket guard.
 
-    The stack probe runs here, once per session, at collection time — deliberately not in
-    ``pytest_runtest_setup``, where the socket guard would already be installed and the
-    probe itself would be blocked.
+    The probes run here, at collection time — deliberately not in ``pytest_runtest_setup``,
+    where the socket guard would already be installed and the probe itself would be blocked.
+
+    Each *service* is probed at most once per session (``probed`` below), and each *item*
+    then gets the reason built from only the services it needs. That ordering matters both
+    ways: probing per item would open three TCP connections per collected test, and probing
+    once for the whole stack is the T-109 defect.
     """
-    docker_reason: str | None = None
-    if any(item.get_closest_marker("docker") for item in items):
-        docker_reason = reachability.skip_reason()
+    probed: dict[str, reachability.Endpoint | None] = {}
+
+    def docker_reason_for(item: pytest.Item) -> str | None:
+        try:
+            services = service_markers.services_for(
+                [marker.args for marker in item.iter_markers("docker")],
+                getattr(item, "fixturenames", ()),
+            )
+        except ValueError as exc:
+            # A typo'd service name must stop the session, not silently widen to the whole
+            # stack — a widened skip is invisible in the metrics.
+            raise pytest.UsageError(f"{item.nodeid}: {exc}") from exc
+        for name in services:
+            if name not in probed:
+                down = reachability.unreachable(name)
+                probed[name] = down[0] if down else None
+        return reachability.format_reason(
+            [endpoint for name in services if (endpoint := probed[name]) is not None]
+        )
 
     model_reason = (
         None
@@ -117,9 +145,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     )
 
     for item in items:
-        if docker_reason and item.get_closest_marker("docker"):
-            item.add_marker(pytest.mark.skip(reason=docker_reason))
-            item.stash[_DOCKER_SKIP_KEY] = docker_reason
+        if item.get_closest_marker("docker"):
+            docker_reason = docker_reason_for(item)
+            if docker_reason:
+                item.add_marker(pytest.mark.skip(reason=docker_reason))
+                item.stash[_DOCKER_SKIP_KEY] = docker_reason
         if model_reason and item.get_closest_marker("needs_model"):
             item.add_marker(pytest.mark.skip(reason=model_reason))
 
@@ -135,8 +165,14 @@ def worker_index() -> int:
     return worker_id()
 
 
-def _require_stack() -> None:
-    reason = reachability.skip_reason()
+def _require_services(*services: str) -> None:
+    """Skip cleanly when the datastores THIS fixture needs are down (T-109).
+
+    Named services only. ``_require_services()`` with no argument would mean the whole
+    stack, which is what every fixture used to do and is why a Redis outage skipped the
+    Postgres fixtures — so every call site below names its own store.
+    """
+    reason = reachability.skip_reason(*services)
     if reason:
         pytest.skip(f"{reason} (mark this test @pytest.mark.docker so it skips cleanly)")
 
@@ -159,7 +195,7 @@ def worker_database(worker_index: int) -> str:
 
     Requires ``@pytest.mark.docker`` — the stack being *down* is still a clean skip.
     """
-    _require_stack()
+    _require_services("postgres")
     return ensure_worker_database(worker_index)
 
 
@@ -274,7 +310,7 @@ def _neo4j_guard() -> Iterator[bool]:
     nested acquisition — a test that takes it explicitly, a lane conftest that still wraps
     it — costs nothing and cannot self-deadlock.
     """
-    _require_stack()
+    _require_services("neo4j-bolt")
     with neo4j_flock():
         yield True
 
@@ -291,7 +327,7 @@ def neo4j_driver(_neo4j_guard: bool) -> Iterator[Any]:
     """
     from neo4j import GraphDatabase
 
-    _require_stack()
+    _require_services("neo4j-bolt")
     uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
     user = os.environ.get("NEO4J_USER", "neo4j")
     password = os.environ.get("NEO4J_PASSWORD", "proxyshop_dev_pw")
@@ -343,7 +379,7 @@ def redis_client(worker_index: int) -> Iterator[WorkerRedis]:
 
     Requires ``@pytest.mark.docker``.
     """
-    _require_stack()
+    _require_services("redis")
     client = worker_redis(worker=worker_index)
     try:
         client.flushdb()

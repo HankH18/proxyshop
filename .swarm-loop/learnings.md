@@ -339,3 +339,106 @@ the failure it was written to catch.
 Found by the lane that was told to implement it, which is the point: a brief is a
 hypothesis, and the agent executing it is the one positioned to falsify it. Say so in
 every packet.
+
+## A build lane's OWN sub-agents must not mutate the lane's worktree concurrently
+
+Cycle 10, T-031. The lane did what its packet asked — ran its own adversarial pass — but
+spawned sub-agents that mutated the SAME worktree it was building in. Two of them collided:
+the test auditor "observed `if False:` appear in rerank.py between its own restore and its
+next read" (the sibling's concurrent mutation testing), and its whole first run's results
+were unusable. Worse, one sub-agent had been told it could revert source files with
+`git checkout` — which would have silently destroyed 112 lines of uncommitted fix sitting in
+the tree. The PreToolUse git-guard is what stood between that instruction and the loss.
+
+The skill's isolation invariant is written about the ORCHESTRATOR's waves; the same physics
+applies one level down, and nothing in the packet said so. Disjoint file scopes are not
+disjoint state.
+
+APPLY: every task packet that tells a lane to run its own adversarial pass must also say —
+your sub-agents are READ-ONLY in your worktree; if one must mutate to test (sabotage, mutation
+testing), it works on its own copy outside the tree, never in yours; and no sub-agent may run
+a repo-global git op, ever.
+
+## Assert a lane's worktree is CLEAN before believing anything it reported
+
+Cycle 10, T-031. The lane's verifier found the worktree dirty at the moment it was briefed:
+`criteria.py` and `test_retrieval.py` carried 112 uncommitted lines relative to the commit it
+was told to judge, and the "verified facts" it was handed (46 tests green, verify.sh exit 0)
+had been measured against the DIRTY tree, not against the commit. The pinned SHA was
+therefore not what produced the numbers.
+
+Pinning the tip is necessary and NOT sufficient: a tip pins what was committed, and says
+nothing about what is sitting uncommitted beside it.
+
+APPLY: at collection, run `git -C <worktree> status --porcelain` and require it EMPTY before
+accepting a branch. If it is non-empty the lane has work it never committed — ask for it to be
+committed and re-pin, rather than merging a tip whose reported greens came from other bytes.
+
+## CodeGraph does not work from a worktree — its index is gitignored and never comes along
+
+Cycle 10. Every packet this cycle told its lane to prefer `codegraph explore` over grep. In a
+worktree that instruction is actively harmful: `.codegraph/` is untracked, so `git worktree add`
+does not bring it, and the CLI silently resolves some OTHER index instead of failing. Measured
+side by side on the same query:
+
+  primary tree      "validate_bid boundary" -> 48 symbols / 3 files, correctly naming
+                    packages/contracts/src/boundary.py:225 and its 11 callers
+  worktree (T-135)  same query -> 25 symbols / 1 file of PYDANTIC internals (validate_call,
+                    AnyCallableT, FORMAT_FUNCTIONS) — none of them this repo
+
+The T-135 lane caught it and fell back to direct reads; it reported foreign source from
+unrelated repositories. Any lane that did NOT notice acted on another codebase's symbols while
+believing it was reading its own. This is worse than an unavailable tool, because it answers.
+
+APPLY: in every worktree packet say — CodeGraph is available in the PRIMARY checkout only; from
+your worktree use `git grep` and direct reads, and if you run `codegraph explore` at all, verify
+the returned paths are inside your tree before believing a word of it. The orchestrator keeps
+CodeGraph for its own primary-tree work, where it is correct.
+
+## Pass --worktree-root at init, or `retire` reclaims nothing and `resume` sees no trees
+
+Cycle 10. `state.json` has NO `worktree_root` key — the run was initialised without the flag —
+so every tool that looks for the run's worktrees looks under the default
+`<repo>/.swarm-loop/worktrees`, which does not exist. The trees actually live beside the repo at
+`../proxyshop-worktrees`, which is the correct LOCATION; only the record of it is missing.
+
+Two measured consequences, both silent. `checkpoint` correctly warned that four landed worktrees
+were overdue for teardown, but `retire --dry-run` then reported **0 retired · 5 kept** and
+"worktree root size: unmeasured (no worktree root on disk)" — it could name the branches to
+delete but could not find a single tree to reclaim, so ~4 GB stayed on disk and the operator has
+to fall back to `git worktree remove` by hand. And a resumed session would report ZERO live
+worktrees no matter how many exist, then re-dispatch every in-flight ticket into a second set.
+
+APPLY: pass `--worktree-root ../<repo>-worktrees` at `init`. When inheriting a run that lacks it,
+say so in the handoff and in the cycle report — `state.json` is guard-protected against in-place
+rewrites, so it cannot simply be patched, and the gap silently survives every later session.
+
+## "Zero production callers": the discriminator is whether a FROZEN TEST already counts it
+
+Cycle 10 refuted seven findings whose whole content was "this landed symbol has no production
+caller", then minted two HIGH findings of apparently the same shape hours later. The ledger
+regeneration caught the contradiction. Adjudicated at ground truth, and the rule generalises:
+
+**An unwired half is scheduled work. It becomes a DEFECT the moment a frozen acceptance test
+counts it as satisfying a requirement.**
+
+Applied to the actual cases:
+- T-136/T-141/T-142/T-147/T-148/T-150 — no frozen test asserts any of them is wired, so "no
+  caller" means "the consumer is a scheduled ticket". REFUTED, correctly.
+- T-169 — the frozen S8-3 release blocker `test_offdomain_checkout_url_is_refused` PASSES, and
+  it passes by comparing the permalink host against `bid['store_domain']`, a BIDDER-CONTROLLED
+  field, because no registry is ever wired. A bidder that lies consistently (store_domain and
+  checkout_url both attacker.tld) defeats it, and the test cannot see that because it never
+  wires a registry. The metric therefore counts a security property as met that is not enforced.
+  NOT the zero-caller pattern. HIGH stands.
+- T-170 ("the accept package ships no routes.py") — checked: NO frozen test asserts an HTTP
+  accept endpoint (no TestClient in the acceptance suite), and T-052 owns
+  apps/merchant/svc/src/codes/**, not the exchange route. So this IS the zero-caller pattern.
+  DOWNGRADE from HIGH to a graph gap: no ticket in the 123-ticket graph owns
+  apps/exchange/src/accept/routes.py, which is worth recording precisely because nothing will
+  otherwise schedule it.
+
+APPLY: before accepting or refuting any "nothing calls this" finding, ask ONE question — does a
+frozen acceptance test currently pass because of this thing? If yes it is a measurement-
+credibility defect regardless of callers; if no it is unfinished work, and the answer is a
+schedule, not a ticket. Record which answer you got, so the next pass cannot re-litigate it.

@@ -2606,6 +2606,456 @@
       "defect": "A bid's stated price is not reconciled against its granted discount. The floor wall exists, but unit_price ~= list_price * (1 - pct) is NOT verified. A real Bid with an honest 20% grant and unit_price=1.00 under a 10.00 floor was admitted before the floor wall; the arithmetic relation is still unchecked because quantity/currency semantics for total_price are undecided. contracts.boundary.validate_bid does schema + provenance + expiry + eligibility but NO price/floor reconciliation, which is why this was invisible everywhere.",
       "finding_id": "3958348dc2ef784a4510d6bb464db93f8c0ba6441eb87a3d39c440463fa96462",
       "reproduction": "Construct a Bid whose unit_price does not follow from list_price and the granted discount pct; the boundary admits it."
+    },
+    {
+      "id": "T-154",
+      "title": "EVENTS_ROLE = \"app\", and its comment asserts app is 'the role the writer connects as... deliberately not trust_rw'. That statement is now false: compose, .env.example, proxyshop_support.postgres.ROLES and the T-151 fix all say the shipped ledger writer is trust_rw. Consequence: every DB-backed test in apps/trust exercises a database principal the deployment does not use, against a DIFFERENT grant set (app has SELECT+INSERT on ledger plus full DML on app and sealed; trust_rw has full DML on ledger, read-only on app, nothing in sealed). The suite's DB coverage is therefore evidence about the wrong role.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/_fixtures_events.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/trust/tests/_fixtures_events.py:42",
+      "defect": "EVENTS_ROLE = \"app\", and its comment asserts app is 'the role the writer connects as... deliberately not trust_rw'. That statement is now false: compose, .env.example, proxyshop_support.postgres.ROLES and the T-151 fix all say the shipped ledger writer is trust_rw. Consequence: every DB-backed test in apps/trust exercises a database principal the deployment does not use, against a DIFFERENT grant set (app has SELECT+INSERT on ledger plus full DML on app and sealed; trust_rw has full DML on ledger, read-only on app, nothing in sealed). The suite's DB coverage is therefore evidence about the wrong role.",
+      "finding_id": "8839686827cae7e2ae56604411c8f4576f80989c2b221ffcbfc9b7490d918da4",
+      "reproduction": "Read apps/trust/tests/_fixtures_events.py:42 and compare with proxyshop_support.postgres.ROLES and apps/trust/compose.yaml. Then run apps/trust tests and observe the connected principal is 'app' while the service ships as 'trust_rw'. Reported by the T-151 lane, which added the only test covering the real principal."
+    },
+    {
+      "id": "T-155",
+      "title": "MAX_SWEEP_DEPTH = 12 truncates the provenance walk SILENTLY. A priced node, a claim, or a discount nested 13+ levels deep in a dict-shaped bid is admitted having been inspected by nothing. This bypasses EVERY boundary wall \u2014 the claim provenance walk, the floor wall and the new price reconciliation alike \u2014 not merely the price checks, so it is strictly wider than the T-153 defect that surfaced it. Raising the bound does not fix it, and refusing everything past the bound would refuse an honestly deep metadata blob, which _sweep is explicitly written to tolerate. The bound's stated purpose is to stop a self-referential dict hanging the boundary, so the correct fix is CYCLE DETECTION replacing the depth bound.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "CRITICAL",
+      "location": "packages/store-agent/src/hooks/provenance.py:447",
+      "defect": "MAX_SWEEP_DEPTH = 12 truncates the provenance walk SILENTLY. A priced node, a claim, or a discount nested 13+ levels deep in a dict-shaped bid is admitted having been inspected by nothing. This bypasses EVERY boundary wall \u2014 the claim provenance walk, the floor wall and the new price reconciliation alike \u2014 not merely the price checks, so it is strictly wider than the T-153 defect that surfaced it. Raising the bound does not fix it, and refusing everything past the bound would refuse an honestly deep metadata blob, which _sweep is explicitly written to tolerate. The bound's stated purpose is to stop a self-referential dict hanging the boundary, so the correct fix is CYCLE DETECTION replacing the depth bound.",
+      "finding_id": "3c9909f89b365f202e71ce026fcee623d47318e6310222c579e8ed57055abcae",
+      "reproduction": "On the current tree, wrap {\"product_ref\": \"prod-cap\", \"unit_price\": 1.0} in 14 nested dicts and pass it through the boundary: the node is ADMITTED. Measured by the T-153 lane. Compare against the same node at depth < 12, which is collected and refused."
+    },
+    {
+      "id": "T-156",
+      "title": "offer.total_price is never reconciled against unit_price: an offer stating unit_price=80.0 with total_price=1.0 is admitted. Offer carries no quantity, and the quantity that would relate the two lives in apps/exchange/src/checkout/codes.py:111, so the relation is not decidable from a bid alone. The T-153 lane scoped this out explicitly and documented it in the refusal's docstring rather than leaving it silent. Closing it requires deciding where quantity enters the bid \u2014 a design question, not a bug fix.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py (_price_reconciliation_refusal)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/store-agent/src/hooks/provenance.py (_price_reconciliation_refusal)",
+      "defect": "offer.total_price is never reconciled against unit_price: an offer stating unit_price=80.0 with total_price=1.0 is admitted. Offer carries no quantity, and the quantity that would relate the two lives in apps/exchange/src/checkout/codes.py:111, so the relation is not decidable from a bid alone. The T-153 lane scoped this out explicitly and documented it in the refusal's docstring rather than leaving it silent. Closing it requires deciding where quantity enters the bid \u2014 a design question, not a bug fix.",
+      "finding_id": "1096f78cc52da904315c756c6858dceb18657a18d2bd083aa8afb36f3ae50686",
+      "reproduction": "Construct an Offer with unit_price=80.0 and total_price=1.0 and pass it through enforce_bid_provenance: admitted."
+    },
+    {
+      "id": "T-157",
+      "title": "An off-domain permalink from a delegating merchant client leaves a LIVE single-use discount code with no ledger record. The offer's checkout_url is checked BEFORE the mint, but an offer with NO url \u2014 the legal R10 list-price fallback shape that collect_bids manufactures \u2014 gives that check nothing to look at. The first failable host comparison is therefore the one on the permalink returned BY mint, i.e. AFTER POST /codes has already issued a real discount code. Measured on task/T-033: merchant invoked once, code PSX-REALCODE live, accept correctly returns no permalink and leaves the auction open, and NO code_created event exists for that code. Carrying the minted code out on OffDomainCheckout so the exchange can revoke it is T-036's file.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/checkout/provider.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/checkout/provider.py:209-222",
+      "defect": "An off-domain permalink from a delegating merchant client leaves a LIVE single-use discount code with no ledger record. The offer's checkout_url is checked BEFORE the mint, but an offer with NO url \u2014 the legal R10 list-price fallback shape that collect_bids manufactures \u2014 gives that check nothing to look at. The first failable host comparison is therefore the one on the permalink returned BY mint, i.e. AFTER POST /codes has already issued a real discount code. Measured on task/T-033: merchant invoked once, code PSX-REALCODE live, accept correctly returns no permalink and leaves the auction open, and NO code_created event exists for that code. Carrying the minted code out on OffDomainCheckout so the exchange can revoke it is T-036's file.",
+      "finding_id": "988147bfae9b113330152cf1b212e487cbd7a98a3dda948cce39c49211690469",
+      "reproduction": "See test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_record in apps/exchange/tests/test_accept.py on branch task/T-033."
+    },
+    {
+      "id": "T-158",
+      "title": "The one-accept-per-auction guard is only as durable as the record handed in. accept() stamps the auction OBJECT it receives. A route that loads an AuctionRecord from RedisAuctionStore, accepts, and does not save it back leaves an unstamped record for the next request; and two concurrent requests reading it can both pass the guard, because the check-then-act window spans the whole provider call including merchant I/O. The durable guard belongs on AuctionStateMachine's already-serialised ACCEPTED transition.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/accept/offer.py (module docstring) + AuctionStateMachine"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/accept/offer.py (module docstring) + AuctionStateMachine",
+      "defect": "The one-accept-per-auction guard is only as durable as the record handed in. accept() stamps the auction OBJECT it receives. A route that loads an AuctionRecord from RedisAuctionStore, accepts, and does not save it back leaves an unstamped record for the next request; and two concurrent requests reading it can both pass the guard, because the check-then-act window spans the whole provider call including merchant I/O. The durable guard belongs on AuctionStateMachine's already-serialised ACCEPTED transition.",
+      "finding_id": "6c6e8e16d09a3cae7e73a4d346f494655796680c216f345bb77062cc06fda633",
+      "reproduction": "Load an AuctionRecord from RedisAuctionStore, call accept(), discard the object without saving; the next accept on a freshly loaded record passes the guard and mints a second code."
+    },
+    {
+      "id": "T-159",
+      "title": "SYSTEMIC GATE-CREDIBILITY DEFECT: tests that swallow a missing subject with `except ImportError` are VACUOUS until the subject exists, and report green the whole time. test_checkout_provider.py:406 counted accept()'s no-default positionals but was wrapped so it tolerated accept not existing at all \u2014 it had therefore NEVER run for real until T-033 created the module, at which point it immediately went red. This is the third vacuous gate found in cycle 10 alone: red-check independently proved T-111's and T-123's gates EXIT 0 with their defects live. The class is 'a gate that cannot fail is indistinguishable from a gate that passes', and it is what let earlier waves report T-109/T-111/T-123 fixed when git says the files were never touched. Needs a repo-wide sweep for except-ImportError-tolerant tests and skip/xfail guards whose condition is permanently true.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/tests/test_checkout_provider.py:406 (and repo-wide)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/tests/test_checkout_provider.py:406 (and repo-wide)",
+      "defect": "SYSTEMIC GATE-CREDIBILITY DEFECT: tests that swallow a missing subject with `except ImportError` are VACUOUS until the subject exists, and report green the whole time. test_checkout_provider.py:406 counted accept()'s no-default positionals but was wrapped so it tolerated accept not existing at all \u2014 it had therefore NEVER run for real until T-033 created the module, at which point it immediately went red. This is the third vacuous gate found in cycle 10 alone: red-check independently proved T-111's and T-123's gates EXIT 0 with their defects live. The class is 'a gate that cannot fail is indistinguishable from a gate that passes', and it is what let earlier waves report T-109/T-111/T-123 fixed when git says the files were never touched. Needs a repo-wide sweep for except-ImportError-tolerant tests and skip/xfail guards whose condition is permanently true.",
+      "finding_id": "6f077a3bc3ab2f21765b33d17c8a1cb289e1c72e6e42f5235748fa1ed0f78dc6",
+      "reproduction": "git grep -n 'except ImportError' -- '*test*' and check each for an assertion that only runs when the import succeeds. Compare with the T-111/T-123 red-check output: 'VACUOUS \u2014 EXITS 0 with nothing implemented'."
+    },
+    {
+      "id": "T-160",
+      "title": "These three tickets' recorded `verify` commands pass IDENTICALLY with and without their defect, which is the precise mechanism by which all three were reported closed twice while the defects stayed live. red-check measured it this cycle: T-111's `./scripts/bootstrap.sh && ./scripts/verify.sh check` and T-123's `bootstrap.sh && pytest packages/llm && python -c 'import contracts, llm, trust'` both exit 0 with nothing implemented (3046 and 210 tests selected), and T-109's `pytest apps/trust -q && pytest proxyshop_support -q` was green on the parent commit. A ticket whose gate cannot distinguish the two states must not be closable on that gate. Companion to T-159 (except-ImportError vacuity) \u2014 same class, different mechanism. The lane has now written real gates; the graph's verify strings should be repaired to point at them.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "tickets.json (T-109, T-111, T-123 verify fields)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "tickets.json (T-109, T-111, T-123 verify fields)",
+      "defect": "These three tickets' recorded `verify` commands pass IDENTICALLY with and without their defect, which is the precise mechanism by which all three were reported closed twice while the defects stayed live. red-check measured it this cycle: T-111's `./scripts/bootstrap.sh && ./scripts/verify.sh check` and T-123's `bootstrap.sh && pytest packages/llm && python -c 'import contracts, llm, trust'` both exit 0 with nothing implemented (3046 and 210 tests selected), and T-109's `pytest apps/trust -q && pytest proxyshop_support -q` was green on the parent commit. A ticket whose gate cannot distinguish the two states must not be closable on that gate. Companion to T-159 (except-ImportError vacuity) \u2014 same class, different mechanism. The lane has now written real gates; the graph's verify strings should be repaired to point at them.",
+      "finding_id": "0569559a8a667e914fbc6bf39f46837c573642def982011bf2eeebc9a22dfe75",
+      "reproduction": "python3 <skill>/scripts/swarmloop.py red-check --ticket T-109,T-111,T-123 \u2014 reports VACUOUS for T-111 and T-123 and WEAK for T-109."
+    },
+    {
+      "id": "T-161",
+      "title": "A provenance block nested inside a hook-provenanced claim's opaque `value` is not walked. Measured: make_bid(claims=[{\"key\":\"x\",\"value\":{\"provenance\": seller_asserted}, \"provenance\": hook}]) returns hosted ok=True. _source_verdict reads holder[\"provenance\"] only. NOT fixed by the T-135 lane by deliberate choice: Claim.value is typed Any, and walking arbitrary values for provenance-shaped dicts would reject legitimate structured values. Speculative today (nothing downstream reads it) and closing it needs a schema decision about Claim.value.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/boundary.py:157 (_source_verdict)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/contracts/src/boundary.py:157 (_source_verdict)",
+      "defect": "A provenance block nested inside a hook-provenanced claim's opaque `value` is not walked. Measured: make_bid(claims=[{\"key\":\"x\",\"value\":{\"provenance\": seller_asserted}, \"provenance\": hook}]) returns hosted ok=True. _source_verdict reads holder[\"provenance\"] only. NOT fixed by the T-135 lane by deliberate choice: Claim.value is typed Any, and walking arbitrary values for provenance-shaped dicts would reject legitimate structured values. Speculative today (nothing downstream reads it) and closing it needs a schema decision about Claim.value.",
+      "finding_id": "e727bef2c0ccb13958b0bc304f248ebfc580edfb2743860d07f238c2e781ff85",
+      "reproduction": "make_bid(claims=[{\"key\":\"x\",\"value\":{\"provenance\": seller_asserted}, \"provenance\": hook}]) -> hosted ok=True"
+    },
+    {
+      "id": "T-162",
+      "title": "The boundary checks provenance SOURCE but never discount AUTHORISATION. make_bid(claims=[make_claim(\"policy\", {\"authorized_discount_pct\": 25.0}, hook_provenance)]) returns hosted ok=True. The boundary cannot do better on its own \u2014 it holds no hook ledger. The store-agent guard covers this for hosted Tier-1 (packages/store-agent/src/hooks/provenance.py:555) but there is NO equivalent for the external path, so an external submitter's stated discount authorisation is unchecked by anything.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/boundary.py (validate_bid) \u2014 external path"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/contracts/src/boundary.py (validate_bid) \u2014 external path",
+      "defect": "The boundary checks provenance SOURCE but never discount AUTHORISATION. make_bid(claims=[make_claim(\"policy\", {\"authorized_discount_pct\": 25.0}, hook_provenance)]) returns hosted ok=True. The boundary cannot do better on its own \u2014 it holds no hook ledger. The store-agent guard covers this for hosted Tier-1 (packages/store-agent/src/hooks/provenance.py:555) but there is NO equivalent for the external path, so an external submitter's stated discount authorisation is unchecked by anything.",
+      "finding_id": "490b1df94ad94951abda03b0b23e7489924b89d1bf01b45cd17a9f02affbcad5",
+      "reproduction": "Pass the payload above through validate_bid on the external path and observe ok=True with no authorisation check."
+    },
+    {
+      "id": "T-163",
+      "title": "T-133 item (c): SessionStore.open() validates only that the subject carries the 'psn-' PREFIX \u2014 it never checks vault membership. Any psn--prefixed string therefore opens a session, so the pseudonym is treated as a bearer credential whose format is its only proof. The T-139 lane deferred this deliberately and correctly: closing it requires threading a vault reference into SessionStore, which changes that seam's contract and touches MagicLinkAuth wiring plus every SessionStore subclass \u2014 more than the 'small and self-contained' scope it was given. It is the largest remaining R5 auth gap.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/auth/sessions.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/src/auth/sessions.py:170",
+      "defect": "T-133 item (c): SessionStore.open() validates only that the subject carries the 'psn-' PREFIX \u2014 it never checks vault membership. Any psn--prefixed string therefore opens a session, so the pseudonym is treated as a bearer credential whose format is its only proof. The T-139 lane deferred this deliberately and correctly: closing it requires threading a vault reference into SessionStore, which changes that seam's contract and touches MagicLinkAuth wiring plus every SessionStore subclass \u2014 more than the 'small and self-contained' scope it was given. It is the largest remaining R5 auth gap.",
+      "finding_id": "b0b80d2fb935cc33fe4e4c8cf9a77c78161338d1a6f47a10b3fc8826ffe8c045",
+      "reproduction": "Call SessionStore.open() with an arbitrary string beginning 'psn-' that the vault never issued; a session opens."
+    },
+    {
+      "id": "T-164",
+      "title": "build_buckets() and anonymise_cohort() are public and run NO identity-leak check; only build_profile()/build_profiles() do. Harmless at HEAD because every publishing path goes through build_profile and publish_profile only accepts a BuyerProfile \u2014 but it is a live trap for the next lane: T-142 wires publish_profile, and if it sources buckets from build_buckets instead of build_profile it bypasses the backstop entirely. Either run the check inside build_buckets or make the unguarded entry points private.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/profile/__init__.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/buyer/svc/src/profile/__init__.py:687",
+      "defect": "build_buckets() and anonymise_cohort() are public and run NO identity-leak check; only build_profile()/build_profiles() do. Harmless at HEAD because every publishing path goes through build_profile and publish_profile only accepts a BuyerProfile \u2014 but it is a live trap for the next lane: T-142 wires publish_profile, and if it sources buckets from build_buckets instead of build_profile it bypasses the backstop entirely. Either run the check inside build_buckets or make the unguarded entry points private.",
+      "finding_id": "ea39753b7bc41f8025971c9793d6b8932709715e6214f60d495a22572d6a10db",
+      "reproduction": "Call build_buckets() directly on the Dana account fixture: buckets are returned with no IdentityLeak raised."
+    },
+    {
+      "id": "T-165",
+      "title": "No rate limiter on the unauthenticated magic-link endpoint, and the session/pending-link store behind it is process-local (ProcessLocalStateUnsafe), so state is neither shared across replicas nor durable. T-133 item (b) bounded the session table (sweep expired, then refuse with SessionsExhausted at max_sessions=50000, refuse-don't-evict) which closes the unbounded-growth half, but the request-rate half needs shared infrastructure plus a migration and is correctly outside a buyer-scoped lane.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/auth/routes.py (POST /buyer/auth/magic-link) + routes.py:57 ProcessLocalStateUnsafe"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/buyer/svc/src/auth/routes.py (POST /buyer/auth/magic-link) + routes.py:57 ProcessLocalStateUnsafe",
+      "defect": "No rate limiter on the unauthenticated magic-link endpoint, and the session/pending-link store behind it is process-local (ProcessLocalStateUnsafe), so state is neither shared across replicas nor durable. T-133 item (b) bounded the session table (sweep expired, then refuse with SessionsExhausted at max_sessions=50000, refuse-don't-evict) which closes the unbounded-growth half, but the request-rate half needs shared infrastructure plus a migration and is correctly outside a buyer-scoped lane.",
+      "finding_id": "729ef7fc5a9ff9d82c14406ddb2395b3028b714fa68463503386194f2bc886f4",
+      "reproduction": "Issue unlimited POSTs to /buyer/auth/magic-link; nothing throttles them. Inspect routes.py:57 for the process-local marker."
+    },
+    {
+      "id": "T-166",
+      "title": "test_replay_with_snapshots_names_the_missing_scorer branches on `if response.status_code == 503`. Now that T-062 has landed a real scorer it ALWAYS takes the 200 branch, so the 503 half is dead code that can never execute \u2014 a conditional test that silently stopped covering the case it was written for. Same vacuity class as T-159/T-160. It is @pytest.mark.docker (deselected by `verify.sh check`); the T-062 lane confirmed the 200 branch is satisfied and left it alone as T-060's file.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_events.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/tests/test_events.py:1159",
+      "defect": "test_replay_with_snapshots_names_the_missing_scorer branches on `if response.status_code == 503`. Now that T-062 has landed a real scorer it ALWAYS takes the 200 branch, so the 503 half is dead code that can never execute \u2014 a conditional test that silently stopped covering the case it was written for. Same vacuity class as T-159/T-160. It is @pytest.mark.docker (deselected by `verify.sh check`); the T-062 lane confirmed the 200 branch is satisfied and left it alone as T-060's file.",
+      "finding_id": "4a5767fb021b228f055588bfb58e4879798b0418169f265ba748abd285bdaeff",
+      "reproduction": "Run apps/trust/tests/test_events.py::test_replay_with_snapshots_names_the_missing_scorer with the T-062 scoring package present and observe the 503 branch is never taken."
+    },
+    {
+      "id": "T-167",
+      "title": "Four BYTE-IDENTICAL copies of the elected-primary module-binding shim (md5 56d63d33...), one per E6 feature package, because the sequencing must run before the first relative import and there is no shared home inside one ticket's ownership. Nothing enforces that they stay identical, so a fix applied to one copy and not the others reintroduces the dual-spelling module-identity bug the shim exists to prevent \u2014 a bug this project already paid for once (5/5 runs reproduced it). A future ticket owning apps/trust/src/ should hoist it to a single module.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/src/{scoring,reconcile,feedback,snapshot}/_binding.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/src/{scoring,reconcile,feedback,snapshot}/_binding.py",
+      "defect": "Four BYTE-IDENTICAL copies of the elected-primary module-binding shim (md5 56d63d33...), one per E6 feature package, because the sequencing must run before the first relative import and there is no shared home inside one ticket's ownership. Nothing enforces that they stay identical, so a fix applied to one copy and not the others reintroduces the dual-spelling module-identity bug the shim exists to prevent \u2014 a bug this project already paid for once (5/5 runs reproduced it). A future ticket owning apps/trust/src/ should hoist it to a single module.",
+      "finding_id": "f9e821b8355be85f89705a49ddabfa01c508b1570889d34e96ade65728f40033",
+      "reproduction": "md5 apps/trust/src/*/_binding.py \u2014 four identical digests, four separate files, no test asserting they agree."
+    },
+    {
+      "id": "T-168",
+      "title": "CROSS-TICKET SCHEDULING CONSTRAINT, not a defect in the landed code. The `bid_placed` event COUNT is load-bearing in two frozen places at once: T-082 pins an exact per-kind multiset (bid_placed == n_stores_solicited) and T-086 proves shadow mode by the ABSENCE of any bid_placed, while D24 forbids a nineteenth event kind. T-031 resolved this by making annotate_bid_payload() the primary path (it merges fit into the bid's own payload and emits NOTHING) and documenting record_fit_scores() as BEING the bid receipt rather than a second producer. THE CONSTRAINT: when T-030 starts emitting real bid receipts, that call site must switch to the annotate path, or T-082 and T-086 both break simultaneously.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/retrieval/ (record_fit_scores / annotate_bid_payload) + T-030"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/retrieval/ (record_fit_scores / annotate_bid_payload) + T-030",
+      "defect": "CROSS-TICKET SCHEDULING CONSTRAINT, not a defect in the landed code. The `bid_placed` event COUNT is load-bearing in two frozen places at once: T-082 pins an exact per-kind multiset (bid_placed == n_stores_solicited) and T-086 proves shadow mode by the ABSENCE of any bid_placed, while D24 forbids a nineteenth event kind. T-031 resolved this by making annotate_bid_payload() the primary path (it merges fit into the bid's own payload and emits NOTHING) and documenting record_fit_scores() as BEING the bid receipt rather than a second producer. THE CONSTRAINT: when T-030 starts emitting real bid receipts, that call site must switch to the annotate path, or T-082 and T-086 both break simultaneously.",
+      "finding_id": "9cdac94772958acc299322a2fb3d0d76392418b25160cf4e20de466ecc0fdad7",
+      "reproduction": "Add a real bid_placed producer alongside record_fit_scores and run the T-082 and T-086 acceptance tests: both fail, one on doubled counts and one on shadow-mode absence."
+    },
+    {
+      "id": "T-169",
+      "title": "T-033's registered-domain guard is DECORATIVE in the deployed configuration. `_platform_domains` is module state initialised to None and NOTHING in the repository calls `use_registered_domains`, so under `uvicorn exchange.main:app` the resolution yields None, CheckoutRequest(registered_domains=None) is built, and registered_domain_for falls back to `bid['store_domain']` \u2014 a field the bidder controls. The frozen S8-3 blocker test_offdomain_checkout_url_is_refused therefore PASSES on that decorative comparison, which means spec_criteria_passing counts a decorative pass toward its target. Worse, the package's own wiring docstring tells an integrator to wire `apps.exchange.src.accept`, while the served app reads `exchange.accept` \u2014 measured as the SAME FILE (equal inode) but DIFFERENT module objects, so wiring one spelling leaves the other completely unwired and an accept through the unwired spelling mints a real single-use discount code for a host the platform never registered. apps/trust/src/ledger/__init__.py and packages/store-agent/src/hooks/__init__.py both already implement _install_canonical_alias() for exactly this hazard; the accept package skipped that convention.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/accept/offer.py:94,:328 + apps/exchange/src/accept/__init__.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/accept/offer.py:94,:328 + apps/exchange/src/accept/__init__.py:17-21",
+      "defect": "T-033's registered-domain guard is DECORATIVE in the deployed configuration. `_platform_domains` is module state initialised to None and NOTHING in the repository calls `use_registered_domains`, so under `uvicorn exchange.main:app` the resolution yields None, CheckoutRequest(registered_domains=None) is built, and registered_domain_for falls back to `bid['store_domain']` \u2014 a field the bidder controls. The frozen S8-3 blocker test_offdomain_checkout_url_is_refused therefore PASSES on that decorative comparison, which means spec_criteria_passing counts a decorative pass toward its target. Worse, the package's own wiring docstring tells an integrator to wire `apps.exchange.src.accept`, while the served app reads `exchange.accept` \u2014 measured as the SAME FILE (equal inode) but DIFFERENT module objects, so wiring one spelling leaves the other completely unwired and an accept through the unwired spelling mints a real single-use discount code for a host the platform never registered. apps/trust/src/ledger/__init__.py and packages/store-agent/src/hooks/__init__.py both already implement _install_canonical_alias() for exactly this hazard; the accept package skipped that convention.",
+      "finding_id": "81bee586b58b96156b0f597f23a90959d65078e6365d118e37e1816369a97ed1",
+      "reproduction": "Boot exchange.main:app; print exchange.accept.offer._platform_domains -> None. Then: import apps.exchange.src.accept as A, exchange.accept as B; os.path.realpath equal and st_ino equal, but (A is B) is False and (A.accept is B.accept) is False; checkout.registry._REGISTRY are two distinct dicts. git grep use_registered_domains outside tests returns only its own definition."
+    },
+    {
+      "id": "T-170",
+      "title": "T-033's objective opens 'Accept endpoint resolves a CheckoutProvider by CHECKOUT_MODE...', but the accept package ships NO routes.py. main.py discovers routers by globbing <feature>/routes.py, so the booted app mounts only exchange.auction.routes and the exchange OpenAPI exposes exactly ['/auctions','/auctions/{auction_id}']. There is no HTTP path by which a buyer's accept can reach accept() or accept_offer(). The accept half is complete, tested and lint-enforced, but has no production consumer and no wiring \u2014 so no deployed path is protected by any of it.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/accept/ (no routes.py) vs apps/exchange/src/main.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/accept/ (no routes.py) vs apps/exchange/src/main.py:29-31",
+      "defect": "T-033's objective opens 'Accept endpoint resolves a CheckoutProvider by CHECKOUT_MODE...', but the accept package ships NO routes.py. main.py discovers routers by globbing <feature>/routes.py, so the booted app mounts only exchange.auction.routes and the exchange OpenAPI exposes exactly ['/auctions','/auctions/{auction_id}']. There is no HTTP path by which a buyer's accept can reach accept() or accept_offer(). The accept half is complete, tested and lint-enforced, but has no production consumer and no wiring \u2014 so no deployed path is protected by any of it.",
+      "finding_id": "58c4034d3e4e6a7a277532fb157b153053f70375e7e4d6a803d8aa002eeac880",
+      "reproduction": "Boot the exchange app and read its OpenAPI paths: ['/auctions','/auctions/{auction_id}'] only. ls apps/exchange/src/accept/ shows __init__.py, offer.py, gate.py and no routes.py."
+    },
+    {
+      "id": "T-171",
+      "title": "The D37 Neo4j lock is MACHINE-GLOBAL (/private/tmp/proxyshop-neo4j.lock) and PROXYSHOP_WORKER does not isolate it, so it is shared across every worktree and every concurrent lane. Its own 600s wait is UNREACHABLE by construction because the repo-wide addopts carry --timeout=300: under contention the session-scoped _neo4j_guard fixture dies inside time.sleep(poll) with 'Failed: Timeout (>300.0s) from pytest-timeout' instead of the diagnosable Neo4jLockTimeout the module exists to raise. This is a swarm-scale hazard: it turns lock contention into an undiagnosable red that looks like a product failure.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "proxyshop_support/neo4j_lock.py:79,119-131 + pyproject.toml:71 + conftest.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "proxyshop_support/neo4j_lock.py:79,119-131 + pyproject.toml:71 + conftest.py:310-314",
+      "defect": "The D37 Neo4j lock is MACHINE-GLOBAL (/private/tmp/proxyshop-neo4j.lock) and PROXYSHOP_WORKER does not isolate it, so it is shared across every worktree and every concurrent lane. Its own 600s wait is UNREACHABLE by construction because the repo-wide addopts carry --timeout=300: under contention the session-scoped _neo4j_guard fixture dies inside time.sleep(poll) with 'Failed: Timeout (>300.0s) from pytest-timeout' instead of the diagnosable Neo4jLockTimeout the module exists to raise. This is a swarm-scale hazard: it turns lock contention into an undiagnosable red that looks like a product failure.",
+      "finding_id": "9ffe9d38379dbaccb9789e7bae8f998197390464911966c3a06fe5adba9c25e8",
+      "reproduction": "Run two pytest sessions that both need Neo4j from different worktrees; the loser dies on pytest-timeout at 300s rather than reaching the lock's own 600s Neo4jLockTimeout."
+    },
+    {
+      "id": "T-172",
+      "title": "T-109's per-service inference has an 8-item hole and every item in it is a Postgres-only test that a Redis-only outage still silently skips at exit 0 \u2014 i.e. the pre-T-109 defect survives for exactly these. services_for reads a marker argument first, else the fixture closure against a fixed 7-entry FIXTURE_SERVICES map; a test with a bare @pytest.mark.docker that requests none of those 7 fixtures falls back to the whole stack. The tests that spin their OWN fresh-volume Postgres container use no shared fixture and so land in the fallback. FIVE of the eight are the schema-grants/role-password security tests in apps/trust/tests/test_schema_grants.py and proxyshop_support/tests/test_role_password_end_to_end.py \u2014 the same class of security check whose silent skipping the ticket was written to stop. One instance was reintroduced by this very merge: apps/trust/tests/test_events_hardening.py:146 (T-151's own new test) points at a CLOSED loopback port and needs no datastore at all, yet is classified whole-stack.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "proxyshop_support/service_markers.py:78-85 (whole-stack fallback)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "proxyshop_support/service_markers.py:78-85 (whole-stack fallback)",
+      "defect": "T-109's per-service inference has an 8-item hole and every item in it is a Postgres-only test that a Redis-only outage still silently skips at exit 0 \u2014 i.e. the pre-T-109 defect survives for exactly these. services_for reads a marker argument first, else the fixture closure against a fixed 7-entry FIXTURE_SERVICES map; a test with a bare @pytest.mark.docker that requests none of those 7 fixtures falls back to the whole stack. The tests that spin their OWN fresh-volume Postgres container use no shared fixture and so land in the fallback. FIVE of the eight are the schema-grants/role-password security tests in apps/trust/tests/test_schema_grants.py and proxyshop_support/tests/test_role_password_end_to_end.py \u2014 the same class of security check whose silent skipping the ticket was written to stop. One instance was reintroduced by this very merge: apps/trust/tests/test_events_hardening.py:146 (T-151's own new test) points at a CLOSED loopback port and needs no datastore at all, yet is classified whole-stack.",
+      "finding_id": "5f32b05f5654ed2a6c15dfc7ae58fe962446b164d22ccd2f11cbdd91f773847e",
+      "reproduction": "With Redis down, run -m docker and observe the 8 items skip at exit 0: 5 in test_schema_grants.py, 2 in test_role_password_end_to_end.py, 1 at test_events_hardening.py:146."
+    },
+    {
+      "id": "T-173",
+      "title": "A REMOVED LINE IN THIS BATCH TURNED A LOUD FAILURE INTO A SILENT FAIL-OPEN, and the per-branch removed-lines audit cleared it as benign. The batch replaced `list_price = float(listing.get(\"list_price\") or 0.0)` with `list_price = self.list_price(product_ref) or 0.0`. The new list_price() swallows TypeError/ValueError and returns None for a catalog entry whose list_price is not a number; the `or 0.0` at the call site then coerces that None into a real number. So a malformed catalog entry that previously raised now silently prices at 0.0 inside the discount evaluator \u2014 the exact class of defect T-153 was created to close, relocated into the code that closes it. Only visible on the combined diff, which is why rung 2 exists.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/tools.py:687 (_evaluate_discount) + tools.py:582-604 (new ToolHooks.list_price)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/store-agent/src/hooks/tools.py:687 (_evaluate_discount) + tools.py:582-604 (new ToolHooks.list_price)",
+      "defect": "A REMOVED LINE IN THIS BATCH TURNED A LOUD FAILURE INTO A SILENT FAIL-OPEN, and the per-branch removed-lines audit cleared it as benign. The batch replaced `list_price = float(listing.get(\"list_price\") or 0.0)` with `list_price = self.list_price(product_ref) or 0.0`. The new list_price() swallows TypeError/ValueError and returns None for a catalog entry whose list_price is not a number; the `or 0.0` at the call site then coerces that None into a real number. So a malformed catalog entry that previously raised now silently prices at 0.0 inside the discount evaluator \u2014 the exact class of defect T-153 was created to close, relocated into the code that closes it. Only visible on the combined diff, which is why rung 2 exists.",
+      "finding_id": "a599295cc2966fbfd9b4b4cc14076aa55ed3988b6802c6a039e188cb0c6840f6",
+      "reproduction": "Give a catalog entry a non-numeric list_price (e.g. \"n/a\") and call ToolHooks._evaluate_discount for that product: pre-batch it raised; post-batch list_price resolves to 0.0 and evaluation proceeds."
+    },
+    {
+      "id": "T-174",
+      "title": "test_the_flat_namespaces_survive_a_pytest_run runs `chflags -R hidden` on the checkout's REAL shared .venv/lib/python3.12/site-packages \u2014 the one piece of state PROXYSHOP_WORKER cannot isolate \u2014 then runs a nested pytest with a 600s timeout before restoring it in a finally. For that entire window every other Python process starting in this checkout loses the .pkgroot namespaces and fails with ModuleNotFoundError. That breaks any concurrently running service, `make demo-seed`, a sibling lane, OR A METRIC MEASUREMENT. This is a live hazard to the swarm and to the frozen build_succeeds metric, which has already recorded four false zeros in six cycles.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "proxyshop_support/tests/test_bootstrap_provisioning.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "proxyshop_support/tests/test_bootstrap_provisioning.py:211-265",
+      "defect": "test_the_flat_namespaces_survive_a_pytest_run runs `chflags -R hidden` on the checkout's REAL shared .venv/lib/python3.12/site-packages \u2014 the one piece of state PROXYSHOP_WORKER cannot isolate \u2014 then runs a nested pytest with a 600s timeout before restoring it in a finally. For that entire window every other Python process starting in this checkout loses the .pkgroot namespaces and fails with ModuleNotFoundError. That breaks any concurrently running service, `make demo-seed`, a sibling lane, OR A METRIC MEASUREMENT. This is a live hazard to the swarm and to the frozen build_succeeds metric, which has already recorded four false zeros in six cycles.",
+      "finding_id": "c17897f23827e850cc14f5aad0c15527c795ca6432eea46c7a212b7a889ec9d6",
+      "reproduction": "Run that test and, during its window, start any `python -c 'import exchange'` in the checkout: ModuleNotFoundError."
+    },
+    {
+      "id": "T-175",
+      "title": "Neither the new price-reconciliation wall nor the pre-existing floor wall looks at Offer.total_price (PRICE_FIELD == 'unit_price'), so a bid can state a fully honest unit_price and an arbitrary total_price and be admitted \u2014 the same unauthorised-discount shape T-153 closed, moved one field over. DESIGN.md:127 specifies the ranking price dimension as a function of total_price, and the C11 accepted-event payload records total_price verbatim, so a downstream consumer can treat an unreconciled number as authoritative. Companion to T-156 with the design citation attached.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py:830-834 vs DESIGN.md"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/store-agent/src/hooks/provenance.py:830-834 vs DESIGN.md:127",
+      "defect": "Neither the new price-reconciliation wall nor the pre-existing floor wall looks at Offer.total_price (PRICE_FIELD == 'unit_price'), so a bid can state a fully honest unit_price and an arbitrary total_price and be admitted \u2014 the same unauthorised-discount shape T-153 closed, moved one field over. DESIGN.md:127 specifies the ranking price dimension as a function of total_price, and the C11 accepted-event payload records total_price verbatim, so a downstream consumer can treat an unreconciled number as authoritative. Companion to T-156 with the design citation attached.",
+      "finding_id": "70d2208a3364796f11379d3969a8f84bb4520b51e1014b76de0b7944cfa14bfc",
+      "reproduction": "Construct an Offer with an honest unit_price and total_price=1.0; it is admitted by both walls."
+    },
+    {
+      "id": "T-176",
+      "title": "ORCHESTRATOR ADJUDICATION of the T-169/T-170 vs refuted-zero-callers contradiction, recorded so it cannot be re-litigated. NO ticket in the 123-ticket graph owns an accept HTTP route: T-033's scope is apps/exchange/src/accept/** but its frozen tests grade the LIBRARY (accept() called directly, no TestClient anywhere in the acceptance suite), and T-052's scope is apps/merchant/svc/src/codes/** \u2014 the Shopify adapter, not the exchange route. So T-170 is DOWNGRADED from HIGH to this graph gap: it is the ordinary zero-caller pattern (unfinished work awaiting a schedule), not a defect. T-169 is NOT downgraded and stands as HIGH, because it fails the discriminator: the frozen S8-3 release blocker PASSES today by comparing the permalink host against bid['store_domain'], a BIDDER-CONTROLLED field, since no registry is ever wired \u2014 so spec_criteria_passing counts a security property as met that a consistently-lying bidder defeats. The rule: an unwired half is scheduled work; it becomes a defect the moment a frozen test counts it as satisfying a requirement.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "tickets.json (graph gap) \u2014 apps/exchange/src/accept/routes.py, owned by no ticket"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "tickets.json (graph gap) \u2014 apps/exchange/src/accept/routes.py, owned by no ticket",
+      "defect": "ORCHESTRATOR ADJUDICATION of the T-169/T-170 vs refuted-zero-callers contradiction, recorded so it cannot be re-litigated. NO ticket in the 123-ticket graph owns an accept HTTP route: T-033's scope is apps/exchange/src/accept/** but its frozen tests grade the LIBRARY (accept() called directly, no TestClient anywhere in the acceptance suite), and T-052's scope is apps/merchant/svc/src/codes/** \u2014 the Shopify adapter, not the exchange route. So T-170 is DOWNGRADED from HIGH to this graph gap: it is the ordinary zero-caller pattern (unfinished work awaiting a schedule), not a defect. T-169 is NOT downgraded and stands as HIGH, because it fails the discriminator: the frozen S8-3 release blocker PASSES today by comparing the permalink host against bid['store_domain'], a BIDDER-CONTROLLED field, since no registry is ever wired \u2014 so spec_criteria_passing counts a security property as met that a consistently-lying bidder defeats. The rule: an unwired half is scheduled work; it becomes a defect the moment a frozen test counts it as satisfying a requirement.",
+      "finding_id": "bd450d38bc4ceab711f4df2d31e608fc317f0010caf02cf1c2a174b5bf68da12",
+      "reproduction": "git grep -n 'TestClient' .swarm-loop/acceptance/ returns nothing; sed -n '1079,1090p' .swarm-loop/acceptance/test_spec_criteria.py shows the blocker importing accept() and calling it directly; tickets.json T-052 scope is apps/merchant/svc/src/codes/**."
+    },
+    {
+      "id": "T-177",
+      "title": "T-153'S WALL IS ON THE WRONG DOOR AND THE ORIGINAL ATTACK STILL WORKS END TO END. Measured by the sabotage lens against the CLEAN tree, through the real dual-path bid door the acceptance harness uses: a hosted bid carrying a genuine hook-minted 20% grant, declaring 20%, charging 15.00 on a product listed at 100.00 -> validate_bid returns ok=True, reasons=[]. The price reconciliation lives only in the store-agent's enforce_bid_provenance, which is the EMITTING side; contracts.boundary \u2014 the VALIDATING side, and the only boundary the exchange can run \u2014 contains no reference to enforce_bid_provenance, list_price or reconciliation at all. So the wall protects only bids produced by our own runtime, and a store that does not run our runtime bypasses it entirely. Corroborated: the S1d witness counted 49 lines in a store-agent-only run and 49 in the full-suite run, identical, so nothing outside packages/store-agent/tests exercises that code. NOTE T-041 (accepted this cycle, not yet merged) adds the first production caller on the emitting side; it does NOT close this, because the validating side is untouched.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/boundary.py (validate_bid) vs packages/store-agent/src/hooks/provenance.py (_price_reconciliation_refusal)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "CRITICAL",
+      "location": "packages/contracts/src/boundary.py (validate_bid) vs packages/store-agent/src/hooks/provenance.py (_price_reconciliation_refusal)",
+      "defect": "T-153'S WALL IS ON THE WRONG DOOR AND THE ORIGINAL ATTACK STILL WORKS END TO END. Measured by the sabotage lens against the CLEAN tree, through the real dual-path bid door the acceptance harness uses: a hosted bid carrying a genuine hook-minted 20% grant, declaring 20%, charging 15.00 on a product listed at 100.00 -> validate_bid returns ok=True, reasons=[]. The price reconciliation lives only in the store-agent's enforce_bid_provenance, which is the EMITTING side; contracts.boundary \u2014 the VALIDATING side, and the only boundary the exchange can run \u2014 contains no reference to enforce_bid_provenance, list_price or reconciliation at all. So the wall protects only bids produced by our own runtime, and a store that does not run our runtime bypasses it entirely. Corroborated: the S1d witness counted 49 lines in a store-agent-only run and 49 in the full-suite run, identical, so nothing outside packages/store-agent/tests exercises that code. NOTE T-041 (accepted this cycle, not yet merged) adds the first production caller on the emitting side; it does NOT close this, because the validating side is untouched.",
+      "finding_id": "82d6390836d2429be9f0f1a87600f7c1659379fbef843f82a417fa38009ad030",
+      "reproduction": "On clean main: build a hosted bid with a real 20% grant, declared 20%, unit_price 15.00 against list_price 100.00; call contracts.boundary.validate_bid(bid, path='hosted') -> ok=True, reasons=[]. Compare with enforce_bid_provenance on the same bid -> refused."
+    },
+    {
+      "id": "T-178",
+      "title": "BID-WIDE PRICE RECONCILIATION PASSES A FULL GREEN SUITE. Sabotage S1d replaced the per-offer lookup `declared.get(node, 0.0)` with `max(declared.values(), default=0.0)` \u2014 i.e. one grant licenses every priced node in the bid \u2014 and NOTHING CAUGHT IT: package 111 passed, full suite 3368 passed, 1 skipped, with a 49-line witness proving the mutated bytecode executed. Measured escape: one 20% grant, `.offer` at 80.00 declaring 20%, `.bundled` at 80.00 declaring NOTHING -> sabotaged ADMITTED, clean REFUSED. The test written to catch exactly this is vacuous against it because its `.bundled` is priced at 40.00, which bid-wide reconciliation refuses anyway. THE FIX IS ONE LITERAL: change that 40.0 to 80.0 and the test catches S1d.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py (_discount_refusal, declared.get(node)) + packages/store-agent/tests/test_price_reconciliation.py::test_the_price_is_reconciled_where_the_offer_is_rather_than_bid_wide"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/store-agent/src/hooks/provenance.py (_discount_refusal, declared.get(node)) + packages/store-agent/tests/test_price_reconciliation.py::test_the_price_is_reconciled_where_the_offer_is_rather_than_bid_wide",
+      "defect": "BID-WIDE PRICE RECONCILIATION PASSES A FULL GREEN SUITE. Sabotage S1d replaced the per-offer lookup `declared.get(node, 0.0)` with `max(declared.values(), default=0.0)` \u2014 i.e. one grant licenses every priced node in the bid \u2014 and NOTHING CAUGHT IT: package 111 passed, full suite 3368 passed, 1 skipped, with a 49-line witness proving the mutated bytecode executed. Measured escape: one 20% grant, `.offer` at 80.00 declaring 20%, `.bundled` at 80.00 declaring NOTHING -> sabotaged ADMITTED, clean REFUSED. The test written to catch exactly this is vacuous against it because its `.bundled` is priced at 40.00, which bid-wide reconciliation refuses anyway. THE FIX IS ONE LITERAL: change that 40.0 to 80.0 and the test catches S1d.",
+      "finding_id": "6a1ecb79d7f29b5d652f22ea9378352a9fec052fa634d5c2f540dfe8fde308dc",
+      "reproduction": "Apply max(declared.values(), default=0.0) in place of declared.get(node, 0.0); run the full suite -> green. Then build the two-offer bid above: admitted."
+    },
+    {
+      "id": "T-179",
+      "title": "THE RECONCILIATION TOLERANCE IS UNDEFENDED BELOW 0.50, AND THE TEST THAT CLAIMS TO DEFEND IT DOES NOT. Bisected by sabotage: tolerance 1.00 -> 1 red; 0.50 -> 1 red; 0.49 and 0.25 -> ENTIRELY GREEN, full suite 3368 passed with a 45-line execution witness. So a 49-cent-per-unit unauthorised discount passes unnoticed. Worse, test_a_cent_of_currency_rounding_is_not_an_unauthorised_discount \u2014 written specifically to assert 'a dollar is not rounding' \u2014 SURVIVES tolerance=1.00 by 0.0015 (15.99 + 1.00 = 16.99 against an honest 16.9915). It does not defend the property its own docstring claims. The suite's tightest refusal is a 0.50 gap (79.5 vs 80.0), which is the sole load-bearing value.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py PRICE_RECONCILIATION_TOLERANCE + tests/test_price_reconciliation.py::test_a_cent_of_currency_rounding_is_not_an_unauthorised_discount"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/store-agent/src/hooks/provenance.py PRICE_RECONCILIATION_TOLERANCE + tests/test_price_reconciliation.py::test_a_cent_of_currency_rounding_is_not_an_unauthorised_discount",
+      "defect": "THE RECONCILIATION TOLERANCE IS UNDEFENDED BELOW 0.50, AND THE TEST THAT CLAIMS TO DEFEND IT DOES NOT. Bisected by sabotage: tolerance 1.00 -> 1 red; 0.50 -> 1 red; 0.49 and 0.25 -> ENTIRELY GREEN, full suite 3368 passed with a 45-line execution witness. So a 49-cent-per-unit unauthorised discount passes unnoticed. Worse, test_a_cent_of_currency_rounding_is_not_an_unauthorised_discount \u2014 written specifically to assert 'a dollar is not rounding' \u2014 SURVIVES tolerance=1.00 by 0.0015 (15.99 + 1.00 = 16.99 against an honest 16.9915). It does not defend the property its own docstring claims. The suite's tightest refusal is a 0.50 gap (79.5 vs 80.0), which is the sole load-bearing value.",
+      "finding_id": "29804e26202ef83ef736f5c1421a9844ff349f112c834881f9dcfaa50388a628",
+      "reproduction": "Set PRICE_RECONCILIATION_TOLERANCE = 0.49 and run the full suite: 3368 passed. Then price a unit 0.49 under its honest price: admitted."
+    },
+    {
+      "id": "T-180",
+      "title": "A DROPPED FIXTURE_SERVICES ENTRY SILENTLY REINTRODUCES THE T-109 DEFECT. Sabotage S4c removed one entry ('worker_database': 'postgres') and NOTHING CAUGHT IT \u2014 proxyshop_support 96 passed, full suite 3368 passed. Consequence measured with a throwaway probe marked bare @pytest.mark.docker requesting only worker_database, with REDIS_URL at a closed port: clean tree -> 1 passed; sabotaged -> 1 SKIPPED ('redis not reachable'). That is precisely the all-or-nothing defect T-109 was written to remove, restored for one fixture, invisible to the suite. Only 4 of the 7 map entries are pinned by any test (pg_role, pg_admin, neo4j_session, redis_client); worker_database, _neo4j_guard and neo4j_driver are unpinned, and nothing ties the map to conftest's actual datastore fixtures. Needs a completeness check asserting the map covers every datastore fixture conftest defines.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "proxyshop_support/service_markers.py FIXTURE_SERVICES map"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "proxyshop_support/service_markers.py FIXTURE_SERVICES map",
+      "defect": "A DROPPED FIXTURE_SERVICES ENTRY SILENTLY REINTRODUCES THE T-109 DEFECT. Sabotage S4c removed one entry ('worker_database': 'postgres') and NOTHING CAUGHT IT \u2014 proxyshop_support 96 passed, full suite 3368 passed. Consequence measured with a throwaway probe marked bare @pytest.mark.docker requesting only worker_database, with REDIS_URL at a closed port: clean tree -> 1 passed; sabotaged -> 1 SKIPPED ('redis not reachable'). That is precisely the all-or-nothing defect T-109 was written to remove, restored for one fixture, invisible to the suite. Only 4 of the 7 map entries are pinned by any test (pg_role, pg_admin, neo4j_session, redis_client); worker_database, _neo4j_guard and neo4j_driver are unpinned, and nothing ties the map to conftest's actual datastore fixtures. Needs a completeness check asserting the map covers every datastore fixture conftest defines.",
+      "finding_id": "ccf6ee8f0617b85a44e61ea1b1c652dbb2551014d3be0ac3f72d5ca306322473",
+      "reproduction": "Delete 'worker_database': 'postgres' from FIXTURE_SERVICES, run the full suite (green), then run a bare-docker-marked test requesting worker_database with Redis down: it skips instead of passing."
+    },
+    {
+      "id": "T-181",
+      "title": "T-151's DSN ORDER RESTS ON A SINGLE ASSERTION IN A SINGLE TEST OF 327. Sabotage S3a (reorder the tuple, i.e. re-ship the exact defect) and S3b (leave the tuple correct but walk it in the wrong order) both produce exactly 1 red: test_the_per_role_ledger_dsn_outranks_the_generic_app_dsn at line 606. S3b is the valuable half \u2014 it proves the DEFAULT_DSN_ENV.index(...) source-text assertion at line 610 is NOT doing the work, and the behavioural assertion carries it alone, which is the right shape. But the live connected-principal test cannot see precedence at all: it clears every DSN variable and sets only trust_rw, so it stayed green under both sabotages. It defends the OMISSION (T-151's original half), never the ORDER. One more precedence assertion, ideally at the live layer, would make the order as well defended as the omission.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_events_hardening.py (DSN precedence coverage)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/tests/test_events_hardening.py (DSN precedence coverage)",
+      "defect": "T-151's DSN ORDER RESTS ON A SINGLE ASSERTION IN A SINGLE TEST OF 327. Sabotage S3a (reorder the tuple, i.e. re-ship the exact defect) and S3b (leave the tuple correct but walk it in the wrong order) both produce exactly 1 red: test_the_per_role_ledger_dsn_outranks_the_generic_app_dsn at line 606. S3b is the valuable half \u2014 it proves the DEFAULT_DSN_ENV.index(...) source-text assertion at line 610 is NOT doing the work, and the behavioural assertion carries it alone, which is the right shape. But the live connected-principal test cannot see precedence at all: it clears every DSN variable and sets only trust_rw, so it stayed green under both sabotages. It defends the OMISSION (T-151's original half), never the ORDER. One more precedence assertion, ideally at the live layer, would make the order as well defended as the omission.",
+      "finding_id": "c9ba0b6e4bad48480b2771bf64e0fb95ff5a21168f11d07273a653b8e3d1a9be",
+      "reproduction": "Reorder DEFAULT_DSN_ENV so PROXYSHOP_PG_DSN_APP precedes PROXYSHOP_PG_DSN_TRUST_RW; exactly one test of 327 fails."
+    },
+    {
+      "id": "T-182",
+      "title": "TYPE CONTRADICTION BETWEEN THE SCHEMA AND ITS CONSUMER: every schema-valid hosted offer carrying an expiry is UNMINTABLE at checkout. contracts Offer.expires_at is annotated `str | None` and packages/contracts/src/boundary.py:281 parses it with parse_timestamp (ISO), but apps/exchange/src/checkout/codes.py:code_expiry does `float(expires_at)` and raises UnusableOffer on anything non-numeric. VERIFIED BY THE ORCHESTRATOR, not taken on report: Offer.model_fields['expires_at'].annotation is `str | None`; code_expiry('2026-09-03T00:00:00Z') -> ValueError 'could not convert string to float'; code_expiry(1788480000.0) -> 1788652800.0 accepted. So the only expiry shape the schema permits is the one the minting path refuses. Latent only because no HTTP route reaches accept() yet (T-176); it blocks the hosted checkout path the moment that route is wired. Blast radius named by the T-041 lane: codes.py:128, provider.py:215/:236, providers.py:51/:104.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/checkout/codes.py:code_expiry vs packages/contracts (Offer.expires_at)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/checkout/codes.py:code_expiry vs packages/contracts (Offer.expires_at)",
+      "defect": "TYPE CONTRADICTION BETWEEN THE SCHEMA AND ITS CONSUMER: every schema-valid hosted offer carrying an expiry is UNMINTABLE at checkout. contracts Offer.expires_at is annotated `str | None` and packages/contracts/src/boundary.py:281 parses it with parse_timestamp (ISO), but apps/exchange/src/checkout/codes.py:code_expiry does `float(expires_at)` and raises UnusableOffer on anything non-numeric. VERIFIED BY THE ORCHESTRATOR, not taken on report: Offer.model_fields['expires_at'].annotation is `str | None`; code_expiry('2026-09-03T00:00:00Z') -> ValueError 'could not convert string to float'; code_expiry(1788480000.0) -> 1788652800.0 accepted. So the only expiry shape the schema permits is the one the minting path refuses. Latent only because no HTTP route reaches accept() yet (T-176); it blocks the hosted checkout path the moment that route is wired. Blast radius named by the T-041 lane: codes.py:128, provider.py:215/:236, providers.py:51/:104.",
+      "finding_id": "311853a303d0c9cd9f66cf289d715796cb280ee33fd3f8bfa6d7799d9f5a8ff3",
+      "reproduction": "PROXYSHOP_WORKER=<n> .venv/bin/python -c \"from apps.exchange.src.checkout import codes; codes.code_expiry(0.0, {'expires_at': '2026-09-03T00:00:00Z'})\" -> UnusableOffer. Compare contracts.Offer.model_fields['expires_at'].annotation == str | None."
+    },
+    {
+      "id": "T-183",
+      "title": "DISCOUNT UNIT MISMATCH, latent until now and about to become live. The shopify stub expects a discount as a 0.0-1.0 FRACTION while contracts.Discount.value is a PERCENT (e.g. 20.0 for 20%). Nothing in apps/ fed the stub a Discount before, which is why no test sees it \u2014 but T-041's runtime (accepted this cycle) is the first real producer of a Discount, so the two halves are about to meet. A 20% grant arriving as 20.0 where a fraction is expected is not a rounding error; it is a two-orders-of-magnitude misapplication of a discount at the point money is decided.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/shopify-stub/src/graphql_admin.py:296 vs contracts.Discount.value"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "services/shopify-stub/src/graphql_admin.py:296 vs contracts.Discount.value",
+      "defect": "DISCOUNT UNIT MISMATCH, latent until now and about to become live. The shopify stub expects a discount as a 0.0-1.0 FRACTION while contracts.Discount.value is a PERCENT (e.g. 20.0 for 20%). Nothing in apps/ fed the stub a Discount before, which is why no test sees it \u2014 but T-041's runtime (accepted this cycle) is the first real producer of a Discount, so the two halves are about to meet. A 20% grant arriving as 20.0 where a fraction is expected is not a rounding error; it is a two-orders-of-magnitude misapplication of a discount at the point money is decided.",
+      "finding_id": "04eebd93b18655bae32b3a9d34e99ccbc169f8ccb8d5992f907c617e4ab0bd37",
+      "reproduction": "Compare services/shopify-stub/src/graphql_admin.py:296's expected range against contracts.Discount.value's percent semantics; construct a Discount(value=20.0) from the T-041 runtime and follow it into the stub."
     }
   ]
 }
