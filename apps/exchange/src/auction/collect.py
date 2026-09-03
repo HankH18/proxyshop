@@ -39,6 +39,30 @@ argument** — D54 is explicit that the R12 gate lives in the orchestration laye
 which hands this function an already-eligible roster. Putting a gate here would make the
 function deny whenever no port was injected, which is the wrong default for a pure helper
 and the wrong layer for a system guarantee.
+
+The discount wall (T-177)
+-------------------------
+
+There is one thing this function *does* judge about a bid's content, and it is here because
+this is the only place in the exchange that holds both halves of the comparison: the store's
+answer, and **the roster row it was asked from**. A rostered row carries the product's
+``list_price`` and — when the merchant's approved envelope is known — the ``max_discount_pct``
+that envelope permits on it.
+
+A bid that DECLARES a discount is making a claim about authorization, and until this the only
+wall checking that claim ran inside our own store-agent runtime, on the emitting side. A Tier-2
+store does not run our runtime. Measured on the boundary before this: a bid declaring 20% and
+charging 15.00 for a product the exchange lists at 100.00 came back ``ok=True, reasons=[]``, and
+so did the same bid declaring 85% — the depth bounded the price and the bid chose the depth.
+:func:`contracts.boundary.price_reasons` is that wall; this module runs it, and a bid that fails
+it is replaced by the store's list-price fallback with ``fallback_reason`` naming why.
+
+**Only bids that declare a discount are judged**, and that boundary is deliberate. R10 lets a
+store bid whatever it likes: undercutting its own list price with no discount declared is what an
+auction IS, and ``.swarm-loop/acceptance/test_e3_exchange.py`` pins exactly that (an 80.00 bid
+against a 120.00 rostered list price is kept, not refused). What the exchange does not admit is a
+store awarding itself an authorization nobody granted. So the arithmetic runs on the offers that
+claim one, and a store that declares no discount is measured only by the ranker, as before.
 """
 
 from __future__ import annotations
@@ -47,10 +71,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from contracts.boundary import price_reasons
+
 __all__ = [
     "BidEntry",
     "FALLBACK_REASONS",
     "MALFORMED_RESPONSE_REASONS",
+    "UNRECONCILABLE_PRICE_REASON",
     "collect_bids",
 ]
 
@@ -65,6 +92,14 @@ __all__ = [
 #: and only one of them is evidence about latency. A loss report built on the collapsed
 #: label would blame the wrong thing, and a store arguing it answered in time would be
 #: right.
+#: The store answered, in time, with a well-formed bid — and the discount it declared does not
+#: reconcile against the roster row it was asked from (T-177). A seventh reason rather than a
+#: shrug: this is a *policy* refusal, not a transport fault and not latency, and an operator
+#: reading a loss report must not see "you were slow" when what happened is "you declared a
+#: discount the exchange has no authorization for". The entry keeps the store's real
+#: :attr:`BidEntry.price_reasons` alongside it so the rejection can be quoted back verbatim.
+UNRECONCILABLE_PRICE_REASON = "bid_price_unreconcilable"
+
 FALLBACK_REASONS: tuple[str, ...] = (
     "tier_0_no_agent",
     "no_response",
@@ -72,6 +107,7 @@ FALLBACK_REASONS: tuple[str, ...] = (
     "response_carried_no_bid",
     "response_not_stamped",
     "arrival_stamp_unparseable",
+    UNRECONCILABLE_PRICE_REASON,
 )
 
 #: The subset of :data:`FALLBACK_REASONS` that means "a reply arrived, and we could not use
@@ -98,6 +134,11 @@ class BidEntry:
     received_at: float | None = None
     fallback_reason: str | None = None
     claims: list[Any] = field(default_factory=list)
+    #: The boundary's own reason strings when this entry fell back because its declared discount
+    #: did not reconcile (``fallback_reason == UNRECONCILABLE_PRICE_REASON``). Empty otherwise.
+    #: Kept because ``fallback_reason`` is a fixed vocabulary a loss report aggregates on, while
+    #: *which* relation the bid broke is what the store's operator actually needs told.
+    price_reasons: list[str] = field(default_factory=list)
 
     @property
     def offer(self) -> dict[str, Any]:
@@ -126,6 +167,47 @@ def _list_price_bid(entry: Mapping[str, Any], auction_id: str | None) -> dict[st
         "claims": [],
         "fallback": True,
     }
+
+
+def _declares_a_discount(offer: Any) -> bool:
+    """Does this offer CLAIM a discount — i.e. assert an authorization someone had to grant?
+
+    ``True`` for a stated non-zero depth, and also for one this function cannot read: a
+    ``discount`` block whose ``value`` is ``"85"`` or ``null`` is a claim made illegibly, and
+    reading past it would let a bid disable the wall by making its own paperwork unreadable. The
+    boundary names that case ``price_unreconcilable:offer.discount:depth_not_a_number`` rather
+    than guessing, which is why it must be handed the offer rather than skipped.
+
+    ``False`` only for an offer with no ``discount`` at all, or one declaring exactly zero — a
+    discount that takes nothing off the price asserts no authorization and needs none.
+    """
+    discount = offer.get("discount") if isinstance(offer, Mapping) else None
+    if discount is None:
+        return False
+    value = discount.get("value") if isinstance(discount, Mapping) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return True
+    return float(value) != 0.0
+
+
+def _price_refusal(bid: Mapping[str, Any], rostered: Mapping[str, Any]) -> list[str]:
+    """The boundary's verdict on this bid's declared discount, against its own roster row.
+
+    The one-row roster is keyed by **the ROSTER's** ``product_ref``, and the boundary looks the
+    row up by the **OFFER's**. Keying it by the offer's instead would hand every bid a row
+    whatever product it named — the bid would be choosing which catalog entry it is priced
+    against, which is the shape of the defect this whole wall exists to close. So a store
+    answering about a product it was not asked about finds no row, and an unpriceable product is
+    a refusal rather than an abstention
+    (:data:`contracts.boundary.ROSTER_LIST_PRICE_UNAVAILABLE`) — the direction an attacker's
+    "you've never heard of that ref" would otherwise walk through.
+
+    Empty list when the offer declares no discount — see the module docstring on why the exchange
+    does not run the whole wall here, only the half about claimed authorization.
+    """
+    if not _declares_a_discount(bid.get("offer")):
+        return []
+    return price_reasons(bid, list_prices={rostered.get("product_ref"): rostered})
 
 
 def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | None:
@@ -172,7 +254,12 @@ def collect_bids(
 
     Args:
         roster: the stores selected for this auction —
-            ``{store_id, tier, product_ref, list_price}``. Roster order is the output order.
+            ``{store_id, tier, product_ref, list_price}``, optionally with
+            ``max_discount_pct`` — the deepest discount the merchant's approved envelope
+            permits on that product. Roster order is the output order. A row that names no
+            ``max_discount_pct`` authorizes no discount at all: a bid declaring one is
+            refused rather than measured against a depth it chose for itself, and falls back
+            to the row's list price. An undiscounted bid never consults the cap.
         responses: whatever came back — ``{store_id, received_at, bid}``. Responses for a
             store that is not on the roster are ignored; a store that answered twice keeps
             its **first** on-time answer, so a second, cheaper resubmission cannot displace
@@ -228,6 +315,17 @@ def collect_bids(
         else:
             reason = None
 
+        refused: list[str] = []
+        if reason is None and answer is not None:
+            # T-177. The store answered in time with a well-formed bid; the remaining question is
+            # whether the discount it DECLARES is one this roster authorizes at the price it
+            # charges. A bid that fails that is not a bid the exchange may rank — it is a store
+            # helping itself to an authorization — so it degrades to its list price like any
+            # other unusable answer, with its own reason.
+            refused = _price_refusal(dict(answer["bid"]), rostered)
+            if refused:
+                reason = UNRECONCILABLE_PRICE_REASON
+
         if reason is None and answer is not None:
             bid = dict(answer["bid"])
             entries.append(
@@ -249,6 +347,7 @@ def collect_bids(
                     bid=_list_price_bid(rostered, auction_id),
                     received_at=None,
                     fallback_reason=reason,
+                    price_reasons=refused,
                 )
             )
     return entries

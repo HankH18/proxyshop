@@ -96,6 +96,12 @@ class RosterEntry(BaseModel):
     tier: int = 1
     product_ref: str | None = None
     list_price: float = 0.0
+    #: The deepest percentage discount the merchant's approved envelope permits on this product —
+    #: the policy `Envelope`'s own `max_discount_pct`. Optional, and its absence is not permissive:
+    #: a bid DECLARING a discount on a row that authorizes none is refused and falls back to the
+    #: list price (T-177). Omitting it therefore costs an auction its discounted bids, never its
+    #: safety, which is the direction to fail in on a field that decides money.
+    max_discount_pct: float | None = None
 
 
 class CreateAuctionRequest(BaseModel):
