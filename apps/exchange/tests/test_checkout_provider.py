@@ -35,6 +35,7 @@ from exchange.checkout import (
     MintedCheckout,
     OffDomainCheckout,
     OrphanedCheckoutCode,
+    OrphanedCode,
     OrphanedOffDomainCheckout,
     PortMethodIsFinal,
     ShopifyCheckoutProvider,
@@ -942,3 +943,108 @@ def test_the_offer_level_reader_finds_the_discount_the_protocol_puts_on_the_offe
     hosted = offer()
     hosted["discount"] = {"type": "percentage", "value": 25.0}
     assert offer_discount_percentage(hosted) == 0.25
+
+
+class FlakyDomains:
+    """A registry that answers once and fails afterwards — a dropped connection, in effect."""
+
+    def __init__(self, domain: str = SELLER_DOMAIN) -> None:
+        self.domain = domain
+        self.calls = 0
+
+    def domain_for(self, store_id: str) -> str | None:
+        self.calls += 1
+        if self.calls > 1:
+            raise RuntimeError("registry connection dropped")
+        return self.domain
+
+
+class CodeOnlyCreator:
+    """A merchant that answers with the code and no permalink — the adapter builds one."""
+
+    def __init__(self, code: str = "PSX-CODEONLY") -> None:
+        self.code = code
+        self.calls: list[tuple[str, Any]] = []
+
+    def create_code(self, store_id: str, offer_payload: Any) -> dict[str, str]:
+        self.calls.append((store_id, offer_payload))
+        return {"code": self.code}
+
+
+def test_a_failure_inside_the_adapter_after_the_merchant_answered_carries_the_code_out() -> None:
+    """The second window on T-157, one level deeper than the port can reach.
+
+    ``CheckoutProvider.checkout`` can only guard what happens *after* ``mint`` returns. The
+    Shopify adapter keeps working after the merchant has answered — when the merchant sends
+    no permalink it builds one, and building one resolves the registered domain a SECOND
+    time. A lookup that answers once and fails once is enough to raise there, with a real
+    code already issued, and the port's wrapper would never see it.
+    """
+    creator = CodeOnlyCreator()
+    registry = FlakyDomains()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=dict(FALLBACK_OFFER),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=registry,
+            )
+        )
+
+    assert creator.calls, "the merchant must actually have been reached"
+    assert registry.calls > 1, "the second lookup must actually have happened"
+    assert raised.value.orphan.code == "PSX-CODEONLY"
+    assert raised.value.orphan.store_id == "store-a"
+
+
+def test_the_positive_control_a_code_only_merchant_reply_still_completes_normally() -> None:
+    """The refusal above must not be satisfiable by an adapter that refuses code-only replies."""
+    creator = CodeOnlyCreator()
+    result = resolve_provider("shopify").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer=dict(FALLBACK_OFFER),
+            mode="shopify",
+            code_creator=creator,
+            now=T_NOW,
+            registered_domains=SELLERS,
+        )
+    )
+    assert result.code == "PSX-CODEONLY"
+    assert urlsplit(result.permalink_url).hostname == SELLER_DOMAIN
+
+
+def test_an_orphan_refusal_survives_being_serialised() -> None:
+    """The code is the payload. An exception that loses it in transit has lost the code.
+
+    `BaseException.__reduce__` rebuilds by calling the class with `self.args`, and `orphan`
+    is keyword-only — so without `__reduce__` this raises `TypeError` on the way back and
+    turns a recoverable refusal into a crash wherever the exception crossed a boundary.
+    """
+    import pickle  # noqa: PLC0415
+
+    original = OrphanedOffDomainCheckout(
+        "refused",
+        orphan=OrphanedCode(
+            code="PSX-ROUNDTRIP",
+            permalink_url="https://attacker.tld/cart/1:1",
+            provider="shopify",
+            store_id="store-a",
+            auction_id="auction-1",
+            bid_ref="bid-a",
+        ),
+    )
+    revived = pickle.loads(pickle.dumps(original))
+    assert isinstance(revived, OrphanedOffDomainCheckout)
+    assert isinstance(revived, OffDomainCheckout)
+    assert revived.orphan == original.orphan
+    assert str(revived) == "refused"

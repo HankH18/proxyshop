@@ -75,6 +75,13 @@ class PortMethodIsFinal(TypeError):
     """A provider tried to override a method the port performs on every provider's behalf."""
 
 
+def _rebuild_orphaned(
+    kind: type[OrphanedCheckoutCode], args: tuple[Any, ...], orphan: OrphanedCode
+) -> OrphanedCheckoutCode:
+    """Module-level so :meth:`OrphanedCheckoutCode.__reduce__` is picklable."""
+    return kind(*args, orphan=orphan)
+
+
 @dataclass(frozen=True)
 class OrphanedCode:
     """A discount code that EXISTS in the merchant's system for a checkout that was refused.
@@ -115,6 +122,14 @@ class OrphanedCheckoutCode(Exception):
     def __init__(self, message: str, *, orphan: OrphanedCode) -> None:
         super().__init__(message)
         self.orphan = orphan
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        # `BaseException.__reduce__` rebuilds an exception by calling its class with
+        # `self.args`, which here is `(message,)` — and `orphan` is keyword-ONLY, so the
+        # default would raise `TypeError` on the way back and turn a recoverable refusal
+        # into a crash in whatever crossed the process boundary. The orphan is the whole
+        # payload; it has to survive the round trip.
+        return (_rebuild_orphaned, (type(self), self.args, self.orphan))
 
 
 class OrphanedOffDomainCheckout(OrphanedCheckoutCode, OffDomainCheckout):

@@ -22,7 +22,14 @@ from __future__ import annotations
 from typing import Any
 
 from .codes import code_expiry, mint_code
-from .provider import CheckoutProvider, CheckoutRequest, MintedCheckout, default_permalink
+from .provider import (
+    CheckoutProvider,
+    CheckoutRequest,
+    MintedCheckout,
+    OrphanedCheckoutCode,
+    OrphanedCode,
+    default_permalink,
+)
 
 __all__ = ["CheckoutCreatorError", "ShopifyCheckoutProvider", "SimulatedRedirectProvider"]
 
@@ -92,18 +99,41 @@ class ShopifyCheckoutProvider(CheckoutProvider):
                 f"the merchant code creator returned no code for {request.store_id!r}: {reply!r}"
             )
 
-        permalink = _read(reply, "permalink_url") or _read(reply, "permalink")
-        if not permalink:
-            # The merchant may return only the code; the permalink shape is pinned by D22
-            # and identical on both paths, so building it here is not a divergence.
-            permalink = default_permalink(request, str(code))
+        # From here the merchant's code EXISTS. `CheckoutProvider.checkout` cannot guard this
+        # region — it only wraps what happens after `mint` returns — so anything that raises
+        # between the merchant's answer and that return would lose the code exactly the way
+        # T-157 lost it one level up. Nothing below is *expected* to raise: the port already
+        # resolved the registered domain and already proved the offer's fields parse. But
+        # "already proved" is a claim about a previous call, and `default_permalink` resolves
+        # the domain a *second* time — a lookup that answers once and fails once (a dropped
+        # connection, a cache eviction) is all it takes.
+        try:
+            permalink = _read(reply, "permalink_url") or _read(reply, "permalink")
+            if not permalink:
+                # The merchant may return only the code; the permalink shape is pinned by D22
+                # and identical on both paths, so building it here is not a divergence.
+                permalink = default_permalink(request, str(code))
 
-        return MintedCheckout(
-            code=str(code),
-            permalink_url=str(permalink),
-            expires_at=code_expiry(request.now, request.offer),
-            details={"minted_by": self.name, "delegated_to": type(creator).__name__},
-        )
+            return MintedCheckout(
+                code=str(code),
+                permalink_url=str(permalink),
+                expires_at=code_expiry(request.now, request.offer),
+                details={"minted_by": self.name, "delegated_to": type(creator).__name__},
+            )
+        except Exception as exc:
+            raise OrphanedCheckoutCode(
+                f"{type(exc).__name__}: {exc} — raised AFTER the merchant issued "
+                f"{str(code)!r} for store {request.store_id!r}; the code is live and must be "
+                f"recorded and revoked",
+                orphan=OrphanedCode(
+                    code=str(code),
+                    permalink_url=str(_read(reply, "permalink_url") or ""),
+                    provider=self.name,
+                    store_id=request.store_id,
+                    auction_id=request.auction_id,
+                    bid_ref=request.bid_ref,
+                ),
+            ) from exc
 
 
 def _read(reply: Any, key: str) -> Any:
