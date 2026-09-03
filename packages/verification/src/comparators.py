@@ -297,6 +297,15 @@ def compare(claimed: Any, attribute: Any, *, key: Any, op: Any = None) -> Compar
     if claimed is None or (isinstance(claimed, str) and not claimed.strip()):
         return ComparisonOutcome("ambiguous", catalog, "the claim carries no value to check")
 
+    if catalog is None:
+        # The attribute is PRESENT but holds no value. That is silence, not contradiction —
+        # and without this branch it is worse than either: the string comparator below would
+        # normalise `None` to "none" and cheerfully VERIFY a claim whose value is the word
+        # "None", or "none", or "NONE".
+        return ComparisonOutcome(
+            "unsupported", None, "the catalog attribute is present but records no value"
+        )
+
     if isinstance(catalog, bool):
         return _compare_boolean(claimed, catalog)
 

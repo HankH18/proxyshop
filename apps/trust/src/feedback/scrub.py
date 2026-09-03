@@ -102,12 +102,38 @@ def _redact_text(value: str) -> str:
     return _LONG_DIGITS.sub(REDACTED, redacted)
 
 
+def _as_plain(value: Any) -> Any:
+    """A model object rendered as plain data, so the scrub can actually walk into it.
+
+    Without this the scrub silently passes an object-shaped event straight through: it is not
+    a Mapping and not a Sequence, so the recursion bottoms out and every attribute on it —
+    including ``buyer_email`` — survives to the wire. The scrub would still look like it
+    worked, because everything anybody tested it with was a dict. Pydantic models, dataclasses
+    and plain objects all reach here, and anything genuinely opaque falls through to its
+    ``repr`` rather than being emitted whole.
+    """
+    for attribute in ("model_dump", "dict", "_asdict"):
+        method = getattr(value, attribute, None)
+        if callable(method):
+            try:
+                rendered = method()
+            except Exception:  # noqa: BLE001 - a model that will not render is not a scrub failure
+                continue
+            if isinstance(rendered, Mapping):
+                return rendered
+    contents = getattr(value, "__dict__", None)
+    if isinstance(contents, Mapping) and contents:
+        return dict(contents)
+    return repr(value)
+
+
 def scrub(value: Any, *, _removed: list[str] | None = None) -> Any:
     """A deep copy of ``value`` with every buyer-identity key removed.
 
     Recursive over mappings **and** sequences: identity buried three levels down inside a
     list of line items is identity all the same, and a scrub that only walked the top level
-    would look like it worked on the one payload anybody tested it with.
+    would look like it worked on the one payload anybody tested it with. Objects are rendered
+    to plain data first (see :func:`_as_plain`) for exactly the same reason.
 
     Returns a NEW structure. The caller's event is never mutated — a scrub with a side effect
     on the ledger's own copy of an event would corrupt the hash chain that event is sealed
@@ -128,7 +154,12 @@ def scrub(value: Any, *, _removed: list[str] | None = None) -> Any:
         return [scrub(item, _removed=_removed) for item in value]
     if isinstance(value, str):
         return _redact_text(value)
-    return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    plain = _as_plain(value)
+    if plain is value:  # pragma: no cover - `_as_plain` always returns something else
+        return value
+    return scrub(plain, _removed=_removed)
 
 
 def scrub_report(value: Any) -> tuple[Any, int]:

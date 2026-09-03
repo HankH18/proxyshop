@@ -203,6 +203,11 @@ def reconciled_event(
     Every comparison in the payload derives from ``webhook``. ``pixel`` contributes only
     ``pixel_missing`` / ``pixel_price`` / ``pixel_agrees``, which describe the *integration*
     and never a promise.
+
+    The payload carries ``price_comparable`` / ``discount_comparable`` alongside the two
+    verdicts. Read them: a verdict of ``False`` on an *incomparable* field means "the webhook
+    did not say", not "the store overcharged", and turning the second into a ``contradicted``
+    observation would penalise a store for a malformed webhook.
     """
     observation = _payload(webhook)
     observed_price = _number(observation.get("total_price"))
@@ -214,6 +219,16 @@ def reconciled_event(
     if promised_price is None:
         promised_price = promised.get("unit_price")
     promised_discount = promised.get("discount_percentage")
+
+    # Whether the comparison could be made AT ALL, kept separate from its verdict. A webhook
+    # that carries no total is not evidence that the store overcharged — it is a gap. The
+    # boolean below still reads False in that case (the fail-closed direction: "not
+    # demonstrated honored"), but a consumer turning this event into a trust observation must
+    # read `price_comparable` to choose `unsupported` over `contradicted`. Collapsing the two
+    # would let a malformed webhook manufacture a contradiction, which is a penalty the store
+    # cannot see coming and cannot appeal.
+    price_comparable = observed_price is not None and promised_price is not None
+    discount_comparable = promised_discount is None or observed_discount is not None
 
     # `price_honored` is one-sided on purpose: charging LESS than promised is not a broken
     # promise, and grading it as one would penalise a store for a goodwill discount.
@@ -247,6 +262,8 @@ def reconciled_event(
             # the verdicts — every one of them computed from the webhook
             "price_honored": bool(price_honored),
             "discount_honored": bool(discount_honored),
+            "price_comparable": bool(price_comparable),
+            "discount_comparable": bool(discount_comparable),
             "observed_price": observed_price,
             "observed_discount_percentage": observed_discount,
             "promised_price": promised_price,
