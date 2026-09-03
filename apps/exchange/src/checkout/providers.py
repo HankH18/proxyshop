@@ -28,6 +28,7 @@ from .provider import (
     MintedCheckout,
     OrphanedCheckoutCode,
     OrphanedCode,
+    code_fingerprint,
     default_permalink,
 )
 
@@ -124,8 +125,8 @@ class ShopifyCheckoutProvider(CheckoutProvider):
         except Exception as exc:
             raise OrphanedCheckoutCode(
                 f"{type(exc).__name__}: {exc} — raised AFTER the merchant issued "
-                f"{str(code)!r} for store {request.store_id!r}; the code is live and must be "
-                f"recorded and revoked",
+                f"{code_fingerprint(str(code))} for store {request.store_id!r}; the code is "
+                f"live and must be recorded and revoked",
                 orphan=OrphanedCode(
                     code=str(code),
                     # Read off the local, never back off `reply`: if `_read(reply, ...)` is

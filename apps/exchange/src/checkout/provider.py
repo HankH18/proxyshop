@@ -32,10 +32,12 @@ The Shopify path (T-052) is one adapter behind this port — not the route to a 
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
+from urllib.parse import quote
 
 from ..auction.ledger import build_event
 from .codes import assert_offer_is_mintable, build_cart_permalink, code_expiry, offer_quantity
@@ -52,7 +54,9 @@ __all__ = [
     "OrphanedOffDomainCheckout",
     "PortMethodIsFinal",
     "RegisteredDomains",
+    "code_fingerprint",
     "default_permalink",
+    "redact_code",
     "registered_domain_for",
 ]
 
@@ -73,6 +77,51 @@ CHECKOUT_EVENT_KINDS: tuple[str, str, str] = ("accepted", "code_created", "check
 
 class PortMethodIsFinal(TypeError):
     """A provider tried to override a method the port performs on every provider's behalf."""
+
+
+def code_fingerprint(code: str) -> str:
+    """A stable, non-reversible handle for a discount code, safe to put in prose (T-215).
+
+    A refusal message has to be debuggable — an operator reading a ``policy_event`` must be
+    able to say *which* code was orphaned — and it must not be the place the code itself is
+    published. The fingerprint is the join: the same code always produces the same handle, so
+    the redacted prose and the ``code_created`` event that holds the real, revocable code can
+    be matched to each other, while the handle alone buys an attacker nothing.
+
+    Truncated to 12 hex characters deliberately: this is a correlation token within one
+    ledger, not a commitment, and a full digest in every message is noise.
+    """
+    text = str(code or "")
+    if not text:
+        return "code:none"
+    return "code:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def redact_code(message: str, code: str) -> str:
+    """Replace every occurrence of ``code`` in ``message`` with its fingerprint.
+
+    Substring replacement rather than a whole-message blank on purpose. The code reaches a
+    refusal message by **two** routes and both have to close while the rest of the message
+    survives:
+
+    * spelled out — ``the discount code 'PSX-…' was ALREADY minted``; and
+    * carried inside a URL — a cart permalink is ``…/cart/1:1?discount=PSX-…``, and the
+      off-domain reason quotes the URL it refused. Blanking the whole URL would delete the
+      refused *host*, which is the one fact the message exists to report.
+
+    The percent-encoded spellings are covered too, because a permalink built by a merchant
+    may have escaped the code on the way in.
+    """
+    text = str(message)
+    raw = str(code or "")
+    if not raw:
+        return text
+    handle = f"<redacted {code_fingerprint(raw)}>"
+    # Longest first: a shorter spelling that is a prefix of a longer one must not eat it.
+    for spelling in sorted({raw, quote(raw, safe=""), quote(raw)}, key=len, reverse=True):
+        if spelling:
+            text = text.replace(spelling, handle)
+    return text
 
 
 def _rebuild_orphaned(
@@ -117,10 +166,28 @@ class OrphanedCheckoutCode(Exception):
     :attr:`orphan` is what the caller records and revokes. Catch this before
     ``OffDomainCheckout`` when you can do something with it; catching only the latter still
     works, which is why the domain-flavoured subclass below exists.
+
+    **The message is redacted; the attribute is not (T-215).** The two are different
+    audiences. A refusal message is prose, and prose from an exception ends up in logs and —
+    via ``accept()`` — inside a persisted ``policy_event`` payload that the published API
+    types as a bare string, readable by anything with the event stream. A live discount this
+    layer cannot revoke must not be published there, so :meth:`__init__` runs the message
+    through :func:`redact_code` and every spelling of the code becomes
+    :func:`code_fingerprint`. The real code stays on :attr:`orphan`, for the one caller whose
+    job is to record and revoke it. Redacting in the constructor rather than at each call
+    site is the point: a *new* caller that formats this exception naively is safe by
+    construction, and cannot re-open the leak by forgetting.
     """
 
     def __init__(self, message: str, *, orphan: OrphanedCode) -> None:
-        super().__init__(message)
+        # T-215: the code is redacted HERE, not at the call site that formats this exception.
+        # A caller that logs `f"{exc}"` — `accept()` does exactly that, into a persisted
+        # `policy_event` whose reason the published OpenAPI types as a bare string — must not
+        # be able to publish a live discount by being naive, and neither must the next caller
+        # that does the same. Because the redaction happens before `Exception.__init__`, the
+        # code is absent from `args`, `str()`, `repr()`, the traceback line and anything
+        # pickled from it. `orphan` still carries the real code for whoever can revoke it.
+        super().__init__(redact_code(str(message), orphan.code))
         self.orphan = orphan
 
     def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
@@ -312,9 +379,13 @@ class CheckoutProvider:
             assert_on_domain(minted.permalink_url, registered, what=f"{self.name} permalink_url")
         except OffDomainCheckout as exc:
             raise OrphanedOffDomainCheckout(
-                f"{exc} — the discount code {minted.code!r} was ALREADY minted by "
-                f"{self.name!r} for store {request.store_id!r} and is live in the merchant's "
-                f"system; record and revoke it",
+                # The fingerprint, not the code: this message is formatted into a persisted
+                # `policy_event` by `accept()` (T-215). `{exc}` is left as it is because the
+                # refused HOST is the diagnostic — the code it also carries, inside the
+                # permalink's `?discount=`, is redacted by `OrphanedCheckoutCode.__init__`.
+                f"{exc} — the discount code {code_fingerprint(minted.code)} was ALREADY "
+                f"minted by {self.name!r} for store {request.store_id!r} and is live in the "
+                f"merchant's system; record and revoke it via the code_created event",
                 orphan=orphan,
             ) from exc
 
@@ -342,8 +413,8 @@ class CheckoutProvider:
             # attached like any other post-mint refusal.
             raise OrphanedCheckoutCode(
                 f"{type(exc).__name__}: {exc} — raised AFTER {self.name!r} minted "
-                f"{minted.code!r} for store {request.store_id!r}; the code is live and must "
-                f"be recorded and revoked",
+                f"{code_fingerprint(minted.code)} for store {request.store_id!r}; the code "
+                f"is live and must be recorded and revoked",
                 orphan=orphan,
             ) from exc
 

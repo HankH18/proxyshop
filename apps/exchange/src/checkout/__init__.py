@@ -94,8 +94,10 @@ from .provider import (
     OrphanedOffDomainCheckout,
     PortMethodIsFinal,
     RegisteredDomains,
+    code_fingerprint,
     default_permalink,
     domain_is_platform_verified,
+    redact_code,
     registered_domain_for,
 )
 from .providers import (
@@ -155,6 +157,7 @@ __all__ = [
     "assert_on_domain",
     "build_cart_permalink",
     "code_expiry",
+    "code_fingerprint",
     "code_minting_call_sites",
     "default_permalink",
     "discount_percent",
@@ -164,6 +167,7 @@ __all__ = [
     "mint_code",
     "offer_discount_percentage",
     "offer_quantity",
+    "redact_code",
     "register_provider",
     "registered_domain_for",
     "registered_modes",

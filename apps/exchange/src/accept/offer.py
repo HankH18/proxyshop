@@ -63,7 +63,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..auction.ledger import build_event
-from ..checkout import CheckoutRequest, CheckoutResult, resolve_provider
+from ..checkout import (
+    CheckoutRequest,
+    CheckoutResult,
+    OrphanedCheckoutCode,
+    OrphanedCode,
+    code_fingerprint,
+    resolve_provider,
+)
 
 __all__ = [
     "ACCEPT_REFUSED",
@@ -150,6 +157,13 @@ class AcceptResult:
     denial_reason: str | None = None
     #: The next slot to offer the buyer when this one could not be completed (A5).
     reoffer_bid_ref: str | None = None
+    #: Set when this refusal happened AFTER the merchant had already issued a real
+    #: single-use discount (T-202). It carries the code itself, so a caller that can reach
+    #: the merchant's revoke API does not have to parse it back out of an event — and it is
+    #: the reason ``denial_reason`` may not name the code: the structured field is for the
+    #: process that revokes, the prose is for the log, and only one of those is a safe place
+    #: for a live discount. ``None`` means nothing was minted and there is nothing to revoke.
+    orphaned_code: OrphanedCode | None = None
     events: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
     @property
@@ -237,29 +251,95 @@ def _record_acceptance(auction: Any, bid_ref: str) -> None:
     setattr(auction, _ACCEPTED_FIELD, bid_ref)
 
 
+def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any]:
+    """The ``code_created`` event for a code that exists but whose checkout was refused.
+
+    This is the whole of T-202's fix, and it is a ``code_created`` for the plain reason that
+    a code **was** created: the merchant's ``POST /codes`` returned before anything failed,
+    the discount is live in the merchant's system, and ``code_created`` is the frozen kind
+    (D24) whose published body — ``code``, ``permalink_url``, ``expires_at`` — is exactly
+    what revocation and reconciliation read. Inventing a kind is not open to the exchange,
+    and filing the code anywhere else would mean the one process that revokes codes had to
+    learn a second place to look.
+
+    ``orphaned: True`` is what keeps that honest. Without it a reconciler joining
+    ``code_created`` to ``order_paid`` would read this as a checkout that simply never
+    converted, rather than as one the exchange itself refused; with it, the code is on the
+    revoke list rather than the follow-up list. The event is emitted **beside** the refusal,
+    never instead of it, and no ``accepted`` or ``checkout_redirect`` accompanies it — the
+    buyer was handed nothing, and the C11 trio describes a checkout that completed.
+    """
+    return build_event(
+        "code_created",
+        auction_id=str(_read(auction, "auction_id") or orphan.auction_id or ""),
+        store_id=orphan.store_id or None,
+        payload={
+            # The published `code_created` body (D24).
+            "code": orphan.code,
+            "permalink_url": orphan.permalink_url,
+            "expires_at": orphan.expires_at,
+            # ...and what makes it actionable rather than merely recorded.
+            "orphaned": True,
+            "revocation_required": True,
+            "bid_ref": orphan.bid_ref,
+            "provider": orphan.provider,
+            # The join to the refusal's redacted prose (T-215).
+            "fingerprint": code_fingerprint(orphan.code),
+        },
+    )
+
+
 def _refusal_event(
-    auction: Any, bid_ref: str, store_id: str | None, reason: str
+    auction: Any,
+    bid_ref: str,
+    store_id: str | None,
+    reason: str,
+    orphan: OrphanedCode | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Record the refusal against D24's frozen vocabulary.
 
     A refused accept that leaves no trace is the one an operator cannot investigate, and
     there is no ``accept_refused`` LedgerEvent kind to invent one with — so it is filed as
     the ``policy_event`` it is, carrying that kind's published body plus the reason.
+
+    When the refusal happened *after* a code was minted, the code's own record is emitted
+    first — it happened first — and the refusal carries a pointer to it rather than the code.
+    The split is deliberate and is T-215: ``reason`` is free prose in a payload the published
+    API types as a bare string, so a live discount must not be in it, while
+    ``orphaned_code.fingerprint`` and ``orphaned_code.event_id`` let an operator holding only
+    the refusal walk straight to the ``code_created`` event that names the revocable code.
     """
-    return (
+    events: list[Mapping[str, Any]] = []
+    pointer: dict[str, Any] | None = None
+    if orphan is not None:
+        record = _orphan_record(auction, orphan)
+        events.append(record)
+        pointer = {
+            "fingerprint": code_fingerprint(orphan.code),
+            "event_id": record["event_id"],
+            "kind": "code_created",
+            "provider": orphan.provider,
+        }
+
+    payload: dict[str, Any] = {
+        "kind": ACCEPT_REFUSED,
+        "severity": "critical" if orphan is not None else "warning",
+        "opened_at": float(_read(auction, "now") or 0.0),
+        "bid_ref": bid_ref,
+        "reason": reason,
+    }
+    if pointer is not None:
+        payload["orphaned_code"] = pointer
+
+    events.append(
         build_event(
             "policy_event",
             auction_id=str(_read(auction, "auction_id") or ""),
             store_id=store_id,
-            payload={
-                "kind": ACCEPT_REFUSED,
-                "severity": "warning",
-                "opened_at": float(_read(auction, "now") or 0.0),
-                "bid_ref": bid_ref,
-                "reason": reason,
-            },
-        ),
+            payload=payload,
+        )
     )
+    return tuple(events)
 
 
 def _refused(
@@ -270,6 +350,7 @@ def _refused(
     *,
     store_id: str | None = None,
     reoffer_bid_ref: str | None = None,
+    orphan: OrphanedCode | None = None,
 ) -> AcceptResult:
     ref = str(bid_ref)
     return AcceptResult(
@@ -280,7 +361,8 @@ def _refused(
         store_id=store_id,
         denial_reason=reason,
         reoffer_bid_ref=reoffer_bid_ref,
-        events=_refusal_event(auction, ref, store_id, reason),
+        orphaned_code=orphan,
+        events=_refusal_event(auction, ref, store_id, reason, orphan),
     )
 
 
@@ -388,19 +470,35 @@ def accept(
     try:
         checkout: CheckoutResult = provider.checkout(request)
     except Exception as exc:
-        # Deliberately broad. Everything reachable here is a refusal of THIS offer — an
-        # off-domain checkout URL, an unusable offer field, a merchant `POST /codes` that
-        # answered with no code or did not answer at all — and A5's promise is that the buyer
-        # gets the next slot rather than a stack trace. The port runs its checks before the
-        # mint, so a refusal from any of them has created no code anywhere; a failure from
-        # the mint itself is exactly the code-creation failure this path exists for.
+        # Deliberately broad, and it stays broad. Everything reachable here is a refusal of
+        # THIS offer — an off-domain checkout URL, an unusable offer field, a merchant
+        # `POST /codes` that answered with no code or did not answer at all — and A5's
+        # promise is that the buyer gets the next slot rather than a stack trace. Narrowing
+        # it to the orphan case would turn every other refusal into a 500.
+        #
+        # What is NOT true, and what T-157 measured false, is the comforting half of the old
+        # comment here: "a refusal from any of them has created no code anywhere". The port
+        # hoists every check it can ahead of the mint, but one cannot be hoisted — the
+        # permalink a provider hands back does not exist until the provider has run — and the
+        # R10 list-price fallback offer carries no `checkout_url`, so that post-mint check is
+        # the FIRST failable host comparison for a legal, everyday bid. By then `POST /codes`
+        # has issued a live single-use discount.
+        #
+        # The port carries that code out on `OrphanedCheckoutCode.orphan`. Reading it is this
+        # frame's entire job: dropping it here is the original defect, one frame higher up.
+        orphan = exc.orphan if isinstance(exc, OrphanedCheckoutCode) else None
         return _refused(
             auction,
             ref,
             mode,
+            # `{exc}` is safe to persist BECAUSE `OrphanedCheckoutCode` redacts the code out
+            # of its own message (T-215). This reason lands in a `policy_event` payload the
+            # published API types as a bare string; the code goes to the `code_created`
+            # event `_refused` emits alongside, which is where a code can be revoked from.
             f"checkout_refused: {type(exc).__name__}: {exc}",
             store_id=store_id,
             reoffer_bid_ref=next_slot(auction, ref),
+            orphan=orphan,
         )
 
     # Only now, with a code that actually exists, is the auction closed to further accepts.
