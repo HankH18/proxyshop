@@ -11,6 +11,7 @@ import {
   HOOK_PROVENANCE_SOURCES,
   HOSTED_PATH,
   LIST_PRICE_CLAIM_KEY,
+  MAX_DISCOUNT_ROSTER_KEY,
   NON_HOOK_PROVENANCE_SOURCES,
   OFFER_COMMITMENTS_SITE,
   OFFER_DISCOUNT_SITE,
@@ -20,6 +21,7 @@ import {
   REASON_CLAIM_PROVENANCE_EMPTY_SOURCE,
   REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE,
   REASON_CLAIM_WITHOUT_PROVENANCE,
+  REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH,
   REASON_HOSTED_NON_HOOK_PROVENANCE,
   REASON_OFFER_EXPIRED,
   REASON_OFFER_EXPIRY_MISSING,
@@ -33,9 +35,11 @@ import {
   REASON_UNKNOWN_PATH,
   REASON_UNVERIFIABLE_CLAIM_SITE,
   parseTimestamp,
+  priceReasons,
   validateBid,
   validateExternalSubmission,
 } from "../src/ts/boundary.js";
+import type {PriceRosterMap} from "../src/ts/boundary.js";
 import {PROVENANCE_SOURCES} from "../src/ts/vocabulary.js";
 import {
   ASSERTED_PROVENANCE,
@@ -47,6 +51,9 @@ import {
   makeOffer,
   makeSnapshotTable,
 } from "./fixtures.js";
+// The SHARED parity corpus. `test_boundary_dual_path.py` reads this same file, so a case added
+// here is asserted against both doors and a door that answers differently goes red.
+import corpus from "./price_parity_corpus.json" with {type: "json"};
 
 const BOTH_PATHS = [HOSTED_PATH, EXTERNAL_PATH] as const;
 
@@ -916,77 +923,92 @@ describe("T-177 — a bid may not charge more off than the depth it declares", (
     }
   });
 });
-
-describe("T-177 price parity — the same table `test_boundary_dual_path.py` asserts", () => {
-  const PRICE_PARITY_TABLE: Record<string, {ok: boolean; reasons: string[]}> = {
-    charges_under_the_carried_list_price: {
-      ok: false,
-      reasons: ["price_under_declared_depth:offer.unit_price"],
-    },
-    total_under_the_stated_unit_price: {
-      ok: false,
-      reasons: ["price_under_declared_depth:offer.total_price"],
-    },
-    amount_discount: {ok: false, reasons: ["price_unreconcilable:offer.discount:amount"]},
-    depth_out_of_range: {
-      ok: false,
-      reasons: ["price_unreconcilable:offer.discount:depth_out_of_range"],
-    },
-    ambiguous_list_price: {
-      ok: false,
-      reasons: ["price_unreconcilable:offer.unit_price:ambiguous_list_price"],
-    },
-    unreadable_list_price: {
-      ok: false,
-      reasons: ["price_unreconcilable:offer.unit_price:unreadable_list_price"],
-    },
-    honest_price: {ok: true, reasons: []},
-    // The abstention, pinned on BOTH doors: they must be blind to the same thing.
-    no_list_price_carried: {ok: true, reasons: []},
-  };
-
-  function pricedParityBid(name: string): unknown {
-    switch (name) {
-      case "charges_under_the_carried_list_price":
-        return makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(15.0, 15.0)});
-      case "total_under_the_stated_unit_price":
-        return makeBid({offer: pricedOffer(100.0, 15.0)});
-      case "amount_discount":
-        return makeBid({offer: pricedOffer(49.0, 44.1, 10.0, "amount")});
-      case "depth_out_of_range":
-        return makeBid({offer: pricedOffer(49.0, 44.1, 150.0)});
-      case "ambiguous_list_price":
-        return makeBid({
-          claims: [listPriceClaim(100.0), listPriceClaim(120.0)],
-          offer: pricedOffer(80.0, 80.0),
-        });
-      case "unreadable_list_price":
-        return makeBid({claims: [listPriceClaim("n/a")], offer: pricedOffer(80.0, 80.0)});
-      case "honest_price":
-        return makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(80.0, 80.0)});
-      case "no_list_price_carried":
-        return makeBid({offer: pricedOffer(15.0, 15.0)});
-      default:
-        throw new Error(`unknown price parity case ${name}`);
-    }
+describe("T-177 price parity — the SHARED corpus `test_boundary_dual_path.py` also drives", () => {
+  // This table used to live here AND in `test_boundary_dual_path.py`, hand-copied, payload
+  // builders included. Two copies of a parity table are not a parity test: a divergence
+  // introduced on one side alone gets edited into that side's copy and both suites stay green
+  // while the doors disagree — which is exactly what happened when the T-177 roster landed in
+  // `boundary.py` and not in `boundary.ts` and both copies went on asserting
+  // `no_list_price_carried: ok=true`. The cases now live once, as wire payloads, in
+  // `price_parity_corpus.json`, and each suite drives its own door with them.
+  interface ParityCase {
+    name: string;
+    why: string;
+    bid: unknown;
+    list_prices: Record<string, unknown> | null;
+    max_discount_pct: number | null;
+    ok: boolean;
+    reasons: string[];
   }
+  const cases = corpus.cases as unknown as ParityCase[];
+  const byName = new Map(cases.map((c) => [c.name, c]));
 
-  it.each(Object.keys(PRICE_PARITY_TABLE))("matches the Python verdict for %s", (name) => {
-    const expected = PRICE_PARITY_TABLE[name]!;
-    const result = check(pricedParityBid(name), HOSTED_PATH);
+  it.each(cases.map((c) => c.name))("matches the Python verdict for %s", (name) => {
+    const expected = byName.get(name)!;
+    const result = validateBid(expected.bid, {
+      path: corpus.path,
+      trustSnapshot: makeSnapshotTable(),
+      now: corpus.now,
+      listPrices: (expected.list_prices ?? undefined) as PriceRosterMap | undefined,
+      maxDiscountPct: expected.max_discount_pct ?? undefined,
+    });
+    // `schema_invalid:` reasons name ajv/pydantic field paths, the one part of the vocabulary the
+    // two implementations are not expected to spell identically.
     const priced = result.reasons.filter((r) => !r.startsWith("schema_invalid"));
-    expect(priced, name).toEqual(expected.reasons);
+    expect(priced, `${name}: ${result.reasons.join(", ")}`).toEqual(expected.reasons);
     expect(result.ok, `${name}: ${result.reasons.join(", ")}`).toBe(expected.ok);
   });
 
   it("is not quietly empty, and the reason vocabulary is the Python peer's", () => {
-    expect(Object.keys(PRICE_PARITY_TABLE).length).toBe(8);
+    // A table of nothing but rejections is satisfied by a door that refuses everything, and a
+    // table of nothing but admissions by a door with no wall in it at all.
+    expect(cases.length).toBeGreaterThanOrEqual(20);
+    expect(byName.size).toBe(cases.length);
+    expect(cases.filter((c) => c.ok).length).toBeGreaterThanOrEqual(5);
+    expect(cases.filter((c) => !c.ok).length).toBeGreaterThanOrEqual(12);
+    for (const c of cases) expect(c.reasons.length > 0, c.name).toBe(!c.ok);
+
     expect(OFFER_UNIT_PRICE_SITE).toBe("offer.unit_price");
     expect(OFFER_TOTAL_PRICE_SITE).toBe("offer.total_price");
     expect(REASON_PRICE_UNDER_DECLARED_DEPTH).toBe("price_under_declared_depth");
     expect(REASON_PRICE_UNRECONCILABLE).toBe("price_unreconcilable");
+    expect(REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH).toBe("discount_over_authorized_depth");
     expect(LIST_PRICE_CLAIM_KEY).toBe("list_price");
+    expect(MAX_DISCOUNT_ROSTER_KEY).toBe("max_discount_pct");
     expect(PRICE_RECONCILIATION_TOLERANCE).toBe(0.01);
+  });
+
+  it("still covers every case the hand-copied table pinned", () => {
+    for (const name of [
+      "charges_under_the_carried_list_price",
+      "total_under_the_stated_unit_price",
+      "amount_discount",
+      "depth_out_of_range",
+      "ambiguous_list_price",
+      "unreadable_list_price",
+      "honest_price",
+      "no_list_price_carried",
+    ]) {
+      expect(byName.has(name), name).toBe(true);
+    }
+  });
+
+  it("exposes the price walk on its own, for a caller holding no trust snapshot", () => {
+    // The peer of `contracts.boundary.price_reasons`. Same arithmetic, no eligibility gate.
+    const roster = {"prod-1": {list_price: 100.0, max_discount_pct: 20.0}};
+    const deep = makeBid({offer: pricedOffer(15.0, 15.0, 85.0)});
+    expect(priceReasons(deep)).toEqual([]);
+    expect(priceReasons(deep, {listPrices: roster})).toEqual([
+      `${REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH}:${OFFER_DISCOUNT_SITE}`,
+      `${REASON_PRICE_UNDER_DECLARED_DEPTH}:${OFFER_UNIT_PRICE_SITE}`,
+    ]);
+    expect(priceReasons(makeBid({offer: pricedOffer(80.0, 80.0)}), {listPrices: roster})).toEqual(
+      [],
+    );
+    // Never throws, on anything.
+    for (const hostile of [null, undefined, 42, "a bid", [1, 2]]) {
+      expect(() => priceReasons(hostile, {listPrices: roster})).not.toThrow();
+    }
   });
 });
 

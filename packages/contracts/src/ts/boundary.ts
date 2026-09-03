@@ -71,10 +71,22 @@ export const PERCENTAGE_DISCOUNT_TYPES: ReadonlySet<string> = new Set([
 
 /**
  * The claim key under which a bid carries the list price its discount is a percentage OF.
- * `get_product_fact(product_ref, "list_price")` is the hook that mints it. **This is the only
- * list price the boundary can ever see**: it holds no catalog, no envelope and no hook ledger.
+ * `get_product_fact(product_ref, "list_price")` is the hook that mints it, so a hosted bid can
+ * only carry a list price the catalog actually published. It is the only list price the boundary
+ * can see **when the caller supplies no roster** — it holds no catalog of its own, and inventing
+ * a lookup it cannot perform would be worse than saying so. It is also the SAME key a `listPrices`
+ * roster row may spell its number under, so one name means one thing on both sides.
  */
 export const LIST_PRICE_CLAIM_KEY = "list_price";
+
+/**
+ * The `listPrices` roster row key naming the deepest percentage discount the caller AUTHORIZES for
+ * a product. Deliberately the policy `Envelope`'s own spelling — `max_discount_pct`, the field
+ * `authorize_discount` refuses to mint past on the emitting side. There is NO claim by this name:
+ * a cap a bid could carry would be a cap the bid chooses. The Python peer's
+ * `MAX_DISCOUNT_ROSTER_KEY`.
+ */
+export const MAX_DISCOUNT_ROSTER_KEY = "max_discount_pct";
 
 /**
  * Slack when reconciling a stated price against the price its declared depth prices out at, as
@@ -115,6 +127,33 @@ export const REASON_PRICE_UNDER_DECLARED_DEPTH = "price_under_declared_depth";
  * arithmetic cannot be checked at all. Fail-closed, exactly like an unavailable eligibility read.
  */
 export const REASON_PRICE_UNRECONCILABLE = "price_unreconcilable";
+/**
+ * The offer declares a depth deeper than the caller authorizes for that product. Distinct from
+ * `price_under_declared_depth` on purpose: that one says the offer is priced under its own
+ * paperwork, this one says the paperwork itself was never granted, and only one of the two is
+ * fixable by repricing.
+ */
+export const REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH = "discount_over_authorized_depth";
+
+/**
+ * `price_unreconcilable` suffixes for the caller-supplied roster, named rather than spelled inline
+ * so a caller can match on them. A roster is EVIDENCE like any other, so every way of failing to
+ * read one is its own refusal — never a silent downgrade back to the claim-only abstention, which
+ * would hand an attacker one unknown `product_ref` as a way round the entire wall. The Python
+ * peer's `ROSTER_*` constants, string for string.
+ */
+export const ROSTER_LIST_PRICE_UNAVAILABLE = "list_price_unavailable";
+export const ROSTER_LIST_PRICE_UNREADABLE = "unreadable_roster_list_price";
+export const ROSTER_LIST_PRICE_CONTRADICTED = "list_price_contradicts_roster";
+export const ROSTER_MAX_DISCOUNT_UNAVAILABLE = "authorized_depth_unavailable";
+export const ROSTER_MAX_DISCOUNT_UNREADABLE = "unreadable_authorized_depth";
+/**
+ * The roster prices this product ABOVE zero and the offer charges nothing for it. Alone among the
+ * suffixes here it says nothing about reading the roster: it is the one refusal in the price walk
+ * that no declared depth and no authorized cap can talk its way out of. See the floor in
+ * `priceReasonsFor`.
+ */
+export const ROSTER_PRICE_NOT_POSITIVE = "not_positive";
 
 export interface TrustSnapshotRow {
   store_id?: string;
@@ -135,6 +174,34 @@ export interface ValidateBidOptions {
    * agent holds no key. `validateExternalSubmission` is this flag turned on.
    */
   requireSigningEnvelope?: boolean;
+  /**
+   * The caller's OWN catalog, `{product_ref: 100.0}` or
+   * `{product_ref: {list_price: 100.0, max_discount_pct: 20.0}}`. Pass it and the price wall stops
+   * depending on the bid volunteering what it is discounting from — the one move that defeated it,
+   * and the only one an emitter did not have to forge anything to make. Omit it and the wall reads
+   * the bid's `list_price` claim alone, abstaining when there is none, exactly as before.
+   *
+   * **A roster you pass is evidence.** A product it cannot price refuses rather than falling back
+   * to that abstention, and a product it prices but authorizes no discount depth on refuses a
+   * discounted offer rather than accepting the depth the bid chose for itself.
+   */
+  listPrices?: PriceRosterMap;
+  /**
+   * A caller-wide ceiling in percentage points, for a caller holding one approved number rather
+   * than a per-product column. A roster row's own `max_discount_pct` beats it. Read only when a
+   * roster is passed: on its own it would be a cap with no list price to apply it to.
+   */
+  maxDiscountPct?: number;
+}
+
+/** A roster row: the number itself, or a record spelling it under `list_price`. */
+export type PriceRosterRow = number | Record<string, unknown> | null | undefined;
+export type PriceRosterMap = Record<string, PriceRosterRow>;
+
+/** Options for the standalone {@link priceReasons}, for a caller holding no trust snapshot. */
+export interface PriceReasonOptions {
+  listPrices?: PriceRosterMap;
+  maxDiscountPct?: number;
 }
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
@@ -390,12 +457,105 @@ function carriedListPrice(
   return {listed: distinct[0], reasons: []};
 }
 
+/** "the roster has no row for this product", distinct from a row that IS `null`. */
+const NO_ROW = Symbol("no roster row");
+
 /**
- * Reconcile the price the offer STATES against the depth it DECLARES (T-177). The line-for-line
- * peer of `_price_reasons` in `boundary.py` — see that docstring for why both relations exist,
- * why they are one-sided, and what the first one deliberately cannot know.
+ * The roster's row for this offer's product, or `NO_ROW`. Mirrors `_roster_row` in `boundary.py`.
+ *
+ * `readOwn` and not `roster[ref]`: `product_ref` comes off the wire, so a bid naming the product
+ * `__proto__` would otherwise walk the prototype chain and be handed an object — the same hole
+ * `readOwn` exists to close on the trust snapshot, on the one lookup that decides a price.
  */
-function priceReasons(bid: Record<string, unknown>, offer: unknown): string[] {
+function rosterRow(offer: Record<string, unknown>, listPrices: PriceRosterMap | undefined): unknown {
+  const table = listPrices === undefined ? undefined : readRecord(listPrices);
+  if (table === undefined) return NO_ROW;
+  const productRef = offer["product_ref"];
+  if (typeof productRef !== "string" && typeof productRef !== "number") return NO_ROW;
+  const row = readOwn(table, String(productRef));
+  return row === null || row === undefined ? NO_ROW : row;
+}
+
+/**
+ * The list price the EXCHANGE holds for this offer's product. Mirrors `_roster_list_price`.
+ *
+ * `{listed: undefined, reasons: []}` — abstain — only when the caller passed no roster at all.
+ * Once a roster IS passed, every way of failing to read it is a refusal: a product it does not
+ * price, or prices with something that is not a non-negative finite number.
+ */
+function rosterListPrice(
+  offer: Record<string, unknown>,
+  listPrices: PriceRosterMap | undefined,
+): {listed: number | undefined; reasons: string[]} {
+  if (listPrices === undefined) return {listed: undefined, reasons: []};
+
+  const site = OFFER_UNIT_PRICE_SITE;
+  const row = rosterRow(offer, listPrices);
+  if (row === NO_ROW) {
+    return {
+      listed: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_LIST_PRICE_UNAVAILABLE}`],
+    };
+  }
+
+  const direct = finiteNumber(row);
+  const listed = direct ?? finiteNumber(readRecord(row)?.[LIST_PRICE_CLAIM_KEY]);
+  if (listed === undefined || listed < 0) {
+    return {
+      listed: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_LIST_PRICE_UNREADABLE}`],
+    };
+  }
+  return {listed, reasons: []};
+}
+
+/**
+ * The deepest percentage the CALLER authorizes for this product. Mirrors `_authorized_depth`.
+ *
+ * The half of T-177 that makes the other half bind: `priceReasons` bounds the stated price by the
+ * depth the offer DECLARES, and a bound chosen by the thing being bounded is not a bound. The cap
+ * is read from the caller — the roster row's own `max_discount_pct` first, then the call's
+ * `maxDiscountPct` — and never from the bid. Nothing is a REFUSAL, not a default.
+ */
+function authorizedDepth(
+  offer: Record<string, unknown>,
+  listPrices: PriceRosterMap | undefined,
+  maxDiscountPct: number | undefined,
+): {cap: number | undefined; reasons: string[]} {
+  if (listPrices === undefined) return {cap: undefined, reasons: []};
+
+  const site = OFFER_DISCOUNT_SITE;
+  const row = rosterRow(offer, listPrices);
+  const fromRow = row === NO_ROW ? undefined : readRecord(row)?.[MAX_DISCOUNT_ROSTER_KEY];
+  const raw = fromRow === undefined || fromRow === null ? maxDiscountPct : fromRow;
+  if (raw === undefined || raw === null) {
+    return {
+      cap: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_MAX_DISCOUNT_UNAVAILABLE}`],
+    };
+  }
+
+  const cap = finiteNumber(raw);
+  if (cap === undefined || cap < 0 || cap > 100) {
+    return {
+      cap: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_MAX_DISCOUNT_UNREADABLE}`],
+    };
+  }
+  return {cap, reasons: []};
+}
+
+/**
+ * Reconcile the price the offer STATES against the depth the caller AUTHORIZES (T-177). The
+ * line-for-line peer of `_price_reasons` in `boundary.py` — see that docstring for why both
+ * relations exist, why they are one-sided, and what the first one deliberately cannot know.
+ */
+function priceReasonsFor(
+  bid: Record<string, unknown>,
+  offer: unknown,
+  listPrices?: PriceRosterMap,
+  maxDiscountPct?: number,
+): string[] {
   const record = readRecord(offer);
   if (record === undefined) return [];
 
@@ -421,29 +581,114 @@ function priceReasons(bid: Record<string, unknown>, offer: unknown): string[] {
   // refused above, and restating them as an inequality would report one bad number twice.
   if (depth === undefined || unitPrice === undefined || unitPrice < 0) return reasons;
 
+  // The depth the offer declared is paperwork; the depth the CALLER authorized is the bound. They
+  // are the same number whenever no roster was passed, which is what keeps every existing verdict
+  // identical. A zero depth needs no authorization — it takes nothing off — so the cap is not even
+  // consulted for one.
+  let authorized = depth;
+  if (depth > 0) {
+    const granted = authorizedDepth(record, listPrices, maxDiscountPct);
+    reasons.push(...granted.reasons);
+    if (granted.cap === undefined) {
+      // `listPrices === undefined` is the abstention; anything else here is a roster that could
+      // not authorize this depth, and an unauthorized depth authorizes nothing.
+      authorized = listPrices === undefined ? depth : 0;
+    } else {
+      // No tolerance on this comparison, and none is wanted: a request exactly AT the cap is
+      // authorized (`authorize_discount` grants at `max_discount_pct` and denies above it), and a
+      // cent of currency slack has no meaning applied to percentage points.
+      if (depth > granted.cap) {
+        reasons.push(`${REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH}:${OFFER_DISCOUNT_SITE}`);
+      }
+      authorized = Math.min(depth, granted.cap);
+    }
+  } else if (listPrices !== undefined) {
+    // NO depth declared, and a roster to check against. The price is still a depth — an implicit
+    // one — and 15.00 for a 100.00 product is an 85% discount however the paperwork is spelled. So
+    // when the roster STATES what is authorized, the undeclared price is measured against that,
+    // exactly as a declared one is. The cap's own reasons are dropped: `authorized_depth_
+    // unavailable` names a depth the offer claimed without authorization, and this offer claimed
+    // nothing. `authorized` then stays at zero, so an absent or unreadable cap still measures the
+    // price against the full list price — the fail-closed direction.
+    const granted = authorizedDepth(record, listPrices, maxDiscountPct);
+    if (granted.cap !== undefined) authorized = granted.cap;
+  }
+
   const carried = carriedListPrice(bid, record);
   reasons.push(...carried.reasons);
+  const rostered = rosterListPrice(record, listPrices);
+  reasons.push(...rostered.reasons);
+
+  // The roster wins when both are readable, and a disagreement between them is its own refusal
+  // rather than a tie broken silently: letting the door pick would let a bid choose which wall it
+  // is measured against by writing a claim.
+  const listed = rostered.listed ?? carried.listed;
   if (
+    rostered.listed !== undefined &&
     carried.listed !== undefined &&
-    unitPrice + PRICE_RECONCILIATION_TOLERANCE < (carried.listed * (100 - depth)) / 100
+    Math.abs(rostered.listed - carried.listed) > PRICE_RECONCILIATION_TOLERANCE
+  ) {
+    reasons.push(
+      `${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:${ROSTER_LIST_PRICE_CONTRADICTED}`,
+    );
+  }
+
+  // THE FLOOR — the one relation here that no depth can satisfy. Everything else is an inequality
+  // against `authorized`, so an authorized 100 makes all of them true at once: `listed * (100 -
+  // 100) / 100` is 0.00, and a bid charging 0.00 for a 100.00 product is then arithmetically
+  // perfect. Measured through the exchange's own `POST /auctions` before this existed — roster row
+  // `{list_price: 100.0, max_discount_pct: 100.0}`, an offer declaring 100% at 0.00 — `HTTP 201,
+  // entries=[{fallback: false, unit_price: 0.0}]`. A price of nothing is not a deep discount; it is
+  // the absence of a price, and no authorization makes a product free.
+  //
+  // Deliberately `rostered`, never `listed`: a carried claim must not switch this on, or the
+  // emitter would choose its own floor and every no-roster verdict would stop being identical.
+  // Exactly zero only — a negative price is already `:negative` above.
+  if (rostered.listed !== undefined && rostered.listed > 0) {
+    for (const [site, priced] of [
+      [OFFER_UNIT_PRICE_SITE, unitPrice],
+      [OFFER_TOTAL_PRICE_SITE, totalPrice],
+    ] as const) {
+      if (priced !== undefined && priced === 0) {
+        reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_PRICE_NOT_POSITIVE}`);
+      }
+    }
+  }
+
+  if (
+    listed !== undefined &&
+    unitPrice + PRICE_RECONCILIATION_TOLERANCE < (listed * (100 - authorized)) / 100
   ) {
     reasons.push(`${REASON_PRICE_UNDER_DECLARED_DEPTH}:${OFFER_UNIT_PRICE_SITE}`);
   }
 
-  // `depth > 0` only. At zero there is no declared depth to make true, and `total >= unit` would
-  // no longer be a statement about a discount — it would conflate quantity with discount. The
-  // list-price relation above still applies at zero: a price under LIST with no declared
-  // discount is a discount that entered the bid through no hook at all.
+  // An authorized depth above zero only. At zero there is no depth to make true, and `total >=
+  // unit` would no longer be a statement about a discount — it would conflate quantity with
+  // discount. The list-price relation above still applies at zero: a price under LIST with no
+  // authorized discount is a discount that entered the bid through no hook at all.
   if (
-    depth > 0 &&
+    authorized > 0 &&
     totalPrice !== undefined &&
     totalPrice >= 0 &&
-    totalPrice + PRICE_RECONCILIATION_TOLERANCE < (unitPrice * (100 - depth)) / 100
+    totalPrice + PRICE_RECONCILIATION_TOLERANCE < (unitPrice * (100 - authorized)) / 100
   ) {
     reasons.push(`${REASON_PRICE_UNDER_DECLARED_DEPTH}:${OFFER_TOTAL_PRICE_SITE}`);
   }
 
   return reasons;
+}
+
+/**
+ * The PRICE half of `validateBid`'s verdict, for a caller holding a catalog but no trust snapshot.
+ *
+ * The peer of `price_reasons` in `boundary.py`, and the SAME function `validateBid` calls rather
+ * than a second copy of the arithmetic. A caller that already ran the R12 eligibility gate
+ * elsewhere has no snapshot to hand this door and would otherwise have to invent a permissive one
+ * to reach the price walk. Never throws.
+ */
+export function priceReasons(bid: unknown, options: PriceReasonOptions = {}): string[] {
+  const record = readRecord(bid) ?? {};
+  return priceReasonsFor(record, record["offer"], options.listPrices, options.maxDiscountPct);
 }
 
 function expiryReasons(offer: unknown, now: Date): string[] {
@@ -541,8 +786,13 @@ export function validateBid(bid: unknown, options: ValidateBidOptions): BidValid
   // 3. The PRICE the offer states, against the depth it declares. Path-insensitive: arithmetic
   //    does not care who is speaking. A genuine hook-minted 20% grant used to license any price
   //    at all here, because the only wall comparing what a bid charges with what it declares
-  //    lived on the emitting side, where a store not running our runtime never meets it.
-  reasons.push(...priceReasons(record, record["offer"]));
+  //    lived on the emitting side, where a store not running our runtime never meets it. The list
+  //    price and the authorized depth it reconciles against come from the bid's own claim and,
+  //    when the caller supplies one, from the caller's roster — the version of this wall silence
+  //    cannot disarm, and the one the bid does not get to choose its own cap for.
+  reasons.push(
+    ...priceReasonsFor(record, record["offer"], options.listPrices, options.maxDiscountPct),
+  );
 
   // 4. Offer expiry and 5. seller eligibility — path-insensitive.
   reasons.push(...expiryReasons(record["offer"], evaluatedAt));

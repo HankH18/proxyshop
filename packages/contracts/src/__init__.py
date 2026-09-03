@@ -45,6 +45,7 @@ from contracts.boundary import (
     REASON_SIGNATURE_MISSING,
     REASON_SIGNING_ENVELOPE_INCOMPLETE,
     parse_timestamp,
+    price_reasons,
     validate_bid,
     validate_external_submission,
 )
@@ -204,6 +205,7 @@ __all__ = [
     "REASON_SIGNATURE_MISSING",
     "REASON_SIGNING_ENVELOPE_INCOMPLETE",
     "parse_timestamp",
+    "price_reasons",
     "validate_bid",
     "validate_external_submission",
     # signing

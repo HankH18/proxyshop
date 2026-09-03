@@ -7,6 +7,8 @@ rejection assertion in this file and be worthless, so each one is paired.
 
 from __future__ import annotations
 
+import json
+import pathlib
 from typing import Any
 
 import pytest
@@ -1074,10 +1076,13 @@ def test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price(path:
     inventing a lookup it cannot do. Such a bid is measured by the `total_price` relation alone,
     which is why the offer below — 20% off, charging 15.00, internally consistent — is admitted.
 
-    Closing this needs a list price the EXCHANGE supplies from its own roster; that is a
-    signature change and a different ticket. Refusing every discounted offer that omits the
-    claim would not be fail-closed, it would be closed: `make_offer()` itself declares 10% and
-    carries no list price, as does every honest bid in this suite.
+    Closing this needs a list price the EXCHANGE supplies from its own roster — which is now the
+    `list_prices` parameter, pinned in `test_boundary_price_roster.py`. This test is what says
+    the roster is OPT-IN: with none passed the abstention is still exactly here, unchanged, and
+    every assertion below is the one it was written with. Removing the abstention outright rather
+    than giving callers a way to close it would not be fail-closed, it would be closed:
+    `make_offer()` itself declares 10% and carries no list price, as does every honest bid in
+    this suite.
     """
     silent = make_bid(offer=priced_offer(15.0, 15.0))
     result = check(silent, path)
@@ -1091,84 +1096,77 @@ def test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price(path:
     )
 
 
-# --- the cross-language price table, mirrored in `boundary.test.ts::T-177 price parity` -------
+# --- the cross-language price table, READ FROM THE SHARED CORPUS both doors drive ------------
+#
+# This table used to live here AND in `boundary.test.ts`, hand-copied, payload builders included.
+# Two copies of a parity table are not a parity test: a divergence introduced on one side alone
+# gets edited into that side's copy and both suites stay green while the doors disagree — which
+# is exactly what happened when the T-177 roster landed in `boundary.py` and not in `boundary.ts`
+# and both copies went on asserting `no_list_price_carried: ok=true`. The cases now live once, as
+# wire payloads, in `price_parity_corpus.json`, and each suite drives its own door with them.
 
-PRICE_PARITY_TABLE: dict[str, dict] = {
-    "charges_under_the_carried_list_price": {
-        "ok": False,
-        "reasons": ["price_under_declared_depth:offer.unit_price"],
-    },
-    "total_under_the_stated_unit_price": {
-        "ok": False,
-        "reasons": ["price_under_declared_depth:offer.total_price"],
-    },
-    "amount_discount": {
-        "ok": False,
-        "reasons": ["price_unreconcilable:offer.discount:amount"],
-    },
-    "depth_out_of_range": {
-        "ok": False,
-        "reasons": ["price_unreconcilable:offer.discount:depth_out_of_range"],
-    },
-    "ambiguous_list_price": {
-        "ok": False,
-        "reasons": ["price_unreconcilable:offer.unit_price:ambiguous_list_price"],
-    },
-    "unreadable_list_price": {
-        "ok": False,
-        "reasons": ["price_unreconcilable:offer.unit_price:unreadable_list_price"],
-    },
-    "honest_price": {"ok": True, "reasons": []},
-    # The abstention, pinned on BOTH doors: they must be blind to the same thing, or the seller
-    # picks the blinder one.
-    "no_list_price_carried": {"ok": True, "reasons": []},
-}
+_PARITY_CORPUS = json.loads(
+    (pathlib.Path(__file__).parent / "price_parity_corpus.json").read_text(encoding="utf-8")
+)
+PRICE_PARITY_CASES: list[dict] = _PARITY_CORPUS["cases"]
+PRICE_PARITY_BY_NAME: dict[str, dict] = {case["name"]: case for case in PRICE_PARITY_CASES}
 
 
-def price_parity_bid(name: str) -> dict:
-    """The payload for one price-parity case. Mirrored by `pricedParityBid` in `boundary.test.ts`."""
-    if name == "charges_under_the_carried_list_price":
-        return make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(15.0, 15.0))
-    if name == "total_under_the_stated_unit_price":
-        return make_bid(offer=priced_offer(100.0, 15.0))
-    if name == "amount_discount":
-        return make_bid(offer=priced_offer(49.0, 44.1, depth=10.0, kind="amount"))
-    if name == "depth_out_of_range":
-        return make_bid(offer=priced_offer(49.0, 44.1, depth=150.0))
-    if name == "ambiguous_list_price":
-        return make_bid(
-            claims=[list_price_claim(100.0), list_price_claim(120.0)],
-            offer=priced_offer(80.0, 80.0),
-        )
-    if name == "unreadable_list_price":
-        return make_bid(claims=[list_price_claim("n/a")], offer=priced_offer(80.0, 80.0))
-    if name == "honest_price":
-        return make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(80.0, 80.0))
-    if name == "no_list_price_carried":
-        return make_bid(offer=priced_offer(15.0, 15.0))
-    raise AssertionError(f"unknown price parity case {name!r}")
-
-
-@pytest.mark.parametrize("case", sorted(PRICE_PARITY_TABLE))
+@pytest.mark.parametrize("case", sorted(PRICE_PARITY_BY_NAME))
 def test_the_price_verdicts_match_the_typescript_peer(case: str) -> None:
-    expected = PRICE_PARITY_TABLE[case]
-    result = check(price_parity_bid(case), HOSTED_PATH)
+    """One corpus case, through the Python door. `boundary.test.ts` asserts the same rows."""
+    expected = PRICE_PARITY_BY_NAME[case]
+    result = validate_bid(
+        expected["bid"],
+        path=_PARITY_CORPUS["path"],
+        trust_snapshot=make_snapshot_table(),
+        now=_PARITY_CORPUS["now"],
+        list_prices=expected["list_prices"],
+        max_discount_pct=expected["max_discount_pct"],
+    )
+    # `schema_invalid:` reasons name pydantic/ajv field paths, the one part of the vocabulary the
+    # two implementations are not expected to spell identically.
     priced = [r for r in result.reasons if not r.startswith("schema_invalid")]
     assert priced == expected["reasons"], (case, list(result.reasons))
     assert result.ok is expected["ok"], (case, list(result.reasons))
 
 
-def test_the_price_parity_table_is_not_quietly_empty() -> None:
-    """Guards the parametrization: an emptied table registers zero cases, which reads as green."""
+def test_the_price_parity_corpus_is_not_quietly_empty() -> None:
+    """Guards the parametrization: an emptied corpus registers zero cases, which reads as green.
+    Guards the corpus too — a table of nothing but rejections is satisfied by a door that refuses
+    everything, and a table of nothing but admissions by a door with no wall in it at all."""
     from contracts import boundary
 
-    assert len(PRICE_PARITY_TABLE) == 8
+    assert len(PRICE_PARITY_CASES) >= 20
+    assert len(PRICE_PARITY_BY_NAME) == len(PRICE_PARITY_CASES), "duplicate case name"
+    assert sum(1 for c in PRICE_PARITY_CASES if c["ok"]) >= 5
+    assert sum(1 for c in PRICE_PARITY_CASES if not c["ok"]) >= 12
+    for case in PRICE_PARITY_CASES:
+        assert bool(case["reasons"]) is not case["ok"], case["name"]
+
     assert boundary.OFFER_UNIT_PRICE_SITE == "offer.unit_price"
     assert boundary.OFFER_TOTAL_PRICE_SITE == "offer.total_price"
     assert boundary.REASON_PRICE_UNDER_DECLARED_DEPTH == "price_under_declared_depth"
     assert boundary.REASON_PRICE_UNRECONCILABLE == "price_unreconcilable"
+    assert boundary.REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH == "discount_over_authorized_depth"
     assert boundary.LIST_PRICE_CLAIM_KEY == "list_price"
+    assert boundary.MAX_DISCOUNT_ROSTER_KEY == "max_discount_pct"
     assert boundary.PRICE_RECONCILIATION_TOLERANCE == 0.01
+
+
+def test_the_corpus_still_covers_every_case_the_hand_copied_table_pinned() -> None:
+    """The eight rows the two duplicated tables carried before they were merged into the corpus.
+    Named explicitly so replacing the mechanism cannot quietly drop a case with it."""
+    assert {
+        "charges_under_the_carried_list_price",
+        "total_under_the_stated_unit_price",
+        "amount_discount",
+        "depth_out_of_range",
+        "ambiguous_list_price",
+        "unreadable_list_price",
+        "honest_price",
+        "no_list_price_carried",
+    } <= set(PRICE_PARITY_BY_NAME)
 
 
 def test_the_price_walk_survives_attribute_access_and_hostile_offers() -> None:
