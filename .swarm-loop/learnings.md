@@ -394,3 +394,21 @@ APPLY: in every worktree packet say — CodeGraph is available in the PRIMARY ch
 your worktree use `git grep` and direct reads, and if you run `codegraph explore` at all, verify
 the returned paths are inside your tree before believing a word of it. The orchestrator keeps
 CodeGraph for its own primary-tree work, where it is correct.
+
+## Pass --worktree-root at init, or `retire` reclaims nothing and `resume` sees no trees
+
+Cycle 10. `state.json` has NO `worktree_root` key — the run was initialised without the flag —
+so every tool that looks for the run's worktrees looks under the default
+`<repo>/.swarm-loop/worktrees`, which does not exist. The trees actually live beside the repo at
+`../proxyshop-worktrees`, which is the correct LOCATION; only the record of it is missing.
+
+Two measured consequences, both silent. `checkpoint` correctly warned that four landed worktrees
+were overdue for teardown, but `retire --dry-run` then reported **0 retired · 5 kept** and
+"worktree root size: unmeasured (no worktree root on disk)" — it could name the branches to
+delete but could not find a single tree to reclaim, so ~4 GB stayed on disk and the operator has
+to fall back to `git worktree remove` by hand. And a resumed session would report ZERO live
+worktrees no matter how many exist, then re-dispatch every in-flight ticket into a second set.
+
+APPLY: pass `--worktree-root ../<repo>-worktrees` at `init`. When inheriting a run that lacks it,
+say so in the handoff and in the cycle report — `state.json` is guard-protected against in-place
+rewrites, so it cannot simply be patched, and the gap silently survives every later session.
