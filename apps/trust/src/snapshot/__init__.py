@@ -9,6 +9,7 @@ resolve to the same objects — see :mod:`._binding`.
 :func:`build_snapshot`        stores -> ``{version, score_version, as_of, stores}``.
 :func:`store_entry`           one store's entry, if you already have the store.
 :func:`clean_episodes`        the ``low_data`` count, and how it is derived.
+:data:`EPISODE_FLOOR_DIMENSIONS`  the dimensions that count is derived over, and why.
 :data:`SNAPSHOT_VERSION`      what the exchange client caches on and refreshes against.
 ============================  ==========================================================
 
@@ -39,6 +40,7 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 # relative import, because it is the eager imports that build the second copy.
 from ._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .builder import (  # noqa: E402
+    EPISODE_FLOOR_DIMENSIONS,
     SNAPSHOT_VERSION,
     build_snapshot,
     clean_episodes,
@@ -46,6 +48,7 @@ from .builder import (  # noqa: E402
 )
 
 __all__ = [
+    "EPISODE_FLOOR_DIMENSIONS",
     "SNAPSHOT_VERSION",
     "build_snapshot",
     "clean_episodes",

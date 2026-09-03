@@ -36,18 +36,26 @@ job through the published ``claim_type -> dimension`` table.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 __all__ = [
     "ACCEPTED_KIND",
     "DISCOUNT_TOLERANCE",
+    "DISHONORED_OBSERVATION_TYPE",
+    "HONORED_OBSERVATION_TYPE",
+    "INCOMPARABLE_OBSERVATION_TYPE",
+    "OBSERVATION_KIND",
     "PIXEL_KIND",
     "PRICE_TOLERANCE",
+    "RECONCILED_DIMENSIONS",
     "RECONCILED_KIND",
     "WEBHOOK_KIND",
     "ReconciliationInputError",
+    "observation_events",
     "reconcile",
     "reconciled_event",
+    "reconciled_observations",
 ]
 
 #: The three input kinds, and the one output kind. All four are already in the frozen
@@ -65,6 +73,37 @@ PRICE_TOLERANCE = 0.005
 
 #: Discount comparison tolerance, in percentage points.
 DISCOUNT_TOLERANCE = 0.01
+
+#: The kind the translated trust observations are emitted under. ``offer_integrity`` is
+#: already in the frozen 18-kind vocabulary and its published body is exactly what one of
+#: these carries — ``(bid_ref, field, promised, observed)`` — so no vocabulary edit, no
+#: migration, and nothing in ``contracts`` has to learn a new shape.
+OBSERVATION_KIND = "offer_integrity"
+
+#: Which promise each reconciled verdict grades, and the trust dimension it lands on. The
+#: pairs are the approved ``claim_type -> dimension`` routing restated for the two fields a
+#: reconciliation actually decides; nothing here invents a dimension.
+RECONCILED_DIMENSIONS: Mapping[str, str] = MappingProxyType(
+    {"price": "price_honored", "discount": "discount_honored"}
+)
+
+#: A promise the webhook shows was kept. ``fulfilled``, the published positive for exactly
+#: that (weight 1.0) — a kept promise must be able to EARN a store its score, not merely
+#: avoid costing it one, or an honest store never leaves the prior.
+HONORED_OBSERVATION_TYPE = "fulfilled"
+
+#: A promise the webhook shows was broken. The published ``contradicted`` (2.0).
+DISHONORED_OBSERVATION_TYPE = "contradicted"
+
+#: A promise the webhook did not say enough to grade. ``unsupported`` (0.5) — a small
+#: published negative whose dominant effect is on coverage and confidence.
+#:
+#: This distinction is the whole reason ``price_comparable`` / ``discount_comparable`` are on
+#: the reconciled payload. Both verdicts read ``False`` when the webhook was silent (the
+#: fail-closed direction, "not demonstrated honored"), so a translator that read only the
+#: verdict would manufacture a 2.0 contradiction out of a malformed webhook — a penalty the
+#: store cannot see coming and cannot appeal.
+INCOMPARABLE_OBSERVATION_TYPE = "unsupported"
 
 
 class ReconciliationInputError(ValueError):
@@ -235,6 +274,7 @@ def reconciled_event(
     webhook: Any,
     pixel: Any,
     ts: Any,
+    bid_ref: Any = None,
 ) -> dict[str, Any]:
     """Build the one ``reconciled`` event for one order.
 
@@ -309,6 +349,11 @@ def reconciled_event(
             "order_ref": order_ref,
             "checkout_token": checkout_token,
             "product_ref": promised.get("product_ref"),
+            # Carried from the accepted offer so a translated observation can name the bid it
+            # grades: `offer_integrity` publishes `bid_ref` in its body, and an integrity
+            # finding that cannot be traced back to the bid that made the promise is one a
+            # store can neither check nor contest.
+            "bid_ref": bid_ref,
             # the verdicts — every one of them computed from the webhook
             "price_honored": bool(price_honored),
             "discount_honored": bool(discount_honored),
@@ -423,6 +468,172 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
                 webhook=webhook,
                 pixel=bucket.get(PIXEL_KIND),
                 ts=_field(webhook, "ts"),
+                bid_ref=_payload(accepted).get("bid_ref"),
             )
         )
     return emitted
+
+
+def _as_reconciled_events(reconciled: Any) -> list[Any]:
+    """One reconciled event, or an iterable of them, as a list of the ``reconciled`` ones."""
+    events = [reconciled] if isinstance(reconciled, Mapping) else list(reconciled)
+    return [event for event in events if str(_field(event, "kind", "")) == RECONCILED_KIND]
+
+
+def _verdict_observation_type(*, honored: Any, comparable: Any) -> str:
+    """One reconciled verdict as a published observation type."""
+    if not bool(comparable):
+        return INCOMPARABLE_OBSERVATION_TYPE
+    return HONORED_OBSERVATION_TYPE if bool(honored) else DISHONORED_OBSERVATION_TYPE
+
+
+def _graded_fields(payload: Mapping[str, Any]) -> list[tuple[str, str, str, Any, Any]]:
+    """The promises this reconciliation graded: ``(field, dim, type, promised, observed)``.
+
+    ONE place decides which promises are gradeable and what each verdict is worth, so the
+    observation records and the ledger events below cannot drift apart about either.
+
+    A verdict is only evidence about a store when there was a promise behind it, so a field
+    the offer never promised produces NOTHING here — not a positive, and not a negative.
+
+    * ``discount_honored`` reads ``True`` when no discount was promised, because there is
+      nothing to dishonour. Translating that into a ``fulfilled`` observation would pay a
+      store for a promise it never made, on every order it ever takes: promise no discount,
+      collect free positive evidence on ``discount_honored`` forever.
+    * a missing promised PRICE is likewise not gradeable. ``unsupported`` there would
+      penalise a store for an offer that carried no price rather than for anything it did.
+    """
+    graded: list[tuple[str, str, str, Any, Any]] = []
+
+    promised_price = payload.get("promised_price")
+    if promised_price is not None:
+        graded.append(
+            (
+                "price",
+                RECONCILED_DIMENSIONS["price"],
+                _verdict_observation_type(
+                    honored=payload.get("price_honored"),
+                    comparable=payload.get("price_comparable"),
+                ),
+                promised_price,
+                payload.get("observed_price"),
+            )
+        )
+
+    promised_discount = payload.get("promised_discount_percentage")
+    if promised_discount is not None and float(promised_discount) > 0.0:
+        graded.append(
+            (
+                "discount",
+                RECONCILED_DIMENSIONS["discount"],
+                _verdict_observation_type(
+                    honored=payload.get("discount_honored"),
+                    comparable=payload.get("discount_comparable"),
+                ),
+                promised_discount,
+                payload.get("observed_discount_percentage"),
+            )
+        )
+    return graded
+
+
+def reconciled_observations(reconciled: Any) -> list[dict[str, Any]]:
+    """Translate reconciled verdicts into the trust observations the scorer consumes.
+
+    This is the R4 -> R12 seam. Before it existed, ``reconciled`` events carried
+    ``price_honored`` / ``discount_honored`` and no ``dim`` and no ``type``, and
+    ``trust.ledger.replay.observations_from_events`` silently skips any event whose payload
+    lacks both — so a dishonest fulfilment reconciled perfectly and then moved nothing.
+    Measured: ``accepted{total 100, discount 20%}`` + ``order_paid{total 130}`` produced
+    ``price_honored=False``, ``discount_honored=False``, and then ``[]`` observations and
+    ``{}`` snapshots.
+
+    Args:
+        reconciled: one ``reconciled`` event, or an iterable of events. Events of any other
+            kind are ignored, so a whole ledger page can be handed straight in.
+
+    Returns:
+        ``[{store_id, dim, type, observed_at}, ...]`` in field order (price, then discount)
+        per order, in the order the reconciled events arrived. Deterministic: no clock, no
+        randomness, and the same input gives the same list — the ledger is replayable only if
+        everything written into it is.
+
+        Observations carry NO per-observation ``weight``: a reconciliation is a machine
+        comparison against the authoritative webhook, worth exactly its published type weight.
+        The weight channel exists for reports whose *source* is discountable (R14 buyer
+        feedback), and defaulting these to 1.0 is what keeps a replayed snapshot bit-identical
+        to a served one.
+    """
+    observations: list[dict[str, Any]] = []
+    for event in _as_reconciled_events(reconciled):
+        payload = _payload(event)
+        store_id = _field(event, "store_id") or payload.get("store_id")
+        observed_at = payload.get("observed_at") or _field(event, "ts")
+        for _field_name, dimension, observation_type, _promised, _observed in _graded_fields(
+            payload
+        ):
+            observations.append(
+                {
+                    "store_id": store_id,
+                    "dim": dimension,
+                    "type": observation_type,
+                    "observed_at": observed_at,
+                }
+            )
+    return observations
+
+
+def observation_events(reconciled: Any) -> list[dict[str, Any]]:
+    """The same translation, as ledger events the existing replay consumer already reads.
+
+    ``apps/trust/src/ledger/**`` belongs to another ticket and
+    ``observations_from_events`` projects exactly ``{store_id, dim, type, observed_at}`` off
+    any event whose payload names a ``dim`` and a ``type``. So the translation lives on the
+    EMITTER side: these events are shaped to what that consumer already requires, rather than
+    the consumer being asked to learn what a ``reconciled`` payload means.
+
+    One event per graded promise, not one per order, because an observation is about exactly
+    one dimension and ``observations_from_events`` reads exactly one ``dim`` per event.
+
+    Args:
+        reconciled: one ``reconciled`` event, or an iterable of events.
+
+    Returns:
+        ``offer_integrity`` events carrying the published body for that kind
+        (``bid_ref`` / ``field`` / ``promised`` / ``observed``) plus the ``dim``, ``type`` and
+        ``observed_at`` the trust projection reads. ``event_id`` is
+        ``offer_integrity:{store}:{order}:{field}`` — deterministic, and scoped by store for
+        the same reason the reconciled event's is: a platform ``order_id`` is a PER-SHOP
+        number, and ``event_id`` IS the ledger's idempotency key, so an unscoped one would
+        make one shop's integrity finding a silent no-op against another's.
+    """
+    events: list[dict[str, Any]] = []
+    for event in _as_reconciled_events(reconciled):
+        payload = _payload(event)
+        store_id = _field(event, "store_id") or payload.get("store_id")
+        order_ref = payload.get("order_ref") or _field(event, "order_ref")
+        observed_at = payload.get("observed_at") or _field(event, "ts")
+        for field, dimension, observation_type, promised_value, observed_value in _graded_fields(
+            payload
+        ):
+            events.append(
+                {
+                    "event_id": f"{OBSERVATION_KIND}:{store_id}:{order_ref}:{field}",
+                    "ts": _field(event, "ts"),
+                    "kind": OBSERVATION_KIND,
+                    "store_id": store_id,
+                    "order_ref": order_ref,
+                    "payload": {
+                        "bid_ref": payload.get("bid_ref"),
+                        "field": field,
+                        "promised": promised_value,
+                        "observed": observed_value,
+                        "dim": dimension,
+                        "type": observation_type,
+                        "observed_at": observed_at,
+                        "reconciled_event_id": _field(event, "event_id"),
+                        "authority": WEBHOOK_KIND,
+                    },
+                }
+            )
+    return events

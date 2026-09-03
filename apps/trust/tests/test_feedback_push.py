@@ -678,3 +678,133 @@ def test_the_routed_table_is_consulted_by_the_order_reference_as_a_string():
 
     assert verdict["accepted"] is True, "a numeric order reference was treated as unrouted"
     assert verdict["order_ref"] == "12345"
+
+
+# --------------------------------------------------------------------------------------
+# T-186 — the weight has to REACH the score (R14)
+#
+# `accept_feedback` returned a weight and nothing consumed it: `trust.scoring.score` derived
+# an observation's weight solely from the published type table. So both R14 properties this
+# file already asserts -- "downweighted by a contradicting return" and "one account cannot
+# outvote the network" -- held over a number that never touched a Beta. These tests assert
+# the weight all the way through to alpha/beta, which is the only place it means anything.
+# --------------------------------------------------------------------------------------
+
+
+def _feedback_alpha(verdict, as_of):
+    """The alpha ``feedback_match`` carries after scoring one accepted feedback verdict."""
+    from apps.trust.src.feedback import feedback_observation
+    from apps.trust.src.scoring import score
+
+    observation = feedback_observation(verdict, observed_at=as_of)
+    assert observation is not None, "an accepted verdict produced no trust observation"
+    return float(score([observation], as_of=as_of)["dims"]["feedback_match"]["alpha"])
+
+
+def test_accepted_feedback_becomes_a_weighted_feedback_match_observation(e6_as_of):
+    """R14: the routed buyer's report lands on ``feedback_match``, carrying its weight.
+
+    ``feedback_match`` takes NO verification outcome -- the approved manifest says so in
+    ``claim_type_dimensions_meta`` -- so the observation type is the buyer-reported one
+    (``fulfilled`` for "it matched"), never ``verified``.
+    """
+    from apps.trust.src.feedback import feedback_observation
+
+    verdict = accept_feedback("o-1", {"matched_pitch": True}, routed_orders=_routed("o-1"))
+    observation = feedback_observation(verdict, observed_at=e6_as_of)
+
+    assert observation["store_id"] == "s-1"
+    assert observation["dim"] == "feedback_match"
+    assert observation["type"] == "fulfilled"
+    assert observation["observed_at"] == e6_as_of
+    assert float(observation["weight"]) == BASE_FEEDBACK_WEIGHT
+
+
+def test_unrouted_feedback_produces_no_observation_at_all(e6_as_of):
+    """R14: the gate is the point -- rejected feedback is not a zero-weight observation.
+
+    A zero-weight observation still counts towards coverage and towards the store's
+    observation count, so admitting one for every astroturfed review would let a store dilute
+    its own coverage on demand. Rejected feedback simply is not evidence.
+    """
+    from apps.trust.src.feedback import feedback_observation
+
+    verdict = accept_feedback("o-nope", {"matched_pitch": True}, routed_orders=_routed("o-1"))
+
+    assert verdict["accepted"] is False
+    assert feedback_observation(verdict, observed_at=e6_as_of) is None
+
+
+def test_a_return_contradicting_a_positive_report_moves_the_beta_strictly_less(e6_as_of):
+    """R14, all the way to the number: the downweight has to show up in alpha.
+
+    Measured before the fix: the kept order and the returned order produced weights 1.0 and
+    0.25 and then the identical alpha, because ``score`` never read the weight.
+    """
+    kept = accept_feedback("o-kept", {"matched_pitch": True}, routed_orders=_routed("o-kept"))
+    returned = accept_feedback(
+        "o-returned",
+        {"matched_pitch": True},
+        routed_orders=_routed("o-returned", returned=True),
+    )
+
+    kept_alpha = _feedback_alpha(kept, e6_as_of)
+    returned_alpha = _feedback_alpha(returned, e6_as_of)
+    prior_alpha = 2.0
+
+    assert kept_alpha > returned_alpha > prior_alpha, (
+        f"the return contradiction never reached the Beta update "
+        f"(kept alpha={kept_alpha}, returned alpha={returned_alpha})"
+    )
+    assert (returned_alpha - prior_alpha) == pytest.approx(
+        (kept_alpha - prior_alpha) * RETURN_CONTRADICTION_FACTOR
+    ), "the alpha movement did not scale by the published return-contradiction factor"
+
+
+def test_one_account_with_a_poor_track_record_cannot_outvote_the_network(e6_as_of):
+    """R14: ten reports from a 0.1-track-record account weigh exactly one honest report.
+
+    Stated as an equality rather than an inequality on purpose: "weighs less" is satisfied by
+    an engine that ignores the track record entirely as long as it also ignores the count.
+    """
+    from apps.trust.src.feedback import feedback_observation
+    from apps.trust.src.scoring import score
+
+    honest = accept_feedback("o-1", {"matched_pitch": True}, routed_orders=_routed("o-1"))
+    spammer = accept_feedback(
+        "o-1", {"matched_pitch": True}, routed_orders=_routed("o-1"), buyer_track_record=0.1
+    )
+
+    one_honest = [feedback_observation(honest, observed_at=e6_as_of)]
+    ten_spammed = [feedback_observation(spammer, observed_at=e6_as_of) for _ in range(10)]
+
+    honest_alpha = float(score(one_honest, as_of=e6_as_of)["dims"]["feedback_match"]["alpha"])
+    spam_alpha = float(score(ten_spammed, as_of=e6_as_of)["dims"]["feedback_match"]["alpha"])
+
+    assert spam_alpha == pytest.approx(honest_alpha), (
+        "a buyer's track record does not scale what their feedback is worth to the score"
+    )
+
+
+def test_a_negative_report_lands_as_the_published_buyer_reported_negative(e6_as_of):
+    """A buyer who says the delivery did not match the pitch moves ``feedback_match`` down.
+
+    ``mismatch_return`` is the only buyer-reported negative the approved weight table
+    publishes, and it is NOT one of the four verification statuses the manifest forbids on
+    this dimension.
+    """
+    from apps.trust.src.feedback import feedback_observation
+    from apps.trust.src.scoring import score
+
+    verdict = accept_feedback(
+        "o-1", {"matched_pitch": False}, routed_orders=_routed("o-1", returned=True)
+    )
+    observation = feedback_observation(verdict, observed_at=e6_as_of)
+
+    assert observation["type"] == "mismatch_return"
+    assert float(observation["weight"]) == BASE_FEEDBACK_WEIGHT, (
+        "a negative report from a returning buyer is corroborated by the return, not "
+        "contradicted by it, so it is not downweighted"
+    )
+    entry = score([observation], as_of=e6_as_of)["dims"]["feedback_match"]
+    assert float(entry["beta"]) > 2.0 and float(entry["alpha"]) == 2.0

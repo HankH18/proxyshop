@@ -26,9 +26,17 @@ Counting clean episodes without episode identifiers
 An "episode" is one completed round of evidence. When the caller can say how many there were
 it should — pass ``episodes`` on the store record, or tag observations with an ``episode`` —
 and :func:`clean_episodes` uses it. Absent both, it derives the count as *the largest k such
-that every one of the six dimensions carries at least k positive observations*, which is
-deliberately conservative: a store observed on one dimension only has not completed a round,
-and reading its score as established is exactly the mistake ``low_data`` exists to prevent.
+that every dimension evidence can actually reach carries at least k positive observations*,
+which is deliberately conservative: a store observed on one dimension only has not completed
+a round, and reading its score as established is exactly the mistake ``low_data`` exists to
+prevent.
+
+"Every dimension evidence can reach" is five of the six, and which five is read off the
+approved routing table rather than chosen here — see :data:`EPISODE_FLOOR_DIMENSIONS`. Taking
+the min over all six instead made the flag inoperable: ``feedback_match`` takes no
+verification outcome by policy, so its count stayed at zero and pinned the floor at zero for
+every store forever. A flag that is always on carries no information, and this one is the
+only thing standing between "we have never seen this store" and "half its orders go wrong".
 
 No ranking and no exploration policy here (T-064 non-goal): this package publishes the
 inputs, and the exchange decides what to do with them.
@@ -44,6 +52,7 @@ from typing import Any
 # `sys.path`, where `trust.` does not resolve at all. A relative import follows whichever
 # spelling is executing, and the scoring package's own binding makes both yield one object.
 from ..scoring import (
+    CLAIM_TYPE_DIMENSIONS,
     NEW_STORE_PRIOR_N,
     SCORE_VERSION,
     TRUST_DIMENSIONS,
@@ -53,6 +62,7 @@ from ..scoring import (
 )
 
 __all__ = [
+    "EPISODE_FLOOR_DIMENSIONS",
     "SNAPSHOT_VERSION",
     "build_snapshot",
     "clean_episodes",
@@ -73,6 +83,42 @@ _EVIDENCE_TYPES = frozenset(
 _POSITIVE_TYPES = frozenset({"verified", "fulfilled"})
 
 
+def _episode_floor_dimensions() -> tuple[str, ...]:
+    """The dimensions a completed clean episode is counted over.
+
+    The derived floor asks "has a whole round of evidence happened?", and it can only ask
+    that about dimensions a round of evidence can actually LAND on. The approved
+    ``claim_type -> dimension`` table is the answer, read from ground truth rather than
+    listed here: every dimension it routes a claim type onto is one a verification outcome
+    can reach, and reconciliation verdicts land on two of them (``price_honored``,
+    ``discount_honored``) as well.
+
+    The dimension it leaves out is ``feedback_match``, and that is not an accident of this
+    deployment — the manifest states it as policy: "Takes NO verification outcome at all. It
+    is the post-purchase, buyer-reported match between pitch and delivery (R14)". Counting it
+    in the floor made the floor ``min(..., 0)`` for every store that had not yet been left
+    buyer feedback, which pinned it at zero and made ``low_data`` — one of the two flags this
+    package exists to publish — permanently ``True``. Measured before the fix: a store with
+    forty clean rounds over every reachable dimension derived 0 clean episodes.
+
+    Derived, not hard-coded at five, for the obvious reason: if a future approved manifest
+    ever does route a claim type to ``feedback_match``, the floor starts counting it again
+    without anyone remembering to come back here.
+    """
+    routed = {str(dim) for dim in CLAIM_TYPE_DIMENSIONS.values()}
+    reachable = tuple(dim for dim in TRUST_DIMENSIONS if dim in routed)
+    # Fail safe rather than fail empty. An empty routing table would make the floor a min over
+    # nothing; `min(())` raises and `0` would silently flag every store as established. Six
+    # dimensions is the conservative reading, and it is the behaviour that was there before.
+    return reachable or TRUST_DIMENSIONS
+
+
+#: The dimensions :func:`clean_episodes` derives its floor over. See
+#: :func:`_episode_floor_dimensions` — it is the reachable subset of the six, and the reason
+#: it is a subset is written down there.
+EPISODE_FLOOR_DIMENSIONS: tuple[str, ...] = _episode_floor_dimensions()
+
+
 def _field(record: Any, name: str, default: Any = None) -> Any:
     if isinstance(record, Mapping):
         return record.get(name, default)
@@ -86,8 +132,14 @@ def clean_episodes(store: Any, observations: Iterable[Any]) -> int:
 
     1. an explicit ``episodes`` count on the store record;
     2. an ``episode`` identifier on the observations — episodes with no negative outcome;
-    3. the derived floor: the largest ``k`` such that every dimension carries ``k`` positive
-       observations.
+    3. the derived floor: the largest ``k`` such that every dimension in
+       :data:`EPISODE_FLOOR_DIMENSIONS` carries ``k`` positive observations.
+
+    Positive observations on a dimension OUTSIDE that set — buyer feedback on
+    ``feedback_match`` — are evidence and are scored as such; they simply cannot lower this
+    count. A floor taken over "every dimension that carries evidence" would drop an
+    established store from five clean episodes to one the moment its first piece of buyer
+    feedback arrived, which would make receiving evidence a penalty.
     """
     declared = _field(store, "episodes")
     if isinstance(declared, int) and not isinstance(declared, bool):
@@ -105,7 +157,7 @@ def clean_episodes(store: Any, observations: Iterable[Any]) -> int:
                 dirty.add(episode)
         return len(seen - dirty)
 
-    per_dimension = dict.fromkeys(TRUST_DIMENSIONS, 0)
+    per_dimension = dict.fromkeys(EPISODE_FLOOR_DIMENSIONS, 0)
     for row in rows:
         dimension = str(_field(row, "dim", ""))
         if dimension in per_dimension and str(_field(row, "type", "")) in _POSITIVE_TYPES:

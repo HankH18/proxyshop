@@ -832,3 +832,186 @@ def test_records_may_be_objects_rather_than_mappings(e6_make_event):
     assert payload["observed_price"] == 130.0
     assert payload["price_honored"] is False
     assert payload["discount_honored"] is False
+
+
+# --------------------------------------------------------------------------------------
+# T-188 — the reconciled verdict has to be able to become a trust observation
+#
+# `reconciled_event` emits price_honored / discount_honored / price_comparable booleans and
+# no `dim` and no `type`. `trust.ledger.replay.observations_from_events` silently skips any
+# event whose payload lacks both, so the R4 half of the trust loop dead-ended AT THE SEAM:
+# measured, accepted{total 100, discount 20%} + order_paid{total 130, no discount} reconciled
+# correctly to price_honored=False / discount_honored=False and then produced
+# `observations_from_events(...) == []` and `replay(...) == {}`.
+#
+# The translation lives on the EMITTER side on purpose. `apps/trust/src/ledger/**` is another
+# ticket's scope and `observations_from_events` projects exactly
+# {store_id, dim, type, observed_at}; so reconciliation emits events that consumer already
+# understands rather than asking it to learn a new shape.
+# --------------------------------------------------------------------------------------
+
+
+def _dishonest_stream(make, *, observed_discount=None):
+    """The measured reproduction: promised 100 at 20% off, charged 130.
+
+    ``observed_discount=None`` is the exact stream from the ticket -- the webhook carries no
+    ``discountApplications`` at all, so the promised discount is *incomparable*. Pass ``0.0``
+    for the webhook that explicitly reports "no percentage discount was applied", which is a
+    comparable statement and therefore a real contradiction.
+    """
+    return [
+        _accepted(make, total=100.0, discount=20.0),
+        _webhook(make, total=130.0, discount=observed_discount),
+    ]
+
+
+def test_a_dishonest_fulfilment_becomes_trust_observations(e6_make_event, e6_as_of):
+    """R4 -> R12: a broken price promise and an ungradeable discount each land on a dim.
+
+    The two halves grade apart on purpose. The webhook charged 130 against a promised 100 --
+    comparable, and broken, so ``contradicted`` at the published 2.0. It said nothing at all
+    about the discount -- so ``unsupported`` at 0.5, which holds the store's coverage and
+    confidence down without accusing it of anything.
+    """
+    from apps.trust.src.reconcile import observation_events, reconciled_observations
+
+    reconciled = reconcile(_dishonest_stream(e6_make_event))
+    payload = _one(reconciled)["payload"]
+    assert payload["price_honored"] is False and payload["discount_honored"] is False
+    assert payload["price_comparable"] is True and payload["discount_comparable"] is False
+
+    observations = reconciled_observations(reconciled)
+
+    assert [(row["dim"], row["type"]) for row in observations] == [
+        ("price_honored", "contradicted"),
+        ("discount_honored", "unsupported"),
+    ]
+    assert all(row["store_id"] == "s-1" for row in observations)
+    assert all(row["observed_at"] == _one(reconciled)["ts"] for row in observations)
+
+    # ...and the same verdicts, wrapped as ledger events the existing consumer understands.
+    events = observation_events(reconciled)
+    assert [event["kind"] for event in events] == ["offer_integrity", "offer_integrity"]
+    assert len({event["event_id"] for event in events}) == len(events), (
+        "two observation events shared an event_id, which IS the ledger idempotency key"
+    )
+
+
+def test_a_comparable_broken_discount_is_a_contradiction_not_a_gap(e6_make_event):
+    """The same order with a webhook that DID report its discounts: 20% promised, 0% applied."""
+    from apps.trust.src.reconcile import reconciled_observations
+
+    reconciled = reconcile(_dishonest_stream(e6_make_event, observed_discount=0.0))
+    payload = _one(reconciled)["payload"]
+    assert payload["discount_comparable"] is True and payload["discount_honored"] is False
+
+    assert [(row["dim"], row["type"]) for row in reconciled_observations(reconciled)] == [
+        ("price_honored", "contradicted"),
+        ("discount_honored", "contradicted"),
+    ]
+
+
+def test_the_reconciled_verdicts_reach_the_scorer_through_replay(e6_make_event, e6_as_of):
+    """The measured dead end, closed: replaying the emitted events moves the store's score."""
+    from apps.trust.src.ledger.replay import observations_from_events, replay
+    from apps.trust.src.reconcile import observation_events
+    from apps.trust.src.scoring import prior_snapshot
+
+    events = observation_events(reconcile(_dishonest_stream(e6_make_event, observed_discount=0.0)))
+
+    projected = observations_from_events(events)
+    assert len(projected) == 2, (
+        "the emitted events do not carry what observations_from_events already requires"
+    )
+
+    snapshots = replay(events, as_of=e6_as_of)
+    assert "s-1" in snapshots, "replay produced no snapshot for the dishonest store"
+
+    dims = snapshots["s-1"]["dims"]
+    assert float(dims["price_honored"]["beta"]) == 2.0 + 2.0
+    assert float(dims["discount_honored"]["beta"]) == 2.0 + 2.0
+    assert snapshots["s-1"]["score"] < prior_snapshot(as_of=e6_as_of)["score"], (
+        "a dishonest fulfilment did not move the store's score"
+    )
+
+
+def test_an_honest_fulfilment_becomes_positive_evidence(e6_make_event, e6_as_of):
+    """The mirror: a kept promise has to be able to EARN a store its score, not just avoid loss."""
+    from apps.trust.src.ledger.replay import replay
+    from apps.trust.src.reconcile import observation_events
+    from apps.trust.src.scoring import prior_snapshot
+
+    honest = reconcile(
+        [
+            _accepted(e6_make_event, total=100.0, discount=10.0),
+            _webhook(e6_make_event, total=100.0, discount=10.0),
+        ]
+    )
+    events = observation_events(honest)
+    snapshots = replay(events, as_of=e6_as_of)
+
+    dims = snapshots["s-1"]["dims"]
+    assert float(dims["price_honored"]["alpha"]) == 2.0 + 1.0
+    assert float(dims["discount_honored"]["alpha"]) == 2.0 + 1.0
+    assert snapshots["s-1"]["score"] > prior_snapshot(as_of=e6_as_of)["score"]
+
+
+def test_an_incomparable_webhook_yields_unsupported_and_never_a_contradiction(e6_make_event):
+    """A malformed webhook is a gap, not a fraud.
+
+    ``price_comparable`` is False when the webhook carried no total at all. The verdict field
+    still reads False (fail-closed), and a translator that read only the verdict would
+    manufacture a 2.0 contradiction out of a missing field -- a penalty the store cannot see
+    coming and cannot appeal.
+    """
+    from apps.trust.src.reconcile import reconciled_observations
+
+    reconciled = reconcile(
+        [
+            _accepted(e6_make_event, total=100.0, discount=None),
+            _webhook(e6_make_event, total=None, discount=None),
+        ]
+    )
+    payload = _one(reconciled)["payload"]
+    assert payload["price_comparable"] is False and payload["price_honored"] is False
+
+    observations = reconciled_observations(reconciled)
+
+    assert [(row["dim"], row["type"]) for row in observations] == [("price_honored", "unsupported")]
+
+
+def test_a_promise_with_no_discount_earns_no_discount_evidence(e6_make_event):
+    """A store cannot farm ``discount_honored`` positives by promising no discount.
+
+    ``discount_honored`` is trivially True when nothing was promised -- there is nothing to
+    dishonour -- so translating that True into a ``fulfilled`` observation would pay a store
+    for a promise it never made, on every single order.
+    """
+    from apps.trust.src.reconcile import reconciled_observations
+
+    reconciled = reconcile(
+        [
+            _accepted(e6_make_event, total=100.0, discount=None),
+            _webhook(e6_make_event, total=100.0, discount=None),
+        ]
+    )
+    payload = _one(reconciled)["payload"]
+    assert payload["discount_honored"] is True
+
+    dims = [row["dim"] for row in reconciled_observations(reconciled)]
+    assert dims == ["price_honored"], "an unpromised discount was graded as honored"
+
+
+def test_the_translation_is_deterministic_and_leaves_reconcile_alone(e6_make_event):
+    """Two runs produce identical events, and ``reconcile`` itself still emits only its own kind."""
+    from apps.trust.src.reconcile import observation_events
+
+    stream = _dishonest_stream(e6_make_event)
+    emitted = reconcile(stream)
+
+    assert [event["kind"] for event in emitted] == [RECONCILED_KIND], (
+        "reconcile() must keep emitting exactly one reconciled event per order"
+    )
+    assert json.dumps(observation_events(emitted), sort_keys=True) == json.dumps(
+        observation_events(reconcile(stream)), sort_keys=True
+    )
