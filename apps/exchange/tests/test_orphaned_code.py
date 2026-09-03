@@ -67,6 +67,7 @@ path. Every case in ``SPELLINGS`` therefore asserts the T-202 half too.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import io
 import json
@@ -75,7 +76,7 @@ import sys
 import traceback
 from collections.abc import Iterator
 from typing import Any, NamedTuple
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import pytest
 from exchange.accept import accept, use_registered_domains
@@ -95,9 +96,14 @@ from exchange.checkout import (
     record_minted_code,
     redact_code,
     redact_url,
+    register_provider,
+    render_can_publish,
     rendered_exception,
     resolve_provider,
+    safe_token,
+    spells_code,
 )
+from trust.ledger.canonical import canonical_event, canonical_json
 
 SELLER_DOMAIN = "store-a.example.com"
 RIVAL_DOMAIN = "attacker.tld"
@@ -2610,3 +2616,450 @@ def test_the_oracle_terminates_on_a_cycle_through_the_redacting_properties() -> 
     rendered = rendered_exception(first)  # must terminate
     assert isinstance(rendered, str)
     assert_code_is_unrecoverable(rendered, ORACLE_CODE, "a cyclic chain of orphan refusals")
+
+
+# =====================================================================================
+# T-215 (j) — the ORACLE asks the question the PERSISTED EVENT asks, byte for byte
+# =====================================================================================
+"""Why this section exists after nine others, and what is different about it.
+
+Every oracle above searches a string this file chose: ``denial_reason``,
+``json.dumps(event, default=str)``, ``str(exc)``, a rendered traceback. Those are *proxies*
+for the surface the ticket is about, and this defect has now been defeated five times, each
+time through a channel the previous pass had not enumerated. The pattern is always the same
+shape — **the check asked a narrower question than the surface it protects.**
+
+So the check below asks the surface's own question. ``apps/trust/src/events/store.py``
+persists a ``LedgerEvent`` by hashing and storing ``canonical_json(canonical_event(event))``
+(store.py:347). That function pair, imported from the module the store imports it from, is
+the definition of "what gets written down". :func:`persisted_bytes` runs the events an
+accept actually emitted through it and returns the resulting characters, and every assertion
+here is "the code is not recoverable from those characters".
+
+Two properties follow that no amount of case-adding buys:
+
+* it covers fields nobody thought to name. ``json.dumps(..., default=str)`` and
+  ``canonical_json`` disagree about number formatting, key order, escaping and non-ASCII;
+  the ledger's rules (RFC-8785) are the ones that decide what a reader of the event stream
+  sees, and this reads exactly those; and
+* it covers **every event the refusal emits**, minus exactly one — the single event the
+  refusal itself names as the code's sanctioned home. That exclusion is computed from the
+  result's own ``orphaned_code`` pointer rather than hard-coded to ``code_created``, so if
+  the code is ever written into a second event, or into a different kind, this gate fails
+  instead of silently agreeing with the change.
+"""
+
+
+def sanctioned_home(result: Any) -> str:
+    """The ``event_id`` of the one event this refusal declares as the live code's home.
+
+    Read off the refusal's own ``orphaned_code`` pointer, never assumed. T-215's whole
+    division of labour is "the code goes to the ledger event shaped to hold it, and the
+    prose carries a fingerprint that joins to it" — so the refusal already has to say WHICH
+    event that is, and a gate that instead hard-codes ``kind == "code_created"`` would keep
+    passing if a future change filed the code somewhere else as well.
+    """
+    for event in result.events:
+        pointer = dict(event.get("payload") or {}).get("orphaned_code")
+        if isinstance(pointer, dict) and pointer.get("event_id"):
+            return str(pointer["event_id"])
+    return ""
+
+
+def persisted_bytes(result: Any) -> str:
+    """Everything this accept will WRITE DOWN, serialised the way the ledger serialises it.
+
+    Not ``json.dumps``: :func:`~trust.ledger.canonical.canonical_json` is the RFC-8785
+    canonicalisation ``apps/trust/src/events/store.py`` hashes and stores events with, and
+    the bytes it produces are the bytes anything reading the event stream reads.
+    """
+    return "\n".join(
+        canonical_json(canonical_event(event))
+        for event in result.events
+        if str(event.get("event_id")) != sanctioned_home(result)
+    )
+
+
+def test_the_gates_serialiser_is_the_one_the_event_store_actually_persists_with() -> None:
+    """Pin the oracle to the production serialiser, so it cannot drift into a stand-in.
+
+    This is the assertion that keeps :func:`persisted_bytes` honest. Its value comes
+    entirely from being the *same* function the store calls; the moment it is a lookalike —
+    a local ``json.dumps``, a vendored copy, a second canonicaliser — it is a proxy again,
+    and a proxy is what has been defeated five times. Identity, not equality of output on
+    the examples this file happens to try.
+    """
+    from trust.events import store as event_store
+
+    assert event_store.canonical_json is canonical_json, (
+        "the gate is canonicalising with a different function than the event store "
+        "persists with, so it is measuring a stand-in for the surface it protects"
+    )
+    assert event_store.canonical_event is canonical_event, (
+        "the gate is normalising events differently than the event store does"
+    )
+
+
+def test_the_persisted_bytes_oracle_detects_a_planted_leak() -> None:
+    """The falsifiability control: this gate must be able to FAIL.
+
+    Same duty as :func:`test_the_leak_detector_itself_detects_a_leak`, one layer up. An
+    oracle that never fires is indistinguishable from a fixed bug, and a gate that
+    canonicalises the wrong events — or excludes too many of them — would be exactly that.
+    Three plants, each aimed at a different way this helper could be vacuous.
+    """
+    live = auction("bid-a", "bid-b")
+    result = accept(live, "bid-a", OffDomainMerchant(), "shopify")
+    assert persisted_bytes(result), "the oracle serialised nothing at all — vacuous"
+
+    # 1. The code planted in the refusal's own prose, percent-encoded so a bare substring
+    #    search over the raw bytes would miss it but a reader would not.
+    leaky = copy.deepcopy(list(result.events))
+    for event in leaky:
+        if event["kind"] == "policy_event":
+            event["payload"]["reason"] = f"refused https://x.tld/c?discount={quote(ORPHAN_CODE)}"
+    planted = dataclasses.replace(result, events=tuple(leaky))
+    assert redeemable_spelling(persisted_bytes(planted), ORPHAN_CODE) is not None, (
+        "a percent-encoded code planted in the persisted reason was not detected"
+    )
+
+    # 2. The code planted in a SECOND event of the sanctioned kind. Only ONE event is
+    #    excluded — the one the refusal points at — so a duplicate must still be caught.
+    duplicate = copy.deepcopy(event_of(result, "code_created"))
+    duplicate["event_id"] = "a-different-event-id"
+    doubled = dataclasses.replace(result, events=(*result.events, duplicate))
+    assert redeemable_spelling(persisted_bytes(doubled), ORPHAN_CODE) is not None, (
+        "a second code_created event carrying the code was excluded from the oracle; the "
+        "exclusion must name ONE event, not a kind"
+    )
+
+    # 3. Nothing excluded at all: the sanctioned event itself carries the code, so an
+    #    oracle that forgot to honour the pointer would be permanently red rather than
+    #    permanently green. This proves the exclusion is doing real work.
+    unpointed = dataclasses.replace(
+        result,
+        events=tuple(e for e in result.events if e["kind"] != "policy_event"),
+    )
+    assert redeemable_spelling(persisted_bytes(unpointed), ORPHAN_CODE) is not None, (
+        "with no refusal event to name the home, the code_created event must NOT be "
+        "excluded — otherwise the exclusion is unconditional"
+    )
+
+
+# -------------------------------------------------------------------------------------
+# The channels pass 5 was killed before it could try. Inputs are enumerated; the CHECK is
+# not — every one of them ends at the same two assertions.
+# -------------------------------------------------------------------------------------
+HOSTILE_CODE = "PSX-HOSTILE-4RTX9"
+
+
+class _StrRaises(Exception):
+    """An exception whose ``__str__`` raises. Its ``repr`` still spells the code."""
+
+    def __str__(self) -> str:
+        raise RuntimeError(f"rendering exploded, and this text names {HOSTILE_CODE}")
+
+
+class _UnreadableValue:
+    """A non-string exception ARGUMENT that cannot be stringified but can be repr'd.
+
+    The shape the pass-5 lane reported and died before confirming. ``_redact_arg`` asked
+    ``spells_code(str(arg), code)``, and that conversion sat outside every guard, so this
+    object made the SANITISER raise — no ``OrphanedCheckoutCode``, no ``code_created``
+    event, an unrevokable discount, and the raw exception propagating with this ``repr`` in
+    it.
+    """
+
+    def __str__(self) -> str:
+        raise RuntimeError("no str for you")
+
+    def __repr__(self) -> str:
+        return f"<merchant-reply {HOSTILE_CODE}>"
+
+
+class _HostileEquality:
+    """An argument whose ``__eq__`` raises — reached by the walk's change detection.
+
+    ``redacted != node.args`` compares TUPLES, and a tuple comparison runs the elements'
+    ``__eq__``. Nothing about redaction is involved; the sanitiser simply asked a hostile
+    object a question it was free to answer with an exception.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        raise RuntimeError("equality exploded")
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __str__(self) -> str:
+        return f"merchant reply for {HOSTILE_CODE}"
+
+    def __repr__(self) -> str:
+        return f"<HostileEquality {HOSTILE_CODE}>"
+
+
+class _UnprintableMember(Exception):
+    """A group member that no renderer can format. Neither ``str`` nor ``repr`` survives.
+
+    Its purpose is not to leak — it cannot — but to make ``TracebackException.format``
+    RAISE, which used to send the render oracle down its ``str(exc)`` fallback and let a
+    *sibling* member's message through as "clean".
+    """
+
+    def __str__(self) -> str:
+        raise RuntimeError("unstringable")
+
+    def __repr__(self) -> str:
+        raise RuntimeError("unreprable")
+
+
+@dataclasses.dataclass
+class _ReprOnlyReply:
+    """``str`` hides the code; ``repr`` prints it — and a multi-arg exception renders ``repr``."""
+
+    code: str
+
+    def __str__(self) -> str:
+        return "<merchant reply>"
+
+
+def _hostile_str_cause() -> BaseException:
+    return _StrRaises(f"the code is {HOSTILE_CODE}")
+
+
+def _unreadable_arg_cause() -> BaseException:
+    return ValueError("merchant reply rejected", _UnreadableValue())
+
+
+def _hostile_equality_cause() -> BaseException:
+    return ValueError("merchant reply rejected", _HostileEquality())
+
+
+def _unprintable_group_member_cause() -> BaseException:
+    return ExceptionGroup(
+        "two link attempts failed",
+        [_UnprintableMember(), ValueError(f"the second attempt used {HOSTILE_CODE}")],
+    )
+
+
+def _hostile_note_object_cause() -> BaseException:
+    exc = RuntimeError("the merchant call failed")
+    # `__notes__` is a plain attribute, and nothing requires its members to be strings —
+    # `format_exception_only` stringifies whatever is in the list.
+    exc.__notes__ = [_UnreadableValue()]  # type: ignore[attr-defined]
+    return exc
+
+
+def _nested_container_cause() -> BaseException:
+    """The code inside a dict inside a list, never as a top-level string argument."""
+    return ValueError("merchant reply rejected", {"discounts": [{"code": HOSTILE_CODE}]})
+
+
+def _repr_only_cause() -> BaseException:
+    return ValueError("merchant reply rejected", _ReprOnlyReply(HOSTILE_CODE))
+
+
+def _implicit_context_cause() -> BaseException:
+    """The code reachable ONLY through ``__context__`` — nobody wrote ``raise … from``."""
+    try:
+        raise ValueError(f"the inner failure named {HOSTILE_CODE}")
+    except ValueError:
+        return RuntimeError("the outer message is clean")
+
+
+def _cyclic_cause() -> BaseException:
+    first = ValueError(f"the first names {HOSTILE_CODE}")
+    second = ValueError("the second is clean")
+    first.__cause__ = second
+    second.__cause__ = first
+    return first
+
+
+def _named_after_the_code_cause() -> BaseException:
+    """A merchant library whose EXCEPTION CLASS is named after the code it just minted.
+
+    A merchant's ``POST /codes`` returns a code the merchant chose, so it need not look like
+    ``PSX-…`` at all — and a type name is printed by ``repr``, by the traceback's final
+    line, and by every handler in this package that formats ``type(exc).__name__``. It reads
+    like metadata, which is why it survived five passes.
+    """
+    kind = type(_IDENTIFIER_CODE, (Exception,), {})
+    return kind("the merchant client refused")
+
+
+#: A merchant-chosen code that is also a legal Python identifier, so it can BE a class name.
+_IDENTIFIER_CODE = "SUMMER10LIVE"
+
+
+HOSTILE_CAUSES: list[tuple[str, Any, str]] = [
+    ("cause-whose-str-raises", _hostile_str_cause, HOSTILE_CODE),
+    ("argument-that-cannot-be-stringified", _unreadable_arg_cause, HOSTILE_CODE),
+    ("argument-whose-eq-raises", _hostile_equality_cause, HOSTILE_CODE),
+    ("group-with-an-unprintable-member", _unprintable_group_member_cause, HOSTILE_CODE),
+    ("note-that-is-not-a-string", _hostile_note_object_cause, HOSTILE_CODE),
+    ("code-nested-in-a-dict-in-a-list", _nested_container_cause, HOSTILE_CODE),
+    ("code-only-in-repr-not-in-str", _repr_only_cause, HOSTILE_CODE),
+    ("code-only-through-implicit-context", _implicit_context_cause, HOSTILE_CODE),
+    ("cyclic-chain-of-causes", _cyclic_cause, HOSTILE_CODE),
+    ("exception-class-named-after-the-code", _named_after_the_code_cause, _IDENTIFIER_CODE),
+]
+
+
+class LosesTheCodeAfterMinting(CheckoutProvider):
+    """Mints a real code, then fails with whatever cause the case supplies.
+
+    Drives the ``_mint_recording_orphans`` path — the deepest of the three post-mint
+    handlers, and the one where the code exists but the permalink does not, so the port has
+    only the minting ledger to learn the code from.
+    """
+
+    name = "loses-the-code"
+
+    def __init__(self, code: str, make_exc: Any) -> None:
+        self.code = code
+        self.make_exc = make_exc
+
+    def mint(self, request: CheckoutRequest) -> MintedCheckout:
+        record_minted_code(self.code)
+        raise self.make_exc()
+
+
+def _accept_against(provider: CheckoutProvider, mode: str) -> Any:
+    register_provider(mode, provider)
+    live = auction("bid-a", "bid-b")
+    return accept(
+        live,
+        "bid-a",
+        None,
+        mode,
+        registered_domains=StaticRegisteredDomains(
+            {"store-a": SELLER_DOMAIN, "store-b": "store-b.example.com"}
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "make_exc", "code"), HOSTILE_CAUSES, ids=[c[0] for c in HOSTILE_CAUSES]
+)
+def test_no_hostile_cause_reaches_the_persisted_event_or_costs_the_record(
+    label: str, make_exc: Any, code: str
+) -> None:
+    """The two invariants, together, for every shape a merchant's library can raise.
+
+    They are asserted TOGETHER on purpose, and that pairing is the lesson of this pass. Each
+    of these shapes used to break BOTH at once, through one mechanism: the sanitiser itself
+    raised. A gate that only checked "the code is not published" would have gone green on a
+    tree where the exception never reached ``accept()`` as an orphan at all — no
+    ``code_created`` event, a live discount nobody could revoke, and a suite that could not
+    tell the difference between "redacted" and "never got there".
+    """
+    result = _accept_against(LosesTheCodeAfterMinting(code, make_exc), f"hostile-{label}")
+
+    # T-202 — the record survived. `accept()` must have seen an OrphanedCheckoutCode.
+    assert result.accepted is False, f"{label}: a failed mint was accepted"
+    assert result.orphaned_code is not None, (
+        f"{label}: the port did not carry the code out — the sanitiser probably raised, "
+        f"which loses the orphan entirely. denial_reason was {result.denial_reason!r}"
+    )
+    assert result.orphaned_code.code == code, f"{label}: the wrong code was recorded"
+    created = event_of(result, "code_created")
+    assert created["payload"]["code"] == code, f"{label}: the ledger record lost the code"
+    assert created["payload"].get("orphaned") is True
+
+    # T-215 — and nothing that gets written down spells it.
+    assert_code_is_unrecoverable(
+        persisted_bytes(result), code, f"the persisted events of a {label} refusal"
+    )
+    assert_code_is_unrecoverable(
+        str(result.denial_reason or ""), code, f"the denial_reason of a {label} refusal"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "make_exc", "code"), HOSTILE_CAUSES, ids=[c[0] for c in HOSTILE_CAUSES]
+)
+def test_no_hostile_cause_reaches_any_renderer_of_the_refusal(
+    label: str, make_exc: Any, code: str
+) -> None:
+    """...and no renderer prints it either, C-level excepthook first.
+
+    Separate from the test above because it asserts about a different surface — the
+    exception object rather than the ledger — and because the excepthook channel is the one
+    that bypasses every Python-level property this package installs.
+    """
+    provider = LosesTheCodeAfterMinting(code, make_exc)
+    request = CheckoutRequest(
+        auction_id="auction-1",
+        bid_ref="bid-a",
+        store_id="store-a",
+        store_domain=SELLER_DOMAIN,
+        offer=offer(SELLER_DOMAIN),
+        mode=f"renderer-{label}",
+        now=T_NOW,
+        registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+    )
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        provider.checkout(request)
+
+    assert_no_renderer_publishes(raised.value, code, f"a {label} refusal")
+
+
+def test_the_redaction_machinery_cannot_be_made_to_raise() -> None:
+    """The property behind every case above, asserted directly on the redactor.
+
+    A sanitiser that raises on hostile input is worse than no sanitiser — this module's
+    header already says so about pass 2's ``redact_url``, and pass 4 reintroduced exactly
+    that failure one layer in. The rule is not "handle these ten shapes"; it is that no
+    object a merchant's library can construct may make the redaction path raise, because the
+    redaction path is the only thing standing between a live discount and the event stream,
+    and it runs on a path that is *already refusing*.
+    """
+    hostile: list[Any] = [
+        _UnreadableValue(),
+        _HostileEquality(),
+        _ReprOnlyReply(HOSTILE_CODE),
+        {"nested": [HOSTILE_CODE]},
+        object(),
+        b"\xff\xfe not utf-8",
+        None,
+    ]
+    for value in hostile:
+        # The detector must answer, not raise — and it must answer "redact" when it cannot
+        # read the value at all.
+        answer = spells_code(value, HOSTILE_CODE)
+        assert isinstance(answer, bool), f"spells_code({value!r}) did not answer"
+        assert safe_token(value, HOSTILE_CODE, label="probe") is not None
+
+    for _, make_exc, code in HOSTILE_CAUSES:
+        exc = make_exc()
+        # Never raises, whatever is in there.
+        assert isinstance(rendered_exception(exc), str)
+        assert isinstance(render_can_publish(exc, code), bool)
+
+
+def test_an_exception_no_renderer_can_format_is_treated_as_unsafe() -> None:
+    """Not looking is not the same as seeing nothing, and must not be recorded as it.
+
+    This is the pass-5 position reversed, and it is reversed because it was measured false.
+    Pass 5 argued a render that failed has published nothing. But ``rendered_exception``
+    falls back to ``str(exc)`` when ``TracebackException.format`` raises, and for an
+    ``ExceptionGroup`` that fallback is the summary line and the member COUNT — clean, while
+    the C-level ``PyErr_Display`` is *more* tolerant than ``TracebackException``: it prints
+    a placeholder for the member it cannot format and goes on to print the next one. So the
+    render this process could not obtain says nothing about what another reader prints, and
+    the only safe reading of it is "replace the object".
+    """
+    group = _unprintable_group_member_cause()
+
+    # The proxy is clean — this is the fail-open that the composition used to walk into.
+    assert redeemable_spelling(str(group), HOSTILE_CODE) is None, (
+        "the premise of this test is gone: str() of the group now spells the code, so it "
+        "no longer demonstrates the gap between the two readers"
+    )
+    # ...and the oracle refuses to certify it anyway.
+    assert render_can_publish(group, HOSTILE_CODE) is True, (
+        "an exception this process cannot render was reported as safe to publish"
+    )
+
+    # A plain, fully renderable, code-free exception is still publishable — otherwise the
+    # assertion above would be satisfied by a function that always says True.
+    assert render_can_publish(ValueError("nothing interesting here"), HOSTILE_CODE) is False
