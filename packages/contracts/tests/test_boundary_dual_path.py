@@ -1074,10 +1074,13 @@ def test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price(path:
     inventing a lookup it cannot do. Such a bid is measured by the `total_price` relation alone,
     which is why the offer below — 20% off, charging 15.00, internally consistent — is admitted.
 
-    Closing this needs a list price the EXCHANGE supplies from its own roster; that is a
-    signature change and a different ticket. Refusing every discounted offer that omits the
-    claim would not be fail-closed, it would be closed: `make_offer()` itself declares 10% and
-    carries no list price, as does every honest bid in this suite.
+    Closing this needs a list price the EXCHANGE supplies from its own roster — which is now the
+    `list_prices` parameter, pinned in `test_boundary_price_roster.py`. This test is what says
+    the roster is OPT-IN: with none passed the abstention is still exactly here, unchanged, and
+    every assertion below is the one it was written with. Removing the abstention outright rather
+    than giving callers a way to close it would not be fail-closed, it would be closed:
+    `make_offer()` itself declares 10% and carries no list price, as does every honest bid in
+    this suite.
     """
     silent = make_bid(offer=priced_offer(15.0, 15.0))
     result = check(silent, path)

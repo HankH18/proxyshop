@@ -24,7 +24,10 @@ Five conditions reject on BOTH paths, because none of them is about who is speak
 * a claim with no `provenance` key at all, or with an empty `source`;
 * an offer that charges less than the discount depth it declares prices out at (T-177) — the
   arithmetic, not the paperwork: a genuine hook-minted 20% grant is not a licence to state any
-  number at all as the price. See `_price_reasons`, including what it deliberately cannot know;
+  number at all as the price. See `_price_reasons`, including what it deliberately cannot know.
+  The list price that relation needs comes from the bid's own `list_price` claim, and — when
+  the caller passes `list_prices` — from the EXCHANGE'S OWN ROSTER, which is the only version of
+  this wall an emitter cannot disarm by staying silent;
 * an offer whose `expires_at` has passed — or is missing, which fails closed;
 * a store the trust snapshot marks blacklisted, or has no row for at all (R12: an unavailable
   eligibility read denies exactly like a positive one);
@@ -93,9 +96,10 @@ PERCENTAGE_DISCOUNT_TYPES: frozenset[str] = frozenset({"percentage", "percent", 
 
 #: The claim key under which a bid carries the list price its discount is a percentage OF.
 #: `get_product_fact(product_ref, "list_price")` is the hook that mints it, so a hosted bid can
-#: only carry a list price the catalog actually published. **This is the only list price the
-#: boundary can ever see**: it holds no catalog, no envelope and no hook ledger, and inventing a
-#: lookup it cannot perform would be worse than saying so.
+#: only carry a list price the catalog actually published. It is the only list price the boundary
+#: can see when the caller supplies no roster — the boundary holds no catalog of its own, and
+#: inventing a lookup it cannot perform would be worse than saying so. It is also the SAME key a
+#: `list_prices` roster row may spell its number under, so one name means one thing on both sides.
 LIST_PRICE_CLAIM_KEY = "list_price"
 
 #: Slack when reconciling a stated price against the price its declared depth prices out at, as
@@ -139,6 +143,23 @@ REASON_PRICE_UNDER_DECLARED_DEPTH = "price_under_declared_depth"
 #: The depth, the price, or the list price is a number this boundary cannot read, so the offer's
 #: arithmetic cannot be checked at all. Fail-closed, exactly like an unavailable eligibility read.
 REASON_PRICE_UNRECONCILABLE = "price_unreconcilable"
+
+#: `price_unreconcilable` suffixes for the exchange-supplied roster, named rather than spelled
+#: inline so a caller can match on them without pattern-matching a sentence. A roster is EVIDENCE
+#: like any other, so every way of failing to read one is its own refusal.
+#:
+#: * `list_price_unavailable` — the caller passed a roster and it does not price this product.
+#:   A caller that supplies a roster is asserting it can price what it admits, so a product it
+#:   cannot price is an unavailable read (R12's shape), not a licence to fall back to the
+#:   claim-only abstention. Falling back would hand an attacker one unknown `product_ref` as a
+#:   way round the entire wall.
+#: * `unreadable_roster_list_price` — the row exists and is not a non-negative finite number.
+#: * `list_price_contradicts_roster` — the bid CARRIES a list price and the roster names a
+#:   different one. The carried claim is minted by `get_product_fact`, so it can only be a number
+#:   the catalog published; disagreeing with the catalog is evidence it came from somewhere else.
+ROSTER_LIST_PRICE_UNAVAILABLE = "list_price_unavailable"
+ROSTER_LIST_PRICE_UNREADABLE = "unreadable_roster_list_price"
+ROSTER_LIST_PRICE_CONTRADICTED = "list_price_contradicts_roster"
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -474,7 +495,54 @@ def _carried_list_price(bid: Any, offer: Any) -> tuple[float | None, list[str]]:
     return distinct[0], []
 
 
-def _price_reasons(bid: Any, offer: Any) -> list[str]:
+def _roster_list_price(offer: Any, list_prices: Any) -> tuple[float | None, list[str]]:
+    """The list price the EXCHANGE holds for this offer's product, and why it could not be read.
+
+    `(None, [])` — abstain — only when the caller passed no roster at all. That is the whole of
+    the backward compatibility story: every caller that does not opt in keeps the claim-only
+    behaviour it had, including the deliberate abstention `_price_reasons` documents.
+
+    Once a roster IS passed, it is evidence, and every way of failing to read it is a refusal:
+
+    * the roster does not price this product — `list_price_unavailable`;
+    * it prices it with something that is not a non-negative finite number —
+      `unreadable_roster_list_price`.
+
+    Neither degrades back to the abstention. A caller supplying a roster is asserting it can
+    price what it admits, and "the roster has never heard of this `product_ref`" is exactly the
+    string an attacker would put there if silence still worked.
+
+    A row may be the number itself or a record spelling it under `list_price`, so a caller
+    holding catalog rows does not have to unwrap them into a shape this door invented. The
+    lookup is wrapped: `list_prices` is arbitrary caller code and `product_ref` comes off the
+    wire, so an unhashable key or a `get` that raises is an unavailable read — never a 500 at
+    the public boundary, the same property `_eligibility_reasons` holds for `store_id`.
+    """
+    if list_prices is None:
+        return None, []
+
+    site = OFFER_UNIT_PRICE_SITE
+    unavailable = [f"{REASON_PRICE_UNRECONCILABLE}:{site}:{ROSTER_LIST_PRICE_UNAVAILABLE}"]
+    if not isinstance(list_prices, Mapping):
+        return None, unavailable
+
+    product_ref = _get(offer, "product_ref")
+    try:
+        row = list_prices.get(product_ref)
+    except Exception:  # noqa: BLE001 - an unhashable ref or a hostile mapping is an absent row
+        return None, unavailable
+    if row is None:
+        return None, unavailable
+
+    listed = _finite_number(row)
+    if listed is None:
+        listed = _finite_number(_get(_record(row), LIST_PRICE_CLAIM_KEY))
+    if listed is None or listed < 0.0:
+        return None, [f"{REASON_PRICE_UNRECONCILABLE}:{site}:{ROSTER_LIST_PRICE_UNREADABLE}"]
+    return listed, []
+
+
+def _price_reasons(bid: Any, offer: Any, list_prices: Any = None) -> list[str]:
     """Reconcile the price the offer STATES against the depth it DECLARES (T-177).
 
     A depth is a description of a price, and until this walk existed nothing on the validating
@@ -506,14 +574,28 @@ def _price_reasons(bid: Any, offer: Any) -> list[str]:
     declared; there is nothing there for a wall about authorization to refuse, and refusing it
     would turn every rounding-up into an outage.
 
-    **What this cannot do, said plainly.** When the bid carries no `list_price` claim, there is
-    no number for the declared depth to be a percentage of and the first relation ABSTAINS — it
-    reports nothing rather than guessing at a catalog it cannot read. That abstention is
-    deliberate and it is a real gap: an external store that simply omits its list price is
-    measured only by the second relation. Closing it needs a list price the exchange supplies
-    from its own roster, which is a signature change and a different ticket; refusing every
-    discounted offer that omits the claim would instead refuse most honest bids, which is not
-    fail-closed, it is closed.
+    **Where the list price comes from, and why that was the whole attack.** The first relation
+    originally had ONE source of a list price: the `list_price` claim the bid carries. That made
+    the wall answer to evidence the emitter controls, and the emitter's counter-move was not to
+    forge anything — it was to say nothing. A bid declaring 20%, charging 15.00 on a product the
+    exchange lists at 100.00 and carrying no `list_price` claim was admitted `ok=True,
+    reasons=[]`: the relation had no number to be a percentage of, so it abstained, and the
+    second relation (15.00 total against a 15.00 unit) is satisfied by any self-consistent lie.
+
+    So `list_prices` is the exchange's OWN roster, `{product_ref: 100.0}` or
+    `{product_ref: {"list_price": 100.0}}` — the same catalog the auction was opened from. When
+    it is passed, it is authoritative, it cannot be silenced by omitting a claim, and a carried
+    claim that names a different number is refused rather than reconciled: `get_product_fact`
+    mints that claim off the catalog, so a claim disagreeing with the catalog is evidence it came
+    from somewhere else, and reading past it would restore the very move this closes one step
+    over — inflate the stated list price until 15.00 looks like 20% off.
+
+    **What this still cannot do, said plainly.** With NO roster passed the first relation
+    abstains exactly as it always did. That abstention is what `list_prices` exists to let a
+    caller close, and it is left in place rather than removed because refusing every discounted
+    offer that omits the claim would refuse most honest bids from callers holding no catalog —
+    that is not fail-closed, it is closed. A caller that CAN price its products should pass the
+    roster; a caller that cannot is measured by the second relation alone and should know it.
     """
     record = _record(offer)
     if record is None:
@@ -539,8 +621,26 @@ def _price_reasons(bid: Any, offer: Any) -> list[str]:
         # refused above, and restating them as an inequality would report one bad number twice.
         return reasons
 
-    listed, list_reasons = _carried_list_price(bid, record)
-    reasons.extend(list_reasons)
+    carried, carried_reasons = _carried_list_price(bid, record)
+    reasons.extend(carried_reasons)
+    rostered, roster_reasons = _roster_list_price(record, list_prices)
+    reasons.extend(roster_reasons)
+
+    # The roster wins when both are readable, and a disagreement between them is its own refusal
+    # rather than a tie broken silently: letting the door pick would let a bid choose which wall
+    # it is measured against by writing a claim, which is the property `_carried_list_price`
+    # refuses two claims to protect.
+    listed = rostered if rostered is not None else carried
+    if (
+        rostered is not None
+        and carried is not None
+        and abs(rostered - carried) > PRICE_RECONCILIATION_TOLERANCE
+    ):
+        reasons.append(
+            f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_UNIT_PRICE_SITE}:"
+            f"{ROSTER_LIST_PRICE_CONTRADICTED}"
+        )
+
     if listed is not None and unit_price + PRICE_RECONCILIATION_TOLERANCE < (
         listed * (100.0 - depth) / 100.0
     ):
@@ -623,6 +723,7 @@ def validate_bid(
     trust_snapshot: Mapping[str, Any],
     now: datetime | str | float | None = None,
     require_signing_envelope: bool = False,
+    list_prices: Mapping[Any, Any] | None = None,
 ) -> BidValidationResult:
     """Decide whether `bid` may enter the auction through `path`.
 
@@ -645,6 +746,15 @@ def validate_bid(
             a hosted Tier-1 agent holds no key and has nothing to sign with, and because
             `validate_bid` is also used to judge already-extracted `Bid` objects that never
             carried an envelope.
+        list_prices: the caller's OWN catalog, `{product_ref: 100.0}` or
+            `{product_ref: {"list_price": 100.0}}`. Pass it and the price wall stops depending on
+            the bid volunteering what it is discounting from — the one move that defeated it, and
+            the only one an emitter did not have to forge anything to make. Omit it and the wall
+            reads the bid's `list_price` claim alone, abstaining when there is none, exactly as
+            before; every existing caller is unaffected. **A roster you pass is evidence**: a
+            product it cannot price refuses (`price_unreconcilable:offer.unit_price:
+            list_price_unavailable`) rather than falling back to that abstention, so pass a
+            roster only if it covers what you are willing to admit.
 
     Returns:
         `BidValidationResult` — `ok`, the `path` it was judged on, `reasons` (non-empty exactly
@@ -695,8 +805,10 @@ def validate_bid(
     # 3. The PRICE the offer states, against the depth it declares. Path-insensitive: arithmetic
     #    does not care who is speaking. A genuine hook-minted 20% grant used to license any price
     #    at all here, because the only wall comparing what a bid charges with what it declares
-    #    lived on the emitting side, where a store not running our runtime never meets it.
-    reasons.extend(_price_reasons(bid, offer))
+    #    lived on the emitting side, where a store not running our runtime never meets it. The
+    #    list price it reconciles against comes from the bid's own claim and, when the caller
+    #    supplies one, from the caller's roster — the version of this wall silence cannot disarm.
+    reasons.extend(_price_reasons(bid, offer, list_prices))
 
     # 4. Offer expiry and 5. seller eligibility — path-insensitive.
     reasons.extend(_expiry_reasons(offer, evaluated_at))
@@ -723,6 +835,7 @@ def validate_external_submission(
     *,
     trust_snapshot: Mapping[str, Any],
     now: datetime | str | float | None = None,
+    list_prices: Mapping[Any, Any] | None = None,
 ) -> BidValidationResult:
     """The Tier-2 door: everything `validate_bid` judges, plus D52's signing envelope.
 
@@ -730,6 +843,11 @@ def validate_external_submission(
     `POST /v1/auctions/{auction_id}/bids`. It refuses an unsigned submission with the same
     finality as an expired offer or a blacklisted store — before extraction and before
     verification — and, like `validate_bid`, it never raises.
+
+    `list_prices` is forwarded unchanged, and this is the door it matters most on: a Tier-2 store
+    is precisely the submitter that does not run our runtime, never meets the emitting wall in
+    `store-agent/hooks/provenance.py`, and gets to choose what its bid says about its own
+    catalog. Pass the roster here or that choice is the only list price anybody checks.
     """
     return validate_bid(
         submission,
@@ -737,6 +855,7 @@ def validate_external_submission(
         trust_snapshot=trust_snapshot,
         now=now,
         require_signing_envelope=True,
+        list_prices=list_prices,
     )
 
 
@@ -769,6 +888,9 @@ __all__ = [
     "REASON_TRUST_SNAPSHOT_UNAVAILABLE",
     "REASON_UNKNOWN_PATH",
     "REASON_UNVERIFIABLE_CLAIM_SITE",
+    "ROSTER_LIST_PRICE_CONTRADICTED",
+    "ROSTER_LIST_PRICE_UNAVAILABLE",
+    "ROSTER_LIST_PRICE_UNREADABLE",
     "parse_timestamp",
     "validate_bid",
     "validate_external_submission",
