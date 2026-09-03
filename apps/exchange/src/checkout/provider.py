@@ -124,6 +124,17 @@ _BASE_CONTEXT = BaseException.__dict__["__context__"]
 #: the code, and does not depend on this walk having reached everything.
 _MAX_CHAIN_NODES = 256
 
+#: Where :meth:`OrphanedCheckoutCode._sanitised_slot` remembers what it decided about a
+#: chained slot, in the instance ``__dict__``. Keyed by slot name (``"__cause__"`` /
+#: ``"__context__"``); the value is ``(the object that was in the slot, the object the
+#: decision produced)`` or :data:`_DECIDING` while the decision is being taken.
+_SLOT_DECISIONS = "_psx_slot_decisions"
+
+#: In the slot-decision table: "this exact decision is already running further up the
+#: stack." Reading a redacting slot RENDERS, and rendering READS the slot again, so the
+#: decision is genuinely re-entrant; see :meth:`OrphanedCheckoutCode._sanitised_slot`.
+_DECIDING = object()
+
 
 def _redact_chain(exc: BaseException | None, code: str, urls: Sequence[str] = ()) -> None:
     """Redact ``code`` and ``urls`` out of ``exc`` and every exception it chains to, in place.
@@ -436,17 +447,56 @@ class OrphanedCheckoutCode(Exception):
         C-level excepthook reads that slot directly — so a reader that went through
         attribute lookup would be safe while ``PyErr_Display`` published the code. Storing
         the stand-in repairs the slot for every subsequent reader, whichever door it uses.
+
+        **Why the decision is remembered, and why it has to be re-entrant (pass 5).** Pass 4
+        made this property RENDER, and rendering an exception READS its ``__cause__`` — so
+        this method now calls, by way of :func:`~.redaction.rendered_exception`, the very
+        renderer whose chain walk calls it back. Two distinct failures come out of that, and
+        the one table below closes both:
+
+        * **Non-termination.** ``a.__cause__ = b; b.__cause__ = a`` re-enters *this exact*
+          decision — same object, same slot — and neither :mod:`traceback`'s own ``_seen``
+          set nor a cycle check over the chain can see it, because the recursion is through
+          a Python property rather than through the chain. On re-entry the raw slot value is
+          returned: the decision one frame up is still running and is the one that will
+          publish, and the renderer that asked is only LOOKING — handing it the real object
+          is what lets the outer decision see the whole cycle instead of a hole in it.
+        * **Combinatorial cost.** ``TracebackException.__init__`` reads ``__cause__`` twice
+          per node (``... is not None``, then ``id(...) not in _seen``) and *then* recurses
+          into it, so every level re-renders the whole suffix several times over. Measured
+          on this tree, rendering a chain of plain orphan refusals with the decision not
+          remembered: depth 6 took 0.24 s, depth 8 took 12.4 s, and depth 10 had not
+          finished after 180 s — on the REFUSAL path, where the merchant chooses the depth.
+          A refusal that hangs is a worse defect than the leak this exists to close. With
+          one decision per ``(slot, object in it)`` pair the same walk is 0.0004 s at depth
+          8 and 0.18 s at depth 160.
+
+        The memo is keyed on the object the slot actually holds, so replacing the cause
+        through the setter re-decides rather than returning a stale verdict.
         """
         current = slot.__get__(self)
         if current is None:
             return None
-        code = self._orphan_code
-        if not code:
-            _redact_chain(current, code, self._orphan_urls)
+        decisions: dict[str, Any] = self.__dict__.setdefault(_SLOT_DECISIONS, {})
+        name = str(getattr(slot, "__name__", slot))
+        decided = decisions.get(name)
+        if decided is _DECIDING:
             return current
-        safe = _sanitised_cause(current, code, self._orphan_urls)
-        if safe is not current:
-            slot.__set__(self, safe)
+        if decided is not None and decided[0] is current:
+            return decided[1]  # type: ignore[no-any-return]
+        decisions[name] = _DECIDING
+        try:
+            code = self._orphan_code
+            if not code:
+                _redact_chain(current, code, self._orphan_urls)
+                safe = current
+            else:
+                safe = _sanitised_cause(current, code, self._orphan_urls)
+                if safe is not current:
+                    slot.__set__(self, safe)
+        finally:
+            decisions.pop(name, None)
+        decisions[name] = (slot.__get__(self), safe)
         return safe
 
     @property
@@ -577,9 +627,7 @@ class CheckoutProvider:
 
     #: Methods the port performs on every provider's behalf. Overriding one would let an
     #: implementation opt out of a guarantee the port makes, so it is refused.
-    _FINAL_METHODS: ClassVar[frozenset[str]] = frozenset(
-        {"checkout", "_mint_recording_orphans"}
-    )
+    _FINAL_METHODS: ClassVar[frozenset[str]] = frozenset({"checkout", "_mint_recording_orphans"})
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)

@@ -2448,8 +2448,10 @@ def test_a_group_whose_members_can_be_rewritten_survives_as_a_group() -> None:
 
 @pytest.mark.parametrize(
     ("label", "make_exc"),
-    [("lazily-computed-notes", _lazy_note_cause),
-     ("self-rendering-member-of-a-group", _group_of_self_rendering_cause)],
+    [
+        ("lazily-computed-notes", _lazy_note_cause),
+        ("self-rendering-member-of-a-group", _group_of_self_rendering_cause),
+    ],
     ids=["lazily-computed-notes", "self-rendering-member-of-a-group"],
 )
 def test_a_cause_the_rewrite_cannot_reach_is_replaced_whole(label: str, make_exc: Any) -> None:

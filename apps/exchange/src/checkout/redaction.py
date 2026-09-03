@@ -75,7 +75,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import threading
 import traceback
 from collections.abc import Sequence
 from urllib.parse import quote, unquote, urlsplit
@@ -436,12 +435,6 @@ def redact_code(message: str, code: str, *, urls: Sequence[str] = ()) -> str:
 _GROUP_WIDTH = 64
 _GROUP_DEPTH = 16
 
-#: Re-entrancy guard. Rendering an exception reads ``__cause__``/``__context__`` by ordinary
-#: attribute lookup, and :class:`~.provider.OrphanedCheckoutCode` puts *redacting properties*
-#: there — so a chain of them would re-enter this function once per level, and a chain that
-#: contains a cycle would not terminate at all. Per-thread, and released in ``finally``.
-_RENDERING = threading.local()
-
 
 def rendered_exception(exc: BaseException | None) -> str:
     """Everything a traceback renderer would print for ``exc`` — the oracle, not a proxy.
@@ -469,19 +462,24 @@ def rendered_exception(exc: BaseException | None) -> str:
     formatting pass with no I/O, on a path that is already raising.
 
     Never raises: an exception whose rendering itself explodes falls back to ``str``, and
-    then to the empty string. An empty result means *the oracle could not see*, and callers
-    treat that the way they treat any other unknown — :func:`spells_code` is what decides,
-    and it fails closed on its own errors.
+    then to the empty string. That fallback is the one place this function is not the
+    renderer, so it is deliberately the *narrower* of the two — a render that failed has
+    published nothing, and the caller is choosing between an exception it could not read and
+    no cause at all.
+
+    **Where the re-entrancy guard is, and why it is not here.** Rendering reads
+    ``__cause__``/``__context__`` by ordinary attribute lookup, and
+    :class:`~.provider.OrphanedCheckoutCode` puts *redacting properties* there — properties
+    that call back into this function. A cycle through two of them therefore recurses
+    forever, and :mod:`traceback`'s own ``_seen`` set cannot see it, because the recursion
+    is not through the chain it walks. The guard belongs at that property, not here: it is
+    the property that is re-entered, and only the property can hand the renderer the real
+    object when it happens. Guarding here instead would mean returning a truncated string —
+    a blind spot in the oracle — for the exact shape the oracle exists to inspect. See
+    :meth:`~.provider.OrphanedCheckoutCode._sanitised_slot`.
     """
     if exc is None:
         return ""
-    active = getattr(_RENDERING, "ids", None)
-    if active is None:
-        active = _RENDERING.ids = set()
-    key = id(exc)
-    if False:
-        return ""
-    active.add(key)
     try:
         return "".join(
             traceback.TracebackException(
@@ -498,7 +496,5 @@ def rendered_exception(exc: BaseException | None) -> str:
     except Exception:
         try:
             return str(exc)
-        except Exception:  # pragma: no cover - an exception whose __str__ raises
+        except Exception:  # an exception whose __str__ raises is opaque to every reader
             return ""
-    finally:
-        active.discard(key)
