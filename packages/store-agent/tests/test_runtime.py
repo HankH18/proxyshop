@@ -55,6 +55,7 @@ from store_agent.runtime import (
     assemble_context,
     bid,
     is_decline,
+    offer_id,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -190,7 +191,7 @@ def test_the_cold_bid_is_the_documented_default_offer() -> None:
     answer = _bid()
 
     assert answer.offer.model_dump(mode="json") == {
-        "bid_offer_id": "bidoffer:auc-0001:store-alpha:prod-cap",
+        "bid_offer_id": offer_id("auc-0001", STORE_ID, "prod-cap"),
         "product_ref": "prod-cap",
         "variant_ref": None,
         "unit_price": LIST_PRICE,
@@ -233,8 +234,22 @@ def test_the_cold_bid_is_the_documented_default_offer() -> None:
     }
     assert answer.auction_id == "auc-0001"
     assert answer.store_id == STORE_ID
-    assert answer.agent_version == AGENT_VERSION
+    assert answer.agent_version == AGENT_VERSION == "store-agent/0.0.0", (
+        "the version stamp is read downstream as 'which advocate built this', so it is pinned "
+        "here as a literal — asserting it equals the constant it came from grades nothing"
+    )
     assert answer.message is None, "the hosted path asserts nothing in prose; claims are evidence"
+
+    # EXACTLY these claims, in this order. `⊆ what the hooks emitted` is the traceability
+    # property and it is checked elsewhere; on its own it is also satisfied by a bid carrying
+    # NO evidence at all, so dropping every pixel-feed claim would pass a subset test.
+    assert [(c.key, c.provenance.source.value) for c in answer.claims] == [
+        ("list_price", "scraped"),
+        ("material", "scraped"),
+        ("in_stock", "pixel_feed"),
+        ("units_left", "pixel_feed"),
+        ("policy_action", "learned_policy"),
+    ]
 
 
 def test_the_cold_price_is_the_catalog_list_price_and_not_a_model_invention() -> None:
@@ -340,6 +355,10 @@ def test_the_runtime_reads_no_clock_and_no_randomness() -> None:
         "uuid",
     }
     banned_calls = {
+        # `hash` and `id` need no import and are the two ways to get PYTHONHASHSEED-dependent
+        # or address-dependent behaviour into a sort key without tripping the import scan.
+        "hash",
+        "id",
         "choice",
         "getenv",
         "monotonic",
@@ -768,6 +787,212 @@ def test_a_constraint_on_an_attribute_the_catalog_lacks_disqualifies_the_product
     )
     assert is_decline(answer) and answer.reason == DeclineReason.no_matching_product
     assert "waterproof" in answer.detail
+
+
+# ---------------------------------------------------------------------------------------------
+# 6b. What an independent adversarial review found. Each of these crashed or was ungraded.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_offer_id_is_injective_and_not_a_joinable_string() -> None:
+    """`app.offers.offer_id` is a PRIMARY KEY, and colons are legal in all three components.
+
+    `f"{auction}:{store}:{product}"` renders store `a` offering `b:c` and store `a:b` offering
+    `c` identically — two stores in one auction, one row.
+    """
+    assert offer_id("auc", "a", "b:c") != offer_id("auc", "a:b", "c")
+    assert offer_id("auc", "a", "b") == offer_id("auc", "a", "b"), "and still deterministic"
+    assert _bid().offer.bid_offer_id.startswith("bidoffer:")
+
+
+def test_a_store_whose_id_cannot_be_cited_bids_at_list_price_instead_of_crashing() -> None:
+    """`scoped_ref` refuses to mint a grant whose rule half contains the scope separator.
+
+    A `store_id` of `store@alpha` is the real case. The grant could never be matched back to
+    its product, so there is no discount — but that is a fail-closed answer, not a reason to
+    throw `ValueError` into the solicitation.
+    """
+    context = _with_intro(15.0)
+    context["store_id"] = "store@alpha"
+    context["envelope"] = dict(context["envelope"], store_id="store@alpha")
+
+    answer = _bid(context=context)
+    assert answer.store_id == "store@alpha"
+    assert answer.offer.unit_price == LIST_PRICE, "no citable grant means no discount"
+    assert answer.offer.discount is None
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        # A request or a context that does not identify itself. The models forbid the empty
+        # string, so the alternative to a decline here is a ValidationError thrown at the caller.
+        (lambda r, c: r.__setitem__("auction_id", ""), DeclineReason.unidentified_request),
+        # The envelope names the store too, so blanking only `store_id` is NOT unidentified —
+        # both have to be missing before the bid has no one to answer for.
+        (
+            lambda r, c: (
+                c.__setitem__("store_id", ""),
+                c.__setitem__("envelope", dict(c["envelope"], store_id="")),
+            ),
+            DeclineReason.unidentified_request,
+        ),
+        # A store context that is not the shape it claims to be.
+        (
+            lambda r, c: c.__setitem__("catalog", {"prod-cap": "not a mapping"}),
+            DeclineReason.unusable_store_context,
+        ),
+        (
+            lambda r, c: c.__setitem__("live_state", {"prod-cap": "not a mapping"}),
+            DeclineReason.unusable_store_context,
+        ),
+        (
+            lambda r, c: c.__setitem__(
+                "envelope",
+                dict(c["envelope"], floors=[{"product_ref": "prod-cap", "min_price": "cheap"}]),
+            ),
+            DeclineReason.unusable_store_context,
+        ),
+        (
+            lambda r, c: c.__setitem__(
+                "envelope", dict(c["envelope"], max_discount_pct="lots", intro_discount_pct=5.0)
+            ),
+            DeclineReason.unusable_store_context,
+        ),
+        (
+            lambda r, c: c.__setitem__(
+                "envelope", dict(c["envelope"], standing_commitments=[{"value": "no key here"}])
+            ),
+            DeclineReason.unusable_store_context,
+        ),
+        (
+            lambda r, c: c.__setitem__(
+                "catalog", {"prod-cap": dict(c["catalog"]["prod-cap"], list_price=float("nan"))}
+            ),
+            DeclineReason.unusable_store_context,
+        ),
+        (
+            lambda r, c: r.__setitem__("intent", dict(r["intent"], hard_constraints=["nope"])),
+            DeclineReason.unusable_store_context,
+        ),
+        # An expiry nobody can read is the same problem as no expiry at all.
+        (
+            lambda r, c: c.__setitem__(OFFER_EXPIRES_AT_KEY, "whenever"),
+            DeclineReason.unstatable_offer_expiry,
+        ),
+        (lambda r, c: r.__setitem__("respond_by", ""), DeclineReason.unstatable_offer_expiry),
+    ],
+)
+def test_malformed_input_is_answered_with_a_decline_and_never_raised(
+    mutate: Any, expected: DeclineReason
+) -> None:
+    """The exchange asked a question; every one of these used to answer with a traceback.
+
+    A crash mid-solicitation is strictly worse than a decline that names the problem: the
+    merchant service owns the shape of the store context, and the advocate is not entitled to
+    take the caller down over it.
+    """
+    request, context = _request(), _context()
+    mutate(request, context)
+
+    answer = bid(request, context)
+    assert is_decline(answer), f"expected a decline, got {answer}"
+    assert answer.reason == expected
+    assert answer.detail, "a decline must say what was wrong with the input"
+
+
+def test_a_catalog_key_that_names_nothing_is_not_offered() -> None:
+    context = _context()
+    context["catalog"] = {"": dict(_fixture()["catalog"]["prod-cap"])}
+    answer = bid(_request(hard_constraints=[]), context)
+    assert is_decline(answer) and answer.reason == DeclineReason.no_priced_product
+
+
+def test_a_negative_catalog_price_is_not_offered() -> None:
+    context = _context()
+    context["catalog"] = {"prod-cap": dict(_fixture()["catalog"]["prod-cap"], list_price=-5.0)}
+    answer = bid(_request(), context)
+    assert is_decline(answer) and answer.reason == DeclineReason.no_priced_product
+
+
+def test_the_price_arithmetic_is_the_hooks_spelling_to_the_last_bit() -> None:
+    """`list * (100 - pct) / 100`, not `list * (1 - pct/100)`. They are not the same float.
+
+    The boundary re-checks the stated price against the floor that `authorize_discount`'s own
+    arithmetic cleared, so a bid a bit-width away from it is an honest bid the guard refuses.
+    """
+    assert 19.99 * (100.0 - 19.0) / 100.0 != 19.99 * (1.0 - 19.0 / 100.0), (
+        "this fixture only discriminates if the two spellings actually differ here"
+    )
+    context = _with_intro(19.0)
+    context["catalog"] = {"prod-odd": {"product_ref": "prod-odd", "list_price": 19.99}}
+    context["live_state"] = {"prod-odd": {"in_stock": True}}
+
+    answer = _bid(_request(hard_constraints=[]), context)
+    assert answer.offer.unit_price == 19.99 * (100.0 - 19.0) / 100.0
+    assert answer.offer.unit_price != 19.99 * (1.0 - 19.0 / 100.0)
+
+
+def test_the_stores_own_currency_outranks_the_one_the_buyer_asked_in() -> None:
+    """A price is the store's assertion, so the currency it is asserted in is the store's."""
+    context = _context(currency="GBP")
+    answer = _bid(_request(currency="USD"), context)
+    assert answer.offer.currency == "GBP"
+    assert _bid(_request(currency="USD"), _context()).offer.currency == "USD", (
+        "and with no store currency, the one that was asked for"
+    )
+
+
+def test_the_hook_call_log_reads_the_same_on_two_runs() -> None:
+    """S5's audit trail is an ORDERED record, and catalog dict order must not reach it.
+
+    The bid itself is protected by the price/product_ref tie-break, so a runtime that walked
+    the catalog in insertion order would still emit an identical bid — and an identical bid is
+    all the other determinism tests look at. The call log is where that difference shows.
+    """
+
+    def log_of(context: dict[str, Any]) -> list[tuple[str, str]]:
+        hooks = ToolHooks(context)
+        _bid(context=context, hooks=hooks)
+        return [(call.hook, call.subject) for call in hooks.call_log]
+
+    straight = _context()
+    reversed_context = _context()
+    reversed_context["catalog"] = dict(reversed(list(straight["catalog"].items())))
+
+    assert log_of(straight) == log_of(reversed_context)
+    assert log_of(straight) == [
+        ("get_product_fact", "prod-cap"),
+        ("get_product_fact", "prod-cap"),
+        ("get_live_state", "prod-cap"),
+        ("get_product_fact", "prod-floor"),
+        ("get_product_fact", "prod-floor"),
+        ("get_owner_commitments", CLUSTER),
+        ("choose_policy_action", CLUSTER),
+    ]
+
+
+def test_the_respond_by_expiry_floor_is_a_known_limitation_and_is_written_down() -> None:
+    """The fallback expiry is the auction's own deadline, so the offer dies when it closes.
+
+    Asserted rather than left implicit, because it is the one place this runtime's output has a
+    lifetime shorter than the flow that consumes it: a store that wants its offers to outlive
+    the auction must state `offer_expires_at`. Stating it removes the limitation entirely, and
+    that is asserted too, so this test fails the day someone "fixes" the fallback silently.
+    """
+    from contracts.boundary import validate_bid
+
+    at_close = _bid().offer.expires_at
+    assert at_close == _request()["respond_by"]
+    refused = validate_bid(_bid(), path="hosted", trust_snapshot=SNAPSHOT, now=at_close)
+    assert list(refused.reasons) == ["offer_expired"], (
+        "documented: at the instant the auction closes, the fallback expiry has lapsed"
+    )
+
+    stated = _context()
+    stated[OFFER_EXPIRES_AT_KEY] = "2999-06-01T00:00:00Z"
+    ok = validate_bid(_bid(context=stated), path="hosted", trust_snapshot=SNAPSHOT, now=at_close)
+    assert ok.ok and list(ok.reasons) == [], "a stated expiry removes the limitation"
 
 
 # ---------------------------------------------------------------------------------------------

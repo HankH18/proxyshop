@@ -30,13 +30,16 @@ and leaves the lifecycle to the caller that owns it.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from contracts import SCHEMA_VERSION, Bid, Claim, Discount, Offer
+from contracts.signing import canonical_json
 
 from ..hooks import (
+    CLAIM_SCOPE_SEPARATOR,
     Denied,
     HookInputError,
     HookProvenanceError,
@@ -58,6 +61,33 @@ IN_STOCK_KEY = "in_stock"
 
 #: `Discount.type` for a percentage depth — the only form a tool hook can authorize.
 PERCENTAGE = "percentage"
+
+#: Prefix on a bid-offer id, so a bare string in a log says what it is.
+OFFER_ID_PREFIX = "bidoffer"
+
+#: How many hex characters of the digest the id carries. 32 is 128 bits — far past any
+#: collision a single exchange will see, and short enough to read in a log line.
+OFFER_ID_LENGTH = 32
+
+
+def offer_id(auction_id: str, store_id: str, product_ref: str) -> str:
+    """A deterministic, INJECTIVE id for the offer this bid carries.
+
+    Injective is the whole requirement, and the reason this is a digest rather than the obvious
+    `f"{auction}:{store}:{product}"`. Colons are legal in every one of those three fields, so
+    the readable form is ambiguous: store ``a`` offering ``b:c`` and store ``a:b`` offering
+    ``c`` render the same string, and `app.offers.offer_id` is a PRIMARY KEY — two stores in one
+    auction would collide on insert. This package already refuses to build an ambiguous
+    identifier elsewhere (`hooks.provenance.scoped_ref` raises rather than mint one), and the
+    same argument applies here.
+
+    Hashed over RFC 8785 canonical JSON of the three fields as a LIST, so the separator problem
+    cannot come back through the serialization: the encoding is unambiguous by construction.
+    No clock and no counter, so the id is a pure function of the bid it names (S4).
+    """
+    material = canonical_json([str(auction_id), str(store_id), str(product_ref)])
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return f"{OFFER_ID_PREFIX}:{digest[:OFFER_ID_LENGTH]}"
 
 
 @dataclass(frozen=True)
@@ -116,6 +146,11 @@ def _gather(ctx: AuctionContext, hooks: Any) -> tuple[list[_Candidate], dict[str
     candidates: list[_Candidate] = []
     rejected: dict[str, tuple[str, str]] = {}
     for product_ref in sorted(ctx.catalog):
+        if not product_ref:
+            # `Offer.product_ref` forbids the empty string, and a provenance `ref` that names no
+            # product cites nothing. Rejecting it here answers; building the Offer would raise.
+            rejected[product_ref] = (UNPRICED, "the catalog key is empty, so nothing cites it")
+            continue
         try:
             price_claim = hooks.get_product_fact(product_ref, LIST_PRICE_KEY)
         except HookInputError:
@@ -203,7 +238,9 @@ def _requested_depth(ctx: AuctionContext, action: Claim) -> float:
     return depth if depth is not None and depth > 0.0 else 0.0
 
 
-def _authorized(hooks: Any, product_ref: str, requested: float) -> tuple[float, Claim | None]:
+def _authorized(
+    hooks: Any, store_id: str, product_ref: str, requested: float
+) -> tuple[float, Claim | None]:
     """Ask the envelope for `requested`, and return ``(granted depth, the grant)``.
 
     A :class:`Denied` is a VALUE, looked at rather than swallowed: it is falsy and typed
@@ -215,7 +252,7 @@ def _authorized(hooks: Any, product_ref: str, requested: float) -> tuple[float, 
     discount is inside every wall; a grant for nothing is still a grant in the ledger, and the
     bid would carry an authorization it does not spend.
     """
-    if requested <= 0.0:
+    if requested <= 0.0 or not citable_as_a_grant(store_id):
         return 0.0, None
     granted = hooks.authorize_discount(product_ref, requested)
     if isinstance(granted, Denied) or not granted:
@@ -224,6 +261,25 @@ def _authorized(hooks: Any, product_ref: str, requested: float) -> tuple[float, 
     if depth is None or depth <= 0.0:
         return 0.0, None
     return depth, granted
+
+
+def citable_as_a_grant(store_id: str) -> bool:
+    """Whether a grant minted for this store could be matched back to its product.
+
+    `hooks.provenance.scoped_ref` builds a grant's ref as ``<rule>@<product>`` and REFUSES —
+    loudly, by raising — to build one whose rule half already contains that separator, because
+    `claim_is_scoped_to` could never read it back. The rule half embeds `store_id`, so a store
+    called ``store@alpha`` can never hold an authorization.
+
+    Asked here, before the hook is called, rather than caught afterwards. Catching the
+    `ValueError` would also swallow the unrelated ones `authorize_discount` raises on a
+    malformed envelope — a `max_discount_pct` of ``"lots"`` — and those must stay visible as a
+    decline that names them, not become a silent absence of discount.
+
+    A store in this state still bids: list price needs no authorization. It simply never gets a
+    discount, which is the same fail-closed answer a :class:`Denied` produces.
+    """
+    return CLAIM_SCOPE_SEPARATOR not in str(store_id)
 
 
 def _priced(list_price: float, depth: float) -> float:
@@ -265,10 +321,70 @@ def bid(request: Any, context: Any, *, hooks: Any | None = None) -> Bid | Declin
     module, not a business condition — so it becomes a decline carrying the boundary's own
     message rather than a bid. A hosted agent that cannot trace its own claims must not emit
     them.
+
+    **Answering is not optional.** A malformed store context — a catalog entry that is not a
+    mapping, an envelope floor whose `min_price` is a string, a commitment with no `key`, a
+    list price that is NaN — used to leave this function as a `TypeError`, a `ValueError` or a
+    `pydantic.ValidationError`, thrown into whoever solicited the bid. None of those is a
+    better outcome than a decline that names the problem: the merchant service owns the shape
+    of the context, and the exchange asked a question that deserves an answer. So the assembly
+    runs inside :func:`_answered`, which converts exactly the "this input is not what it claims
+    to be" family into :attr:`DeclineReason.unusable_store_context` with the original message
+    attached, and lets everything else — including a `HookProvenanceError`, which is handled on
+    its own terms below — propagate.
     """
+    try:
+        return _assemble(request, context, hooks)
+    except _UNUSABLE_INPUT as exc:
+        return _unanswerable(request, context, exc)
+
+
+#: The exception family that means "the input is not the shape it claims to be", as opposed to
+#: "this runtime has a bug". `pydantic.ValidationError` and `contracts.signing`'s
+#: `CanonicalisationError` are both `ValueError` subclasses, so all four arrive through these
+#: two names. `HookProvenanceError` is a `RuntimeError` and is deliberately NOT here: a claim
+#: the boundary refuses is answered on its own terms, with its own reason.
+_UNUSABLE_INPUT = (HookInputError, TypeError, ValueError)
+
+
+def _unanswerable(request: Any, context: Any, exc: Exception) -> Decline:
+    """A decline for a context this runtime could not read, built without trusting that context.
+
+    Deliberately re-reads the two identifiers defensively rather than through
+    `assemble_context`: the reason we are here may be that assembling threw, and a fallback
+    that can fail is not a fallback.
+    """
+
+    def _field(source: Any, name: str) -> str:
+        try:
+            value = source.get(name) if hasattr(source, "get") else getattr(source, name, "")
+        except Exception:  # noqa: BLE001 - the input is already known to be malformed
+            return ""
+        return str(value) if value else ""
+
+    return Decline(
+        auction_id=_field(request, "auction_id"),
+        store_id=_field(context, "store_id"),
+        reason=DeclineReason.unusable_store_context,
+        detail=f"{type(exc).__name__}: {exc}",
+        agent_version=AGENT_VERSION,
+        schema_version=SCHEMA_VERSION,
+    )
+
+
+def _assemble(request: Any, context: Any, hooks: Any | None) -> Bid | Decline:
+    """The bid path proper. See :func:`bid`, which is this function plus the input guard."""
     ctx = assemble_context(request, context)
     if hooks is None:
         hooks = ToolHooks(context)
+
+    if not ctx.auction_id or not ctx.store_id:
+        return _decline(
+            ctx,
+            DeclineReason.unidentified_request,
+            f"a bid must name both the auction and the store it answers for; got "
+            f"auction_id={ctx.auction_id!r} store_id={ctx.store_id!r}",
+        )
 
     if not ctx.pursues(ctx.cluster_id):
         return _decline(
@@ -282,16 +398,27 @@ def bid(request: Any, context: Any, *, hooks: Any | None = None) -> Bid | Declin
     if not candidates:
         return _decline(ctx, _no_candidate_reason(ctx, rejected), _detail(rejected))
 
+    expires_at = ctx.offer_expires_at
+    if not expires_at:
+        return _decline(
+            ctx,
+            DeclineReason.unstatable_offer_expiry,
+            "neither the store context's `offer_expires_at` nor the request's `respond_by` is a "
+            "readable instant, and an offer with no readable expiry is one the exchange refuses",
+        )
+
     chosen = candidates[0]
     commitments = hooks.get_owner_commitments(ctx.cluster_id)
     action = hooks.choose_policy_action(
         {"cluster_id": ctx.cluster_id, "product_ref": chosen.product_ref}
     )
-    depth, grant = _authorized(hooks, chosen.product_ref, _requested_depth(ctx, action))
+    depth, grant = _authorized(
+        hooks, ctx.store_id, chosen.product_ref, _requested_depth(ctx, action)
+    )
     unit_price = _priced(chosen.list_price, depth)
 
     offer = Offer(
-        bid_offer_id=f"bidoffer:{ctx.auction_id}:{ctx.store_id}:{chosen.product_ref}",
+        bid_offer_id=offer_id(ctx.auction_id, ctx.store_id, chosen.product_ref),
         product_ref=chosen.product_ref,
         unit_price=unit_price,
         currency=ctx.currency,
@@ -307,7 +434,7 @@ def bid(request: Any, context: Any, *, hooks: Any | None = None) -> Bid | Declin
         # states no expiry, because an offer nobody can price the risk of is not an offer. It
         # comes off the context (or, failing that, off the auction's own `respond_by`) rather
         # than out of a `now() + ttl`, which would be the one clock read on this path.
-        expires_at=ctx.offer_expires_at,
+        expires_at=expires_at,
     )
     assembled = Bid(
         auction_id=ctx.auction_id,
@@ -342,4 +469,6 @@ __all__ = [
     "LIST_PRICE_KEY",
     "PERCENTAGE",
     "bid",
+    "citable_as_a_grant",
+    "offer_id",
 ]

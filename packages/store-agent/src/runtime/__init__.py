@@ -34,6 +34,7 @@ from .bidding import (
     LIST_PRICE_KEY,
     PERCENTAGE,
     bid,
+    offer_id,
 )
 from .context import (
     INTRO_DISCOUNT_KEY,
@@ -100,6 +101,7 @@ __all__ = [
     "assemble_context",
     "bid",
     "is_decline",
+    "offer_id",
     "satisfies",
 ]
 

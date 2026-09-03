@@ -36,6 +36,18 @@ class DeclineReason(StrEnum):
     #: A product matched, but the pixel feed says it is out of stock. Bidding it would be a
     #: claim about availability that the store's own evidence contradicts.
     no_available_product = "no_available_product"
+    #: The request does not identify itself: no `auction_id`, or no store to answer for. The
+    #: protocol requires both and the models refuse an empty one, so the alternative to this is
+    #: a `ValidationError` thrown at whoever solicited the bid.
+    unidentified_request = "unidentified_request"
+    #: The store context cannot be read as a store context — a catalog entry that is not a
+    #: mapping, a floor whose `min_price` is not a number, a commitment with no `key`, a list
+    #: price that has no canonical form. The merchant service owns that shape; the advocate
+    #: answers rather than raising into the solicitation, and carries the reason verbatim.
+    unusable_store_context = "unusable_store_context"
+    #: The offer cannot state an expiry that anyone can read, and an offer with no readable
+    #: expiry is one `contracts.boundary.validate_bid` refuses outright.
+    unstatable_offer_expiry = "unstatable_offer_expiry"
     #: The hook-provenance boundary refused the assembled bid (R8/T-152). This one is a DEFECT
     #: in the runtime rather than a business condition — a hosted agent that cannot prove its
     #: own bid must not emit it — so the detail carries the boundary's full refusal.

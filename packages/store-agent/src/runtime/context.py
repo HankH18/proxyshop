@@ -25,6 +25,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from contracts.boundary import parse_timestamp
 from contracts.signing import canonical_json
 
 #: The envelope key carrying the cold-start intro discount, as a percentage depth.
@@ -184,12 +185,28 @@ class AuctionContext:
         the merchant to a window nobody approved. A store that wants its offers to outlive the
         auction says so, once, on its context.
 
-        Stated as the ISO instant `contracts.Offer.expires_at` is typed as; `validate_bid` reads
-        it with `parse_timestamp` and refuses an offer that states none at all.
+        Stated as the ISO instant `contracts.Offer.expires_at` is typed as, and **checked with
+        the same `parse_timestamp` the boundary will use**, so an unreadable one is `None` here
+        rather than an `offer_expiry_unparseable` refusal at the door. Passing a value through
+        unread would make this method a place where a typo becomes the exchange's problem.
+
+        `None` means no readable expiry exists, which :func:`~.bidding.bid` turns into a decline:
+        an offer nobody can price the risk of is one the exchange refuses anyway, and refusing
+        it here at least says why.
+        A stated expiry that cannot be read does NOT fall through to `respond_by`. Falling back
+        would turn a merchant's typo into "the offer dies when the auction closes", silently and
+        with the wrong lifetime; the merchant asked for something specific and unreadable, and
+        the honest answer is to say so.
         """
         if self.stated_offer_expiry:
-            return self.stated_offer_expiry
-        return self.respond_by or None
+            return (
+                self.stated_offer_expiry
+                if parse_timestamp(self.stated_offer_expiry) is not None
+                else None
+            )
+        if self.respond_by and parse_timestamp(self.respond_by) is not None:
+            return self.respond_by
+        return None
 
     @property
     def is_cold(self) -> bool:
