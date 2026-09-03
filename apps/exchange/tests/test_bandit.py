@@ -23,11 +23,14 @@ not implemented yet" rather than as "the gate itself is broken".
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from apps.exchange.tests._fixtures_bandit import build_outcomes, build_trust_snapshot
 
 FLOOR = "exploration_floor"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _shares(raw) -> dict[str, float]:
@@ -336,3 +339,70 @@ def test_the_frozen_acceptance_import_path_exposes_the_whole_surface() -> None:
     module = importlib.import_module("apps.exchange.src.policy")
     for name in ("exposure", "initial_state", "update"):
         assert callable(getattr(module, name, None)), f"{name} is missing from the package"
+
+
+def test_update_rejects_an_outcome_that_never_says_what_happened() -> None:
+    """An outcome with no ``converted`` result is not an outcome. R16 learns from results."""
+    from exchange.policy import initial_state, update
+
+    stores = ["store-a"]
+    state = initial_state(stores, ["cluster-1"], build_trust_snapshot(stores), {FLOOR: 0.0})
+
+    with pytest.raises(ValueError, match="converted"):
+        update(state, [{"store_id": "store-a", "cluster_id": "cluster-1"}])
+    with pytest.raises(ValueError, match="converted"):
+        update(state, [{"store_id": "store-a", "cluster_id": "cluster-1", "converted": None}])
+
+
+def test_exposure_agrees_with_itself_across_separate_interpreters() -> None:
+    """The seed must mean the same thing in another process, or S4's fixed seeds are noise.
+
+    ``hash()`` on strings is salted per interpreter, so an implementation that derived its
+    RNG seed from ``hash(cluster_id)`` passes every same-process determinism check above
+    and still returns different numbers on the next run. This is the check that catches it.
+    """
+    import json
+    import subprocess
+    import sys
+
+    program = (
+        "import json, sys;"
+        "sys.path[:0] = ['.', '.pkgroot'];"
+        "from exchange.policy import exposure, initial_state, update;"
+        "stores = ['store-a', 'store-b', 'store-c'];"
+        "snap = {s: {'score': 0.5, 'confidence': 0.4, 'blacklisted': False,"
+        " 'low_data': s == 'store-c'} for s in stores};"
+        "st = initial_state(stores, ['cluster-1'], snap, {'exploration_floor': 0.1});"
+        "st = update(st, [{'store_id': 'store-a', 'cluster_id': 'cluster-1',"
+        " 'converted': True}] * 12);"
+        "print(json.dumps(exposure(st, 'cluster-1', 4)))"
+    )
+    runs = [
+        json.loads(
+            subprocess.run(
+                [sys.executable, "-c", program],
+                capture_output=True,
+                check=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+            ).stdout
+        )
+        for _ in range(2)
+    ]
+    assert runs[0] == runs[1], f"the same seed gave two answers in two processes: {runs}"
+
+    in_process = _shares(_reference_exposure())
+    assert runs[0] == pytest.approx(in_process), (
+        f"a subprocess disagrees with this one at the same seed: {runs[0]} vs {in_process}"
+    )
+
+
+def _reference_exposure() -> dict[str, float]:
+    """The same computation the subprocess above runs, in this interpreter."""
+    from exchange.policy import exposure, initial_state, update
+
+    stores = ["store-a", "store-b", "store-c"]
+    snapshot = build_trust_snapshot(stores, low_data=("store-c",))
+    state = initial_state(stores, ["cluster-1"], snapshot, {FLOOR: 0.1})
+    state = update(state, build_outcomes(12, ["store-a"]))
+    return exposure(state, "cluster-1", 4)
