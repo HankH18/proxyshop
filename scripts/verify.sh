@@ -2,7 +2,8 @@
 # The single verification entrypoint. Orchestrator-owned (T-000), frozen.
 #
 #   ./scripts/verify.sh all      full pipeline (per-wave integration gate, stack up)
-#   ./scripts/verify.sh check    per-ticket gate: skips @pytest.mark.docker and .slow
+#   ./scripts/verify.sh check    per-ticket gate: RUNS docker tests (they skip per-service
+#                                when their datastore is down); excludes needs_model only
 #   ./scripts/verify.sh lint     ruff + import-linter + the banned-reset gate + eslint
 #   ./scripts/verify.sh types    mypy + tsc -b
 #   ./scripts/verify.sh pytest   python tests only
@@ -76,10 +77,26 @@ run_pytest() {
     echo "        selected none of its own tests proves nothing and is refused here too.)" >&2
     return 1
   fi
-  line="$(grep -E '[0-9]+ (passed|failed|deselected|skipped)' "$log" | tail -1)"
+  # `|| true` on ALL THREE, and it is load-bearing rather than sloppy. Under this file's
+  # `set -euo pipefail`, a grep that matches nothing exits 1, pipefail promotes that to the
+  # pipeline's status, and the assignment's non-zero status trips errexit — killing the
+  # function HERE, before `return "$rc"`, before the SELECTION line, and before `rm -f`.
+  # Reported by a rung-2 verifier that drove both bodies through a replica of this call site:
+  # a usage error (4), an INTERNALERROR (3), a SIGKILL (137), an interrupt (2) and even a
+  # GREEN run whose epilogue it could not parse (0) all came back as 1. Fail-closed, so it
+  # weakened nothing — but it destroyed pytest's real exit code, leaked the temp file, and
+  # suppressed the SELECTION line in exactly the case where the parse had failed, which is
+  # the one case a reader most needs to see. A missing epilogue is not a gate failure: `rc`
+  # was captured at line 68 before any of this and is what the function returns.
+  line="$(grep -E '[0-9]+ (passed|failed|deselected|skipped)' "$log" | tail -1 || true)"
   desel="$(printf '%s' "$line" | grep -Eo '[0-9]+ deselected' || true)"
   skip="$(printf '%s' "$line" | grep -Eo '[0-9]+ skipped' || true)"
   rm -f "$log"
+  if [ -z "$line" ]; then
+    echo "SELECTION: UNPARSEABLE — pytest printed no recognisable summary line for: pytest $*"
+    echo "           Treat this run's coverage as unknown; the exit status ($rc) still stands."
+    return "$rc"
+  fi
   echo "SELECTION: ${desel:-0 deselected}, ${skip:-0 skipped}  <-  pytest $*"
   if [ -n "$desel" ] || [ -n "$skip" ]; then
     echo "           Those tests did NOT run. A green gate is evidence only about what it"
@@ -145,10 +162,28 @@ if [ "$STEP" = all ] || [ "$STEP" = pytest ]; then run_pytest -q -m "not needs_m
 # So the gate can run them and let reachability decide — which is T-117 acceptance 3, "T-109's
 # per-service reachability work lands consistently with this".
 #
-# Measured before making this change, stack up: `-m "not needs_model and not slow"` gives
-# `3756 passed, 1 deselected in 243.87s`. Running the docker tests costs ONE further deselection
-# (the single `slow` test) and stays green. `check` is slower than it was; a per-ticket gate that
-# does not run the ticket's own tests was not worth the seconds it saved.
+# MEASURED, and CORRECTED after a rung-2 verifier re-measured the original claim:
+#   old `-m "not needs_model and not docker and not slow"`  ->  3729 selected / 247 deselected
+#   new `-m "not needs_model and not slow"`                 ->  3975 selected /   1 deselected
+# So this runs 246 docker-marked tests that the per-ticket gate previously dropped. (The first
+# version of this comment said "~3520 -> 3908, ~388 tests" and that was wrong: it compared a
+# pre-cycle-11 suite size against a post-cycle-11 one and charged ~142 newly-ADDED tests to this
+# change. The direction was right; the magnitude was not.)
+#
+# `and not slow` is a PRESENT-DAY NO-OP kept for future use: `-m slow` collects zero of 3976, so
+# there is no "single slow test" — the one remaining deselection under both expressions is the
+# needs_model test. The earlier comment misnamed it.
+#
+# Verified in both directions with the stack down (every datastore pointed at a closed port):
+# all 246 SKIP with a named per-service reason and none passes, so nothing here passes without
+# touching its service and nothing fails for a machine reason.
+#
+# KNOWN COST, named because the first version of this amendment failed to name it: every
+# `graph`-marked test is also `docker`-marked, so `check` now builds the session-scoped
+# `_neo4j_guard` and holds the MACHINE-GLOBAL flock /tmp/proxyshop-neo4j.lock for most of its
+# run (measured: 196s of a 222s session). Concurrent lanes running `check` therefore serialise
+# on it, and one that waits past the lock's budget fails with Neo4jLockTimeout for a machine
+# reason. That is tracked separately; the fix belongs in the fixture's scope, not here.
 if [ "$STEP" = check ]; then run_pytest -q -m "not needs_model and not slow"; fi
 if [ "$STEP" = all ] || [ "$STEP" = vitest ]; then npx --no-install vitest run --passWithNoTests; fi
 if [ "$STEP" = all ] || [ "$STEP" = check ]; then python scripts/check_verify_contracts.py; fi
