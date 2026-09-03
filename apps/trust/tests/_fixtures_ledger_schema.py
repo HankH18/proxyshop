@@ -31,6 +31,7 @@ in a commit message.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
@@ -176,34 +177,81 @@ REBUILD_WITNESS_TABLES = (
 #: files; finite, because a wait with no end is a hung unattended build.
 REBUILD_LOCK_TIMEOUT_SECONDS = 60.0
 
+#: ``lock_timeout`` for the rebuild's ``DROP SCHEMA``. The drop needs ``ACCESS EXCLUSIVE`` on
+#: every table in the four schemas, so any session merely *reading* one of them -- including
+#: a ``pg_role`` connection left idle in transaction by CF-4 above -- blocks it. With no
+#: timeout that block is unbounded, and because the drop runs while this session holds
+#: ``MIGRATION_LOCK_KEY``, an unbounded block does not stall one session, it stalls every
+#: session on the database that respects that key. Same value, and the same reasoning, as
+#: ``apps/exchange/tests/test_scaffold_datastores.py``'s ``d5_grant_model`` teardown.
+REBUILD_DROP_LOCK_TIMEOUT = "15s"
+
+#: ``lock_timeout`` is interpolated into ``SET LOCAL``, which takes no query parameters, so
+#: the value is constrained to a literal rather than trusted.
+_LOCK_TIMEOUT_PATTERN = re.compile(r"^\d+(?:ms|s)$")
+
 
 class LedgerSchemaRebuildError(RuntimeError):
     """The four owned schemas could not be rebuilt, or were not there afterwards."""
 
 
 def rebuild_owned_schemas(
-    pg_admin: Any, *, lock_timeout: float = REBUILD_LOCK_TIMEOUT_SECONDS
+    pg_admin: Any,
+    *,
+    lock_timeout: float = REBUILD_LOCK_TIMEOUT_SECONDS,
+    drop_lock_timeout: str = REBUILD_DROP_LOCK_TIMEOUT,
 ) -> list[str]:
-    """Drop and re-apply T-011's four schemas, holding the migration lock the whole time.
+    """Drop and re-apply T-011's four schemas in **one transaction**, under the migration lock.
 
-    **Why the lock (T-216).** ``DROP SCHEMA ... CASCADE`` followed by four migration files is
-    not an instant, it is a *window*, and for as long as it is open the ``ledger`` schema
-    genuinely does not exist. Any other session on this same database that touches
-    ``ledger.*`` in that window gets
+    **The window, and why a transaction and not a lock closes it (T-216).**
+    ``DROP SCHEMA ... CASCADE`` followed by four migration files is not an instant, it is a
+    *window*, and for as long as it is open the ``ledger`` schema genuinely does not exist.
+    Any other session on this same database that touches ``ledger.*`` in that window gets
     ``psycopg.errors.InvalidSchemaName: schema "ledger" does not exist`` -- and then passes
     on a retry seconds later, against a database in which the schema demonstrably exists.
     That is the whole shape of the flake this function was extracted to close.
 
-    :func:`apply_migrations` already serialises itself on ``MIGRATION_LOCK_KEY``, a
-    session-level advisory lock whose tag carries the database OID. The bare drop in front of
-    it took no lock at all, so it could land in the middle of another session's migration
-    run. Taking the *same* key here, before dropping, makes drop-plus-apply one indivisible
-    step as far as anything else that respects that lock is concerned. Advisory locks are
-    re-entrant per session, so ``apply_migrations`` taking it again below is a no-op.
+    An advisory lock does **not** close it, and the first attempt at this fix was wrong to
+    claim it did. Advisory locks are cooperative: they constrain only sessions that ask for
+    the same key. A test body is a reader that never asks, so with the drop merely *locked*
+    a concurrent reader still saw the schema vanish. Measured against exactly that code, with
+    a positive control::
 
+        POSITIVE CONTROL (reader before rebuild): True
+        rebuild window 0.13s, 41 reads, 12 failures
+          InvalidSchemaName: schema "ledger" does not exist
+          UndefinedTable: relation "ledger.commerce_events" does not exist
+
+    What closes it is that PostgreSQL's DDL is transactional. Run the drop and the re-apply
+    inside **one** transaction and no other session ever observes the intermediate state:
+    a catalog reader keeps seeing the old schema until COMMIT flips it to the new one in a
+    single step, and a reader that takes a relation lock waits for the COMMIT rather than
+    racing it. Same probe, same positive control, against this function::
+
+        [privilege] POSITIVE CONTROL before rebuild: True
+        [privilege] window 0.14s, 43 reads, 0 failures -> PROTECTED
+        [select]    POSITIVE CONTROL before rebuild: 0
+        [select]    window 0.14s, 2 reads, 0 failures  -> PROTECTED
+
+    :func:`test_ledger_schema_state_hygiene.
+    test_a_concurrent_reader_never_sees_the_owned_schemas_disappear` is that measurement,
+    made deterministic and kept.
+
+    **The advisory lock is still taken**, for the writer-versus-writer half:
+    :func:`apply_migrations` serialises itself on ``MIGRATION_LOCK_KEY``, a session-level
+    advisory lock whose tag carries the database OID, but the bare drop in front of it took
+    no lock at all, so a second rebuild could tear the schemas out mid-run. Advisory locks
+    are re-entrant per session, so ``apply_migrations`` taking it again below is a no-op.
     ``pg_try_advisory_lock`` in a bounded poll rather than the blocking ``pg_advisory_lock``:
     a blocking wait is not covered by ``lock_timeout`` (that governs heavyweight locks only),
     so a stuck holder would hang the session with no diagnostic.
+
+    **And the drop is bounded.** It needs ``ACCESS EXCLUSIVE`` on every table in the four
+    schemas, so one idle-in-transaction reader blocks it -- while this session holds
+    ``MIGRATION_LOCK_KEY``, which turns a one-session stall into a whole-database one.
+    ``SET LOCAL lock_timeout`` makes that fail in seconds with a diagnostic instead. Because
+    the drop is inside the transaction, a drop that times out leaves the four schemas exactly
+    as they were; nothing is half-torn-down.
 
     **Why it still drops.** Every migration is ``CREATE ... IF NOT EXISTS`` and
     ``proxyshop_w<N>`` keeps its schema between runs -- so a fixture that only *applied* the
@@ -223,20 +271,38 @@ def rebuild_owned_schemas(
     freshly graded too.
 
     Args:
-        pg_admin: an **autocommit** superuser connection to this worker's database.
+        pg_admin: an **autocommit** superuser connection to this worker's database. The drop
+            and the re-apply run inside one explicit transaction on it; ``apply_migrations``
+            opens a transaction per file, which nests as a savepoint and commits with the
+            outer one.
         lock_timeout: seconds to wait for the migration advisory lock.
+        drop_lock_timeout: PostgreSQL interval literal (``'15s'``, ``'500ms'``) the
+            ``DROP SCHEMA`` waits for its relation locks. Lowered by the tests that assert
+            the bound exists, so they take a second rather than fifteen.
 
     Returns:
         The migration filenames applied, in order.
 
     Raises:
-        LedgerSchemaRebuildError: the lock could not be taken inside ``lock_timeout``
-            (nothing was dropped), or the migrations returned without producing the schemas.
-            The second case is the one that arms the flake for every session that follows:
-            a database left with no ledger schema at all looks exactly like a fresh one.
+        LedgerSchemaRebuildError: the advisory lock could not be taken inside
+            ``lock_timeout``; the drop could not take its relation locks inside
+            ``drop_lock_timeout``; or the migrations returned without producing the schemas.
+            In the first two cases nothing was dropped. The third is the one that arms the
+            flake for every session that follows -- a database left with no ledger schema at
+            all looks exactly like a fresh one -- and the surrounding transaction rolls the
+            drop back rather than leaving that database behind.
+        ValueError: ``drop_lock_timeout`` is not a bare interval literal.
     """
+    import psycopg
+
     from apps.trust.src.ledger import apply_migrations
     from apps.trust.src.ledger.migrations import MIGRATION_LOCK_KEY
+
+    if not _LOCK_TIMEOUT_PATTERN.match(drop_lock_timeout):
+        raise ValueError(
+            f"drop_lock_timeout={drop_lock_timeout!r} is interpolated into SET LOCAL, which "
+            f"takes no query parameters; it must look like '15s' or '500ms'"
+        )
 
     deadline = time.monotonic() + lock_timeout
     while True:
@@ -250,25 +316,42 @@ def rebuild_owned_schemas(
                 f"another session on this database has held the migration advisory lock "
                 f"({MIGRATION_LOCK_KEY}) for more than {lock_timeout:g}s, so the four owned "
                 f"schemas were NOT dropped. Dropping anyway would tear them out from under "
-                f"whatever that session is doing, which is exactly the InvalidSchemaName "
-                f"flake T-216 closed. Two pytest sessions sharing one proxyshop_w<N> means "
-                f"two runs share a $PROXYSHOP_WORKER (D38)."
+                f"another session's half-finished migration run, and that session would "
+                f"then report success over a database missing whatever this one removed. "
+                f"Two pytest sessions sharing one proxyshop_w<N> means two runs share a "
+                f"$PROXYSHOP_WORKER (D38)."
             )
         time.sleep(0.05)
 
     try:
-        with pg_admin.cursor() as cur:
-            cur.execute(f"drop schema if exists {', '.join(OWNED_SCHEMAS)} cascade")
-        applied = apply_migrations(pg_admin)
-        missing = _absent_witnesses(pg_admin)
-        if missing:
-            raise LedgerSchemaRebuildError(
-                f"the migrations ran ({', '.join(applied) or 'nothing applied'}) but "
-                f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} not there "
-                f"afterwards. The four owned schemas were dropped and not rebuilt, so this "
-                f"worker's database is now indistinguishable from a fresh one and every "
-                f"later session that assumes a ledger schema will fail."
-            )
+        # ONE transaction around drop-plus-apply: that, not the advisory lock above, is what
+        # makes the window invisible to every other session on this database.
+        with pg_admin.transaction():
+            with pg_admin.cursor() as cur:
+                cur.execute(f"set local lock_timeout = '{drop_lock_timeout}'")  # noqa: S608
+                try:
+                    cur.execute(f"drop schema if exists {', '.join(OWNED_SCHEMAS)} cascade")
+                except psycopg.errors.LockNotAvailable as exc:
+                    raise LedgerSchemaRebuildError(
+                        f"the drop of {', '.join(OWNED_SCHEMAS)} could not take its relation "
+                        f"locks within {drop_lock_timeout} -- another session is reading one "
+                        f"of those tables, most likely a pg_role connection left idle in "
+                        f"transaction (CF-4). Nothing was dropped. Waiting instead of "
+                        f"failing would stall every other session too, because this one "
+                        f"holds the migration advisory lock ({MIGRATION_LOCK_KEY}) while it "
+                        f"drops."
+                    ) from exc
+            applied = apply_migrations(pg_admin)
+            missing = _absent_witnesses(pg_admin)
+            if missing:
+                raise LedgerSchemaRebuildError(
+                    f"the migrations ran ({', '.join(applied) or 'nothing applied'}) but "
+                    f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} not there "
+                    f"afterwards. Had this committed, the four owned schemas would be "
+                    f"dropped and not rebuilt, leaving this worker's database "
+                    f"indistinguishable from a fresh one for every later session; the "
+                    f"transaction is rolled back instead, so they are still standing."
+                )
     finally:
         with pg_admin.cursor() as cur:
             cur.execute("select pg_advisory_unlock(%s)", (MIGRATION_LOCK_KEY,))
@@ -299,7 +382,7 @@ def ledger_migrated(pg_admin: Any) -> str:
     declaration is graded against the persistent ``proxyshop_w<N>`` database's ambient state,
     and is therefore invisible until that state changes (T-216).
 
-    All the work, and the reasoning behind the drop and the lock, is in
+    All the work, and the reasoning behind the drop, the transaction and the lock, is in
     :func:`rebuild_owned_schemas`.
 
     Returns:
