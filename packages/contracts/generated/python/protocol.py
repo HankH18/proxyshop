@@ -292,7 +292,7 @@ class Offer(BaseModel):
     unit_price: float
     currency: str | None = None
     discount: Discount | None = None
-    commitments: list[Claim] | None = Field([], validate_default=True)
+    commitments: list[Claim] = Field([], validate_default=True)
     total_price: float
     expires_at: str | None = None
     checkout_url: str | None = None
@@ -507,7 +507,7 @@ class ProfileBuckets(BaseModel):
         extra="forbid",
     )
     budget_band: str | None = None
-    category_affinity: list[str] | None = []
+    category_affinity: list[str] = []
     frequency_tier: str | None = None
     region: str | None = None
     first_time: bool | None = None
@@ -617,10 +617,10 @@ class LossReasons(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    fit: int | None = Field(0, ge=0)
-    price: int | None = Field(0, ge=0)
-    commitments: int | None = Field(0, ge=0)
-    trust: int | None = Field(0, ge=0)
+    fit: int = Field(0, ge=0)
+    price: int = Field(0, ge=0)
+    commitments: int = Field(0, ge=0)
+    trust: int = Field(0, ge=0)
 
 
 class ClusterLoss(BaseModel):

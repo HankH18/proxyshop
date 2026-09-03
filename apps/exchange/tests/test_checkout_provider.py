@@ -34,18 +34,24 @@ from exchange.checkout import (
     CheckoutRequest,
     MintedCheckout,
     OffDomainCheckout,
+    OrphanedCheckoutCode,
+    OrphanedCode,
+    OrphanedOffDomainCheckout,
     PortMethodIsFinal,
     ShopifyCheckoutProvider,
     SimulatedRedirectProvider,
     UnknownCheckoutMode,
+    UnusableDiscount,
     UnusableOffer,
     code_expiry,
     code_minting_call_sites,
     is_on_domain,
     mint_code,
+    offer_discount_percentage,
     register_provider,
     registered_modes,
     resolve_provider,
+    shopify_discount_percentage,
 )
 
 SELLER_DOMAIN = "store-a.example.com"
@@ -390,20 +396,24 @@ def test_registering_a_further_provider_widens_nothing() -> None:
     finally:
         register_provider("bank_transfer", SimulatedRedirectProvider())
 
-    # `accept()` is T-033's. The moment it exists, this becomes binding: the mode it already
-    # receives is the selector, so no provider registration may widen its four positionals.
-    try:
-        from exchange.accept import accept  # noqa: PLC0415
-    except ImportError:
-        accept = None  # type: ignore[assignment]
-    if accept is not None:
-        positional = [
-            name
-            for name, parameter in inspect.signature(accept).parameters.items()
-            if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
-            and parameter.default is parameter.empty
-        ]
-        assert len(positional) == 4, f"accept() grew past four positionals: {positional}"
+    # `accept()` is T-033's, and it exists: the mode it already receives is the selector, so
+    # no provider registration may widen its four positionals.
+    #
+    # This import used to be wrapped in `try/except ImportError: accept = None` with the
+    # assertion under `if accept is not None`, from when the module had not landed. That
+    # tolerance outlived its reason and made the check silently self-disarming — ANY import
+    # failure anywhere under `exchange.accept`, including a transitive one, turned the whole
+    # assertion off and left the test green. The module is here now; the import is
+    # unconditional, so a broken `accept` fails this test instead of hiding behind it.
+    from exchange.accept import accept  # noqa: PLC0415
+
+    positional = [
+        name
+        for name, parameter in inspect.signature(accept).parameters.items()
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        and parameter.default is parameter.empty
+    ]
+    assert len(positional) == 4, f"accept() grew past four positionals: {positional}"
 
 
 def test_a_provider_cannot_opt_out_of_the_ports_guarantees() -> None:
@@ -652,3 +662,511 @@ def test_the_positive_control_a_well_formed_quantity_and_expiry_still_complete()
     )
     assert ":3?" in result.permalink_url
     assert result.expires_at == code_expiry(T_NOW, good)
+
+
+# =====================================================================================
+# T-182: the schema types `Offer.expires_at` as an ISO-8601 STRING, and the mint refused it
+# =====================================================================================
+#: The instant every ISO spelling below names, and the epoch float that is the same instant.
+#: Chosen to sit ~27.8 hours after ``T_NOW`` so it is INSIDE D22's 48-hour ceiling: with an
+#: expiry past the ceiling, ``min()`` returns the ceiling whatever the parse did, and the
+#: test could not tell a parsed expiry from a discarded one.
+ISO_EXPIRY_EPOCH = 1_700_100_000.0
+
+#: Every spelling `contracts.parse_timestamp` accepts, which is the set the boundary admits
+#: at `packages/contracts/src/boundary.py` — so anything `validate_bid` lets through reaches
+#: the mint. A naive instant is read as UTC on both sides, deliberately (a boundary that read
+#: it as local time would make expiry depend on where the process happens to run).
+ISO_EXPIRY_SPELLINGS = {
+    "Z suffix": "2023-11-16T02:00:00Z",
+    "explicit UTC offset": "2023-11-16T02:00:00+00:00",
+    "naive, read as UTC": "2023-11-16T02:00:00",
+    "non-UTC offset": "2023-11-15T18:00:00-08:00",
+}
+
+
+def test_the_schema_still_types_the_offer_expiry_as_a_string() -> None:
+    """The premise of every test below. If contracts changes, these stop meaning anything."""
+    from contracts import Offer  # noqa: PLC0415
+
+    assert Offer.model_fields["expires_at"].annotation == (str | None), (
+        "Offer.expires_at is no longer an ISO string; the ISO cases below now pin nothing"
+    )
+
+
+@pytest.mark.parametrize("spelling", sorted(ISO_EXPIRY_SPELLINGS), ids=str)
+def test_an_iso_expiry_the_schema_permits_is_read_not_refused(spelling: str) -> None:
+    """T-182: `float("2026-09-03T00:00:00Z")` raised, so EVERY schema-valid expiry was fatal.
+
+    The schema types ``Offer.expires_at`` as ``str | None`` and the boundary parses it with
+    ``contracts.parse_timestamp``; the mint parsed it with ``float()``. The only expiry shape
+    the schema permitted was therefore the one the minting path refused, and the only one the
+    mint accepted — a bare epoch number — is one the schema forbids.
+    """
+    assert code_expiry(T_NOW, {"expires_at": ISO_EXPIRY_SPELLINGS[spelling]}) == ISO_EXPIRY_EPOCH
+
+
+def test_the_iso_and_epoch_spellings_of_one_instant_expire_at_the_same_second() -> None:
+    """Widening must not have introduced a second answer: one instant, one expiry."""
+    assert code_expiry(T_NOW, {"expires_at": "2023-11-16T02:00:00Z"}) == code_expiry(
+        T_NOW, {"expires_at": ISO_EXPIRY_EPOCH}
+    )
+
+
+def test_the_forty_eight_hour_ceiling_still_caps_a_distant_iso_expiry() -> None:
+    """D22 is ``min(now + 48h, offer.expires_at)`` — parsing the string must not lift the cap."""
+    assert code_expiry(T_NOW, {"expires_at": "2033-05-18T03:33:20Z"}) == T_NOW + 48 * 60 * 60
+
+
+@pytest.mark.parametrize("unreadable", ["whenever", "2026-13-45T99:99:99Z", "", [], {}])
+def test_an_unreadable_expiry_is_still_refused_before_anything_is_minted(
+    unreadable: Any,
+) -> None:
+    """The positive control. Accepting ISO must not mean accepting anything at all."""
+    creator = RecordingCodeCreator()
+    with pytest.raises(UnusableOffer):
+        code_expiry(T_NOW, {"expires_at": unreadable})
+
+    hostile = offer()
+    hostile["expires_at"] = unreadable
+    with pytest.raises(UnusableOffer):
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=hostile,
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+    assert creator.calls == [], "the merchant minted a code for an offer that cannot expire"
+
+
+def test_a_whole_checkout_completes_on_an_iso_expiry() -> None:
+    """End to end, through the port: the shape the schema publishes mints a real code."""
+    hosted = offer()
+    hosted["expires_at"] = "2023-11-16T02:00:00Z"
+    result = resolve_provider("redirect").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer=hosted,
+            mode="redirect",
+            now=T_NOW,
+            registered_domains=SELLERS,
+        )
+    )
+    assert result.code.startswith(CODE_PREFIX)
+    assert result.expires_at == ISO_EXPIRY_EPOCH
+    assert [event["kind"] for event in result.events] == list(CHECKOUT_EVENT_KINDS)
+
+
+# =====================================================================================
+# T-157: a code minted and then orphaned by the post-mint permalink check
+# =====================================================================================
+class OffDomainCodeCreator:
+    """A merchant that issues a REAL code and answers with a permalink on another host."""
+
+    def __init__(self, code: str = "PSX-REALCODE") -> None:
+        self.code = code
+        self.calls: list[tuple[str, Any]] = []
+
+    def create_code(self, store_id: str, offer_payload: Any) -> dict[str, str]:
+        self.calls.append((store_id, offer_payload))
+        return {
+            "code": self.code,
+            "permalink_url": f"https://attacker.tld/cart/1:1?discount={self.code}",
+        }
+
+
+#: The R10 list-price fallback shape `collect_bids` manufactures: no `checkout_url` at all.
+FALLBACK_OFFER: dict[str, Any] = {
+    "product_ref": "product-1",
+    "unit_price": 100.0,
+    "total_price": 100.0,
+}
+
+
+def test_a_refusal_after_the_mint_carries_the_live_code_out() -> None:
+    """T-157: the merchant issued ``PSX-REALCODE`` and this layer used to lose it entirely.
+
+    With no ``checkout_url`` — the legal R10 fallback shape — the pre-mint host check has
+    nothing to look at, so the first failable comparison is the one on the permalink the
+    merchant returned, i.e. AFTER ``POST /codes`` issued a real single-use discount. The
+    refusal is correct; dropping the code on the floor is not. A discount that exists in the
+    merchant's system and nowhere in the exchange's cannot be revoked, cannot be expired and
+    will not appear in any reconciliation.
+    """
+    creator = OffDomainCodeCreator()
+    with pytest.raises(OffDomainCheckout) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=dict(FALLBACK_OFFER),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+
+    assert creator.calls, "the fixture must actually reach the merchant, or it proves nothing"
+    assert isinstance(raised.value, OrphanedCheckoutCode)
+    orphan = raised.value.orphan
+    assert orphan.code == "PSX-REALCODE"
+    assert orphan.permalink_url == "https://attacker.tld/cart/1:1?discount=PSX-REALCODE"
+    assert orphan.provider == "shopify"
+    assert (orphan.store_id, orphan.auction_id, orphan.bid_ref) == (
+        "store-a",
+        "auction-1",
+        "bid-a",
+    )
+    assert "PSX-REALCODE" in str(raised.value), (
+        "an operator reading the refusal cannot see there is a live code to revoke"
+    )
+
+
+def test_a_refusal_before_the_mint_carries_no_code_because_there_is_none() -> None:
+    """The positive control: the orphan marker must mean something, not ride every refusal.
+
+    An off-domain ``checkout_url`` is refused by the PRE-mint check. Nothing was minted, so
+    there is nothing to revoke — and an exception claiming otherwise would send the exchange
+    hunting for a code that does not exist.
+    """
+    creator = OffDomainCodeCreator()
+    with pytest.raises(OffDomainCheckout) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=offer("https://attacker.tld/cart/1:1?discount=X"),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+    assert creator.calls == []
+    assert not isinstance(raised.value, OrphanedCheckoutCode)
+
+
+def test_the_orphan_refusal_is_still_caught_by_a_caller_watching_for_off_domain() -> None:
+    """`accept()` and every existing caller catch `OffDomainCheckout`; that must keep working.
+
+    Asserted by CATCHING, not by `issubclass`: the class statement and an `issubclass` of it
+    are the same fact written twice, and a caller's `except` clause is the thing that has to
+    keep working. This is the real post-mint refusal, caught the way `accept()` catches it.
+    """
+    creator = OffDomainCodeCreator()
+    caught: Exception | None = None
+    try:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=dict(FALLBACK_OFFER),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+    except OffDomainCheckout as exc:  # the clause every existing caller already has
+        caught = exc
+    assert caught is not None, "an existing `except OffDomainCheckout` no longer catches this"
+    assert isinstance(caught, ValueError), "and `accept()`'s broad catch still sees it"
+    assert isinstance(caught, OrphanedCheckoutCode), "the orphan is reachable from that clause"
+
+
+def test_the_simulated_provider_cannot_orphan_a_code() -> None:
+    """It builds its permalink from the registered domain, so step 5 cannot fail on it."""
+    result = resolve_provider("redirect").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer=dict(FALLBACK_OFFER),
+            mode="redirect",
+            now=T_NOW,
+            registered_domains=SELLERS,
+        )
+    )
+    assert urlsplit(result.permalink_url).hostname == SELLER_DOMAIN
+
+
+# =====================================================================================
+# T-183: `contracts.Discount.value` is a PERCENT; Shopify's discount input is a FRACTION
+# =====================================================================================
+def test_a_protocol_discount_percent_becomes_a_shopify_fraction() -> None:
+    """20.0 in the protocol means 20% off; 20.0 in Shopify's input would mean 2000% off.
+
+    `services/shopify-stub/src/graphql_admin.py` refuses anything outside ``0.0..1.0``,
+    faithfully to the real Admin API (the recorded fixture
+    ``admin_discount_code_basic_create.json`` carries the sentence "Value must be between
+    0.00 - 1.00" against the INPUT object). So the conversion is the exchange's to do, and
+    this is the one place it happens.
+    """
+    assert shopify_discount_percentage({"type": "percentage", "value": 20.0}) == 0.2
+    assert shopify_discount_percentage({"type": "percentage", "value": 0.0}) == 0.0
+    assert shopify_discount_percentage({"type": "percentage", "value": 100.0}) == 1.0
+
+
+def test_a_contracts_discount_object_converts_the_same_way_a_mapping_does() -> None:
+    """The producer hands over a pydantic `Discount`, not a dict. Both must read alike."""
+    from contracts import Discount  # noqa: PLC0415
+
+    granted = Discount(type="percentage", value=20.0)
+    assert shopify_discount_percentage(granted) == 0.2
+    assert shopify_discount_percentage(granted.model_dump()) == 0.2
+
+
+def test_a_fixed_amount_discount_has_no_percentage_to_send() -> None:
+    """Shopify's input is a union: a fixed amount goes in `discountAmount`, not `percentage`."""
+    assert shopify_discount_percentage({"type": "fixed_amount", "value": 15.0}) is None
+    assert shopify_discount_percentage(None) is None
+    assert offer_discount_percentage({"product_ref": "p", "unit_price": 1.0}) is None
+    # The in-test positive control: without it, `return None` for EVERY input satisfies the
+    # three assertions above and this test passes against an empty implementation.
+    assert shopify_discount_percentage({"type": "percentage", "value": 15.0}) == 0.15
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"type": "percentage", "value": 101.0},
+        {"type": "percentage", "value": -1.0},
+        {"type": "percentage", "value": "twenty"},
+        {"type": "percentage", "value": None},
+        {"type": "mystery-unit", "value": 20.0},
+    ],
+)
+def test_a_discount_whose_unit_cannot_be_established_is_refused_not_guessed(bad: Any) -> None:
+    """Fail closed. Guessing the unit is precisely the 100x mistake this exists to stop.
+
+    ``{"type": "percentage", "value": 0.2}`` is deliberately NOT here: 0.2% is a legal, if
+    stingy, discount, and there is no way to tell it apart from a fraction that arrived in
+    the wrong unit. That ambiguity is why the conversion has one home instead of being
+    open-coded at each call site.
+    """
+    with pytest.raises(UnusableDiscount):
+        shopify_discount_percentage(bad)
+
+
+def test_the_offer_level_reader_finds_the_discount_the_protocol_puts_on_the_offer() -> None:
+    hosted = offer()
+    hosted["discount"] = {"type": "percentage", "value": 25.0}
+    assert offer_discount_percentage(hosted) == 0.25
+
+
+class FlakyDomains:
+    """A registry that answers once and fails afterwards — a dropped connection, in effect."""
+
+    def __init__(self, domain: str = SELLER_DOMAIN) -> None:
+        self.domain = domain
+        self.calls = 0
+
+    def domain_for(self, store_id: str) -> str | None:
+        self.calls += 1
+        if self.calls > 1:
+            raise RuntimeError("registry connection dropped")
+        return self.domain
+
+
+class CodeOnlyCreator:
+    """A merchant that answers with the code and no permalink — the adapter builds one."""
+
+    def __init__(self, code: str = "PSX-CODEONLY") -> None:
+        self.code = code
+        self.calls: list[tuple[str, Any]] = []
+
+    def create_code(self, store_id: str, offer_payload: Any) -> dict[str, str]:
+        self.calls.append((store_id, offer_payload))
+        return {"code": self.code}
+
+
+def test_a_failure_inside_the_adapter_after_the_merchant_answered_carries_the_code_out() -> None:
+    """The second window on T-157, one level deeper than the port can reach.
+
+    ``CheckoutProvider.checkout`` can only guard what happens *after* ``mint`` returns. The
+    Shopify adapter keeps working after the merchant has answered — when the merchant sends
+    no permalink it builds one, and building one resolves the registered domain a SECOND
+    time. A lookup that answers once and fails once is enough to raise there, with a real
+    code already issued, and the port's wrapper would never see it.
+    """
+    creator = CodeOnlyCreator()
+    registry = FlakyDomains()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=dict(FALLBACK_OFFER),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=registry,
+            )
+        )
+
+    assert creator.calls, "the merchant must actually have been reached"
+    assert registry.calls > 1, "the second lookup must actually have happened"
+    assert raised.value.orphan.code == "PSX-CODEONLY"
+    assert raised.value.orphan.store_id == "store-a"
+
+
+def test_the_positive_control_a_code_only_merchant_reply_still_completes_normally() -> None:
+    """The refusal above must not be satisfiable by an adapter that refuses code-only replies."""
+    creator = CodeOnlyCreator()
+    result = resolve_provider("shopify").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer=dict(FALLBACK_OFFER),
+            mode="shopify",
+            code_creator=creator,
+            now=T_NOW,
+            registered_domains=SELLERS,
+        )
+    )
+    assert result.code == "PSX-CODEONLY"
+    assert urlsplit(result.permalink_url).hostname == SELLER_DOMAIN
+
+
+def test_an_orphan_refusal_survives_being_serialised() -> None:
+    """The code is the payload. An exception that loses it in transit has lost the code.
+
+    `BaseException.__reduce__` rebuilds by calling the class with `self.args`, and `orphan`
+    is keyword-only — so without `__reduce__` this raises `TypeError` on the way back and
+    turns a recoverable refusal into a crash wherever the exception crossed a boundary.
+    """
+    import pickle  # noqa: PLC0415
+
+    original = OrphanedOffDomainCheckout(
+        "refused",
+        orphan=OrphanedCode(
+            code="PSX-ROUNDTRIP",
+            permalink_url="https://attacker.tld/cart/1:1",
+            provider="shopify",
+            store_id="store-a",
+            auction_id="auction-1",
+            bid_ref="bid-a",
+        ),
+    )
+    revived = pickle.loads(pickle.dumps(original))
+    assert isinstance(revived, OrphanedOffDomainCheckout)
+    assert isinstance(revived, OffDomainCheckout)
+    assert revived.orphan == original.orphan
+    assert str(revived) == "refused"
+
+
+class HostileReply:
+    """A merchant reply whose second read raises — the handler must not read it again."""
+
+    def __init__(self, code: str = "PSX-HOSTILE1") -> None:
+        self.code = code
+        self.reads = 0
+
+    def get(self, key: str) -> Any:
+        self.reads += 1
+        if key == "code":
+            return self.code
+        raise RuntimeError("reply object exploded on the second read")
+
+
+class HostileReplyCreator:
+    def __init__(self) -> None:
+        self.reply = HostileReply()
+        self.calls: list[tuple[str, Any]] = []
+
+    def create_code(self, store_id: str, offer_payload: Any) -> HostileReply:
+        self.calls.append((store_id, offer_payload))
+        return self.reply
+
+
+def test_a_reply_that_raises_while_being_read_still_yields_its_code() -> None:
+    """An exception raised *inside* the orphan handler would lose the orphan again.
+
+    The handler therefore reads the permalink off a local, never back off the reply object.
+    The code is what has to be revoked; the permalink is a nicety.
+    """
+    creator = HostileReplyCreator()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=dict(FALLBACK_OFFER),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+    assert raised.value.orphan.code == "PSX-HOSTILE1"
+
+
+#: ISO 8601 **basic** format — no separators. `datetime.fromisoformat` accepts it, so
+#: `contracts.parse_timestamp` does too, so `validate_bid` admits a bid carrying it. Each of
+#: these is ALSO a valid float, and reading it as one lands decades away from the instant the
+#: boundary read: 20260903 seconds after the epoch is 23 August 1970.
+BASIC_FORMAT_EXPIRIES = {
+    "20260903": "2026-09-03T00:00:00Z",
+    "19700102": "1970-01-02T00:00:00Z",
+    "20231116": "2023-11-16T00:00:00Z",
+}
+
+
+@pytest.mark.parametrize("basic", sorted(BASIC_FORMAT_EXPIRIES))
+def test_the_mint_reads_a_basic_format_expiry_as_the_boundary_reads_it(basic: str) -> None:
+    """The two-parser hazard, made concrete — and the reason `float()` is not tried first.
+
+    ``"20260903"`` is both a valid ISO 8601 basic-format date AND a valid float. The boundary
+    admits the bid on the first reading; a mint that took the second would issue a code that
+    expired in 1970 for an offer everything upstream agreed was live. There must be exactly
+    one answer, and it must be the boundary's.
+    """
+    from contracts.boundary import parse_timestamp  # noqa: PLC0415
+
+    boundary = parse_timestamp(basic)
+    assert boundary is not None, "the premise: the boundary admits this spelling"
+
+    minted = code_expiry(T_NOW, {"expires_at": basic})
+    assert minted == min(T_NOW + 48 * 60 * 60, boundary.timestamp()), (
+        "the mint did not read the instant the boundary read"
+    )
+    assert minted == code_expiry(T_NOW, {"expires_at": BASIC_FORMAT_EXPIRIES[basic]}), (
+        "the basic and extended spellings of one date must expire at the same second"
+    )
+    assert minted != float(basic), "the expiry was read as an epoch second, not as a date"
+
+
+@pytest.mark.parametrize("numeric_string", ["1700100000", "1700100000.0", " 1700100000 "])
+def test_a_numeric_string_expiry_still_reads_as_an_epoch(numeric_string: str) -> None:
+    """`parse_timestamp` refuses these, so the `float()` fallback must still be reachable.
+
+    The boundary would reject a bid spelling its expiry this way, but the port is also driven
+    directly — by `collect_bids`' fallback offers and by callers that never went through
+    `validate_bid` — and this shape worked here before T-182. It is a fallback, not a first
+    choice: see the basic-format test above for what happens when it goes first.
+    """
+    assert code_expiry(T_NOW, {"expires_at": numeric_string}) == 1_700_100_000.0

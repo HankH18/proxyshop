@@ -29,6 +29,31 @@ observation type        weight    what it means
 ``severe_policy``       3.0       an advertised policy refused outright
 ======================  ========  =========================================================
 
+The per-observation weight channel (R14)
+----------------------------------------
+The table above says what a *kind* of evidence is worth. An observation may additionally
+carry a ``weight`` in ``[0, 1]`` saying what THIS report is worth, and the two multiply.
+That channel exists for exactly one reason: ``trust.feedback.accept_feedback`` computes a
+weight (base 1.0, ×0.25 when the buyer's own return contradicts their positive report, × the
+buyer's track record) and R14 rests two properties on it — "positive feedback contradicted by
+a return is downweighted" and "a single account cannot outvote the network". Without a
+channel into the fold, both were properties of a number nothing consumed. The cap at 1.0 is
+the second property stated as an invariant; see :data:`MAX_OBSERVATION_WEIGHT`.
+
+An observation with no ``weight`` weighs exactly 1.0, which is what keeps the S3 replay
+assertion honest: ``trust.ledger.replay`` projects only ``{store_id, dim, type, observed_at}``
+onto observations, so every replayed observation takes that default.
+
+**And that is a live gap, not a design.** ``observations_from_events`` DROPS the weight, so a
+*weighted* observation served from memory and the same observation replayed out of the ledger
+score differently — measured, a feedback report at 0.25 serves ``alpha=2.25`` and replays
+``alpha=3.0``. The channel is therefore S3-safe exactly to the extent it is unused, which is
+not a property worth having. ``ledger.trust_observations`` already declares a ``weight
+double precision`` column, so the schema expects the number to travel; the projection that
+feeds this scorer is what has to carry it, and that file is owned elsewhere. Until it does,
+the only producer of weighted observations (``trust.feedback``) must not be routed through
+the ledger. Reported as a NEEDS against ``apps/trust/src/ledger/replay.py``.
+
 Coverage, and why undecided outcomes go there instead of into the mean
 ----------------------------------------------------------------------
 ``unsupported`` and ``ambiguous`` are not evidence *about the store*; they are evidence about
@@ -69,16 +94,20 @@ __all__ = [
     "CONFIDENCE_FLOOR",
     "DECIDING_OBSERVATION_TYPES",
     "HALF_LIFE_DAYS",
+    "MAX_OBSERVATION_WEIGHT",
     "NEW_STORE_PRIOR_N",
     "OBSERVATION_POLARITY",
     "OBSERVATION_WEIGHTS",
+    "OBSERVATION_WEIGHT_FIELD",
     "PRIOR_ALPHA",
     "PRIOR_BETA",
     "PUBLISHED_OBSERVATION_WEIGHTS",
     "SCORE_VERSION",
+    "InvalidObservationWeight",
     "UnknownObservationType",
     "decay_factor",
     "prior_snapshot",
+    "relative_observation_weight",
     "score",
 ]
 
@@ -96,6 +125,26 @@ class UnknownObservationType(LookupError):
     would otherwise be silently dropped, and a dishonest behaviour that produced only that
     type would score as a clean record.
     """
+
+
+class InvalidObservationWeight(ValueError):
+    """A per-observation weight outside ``[0, MAX_OBSERVATION_WEIGHT]``, or not a number.
+
+    Raised rather than clamped. A silently clamped ``5.0`` is a producer that believes one
+    report is worth five and is wrong about it in a way no test of its own would show; and a
+    weight it could actually apply would hand back exactly the astroturfing R14's routed-buyer
+    gate exists to prevent, through a different door.
+    """
+
+
+#: The optional per-observation field that scales the published type weight. Absent means
+#: exactly ``1.0`` — see :func:`relative_observation_weight`.
+OBSERVATION_WEIGHT_FIELD = "weight"
+
+#: The most one observation may weigh, relative to its type's published weight. **One.** R14
+#: is explicit that a single account cannot outvote the network, and a channel that accepted
+#: 5.0 would let one routed buyer's report count for five honest ones.
+MAX_OBSERVATION_WEIGHT = 1.0
 
 
 #: The published observation weights, as they appear in the approved manifest at
@@ -260,6 +309,67 @@ def _field(record: Any, name: str, default: Any = None) -> Any:
     return getattr(record, name, default)
 
 
+def relative_observation_weight(observation: Any) -> float:
+    """How much of its type's published weight THIS observation carries, in ``[0, 1]``.
+
+    The published table says what *kind* of evidence an observation is worth. This says how
+    much this particular report is worth given who made it and whether their own behaviour
+    contradicts it — which is the whole of R14's second half. ``trust.feedback`` computes
+    exactly this number (base 1.0, ×0.25 when a return contradicts a positive report, × the
+    buyer's track record); before this channel existed it computed it and nothing read it, so
+    "a single account cannot outvote the network" was a property of a number no Beta ever saw.
+
+    Args:
+        observation: the observation record. A missing ``weight`` — which is every observation
+            the ledger projects, since ``trust.ledger.replay.observations_from_events``
+            carries only ``{store_id, dim, type, observed_at}`` — means exactly ``1.0``, not
+            approximately: the S3 assertion compares a served snapshot against a replayed one
+            with ``==``.
+
+            Any real number is accepted, not only ``int``/``float``: weights arrive from JSON
+            parsed with ``parse_float=Decimal`` and from the ``double precision`` column
+            ``ledger.trust_observations.weight``, and refusing a ``Decimal`` with "is not a
+            number" would take scoring down for a value that is one. ``bool`` is refused
+            because ``True`` is not a weight anybody meant, and ``str`` because a weight that
+            crossed a boundary as text is a producer bug worth seeing.
+
+    Returns:
+        A float in ``[0.0, MAX_OBSERVATION_WEIGHT]``. ``0.0`` is admissible and means what
+        ``ambiguous`` means — it decides nothing and moves neither side of the Beta — which is
+        why it is a value here and not a rejection.
+
+    Raises:
+        InvalidObservationWeight: the weight is not a real number, is negative, is NaN or
+            infinite, or exceeds :data:`MAX_OBSERVATION_WEIGHT`.
+    """
+    raw = _field(observation, OBSERVATION_WEIGHT_FIELD)
+    if raw is None:
+        return 1.0
+    if isinstance(raw, bool) or isinstance(raw, (str, bytes, bytearray)):
+        raise InvalidObservationWeight(
+            f"observation weight {raw!r} is not a number. The weight channel scales a "
+            f"published type weight, so a non-numeric value has no arithmetic meaning and "
+            f"coercing it would invent one."
+        )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise InvalidObservationWeight(
+            f"observation weight {raw!r} is not a real number. The weight channel scales a "
+            f"published type weight, so a value with no float of its own has no arithmetic "
+            f"meaning here."
+        ) from None
+    # NaN fails both comparisons, which is the intent: it would poison every alpha and beta
+    # it touched and the served score would be NaN with nothing naming the observation.
+    if not 0.0 <= value <= MAX_OBSERVATION_WEIGHT:
+        raise InvalidObservationWeight(
+            f"observation weight {value!r} is outside [0.0, {MAX_OBSERVATION_WEIGHT}]. A "
+            "weight above one would let a single report outweigh a whole honest one (R14); a "
+            "negative one would silently flip an observation's polarity."
+        )
+    return value
+
+
 def _blank_dimension(as_of_text: str) -> dict[str, Any]:
     return {
         "alpha": PRIOR_ALPHA,
@@ -297,10 +407,12 @@ def score(observations: Iterable[Any], *, as_of: Any) -> dict[str, Any]:
 
     Args:
         observations: ``{store_id, dim, type, observed_at}`` records — mappings or objects —
-            in the order they were recorded. Order is preserved through the fold so that two
-            paths over the same stream produce bit-identical floats (S3). ``store_id`` is not
-            read here: grouping by store is the caller's job (``trust.ledger.replay`` does
-            it), and a snapshot is always about one store.
+            in the order they were recorded, each optionally carrying a ``weight`` in
+            ``[0, 1]`` that scales its type's published weight (see
+            :func:`relative_observation_weight`; absent means exactly 1.0). Order is preserved
+            through the fold so that two paths over the same stream produce bit-identical
+            floats (S3). ``store_id`` is not read here: grouping by store is the caller's job
+            (``trust.ledger.replay`` does it), and a snapshot is always about one store.
         as_of: the explicit instant decay is evaluated against. Never a wall clock — a
             snapshot computed against ``datetime.now()`` cannot be reproduced, and R15/S3 ask
             for exactly that reproduction.
@@ -320,6 +432,7 @@ def score(observations: Iterable[Any], *, as_of: Any) -> dict[str, Any]:
     Raises:
         UnknownTrustDimension: an observation named a dimension outside the published six.
         UnknownObservationType: an observation type carries no published weight.
+        InvalidObservationWeight: an observation's ``weight`` is not a number in ``[0, 1]``.
         ValueError: a timestamp is not an RFC-3339 instant.
     """
     reference = _parse_instant(as_of)
@@ -332,7 +445,11 @@ def score(observations: Iterable[Any], *, as_of: Any) -> dict[str, Any]:
     for observation in observations:
         dimension = require_trust_dimension(_field(observation, "dim"))
         observation_type = str(_field(observation, "type", ""))
-        weight = _observation_weight(observation_type)
+        # The published weight of the KIND of evidence, scaled by what THIS report is worth.
+        # Multiplicative and not a replacement: the manifest's table stays the authority on
+        # how much a contradiction costs, and the producer only ever discounts its own report.
+        relative = relative_observation_weight(observation)
+        weight = _observation_weight(observation_type) * relative
         polarity = OBSERVATION_POLARITY.get(observation_type, "negative")
         decay = decay_factor(_field(observation, "observed_at"), as_of)
 
@@ -345,7 +462,22 @@ def score(observations: Iterable[Any], *, as_of: Any) -> dict[str, Any]:
             entry["beta"] = float(entry["beta"]) + weight * decay
         if observation_type in DECIDING_OBSERVATION_TYPES:
             entry["decided"] = int(entry["decided"]) + 1
-            entry["decided_mass"] = float(entry.get("decided_mass", 0.0)) + decay
+            # `decided_mass` is scaled by the RELATIVE weight and not by the published type
+            # weight. Coverage asks "how much of what we saw actually decided something", so
+            # a `contradicted` must not count as four times the coverage of a `verified` — but
+            # a report discounted to a quarter did decide a quarter as much, and one
+            # discounted to zero decided nothing at all.
+            #
+            # Leaving this at the raw decay was measured to be a free-confidence machine: a
+            # store's record padded with 360 zero-weight "deciding" observations took
+            # confidence from 0.216 to 0.748 while `effective_evidence` never moved, because
+            # coverage rose and nothing else did. That reopens R14's "a single account cannot
+            # outvote the network" through the confidence channel rather than the mean.
+            #
+            # `mass` (the denominator) stays unscaled on purpose, which is what makes a
+            # zero-weight deciding observation cost coverage exactly as `ambiguous` does
+            # rather than merely being neutral: it happened, and it settled nothing.
+            entry["decided_mass"] = float(entry.get("decided_mass", 0.0)) + relative * decay
             entry["evidence"] = float(entry["evidence"]) + weight * decay
 
     total_mass = 0.0

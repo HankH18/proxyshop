@@ -437,10 +437,25 @@ def _is_sequence(node: Any) -> bool:
     return isinstance(node, Iterable)
 
 
-#: How deep the sweep of unrecognized keys goes before giving up. A bid is a shallow JSON
-#: document; anything deeper than this is not a bid, and a bound keeps a self-referential dict
-#: from turning the boundary into a hang.
-MAX_SWEEP_DEPTH = 12
+#: Why there is no `MAX_SWEEP_DEPTH` any more.
+#:
+#: There was one, set to 12, and :func:`_walk` returned at it. Its stated purpose was to keep a
+#: self-referential dict from turning the boundary into a hang — a real hazard, because looking
+#: under unrecognized keys is what makes a cycle reachable at all. But a depth bound closes that
+#: hazard by *truncating every walk*, cycle or not, and it truncates **silently**: a priced node,
+#: a claim or a discount buried under thirteen dicts was not admitted on weak evidence, it was
+#: admitted having been inspected by nothing. That is a hole under every wall the walk feeds —
+#: the ledger check, the scope check, the floor wall and the reconciliation alike — and nesting
+#: is free to whoever is assembling the bid. Measured: `{"product_ref": "prod-cap",
+#: "unit_price": 1.0}` under fourteen dicts was ADMITTED; the identical node under ten was
+#: refused by both price walls.
+#:
+#: Raising the bound only moves the hole, and refusing everything past it would refuse an
+#: honestly deep `metadata` blob, which :func:`_sweep` exists to tolerate. So the bound is gone
+#: and the hazard it was for is closed where it actually lives: :func:`_walk` carries the set of
+#: object ids **on the current path** and refuses a node it is already inside. Depth is
+#: unbounded, a cycle terminates the walk in one step, and a cycle is *named* rather than pruned
+#: — see :attr:`ClaimMaterial.unwalkable`.
 
 
 class ClaimMaterial(NamedTuple):
@@ -450,12 +465,19 @@ class ClaimMaterial(NamedTuple):
     ledger identity of their own; they are checked against the grants that authorize them.
     `disguises` are nodes that are claim-shaped *and* carry offer material — see
     :func:`_walk` for why that is a refusal rather than a shape to interpret.
+
+    `unwalkable` is every place the walk could not finish, as ``(path, why)``. Two things land
+    here and both are refusals rather than gaps: a node the walk is already inside (a cycle), and
+    a structure too deeply nested for the interpreter to recurse through. Recording them is the
+    point — a boundary that quietly stopped walking would be reporting on a structure that is not
+    the one it was handed, which is exactly what `MAX_SWEEP_DEPTH` did.
     """
 
     claims: list[Any]
     discounts: list[tuple[str, Any]]
     prices: list[tuple[str, Any, Any]]
     disguises: list[tuple[str, Any]]
+    unwalkable: list[tuple[str, str]]
 
 
 def _walk(
@@ -464,7 +486,7 @@ def _walk(
     found: ClaimMaterial,
     *,
     strict: bool = True,
-    depth: int = 0,
+    seen: frozenset[int] = frozenset(),
 ) -> None:
     """Collect every claim, discount and price reachable in `node`, depth first.
 
@@ -489,8 +511,27 @@ def _walk(
     says why; dropping it silently is the difference between a guard and a filter. In the sweep
     of keys the contract does *not* define, the same object is ignored, because a bid carrying an
     unrelated `metadata` blob must not be refused for carrying it.
+
+    `seen` is the set of object ids **on the path from the root to `node`**, and it is the whole
+    of the cycle guard that replaced `MAX_SWEEP_DEPTH`. Path-scoped rather than walk-scoped on
+    purpose: a bid that binds one dict to two different keys is a DAG and both mentions are real
+    priced nodes, so a walker that remembered every object it had ever seen would skip the second
+    one and re-open the same hole from the other side. An object can only appear twice on one
+    path by containing itself, which is precisely a cycle — and every id in `seen` belongs to an
+    object still referenced by the frame above, so an id cannot be reused underneath the guard.
     """
-    if node is None or depth > MAX_SWEEP_DEPTH:
+    if node is None:
+        return
+    if id(node) in seen:
+        found.unwalkable.append(
+            (
+                path or "<root>",
+                "the bid closes back on itself here: this node is one the walk is already "
+                "inside, so nothing under it can be reached and the boundary is not looking at "
+                "the structure it was handed. A bid that arrived as JSON cannot contain a cycle, "
+                "so this is refused rather than quietly pruned",
+            )
+        )
         return
 
     fields = _structural_fields(node)
@@ -502,13 +543,14 @@ def _walk(
     if claim_shaped:
         found.disguises.append((path, node))
 
+    nested = seen | {id(node)}
     if fields:
         for field in CLAIM_BEARING_FIELDS:
             if field in fields:
-                _walk(_read(node, field), f"{path}.{field}", found, depth=depth + 1)
+                _walk(_read(node, field), f"{path}.{field}", found, seen=nested)
         for field in NESTED_OBJECT_FIELDS:
             if field in fields:
-                _walk(_read(node, field), f"{path}.{field}", found, depth=depth + 1)
+                _walk(_read(node, field), f"{path}.{field}", found, seen=nested)
         if DISCOUNT_FIELD in fields:
             discount = _read(node, DISCOUNT_FIELD)
             if discount is not None:
@@ -516,7 +558,7 @@ def _walk(
         price = _read(node, PRICE_FIELD)
         if price is not None:
             found.prices.append((f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), price))
-        _sweep(node, path, found, depth)
+        _sweep(node, path, found, nested)
         return
 
     # A priced node that carries none of the claim-bearing fields above. `Offer` always carries
@@ -537,16 +579,16 @@ def _walk(
 
     if _is_sequence(node):
         for index, item in enumerate(node):
-            _walk(item, f"{path}[{index}]", found, strict=strict, depth=depth + 1)
+            _walk(item, f"{path}[{index}]", found, strict=strict, seen=nested)
         return
 
     if strict:
         found.claims.append(node)
     elif isinstance(node, Mapping):
-        _sweep(node, path, found, depth)
+        _sweep(node, path, found, nested)
 
 
-def _sweep(node: Any, path: str, found: ClaimMaterial, depth: int) -> None:
+def _sweep(node: Any, path: str, found: ClaimMaterial, seen: frozenset[int]) -> None:
     """Look for claims under keys the protocol does not define, and refuse to assume there are none.
 
     `Bid` and `Offer` forbid extra fields, so a bid built as a model cannot carry a claim
@@ -555,13 +597,17 @@ def _sweep(node: Any, path: str, found: ClaimMaterial, depth: int) -> None:
     unrecognized key is exactly where the next payload goes. Claim-shaped material found here is
     checked like any other; everything else is left alone, because refusing a bid for carrying a
     `metadata` blob would be a boundary that fails on honest traffic.
+
+    **However deep it goes.** This used to stop at `MAX_SWEEP_DEPTH`, which meant the next
+    payload after an unrecognized key was the same payload under fourteen of them. `seen` already
+    carries `node`'s own id; the cycle guard in :func:`_walk` is what terminates the walk now.
     """
     if not isinstance(node, Mapping):
         return
     known = {*CLAIM_BEARING_FIELDS, *NESTED_OBJECT_FIELDS, DISCOUNT_FIELD}
     for name, value in node.items():
         if str(name) not in known:
-            _walk(value, f"{path}.{name}", found, strict=False, depth=depth + 1)
+            _walk(value, f"{path}.{name}", found, strict=False, seen=seen)
 
 
 def collect_claim_material(presented: Any) -> ClaimMaterial:
@@ -574,9 +620,28 @@ def collect_claim_material(presented: Any) -> ClaimMaterial:
 
     Everything unrecognized is collected as a claim candidate rather than skipped. A structure
     this function did not understand must fail the boundary, not slip through it.
+
+    The same goes for a structure it could not finish walking. There is no depth limit — see the
+    note where `MAX_SWEEP_DEPTH` used to be — but the interpreter has one, and a bid nested past
+    it must not come back looking like a bid with nothing in it. `RecursionError` is caught here
+    rather than allowed out, because a caller guarding this boundary catches
+    :class:`HookProvenanceError`; letting a different exception escape turns a refusable bid into
+    an unhandled 500 in the runtime, and an unhandled 500 is one `except Exception` away from
+    being the fail-open all over again. The partial walk is kept — whatever it found is still
+    true — and the refusal is recorded on top of it.
     """
-    found = ClaimMaterial([], [], [], [])
-    _walk(presented, "", found)
+    found = ClaimMaterial([], [], [], [], [])
+    try:
+        _walk(presented, "", found)
+    except RecursionError:
+        found.unwalkable.append(
+            (
+                "<root>",
+                "this bid nests deeper than the boundary can walk, so part of it was never "
+                "inspected. A bid is a shallow document and nothing honest is shaped like this; "
+                "refusing the whole of it rather than admitting the part that was reached",
+            )
+        )
     return found
 
 
@@ -1069,6 +1134,11 @@ def enforce_hook_provenance(
             f"({carried}): a claim fingerprint covers the claim, not an "
             "offer wrapped around it, so this would ride a genuine claim's identity into the bid"
         )
+    # Somewhere the walk could not finish. This is a refusal and not a warning: the walls below
+    # are only as good as the field of view above them, and "we did not look" has to be an
+    # answer the boundary gives out loud. It is what the old depth bound did in silence.
+    for path, why in found.unwalkable:
+        extras.append(f"the walk could not complete at {path}: {why}")
     for offset, reason in enumerate(extras):
         offenders.append((len(presented) + offset, reason))
 

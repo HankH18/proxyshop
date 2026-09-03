@@ -47,6 +47,9 @@ __all__ = [
     "CheckoutRequest",
     "CheckoutResult",
     "MintedCheckout",
+    "OrphanedCheckoutCode",
+    "OrphanedCode",
+    "OrphanedOffDomainCheckout",
     "PortMethodIsFinal",
     "RegisteredDomains",
     "default_permalink",
@@ -70,6 +73,73 @@ CHECKOUT_EVENT_KINDS: tuple[str, str, str] = ("accepted", "code_created", "check
 
 class PortMethodIsFinal(TypeError):
     """A provider tried to override a method the port performs on every provider's behalf."""
+
+
+def _rebuild_orphaned(
+    kind: type[OrphanedCheckoutCode], args: tuple[Any, ...], orphan: OrphanedCode
+) -> OrphanedCheckoutCode:
+    """Module-level so :meth:`OrphanedCheckoutCode.__reduce__` is picklable."""
+    return kind(*args, orphan=orphan)
+
+
+@dataclass(frozen=True)
+class OrphanedCode:
+    """A discount code that EXISTS in the merchant's system for a checkout that was refused.
+
+    Everything the exchange needs to record it and revoke it, and nothing it has to go and
+    look up: the code itself, where it would have sent the buyer, which provider issued it,
+    and the three identifiers that place it in the ledger.
+    """
+
+    code: str
+    permalink_url: str
+    provider: str
+    store_id: str
+    auction_id: str
+    bid_ref: str
+    expires_at: float | None = None
+
+
+class OrphanedCheckoutCode(Exception):
+    """A refusal that happened **after** a real code was minted (T-157).
+
+    The port's whole ordering discipline — resolve the domain, check the offer's URL, check
+    the offer's fields, and only then mint — exists so that a refusal costs nothing. One
+    check cannot be moved ahead of the mint, and this is it: the permalink a provider hands
+    back does not exist until the provider has run, and for the Shopify adapter running means
+    the merchant's ``POST /codes`` has already issued a live single-use discount.
+
+    Refusing there is right. Losing the code is not. Before this class the refusal raised a
+    bare :class:`~.domain.OffDomainCheckout` naming only the URL, so a real discount sat in
+    the merchant's account with no ``code_created`` event anywhere in the exchange — nothing
+    to revoke it by, nothing to expire it by, and nothing for reconciliation to notice.
+
+    :attr:`orphan` is what the caller records and revokes. Catch this before
+    ``OffDomainCheckout`` when you can do something with it; catching only the latter still
+    works, which is why the domain-flavoured subclass below exists.
+    """
+
+    def __init__(self, message: str, *, orphan: OrphanedCode) -> None:
+        super().__init__(message)
+        self.orphan = orphan
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        # `BaseException.__reduce__` rebuilds an exception by calling its class with
+        # `self.args`, which here is `(message,)` — and `orphan` is keyword-ONLY, so the
+        # default would raise `TypeError` on the way back and turn a recoverable refusal
+        # into a crash in whatever crossed the process boundary. The orphan is the whole
+        # payload; it has to survive the round trip.
+        return (_rebuild_orphaned, (type(self), self.args, self.orphan))
+
+
+class OrphanedOffDomainCheckout(OrphanedCheckoutCode, OffDomainCheckout):
+    """The post-mint host check refused the provider's own permalink, and a code is live.
+
+    Both parents are load-bearing. It **is** an off-domain refusal, and every existing caller
+    — ``accept()`` included — catches ``OffDomainCheckout``; that must keep working unchanged.
+    It is **also** an orphaned code, and a caller that wants to revoke it needs to be able to
+    say so without matching on a message string.
+    """
 
 
 @dataclass(frozen=True)
@@ -215,27 +285,67 @@ class CheckoutProvider:
         assert_offer_is_mintable(request.offer)
 
         # 4. The provider's only job.
+        #
+        #    Everything from here on runs with a REAL code in existence — for the Shopify
+        #    adapter, one the merchant's `POST /codes` has already issued — so every failure
+        #    below is a refusal that leaves a live discount behind. It is carried out on the
+        #    exception rather than dropped; see `OrphanedCheckoutCode`.
         minted = self.mint(request)
+        orphan = OrphanedCode(
+            code=minted.code,
+            permalink_url=minted.permalink_url,
+            provider=self.name,
+            store_id=request.store_id,
+            auction_id=request.auction_id,
+            bid_ref=request.bid_ref,
+            expires_at=minted.expires_at,
+        )
 
         # 5. The provider's OWN output is untrusted too: a buggy or hostile adapter that
         #    returns a permalink on another host must not be able to hand the buyer over.
-        assert_on_domain(minted.permalink_url, registered, what=f"{self.name} permalink_url")
+        #
+        #    This is the one check that CANNOT be hoisted ahead of the mint — the permalink
+        #    does not exist until the provider has run — and it is reachable on a perfectly
+        #    legal offer: the R10 list-price fallback carries no `checkout_url`, so step 2
+        #    has nothing to look at and this is the first failable host comparison.
+        try:
+            assert_on_domain(minted.permalink_url, registered, what=f"{self.name} permalink_url")
+        except OffDomainCheckout as exc:
+            raise OrphanedOffDomainCheckout(
+                f"{exc} — the discount code {minted.code!r} was ALREADY minted by "
+                f"{self.name!r} for store {request.store_id!r} and is live in the merchant's "
+                f"system; record and revoke it",
+                orphan=orphan,
+            ) from exc
 
-        checkout_token = secrets.token_hex(16)
-        return CheckoutResult(
-            code=minted.code,
-            permalink_url=minted.permalink_url,
-            events=self._events(request, minted, checkout_token, verified=verified),
-            mode=request.mode,
-            provider=self.name,
-            checkout_token=checkout_token,
-            domain_verified=verified,
-            expires_at=(
-                minted.expires_at
-                if minted.expires_at is not None
-                else code_expiry(request.now, request.offer)
-            ),
-        )
+        try:
+            checkout_token = secrets.token_hex(16)
+            return CheckoutResult(
+                code=minted.code,
+                permalink_url=minted.permalink_url,
+                events=self._events(request, minted, checkout_token, verified=verified),
+                mode=request.mode,
+                provider=self.name,
+                checkout_token=checkout_token,
+                domain_verified=verified,
+                expires_at=(
+                    minted.expires_at
+                    if minted.expires_at is not None
+                    else code_expiry(request.now, request.offer)
+                ),
+            )
+        except Exception as exc:
+            # Building the result cannot normally fail — step 3 already proved the offer's
+            # fields parse, and `_events` reads nothing else. But "cannot normally fail" is
+            # exactly the assumption that produced this ticket, and the cost of being wrong
+            # is another unrevokable discount. A failure here is reported with the code
+            # attached like any other post-mint refusal.
+            raise OrphanedCheckoutCode(
+                f"{type(exc).__name__}: {exc} — raised AFTER {self.name!r} minted "
+                f"{minted.code!r} for store {request.store_id!r}; the code is live and must "
+                f"be recorded and revoked",
+                orphan=orphan,
+            ) from exc
 
     # --- the extension point --------------------------------------------------------
     def mint(self, request: CheckoutRequest) -> MintedCheckout:

@@ -32,7 +32,11 @@ Feedback that survives the gate is **weighted, not simply counted**:
   network by leaving a lot of feedback.
 
 No score math here either: this module produces a *weight*, and :mod:`trust.scoring` decides
-what a weighted observation does to a dimension.
+what a weighted observation does to a dimension. :func:`feedback_observation` is the seam
+between the two — one accepted verdict becomes one ``feedback_match`` observation carrying
+that weight. It exists because for a while the two halves did not connect: the weight was
+computed here and ``score`` read no per-observation weight at all, so both properties above
+were properties of a number nothing consumed.
 """
 
 from __future__ import annotations
@@ -44,10 +48,14 @@ from .scrub import scrub, scrub_report
 
 __all__ = [
     "BASE_FEEDBACK_WEIGHT",
+    "FEEDBACK_DIMENSION",
+    "FEEDBACK_NEGATIVE_TYPE",
+    "FEEDBACK_POSITIVE_TYPE",
     "RETURN_CONTRADICTION_FACTOR",
     "TRUST_EVENT_SCHEMA_VERSION",
     "FeedbackRejected",
     "accept_feedback",
+    "feedback_observation",
     "push_trust_event",
     "trust_event_payload",
 ]
@@ -63,6 +71,46 @@ BASE_FEEDBACK_WEIGHT = 1.0
 #: What positive feedback is worth when the same buyer returned the item. Strictly between 0
 #: and 1: downweighted, never discarded — see the module docstring.
 RETURN_CONTRADICTION_FACTOR = 0.25
+
+#: The one dimension buyer feedback lands on. The approved manifest is explicit about why it
+#: is only ever this one: ``feedback_match`` "takes NO verification outcome at all. It is the
+#: post-purchase, buyer-reported match between pitch and delivery (R14), cross-checked against
+#: return behaviour."
+FEEDBACK_DIMENSION = "feedback_match"
+
+#: The observation type a buyer's "it matched the pitch" becomes.
+#:
+#: ``fulfilled``, and deliberately **not** ``verified``. The four verification statuses
+#: (``verified`` / ``contradicted`` / ``unsupported`` / ``ambiguous``) are what the claim
+#: verifier decides about a catalog fact, and the manifest says in as many words that this
+#: dimension takes none of them. ``fulfilled`` is the published positive for "a promise the
+#: transaction record shows was kept", which is exactly what a routed buyer is reporting, and
+#: it carries the same published 1.0 — one framework, one weight table.
+FEEDBACK_POSITIVE_TYPE = "fulfilled"
+
+#: The observation type a buyer's "it did not match the pitch" becomes.
+#:
+#: The approved manifest settles this directly. Its ``dishonest_store.behaviours`` entry
+#: ``pitch_delivery_mismatch`` is ``{dim: feedback_match, type: mismatch_return,
+#: claim_type: null}``, described as "The buyer reports that what arrived **does not match**
+#: what was pitched, and returns it." So ``mismatch_return`` on this dimension is the NEGATIVE
+#: report, which is what is emitted here.
+#:
+#: Note this contradicts the gloss in ``trust.scoring.engine``'s weight table ("the buyer said
+#: it matched and then returned it"), which reads it as the *positive*-report case. Ground
+#: truth is the manifest, not a comment in the engine that consumes it (D18/A3), so the
+#: manifest wins — but the comment is a real divergence and is reported rather than silently
+#: worked around.
+#:
+#: The published 1.5 also sits where a buyer report belongs: above ``unsupported`` (0.5, "no
+#: evidence either way") and below ``contradicted`` (2.0, which is the catalog or the
+#: transaction record saying otherwise, not a person).
+#:
+#: KNOWN GAP: the manifest's behaviour is a mismatch report *and a return*. A buyer who
+#: complains and KEEPS the item is not that behaviour, and the published vocabulary has no
+#: second buyer-reported negative to carry it — so it currently lands at the same 1.5. Closing
+#: that needs a published weight, which is a manifest change and not this engine's to make.
+FEEDBACK_NEGATIVE_TYPE = "mismatch_return"
 
 
 class FeedbackRejected(ValueError):
@@ -248,4 +296,75 @@ def accept_feedback(
         "positive": positive,
         "returned": returned,
         "reasons": reasons,
+    }
+
+
+def feedback_observation(verdict: Any, *, observed_at: Any) -> dict[str, Any] | None:
+    """Turn one :func:`accept_feedback` verdict into the trust observation the scorer consumes.
+
+    This is the seam R14's weight travels through. ``accept_feedback`` decides *whether* a
+    report counts and *for how much*; :mod:`trust.scoring` decides what a weighted observation
+    does to a dimension; this function is the one place that says how the first becomes the
+    second, so no caller has to reinvent the dimension or the type mapping.
+
+    Before it existed the weight was computed and thrown away: ``score`` derived an
+    observation's weight solely from the published type table and read no per-observation
+    weight at all, so "positive feedback contradicted by a return is downweighted" and "a
+    single account cannot outvote the network" were properties of a number nothing consumed.
+
+    Args:
+        verdict: what :func:`accept_feedback` returned.
+        observed_at: when the feedback was given. Explicit, never a clock — the scorer decays
+            against it and the replay has to reproduce the same number (D17/S3).
+
+    There is deliberately no way to name the store. It comes from the verdict, which got it
+    from the routed-order record — the same record the R14 gate consulted to decide the
+    feedback counts at all. An override parameter shipped here briefly and was removed unused:
+    a caller free to name a different store could file one store's complaint against a rival,
+    and no gate downstream would notice, because by then the report is a perfectly well-formed
+    accepted verdict.
+
+    Returns:
+        ``{store_id, dim, type, observed_at, weight}`` — or ``None`` when the verdict was not
+        accepted.
+
+        ``None`` and not a zero-weight observation. A rejected report is not weak evidence,
+        it is *not evidence*: an observation still counts towards the dimension's coverage and
+        the store's observation count, so admitting one per astroturfed review would hand a
+        store a dial on its own coverage for the price of some fake reviews — which is the
+        thing the routed-buyer gate exists to prevent.
+
+        The ``weight`` is carried through in RANGE terms unvalidated on purpose: whether a
+        number is an admissible weight is decided where it is applied, by
+        ``trust.scoring.relative_observation_weight``, so there is one rule about that and not
+        a second copy here free to drift from it. What IS checked here is that it is a number
+        at all — see below.
+
+    Raises:
+        FeedbackRejected: the verdict carries a ``weight`` that is not a number. Neither
+            available default is safe to pick for it: treating it as 1.0 would admit an
+            unverified report at full force, and treating it as 0.0 would erase a buyer's
+            complaint — which of those a silent default did would depend on whether the report
+            happened to be positive. A missing ``weight`` key is different and is fine: it
+            means 1.0, exactly as it does in the scorer.
+    """
+    if not bool(_field(verdict, "accepted", False)):
+        return None
+
+    raw_weight = _field(verdict, "weight", BASE_FEEDBACK_WEIGHT)
+    if isinstance(raw_weight, bool) or not isinstance(raw_weight, (int, float)):
+        raise FeedbackRejected(
+            f"feedback verdict carries weight {raw_weight!r}, which is not a number. The "
+            "weight is what R14's two properties are made of; a verdict that lost it is a "
+            "producer bug, and guessing a replacement would silently pick a side."
+        )
+
+    positive = bool(_field(verdict, "positive", False))
+    resolved_store = _field(verdict, "store_id")
+    return {
+        "store_id": resolved_store,
+        "dim": FEEDBACK_DIMENSION,
+        "type": FEEDBACK_POSITIVE_TYPE if positive else FEEDBACK_NEGATIVE_TYPE,
+        "observed_at": observed_at,
+        "weight": float(raw_weight),
     }

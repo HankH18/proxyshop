@@ -9,6 +9,7 @@ resolve to the same objects — see :mod:`._binding`.
 :func:`push_trust_event`        one delta -> one send, to the affected store only.
 :func:`trust_event_payload`     that payload, without sending it.
 :func:`accept_feedback`         the R14 routed-buyer gate, and the weight it earns.
+:func:`feedback_observation`    that verdict -> the weighted observation the scorer reads.
 :func:`scrub`                   the recursive buyer-identity scrub the push applies.
 ==============================  ========================================================
 
@@ -40,10 +41,14 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 from ._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .engine import (  # noqa: E402
     BASE_FEEDBACK_WEIGHT,
+    FEEDBACK_DIMENSION,
+    FEEDBACK_NEGATIVE_TYPE,
+    FEEDBACK_POSITIVE_TYPE,
     RETURN_CONTRADICTION_FACTOR,
     TRUST_EVENT_SCHEMA_VERSION,
     FeedbackRejected,
     accept_feedback,
+    feedback_observation,
     push_trust_event,
     trust_event_payload,
 )
@@ -57,6 +62,9 @@ from .scrub import (  # noqa: E402
 
 __all__ = [
     "BASE_FEEDBACK_WEIGHT",
+    "FEEDBACK_DIMENSION",
+    "FEEDBACK_NEGATIVE_TYPE",
+    "FEEDBACK_POSITIVE_TYPE",
     "IDENTITY_KEYS",
     "IDENTITY_KEY_SUBSTRINGS",
     "REDACTED",
@@ -64,6 +72,7 @@ __all__ = [
     "TRUST_EVENT_SCHEMA_VERSION",
     "FeedbackRejected",
     "accept_feedback",
+    "feedback_observation",
     "push_trust_event",
     "scrub",
     "scrub_report",

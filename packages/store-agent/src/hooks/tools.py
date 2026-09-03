@@ -54,6 +54,13 @@ REASON_BELOW_PRICE_FLOOR = "below_price_floor"
 #: walls unchallenged. It failed later, in the canonical-JSON serializer, as a
 #: `CanonicalisationError` no caller is told to expect; a wall must refuse it, not a serializer.
 REASON_NON_FINITE_DISCOUNT = "non_finite_discount"
+#: The catalog lists the product but names no number this hook can read as its price — text, a
+#: nested object, a missing key, NaN, inf. Distinct from `REASON_UNKNOWN_PRODUCT`, which is "the
+#: catalog has never heard of it": here the merchant does sell the thing and the entry describing
+#: it is unusable, which is an operator's problem to see rather than a bidder's to route around.
+#: Every discount is a percentage *of* the list price, so with no readable list price there is no
+#: arithmetic to run and nothing to authorize — see :meth:`ToolHooks._evaluate_discount`.
+REASON_UNPRICEABLE_PRODUCT = "unpriceable_product"
 
 #: The claim-type vocabulary (D53) a hook stamps for the catalog / envelope keys this system
 #: actually uses. A key that is not here is minted with `claim_type=None` rather than guessed:
@@ -666,6 +673,19 @@ class ToolHooks:
         that grants, and :meth:`would_authorize`, which the bid boundary uses to re-check a grant
         it is being handed. Two copies of this arithmetic would be two chances to disagree about
         what the merchant approved.
+
+        **A list price nobody can read is a denial, not a zero.** This read the catalog directly
+        and `float("one hundred dollars")` raised, which was ugly but was at least impossible to
+        miss. Routing it through :meth:`list_price` — correct, so the boundary and the hook read
+        one number — was written as ``self.list_price(ref) or 0.0``, and that `or` put the
+        fail-open back: the accessor answers `None` for "unanswerable", `None or 0.0` is a real
+        list price of 0.0, every depth then prices out at 0.0, and 0.0 clears any floor the
+        envelope does not name for that product. A malformed catalog entry stopped raising and
+        started minting genuine, ledger-recorded grants — inside the method whose whole job is to
+        refuse things. So the `None` is now its own denial (`REASON_UNPRICEABLE_PRODUCT`): loud,
+        named, logged, and fail-closed, without reintroducing the crash the accessor prevents at
+        the bid boundary. A catalog that genuinely lists 0.00 is *answerable* and still priced —
+        which is the distinction `or` erased, since 0.0 is falsy and `None` is too.
         """
         cap = float(self.envelope.get("max_discount_pct") or 0.0)
         listing = self.catalog.get(product_ref)
@@ -684,7 +704,10 @@ class ToolHooks:
             rule = self.envelope_ref("max_discount_pct")
             return (REASON_OVER_MAX_DISCOUNT, cap, rule), 0.0, 0.0, cap
 
-        list_price = self.list_price(product_ref) or 0.0
+        list_price = self.list_price(product_ref)
+        if list_price is None:
+            rule = self.envelope_ref(f"catalog#{product_ref}")
+            return (REASON_UNPRICEABLE_PRODUCT, 0.0, rule), 0.0, 0.0, cap
         # `list_price * (100 - pct) / 100` rather than `list_price * (1 - pct/100)`: the first
         # keeps whole percentages exact (100 * 97 / 100 == 97.0), the second does not. The bid
         # boundary reconciles a stated price against this same expression, through
@@ -839,6 +862,7 @@ __all__ = [
     "REASON_NON_FINITE_DISCOUNT",
     "REASON_OVER_MAX_DISCOUNT",
     "REASON_UNKNOWN_PRODUCT",
+    "REASON_UNPRICEABLE_PRODUCT",
     "WALL_TOLERANCE",
     "Denied",
     "HookCall",

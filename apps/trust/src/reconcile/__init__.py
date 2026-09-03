@@ -9,6 +9,8 @@ the bottom makes both spellings resolve to the same objects — see :mod:`._bind
 :func:`reconcile`            a checkout event stream -> one ``reconciled`` event/order.
 :func:`reconciled_event`     build that event for one already-joined order.
 :data:`RECONCILED_KIND`      ``"reconciled"``, already in the frozen 18-kind vocabulary.
+:func:`reconciled_observations`  those verdicts -> the trust observations the scorer reads.
+:func:`observation_events`   the same, as ``offer_integrity`` events the ledger replays.
 ===========================  ===========================================================
 
 The one rule (R4): **every integrity comparison derives from the ``order_paid`` webhook.**
@@ -16,7 +18,9 @@ The pixel is recorded and never consulted. :mod:`.engine` carries the full ratio
 both directions of getting it wrong.
 
 No score math (T-061 non-goal). This package decides what *happened*; :mod:`trust.scoring`
-decides what that is worth.
+decides what that is worth. The translation above is the seam between the two, and it is
+here rather than in ``trust.ledger`` because ``observations_from_events`` already defines the
+shape a trust observation arrives in — so the emitter meets the consumer, not the reverse.
 """
 
 from __future__ import annotations
@@ -46,25 +50,39 @@ from ._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .engine import (  # noqa: E402
     ACCEPTED_KIND,
     DISCOUNT_TOLERANCE,
+    DISHONORED_OBSERVATION_TYPE,
+    HONORED_OBSERVATION_TYPE,
+    INCOMPARABLE_OBSERVATION_TYPE,
+    OBSERVATION_KIND,
     PIXEL_KIND,
     PRICE_TOLERANCE,
+    RECONCILED_DIMENSIONS,
     RECONCILED_KIND,
     WEBHOOK_KIND,
     ReconciliationInputError,
+    observation_events,
     reconcile,
     reconciled_event,
+    reconciled_observations,
 )
 
 __all__ = [
     "ACCEPTED_KIND",
     "DISCOUNT_TOLERANCE",
+    "DISHONORED_OBSERVATION_TYPE",
+    "HONORED_OBSERVATION_TYPE",
+    "INCOMPARABLE_OBSERVATION_TYPE",
+    "OBSERVATION_KIND",
     "PIXEL_KIND",
     "PRICE_TOLERANCE",
+    "RECONCILED_DIMENSIONS",
     "RECONCILED_KIND",
     "WEBHOOK_KIND",
     "ReconciliationInputError",
+    "observation_events",
     "reconcile",
     "reconciled_event",
+    "reconciled_observations",
 ]
 
 

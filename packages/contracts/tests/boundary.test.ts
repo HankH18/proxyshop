@@ -10,9 +10,13 @@ import {
   EXTERNAL_PATH,
   HOOK_PROVENANCE_SOURCES,
   HOSTED_PATH,
+  LIST_PRICE_CLAIM_KEY,
   NON_HOOK_PROVENANCE_SOURCES,
   OFFER_COMMITMENTS_SITE,
   OFFER_DISCOUNT_SITE,
+  OFFER_TOTAL_PRICE_SITE,
+  OFFER_UNIT_PRICE_SITE,
+  PRICE_RECONCILIATION_TOLERANCE,
   REASON_CLAIM_PROVENANCE_EMPTY_SOURCE,
   REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE,
   REASON_CLAIM_WITHOUT_PROVENANCE,
@@ -20,6 +24,8 @@ import {
   REASON_OFFER_EXPIRED,
   REASON_OFFER_EXPIRY_MISSING,
   REASON_OFFER_EXPIRY_UNPARSEABLE,
+  REASON_PRICE_UNDER_DECLARED_DEPTH,
+  REASON_PRICE_UNRECONCILABLE,
   REASON_SCHEMA_INVALID,
   REASON_SIGNATURE_MISSING,
   REASON_STORE_BLACKLISTED,
@@ -717,5 +723,324 @@ describe("T-135 — the offer walk refuses hostile shapes rather than throwing",
         );
       }
     }
+  });
+});
+
+// -----------------------------------------------------------------------------------------
+// T-184 — `table[key]` on a caller-supplied key is not a lookup, it is a prototype walk.
+// -----------------------------------------------------------------------------------------
+
+describe("T-184 — a store_id naming a prototype member is an unavailable read", () => {
+  it.each(["__proto__", "constructor", "toString", "valueOf", "hasOwnProperty"])(
+    "refuses store_id %s",
+    (storeId) => {
+      // Measured on the clean tree: `store_id=__proto__` made `table[key]` return
+      // `Object.prototype` — an object, non-null, not an array, so `readRecord` accepted it —
+      // the `trust_snapshot_unavailable` refusal never fired, and `row["blacklisted"]` was
+      // `undefined` and therefore falsy. The bid was ADMITTED with no trust row behind it.
+      for (const path of BOTH_PATHS) {
+        const result = check(makeBid({store_id: storeId}), path);
+        expect(result.ok, `store_id=${storeId} was admitted with no trust row`).toBe(false);
+        expect(result.reasons.join(" ")).toContain(REASON_TRUST_SNAPSHOT_UNAVAILABLE);
+      }
+    },
+  );
+
+  it("still admits a store the snapshot really does own, however the table was built", () => {
+    // The positive control, and the second half of the fix's claim: an OWN property is found
+    // whether the table has a prototype or not.
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare["store-1"] = {store_id: "store-1", score: 0.6, blacklisted: false};
+    for (const snapshot of [makeSnapshotTable(), bare]) {
+      for (const path of BOTH_PATHS) {
+        const result = check(makeBid(), path, snapshot as never);
+        expect(result.ok, result.reasons.join(", ")).toBe(true);
+      }
+    }
+  });
+
+  it("does not read an INHERITED row as a trust row", () => {
+    // The general shape, not just the four famous names: anything reachable only through the
+    // prototype is an unavailable read, because it is not something the snapshot said.
+    const parent = {"store-9": {store_id: "store-9", score: 0.9, blacklisted: false}};
+    const child = Object.create(parent) as Record<string, unknown>;
+    const result = check(makeBid({store_id: "store-9"}), HOSTED_PATH, child as never);
+    expect(result.ok, "an inherited row was read as a trust row").toBe(false);
+    expect(result.reasons.join(" ")).toContain(REASON_TRUST_SNAPSHOT_UNAVAILABLE);
+  });
+});
+
+// -----------------------------------------------------------------------------------------
+// T-177 — the price wall, on the door the exchange actually runs.
+//
+// Line for line the peer of `test_boundary_dual_path.py`'s T-177 block. See `priceReasons` in
+// `boundary.ts` for what the first relation deliberately cannot know.
+// -----------------------------------------------------------------------------------------
+
+function pricedOffer(unit: unknown, total: unknown, depth: unknown = 20.0, kind = "percentage") {
+  return makeOffer({
+    unit_price: unit,
+    total_price: total,
+    discount: {type: kind, value: depth, provenance: structuredClone(HOOK_PROVENANCE)},
+  });
+}
+
+function listPriceClaim(value: unknown = 100.0) {
+  return makeClaim("list_price", value, HOOK_PROVENANCE);
+}
+
+describe("T-177 — a bid may not charge more off than the depth it declares", () => {
+  it.each(BOTH_PATHS)("refuses the 15.00-on-a-100.00-list reproduction on %s", (path) => {
+    const bid = makeBid({
+      claims: [listPriceClaim(100.0), makeClaim("authorized_discount_pct", 20.0)],
+      offer: pricedOffer(15.0, 15.0),
+    });
+    const result = check(bid, path);
+    expect(result.ok, "a 20% grant licensed an 85% discount").toBe(false);
+    expect(result.reasons).toContain("price_under_declared_depth:offer.unit_price");
+
+    // Control: the same bid at the price that depth prices out at.
+    const honest = makeBid({
+      claims: [listPriceClaim(100.0), makeClaim("authorized_discount_pct", 20.0)],
+      offer: pricedOffer(80.0, 80.0),
+    });
+    expect(check(honest, path).ok, check(honest, path).reasons.join(", ")).toBe(true);
+  });
+
+  it.each(BOTH_PATHS)("reads the list price out of offer.commitments too on %s", (path) => {
+    const bid = makeBid({
+      offer: makeOffer({
+        unit_price: 15.0,
+        total_price: 15.0,
+        commitments: [listPriceClaim(100.0)],
+        discount: {type: "percentage", value: 20.0, provenance: structuredClone(HOOK_PROVENANCE)},
+      }),
+    });
+    expect(check(bid, path).ok, "relocating the list price defeated the price wall").toBe(false);
+    expect(check(bid, path).reasons).toContain("price_under_declared_depth:offer.unit_price");
+  });
+
+  it.each(BOTH_PATHS)("refuses a total that undercuts the declared depth on %s", (path) => {
+    const result = check(makeBid({offer: pricedOffer(100.0, 15.0)}), path);
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("price_under_declared_depth:offer.total_price");
+
+    // Controls: the honest total, and a total for a larger quantity.
+    for (const total of [80.0, 240.0]) {
+      expect(check(makeBid({offer: pricedOffer(100.0, total)}), path).ok).toBe(true);
+    }
+  });
+
+  it.each(BOTH_PATHS)("is one-sided — a shallower discount than declared admits on %s", (path) => {
+    const generous = makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(95.0, 95.0)});
+    expect(check(generous, path).ok, check(generous, path).reasons.join(", ")).toBe(true);
+  });
+
+  it.each(BOTH_PATHS)("leaves a cent of slack for a rounded price on %s", (path) => {
+    const rounded = makeBid({
+      claims: [listPriceClaim(19.99)],
+      offer: pricedOffer(16.99, 16.99, 15.0),
+    });
+    expect(check(rounded, path).ok, check(rounded, path).reasons.join(", ")).toBe(true);
+
+    const under = makeBid({claims: [listPriceClaim(19.99)], offer: pricedOffer(15.99, 15.99, 15.0)});
+    expect(check(under, path).ok).toBe(false);
+  });
+
+  it.each(BOTH_PATHS)("refuses a depth it cannot read rather than skipping it on %s", (path) => {
+    const cases: Array<[unknown, string]> = [
+      [pricedOffer(15.0, 15.0, 10.0, "amount"), "offer.discount:amount"],
+      [pricedOffer(15.0, 15.0, 150.0), "offer.discount:depth_out_of_range"],
+      [pricedOffer(15.0, 15.0, -20.0), "offer.discount:depth_out_of_range"],
+      [pricedOffer(15.0, 15.0, "20"), "offer.discount:depth_not_a_number"],
+      [pricedOffer(15.0, 15.0, true), "offer.discount:depth_not_a_number"],
+    ];
+    for (const [offer, needle] of cases) {
+      const result = check(makeBid({claims: [listPriceClaim(100.0)], offer}), path);
+      expect(result.ok, `${needle} was admitted`).toBe(false);
+      expect(result.reasons.join(" ")).toContain(needle);
+    }
+  });
+
+  it.each(BOTH_PATHS)("answers to the carried list price even at a zero depth on %s", (path) => {
+    const under = makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(60.0, 60.0, 0.0)});
+    expect(check(under, path).ok).toBe(false);
+    expect(check(under, path).reasons).toContain("price_under_declared_depth:offer.unit_price");
+
+    const atList = makeBid({
+      claims: [listPriceClaim(100.0)],
+      offer: pricedOffer(100.0, 100.0, 0.0),
+    });
+    expect(check(atList, path).ok, check(atList, path).reasons.join(", ")).toBe(true);
+  });
+
+  it.each(BOTH_PATHS)("refuses an illegible or contradictory list price on %s", (path) => {
+    const unreadable = makeBid({claims: [listPriceClaim("n/a")], offer: pricedOffer(15.0, 15.0)});
+    expect(check(unreadable, path).ok).toBe(false);
+    expect(check(unreadable, path).reasons.join(" ")).toContain("unreadable_list_price");
+
+    const ambiguous = makeBid({
+      claims: [listPriceClaim(100.0), listPriceClaim(120.0)],
+      offer: pricedOffer(80.0, 80.0),
+    });
+    expect(check(ambiguous, path).ok).toBe(false);
+    expect(check(ambiguous, path).reasons.join(" ")).toContain("ambiguous_list_price");
+
+    // Control: the same list price stated twice is not a contradiction.
+    const twice = makeBid({
+      claims: [listPriceClaim(100.0), listPriceClaim(100.0)],
+      offer: pricedOffer(80.0, 80.0),
+    });
+    expect(check(twice, path).ok, check(twice, path).reasons.join(", ")).toBe(true);
+  });
+
+  it.each(BOTH_PATHS)("abstains deliberately with no list price carried on %s", (path) => {
+    // THE DOCUMENTED GAP, pinned so it cannot be mistaken for coverage — and pinned identically
+    // on both doors, because a seller would otherwise submit at whichever one is blinder.
+    const silent = makeBid({offer: pricedOffer(15.0, 15.0)});
+    const result = check(silent, path);
+    expect(result.ok, result.reasons.join(", ")).toBe(true);
+    expect(result.reasons.filter((r) => r.startsWith("price_"))).toEqual([]);
+
+    const named = makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(15.0, 15.0)});
+    expect(check(named, path).ok).toBe(false);
+  });
+
+  it("never throws on a hostile offer", () => {
+    for (const offer of [null, "an offer", 42, [1, 2], true, {}, {unit_price: NaN}]) {
+      for (const path of BOTH_PATHS) {
+        const result = check(makeBid({offer}), path);
+        expect(result.ok).toBe(false);
+        expect(result.reasons.length).toBeGreaterThan(0);
+      }
+    }
+  });
+});
+
+describe("T-177 price parity — the same table `test_boundary_dual_path.py` asserts", () => {
+  const PRICE_PARITY_TABLE: Record<string, {ok: boolean; reasons: string[]}> = {
+    charges_under_the_carried_list_price: {
+      ok: false,
+      reasons: ["price_under_declared_depth:offer.unit_price"],
+    },
+    total_under_the_stated_unit_price: {
+      ok: false,
+      reasons: ["price_under_declared_depth:offer.total_price"],
+    },
+    amount_discount: {ok: false, reasons: ["price_unreconcilable:offer.discount:amount"]},
+    depth_out_of_range: {
+      ok: false,
+      reasons: ["price_unreconcilable:offer.discount:depth_out_of_range"],
+    },
+    ambiguous_list_price: {
+      ok: false,
+      reasons: ["price_unreconcilable:offer.unit_price:ambiguous_list_price"],
+    },
+    unreadable_list_price: {
+      ok: false,
+      reasons: ["price_unreconcilable:offer.unit_price:unreadable_list_price"],
+    },
+    honest_price: {ok: true, reasons: []},
+    // The abstention, pinned on BOTH doors: they must be blind to the same thing.
+    no_list_price_carried: {ok: true, reasons: []},
+  };
+
+  function pricedParityBid(name: string): unknown {
+    switch (name) {
+      case "charges_under_the_carried_list_price":
+        return makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(15.0, 15.0)});
+      case "total_under_the_stated_unit_price":
+        return makeBid({offer: pricedOffer(100.0, 15.0)});
+      case "amount_discount":
+        return makeBid({offer: pricedOffer(49.0, 44.1, 10.0, "amount")});
+      case "depth_out_of_range":
+        return makeBid({offer: pricedOffer(49.0, 44.1, 150.0)});
+      case "ambiguous_list_price":
+        return makeBid({
+          claims: [listPriceClaim(100.0), listPriceClaim(120.0)],
+          offer: pricedOffer(80.0, 80.0),
+        });
+      case "unreadable_list_price":
+        return makeBid({claims: [listPriceClaim("n/a")], offer: pricedOffer(80.0, 80.0)});
+      case "honest_price":
+        return makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(80.0, 80.0)});
+      case "no_list_price_carried":
+        return makeBid({offer: pricedOffer(15.0, 15.0)});
+      default:
+        throw new Error(`unknown price parity case ${name}`);
+    }
+  }
+
+  it.each(Object.keys(PRICE_PARITY_TABLE))("matches the Python verdict for %s", (name) => {
+    const expected = PRICE_PARITY_TABLE[name]!;
+    const result = check(pricedParityBid(name), HOSTED_PATH);
+    const priced = result.reasons.filter((r) => !r.startsWith("schema_invalid"));
+    expect(priced, name).toEqual(expected.reasons);
+    expect(result.ok, `${name}: ${result.reasons.join(", ")}`).toBe(expected.ok);
+  });
+
+  it("is not quietly empty, and the reason vocabulary is the Python peer's", () => {
+    expect(Object.keys(PRICE_PARITY_TABLE).length).toBe(8);
+    expect(OFFER_UNIT_PRICE_SITE).toBe("offer.unit_price");
+    expect(OFFER_TOTAL_PRICE_SITE).toBe("offer.total_price");
+    expect(REASON_PRICE_UNDER_DECLARED_DEPTH).toBe("price_under_declared_depth");
+    expect(REASON_PRICE_UNRECONCILABLE).toBe("price_unreconcilable");
+    expect(LIST_PRICE_CLAIM_KEY).toBe("list_price");
+    expect(PRICE_RECONCILIATION_TOLERANCE).toBe(0.01);
+  });
+});
+
+describe("T-195 — offer.commitments may not be spelled null", () => {
+  it.each(BOTH_PATHS)("refuses commitments: null on %s, as ajv always did", (path) => {
+    // The schema declares a NON-nullable array with `default: []`, so ajv refused this while
+    // the generated pydantic model accepted it — and that nullable spelling was the one shape
+    // of `offer.commitments` the Python claim walk skipped, on the field the walk covers.
+    const result = check(makeBid({offer: makeOffer({commitments: null})}), path);
+    expect(result.ok).toBe(false);
+    expect(result.reasons.join(" ")).toContain(REASON_SCHEMA_INVALID);
+  });
+
+  it("still admits the two spellings the schema does allow", () => {
+    const withoutKey = makeOffer();
+    delete (withoutKey as Record<string, unknown>)["commitments"];
+    for (const offer of [makeOffer({commitments: []}), withoutKey]) {
+      const result = check(makeBid({offer}), HOSTED_PATH);
+      expect(result.ok, result.reasons.join(", ")).toBe(true);
+    }
+  });
+});
+
+describe("claims lists — the shapes the Python peer now refuses too", () => {
+  // `Array.isArray` has always been this door's rule; the Python peer accepted any iterable, so
+  // a generator of claims was walked once, drained, and admitted with its claims unread. These
+  // pin the shared verdict rather than a TypeScript-only one.
+  it.each(BOTH_PATHS)("refuses a non-array claims list on %s", (path) => {
+    for (const shape of [{0: makeClaim()}, "free_returns", 42, new Set([makeClaim()])]) {
+      expect(check(makeBid({claims: shape}), path).ok, JSON.stringify(shape)).toBe(false);
+      expect(check(makeBid({offer: makeOffer({commitments: shape})}), path).ok).toBe(false);
+    }
+
+    // Control: a real array is still walked and admitted.
+    expect(check(makeBid({claims: [makeClaim()]}), path).ok).toBe(true);
+  });
+});
+
+describe("R12 — a trust-snapshot row that is not an object is an unavailable read", () => {
+  // This door's `readRecord` has always refused these; the Python peer read `blacklisted` off
+  // them with `getattr`, got `False`, and ADMITTED the store. Pinned here so the two doors
+  // cannot drift apart on it again.
+  it.each(BOTH_PATHS)("refuses a non-object row on %s", (path) => {
+    for (const row of [1, "x", [], true, 3.5, 0, "", 0.0, ["blacklisted"], null, undefined]) {
+      const snapshot = {"store-1": row};
+      const result = check(makeBid(), path, snapshot as never);
+      expect(result.ok, `a trust row of ${JSON.stringify(row)} admitted the store`).toBe(false);
+      expect(result.reasons.join(" ")).toContain(REASON_TRUST_SNAPSHOT_UNAVAILABLE);
+    }
+
+    // Controls: a real row admits; a real blacklisted row denies for its own reason.
+    expect(check(makeBid(), path).ok).toBe(true);
+    expect(check(makeBid({store_id: "store-bad"}), path).reasons.join(" ")).toContain(
+      REASON_STORE_BLACKLISTED,
+    );
   });
 });

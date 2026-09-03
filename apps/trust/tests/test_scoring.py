@@ -885,3 +885,233 @@ def test_an_entry_lapses_only_against_an_as_of_that_was_actually_supplied() -> N
     forever = {"business_identity": "biz-forever"}
     assert permanent.lookup("biz-forever").expired_at("2099-01-01T00:00:00Z") is False
     assert is_blacklisted(permanent, forever, as_of="2099-01-01T00:00:00Z") is True
+
+
+# --------------------------------------------------------------------------------------
+# T-186 — the per-observation weight channel (R14)
+#
+# `trust.feedback.accept_feedback` computes a weight (base 1.0, x0.25 when the buyer's own
+# return contradicts their positive report, x the buyer's track record) and R14 rests two
+# properties on it: "positive feedback contradicted by a return is downweighted" and "a
+# single account cannot outvote the network". Both were properties of a number nothing
+# consumed -- `score` derived an observation's weight SOLELY from OBSERVATION_WEIGHTS[type]
+# and had no weight channel at all. Measured before the fix: feeding 1.0 / 0.25 / 0.01 on an
+# otherwise identical observation gave alpha=2.0 beta=3.5 in every case.
+# --------------------------------------------------------------------------------------
+
+
+def _weighted_beta(weight, e6_as_of, *, otype="mismatch_return", dim="feedback_match"):
+    """(alpha, beta) for one observation of ``otype`` carrying ``weight``."""
+    observation = {"store_id": "s-1", "dim": dim, "type": otype, "observed_at": e6_as_of}
+    if weight is not None:
+        observation["weight"] = weight
+    entry = score([observation], as_of=e6_as_of)["dims"][dim]
+    return float(entry["alpha"]), float(entry["beta"])
+
+
+def test_a_per_observation_weight_scales_the_beta_update(e6_as_of):
+    """R14: three different weights on one identical observation must give three results.
+
+    This is the whole seam. The published type weight says what *kind* of evidence this is
+    worth; the per-observation weight says how much this particular report is worth given who
+    made it and whether their own behaviour contradicts it. Without the second, a piece of
+    feedback from an account with no track record lands with exactly the force of one from
+    the network's most reliable buyer.
+    """
+    published = float(OBSERVATION_WEIGHTS["mismatch_return"])
+
+    full = _weighted_beta(1.0, e6_as_of)
+    quarter = _weighted_beta(0.25, e6_as_of)
+    hundredth = _weighted_beta(0.01, e6_as_of)
+
+    assert full == (PRIOR_ALPHA, PRIOR_BETA + published), (
+        "weight 1.0 must land exactly the published type weight -- no more, no less"
+    )
+    assert quarter == (PRIOR_ALPHA, PRIOR_BETA + published * 0.25)
+    assert hundredth == (PRIOR_ALPHA, PRIOR_BETA + published * 0.01)
+    assert full[1] > quarter[1] > hundredth[1], (
+        "the per-observation weight is computed and thrown away: three weights that differ "
+        "by two orders of magnitude produced one identical Beta update"
+    )
+
+
+def test_a_positive_observation_is_scaled_by_its_weight_too(e6_as_of):
+    """The channel is symmetric: a downweighted positive moves alpha less, not beta more."""
+    published = float(OBSERVATION_WEIGHTS["fulfilled"])
+
+    full = _weighted_beta(1.0, e6_as_of, otype="fulfilled")
+    quarter = _weighted_beta(0.25, e6_as_of, otype="fulfilled")
+
+    assert full == (PRIOR_ALPHA + published, PRIOR_BETA)
+    assert quarter == (PRIOR_ALPHA + published * 0.25, PRIOR_BETA)
+
+
+def test_an_observation_with_no_weight_field_is_bit_identical_to_weight_one(e6_as_of):
+    """S3: the ledger projection carries no weight, so absent must mean exactly 1.0.
+
+    ``trust.ledger.replay.observations_from_events`` projects only
+    ``{store_id, dim, type, observed_at}``. If "no weight" meant anything other than exactly
+    1.0, the S3 assertion -- replaying the ledger reproduces the served snapshot bit for bit
+    -- would start comparing two different arithmetics.
+    """
+    for otype in ("verified", "fulfilled", "unsupported", "contradicted", "mismatch_return"):
+        assert _weighted_beta(None, e6_as_of, otype=otype) == _weighted_beta(
+            1.0, e6_as_of, otype=otype
+        ), f"an unweighted {otype!r} observation did not score identically to weight 1.0"
+
+
+def test_a_weight_above_one_is_refused_because_it_would_outvote_the_network(e6_as_of):
+    """R14: no single report may weigh more than one whole piece of evidence.
+
+    A weight channel that accepted 5.0 would hand back exactly the astroturfing the routed-
+    buyer gate exists to prevent, through a different door: one account's feedback worth five
+    honest buyers'. Loud, not clamped -- a silently clamped 5.0 is a caller that believes it
+    is doing something it is not.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _weighted_beta(1.5, e6_as_of)
+    assert "weight" in str(excinfo.value).lower()
+
+    with pytest.raises(ValueError):
+        _weighted_beta(-0.5, e6_as_of)
+    with pytest.raises(ValueError):
+        _weighted_beta("heavy", e6_as_of)
+
+
+def test_a_zero_weight_observation_moves_nothing_and_still_costs_coverage(e6_as_of):
+    """Weight 0.0 is admissible and means what ``ambiguous`` means: it decides nothing.
+
+    Asserted bit-identical to the prior rather than merely close, for the same reason
+    ``ambiguous`` is: "moved it by almost nothing" and "did not move it" are different claims.
+    """
+    snapshot = score(
+        [
+            {
+                "store_id": "s-1",
+                "dim": "feedback_match",
+                "type": "mismatch_return",
+                "observed_at": e6_as_of,
+                "weight": 0.0,
+            }
+        ],
+        as_of=e6_as_of,
+    )
+    entry = snapshot["dims"]["feedback_match"]
+
+    assert (float(entry["alpha"]), float(entry["beta"])) == (PRIOR_ALPHA, PRIOR_BETA)
+    assert int(entry["observations"]) == 1, "a zero-weight observation still happened"
+
+
+def test_a_downweighted_observation_buys_proportionally_less_coverage(e6_as_of):
+    """A discounted report must not buy FULL coverage credit for a fraction of the evidence.
+
+    Coverage is ``decided_mass / mass`` and confidence is
+    ``floor + (1-floor) * saturation(evidence) * coverage``. Scaling only ``evidence`` by the
+    per-observation weight left ``decided_mass`` at full strength, so a report discounted to
+    0.25 -- or to 0.0 -- bought the same coverage as a full-weight one. That reopens R14's
+    "a single account cannot outvote the network" through the confidence channel instead of
+    the mean, which is the channel the weight was added to close.
+    """
+
+    def _coverage(weight):
+        snapshot = score(
+            [
+                {
+                    "store_id": "s-1",
+                    "dim": "feedback_match",
+                    "type": "fulfilled",
+                    "observed_at": e6_as_of,
+                    "weight": weight,
+                }
+            ],
+            as_of=e6_as_of,
+        )
+        return float(snapshot["dims"]["feedback_match"]["coverage"])
+
+    assert _coverage(1.0) == 1.0
+    assert _coverage(0.25) == 0.25, "a quarter-weight report bought full coverage credit"
+    assert _coverage(0.0) == 0.0, (
+        "a zero-weight report decided nothing and must cost coverage exactly as `ambiguous` "
+        "does -- otherwise it is free confidence"
+    )
+
+
+def test_zero_weight_padding_cannot_manufacture_confidence(e6_as_of):
+    """The measured attack: pad a real record with weightless 'deciding' observations.
+
+    Measured before the fix: 18.0 units of real evidence plus 360 zero-weight observations
+    took confidence from 0.1728 to 0.5659 (+227%) while ``effective_evidence`` never moved.
+    Confidence that can be bought with evidence nobody weighted is not confidence.
+
+    The record starts with LOW coverage -- three decided outcomes against twelve undecided
+    ones per dimension -- because coverage is the factor the padding inflates. A baseline
+    already at coverage 1.0 has no room to be inflated and would pass this test vacuously.
+    """
+    real = [
+        {"store_id": "s-1", "dim": dim, "type": otype, "observed_at": e6_as_of}
+        for dim in TRUST_DIMENSIONS
+        for otype in (["contradicted"] * 3 + ["ambiguous"] * 12)
+    ]
+    padding = [
+        {
+            "store_id": "s-1",
+            "dim": dim,
+            "type": "fulfilled",
+            "observed_at": e6_as_of,
+            "weight": 0.0,
+        }
+        for dim in TRUST_DIMENSIONS
+        for _ in range(60)
+    ]
+
+    baseline = score(real, as_of=e6_as_of)
+    padded = score([*real, *padding], as_of=e6_as_of)
+
+    assert padded["effective_evidence"] == baseline["effective_evidence"]
+    assert padded["confidence"] <= baseline["confidence"], (
+        f"padding with weightless observations raised confidence from "
+        f"{baseline['confidence']} to {padded['confidence']}"
+    )
+
+
+def test_the_weight_channel_accepts_any_real_number_not_only_int_and_float(e6_as_of):
+    """A ``Decimal`` weight is a perfectly good weight and must not crash the scorer.
+
+    Reachable from any JSON parsed with ``parse_float=Decimal`` or read out of a NUMERIC
+    column -- and ``ledger.trust_observations.weight`` is a ``double precision`` column, so
+    weights really do arrive from a database. Refusing them with "is not a number" takes
+    scoring down for a value that is one.
+    """
+    from decimal import Decimal
+    from fractions import Fraction
+
+    for value in (Decimal("0.25"), Fraction(1, 4)):
+        entry = score(
+            [
+                {
+                    "store_id": "s-1",
+                    "dim": "feedback_match",
+                    "type": "fulfilled",
+                    "observed_at": e6_as_of,
+                    "weight": value,
+                }
+            ],
+            as_of=e6_as_of,
+        )["dims"]["feedback_match"]
+        assert float(entry["alpha"]) == PRIOR_ALPHA + 0.25, f"{type(value).__name__} was refused"
+
+    # ...and the refusals that matter still refuse.
+    for bad in (True, "0.25", None.__class__, float("nan"), float("inf"), Decimal("2")):
+        with pytest.raises(ValueError):
+            score(
+                [
+                    {
+                        "store_id": "s-1",
+                        "dim": "feedback_match",
+                        "type": "fulfilled",
+                        "observed_at": e6_as_of,
+                        "weight": bad,
+                    }
+                ],
+                as_of=e6_as_of,
+            )
