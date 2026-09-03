@@ -11,6 +11,11 @@
  * the Offer is inside the bid boundary. A boundary that inspected only `bid.claims` did not have
  * an exclusivity property; it had a naming convention, and moving the claim one field over
  * defeated it outright.
+ *
+ * **And a price is judged by the depth it declares, not by the grant sitting beside it.** T-177:
+ * a bid carrying a genuine hook-minted 20% grant, declaring 20% and charging 15.00 on a 100.00
+ * list price was admitted here with `ok=true, reasons=[]`, because the only wall comparing what a
+ * bid CHARGES with what it DECLARES lived on the emitting side. See `priceReasons`.
  */
 import type {Bid, BidValidationResult, LedgerEvent} from "../../generated/ts/protocol.schema.d.ts";
 import {validationErrors} from "./schemas.js";
@@ -48,6 +53,37 @@ export const NON_HOOK_PROVENANCE_SOURCES: ReadonlySet<string> = new Set(["seller
 export const OFFER_COMMITMENTS_SITE = "offer.commitments";
 export const OFFER_DISCOUNT_SITE = "offer.discount";
 
+/** The two priced sites on an offer, spelled the way the price reasons name them. */
+export const OFFER_UNIT_PRICE_SITE = "offer.unit_price";
+export const OFFER_TOTAL_PRICE_SITE = "offer.total_price";
+
+/**
+ * `Discount.type` spellings that mean "`value` is a percentage depth" — the only form this
+ * boundary can reconcile. An amount off cannot be compared with a stated price without
+ * re-deriving what the offer means, and a boundary that re-derived prices would be deciding
+ * rather than checking. The same three spellings the store-agent's emitting wall accepts.
+ */
+export const PERCENTAGE_DISCOUNT_TYPES: ReadonlySet<string> = new Set([
+  "percentage",
+  "percent",
+  "pct",
+]);
+
+/**
+ * The claim key under which a bid carries the list price its discount is a percentage OF.
+ * `get_product_fact(product_ref, "list_price")` is the hook that mints it. **This is the only
+ * list price the boundary can ever see**: it holds no catalog, no envelope and no hook ledger.
+ */
+export const LIST_PRICE_CLAIM_KEY = "list_price";
+
+/**
+ * Slack when reconciling a stated price against the price its declared depth prices out at, as
+ * an absolute amount of currency rather than a float epsilon. Money is quoted to the cent, so an
+ * honest rounded price sits a fraction of a cent under the exact one and a wall tightened to the
+ * float would refuse almost every real product. Identical to the Python peer's constant.
+ */
+export const PRICE_RECONCILIATION_TOLERANCE = 0.01;
+
 export const REASON_UNKNOWN_PATH = "unknown_path";
 export const REASON_SCHEMA_INVALID = "schema_invalid";
 export const REASON_CLAIM_WITHOUT_PROVENANCE = "claim_without_provenance";
@@ -68,6 +104,17 @@ export const REASON_STORE_BLACKLISTED = "store_blacklisted";
 export const REASON_TRUST_SNAPSHOT_UNAVAILABLE = "trust_snapshot_unavailable";
 export const REASON_SIGNING_ENVELOPE_INCOMPLETE = "signing_envelope_incomplete";
 export const REASON_SIGNATURE_MISSING = "signature_missing";
+/**
+ * The offer charges less than the depth it declares licenses. One-sided: charging MORE than the
+ * depth prices out at spends less of the envelope than was declared, which is a question about
+ * what the buyer is told, not about what the merchant authorised.
+ */
+export const REASON_PRICE_UNDER_DECLARED_DEPTH = "price_under_declared_depth";
+/**
+ * The depth, the price, or the list price is a number this boundary cannot read, so the offer's
+ * arithmetic cannot be checked at all. Fail-closed, exactly like an unavailable eligibility read.
+ */
+export const REASON_PRICE_UNRECONCILABLE = "price_unreconcilable";
 
 export interface TrustSnapshotRow {
   store_id?: string;
@@ -94,6 +141,30 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * Read `key` off `table` only when the table OWNS it.
+ *
+ * `table[key]` is not a lookup when the key comes off the wire; it is a walk up the prototype
+ * chain. A seller who registered the store_id `__proto__` got `Object.prototype` back — an
+ * object, non-null, not an array, so `readRecord` accepted it — and the
+ * `trust_snapshot_unavailable` refusal never fired, while `row["blacklisted"]` was `undefined`
+ * and therefore falsy. That bid was ADMITTED with no trust row behind it at all. `constructor`
+ * and `toString` behaved the same way in kind. The Python peer never had this: a dict lookup of
+ * `"__proto__"` is a miss like any other, so this was also a live ok-divergence between the two
+ * doors, on the eligibility gate specifically.
+ */
+function readOwn(table: Record<string, unknown>, key: string): unknown {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
+/**
+ * `value` as a number when it IS one, else `undefined`. No coercion: `"20"` is a string a seller
+ * wrote, not a depth. The Python peer's `_finite_number` reads the same set of values.
+ */
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /**
@@ -233,6 +304,148 @@ function offerClaimReasons(offer: unknown, path: BidPathName): string[] {
   return reasons;
 }
 
+/**
+ * The percentage depth THIS offer declares, and why it could not be read. Mirrors
+ * `_declared_depth` in `boundary.py` case for case.
+ */
+function declaredDepth(offer: Record<string, unknown>): {
+  depth: number | undefined;
+  reasons: string[];
+} {
+  const discount = offer["discount"];
+  if (discount === null || discount === undefined) return {depth: 0, reasons: []};
+
+  const record = readRecord(discount);
+  const depth = finiteNumber(record?.["value"]);
+  if (depth === undefined) {
+    return {
+      depth: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${OFFER_DISCOUNT_SITE}:depth_not_a_number`],
+    };
+  }
+  if (depth === 0) return {depth: 0, reasons: []};
+
+  const kind = record?.["type"];
+  // The raw spelling reaches the reason string, the way a provenance source does — but only when
+  // it IS a string. `String(2.0)` is "2" here and "2.0" in Python, and a reason code that differs
+  // between the two doors is a parity break dressed up as a diagnostic.
+  const spelling = typeof kind === "string" ? kind.trim().toLowerCase() : "not_a_string";
+  if (!PERCENTAGE_DISCOUNT_TYPES.has(spelling)) {
+    return {
+      depth: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${OFFER_DISCOUNT_SITE}:${spelling}`],
+    };
+  }
+  if (depth < 0 || depth > 100) {
+    return {
+      depth: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${OFFER_DISCOUNT_SITE}:depth_out_of_range`],
+    };
+  }
+  return {depth, reasons: []};
+}
+
+/**
+ * The list price the BID carries, from any `list_price` claim at any claim-bearing site. Mirrors
+ * `_carried_list_price` in `boundary.py`.
+ *
+ * Two claims naming two different list prices is refused rather than resolved: an `Offer` names
+ * exactly one `product_ref`, so exactly one list price is coherent, and picking one of them would
+ * let a bid choose which wall it is measured against by adding a claim.
+ */
+function carriedListPrice(
+  bid: Record<string, unknown>,
+  offer: Record<string, unknown>,
+): {listed: number | undefined; reasons: string[]} {
+  const values: number[] = [];
+  let unreadable = false;
+
+  for (const claims of [bid["claims"], offer["commitments"]]) {
+    if (!Array.isArray(claims)) continue;
+    for (const claim of claims) {
+      const key = readRecord(claim)?.["key"];
+      if (typeof key !== "string" || key.trim() !== LIST_PRICE_CLAIM_KEY) continue;
+      const listed = finiteNumber(readRecord(claim)?.["value"]);
+      // A claim that says "here is the list price" and then does not state a number is not an
+      // absent list price; it is an unreadable one, and reading past it would let a bid disable
+      // this wall by making its own evidence illegible.
+      if (listed === undefined || listed < 0) unreadable = true;
+      else values.push(listed);
+    }
+  }
+
+  if (unreadable) {
+    return {
+      listed: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:unreadable_list_price`],
+    };
+  }
+  const distinct = [...new Set(values)].sort((a, b) => a - b);
+  if (distinct.length > 1) {
+    return {
+      listed: undefined,
+      reasons: [`${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:ambiguous_list_price`],
+    };
+  }
+  return {listed: distinct[0], reasons: []};
+}
+
+/**
+ * Reconcile the price the offer STATES against the depth it DECLARES (T-177). The line-for-line
+ * peer of `_price_reasons` in `boundary.py` — see that docstring for why both relations exist,
+ * why they are one-sided, and what the first one deliberately cannot know.
+ */
+function priceReasons(bid: Record<string, unknown>, offer: unknown): string[] {
+  const record = readRecord(offer);
+  if (record === undefined) return [];
+
+  const reasons: string[] = [];
+  const declared = declaredDepth(record);
+  reasons.push(...declared.reasons);
+
+  const unitPrice = finiteNumber(record["unit_price"]);
+  const totalPrice = finiteNumber(record["total_price"]);
+  if (unitPrice === undefined) {
+    reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:not_a_number`);
+  } else if (unitPrice < 0) {
+    reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:negative`);
+  }
+  if (totalPrice === undefined) {
+    reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${OFFER_TOTAL_PRICE_SITE}:not_a_number`);
+  } else if (totalPrice < 0) {
+    reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${OFFER_TOTAL_PRICE_SITE}:negative`);
+  }
+
+  const depth = declared.depth;
+  // Nothing arithmetic left to say: the numbers the relations are built out of are already
+  // refused above, and restating them as an inequality would report one bad number twice.
+  if (depth === undefined || unitPrice === undefined || unitPrice < 0) return reasons;
+
+  const carried = carriedListPrice(bid, record);
+  reasons.push(...carried.reasons);
+  if (
+    carried.listed !== undefined &&
+    unitPrice + PRICE_RECONCILIATION_TOLERANCE < (carried.listed * (100 - depth)) / 100
+  ) {
+    reasons.push(`${REASON_PRICE_UNDER_DECLARED_DEPTH}:${OFFER_UNIT_PRICE_SITE}`);
+  }
+
+  // `depth > 0` only. At zero there is no declared depth to make true, and `total >= unit` would
+  // no longer be a statement about a discount — it would conflate quantity with discount. The
+  // list-price relation above still applies at zero: a price under LIST with no declared
+  // discount is a discount that entered the bid through no hook at all.
+  if (
+    depth > 0 &&
+    totalPrice !== undefined &&
+    totalPrice >= 0 &&
+    totalPrice + PRICE_RECONCILIATION_TOLERANCE < (unitPrice * (100 - depth)) / 100
+  ) {
+    reasons.push(`${REASON_PRICE_UNDER_DECLARED_DEPTH}:${OFFER_TOTAL_PRICE_SITE}`);
+  }
+
+  return reasons;
+}
+
 function expiryReasons(offer: unknown, now: Date): string[] {
   const record = readRecord(offer);
   if (record === undefined) return [REASON_OFFER_EXPIRY_MISSING];
@@ -250,7 +463,11 @@ function eligibilityReasons(storeId: unknown, snapshot: TrustSnapshotMap): strin
   const table = readRecord(snapshot);
   if (table === undefined) return [REASON_TRUST_SNAPSHOT_UNAVAILABLE];
   const key = String(storeId ?? "");
-  const row = readRecord(table[key]);
+  // `readOwn`, never `table[key]`: the key is caller-supplied, and a bare index walks the
+  // prototype chain. `store_id: "__proto__"` returned `Object.prototype` — an object that
+  // `readRecord` accepts and that has no `blacklisted` — so the store was admitted with no trust
+  // row at all. Own properties only; everything inherited is an unavailable read.
+  const row = readRecord(readOwn(table, key));
   // R12, fail-closed: blacklisted denies, and an unavailable read denies the same way.
   if (row === undefined) return [`${REASON_TRUST_SNAPSHOT_UNAVAILABLE}:${key}`];
   // TRUTHY, not `=== true`. A strict comparison admits a store whose row spells the flag `1` or
@@ -321,11 +538,17 @@ export function validateBid(bid: unknown, options: ValidateBidOptions): BidValid
   reasons.push(...claims.reasons);
   reasons.push(...offerClaimReasons(record["offer"], path));
 
-  // 3. Offer expiry and 4. seller eligibility — path-insensitive.
+  // 3. The PRICE the offer states, against the depth it declares. Path-insensitive: arithmetic
+  //    does not care who is speaking. A genuine hook-minted 20% grant used to license any price
+  //    at all here, because the only wall comparing what a bid charges with what it declares
+  //    lived on the emitting side, where a store not running our runtime never meets it.
+  reasons.push(...priceReasons(record, record["offer"]));
+
+  // 4. Offer expiry and 5. seller eligibility — path-insensitive.
   reasons.push(...expiryReasons(record["offer"], evaluatedAt));
   reasons.push(...eligibilityReasons(record["store_id"], options.trustSnapshot));
 
-  // 5. D52's signing envelope, when the caller is the external door rather than a component
+  // 6. D52's signing envelope, when the caller is the external door rather than a component
   //    judging an already-extracted `Bid`.
   if (options.requireSigningEnvelope) reasons.push(...signingEnvelopeReasons(bid));
 

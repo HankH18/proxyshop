@@ -19,9 +19,12 @@ The external path's admit-and-flag applies at `bid.claims` alone, because that i
 `unverified_claim_indexes` can address; a `seller_asserted` source in the offer is refused with
 `unverifiable_claim_site` rather than admitted with nobody assigned to check it.
 
-Four conditions reject on BOTH paths, because none of them is about who is speaking:
+Five conditions reject on BOTH paths, because none of them is about who is speaking:
 
 * a claim with no `provenance` key at all, or with an empty `source`;
+* an offer that charges less than the discount depth it declares prices out at (T-177) — the
+  arithmetic, not the paperwork: a genuine hook-minted 20% grant is not a licence to state any
+  number at all as the price. See `_price_reasons`, including what it deliberately cannot know;
 * an offer whose `expires_at` has passed — or is missing, which fails closed;
 * a store the trust snapshot marks blacklisted, or has no row for at all (R12: an unavailable
   eligibility read denies exactly like a positive one);
@@ -43,7 +46,7 @@ its verdict is the R8/R18/S5 table and nothing more. Use `validate_external_subm
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -78,6 +81,32 @@ NON_HOOK_PROVENANCE_SOURCES: frozenset[str] = frozenset({ProvenanceSource.seller
 OFFER_COMMITMENTS_SITE = "offer.commitments"
 OFFER_DISCOUNT_SITE = "offer.discount"
 
+#: The two priced sites on an offer, spelled the way the price reasons name them.
+OFFER_UNIT_PRICE_SITE = "offer.unit_price"
+OFFER_TOTAL_PRICE_SITE = "offer.total_price"
+
+#: `Discount.type` spellings that mean "`value` is a percentage depth". A depth is the only form
+#: this boundary can reconcile: an amount off cannot be compared with a price without re-deriving
+#: what the offer means, and a boundary that re-derived prices would be deciding rather than
+#: checking. The same three spellings the store-agent's emitting wall accepts.
+PERCENTAGE_DISCOUNT_TYPES: frozenset[str] = frozenset({"percentage", "percent", "pct"})
+
+#: The claim key under which a bid carries the list price its discount is a percentage OF.
+#: `get_product_fact(product_ref, "list_price")` is the hook that mints it, so a hosted bid can
+#: only carry a list price the catalog actually published. **This is the only list price the
+#: boundary can ever see**: it holds no catalog, no envelope and no hook ledger, and inventing a
+#: lookup it cannot perform would be worse than saying so.
+LIST_PRICE_CLAIM_KEY = "list_price"
+
+#: Slack when reconciling a stated price against the price its declared depth prices out at, as
+#: an absolute amount of currency rather than a float epsilon. Money is quoted to the cent, so
+#: 19.99 less an honest 15% is 16.9915 and the honest rounded price sits a fraction of a cent
+#: under the exact one; a wall tightened to the float would refuse almost every real product.
+#: One cent is far below any discount a merchant could feel. Identical to the store-agent's
+#: `PRICE_RECONCILIATION_TOLERANCE`, deliberately: the emitting wall and the validating wall
+#: must not disagree about what 20% off 100.00 comes to.
+PRICE_RECONCILIATION_TOLERANCE = 0.01
+
 #: The two doors. `validate_bid` refuses anything else rather than guessing.
 HOSTED_PATH = "hosted"
 EXTERNAL_PATH = "external"
@@ -103,25 +132,104 @@ REASON_STORE_BLACKLISTED = "store_blacklisted"
 REASON_TRUST_SNAPSHOT_UNAVAILABLE = "trust_snapshot_unavailable"
 REASON_SIGNING_ENVELOPE_INCOMPLETE = "signing_envelope_incomplete"
 REASON_SIGNATURE_MISSING = "signature_missing"
+#: The offer charges less than the depth it declares licenses. One-sided: charging MORE than the
+#: depth prices out at spends less of the envelope than was declared, which is a question about
+#: what the buyer is told, not about what the merchant authorised.
+REASON_PRICE_UNDER_DECLARED_DEPTH = "price_under_declared_depth"
+#: The depth, the price, or the list price is a number this boundary cannot read, so the offer's
+#: arithmetic cannot be checked at all. Fail-closed, exactly like an unavailable eligibility read.
+REASON_PRICE_UNRECONCILABLE = "price_unreconcilable"
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """Read `key` off a mapping or an object, without caring which it is."""
-    if isinstance(obj, Mapping):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+    """Read `key` off a mapping or an object, without caring which it is — and never raise.
+
+    The read itself is arbitrary caller code: `Mapping.get` on a subclass, a property, a
+    `__getattr__` trap. An object whose attribute access raises turned "this bid is refused"
+    into a 500 at the public boundary, which is the observable this module exists to keep
+    distinct — the same reason `_eligibility_reasons` catches the unhashable-`store_id`
+    `TypeError` rather than letting the lookup escape. A field that cannot be read is a field
+    the bid did not state, and the walls above fail closed on exactly that.
+    """
+    try:
+        if isinstance(obj, Mapping):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+    except Exception:  # noqa: BLE001 - a read that raises is a field the bid did not state
+        return default
 
 
 def _as_plain(bid: Any) -> Mapping[str, Any]:
     for attr in ("model_dump", "dict"):
-        fn = getattr(bid, attr, None)
-        if callable(fn):
+        try:
+            fn = getattr(bid, attr, None)
+            if not callable(fn):
+                continue
             dumped = fn()
-            if isinstance(dumped, Mapping):
-                return dumped
+        except Exception:  # noqa: BLE001 - an object that cannot dump itself is not a Bid
+            continue
+        if isinstance(dumped, Mapping):
+            return dumped
     if isinstance(bid, Mapping):
         return bid
     return {}
+
+
+def _finite_number(value: Any) -> float | None:
+    """`value` as a float when it IS a number, else `None`.
+
+    Deliberately no coercion: `"20"` is a string a seller wrote, not a depth, and a boundary that
+    parsed it would be inventing a number the bid did not state. `bool` is excluded even though
+    Python calls it an `int` — `True` is not a 100% discount — and NaN/±inf are excluded because
+    a comparison against them is silently false, which is the fail-OPEN direction on a wall.
+    The TypeScript peer's `typeof value === "number" && Number.isFinite(value)` is this same
+    predicate, so the two doors read the same set of values as numbers.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return number
+
+
+def _js_truthy(value: Any) -> bool:
+    """JavaScript's truthiness, evaluated in Python.
+
+    Not a stylistic choice. `blacklisted` is read as a flag rather than compared to `True`, so
+    that a row spelling it `1` or `"yes"` still denies (R12) — but Python and JavaScript disagree
+    about the empty container: `bool([])` is `False` and `Boolean([])` is `true`, so a snapshot
+    row reading `{"blacklisted": []}` was ADMITTED by this door and REFUSED by the TypeScript
+    one. A seller who can shape the snapshot row picks whichever door lets the bid through, and
+    two doors that disagree are worse than one door with a hole. JavaScript's rule is the
+    fail-closed one of the two — only `false`, `0`, `NaN`, `""`, `null`/`undefined` are falsy,
+    and every object, list and mapping is truthy — so it is the one both doors now use.
+    """
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return not (number == 0.0 or number != number)
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
+def _record(value: Any) -> Any:
+    """`value` when it is an object with FIELDS, else `None`.
+
+    The mirror of `readRecord` in `boundary.ts`. A string, a number, a boolean or a list has no
+    fields, and `getattr(1, "blacklisted", False)` answers `False` — which is the fail-OPEN
+    direction on a wall, and it is exactly how a trust-snapshot row of `1`, `"x"`, `[]`, `True`
+    or `3.5` was ADMITTED here while the TypeScript door refused every one of them. Reading a
+    field off something that has none is not "the field is absent"; it is "this is not the
+    object you thought", and both doors now say so.
+    """
+    if value is None or isinstance(value, (str, bytes, bool, int, float, list, tuple, set)):
+        return None
+    return value
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -211,10 +319,24 @@ def _claim_provenance_reasons(
 
     if claims is None:
         return reasons, unverified
-    if isinstance(claims, (str, bytes)) or not isinstance(claims, Iterable):
+    # A SEQUENCE, not any iterable. Two reasons, and both are holes this closed:
+    #
+    # * a one-shot iterator is CONSUMED by the walk, so the second reader of `bid.claims`
+    #   (the price walk, `_carried_list_price`) saw an empty list and its wall silently did
+    #   not run. `model_validate` drains it first, so even this walk saw nothing: a bid whose
+    #   `claims` was a generator was admitted with every claim in it unexamined.
+    # * `Array.isArray` is what the TypeScript peer asks, so a mapping, a set or a generator
+    #   is `schema_invalid` there. Accepting them here made the two doors answer differently
+    #   about the same payload, which is the one thing a dual-language boundary may not do.
+    if isinstance(claims, (str, bytes)) or not isinstance(claims, Sequence):
         return [REASON_SCHEMA_INVALID], unverified
 
-    for index, claim in enumerate(claims):
+    try:
+        walk = list(enumerate(claims))
+    except Exception:  # noqa: BLE001 - a list that cannot be read is not a list of claims
+        return [REASON_SCHEMA_INVALID], unverified
+
+    for index, claim in walk:
         label = str(index) if site is None else f"{site}[{index}]"
         claim_reasons, needs_verification = _source_verdict(
             claim, path, label, addressable=site is None
@@ -271,6 +393,171 @@ def _offer_claim_reasons(offer: Any, path: str) -> list[str]:
     return reasons
 
 
+def _declared_depth(offer: Any) -> tuple[float | None, list[str]]:
+    """The percentage depth THIS offer declares, and why it could not be read.
+
+    `(0.0, [])` when the offer declares no discount at all, or declares one of zero: a discount
+    that takes nothing off the price needs no authorization and prices out at the price itself.
+    `(None, [reason])` when a depth is declared in a form this boundary cannot reconcile — a
+    non-numeric value, a `type` that is not a percentage, a depth outside 0–100. Those are
+    refusals rather than abstentions: an amount-off cannot be compared with a stated price
+    without re-deriving what the offer means, and a boundary that guessed would be deciding
+    instead of checking.
+    """
+    discount = _get(offer, "discount")
+    if discount is None:
+        return 0.0, []
+
+    depth = _finite_number(_get(discount, "value"))
+    if depth is None:
+        return None, [f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_DISCOUNT_SITE}:depth_not_a_number"]
+    if depth == 0.0:
+        return 0.0, []
+
+    kind = _get(discount, "type")
+    # The raw spelling reaches the reason string, the way a provenance source does — but only
+    # when it IS a string. `str(2.0)` is "2.0" in Python and "2" in JavaScript, and a reason
+    # code that differs between the two doors is a parity break dressed up as a diagnostic.
+    spelling = kind.strip().lower() if isinstance(kind, str) else "not_a_string"
+    if spelling not in PERCENTAGE_DISCOUNT_TYPES:
+        return None, [f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_DISCOUNT_SITE}:{spelling}"]
+    if depth < 0.0 or depth > 100.0:
+        return None, [f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_DISCOUNT_SITE}:depth_out_of_range"]
+    return depth, []
+
+
+def _carried_list_price(bid: Any, offer: Any) -> tuple[float | None, list[str]]:
+    """The list price the BID carries, from any `list_price` claim at any claim-bearing site.
+
+    The boundary holds no catalog. `get_product_fact(product_ref, "list_price")` is a real hook
+    and `list_price` is a real claim key, so a bid can state the number its own discount is a
+    percentage of — and when it does, that number is checkable evidence rather than an oracle
+    this door would have to invent.
+
+    Two claims naming two different list prices is refused rather than resolved: an `Offer`
+    names exactly one `product_ref`, so exactly one list price is coherent, and picking one of
+    them (the smaller? the first?) would let a bid choose which wall it is measured against by
+    adding a claim.
+    """
+    values: list[float] = []
+    unreadable = False
+
+    for claims in (_get(bid, "claims"), _get(offer, "commitments")):
+        if claims is None or isinstance(claims, (str, bytes)) or not isinstance(claims, Sequence):
+            continue
+        try:
+            walk = list(claims)
+        except Exception:  # noqa: BLE001 - handled as `schema_invalid` by the provenance walk
+            continue
+        for claim in walk:
+            key = _get(claim, "key")
+            if not isinstance(key, str) or key.strip() != LIST_PRICE_CLAIM_KEY:
+                continue
+            listed = _finite_number(_get(claim, "value"))
+            if listed is None or listed < 0.0:
+                # A claim that says "here is the list price" and then does not state a number is
+                # not an absent list price; it is an unreadable one, and reading past it would
+                # let a bid disable this wall by making its own evidence illegible.
+                unreadable = True
+                continue
+            values.append(listed)
+
+    if unreadable:
+        return None, [
+            f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_UNIT_PRICE_SITE}:unreadable_list_price"
+        ]
+    distinct = sorted(set(values))
+    if len(distinct) > 1:
+        return None, [f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_UNIT_PRICE_SITE}:ambiguous_list_price"]
+    if not distinct:
+        return None, []
+    return distinct[0], []
+
+
+def _price_reasons(bid: Any, offer: Any) -> list[str]:
+    """Reconcile the price the offer STATES against the depth it DECLARES (T-177).
+
+    A depth is a description of a price, and until this walk existed nothing on the validating
+    side made the description true. `prod-cap` lists at 100.00 with a 20% cap, so an honest 20%
+    grant makes the honest price 80.00 — and 15.00 was admitted here with `ok=True, reasons=[]`
+    while carrying a genuine hook-minted 20% grant, because the only wall comparing what a bid
+    *charges* with what it *declares* lived in `store-agent/hooks/provenance.py`. That is the
+    EMITTING side: it protects bids our own runtime produced and nothing else, and a Tier-2
+    store not running our runtime walked straight past it. This is the same arithmetic on the
+    door the exchange actually runs.
+
+    **The boundary holds no hook ledger, no envelope and no catalog, and does not pretend to.**
+    It reconciles only what the bid itself asserts, on two independent relations:
+
+    * `unit_price` against the list price the bid CARRIES (`_carried_list_price`) —
+      ``unit_price >= list_price * (100 - declared_pct) / 100``, written in the same
+      ``(100 - pct) / 100`` form the store-agent's grant path uses so the wall that grants and
+      the wall that checks cannot round differently and call the difference fraud.
+    * `total_price` against the offer's own `unit_price` —
+      ``total_price >= unit_price * (100 - declared_pct) / 100``. This one needs no catalog at
+      all and is **quantity-safe**: `Offer` carries no quantity, but any quantity is at least
+      one, so a total can only ever be LARGER than one discounted unit. The bound therefore
+      holds whichever way `total_price` is read, which is why it can be enforced while the
+      exact quantity semantics are still undecided. Applied only when a NON-ZERO depth is
+      declared: at zero it degenerates into "a total is never under a unit price", which is a
+      claim about quantity rather than about a discount and is not this wall's subject.
+
+    Both are ONE-SIDED. A price *above* what the depth prices out at takes less off than was
+    declared; there is nothing there for a wall about authorization to refuse, and refusing it
+    would turn every rounding-up into an outage.
+
+    **What this cannot do, said plainly.** When the bid carries no `list_price` claim, there is
+    no number for the declared depth to be a percentage of and the first relation ABSTAINS — it
+    reports nothing rather than guessing at a catalog it cannot read. That abstention is
+    deliberate and it is a real gap: an external store that simply omits its list price is
+    measured only by the second relation. Closing it needs a list price the exchange supplies
+    from its own roster, which is a signature change and a different ticket; refusing every
+    discounted offer that omits the claim would instead refuse most honest bids, which is not
+    fail-closed, it is closed.
+    """
+    record = _record(offer)
+    if record is None:
+        return []
+
+    reasons: list[str] = []
+    depth, depth_reasons = _declared_depth(record)
+    reasons.extend(depth_reasons)
+
+    unit_price = _finite_number(_get(record, "unit_price"))
+    total_price = _finite_number(_get(record, "total_price"))
+    if unit_price is None:
+        reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_UNIT_PRICE_SITE}:not_a_number")
+    elif unit_price < 0.0:
+        reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_UNIT_PRICE_SITE}:negative")
+    if total_price is None:
+        reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_TOTAL_PRICE_SITE}:not_a_number")
+    elif total_price < 0.0:
+        reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_TOTAL_PRICE_SITE}:negative")
+
+    if depth is None or unit_price is None or unit_price < 0.0:
+        # Nothing arithmetic left to say: the numbers the relations are built out of are already
+        # refused above, and restating them as an inequality would report one bad number twice.
+        return reasons
+
+    listed, list_reasons = _carried_list_price(bid, record)
+    reasons.extend(list_reasons)
+    if listed is not None and unit_price + PRICE_RECONCILIATION_TOLERANCE < (
+        listed * (100.0 - depth) / 100.0
+    ):
+        reasons.append(f"{REASON_PRICE_UNDER_DECLARED_DEPTH}:{OFFER_UNIT_PRICE_SITE}")
+
+    # `depth > 0` only. At zero there is no declared depth to make true, and `total >= unit`
+    # would no longer be a statement about a discount — it would be an assertion that a total is
+    # never under a unit price, which conflates quantity with discount and is not this wall's
+    # subject. The list-price relation above still applies at zero, because a price under LIST
+    # with no declared discount is a discount that entered the bid through no hook at all.
+    if depth > 0.0 and total_price is not None and total_price >= 0.0:
+        if total_price + PRICE_RECONCILIATION_TOLERANCE < unit_price * (100.0 - depth) / 100.0:
+            reasons.append(f"{REASON_PRICE_UNDER_DECLARED_DEPTH}:{OFFER_TOTAL_PRICE_SITE}")
+
+    return reasons
+
+
 def _expiry_reasons(offer: Any, now: datetime) -> list[str]:
     if offer is None:
         return [REASON_OFFER_EXPIRY_MISSING]
@@ -295,12 +582,19 @@ def _eligibility_reasons(store_id: Any, trust_snapshot: Any) -> list[str]:
         # letting the lookup raise would turn a rejectable bid into a crash at the public
         # boundary. It is not a store we know about, so it is denied like any other unknown one.
         return [f"{REASON_TRUST_SNAPSHOT_UNAVAILABLE}:{store_id!r}"]
-    if row is None:
+    # A row that is not an OBJECT is not a row. `getattr(1, "blacklisted", False)` is `False`,
+    # so `{"store-1": 1}` — a snapshot mangled in transit, or half-decoded — read as "present and
+    # not blacklisted" and ADMITTED the store, on the one check R12 exists to make fail closed.
+    # `readRecord` in the TypeScript peer has always refused these, so this was also the widest
+    # remaining ok-divergence between the two doors: five row shapes, both paths.
+    if _record(row) is None:
         return [f"{REASON_TRUST_SNAPSHOT_UNAVAILABLE}:{store_id}"]
     # Truthy, not `is True`: a snapshot row that spells the flag `1` or `"yes"` is still a
-    # blacklisted store, and R12 says the fail-closed direction is the one to take on doubt. The
-    # TypeScript peer reads it the same way, for the same reason.
-    if bool(_get(row, "blacklisted", False)):
+    # blacklisted store, and R12 says the fail-closed direction is the one to take on doubt.
+    # JAVASCRIPT's truthiness specifically — see `_js_truthy`. Python's own would admit
+    # `{"blacklisted": []}` that the TypeScript door refuses, and a seller who can shape the
+    # snapshot row would simply submit at whichever door says yes.
+    if _js_truthy(_get(row, "blacklisted", False)):
         return [f"{REASON_STORE_BLACKLISTED}:{store_id}"]
     return []
 
@@ -398,11 +692,17 @@ def validate_bid(
     reasons.extend(claim_reasons)
     reasons.extend(_offer_claim_reasons(offer, path))
 
-    # 3. Offer expiry and 4. seller eligibility — path-insensitive.
+    # 3. The PRICE the offer states, against the depth it declares. Path-insensitive: arithmetic
+    #    does not care who is speaking. A genuine hook-minted 20% grant used to license any price
+    #    at all here, because the only wall comparing what a bid charges with what it declares
+    #    lived on the emitting side, where a store not running our runtime never meets it.
+    reasons.extend(_price_reasons(bid, offer))
+
+    # 4. Offer expiry and 5. seller eligibility — path-insensitive.
     reasons.extend(_expiry_reasons(offer, evaluated_at))
     reasons.extend(_eligibility_reasons(_get(bid, "store_id"), trust_snapshot))
 
-    # 5. D52's signing envelope, when the caller is the external door rather than a component
+    # 6. D52's signing envelope, when the caller is the external door rather than a component
     #    judging an already-extracted `Bid`.
     if require_signing_envelope:
         reasons.extend(_signing_envelope_reasons(bid))
@@ -445,9 +745,14 @@ __all__ = [
     "EXTERNAL_PATH",
     "HOOK_PROVENANCE_SOURCES",
     "HOSTED_PATH",
+    "LIST_PRICE_CLAIM_KEY",
     "NON_HOOK_PROVENANCE_SOURCES",
     "OFFER_COMMITMENTS_SITE",
     "OFFER_DISCOUNT_SITE",
+    "OFFER_TOTAL_PRICE_SITE",
+    "OFFER_UNIT_PRICE_SITE",
+    "PERCENTAGE_DISCOUNT_TYPES",
+    "PRICE_RECONCILIATION_TOLERANCE",
     "REASON_CLAIM_PROVENANCE_EMPTY_SOURCE",
     "REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE",
     "REASON_CLAIM_WITHOUT_PROVENANCE",
@@ -455,6 +760,8 @@ __all__ = [
     "REASON_OFFER_EXPIRED",
     "REASON_OFFER_EXPIRY_MISSING",
     "REASON_OFFER_EXPIRY_UNPARSEABLE",
+    "REASON_PRICE_UNDER_DECLARED_DEPTH",
+    "REASON_PRICE_UNRECONCILABLE",
     "REASON_SCHEMA_INVALID",
     "REASON_SIGNATURE_MISSING",
     "REASON_SIGNING_ENVELOPE_INCOMPLETE",

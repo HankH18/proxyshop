@@ -7,6 +7,8 @@ rejection assertion in this file and be worthless, so each one is paired.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from packages.contracts import (
@@ -883,3 +885,482 @@ def test_the_offer_shapes_that_are_legitimately_quiet_still_admit(path: str) -> 
     ):
         result = check(make_bid(offer=offer), path)
         assert result.ok is True, (offer, path, list(result.reasons))
+
+
+# ---------------------------------------------------------------------------------------------
+# T-177 — the price wall, on the door the exchange actually runs.
+#
+# The wall reconciling a bid's stated price against its declared depth was built on the EMITTING
+# side (`store-agent/hooks/provenance.py`). Measured through the real door on the clean tree:
+#
+#     hosted bid, genuine hook-minted 20% grant, declares 20%, charges 15.00 on a 100.00 list
+#     validate_bid(bid, path="hosted")  ->  ok=True, reasons=[]
+#
+# So the wall protected only bids our own runtime produced, and a Tier-2 store not running our
+# runtime walked past it. These pin the same arithmetic on the validating side.
+# ---------------------------------------------------------------------------------------------
+
+
+def priced_offer(unit: Any, total: Any, depth: Any = 20.0, kind: str = "percentage") -> dict:
+    """An offer that states a price and declares a depth, hook-provenanced throughout."""
+    return make_offer(
+        unit_price=unit,
+        total_price=total,
+        discount={"type": kind, "value": depth, "provenance": dict(HOOK_PROVENANCE)},
+    )
+
+
+def list_price_claim(value: Any = 100.0) -> dict:
+    """The list price a bid CARRIES — `get_product_fact(product_ref, "list_price")` mints it."""
+    return make_claim("list_price", value, dict(HOOK_PROVENANCE))
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_bid_may_not_charge_more_off_than_the_depth_it_declares(path: str) -> None:
+    """The T-177 reproduction, verbatim, through `validate_bid`.
+
+    Every piece of paperwork on this bid is genuine: a hook-minted 20% authorization, a
+    hook-minted list price of 100.00, a hook-provenanced 20% discount on the offer. It charges
+    15.00. An authorized 20% prices out at 80.00, so 65 currency units of unauthorised discount
+    sat INSIDE every wall this boundary had — the depth is a description of a price, and nothing
+    here had ever made the description true.
+    """
+    bid = make_bid(
+        claims=[list_price_claim(100.0), make_claim("authorized_discount_pct", 20.0)],
+        offer=priced_offer(15.0, 15.0),
+    )
+    result = check(bid, path)
+    assert result.ok is False, "a 20% grant licensed an 85% discount"
+    assert "price_under_declared_depth:offer.unit_price" in list(result.reasons), result.reasons
+
+    # Control: the SAME bid at the price that depth actually prices out at is admitted. The
+    # refusal is about the arithmetic, not about carrying a list price or a discount at all.
+    honest = make_bid(
+        claims=[list_price_claim(100.0), make_claim("authorized_discount_pct", 20.0)],
+        offer=priced_offer(80.0, 80.0),
+    )
+    assert check(honest, path).ok is True, check(honest, path).reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_list_price_is_read_from_offer_commitments_too(path: str) -> None:
+    """The relocation move, applied to the evidence instead of to the claim: move the list price
+    out of `bid.claims` and the wall must still find it. `offer.commitments` is `list[Claim]` on
+    the object that carries the price, and a walk that read one site would be a naming
+    convention again."""
+    bid = make_bid(
+        claims=[make_claim()],
+        offer=make_offer(
+            unit_price=15.0,
+            total_price=15.0,
+            commitments=[list_price_claim(100.0)],
+            discount={"type": "percentage", "value": 20.0, "provenance": dict(HOOK_PROVENANCE)},
+        ),
+    )
+    result = check(bid, path)
+    assert result.ok is False, "relocating the list price into the offer defeated the price wall"
+    assert "price_under_declared_depth:offer.unit_price" in list(result.reasons)
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_total_may_not_undercut_the_depth_the_offer_declares(path: str) -> None:
+    """The relation that needs NO catalog at all, and the one that still holds while the quantity
+    semantics of `total_price` are undecided: `Offer` carries no quantity, but every quantity is
+    at least one, so a total can only ever be LARGER than one discounted unit. A 20% discount off
+    a stated 100.00 cannot produce a total of 15.00 under any reading of the field."""
+    result = check(make_bid(offer=priced_offer(100.0, 15.0)), path)
+    assert result.ok is False
+    assert "price_under_declared_depth:offer.total_price" in list(result.reasons), result.reasons
+
+    # Control: the honest total for that depth, and a total for a LARGER quantity, both admit.
+    for total in (80.0, 240.0):
+        assert check(make_bid(offer=priced_offer(100.0, total)), path).ok is True
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_price_wall_is_one_sided(path: str) -> None:
+    """A price ABOVE what the depth prices out at takes less off than was declared. There is
+    nothing there for a wall about authorization to refuse, and refusing it would turn every
+    rounding-up into an outage."""
+    generous = make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(95.0, 95.0))
+    assert check(generous, path).ok is True, check(generous, path).reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_rounded_price_a_fraction_of_a_cent_under_the_exact_one_still_admits(path: str) -> None:
+    """19.99 less an honest 15% is 16.9915 and no bid states that: money is quoted to the cent,
+    so the honest rounded price sits under the exact one. A wall tightened to the float would
+    refuse almost every real product."""
+    bid = make_bid(claims=[list_price_claim(19.99)], offer=priced_offer(16.99, 16.99, depth=15.0))
+    assert check(bid, path).ok is True, check(bid, path).reasons
+
+    # ...and one cent of slack is all there is: a whole currency unit under still refuses.
+    over = make_bid(claims=[list_price_claim(19.99)], offer=priced_offer(15.99, 15.99, depth=15.0))
+    assert check(over, path).ok is False
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_depth_the_boundary_cannot_read_is_refused_rather_than_skipped(path: str) -> None:
+    """A depth in a form this door cannot reconcile is a refusal, not an abstention. An
+    amount-off cannot be compared with a stated price without re-deriving what the offer means,
+    and "the wall does not apply to me" is exactly the shape an attacker reaches for next."""
+    for offer, needle in (
+        (priced_offer(15.0, 15.0, depth=10.0, kind="amount"), "offer.discount:amount"),
+        (priced_offer(15.0, 15.0, depth=150.0), "offer.discount:depth_out_of_range"),
+        (priced_offer(15.0, 15.0, depth=-20.0), "offer.discount:depth_out_of_range"),
+        (priced_offer(15.0, 15.0, depth="20"), "offer.discount:depth_not_a_number"),
+        (priced_offer(15.0, 15.0, depth=True), "offer.discount:depth_not_a_number"),
+    ):
+        result = check(make_bid(claims=[list_price_claim(100.0)], offer=offer), path)
+        assert result.ok is False, (offer, path)
+        assert any(needle in reason for reason in result.reasons), (needle, list(result.reasons))
+
+    # Control: the same offer with a depth the door CAN read, priced honestly, is admitted.
+    ok = check(make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(80.0, 80.0)), path)
+    assert ok.ok is True, ok.reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_zero_discount_needs_no_reconciliation_but_still_answers_to_the_list_price(
+    path: str,
+) -> None:
+    """A discount that takes nothing off prices out at the price itself — so a bid declaring 0%
+    and charging under its own carried list price is a discount that entered through no hook at
+    all, and is refused."""
+    under = make_bid(
+        claims=[list_price_claim(100.0)],
+        offer=priced_offer(60.0, 60.0, depth=0.0),
+    )
+    assert check(under, path).ok is False
+    assert "price_under_declared_depth:offer.unit_price" in list(check(under, path).reasons)
+
+    at_list = make_bid(
+        claims=[list_price_claim(100.0)], offer=priced_offer(100.0, 100.0, depth=0.0)
+    )
+    assert check(at_list, path).ok is True, check(at_list, path).reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_illegible_or_contradictory_list_price_is_refused_not_read_past(path: str) -> None:
+    """A bid does not get to disable the wall by making its own evidence unreadable, and it does
+    not get to pick which wall it is measured against by carrying two list prices."""
+    unreadable = make_bid(claims=[list_price_claim("n/a")], offer=priced_offer(15.0, 15.0))
+    result = check(unreadable, path)
+    assert result.ok is False
+    assert any("unreadable_list_price" in reason for reason in result.reasons), result.reasons
+
+    ambiguous = make_bid(
+        claims=[list_price_claim(100.0), list_price_claim(120.0)],
+        offer=priced_offer(80.0, 80.0),
+    )
+    result = check(ambiguous, path)
+    assert result.ok is False
+    assert any("ambiguous_list_price" in reason for reason in result.reasons), result.reasons
+
+    # Control: the same list price stated twice is not a contradiction.
+    twice = make_bid(
+        claims=[list_price_claim(100.0), list_price_claim(100.0)],
+        offer=priced_offer(80.0, 80.0),
+    )
+    assert check(twice, path).ok is True, check(twice, path).reasons
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price(path: str) -> None:
+    """THE DOCUMENTED GAP, pinned so it cannot be mistaken for coverage.
+
+    The boundary holds no catalog. A bid that declares a depth and carries no `list_price` claim
+    gives the first relation no number to be a percentage OF, and it reports nothing rather than
+    inventing a lookup it cannot do. Such a bid is measured by the `total_price` relation alone,
+    which is why the offer below — 20% off, charging 15.00, internally consistent — is admitted.
+
+    Closing this needs a list price the EXCHANGE supplies from its own roster; that is a
+    signature change and a different ticket. Refusing every discounted offer that omits the
+    claim would not be fail-closed, it would be closed: `make_offer()` itself declares 10% and
+    carries no list price, as does every honest bid in this suite.
+    """
+    silent = make_bid(offer=priced_offer(15.0, 15.0))
+    result = check(silent, path)
+    assert result.ok is True, result.reasons
+    assert not any(reason.startswith("price_") for reason in result.reasons)
+
+    # And the moment the bid DOES say what it is discounting from, the same offer refuses.
+    assert (
+        check(make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(15.0, 15.0)), path).ok
+        is False
+    )
+
+
+# --- the cross-language price table, mirrored in `boundary.test.ts::T-177 price parity` -------
+
+PRICE_PARITY_TABLE: dict[str, dict] = {
+    "charges_under_the_carried_list_price": {
+        "ok": False,
+        "reasons": ["price_under_declared_depth:offer.unit_price"],
+    },
+    "total_under_the_stated_unit_price": {
+        "ok": False,
+        "reasons": ["price_under_declared_depth:offer.total_price"],
+    },
+    "amount_discount": {
+        "ok": False,
+        "reasons": ["price_unreconcilable:offer.discount:amount"],
+    },
+    "depth_out_of_range": {
+        "ok": False,
+        "reasons": ["price_unreconcilable:offer.discount:depth_out_of_range"],
+    },
+    "ambiguous_list_price": {
+        "ok": False,
+        "reasons": ["price_unreconcilable:offer.unit_price:ambiguous_list_price"],
+    },
+    "unreadable_list_price": {
+        "ok": False,
+        "reasons": ["price_unreconcilable:offer.unit_price:unreadable_list_price"],
+    },
+    "honest_price": {"ok": True, "reasons": []},
+    # The abstention, pinned on BOTH doors: they must be blind to the same thing, or the seller
+    # picks the blinder one.
+    "no_list_price_carried": {"ok": True, "reasons": []},
+}
+
+
+def price_parity_bid(name: str) -> dict:
+    """The payload for one price-parity case. Mirrored by `pricedParityBid` in `boundary.test.ts`."""
+    if name == "charges_under_the_carried_list_price":
+        return make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(15.0, 15.0))
+    if name == "total_under_the_stated_unit_price":
+        return make_bid(offer=priced_offer(100.0, 15.0))
+    if name == "amount_discount":
+        return make_bid(offer=priced_offer(49.0, 44.1, depth=10.0, kind="amount"))
+    if name == "depth_out_of_range":
+        return make_bid(offer=priced_offer(49.0, 44.1, depth=150.0))
+    if name == "ambiguous_list_price":
+        return make_bid(
+            claims=[list_price_claim(100.0), list_price_claim(120.0)],
+            offer=priced_offer(80.0, 80.0),
+        )
+    if name == "unreadable_list_price":
+        return make_bid(claims=[list_price_claim("n/a")], offer=priced_offer(80.0, 80.0))
+    if name == "honest_price":
+        return make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(80.0, 80.0))
+    if name == "no_list_price_carried":
+        return make_bid(offer=priced_offer(15.0, 15.0))
+    raise AssertionError(f"unknown price parity case {name!r}")
+
+
+@pytest.mark.parametrize("case", sorted(PRICE_PARITY_TABLE))
+def test_the_price_verdicts_match_the_typescript_peer(case: str) -> None:
+    expected = PRICE_PARITY_TABLE[case]
+    result = check(price_parity_bid(case), HOSTED_PATH)
+    priced = [r for r in result.reasons if not r.startswith("schema_invalid")]
+    assert priced == expected["reasons"], (case, list(result.reasons))
+    assert result.ok is expected["ok"], (case, list(result.reasons))
+
+
+def test_the_price_parity_table_is_not_quietly_empty() -> None:
+    """Guards the parametrization: an emptied table registers zero cases, which reads as green."""
+    from contracts import boundary
+
+    assert len(PRICE_PARITY_TABLE) == 8
+    assert boundary.OFFER_UNIT_PRICE_SITE == "offer.unit_price"
+    assert boundary.OFFER_TOTAL_PRICE_SITE == "offer.total_price"
+    assert boundary.REASON_PRICE_UNDER_DECLARED_DEPTH == "price_under_declared_depth"
+    assert boundary.REASON_PRICE_UNRECONCILABLE == "price_unreconcilable"
+    assert boundary.LIST_PRICE_CLAIM_KEY == "list_price"
+    assert boundary.PRICE_RECONCILIATION_TOLERANCE == 0.01
+
+
+def test_the_price_walk_survives_attribute_access_and_hostile_offers() -> None:
+    """It must work on an extracted `Bid` as well as on a wire dict, and it must never raise."""
+    from packages.contracts import Bid
+
+    model = Bid.model_validate(
+        make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(15.0, 15.0))
+    )
+    result = validate_bid(model, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW)
+    assert result.ok is False, "the price walk does not survive attribute access"
+    assert "price_under_declared_depth:offer.unit_price" in list(result.reasons)
+
+    for offer in (None, "an offer", 42, [1, 2], True, {}, {"unit_price": float("nan")}):
+        for path in BOTH_PATHS:
+            verdict = check(make_bid(offer=offer), path)
+            assert verdict.ok is False
+            assert verdict.reasons
+
+
+# ---------------------------------------------------------------------------------------------
+# T-184's Python peer, and the parity narrowings this lane made.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+@pytest.mark.parametrize("store_id", ("__proto__", "constructor", "toString", "valueOf"))
+def test_a_store_id_naming_a_prototype_member_is_an_unavailable_read(path: str, store_id) -> None:
+    """`table[key]` in JavaScript is not a lookup when the key comes off the wire — it walks the
+    prototype chain, and `store_id: "__proto__"` returned `Object.prototype`: an object with no
+    `blacklisted`, so the TypeScript door ADMITTED the bid with no trust row behind it. Python
+    never had the bug (a dict miss is a miss), so this pins the verdict the two doors must share.
+    """
+    result = check(make_bid(store_id=store_id), path)
+    assert result.ok is False, f"store_id={store_id!r} was admitted with no trust row"
+    assert any("trust_snapshot_unavailable" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_an_empty_container_blacklist_flag_denies_the_way_javascript_reads_it(path: str) -> None:
+    """A measured ok-divergence: `{"blacklisted": []}` was ADMITTED here (`bool([])` is False) and
+    REFUSED by the TypeScript door (`[]` is truthy), so a seller who can shape the snapshot row
+    picked whichever door said yes. JavaScript's truthiness is the fail-closed one of the two,
+    so both doors now use it."""
+    for flag in ([], {}, (), [0], "0", " "):
+        snapshot = {"store-1": {"store_id": "store-1", "score": 0.6, "blacklisted": flag}}
+        result = check(make_bid(), path, snapshot=snapshot)
+        assert result.ok is False, f"blacklisted={flag!r} was admitted"
+        assert any("store_blacklisted" in reason for reason in result.reasons)
+
+    # Control, unchanged: the falsy spellings JavaScript agrees are falsy still admit.
+    for flag in (False, 0, 0.0, "", None):
+        snapshot = {"store-1": {"store_id": "store-1", "score": 0.6, "blacklisted": flag}}
+        assert check(make_bid(), path, snapshot=snapshot).ok is True, flag
+
+
+# ---------------------------------------------------------------------------------------------
+# T-195 — the generated model may not be looser than the schema it is generated from.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_offer_commitments_may_not_be_spelled_null() -> None:
+    """`$defs/Offer/properties/commitments` is a NON-nullable array with `default: []`, so ajv
+    refuses `commitments: null` — but datamodel-code-generator widened every defaulted field to
+    `| None`, and pydantic accepted it. Two halves of one contract disagreeing about a shape is
+    bad on its own; worse, that nullable spelling was the ONE shape of `offer.commitments` the
+    claim walk skipped, on the field the walk exists to cover.
+    """
+    import pydantic
+
+    from packages.contracts import Offer
+
+    with pytest.raises(pydantic.ValidationError):
+        Offer.model_validate(make_offer(commitments=None))
+
+    for path in BOTH_PATHS:
+        result = check(make_bid(offer=make_offer(commitments=None)), path)
+        assert result.ok is False, "commitments: null is admitted here and refused by ajv"
+        assert any(reason.startswith("schema_invalid") for reason in result.reasons)
+
+    # Controls: the two spellings the schema DOES allow still admit.
+    for offer in (
+        make_offer(commitments=[]),
+        {k: v for k, v in make_offer().items() if k != "commitments"},
+    ):
+        assert check(make_bid(offer=offer), HOSTED_PATH).ok is True
+
+
+def test_the_schema_is_the_thing_the_generated_model_was_made_to_match() -> None:
+    """Pins the DIRECTION of the T-195 fix: the schema was already right and the generator was
+    wrong, so a future "fix" that makes the schema nullable to match a regenerated model would
+    be reopening the hole from the other end."""
+    import json
+    import pathlib
+
+    from packages.contracts import Offer
+
+    schema = json.loads(
+        (
+            pathlib.Path(__file__).resolve().parent.parent / "schemas" / "protocol.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    commitments = schema["$defs"]["Offer"]["properties"]["commitments"]
+    assert commitments["type"] == "array", commitments
+    assert commitments.get("default") == []
+
+    assert Offer.model_validate(make_offer(commitments=[])).commitments == []
+
+
+# ---------------------------------------------------------------------------------------------
+# Found by this lane's own adversarial pass, after the price wall went in.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_one_shot_iterator_of_claims_is_not_a_list_of_claims(path: str) -> None:
+    """A generator in `claims` was walked ONCE and then gone.
+
+    `model_validate` drains it first, so by the time the provenance walk reached it there was
+    nothing left to judge — every claim in the bid went unexamined and the bid was admitted. The
+    price wall made it worse by adding a SECOND reader of the same field: whichever walk ran
+    second saw an empty list. The TypeScript peer asks `Array.isArray` and calls anything else
+    `schema_invalid`, so this was also a live ok-divergence. Both doors now say the same thing.
+    """
+    smuggled = make_bid()
+    smuggled["claims"] = iter([make_claim("spf", 30, dict(ASSERTED_PROVENANCE))])
+    result = check(smuggled, path)
+    assert result.ok is False, "a generator of claims was admitted with its claims unread"
+    assert any(reason.startswith("schema_invalid") for reason in result.reasons)
+
+    for shape in ({"0": make_claim()}, {make_claim()["key"]}, iter([])):
+        hidden = make_bid()
+        hidden["claims"] = shape
+        assert check(hidden, path).ok is False, shape
+
+    # ...and the same at the offer's own claim-bearing site.
+    for shape in (iter([make_claim()]), {"0": make_claim()}, frozenset({"free_returns"})):
+        assert check(make_bid(offer=make_offer(commitments=shape)), path).ok is False, shape
+
+    # Control: a real list, and a tuple of the same claims, are still walked and admitted.
+    for shape in ([make_claim()], (make_claim(),)):
+        assert check(make_bid(claims=shape), path).ok is True
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_boundary_refuses_rather_than_raising_on_an_object_that_fights_back(path: str) -> None:
+    """ "Reject" and "500" must not be the same observable — including when the READ itself is
+    hostile. An object whose `__getattr__` raises, or whose `__iter__` does, escaped as a
+    RuntimeError out of the public boundary."""
+
+    class Exploding:
+        def __getattr__(self, name: str) -> Any:
+            raise RuntimeError("boom")
+
+    class UnwalkableClaims(list):
+        def __iter__(self) -> Any:
+            raise RuntimeError("boom-iter")
+
+    hostile: list[Any] = [
+        Exploding(),
+        make_bid(offer=Exploding()),
+        {**make_bid(), "claims": UnwalkableClaims()},
+        make_bid(offer=make_offer(commitments=UnwalkableClaims())),
+        iter([1, 2, 3]),
+    ]
+    for payload in hostile:
+        result = check(payload, path)
+        assert result.ok is False
+        assert result.reasons, "a refusal must still say why"
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_trust_snapshot_row_that_is_not_an_object_is_an_unavailable_read(path: str) -> None:
+    """R12's widest remaining hole, and the widest measured ok-divergence between the two doors.
+
+    A row that is not an object is not a row: `getattr(1, "blacklisted", False)` answers `False`,
+    so `{"store-1": 1}` — a snapshot mangled in transit, or half-decoded — read as "present and
+    not blacklisted" and ADMITTED the store, on the one check R12 exists to make fail closed.
+    The TypeScript peer's `readRecord` refused every one of these all along; a seller who could
+    shape the snapshot row simply submitted at the door that said yes.
+
+    Note this is the ROW, not the snapshot. A non-mapping SNAPSHOT was always refused, which is
+    what made the row case easy to mistake for covered.
+    """
+    for row in (1, "x", [], True, 3.5, 0, "", 0.0, ["blacklisted"], None):
+        snapshot = {"store-1": row}
+        result = check(make_bid(), path, snapshot=snapshot)
+        assert result.ok is False, f"a trust row of {row!r} admitted the store"
+        assert any("trust_snapshot_unavailable" in reason for reason in result.reasons)
+
+    # Control: a real row still admits, and a real blacklisted row still denies for its own
+    # reason rather than being swept up as unavailable.
+    assert check(make_bid(), path, snapshot=make_snapshot_table()).ok is True
+    denied = check(make_bid(store_id="store-bad"), path)
+    assert any("store_blacklisted" in reason for reason in denied.reasons)
