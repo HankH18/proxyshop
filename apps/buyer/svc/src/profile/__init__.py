@@ -1217,7 +1217,8 @@ def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
     account-wide (T-139): the fixed vocabulary the bucket's own coarsener emits
     (:data:`_BUCKET_VOCABULARY`), and — in ``category_affinity`` only — the account's own
     category slugs that earn it (:func:`_exempt_category_slugs`). Everything else is matched
-    in full, substring and all.
+    in full, substring and all, **and in slug space as well as verbatim** — see the comment
+    on ``slugged_fragments`` below for the phone number that escaped when it was not.
     """
     data = _serialise(profile)
     pseudonym: Any = None
@@ -1228,6 +1229,18 @@ def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
 
     fragments = _identity_values(account)
     exempt_slugs = _exempt_category_slugs(account)
+    # A fragment and the bucket value it has to be found inside are punctuated differently.
+    # `_slug` collapses every run of non-alphanumerics to "-", so the phone the account holds
+    # as "+1-555-0100" can only ever reach a bucket as `1-555-0100`, and a verbatim search
+    # never finds it — while the postal code in the same gift note is found, purely because
+    # a postal code carries no punctuation. So every fragment is searched for twice: as
+    # written, and in slug space. That is the space `_exempt_category_slugs` already counts
+    # fragments in (its rules 4 and 5); this is the same comparison on the matching side.
+    slugged_fragments: dict[str, str] = {}
+    for value in fragments:
+        slugged_value = _slug(value)
+        if len(slugged_value) >= _MIN_LEAKABLE and slugged_value != value:
+            slugged_fragments[value] = slugged_value
     # Each bucket value is searched on its own. Joining them first made a fragment able to
     # match across the seam between two unrelated values, which is a leak report about a
     # string no bucket ever held.
@@ -1240,6 +1253,8 @@ def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
             continue
         haystack = text.casefold()
         leaked |= {value for value in fragments if value in haystack}
+        slugged_text = _slug(text)
+        leaked |= {value for value, slugged in slugged_fragments.items() if slugged in slugged_text}
     if isinstance(pseudonym, str):
         name = pseudonym.casefold()
         leaked |= {
