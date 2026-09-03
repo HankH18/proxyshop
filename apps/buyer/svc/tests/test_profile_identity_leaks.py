@@ -580,3 +580,54 @@ def test_the_park_lane_buyer_still_builds_beside_ordinary_merchandise() -> None:
     built = build_profile(record, PSEUDONYM).model_dump()
     assert built["buckets"]["category_affinity"] == ["camera-lenses", "park-gear", "trail-gear"]
     assert identity_leaks(built, record) == []
+
+
+def test_a_fragment_the_slug_punctuates_differently_is_still_found() -> None:
+    """The backstop matched fragments verbatim, and a slug cannot spell them verbatim.
+
+    ``_slug`` collapses every run of non-alphanumerics to ``-``, so the phone number the
+    account holds as ``"+1-555-0100"`` can only ever reach a bucket as ``1-555-0100``. The
+    haystack search was ``value in text.casefold()``, the ``+`` was never there to be found,
+    and the buyer's phone number rode out of a gift note with ``identity_leaks`` reporting
+    clean — while the postal code in the *same* note was reported, because a postal code
+    happens to carry no punctuation::
+
+        category "gift +1-555-0100 gear" -> "gift-1-555-0100-gear"   leaks == []
+        category "gift 97205 gear"       -> "gift-97205-gear"        leaks == ["97205"]
+
+    Nothing about that difference is a policy anybody chose. ``_exempt_category_slugs``
+    already counts fragments in slug space (its rules 4 and 5); this is the same comparison
+    on the matching side.
+
+    The one residue this does *not* close, recorded so it is not mistaken for covered: a
+    number regrouped rather than repunctuated — ``"gift 5550100 gear"`` — is a different
+    normalisation question (which digits of a phone number are the number) and is left open.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks
+
+    account = {
+        "email": "b@example.com",
+        "phone": "+1-555-0100",
+        "postal_code": "97205",
+        "orders": [
+            {"order_ref": f"o{n}", "total": 30.0, "category": "gift +1-555-0100 gear"}
+            for n in range(3)
+        ],
+    }
+    with pytest.raises(IdentityLeak, match="R5") as caught:
+        build_profile(account, PSEUDONYM)
+    assert caught.value.account_keys == ("phone",)
+
+    # The contrast that made it visible: same note, same account, no punctuation.
+    postal = dict(account)
+    postal["orders"] = [
+        {"order_ref": f"o{n}", "total": 30.0, "category": "gift 97205 gear"} for n in range(3)
+    ]
+    with pytest.raises(IdentityLeak, match="R5"):
+        build_profile(postal, PSEUDONYM)
+
+    # And the exemptions still hold in slug space rather than being widened by this.
+    park = dict(PARK_LANE)
+    assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "park-gear"}}, park) == [
+        "park"
+    ]
