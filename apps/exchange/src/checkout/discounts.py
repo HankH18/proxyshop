@@ -5,7 +5,7 @@ Two units, both correct, one conversion (T-183)
 
 ``contracts.Discount.value`` is in **percentage points**: ``20.0`` means 20% off. That is the
 protocol's unit throughout, and it is not an accident of one field —
-``StorePolicyEnvelope.max_discount_pct`` is published with ``minimum: 0, maximum: 100``,
+the policy `Envelope`'s ``max_discount_pct`` is published with ``minimum: 0, maximum: 100``,
 ``packages/store-agent`` prices a grant as ``list_price * (100 - pct) / 100``, and
 ``apps/trust`` reconciles a promise against ``discountApplications[].value``, which Shopify
 reports in points as well.
@@ -78,7 +78,7 @@ FIXED_AMOUNT_DISCOUNT_TYPES: frozenset[str] = frozenset({"fixed_amount", "fixed"
 #: see which direction it goes without deriving it from a division.
 PERCENT_PER_UNIT_FRACTION = 100.0
 
-#: The protocol's own ceiling: `StorePolicyEnvelope.max_discount_pct` is `maximum: 100`.
+#: The protocol's own ceiling: the policy `Envelope`'s `max_discount_pct` is `maximum: 100`.
 MAX_DISCOUNT_PERCENT = 100.0
 
 

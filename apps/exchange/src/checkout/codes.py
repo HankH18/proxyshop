@@ -88,22 +88,40 @@ def expiry_epoch(expires_at: Any) -> float:
     The fix is to read it the way the boundary already reads it rather than to invent a
     second parser: two parsers eventually disagree about some instant, and the instant they
     disagree about is one where an offer validates at the door and dies at the till.
-    ``float()`` is still tried first, so every epoch spelling that worked before still works
-    — this widens what is accepted and narrows nothing.
+
+    **The order below is the whole of that guarantee, and the obvious order is wrong.** Trying
+    ``float()`` first and falling back to :func:`parse_timestamp` reads ``"20260903"`` — ISO
+    8601 basic format, which ``datetime.fromisoformat`` accepts and the boundary therefore
+    admits as 2026-09-03 — as the epoch second 20260903, i.e. **23 August 1970**. The bid
+    passes ``validate_bid`` with a future expiry and mints a code that expired fifty-six years
+    ago. So for anything that is not already a number, the boundary's parser goes first and
+    wins; ``float()`` is only the fallback, which keeps numeric strings (``"1700100000"``,
+    which ``parse_timestamp`` refuses) reading exactly as they did before.
+
+    Real numbers skip both and go through ``float()`` unchanged, so no epoch spelling that
+    worked before changes value — including the ones ``parse_timestamp`` would refuse
+    outright, such as an epoch too large for :meth:`datetime.fromtimestamp`.
 
     Raises:
         UnusableOffer: the value is neither a number nor an instant anything can read.
     """
-    try:
+    # A real number is already epoch seconds. Exact, and not routed through a datetime,
+    # whose microsecond resolution would quietly round a sub-microsecond float.
+    if isinstance(expires_at, (int, float)):
         return float(expires_at)
-    except (TypeError, ValueError):
-        pass
+
     parsed = parse_timestamp(expires_at)
-    if parsed is None:
+    if parsed is not None:
+        return parsed.timestamp()
+
+    try:
+        # Numeric strings: `parse_timestamp` refuses them, and they worked here before.
+        return float(expires_at)
+    except (TypeError, ValueError) as exc:
         raise UnusableOffer(
             f"offer expires_at {expires_at!r} is neither an epoch number nor an RFC-3339 "
             f"instant, so the code's D22 expiry cannot be computed"
-        )
+        ) from exc
     return parsed.timestamp()
 
 

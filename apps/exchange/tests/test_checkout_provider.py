@@ -861,10 +861,34 @@ def test_a_refusal_before_the_mint_carries_no_code_because_there_is_none() -> No
     assert not isinstance(raised.value, OrphanedCheckoutCode)
 
 
-def test_the_orphan_refusal_is_still_an_off_domain_refusal() -> None:
-    """`accept()` and every existing caller catch `OffDomainCheckout`; that must keep working."""
-    assert issubclass(OrphanedOffDomainCheckout, OffDomainCheckout)
-    assert issubclass(OrphanedOffDomainCheckout, OrphanedCheckoutCode)
+def test_the_orphan_refusal_is_still_caught_by_a_caller_watching_for_off_domain() -> None:
+    """`accept()` and every existing caller catch `OffDomainCheckout`; that must keep working.
+
+    Asserted by CATCHING, not by `issubclass`: the class statement and an `issubclass` of it
+    are the same fact written twice, and a caller's `except` clause is the thing that has to
+    keep working. This is the real post-mint refusal, caught the way `accept()` catches it.
+    """
+    creator = OffDomainCodeCreator()
+    caught: Exception | None = None
+    try:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=dict(FALLBACK_OFFER),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+    except OffDomainCheckout as exc:  # the clause every existing caller already has
+        caught = exc
+    assert caught is not None, "an existing `except OffDomainCheckout` no longer catches this"
+    assert isinstance(caught, ValueError), "and `accept()`'s broad catch still sees it"
+    assert isinstance(caught, OrphanedCheckoutCode), "the orphan is reachable from that clause"
 
 
 def test_the_simulated_provider_cannot_orphan_a_code() -> None:
@@ -915,6 +939,9 @@ def test_a_fixed_amount_discount_has_no_percentage_to_send() -> None:
     assert shopify_discount_percentage({"type": "fixed_amount", "value": 15.0}) is None
     assert shopify_discount_percentage(None) is None
     assert offer_discount_percentage({"product_ref": "p", "unit_price": 1.0}) is None
+    # The in-test positive control: without it, `return None` for EVERY input satisfies the
+    # three assertions above and this test passes against an empty implementation.
+    assert shopify_discount_percentage({"type": "percentage", "value": 15.0}) == 0.15
 
 
 @pytest.mark.parametrize(
@@ -1096,3 +1123,50 @@ def test_a_reply_that_raises_while_being_read_still_yields_its_code() -> None:
             )
         )
     assert raised.value.orphan.code == "PSX-HOSTILE1"
+
+
+#: ISO 8601 **basic** format — no separators. `datetime.fromisoformat` accepts it, so
+#: `contracts.parse_timestamp` does too, so `validate_bid` admits a bid carrying it. Each of
+#: these is ALSO a valid float, and reading it as one lands decades away from the instant the
+#: boundary read: 20260903 seconds after the epoch is 23 August 1970.
+BASIC_FORMAT_EXPIRIES = {
+    "20260903": "2026-09-03T00:00:00Z",
+    "19700102": "1970-01-02T00:00:00Z",
+    "20231116": "2023-11-16T00:00:00Z",
+}
+
+
+@pytest.mark.parametrize("basic", sorted(BASIC_FORMAT_EXPIRIES))
+def test_the_mint_reads_a_basic_format_expiry_as_the_boundary_reads_it(basic: str) -> None:
+    """The two-parser hazard, made concrete — and the reason `float()` is not tried first.
+
+    ``"20260903"`` is both a valid ISO 8601 basic-format date AND a valid float. The boundary
+    admits the bid on the first reading; a mint that took the second would issue a code that
+    expired in 1970 for an offer everything upstream agreed was live. There must be exactly
+    one answer, and it must be the boundary's.
+    """
+    from contracts.boundary import parse_timestamp  # noqa: PLC0415
+
+    boundary = parse_timestamp(basic)
+    assert boundary is not None, "the premise: the boundary admits this spelling"
+
+    minted = code_expiry(T_NOW, {"expires_at": basic})
+    assert minted == min(T_NOW + 48 * 60 * 60, boundary.timestamp()), (
+        "the mint did not read the instant the boundary read"
+    )
+    assert minted == code_expiry(T_NOW, {"expires_at": BASIC_FORMAT_EXPIRIES[basic]}), (
+        "the basic and extended spellings of one date must expire at the same second"
+    )
+    assert minted != float(basic), "the expiry was read as an epoch second, not as a date"
+
+
+@pytest.mark.parametrize("numeric_string", ["1700100000", "1700100000.0", " 1700100000 "])
+def test_a_numeric_string_expiry_still_reads_as_an_epoch(numeric_string: str) -> None:
+    """`parse_timestamp` refuses these, so the `float()` fallback must still be reachable.
+
+    The boundary would reject a bid spelling its expiry this way, but the port is also driven
+    directly — by `collect_bids`' fallback offers and by callers that never went through
+    `validate_bid` — and this shape worked here before T-182. It is a fallback, not a first
+    choice: see the basic-format test above for what happens when it goes first.
+    """
+    assert code_expiry(T_NOW, {"expires_at": numeric_string}) == 1_700_100_000.0
