@@ -351,7 +351,10 @@ def test_neo4j_flock_is_re_entrant_within_one_process(tmp_path: Path) -> None:
     """Two session-scoped guards in one whole-repo pytest run must not deadlock.
 
     ``fcntl.flock`` is per open file description, so the naive implementation blocked on
-    itself here and burned the full 600 s timeout — mid-run, looking exactly like a hang.
+    itself here and burned the whole ``neo4j_lock.DEFAULT_TIMEOUT`` — mid-run, looking
+    exactly like a hang. (That default was 600 s when this test was written and is 240 s
+    since T-191, which brought it under pytest's own ``--timeout``; the number is quoted
+    from the module now rather than restated here, because it moved once already.)
     """
     lock = tmp_path / "neo4j.lock"
     assert held_depth(lock) == 0
