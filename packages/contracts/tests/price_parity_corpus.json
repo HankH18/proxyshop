@@ -810,6 +810,8 @@
       "ok": false,
       "reasons": [
         "discount_over_authorized_depth:offer.discount",
+        "price_unreconcilable:offer.unit_price:not_positive",
+        "price_unreconcilable:offer.total_price:not_positive",
         "price_under_declared_depth:offer.unit_price"
       ]
     },
@@ -1074,6 +1076,247 @@
         "price_unreconcilable:offer.discount:unreadable_authorized_depth",
         "price_under_declared_depth:offer.unit_price"
       ]
+    },
+    {
+      "name": "free_item_at_a_cap_that_authorizes_everything",
+      "why": "the cap arrives on an unauthenticated request body, so `max_discount_pct: 100` is a free item every other relation in the walk calls arithmetically perfect",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 0.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:not_positive",
+        "price_unreconcilable:offer.total_price:not_positive"
+      ]
+    },
+    {
+      "name": "a_silent_zero_is_a_free_item_too",
+      "why": "the same free item with the `discount` block deleted \u2014 the spelling that used to walk past the exchange because nothing was declared to judge",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 0.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 20.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:not_positive",
+        "price_unreconcilable:offer.total_price:not_positive",
+        "price_under_declared_depth:offer.unit_price"
+      ]
+    },
+    {
+      "name": "a_zero_total_behind_a_list_price_unit",
+      "why": "a 100.00 unit with a 0.00 total is the free item wearing the other field",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 100.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 0.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 20.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.total_price:not_positive",
+        "price_under_declared_depth:offer.total_price"
+      ]
+    },
+    {
+      "name": "a_silent_undercut_past_the_authorized_cap",
+      "why": "15.00 for a 100.00 product under a 20% authorization is an 85% discount however the paperwork is spelled; an undeclared depth is measured against the cap like a declared one",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 15.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 15.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 20.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_under_declared_depth:offer.unit_price"
+      ]
+    },
+    {
+      "name": "a_silent_price_exactly_at_the_authorized_cap",
+      "why": "the paired control: 80.00 IS the 20% the roster authorizes, and a store that files no paperwork for it must still be admitted or the wall is closed rather than fail-closed",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 80.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 80.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 20.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": true,
+      "reasons": []
+    },
+    {
+      "name": "a_roster_that_prices_a_product_at_zero_has_no_free_item",
+      "why": "the floor is a comparison against the roster, not a rule that prices must be positive",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 0.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 0.0,
+          "max_discount_pct": 20.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": true,
+      "reasons": []
+    },
+    {
+      "name": "a_zero_price_with_no_roster_is_unchanged",
+      "why": "the floor is roster-conditional: with no roster passed every verdict stays byte-identical, which is the whole backward-compatibility story of the T-177 roster",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 0.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": null,
+      "max_discount_pct": null,
+      "ok": true,
+      "reasons": []
     }
   ]
 }

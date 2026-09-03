@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from .collect import (
     FALLBACK_REASONS,
+    ILLEGIBLE_OFFER_REASON,
     MALFORMED_RESPONSE_REASONS,
     UNRECONCILABLE_PRICE_REASON,
     BidEntry,
@@ -69,6 +70,7 @@ __all__ = [
     "DEFAULT_BID_WINDOW_SECONDS",
     "EXPIRED",
     "FALLBACK_REASONS",
+    "ILLEGIBLE_OFFER_REASON",
     "MALFORMED_RESPONSE_REASONS",
     "MAX_FAN_OUT_WORKERS",
     "OPEN",

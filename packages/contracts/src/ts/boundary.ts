@@ -147,6 +147,13 @@ export const ROSTER_LIST_PRICE_UNREADABLE = "unreadable_roster_list_price";
 export const ROSTER_LIST_PRICE_CONTRADICTED = "list_price_contradicts_roster";
 export const ROSTER_MAX_DISCOUNT_UNAVAILABLE = "authorized_depth_unavailable";
 export const ROSTER_MAX_DISCOUNT_UNREADABLE = "unreadable_authorized_depth";
+/**
+ * The roster prices this product ABOVE zero and the offer charges nothing for it. Alone among the
+ * suffixes here it says nothing about reading the roster: it is the one refusal in the price walk
+ * that no declared depth and no authorized cap can talk its way out of. See the floor in
+ * `priceReasonsFor`.
+ */
+export const ROSTER_PRICE_NOT_POSITIVE = "not_positive";
 
 export interface TrustSnapshotRow {
   store_id?: string;
@@ -595,6 +602,16 @@ function priceReasonsFor(
       }
       authorized = Math.min(depth, granted.cap);
     }
+  } else if (listPrices !== undefined) {
+    // NO depth declared, and a roster to check against. The price is still a depth — an implicit
+    // one — and 15.00 for a 100.00 product is an 85% discount however the paperwork is spelled. So
+    // when the roster STATES what is authorized, the undeclared price is measured against that,
+    // exactly as a declared one is. The cap's own reasons are dropped: `authorized_depth_
+    // unavailable` names a depth the offer claimed without authorization, and this offer claimed
+    // nothing. `authorized` then stays at zero, so an absent or unreadable cap still measures the
+    // price against the full list price — the fail-closed direction.
+    const granted = authorizedDepth(record, listPrices, maxDiscountPct);
+    if (granted.cap !== undefined) authorized = granted.cap;
   }
 
   const carried = carriedListPrice(bid, record);
@@ -614,6 +631,28 @@ function priceReasonsFor(
     reasons.push(
       `${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:${ROSTER_LIST_PRICE_CONTRADICTED}`,
     );
+  }
+
+  // THE FLOOR — the one relation here that no depth can satisfy. Everything else is an inequality
+  // against `authorized`, so an authorized 100 makes all of them true at once: `listed * (100 -
+  // 100) / 100` is 0.00, and a bid charging 0.00 for a 100.00 product is then arithmetically
+  // perfect. Measured through the exchange's own `POST /auctions` before this existed — roster row
+  // `{list_price: 100.0, max_discount_pct: 100.0}`, an offer declaring 100% at 0.00 — `HTTP 201,
+  // entries=[{fallback: false, unit_price: 0.0}]`. A price of nothing is not a deep discount; it is
+  // the absence of a price, and no authorization makes a product free.
+  //
+  // Deliberately `rostered`, never `listed`: a carried claim must not switch this on, or the
+  // emitter would choose its own floor and every no-roster verdict would stop being identical.
+  // Exactly zero only — a negative price is already `:negative` above.
+  if (rostered.listed !== undefined && rostered.listed > 0) {
+    for (const [site, priced] of [
+      [OFFER_UNIT_PRICE_SITE, unitPrice],
+      [OFFER_TOTAL_PRICE_SITE, totalPrice],
+    ] as const) {
+      if (priced !== undefined && priced === 0) {
+        reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_PRICE_NOT_POSITIVE}`);
+      }
+    }
   }
 
   if (

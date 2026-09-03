@@ -92,16 +92,41 @@ class NullSolicitor:
 
 
 class RosterEntry(BaseModel):
+    """One rostered store, **as the unauthenticated request body states it**.
+
+    Every field here is caller-supplied. The exchange has no authentication of any kind
+    (``git grep -nE "Depends|api_key|Authorization" apps/exchange/src`` is empty), so
+    ``list_price`` and ``max_discount_pct`` are not facts the exchange holds about a catalog —
+    they are assertions the caller makes about one, and the T-177 price wall in
+    :mod:`~apps.exchange.src.auction.collect` is only as good as they are. That is a known,
+    unclosed gap and it is written down here rather than implied: the authoritative cap needs a
+    derived-authorization port of its own (the shape R12's ``SellerEligibility`` already uses),
+    because C3/S7 forbids the exchange from ever reading a merchant's `Envelope` — the
+    ``.importlinter`` contract ``c3-exchange-cannot-read-envelopes`` enforces exactly that.
+
+    What is closed here is the part that does not wait on that port: a free item cannot be minted
+    through this model whatever the caller writes in it.
+    """
+
     store_id: str
     tier: int = 1
     product_ref: str | None = None
-    list_price: float = 0.0
-    #: The deepest percentage discount the merchant's approved envelope permits on this product —
-    #: the policy `Envelope`'s own `max_discount_pct`. Optional, and its absence is not permissive:
-    #: a bid DECLARING a discount on a row that authorizes none is refused and falls back to the
-    #: list price (T-177). Omitting it therefore costs an auction its discounted bids, never its
-    #: safety, which is the direction to fail in on a field that decides money.
-    max_discount_pct: float | None = None
+    #: **Required, and at least zero.** It used to default to ``0.0``, which minted a free item
+    #: with no bid involved at all: a roster row naming no price produced a 0.00 *fallback* offer
+    #: for a silent store, and that offer wins every ranking there is. Measured before this
+    #: change — ``POST /auctions`` with ``{"store_id": "s1", "tier": 1, "product_ref": "prod-1"}``
+    #: and no solicitor — ``HTTP 201, entries=[{fallback: true, unit_price: 0.0}]``. A caller that
+    #: cannot price a product cannot auction it; 422 says so, and a default said nothing.
+    list_price: float = Field(ge=0.0)
+    #: The deepest percentage discount the caller states is authorized on this product — the
+    #: policy `Envelope`'s own spelling. Optional, and its absence is not permissive: a bid
+    #: DECLARING a discount on a row that authorizes none is refused and falls back to the list
+    #: price (T-177). Its presence is not permissive either — the wall's floor holds at
+    #: ``max_discount_pct: 100`` — but everything between the floor and the cap IS this number's
+    #: word, which is the gap the class docstring names. Omitting it costs an auction its
+    #: discounted bids, never its safety, which is the direction to fail in on a field that
+    #: decides money.
+    max_discount_pct: float | None = Field(default=None, ge=0.0, le=100.0)
 
 
 class CreateAuctionRequest(BaseModel):

@@ -186,11 +186,16 @@ REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH = "discount_over_authorized_depth"
 #:   authorization, which is the T-177 asymmetry itself. The refused bid is not stranded — a
 #:   price at or above the list price needs no authorization and is still admitted.
 #: * `unreadable_authorized_depth` — a cap was supplied and is not a finite number in 0..100.
+#: * `not_positive` — the roster prices this product ABOVE zero and the offer charges nothing for
+#:   it. Alone among the suffixes here it is not a statement about reading the roster; it is the
+#:   one refusal in the whole price walk that no declared depth and no authorized cap can talk its
+#:   way out of. See the floor in `_price_reasons`.
 ROSTER_LIST_PRICE_UNAVAILABLE = "list_price_unavailable"
 ROSTER_LIST_PRICE_UNREADABLE = "unreadable_roster_list_price"
 ROSTER_LIST_PRICE_CONTRADICTED = "list_price_contradicts_roster"
 ROSTER_MAX_DISCOUNT_UNAVAILABLE = "authorized_depth_unavailable"
 ROSTER_MAX_DISCOUNT_UNREADABLE = "unreadable_authorized_depth"
+ROSTER_PRICE_NOT_POSITIVE = "not_positive"
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -667,6 +672,14 @@ def _price_reasons(
     declared; there is nothing there for a wall about authorization to refuse, and refusing it
     would turn every rounding-up into an outage.
 
+    Underneath both sits a floor that is not an inequality against the depth at all: when the
+    ROSTER prices a product above zero, an offer of 0.00 for it is refused whatever depth is
+    declared and whatever cap authorized it (`not_positive`). Every other relation here is
+    satisfied by an authorized 100 — `listed * (100 - 100) / 100` is 0.00 — so without the floor
+    the deepest cap a caller can write is a free item, which is exactly what was measured through
+    `POST /auctions`. It is conditioned on the roster, so with no roster passed it is dead code and
+    every legacy verdict is unchanged.
+
     **Where the list price comes from, and why that was the whole attack.** The first relation
     originally had ONE source of a list price: the `list_price` claim the bid carries. That made
     the wall answer to evidence the emitter controls, and the emitter's counter-move was not to
@@ -743,6 +756,23 @@ def _price_reasons(
             # is authorized (`authorize_discount` grants at `max_discount_pct` and denies above
             # it), and a cent of currency slack has no meaning applied to percentage points.
             authorized = min(depth, cap)
+    elif list_prices is not None:
+        # NO depth declared, and a roster to check against. The price is still a depth — an
+        # implicit one — and 15.00 for a 100.00 product is an 85% discount however the paperwork
+        # is spelled. So when the roster STATES what is authorized, the undeclared price is
+        # measured against that, exactly as a declared one is. Without this the caller's own cap
+        # was unreachable from the silent path and every undercut on a capped row was measured
+        # against the FULL list price — which refuses the honest 80.00 under a 20% authorization,
+        # a wall that is closed rather than fail-closed.
+        #
+        # A roster that states no cap is NOT a refusal here, and the cap's own reasons are
+        # dropped: `authorized_depth_unavailable` names a depth the offer claimed without
+        # authorization, and this offer claimed nothing. `authorized` stays at zero, so an
+        # unreadable or absent cap still measures the price against the full list price — the
+        # fail-closed direction — it simply does not invent a claim to complain about.
+        cap, _ = _authorized_depth(record, list_prices, max_discount_pct)
+        if cap is not None:
+            authorized = cap
 
     carried, carried_reasons = _carried_list_price(bid, record)
     reasons.extend(carried_reasons)
@@ -763,6 +793,31 @@ def _price_reasons(
             f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_UNIT_PRICE_SITE}:"
             f"{ROSTER_LIST_PRICE_CONTRADICTED}"
         )
+
+    # THE FLOOR — the one relation in this walk that no depth can satisfy. Everything else here
+    # is an inequality against `authorized`, so an authorized 100 makes all of them true at once:
+    # `listed * (100 - 100) / 100` is 0.00, and a bid charging 0.00 for a 100.00 product is then
+    # arithmetically perfect. Measured through the exchange's own `POST /auctions` before this
+    # existed — roster row `{list_price: 100.0, max_discount_pct: 100.0}`, an offer declaring 100%
+    # at 0.00 — `HTTP 201, entries=[{fallback: false, unit_price: 0.0}]`. That is the free item
+    # this ticket is about, and it was minted by writing one number into the request body.
+    #
+    # A price of nothing is not a deep discount; it is the absence of a price, and no authorization
+    # makes a product free. So when the ROSTER prices it above zero, an offer of zero is refused at
+    # any depth and under any cap.
+    #
+    # Deliberately `rostered`, never `listed`: a carried claim must not be able to switch this on,
+    # both because the emitter would then choose its own floor and because every no-roster verdict
+    # would stop being byte-identical — with no roster, `rostered` is `None` and this is dead code.
+    # And exactly zero only: a negative price is already `:negative` above, and one bad number
+    # reported twice is the reporting fault the fallback reasons were split apart to end.
+    if rostered is not None and rostered > 0.0:
+        for site, priced in (
+            (OFFER_UNIT_PRICE_SITE, unit_price),
+            (OFFER_TOTAL_PRICE_SITE, total_price),
+        ):
+            if priced is not None and priced == 0.0:
+                reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{site}:{ROSTER_PRICE_NOT_POSITIVE}")
 
     if listed is not None and unit_price + PRICE_RECONCILIATION_TOLERANCE < (
         listed * (100.0 - authorized) / 100.0
@@ -1055,6 +1110,7 @@ __all__ = [
     "ROSTER_LIST_PRICE_UNREADABLE",
     "ROSTER_MAX_DISCOUNT_UNAVAILABLE",
     "ROSTER_MAX_DISCOUNT_UNREADABLE",
+    "ROSTER_PRICE_NOT_POSITIVE",
     "parse_timestamp",
     "price_reasons",
     "validate_bid",

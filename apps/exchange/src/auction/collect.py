@@ -46,8 +46,10 @@ The discount wall (T-177)
 There is one thing this function *does* judge about a bid's content, and it is here because
 this is the only place in the exchange that holds both halves of the comparison: the store's
 answer, and **the roster row it was asked from**. A rostered row carries the product's
-``list_price`` and — when the merchant's approved envelope is known — the ``max_discount_pct``
-that envelope permits on it.
+``list_price`` and, when the caller supplied one, a ``max_discount_pct`` — the deepest discount
+the exchange is told is authorized on that product. It is *told*: C3/S7 forbids the exchange from
+ever reading a merchant's `Envelope` itself, so this number arrives with the roster and is only as
+trustworthy as the roster is. See the last section here and `RosterEntry` in ``routes.py``.
 
 A bid that DECLARES a discount is making a claim about authorization, and until this the only
 wall checking that claim ran inside our own store-agent runtime, on the emitting side. A Tier-2
@@ -57,25 +59,85 @@ so did the same bid declaring 85% — the depth bounded the price and the bid ch
 :func:`contracts.boundary.price_reasons` is that wall; this module runs it, and a bid that fails
 it is replaced by the store's list-price fallback with ``fallback_reason`` naming why.
 
-**Only bids that declare a discount are judged**, and that boundary is deliberate. R10 lets a
-store bid whatever it likes: undercutting its own list price with no discount declared is what an
-auction IS, and ``.swarm-loop/acceptance/test_e3_exchange.py`` pins exactly that (an 80.00 bid
-against a 120.00 rostered list price is kept, not refused). What the exchange does not admit is a
-store awarding itself an authorization nobody granted. So the arithmetic runs on the offers that
-claim one, and a store that declares no discount is measured only by the ranker, as before.
+Silence is not an exemption
+---------------------------
+
+The wall used to run only on offers DECLARING a non-zero discount, and that handed the emitter the
+switch again one spelling over. Measured through ``POST /auctions`` before this change, on a roster
+row ``{product_ref: 'prod-1', list_price: 100.0, max_discount_pct: 20.0}`` answered by a bid with
+**no** ``discount`` key at ``unit_price: 0.0``::
+
+    HTTP 201  entries=[{store_id: 's1', fallback: false, unit_price: 0.0, fallback_reason: null}]
+
+The same bid and the same row handed straight to the boundary
+(:func:`contracts.boundary.price_reasons`) come back ``['price_under_declared_depth:offer.unit_price']``.
+The refusal already existed; this module simply declined to ask for it. An undeclared price under
+list IS a discount — one that entered the bid through no hook at all — so the question asked here is
+no longer "did the offer declare one" but **"does the exchange hold a statement to judge it
+against"**, and there are three ways it does:
+
+1. **The offer declares a discount.** Always judged: it is asserting an authorization, and an
+   assertion is checkable on its own terms.
+2. **The roster row states a ``max_discount_pct``.** Judged whether or not a discount is declared.
+   An implicit depth is not a different animal from a declared one — 15.00 against a 100.00 list
+   under a 20% cap is an 85% discount however the paperwork is spelled — and a row that names the
+   authorized depth is exactly the statement needed to say so.
+3. **Neither of those, and the offer gives the product away.** Judged. A non-positive or unreadable
+   price for a product the roster prices above zero is not an aggressive bid, it is a free item,
+   and it is refused *whatever the request body claims the cap is* — see :func:`_priced_at_nothing`.
+
+Everything else — an undeclared undercut on a row that states no authorized depth — is admitted,
+and that is not a gap left open by preference. **R10 forces it.**
+``.swarm-loop/acceptance/test_e3_exchange.py::test_every_store_is_represented_including_silent_and_tier0``
+rosters ``{"store_id": "store-r1", "tier": 1, "product_ref": "product-1", "list_price": 120.0}``
+with no ``max_discount_pct``, answers it with ``{"product_ref": "product-1", "unit_price": 80.0,
+"total_price": 80.0}`` carrying no ``discount`` at all, and then asserts ``fallback is False`` and
+``_unit_price(...) == 80.0``. That is a 33.3% *undeclared* undercut the frozen suite requires the
+exchange to keep, and with no authorized depth on the row there is no line the exchange can draw
+between an aggressive auction bid and an unauthorized discount.
+
+What R10 does **not** require is that 0.00 be admitted. No case in any frozen acceptance suite
+offers a zero or negative price — ``grep -rn 'unit_price": 0' .swarm-loop/acceptance/`` is empty —
+so case 3 closes the free item without touching a single frozen assertion. An earlier pass read the
+80.00 case as covering 0.00 as well and pinned all three prices as admitted; the frozen text does
+not say that, and the pin was wider than the constraint.
+
+Where the cap comes from, and where it does not
+-----------------------------------------------
+
+``max_discount_pct`` reaches this function on the roster, and the roster reaches the exchange on an
+**unauthenticated ``POST /auctions`` request body** (``RosterEntry`` in ``routes.py``; the exchange
+has no authentication of any kind — ``git grep -nE "Depends|api_key|Authorization" apps/exchange/src``
+is empty). Whatever the caller says the cap is, is the cap — and the same is true of ``list_price``,
+so the trust problem is the whole roster, not this one field.
+
+The obvious repair — read the merchant's approved envelope — is **forbidden here, deliberately**.
+``protocol.schema.json``'s `Envelope` says it "NEVER crosses into the exchange (C3/S7): it is sealed
+state", and ``.importlinter``'s ``c3-exchange-cannot-read-envelopes`` contract enforces exactly that
+by forbidding ``exchange`` from importing ``merchant_svc.envelope``. So an authoritative cap needs a
+*derived-authorization port* — the shape R12's eligibility already uses, where the exchange consults
+a versioned ``SellerEligibility`` interface rather than the trust ledger — and that port does not
+exist in this codebase yet. Case 3 above is the part that does not wait on it: it holds at
+``max_discount_pct: 100`` and on a row with no cap at all.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from contracts.boundary import price_reasons
+from contracts.boundary import (
+    MAX_DISCOUNT_ROSTER_KEY,
+    REASON_PRICE_UNRECONCILABLE,
+    price_reasons,
+)
 
 __all__ = [
     "BidEntry",
     "FALLBACK_REASONS",
+    "ILLEGIBLE_OFFER_REASON",
     "MALFORMED_RESPONSE_REASONS",
     "UNRECONCILABLE_PRICE_REASON",
     "collect_bids",
@@ -99,6 +161,21 @@ __all__ = [
 #: discount the exchange has no authorization for". The entry keeps the store's real
 #: :attr:`BidEntry.price_reasons` alongside it so the rejection can be quoted back verbatim.
 UNRECONCILABLE_PRICE_REASON = "bid_price_unreconcilable"
+
+#: The boundary's verdict on an offer it cannot read as a record AT ALL — `"offer": []`,
+#: `"offer": "free"`, no `offer` key. :func:`contracts.boundary.price_reasons` answers those with
+#: an empty list, because a boundary that cannot find an offer has nothing to say ABOUT one; and
+#: an empty list means "no refusal", so the store was admitted — at :attr:`BidEntry.unit_price`'s
+#: `float(offer.get("unit_price", 0.0))` default of **0.00**. Measured before this existed, on a
+#: rostered row listing at 100.00::
+#:
+#:     offer=[]  ->  fallback=False  unit_price=0.0  price_reasons=[]
+#:
+#: which is the same free item as a 0.00 bid, reached by sending no price at all instead of a
+#: cheap one. The exchange does not get to read the boundary's silence as an admission, so an
+#: illegible offer is named here and refused. Spelled in the boundary's own vocabulary because
+#: that is what `BidEntry.price_reasons` carries.
+ILLEGIBLE_OFFER_REASON = f"{REASON_PRICE_UNRECONCILABLE}:offer:illegible"
 
 FALLBACK_REASONS: tuple[str, ...] = (
     "tier_0_no_agent",
@@ -179,7 +256,8 @@ def _declares_a_discount(offer: Any) -> bool:
     than guessing, which is why it must be handed the offer rather than skipped.
 
     ``False`` only for an offer with no ``discount`` at all, or one declaring exactly zero — a
-    discount that takes nothing off the price asserts no authorization and needs none.
+    discount that takes nothing off the price asserts no authorization and needs none. It is
+    **not** on its own a reason to skip the wall; see :func:`_is_judged`.
     """
     discount = offer.get("discount") if isinstance(offer, Mapping) else None
     if discount is None:
@@ -188,6 +266,83 @@ def _declares_a_discount(offer: Any) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return True
     return float(value) != 0.0
+
+
+def _number(value: Any) -> float | None:
+    """``value`` as a real number, or ``None`` — the same read the boundary does.
+
+    Deliberately no coercion and no ``bool``: ``"0"`` is a string a seller wrote, not a price, and
+    ``True`` is not one dollar. NaN and ±inf are excluded because every comparison against them is
+    silently false, which is the fail-OPEN direction on a wall. This is
+    :func:`contracts.boundary._finite_number`'s predicate, restated rather than imported because
+    that one is private; the two must agree, and the tests below pin the cases where it matters.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _states_an_authorized_depth(rostered: Mapping[str, Any]) -> bool:
+    """Does this roster row make any statement at all about how deep a discount is authorized?
+
+    Presence, not readability: a row carrying ``max_discount_pct: "20"`` or ``max_discount_pct:
+    500`` has made a statement the exchange cannot read, and the boundary refuses that
+    (``unreadable_authorized_depth``) rather than treating it as silence. Reading past an
+    unreadable cap here would let a roster disarm the wall by writing garbage into the field that
+    turns it on — the same "make the paperwork illegible" move :func:`_declares_a_discount` refuses
+    on the bid's side.
+    """
+    try:
+        return rostered.get(MAX_DISCOUNT_ROSTER_KEY) is not None
+    except Exception:  # noqa: BLE001 - a hostile roster row is a row that states nothing
+        return False
+
+
+def _priced_at_nothing(offer: Any, rostered: Mapping[str, Any]) -> bool:
+    """Is this offer giving away a product the roster prices above zero?
+
+    The floor under everything else in :func:`_is_judged`, and the only one of its three cases that
+    survives a caller-supplied cap of 100. A store that answers 0.00 — or -5.00, or ``"free"``, or
+    ``null`` — for a product the exchange was asked to auction at 100.00 is not undercutting
+    anybody; there is no auction semantics under which the winning consideration is nothing. R10
+    protects the store that bids aggressively, and no frozen case anywhere asks the exchange to
+    rank a zero.
+
+    ``total_price`` counts too: a 0.00 total on an 80.00 unit is the same free item wearing the
+    other field. And an *unreadable* price is a priced-at-nothing as well, because
+    :attr:`BidEntry.unit_price` would go on to call ``float()`` on it — so this is also the reason a
+    store answering ``unit_price: "cheap"`` degrades to its list price instead of raising
+    ``ValueError`` out of the middle of an auction every other store is bidding in.
+
+    ``False`` when the roster itself prices the product at zero or cannot price it: there is then
+    no free item to detect, and a row that names no ``list_price`` is handled by the boundary's own
+    ``list_price_unavailable`` refusal on the paths that reach it.
+    """
+    listed = _number(rostered.get("list_price"))
+    if listed is None or listed <= 0.0:
+        return False
+    if not isinstance(offer, Mapping):
+        return True
+    for site in ("unit_price", "total_price"):
+        priced = _number(offer.get(site))
+        if priced is None or priced <= 0.0:
+            return True
+    return False
+
+
+def _is_judged(offer: Any, rostered: Mapping[str, Any]) -> bool:
+    """Does the exchange hold a statement this offer's price can be reconciled against?
+
+    Three ways it does, and the module docstring's "Silence is not an exemption" section carries
+    the argument for each. In one line: a declared discount is a claim, a rostered
+    ``max_discount_pct`` is an authorization, and a free item needs neither.
+    """
+    return (
+        _declares_a_discount(offer)
+        or _states_an_authorized_depth(rostered)
+        or _priced_at_nothing(offer, rostered)
+    )
 
 
 def _price_refusal(bid: Mapping[str, Any], rostered: Mapping[str, Any]) -> list[str]:
@@ -202,12 +357,20 @@ def _price_refusal(bid: Mapping[str, Any], rostered: Mapping[str, Any]) -> list[
     (:data:`contracts.boundary.ROSTER_LIST_PRICE_UNAVAILABLE`) — the direction an attacker's
     "you've never heard of that ref" would otherwise walk through.
 
-    Empty list when the offer declares no discount — see the module docstring on why the exchange
-    does not run the whole wall here, only the half about claimed authorization.
+    Empty list when :func:`_is_judged` says the exchange holds nothing to judge this offer
+    against — an undeclared undercut on a row that states no authorized depth, which R10 requires
+    the exchange to keep. That is the ONLY abstention left; it used to be "any offer that declares
+    no discount", which admitted a 0.00 bid on a 100.00 product at the production door.
     """
-    if not _declares_a_discount(bid.get("offer")):
+    offer = bid.get("offer")
+    if not _is_judged(offer, rostered):
         return []
-    return price_reasons(bid, list_prices={rostered.get("product_ref"): rostered})
+    refused = price_reasons(bid, list_prices={rostered.get("product_ref"): rostered})
+    if refused or isinstance(offer, Mapping):
+        return refused
+    # The boundary read no offer here, so it said nothing — and nothing means "no refusal".
+    # See :data:`ILLEGIBLE_OFFER_REASON` for why silence must not be an admission.
+    return [ILLEGIBLE_OFFER_REASON]
 
 
 def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | None:
@@ -255,11 +418,13 @@ def collect_bids(
     Args:
         roster: the stores selected for this auction —
             ``{store_id, tier, product_ref, list_price}``, optionally with
-            ``max_discount_pct`` — the deepest discount the merchant's approved envelope
-            permits on that product. Roster order is the output order. A row that names no
+            ``max_discount_pct`` — the deepest discount the caller states is authorized on
+            that product. Roster order is the output order. A row that names no
             ``max_discount_pct`` authorizes no discount at all: a bid declaring one is
             refused rather than measured against a depth it chose for itself, and falls back
-            to the row's list price. An undiscounted bid never consults the cap.
+            to the row's list price. A row that DOES name one is the exchange's licence to
+            judge an undeclared price too — silence stops being an exemption — and a bid
+            giving the product away is refused on either kind of row.
         responses: whatever came back — ``{store_id, received_at, bid}``. Responses for a
             store that is not on the roster are ignored; a store that answered twice keeps
             its **first** on-time answer, so a second, cheaper resubmission cannot displace
@@ -317,11 +482,12 @@ def collect_bids(
 
         refused: list[str] = []
         if reason is None and answer is not None:
-            # T-177. The store answered in time with a well-formed bid; the remaining question is
-            # whether the discount it DECLARES is one this roster authorizes at the price it
-            # charges. A bid that fails that is not a bid the exchange may rank — it is a store
-            # helping itself to an authorization — so it degrades to its list price like any
-            # other unusable answer, with its own reason.
+            # T-177. The store answered in time with a well-formed bid; the remaining question
+            # is whether the price it CHARGES is one this roster authorizes — declared or not. A
+            # bid that fails that is not a bid the exchange may rank: it is a store helping itself
+            # to an authorization, whether it wrote the authorization down or stayed quiet about
+            # it. So it degrades to its list price like any other unusable answer, with its own
+            # reason.
             refused = _price_refusal(dict(answer["bid"]), rostered)
             if refused:
                 reason = UNRECONCILABLE_PRICE_REASON

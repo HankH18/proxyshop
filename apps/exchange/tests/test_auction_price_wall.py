@@ -180,21 +180,112 @@ def test_the_honest_discounted_bid_is_kept() -> None:
     assert entry.unit_price == 80.0
 
 
-def test_r10_is_unchanged_for_a_bid_that_declares_no_discount() -> None:
-    """The exchange's own auction semantics, pinned by the frozen acceptance suite
-    (`test_e3_exchange.py::test_every_store_is_represented_including_silent_and_tier0` keeps an
-    80.00 bid against a 120.00 rostered list price). Undercutting your own list price with no
-    discount declared is what an auction IS; what the exchange refuses is a store awarding itself
-    an authorization nobody granted. So the wall runs on the offers that claim one, and only
-    those."""
-    for unit in (80.0, 1.0, 0.0):
-        entry = only([CAPPED_ROW], [reply(offer(unit, unit))])
+def test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized() -> None:
+    """EXACTLY what the frozen acceptance suite requires, and no wider.
+
+    `test_e3_exchange.py::test_every_store_is_represented_including_silent_and_tier0` rosters
+    `{"store_id": "store-r1", "tier": 1, "product_ref": "product-1", "list_price": 120.0}` — a
+    list price and NO `max_discount_pct` — answers it with `{"product_ref": "product-1",
+    "unit_price": 80.0, "total_price": 80.0}` carrying no `discount` at all, and then asserts
+    `fallback is False` and `_unit_price(...) == 80.0`. A 33.3% undeclared undercut on a row that
+    authorizes nothing is therefore REQUIRED to be admitted, and with no authorized depth on the
+    row there is no line the exchange can draw between that and an unauthorized discount.
+
+    A previous pass of this ticket read that frozen case as also licensing 0.00 and 1.00 on a
+    CAPPED row and pinned all three as admitted. It does not: the frozen roster row states no
+    cap, and no case in any acceptance suite offers a zero price at all. The two tests below
+    hold the ground that reading gave away."""
+    for unit in (99.0, 80.0, 1.0):
+        entry = only([UNCAPPED_ROW], [reply(offer(unit, unit))])
         assert entry.fallback is False, (unit, entry.price_reasons)
         assert entry.unit_price == unit
 
     # A discount declared at exactly zero asserts no authorization either.
-    zero = only([CAPPED_ROW], [reply(offer(80.0, 80.0, depth=0.0))])
+    zero = only([UNCAPPED_ROW], [reply(offer(80.0, 80.0, depth=0.0))])
     assert zero.fallback is False, zero.price_reasons
+
+
+def test_an_undeclared_price_is_measured_against_the_cap_the_roster_states() -> None:
+    """Silence is not an exemption. The wall used to run only on offers DECLARING a discount, so
+    a store that omitted the `discount` block entirely and charged 15.00 for a 100.00 product was
+    admitted at the door — while the boundary, handed that same bid and that same row, refuses it
+    `price_under_declared_depth:offer.unit_price`. The refusal existed; this module declined to
+    ask for it.
+
+    An implicit depth is not a different animal from a declared one, so where the roster STATES
+    what is authorized, the undeclared price is measured against exactly that. Both directions are
+    pinned here: the honest 80.00 (precisely the 20% the row authorizes, filed with no paperwork)
+    must still be admitted, or the wall is closed rather than fail-closed."""
+    for unit in (100.0, 80.0):
+        admitted = only([CAPPED_ROW], [reply(offer(unit, unit))])
+        assert admitted.fallback is False, (unit, admitted.price_reasons)
+        assert admitted.unit_price == unit
+
+    for unit in (79.0, 15.0, 1.0):
+        refused = only([CAPPED_ROW], [reply(offer(unit, unit))])
+        assert refused.fallback is True, (unit, refused.price_reasons)
+        assert refused.fallback_reason == "bid_price_unreconcilable"
+        assert "price_under_declared_depth:offer.unit_price" in refused.price_reasons
+        assert refused.unit_price == 100.0
+
+    # The same on the total: an 80.00 unit with a 0.00 total is the free item wearing the other
+    # field, and the total relation only reaches it because the cap is now read at a zero depth.
+    split = only([CAPPED_ROW], [reply(offer(80.0, 0.0))])
+    assert split.fallback is True, split.price_reasons
+    assert "price_unreconcilable:offer.total_price:not_positive" in split.price_reasons
+
+
+def test_the_free_item_is_refused_on_a_row_that_authorizes_nothing_at_all() -> None:
+    """THE FLOOR, and the reason it is not built out of the cap.
+
+    Everything else in the price walk is an inequality against the authorized depth, so a roster
+    row saying `max_discount_pct: 100` satisfies all of them at once — `100.00 * (100 - 100) / 100`
+    is 0.00 — and `max_discount_pct` arrives on an unauthenticated request body. A wall whose
+    deepest setting is "free" is not a wall. A price of nothing is not a deep discount; it is the
+    absence of a price, and no authorization makes a product free.
+
+    So it is refused on a row that authorizes nothing, on a row that authorizes 20%, and on a row
+    that authorizes everything — declared or silent."""
+    for row in (
+        UNCAPPED_ROW,
+        CAPPED_ROW,
+        dict(CAPPED_ROW, max_discount_pct=100.0),
+    ):
+        for depth in (None, 100.0):
+            entry = only([row], [reply(offer(0.0, 0.0, depth=depth))])
+            assert entry.fallback is True, (row.get("max_discount_pct"), depth)
+            assert entry.fallback_reason == "bid_price_unreconcilable"
+            assert "price_unreconcilable:offer.unit_price:not_positive" in entry.price_reasons
+            assert entry.unit_price == 100.0, "the refused store is still represented, at list"
+
+
+def test_a_negative_price_is_refused_and_named_as_negative_not_as_nothing() -> None:
+    """Paying the buyer to take it is the free item with a minus sign, and it was admitted for the
+    same reason: no depth was declared, so nothing ran. It keeps its own `:negative` name — one bad
+    number reported twice is the mislabelling the fallback reasons were split apart to end."""
+    entry = only([UNCAPPED_ROW], [reply(offer(-5.0, -5.0))])
+    assert entry.fallback is True
+    assert "price_unreconcilable:offer.unit_price:negative" in entry.price_reasons
+    assert "price_unreconcilable:offer.unit_price:not_positive" not in entry.price_reasons
+
+
+def test_a_roster_that_prices_a_product_at_zero_has_no_free_item_to_detect() -> None:
+    """The floor is a comparison against the roster, not a rule that prices must be positive. A
+    catalog that genuinely lists something at 0.00 is not describing a giveaway the exchange is
+    being tricked into."""
+    free_row = dict(UNCAPPED_ROW, list_price=0.0)
+    entry = only([free_row], [reply(offer(0.0, 0.0))])
+    assert entry.fallback is False, entry.price_reasons
+
+
+def test_an_unreadable_price_degrades_the_store_instead_of_raising() -> None:
+    """`BidEntry.unit_price` calls `float()` on whatever the store sent, so an unreadable price used
+    to be a `ValueError` out of the middle of an auction every other store was bidding in — the
+    same shape of outage the unparseable arrival stamp caused. It is a fallback now."""
+    for junk in ("cheap", None, float("nan")):
+        entry = only([UNCAPPED_ROW], [reply(offer(junk, junk))])
+        assert entry.fallback is True, junk
+        assert entry.unit_price == 100.0
 
 
 def test_a_depth_exactly_at_the_authorized_cap_is_authorized() -> None:
@@ -286,3 +377,212 @@ def test_the_wall_never_raises_on_a_hostile_offer() -> None:
         assert len(entries) == 1, body
         # Every one of them is refused or admitted, never an exception and never a missing store.
         assert entries[0].store_id == "store-1"
+
+
+# =====================================================================================
+# THROUGH `POST /auctions` — the door that is actually on in production
+#
+# Every test above drives `collect_bids` directly, which is one import away from the route. The
+# verifier that found the two defects this file now pins measured them HERE instead, and got
+# `HTTP 201, entries=[{fallback: false, unit_price: 0.0}]` for a free item. A wall proved only at
+# the library boundary is a wall whose wiring is untested, which is exactly how T-177 shipped the
+# first time — `git grep list_prices` found the parameter, its tests, and no caller.
+# =====================================================================================
+def door(row: dict, priced: dict):
+    """POST one auction with one rostered store answering `priced`, and return its entry."""
+    from exchange.auction.routes import configure_auctions  # noqa: PLC0415
+    from exchange.eligibility import ELIGIBLE, StaticSellerEligibility  # noqa: PLC0415
+    from exchange.main import create_app  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    class Solicitor:
+        def solicit(self, store: Any) -> dict:
+            store_id = store["store_id"] if isinstance(store, dict) else store.store_id
+            return {
+                "store_id": store_id,
+                "bid": {
+                    "auction_id": "auc-1",
+                    "store_id": store_id,
+                    "offer": dict(priced),
+                    "claims": [],
+                },
+            }
+
+        __call__ = solicit
+
+    app = create_app()
+    configure_auctions(
+        app,
+        solicitor=Solicitor(),
+        eligibility=StaticSellerEligibility({row["store_id"]: ELIGIBLE}),
+    )
+    posted = TestClient(app).post(
+        "/auctions",
+        json={
+            "intent": {"intent_id": "intent-1", "cluster_id": "cluster-1"},
+            "roster": [row],
+            "bid_timeout_seconds": 2.0,
+        },
+    )
+    assert posted.status_code == 201, posted.text
+    entries = posted.json()["entries"]
+    assert len(entries) == 1, entries
+    return entries[0]
+
+
+@pytest.mark.parametrize(
+    ("name", "row", "priced"),
+    [
+        # The ticket's own free item, in the spelling that DECLARES the authorization...
+        (
+            "declared_100_at_a_cap_of_100",
+            dict(CAPPED_ROW, max_discount_pct=100.0),
+            offer(0.0, 0.0, depth=100.0),
+        ),
+        ("declared_100_at_a_cap_of_20", CAPPED_ROW, offer(0.0, 0.0, depth=100.0)),
+        # ...and in the spelling that declares NOTHING, which is the one that walked through.
+        ("silent_zero_on_a_capped_row", CAPPED_ROW, offer(0.0, 0.0)),
+        ("silent_zero_on_an_uncapped_row", UNCAPPED_ROW, offer(0.0, 0.0)),
+        # The undeclared 85% undercut the boundary already refused and the route did not ask about.
+        ("silent_undercut_past_the_cap", CAPPED_ROW, offer(15.0, 15.0)),
+    ],
+)
+def test_the_free_item_is_refused_through_the_real_http_door(
+    name: str, row: dict, priced: dict
+) -> None:
+    """Measured before this ticket's third pass, through this exact call:
+
+        HTTP 201  entries=[{store_id: 's1', fallback: false, unit_price: 0.0, fallback_reason: null}]
+
+    for `silent_zero_on_a_capped_row`, `silent_zero_on_an_uncapped_row`,
+    `silent_undercut_past_the_cap` and `declared_100_at_a_cap_of_100`.
+    """
+    entry = door(row, priced)
+    assert entry["fallback"] is True, (name, entry)
+    assert entry["fallback_reason"] == "bid_price_unreconcilable", (name, entry)
+    assert entry["unit_price"] == 100.0, (name, entry)
+    assert entry["total_price"] == 100.0, (name, entry)
+
+
+@pytest.mark.parametrize(
+    ("name", "row", "priced", "expected"),
+    [
+        # R10's own shape, at the route: a list price, no authorized depth, an undeclared undercut.
+        (
+            "r10_undeclared_undercut",
+            {"store_id": "store-1", "tier": 1, "product_ref": "prod-1", "list_price": 120.0},
+            offer(80.0, 80.0),
+            80.0,
+        ),
+        # The honest discounted bid, filed with paperwork...
+        ("honest_declared_discount", CAPPED_ROW, offer(80.0, 80.0, depth=20.0), 80.0),
+        # ...and the same price filed with none.
+        ("honest_undeclared_discount", CAPPED_ROW, offer(80.0, 80.0), 80.0),
+    ],
+)
+def test_the_door_still_admits_the_bids_r10_requires(
+    name: str, row: dict, priced: dict, expected: float
+) -> None:
+    """The paired control. A wall that refused every cheap bid would satisfy every rejection above
+    and destroy the auction, and `r10_undeclared_undercut` is the frozen acceptance case's own
+    shape driven through the route rather than through `collect_bids`."""
+    entry = door(row, priced)
+    assert entry["fallback"] is False, (name, entry)
+    assert entry["fallback_reason"] is None, (name, entry)
+    assert entry["unit_price"] == expected, (name, entry)
+
+
+def post_roster(row: dict):
+    """POST one auction with `row` and nobody answering; return (status, body)."""
+    from exchange.auction.routes import configure_auctions  # noqa: PLC0415
+    from exchange.eligibility import ELIGIBLE, StaticSellerEligibility  # noqa: PLC0415
+    from exchange.main import create_app  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    app = create_app()
+    configure_auctions(app, eligibility=StaticSellerEligibility({row.get("store_id"): ELIGIBLE}))
+    posted = TestClient(app).post(
+        "/auctions",
+        json={
+            "intent": {"intent_id": "intent-1", "cluster_id": "cluster-1"},
+            "roster": [row],
+            "bid_timeout_seconds": 0.2,
+        },
+    )
+    return posted.status_code, posted.json()
+
+
+def test_a_roster_row_that_prices_nothing_cannot_open_an_auction() -> None:
+    """The free item that needs no bid at all.
+
+    `list_price` used to default to 0.00, so a roster row naming no price produced a 0.00
+    *fallback* offer for a silent store — and a fallback is a real, rankable offer, so it wins
+    every ranking there is. Measured before this change, with no solicitor wired:
+
+        POST /auctions  roster=[{"store_id": "s1", "tier": 1, "product_ref": "prod-1"}]
+        ->  HTTP 201  entries=[{fallback: true, unit_price: 0.0, fallback_reason: "no_response"}]
+
+    A caller that cannot price a product cannot auction it. The whole roster arrives on an
+    unauthenticated body, so this is not a defence against a forged price — it is a refusal to
+    mint one out of a missing field."""
+    status, body = post_roster({"store_id": "s1", "tier": 1, "product_ref": "prod-1"})
+    assert status == 422, body
+    assert body["detail"][0]["msg"] == "Field required"
+    assert body["detail"][0]["loc"][-1] == "list_price"
+
+
+def test_a_negative_list_price_and_an_impossible_cap_are_refused_at_the_door() -> None:
+    """A negative list price is a fallback that pays the buyer to take the product, and a cap
+    outside 0..100 is not a percentage. The `Envelope` schema publishes `max_discount_pct` with
+    `minimum: 0, maximum: 100`; the route that accepts one on an unauthenticated body must not be
+    laxer than the schema the number is named after."""
+    status, body = post_roster(
+        {"store_id": "s1", "tier": 1, "product_ref": "prod-1", "list_price": -5.0}
+    )
+    assert status == 422, body
+    assert body["detail"][0]["loc"][-1] == "list_price"
+
+    status, body = post_roster(
+        {
+            "store_id": "s1",
+            "tier": 1,
+            "product_ref": "prod-1",
+            "list_price": 100.0,
+            "max_discount_pct": 500.0,
+        }
+    )
+    assert status == 422, body
+    assert body["detail"][0]["loc"][-1] == "max_discount_pct"
+
+    # The paired control: a well-formed row still opens an auction.
+    status, body = post_roster(
+        {"store_id": "s1", "tier": 1, "product_ref": "prod-1", "list_price": 100.0}
+    )
+    assert status == 201, body
+    assert body["entries"][0]["unit_price"] == 100.0
+
+
+def test_an_offer_the_boundary_cannot_read_at_all_is_not_thereby_admitted() -> None:
+    """The free item reached by sending NO price rather than a cheap one.
+
+    `contracts.boundary.price_reasons` answers an offer it cannot read as a record — `"offer":
+    []`, `"offer": "free"`, no `offer` key — with an empty list: a boundary that cannot find an
+    offer has nothing to say about one. An empty list means "no refusal", so the store was
+    admitted, and `BidEntry.unit_price` then read `float(offer.get("unit_price", 0.0))` off an
+    empty dict. Measured on a row listing at 100.00 before this:
+
+        offer=[]  ->  fallback=False  unit_price=0.0  price_reasons=[]
+
+    The exchange does not get to read the boundary's silence as an admission."""
+    from exchange.auction import ILLEGIBLE_OFFER_REASON  # noqa: PLC0415
+
+    for body in ([], "free", None, 42):
+        entry = only([CAPPED_ROW], [reply(body)])
+        assert entry.fallback is True, body
+        assert entry.fallback_reason == "bid_price_unreconcilable", body
+        assert entry.price_reasons == [ILLEGIBLE_OFFER_REASON], body
+        assert entry.unit_price == 100.0, body
+
+    # It is named in the boundary's own vocabulary, and it is not one of the fixed fallback
+    # reasons a loss report aggregates on — that stays `bid_price_unreconcilable`.
+    assert ILLEGIBLE_OFFER_REASON == "price_unreconcilable:offer:illegible"
