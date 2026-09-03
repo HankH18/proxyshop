@@ -137,9 +137,7 @@ def _sort_key(row: Mapping[str, Any], tie_breakers: Sequence[str]) -> tuple:
             # be a rule this module cannot honour, and quietly sorting it ascending would be
             # a different rule wearing the published one's name.
             if direction != 1:
-                raise ValueError(
-                    f"tie-breaker {name!r} is a string and cannot sort descending"
-                )
+                raise ValueError(f"tie-breaker {name!r} is a string and cannot sort descending")
             key.append(value)
             continue
         if value is None:
@@ -221,9 +219,7 @@ def rank(
             "trust": trust_score,
             "price": _price_of(offer),
             "trust_summary": _shortlist.trust_summary(store_id, row_of_store),
-            "provenance_labels": _shortlist.provenance_labels(
-                read(candidate, "claims", None)
-            ),
+            "provenance_labels": _shortlist.provenance_labels(read(candidate, "claims", None)),
         }
         if row["eligible"]:
             rank_score, components, features = score(candidate, trust_score, weights)

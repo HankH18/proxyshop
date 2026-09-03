@@ -2,9 +2,10 @@
 
 This is the ticket's own declared verify (``pytest apps/exchange/tests/test_ranking.py``).
 It is written to be independent of the frozen acceptance suite: it recomputes the score
-from the published weights in ``packages.contracts.src.ranking`` rather than hard-coding
-numbers, and it drives ``rank()`` through the same four-positional surface every caller
-uses.
+from the published weights in ``contracts.ranking`` — including which weight symbol goes
+with which feature, which is the pairing this file got wrong the first time — rather than
+hard-coding numbers, and it drives ``rank()`` through the same four-positional surface
+every caller uses.
 
 Every product import happens inside a test function, matching the house rule.
 """
@@ -202,12 +203,10 @@ def test_policy_penalties_lower_the_score_and_nothing_else_does():
 
     snapshot = _snapshot(["store-a"])
     clean = rank([_candidate("bid-a")], _intent(), snapshot, _config())
-    penalised = rank(
-        [_candidate("bid-a", policy_penalties=0.25)], _intent(), snapshot, _config()
+    penalised = rank([_candidate("bid-a", policy_penalties=0.25)], _intent(), snapshot, _config())
+    assert _by_bid(penalised)["bid-a"]["rank_score"] < _by_bid(clean)["bid-a"]["rank_score"], (
+        "a policy penalty must reduce the published score"
     )
-    assert (
-        _by_bid(penalised)["bid-a"]["rank_score"] < _by_bid(clean)["bid-a"]["rank_score"]
-    ), "a policy penalty must reduce the published score"
 
 
 def test_score_ignores_network_fee_tier_and_envelope_caps():
@@ -223,11 +222,17 @@ def test_score_ignores_network_fee_tier_and_envelope_caps():
 
     loaded = [dict(c) for c in base]
     loaded[0].update(
-        network_fee=999.0, fee_rate=0.9, tier=0, envelope_max_discount_pct=80.0,
+        network_fee=999.0,
+        fee_rate=0.9,
+        tier=0,
+        envelope_max_discount_pct=80.0,
         envelope_budget_cap=1.0,
     )
     loaded[1].update(
-        network_fee=0.0, fee_rate=0.0, tier=2, envelope_max_discount_pct=0.0,
+        network_fee=0.0,
+        fee_rate=0.0,
+        tier=2,
+        envelope_max_discount_pct=0.0,
         envelope_budget_cap=9_000.0,
     )
     after = rank(loaded, _intent(), snapshot, _config())
@@ -255,9 +260,9 @@ def test_ties_break_by_price_then_bid_id_regardless_of_input_order():
     first = rank(build(), intent, snapshot, _config())
     assert len({row["rank_score"] for row in first["ranked"]}) == 1
     assert _order(first) == ["bid-b", "bid-a", "bid-c"]
-    assert _order(rank(list(reversed(build())), intent, snapshot, _config())) == _order(
-        first
-    ), "input order must not decide output order"
+    assert _order(rank(list(reversed(build())), intent, snapshot, _config())) == _order(first), (
+        "input order must not decide output order"
+    )
 
 
 # ---------------------------------------------------------------------------------
@@ -347,9 +352,7 @@ def test_only_verified_evidence_satisfies_a_hard_constraint(status):
         delivery_fit=0.0,
         unit_price=999.0,
     )
-    snapshot = _snapshot(
-        ["store-weak", "store-ok"], scores={"store-weak": 1.0, "store-ok": 0.0}
-    )
+    snapshot = _snapshot(["store-weak", "store-ok"], scores={"store-weak": 1.0, "store-ok": 0.0})
     result = rank([weak, strong], _intent(), snapshot, _config())
 
     assert _by_bid(result)["bid-weak"]["eligible"] is False, (
@@ -362,9 +365,7 @@ def test_only_verified_evidence_satisfies_a_hard_constraint(status):
 def test_a_candidate_missing_the_constrained_claim_entirely_is_excluded():
     from apps.exchange.src.ranking import rank
 
-    silent = _candidate(
-        "bid-silent", "store-silent", claims=[_claim("ships_in_days", 2)]
-    )
+    silent = _candidate("bid-silent", "store-silent", claims=[_claim("ships_in_days", 2)])
     result = rank([silent], _intent(), _snapshot(["store-silent"]), _config())
     assert _by_bid(result)["bid-silent"]["eligible"] is False
     assert _slot_refs(result) == []
@@ -378,9 +379,7 @@ def test_shortlist_is_at_most_four_distinct_stores_and_collapses_gracefully(n):
     from apps.exchange.src.ranking import rank
 
     letters = "abcdef"
-    candidates = [
-        _candidate(f"bid-{letters[i]}", f"store-{letters[i]}") for i in range(n)
-    ]
+    candidates = [_candidate(f"bid-{letters[i]}", f"store-{letters[i]}") for i in range(n)]
     snapshot = _snapshot([c["store_id"] for c in candidates])
     result = rank(candidates, _intent(), snapshot, _config())
 
@@ -445,9 +444,9 @@ def test_slots_carry_fit_trust_and_provenance_labels():
 
 
 def test_rank_does_not_mutate_the_candidates_it_was_given():
-    from apps.exchange.src.ranking import rank
-
     import copy
+
+    from apps.exchange.src.ranking import rank
 
     candidates = [_candidate("bid-a"), _candidate("bid-b", expires_at=T_PAST)]
     pristine = copy.deepcopy(candidates)
@@ -471,6 +470,148 @@ def test_result_is_deterministic_across_repeated_calls():
     b = rank(build(), intent, snapshot, _config())
     assert _order(a) == _order(b)
     assert _slot_refs(a) == _slot_refs(b)
-    assert [row["components"] for row in a["ranked"]] == [
-        row["components"] for row in b["ranked"]
+    assert [row["components"] for row in a["ranked"]] == [row["components"] for row in b["ranked"]]
+
+
+# ---------------------------------------------------------------------------------
+# Rules the published contract states but the surface above cannot see: the neutral
+# default for an absent feature, and the optional SellerEligibility port.
+#
+# The builders come from `_fixtures_ranking.py`, which the exchange conftest also
+# auto-loads as fixtures. It is test support, not product code, so it is imported at
+# module scope; every product import below is still inside its test.
+# ---------------------------------------------------------------------------------
+from apps.exchange.tests._fixtures_ranking import (  # noqa: E402
+    make_candidate,
+    make_config,
+    make_intent,
+    make_trust_snapshot,
+)
+
+
+def test_an_absent_feature_reads_neutral_not_zero():
+    """D13/D14: a feature the verifier has not reached yet is unknown, not bad.
+
+    Scoring an absent `delivery_fit`/`verified_claim_ratio` as 0 would systematically
+    punish every store nobody has crawled yet, which is a bias rather than a measurement.
+    """
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+
+    from apps.exchange.src.ranking import rank
+
+    features = DEFAULT_RANKING_WEIGHTS.feature_weights
+    bounds = DEFAULT_RANKING_WEIGHTS.normalization
+
+    silent = make_candidate("bid-a", intent_match=0.9, price_value=0.4)
+    assert "delivery_fit" not in silent and "verified_claim_ratio" not in silent
+
+    result = rank([silent], make_intent(), make_trust_snapshot(["store-a"]), make_config())
+    row = _by_bid(result)["bid-a"]
+
+    expected = (
+        features["intent_match"] * 0.9
+        + features["verified_claim_ratio"] * float(bounds.verified_claim_ratio_when_absent)
+        + features["trust"] * 0.5
+        + features["price_value"] * 0.4
+        + features["delivery_fit"] * float(bounds.delivery_fit_when_absent)
+    )
+    assert row["rank_score"] == pytest.approx(expected)
+
+    zeroed = make_candidate(
+        "bid-a", intent_match=0.9, price_value=0.4, delivery_fit=0.0, verified_claim_ratio=0.0
+    )
+    zeroed_row = _by_bid(
+        rank([zeroed], make_intent(), make_trust_snapshot(["store-a"]), make_config())
+    )["bid-a"]
+    assert zeroed_row["rank_score"] < row["rank_score"], (
+        "an absent feature scored the same as an explicit 0.0 — absent is not zero"
+    )
+
+
+def test_components_sum_to_the_score_even_with_a_penalty():
+    """The score is auditable: the published terms are exactly what produced it."""
+    from apps.exchange.src.ranking import rank
+
+    candidates = [
+        make_candidate(
+            "bid-a",
+            intent_match=0.9,
+            price_value=0.4,
+            delivery_fit=0.3,
+            verified_claim_ratio=0.7,
+            policy_penalties=0.30,
+        )
     ]
+    row = _by_bid(rank(candidates, make_intent(), make_trust_snapshot(["store-a"]), make_config()))[
+        "bid-a"
+    ]
+    assert sum(row["components"].values()) == pytest.approx(row["rank_score"])
+    assert row["components"]["policy_penalties"] == pytest.approx(-0.30)
+
+
+def test_an_injected_eligibility_source_only_ever_adds_denials():
+    """T-032 acceptance 4: `rank()` may consult a SellerEligibility source, and every
+    unhappy read denies (R12). It is OPTIONAL — the published surface is four positionals
+    and the blacklist is derived from the trust snapshot."""
+    from apps.exchange.src.eligibility import BLACKLISTED, ELIGIBLE, StaticSellerEligibility
+    from apps.exchange.src.ranking import rank
+
+    good = make_candidate("bid-good", "store-good", intent_match=0.9)
+    bad = make_candidate("bid-bad", "store-bad", intent_match=0.9)
+    # The snapshot says BOTH stores are clean, so only the injected source can exclude.
+    snapshot = make_trust_snapshot(["store-good", "store-bad"])
+    intent = make_intent()
+
+    without = rank([good, bad], intent, snapshot, make_config())
+    assert sorted(_slot_refs(without)) == ["bid-bad", "bid-good"], (
+        "with no source injected the four-positional call must be unaffected"
+    )
+
+    source = StaticSellerEligibility({"store-good": ELIGIBLE, "store-bad": BLACKLISTED})
+    with_source = rank([good, bad], intent, snapshot, make_config(), eligibility=source)
+    assert _by_bid(with_source)["bid-bad"]["eligible"] is False
+    assert "blacklist" in _reason_blob(_by_bid(with_source)["bid-bad"])
+    assert _slot_refs(with_source) == ["bid-good"]
+
+    # A store the source has never heard of is UNAVAILABLE, which denies.
+    unknown_only = StaticSellerEligibility({"store-good": ELIGIBLE})
+    unknown = rank([good, bad], intent, snapshot, make_config(), eligibility=unknown_only)
+    assert _by_bid(unknown)["bid-bad"]["eligible"] is False
+    assert _slot_refs(unknown) == ["bid-good"]
+
+
+def test_an_eligibility_source_speaking_another_interface_version_denies_everything():
+    """Item 4's other half at this boundary: an unsupported `interface_version` is refused,
+    not interpreted."""
+    from apps.exchange.src.eligibility import ELIGIBLE, StaticSellerEligibility
+    from apps.exchange.src.ranking import rank
+
+    source = StaticSellerEligibility({"store-a": ELIGIBLE}, version="seller-eligibility/9.9.9")
+    result = rank(
+        [make_candidate("bid-a")],
+        make_intent(),
+        make_trust_snapshot(["store-a"]),
+        make_config(),
+        eligibility=source,
+    )
+    assert _by_bid(result)["bid-a"]["eligible"] is False
+    assert _slot_refs(result) == []
+
+
+def test_an_undecidable_hard_constraint_excludes_rather_than_admits():
+    """R19: 'I cannot evaluate this constraint' and 'this constraint is satisfied' must
+    never be the same outcome."""
+    from apps.exchange.src.ranking import rank
+
+    intent = make_intent([{"field": "capacity_l", "op": "no_such_op", "value": 30}])
+    result = rank(
+        [make_candidate("bid-a", intent_match=1.0)],
+        intent,
+        make_trust_snapshot(["store-a"]),
+        make_config(),
+    )
+    row = _by_bid(result)["bid-a"]
+    assert row["eligible"] is False
+    assert row["rank_score"] is None
+    assert "constraint" in _reason_blob(row)
+    assert _slot_refs(result) == []
