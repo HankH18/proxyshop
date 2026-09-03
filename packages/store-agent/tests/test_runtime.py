@@ -60,6 +60,7 @@ from store_agent.runtime import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_SRC = REPO_ROOT / "packages" / "store-agent" / "src" / "runtime"
 ENVELOPE_FIXTURE = REPO_ROOT / "fixtures" / "envelopes" / "store-alpha.approved.json"
+BETA_FIXTURE = REPO_ROOT / "fixtures" / "envelopes" / "store-beta.approved.json"
 
 CLUSTER = "cluster-warm-layers"
 STORE_ID = "store-alpha"
@@ -626,6 +627,64 @@ def test_the_offer_states_an_expiry_taken_from_the_context_never_from_a_clock() 
 
     # With none stated, the floor: the offer stands at least as long as the auction it answers.
     assert _bid().offer.expires_at == _request()["respond_by"]
+
+
+# ---------------------------------------------------------------------------------------------
+# 5c. A second approved store, so the runtime is graded on data and not on one fixture
+# ---------------------------------------------------------------------------------------------
+
+
+def _beta_context(**overrides: Any) -> dict[str, Any]:
+    """store-beta: a store-wide 40.00 floor plus a tighter 48.00 one on a single product."""
+    fixture = json.loads(BETA_FIXTURE.read_text(encoding="utf-8"))
+    context: dict[str, Any] = {
+        "store_id": "store-beta",
+        "envelope": fixture["envelope"],
+        "catalog": fixture["catalog"],
+        "live_state": {"prod-open": {"in_stock": True}, "prod-tight": {"in_stock": True}},
+        "learned_policy": None,
+        "network_priors": {},
+    }
+    context.update(overrides)
+    return context
+
+
+def _beta_request() -> dict[str, Any]:
+    """No hard constraints: this store's fixture is about floors, not about eligibility."""
+    return _request(hard_constraints=[])
+
+
+def test_a_second_approved_store_bids_its_own_envelope() -> None:
+    answer = _bid(_beta_request(), _beta_context())
+    assert (answer.store_id, answer.offer.product_ref, answer.offer.unit_price) == (
+        "store-beta",
+        "prod-tight",
+        60.0,
+    )
+    assert [c.key for c in (answer.offer.commitments or [])] == ["warranty"]
+
+
+@pytest.mark.parametrize(
+    ("depth", "expected_price", "discounted"),
+    [
+        # 25% off 60.00 is 45.00, under prod-tight's own 48.00 floor even though 25% is only
+        # half this envelope's 50% cap — the floor refuses it on its own.
+        (25.0, 60.0, False),
+        # 20% lands exactly ON the floor. An approved floor is a limit to reach, not to stay under.
+        (20.0, 48.0, True),
+    ],
+)
+def test_the_stricter_of_the_store_wide_and_per_product_floors_binds(
+    depth: float, expected_price: float, discounted: bool
+) -> None:
+    context = _beta_context()
+    context["envelope"] = dict(context["envelope"], **{INTRO_DISCOUNT_KEY: depth})
+    context["catalog"] = {"prod-tight": context["catalog"]["prod-tight"]}
+    context["live_state"] = {"prod-tight": {"in_stock": True}}
+
+    answer = _bid(_beta_request(), context)
+    assert answer.offer.unit_price == expected_price
+    assert (answer.offer.discount is not None) is discounted
 
 
 # ---------------------------------------------------------------------------------------------
