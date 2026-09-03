@@ -85,6 +85,17 @@ def _datamodel_codegen_argv(output: Path) -> list[str]:
         "--target-python-version",
         "3.12",
         "--use-subclass-enum",
+        # T-195. WITHOUT this, datamodel-code-generator widens every field that merely has a
+        # DEFAULT into an optional one: `commitments`, a non-nullable `array` with `default: []`
+        # in the schema, was generated as `list[Claim] | None`. So pydantic accepted
+        # `commitments: null` while ajv — reading the same bundle — refused it, and the two
+        # halves of one contract disagreed about a shape. Worse, that nullable spelling was the
+        # one shape of `offer.commitments` the boundary's claim walk skipped entirely, on the
+        # field the walk exists to cover. `--strict-nullable` makes `| None` mean what the schema
+        # means by it: `type: [..., "null"]`, and nothing else. It affects exactly the fields
+        # that were being widened (`Offer.commitments`, `ProfileBuckets.category_affinity`,
+        # `LossReasons.*`); nothing in the repo passes `None` for any of them.
+        "--strict-nullable",
         # `Field(min_length=1)` rather than `constr(min_length=1)`. A `con*` call inside an
         # annotation is not a valid type to mypy — it fails with "Cannot use a function call in a
         # type annotation" on every constrained field, so the generated module would be
