@@ -32,11 +32,30 @@ store) carries no ``checkout_url`` at all, and treating its absence as a spoof r
 fallback bid the exchange had manufactured for itself. The caller decides — see
 ``CheckoutProvider.checkout``, which validates the offer's URL only when the offer has one
 and validates the *provider's* permalink unconditionally.
+
+**Every merchant-controlled value this module puts in a message goes through
+``redaction.safe_token`` or ``redaction.redact_url``, and that is T-215 pass 3.** The reason
+strings below are built from four things a merchant chose — the URL, its parsed host, its
+scheme, and the text of a ``urlsplit`` ``ValueError`` (which quotes the offending fragment) —
+and after a code has been minted, prose from here is carried on ``OrphanedCheckoutCode``
+into a persisted ``policy_event`` and into the client-visible ``denial_reason``. Two earlier
+fixes redacted at *that* boundary instead, and both were defeated by exactly this module:
+the boundary can only remove values it was handed, and ``host.lower()`` here is an
+independent second copy of the host that no URL value it holds contains. The ``secret``
+parameter is how the decision is taken where the provenance is known — see
+``redaction.safe_token``.
+
+``secret`` is empty on the **pre-mint** call and that is not an oversight: the port checks
+the offer's ``checkout_url`` before ``mint`` runs, so at that point no code exists anywhere
+and there is nothing to keep out of the message. It is passed on the **post-mint** permalink
+check, which is the one refusal that happens with a live discount behind it.
 """
 
 from __future__ import annotations
 
 from urllib.parse import urlsplit
+
+from .redaction import redact_url, safe_token
 
 __all__ = ["ALLOWED_CHECKOUT_SCHEMES", "OffDomainCheckout", "assert_on_domain", "is_on_domain"]
 
@@ -48,8 +67,17 @@ class OffDomainCheckout(ValueError):
     """A checkout URL whose host is not the seller's registered domain (C10, D22)."""
 
 
-def _reason(url: str, registered_domain: str) -> str | None:
-    """Return why ``url`` is off-domain, or ``None`` when it is on-domain."""
+def _reason(url: str, registered_domain: str, *, secret: str = "") -> str | None:
+    """Return why ``url`` is off-domain, or ``None`` when it is on-domain.
+
+    ``secret`` is a live discount code that must not be recoverable from the returned prose.
+    Every merchant-controlled fragment below is rendered through
+    :func:`~.redaction.safe_token`, which drops the fragment whole when it could spell that
+    code and returns it untouched otherwise — so the diagnostic survives in the ordinary
+    case and fails closed in the hostile one. With ``secret`` empty (the pre-mint call, and
+    :func:`is_on_domain`) nothing has been minted and every fragment is rendered as-is,
+    which is the behaviour every existing caller already has.
+    """
     if not registered_domain or not str(registered_domain).strip():
         return "the seller has no registered domain to compare against"
     if not url or not str(url).strip():
@@ -58,18 +86,25 @@ def _reason(url: str, registered_domain: str) -> str | None:
     try:
         parts = urlsplit(str(url))
     except ValueError as exc:
-        return f"checkout_url is not a parsable URL ({exc})"
-
-    if parts.scheme.lower() not in ALLOWED_CHECKOUT_SCHEMES:
+        # The ValueError's own text QUOTES the offending fragment of the merchant's URL,
+        # so it is merchant-controlled prose and gets the same treatment as the URL itself.
         return (
-            f"checkout_url scheme {parts.scheme!r} is not one a checkout can be redirected "
-            f"to (allowed: {sorted(ALLOWED_CHECKOUT_SCHEMES)})"
+            f"checkout_url is not a parsable URL ({safe_token(exc, secret, label='parse-error')})"
+        )
+
+    scheme = parts.scheme
+    if scheme.lower() not in ALLOWED_CHECKOUT_SCHEMES:
+        # A scheme is merchant-controlled and `urlsplit` accepts any `[A-Za-z][A-Za-z0-9+.-]*`,
+        # so `PSX-LIVE-01://…` parses and spells a code here.
+        return (
+            f"checkout_url scheme {safe_token(scheme, secret, label='scheme')!r} is not one "
+            f"a checkout can be redirected to (allowed: {sorted(ALLOWED_CHECKOUT_SCHEMES)})"
         )
 
     try:
         host = parts.hostname
     except ValueError as exc:
-        return f"checkout_url has no parsable host ({exc})"
+        return f"checkout_url has no parsable host ({safe_token(exc, secret, label='parse-error')})"
 
     if not host:
         return "checkout_url carries no host"
@@ -77,9 +112,14 @@ def _reason(url: str, registered_domain: str) -> str | None:
     expected = str(registered_domain).strip().lower().rstrip(".")
     actual = host.lower().rstrip(".")
     if actual != expected:
+        # `actual` is the SECOND, independently normalised copy of the merchant's host that
+        # defeated pass 2: a boundary redactor holding the URL as a value never contained
+        # this string, and `.lower()` put it out of reach of a case-sensitive literal layer.
+        # It is guarded HERE, where it is known to have come off a merchant reply.
         return (
-            f"checkout_url host {actual!r} is not the registered seller domain "
-            f"{expected!r} — hosts are compared by exact equality (D22/C10)"
+            f"checkout_url host {safe_token(actual, secret, label='host')!r} is not the "
+            f"registered seller domain {expected!r} — hosts are compared by exact equality "
+            f"(D22/C10)"
         )
     return None
 
@@ -89,8 +129,22 @@ def is_on_domain(url: str, registered_domain: str) -> bool:
     return _reason(url, registered_domain) is None
 
 
-def assert_on_domain(url: str, registered_domain: str, *, what: str = "checkout_url") -> None:
-    """Raise :class:`OffDomainCheckout` unless ``url``'s host is the registered domain."""
-    reason = _reason(url, registered_domain)
+def assert_on_domain(
+    url: str, registered_domain: str, *, what: str = "checkout_url", secret: str = ""
+) -> None:
+    """Raise :class:`OffDomainCheckout` unless ``url``'s host is the registered domain.
+
+    Pass ``secret`` — the code that has already been minted — on any call that happens
+    **after** a provider has issued a real discount. The message this raises is carried into
+    a persisted ``policy_event`` and the client-visible ``denial_reason``, and ``secret`` is
+    what lets this function keep the code out of it while it still knows which parts of the
+    sentence the merchant wrote.
+    """
+    reason = _reason(url, registered_domain, secret=secret)
     if reason is not None:
-        raise OffDomainCheckout(f"{what}: {reason} (url={url!r})")
+        # With a secret in play the URL is reduced to scheme+host HERE rather than left for
+        # a downstream replace to find: the reduction is the same one `redact_code`'s
+        # structural layer would apply, done at the point the prose is built so that no
+        # unreduced spelling of the URL ever exists in a string anyone might copy.
+        shown = redact_url(url, secret) if secret else url
+        raise OffDomainCheckout(f"{what}: {reason} (url={shown!r})")

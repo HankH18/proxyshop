@@ -40,6 +40,29 @@ straight into both published surfaces. So:
 * every assertion goes through :func:`redeemable_spelling`, which asks whether a reader could
   RECOVER a redeemable code, not whether the exact bytes appear — and
   :func:`test_the_leak_detector_itself_detects_a_leak` proves that helper can fail.
+
+**The lesson pass 3 added, and it is a lesson about THIS FILE.** Every case the matrix could
+express put the code in the part of the URL ``redact_url`` throws away — the path or the
+query — so the gate was blind to the one component it deliberately KEEPS. ``assert_on_domain``
+builds a second, independently lower-cased copy of the host into its reason; a live code
+spelled in the host walked into both published surfaces, the traceback and the C-level
+excepthook while every test here passed. Two things follow, and both are structural rather
+than "one more case":
+
+* a gate whose cases all exercise the same discarded component is a gate that measures one
+  thing and reports another, so the matrix now spans the host, the port, the scheme and the
+  query — every component the URL has; and
+* the redaction was moved to the sites that BUILD prose out of merchant input, because a
+  redactor at the boundary cannot remove a value it was never handed. The tests that pin
+  that are the ones naming ``_reason``'s individual fragments and the two post-mint handlers
+  in ``provider.py`` and ``providers.py``.
+
+Pass 3 also killed a defect that was not a leak at all: ``urlsplit().port`` raises on a
+non-numeric port, and the redactor read it outside its own guard, so a permalink like
+``https://attacker.tld:notaport/x`` took a bare ``ValueError`` out through
+``provider.checkout()``. No ``OrphanedCheckoutCode`` was built, so no ``code_created`` event
+was emitted and ``orphaned_code`` was ``None`` — the redaction crash destroyed T-202 on that
+path. Every case in ``SPELLINGS`` therefore asserts the T-202 half too.
 """
 
 from __future__ import annotations
@@ -47,20 +70,28 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
+import re
 import sys
 import traceback
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import unquote
 
 import pytest
 from exchange.accept import accept, use_registered_domains
 from exchange.checkout import (
+    CheckoutProvider,
     CheckoutRequest,
+    MintedCheckout,
+    OffDomainCheckout,
     OrphanedCheckoutCode,
     OrphanedCode,
+    RedactedCause,
     StaticRegisteredDomains,
+    assert_on_domain,
     code_fingerprint,
+    redact_code,
+    redact_url,
     resolve_provider,
 )
 
@@ -108,34 +139,95 @@ class OffDomainMerchant:
     __call__ = create_code
 
 
+#: The decodings a reader of a log line can apply for free. Deliberately implemented HERE
+#: rather than imported from ``exchange.checkout.redaction``: a gate that shares its
+#: recovery model with the code under test cannot catch the case where the model itself is
+#: too narrow, which is the failure mode that shipped twice. If production widens, this must
+#: be widened independently, and :func:`test_the_leak_detector_itself_detects_a_leak` is what
+#: proves each transformation below is live.
+def _percent(text: str) -> str:
+    return unquote(text)
+
+
+def _plus_as_space(text: str) -> str:
+    """``+`` is a space in ``application/x-www-form-urlencoded`` — and a query string is one."""
+    return text.replace("+", " ")
+
+
+def _unicode_unescaped(text: str) -> str:
+    r"""``PSX`` is ``PSX`` to a JSON reader, and the policy_event is serialised as JSON."""
+    try:
+        return text.encode("latin-1", "backslashreplace").decode("unicode_escape", "replace")
+    except Exception:  # pragma: no cover - defensive; the encode above does not raise
+        return text
+
+
+_ACE = re.compile(r"xn--[A-Za-z0-9-]+", re.IGNORECASE)
+
+
+def _punycode(text: str) -> str:
+    """Decode ``xn--`` labels. A registrar will sell the host; a browser shows the Unicode.
+
+    Matched wherever it appears in the prose, not only in a string that is entirely a
+    hostname — a refusal message quotes the host inside a sentence, and a decoder that only
+    understands a bare hostname reports "clean" on the surface that actually publishes.
+    """
+
+    def decode(match: re.Match[str]) -> str:
+        try:
+            return match.group(0)[4:].encode("ascii", "replace").decode("punycode")
+        except Exception:
+            return match.group(0)
+
+    return _ACE.sub(decode, text) if "xn--" in text.casefold() else text
+
+
+_DECODINGS = (_percent, _plus_as_space, _unicode_unescaped, _punycode)
+
+
 def redeemable_spelling(text: str, code: str) -> str | None:
     """The form of ``code`` a reader of ``text`` could actually redeem, or ``None``.
 
     A plain ``code not in text`` is NOT this assertion, and believing it was is the whole
     of the first T-215 failure. What matters is not whether the exact bytes of ``code``
     appear — it is whether anything in ``text`` can be turned back into a string the
-    merchant will honour. Two transformations do that, and both were measured defeating the
-    original redaction end to end:
+    merchant will honour. Every transformation below has been measured defeating some
+    version of this redaction end to end:
 
     * **case** — this repo's own Shopify stub matches redemptions with
       ``candidate.strip().upper() == self.code.upper()``
       (``services/shopify-stub/src/codes.py``) and keys its table by ``.upper()``
-      (``state.py``). ``summer10-live`` in a log IS ``SUMMER10-LIVE``.
+      (``state.py``). ``summer10-live`` in a log IS ``SUMMER10-LIVE``. Case is what defeated
+      the pass-2 fix, in the host: ``urlsplit().hostname`` lower-cases, so a case-sensitive
+      literal replace could never have matched it.
     * **percent-encoding** — ``%50%53%58%2D%4C%49%56%45%30%31`` is one ``unquote`` away
       from ``PSX-LIVE01``, and a permalink is a URL, so encoding it is ordinary rather than
-      exotic.
+      exotic. Applied repeatedly: ``%2550`` is a percent-encoded percent-encoding.
+    * **``+`` as space** — the encoding a form-encoded query uses for a code with a space in
+      it, which Shopify permits.
+    * **``\\uNNNN`` escapes** — what ``json.dumps`` writes and what a merchant that
+      round-trips its reply through JSON hands back.
+    * **punycode** — ``xn--psx--42-bkf`` decodes to ``psx-Ω-42``. ``urlsplit().hostname``
+      returns the ACE form, so a case-folded substring search over the raw host misses a
+      non-ASCII code entirely.
 
     Returns the offending decoding so a failure message can show what was recoverable.
     """
     needle = code.casefold()
-    candidate = text
-    for _ in range(4):  # bounded; `%2550` is a percent-encoded percent-encoding
-        if needle in candidate.casefold():
+    seen: set[str] = set()
+    frontier = [text]
+    while frontier and len(seen) < 64:  # bounded: the transformations compose
+        candidate = frontier.pop()
+        folded = candidate.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        if needle in folded:
             return candidate
-        decoded = unquote(candidate)
-        if decoded == candidate:
-            return None
-        candidate = decoded
+        for decode in _DECODINGS:
+            nxt = decode(candidate)
+            if nxt != candidate:
+                frontier.append(nxt)
     return None
 
 
@@ -145,6 +237,25 @@ def assert_code_is_unrecoverable(text: str, code: str, surface: str) -> None:
         f"a live discount code is recoverable from {surface}. The code is {code!r} and this "
         f"surface decodes to something containing it:\n{found}"
     )
+
+
+def excepthook_output(exc: BaseException) -> str:
+    """What the interpreter's DEFAULT excepthook prints — the C-level channel.
+
+    ``PyErr_Display`` walks the chain through ``PyException_GetCause``, reading the C slot
+    directly, so none of ``OrphanedCheckoutCode``'s Python-level properties run. It is the
+    one reader that sees the exception objects exactly as they were chained.
+    """
+    captured = io.StringIO()
+    original = sys.stderr
+    sys.stderr = captured
+    try:
+        sys.excepthook(type(exc), exc, exc.__traceback__)
+    finally:
+        sys.stderr = original
+    rendered = captured.getvalue()
+    assert rendered.strip(), "the excepthook printed nothing; the assertion would be vacuous"
+    return rendered
 
 
 class ExplodingMerchant:
@@ -389,47 +500,166 @@ def test_the_chained_cause_cannot_leak_the_code_into_a_traceback() -> None:
 # both fields, so every case it could reach was the exact-spelling one — the only case a
 # substring blacklist survives. These are the cases it could not express.
 # =====================================================================================
-#: ``(label, code, permalink_url)``. The code and the URL are independent merchant fields.
-SPELLINGS: list[tuple[str, str, str]] = [
-    (
+class Spelling(NamedTuple):
+    """One merchant reply: a code, a permalink, and what the refusal may still say.
+
+    ``host_survives`` is the *diagnostic* expectation, and it is a property of where the
+    merchant put the code rather than a knob. The refusal exists to tell an operator which
+    host was refused, so the host is kept whenever it is safe to keep — but when the code is
+    spelled IN the host there is no way to publish the host without publishing the code, and
+    the redaction fails closed. Those cases assert the fingerprint instead, which is the
+    join to the ``code_created`` record and is what an operator actually acts on next.
+
+    ``detectable_raw`` says whether :func:`redeemable_spelling` must find the code in the
+    RAW permalink. It is False only for the control that spells no code at all, and it is
+    what :func:`test_the_leak_detector_itself_detects_a_leak` iterates.
+    """
+
+    label: str
+    code: str
+    permalink: str
+    host_survives: bool = True
+    detectable_raw: bool = True
+
+
+#: The code and the URL are independent merchant fields. Nothing makes them agree.
+SPELLINGS: list[Spelling] = [
+    Spelling(
         "exact",
         "PSX-EXACT-01",
         f"https://{RIVAL_DOMAIN}/cart/1:1?discount=PSX-EXACT-01",
     ),
-    (
+    Spelling(
         # No hostile intent and no exotic characters: lower-casing a URL is ordinary CDN
         # and link-building behaviour, and Shopify redeems case-insensitively.
         "lowercased-permalink",
         "SUMMER10-LIVE",
         f"https://{RIVAL_DOMAIN}/cart/1:1?discount=summer10-live",
     ),
-    (
+    Spelling(
         # `unquote()`s straight back to `PSX-LIVE01`.
         "percent-encoded-permalink",
         "PSX-LIVE01",
         f"https://{RIVAL_DOMAIN}/cart/1:1?discount=%50%53%58%2D%4C%49%56%45%30%31",
     ),
-    (
+    Spelling(
         # Shopify's OTHER discount-link shape puts the code in the PATH, not the query — so
         # a redaction that parses out the `discount` parameter and stops is still wrong.
         "code-in-the-path",
         "PSX-PATH-77",
         f"https://{RIVAL_DOMAIN}/discount/PSX-PATH-77?redirect=/cart/1:1",
     ),
-    (
+    Spelling(
         # The control: no spelling of the code anywhere in the URL. It must pass for the
         # right reason, and the host assertion below is what proves the message survived.
         "no-code-in-permalink",
         "PSX-ABSENT-9",
         f"https://{RIVAL_DOMAIN}/cart/1:1",
+        detectable_raw=False,
+    ),
+    # -----------------------------------------------------------------------------------
+    # Pass 3. The cases above all keep the code in the part of the URL `redact_url` THROWS
+    # AWAY — path, query — so they could not see the pass-2 hole, which was in the one
+    # component it deliberately KEEPS. `assert_on_domain` builds a second, independently
+    # lower-cased copy of the host into its reason; the boundary redactor never held that
+    # string, and `.lower()` put it out of reach of the case-sensitive literal layer. An
+    # ordinary uppercase Shopify-style code spelled in the host walked into `denial_reason`,
+    # the persisted `policy_event`, `str(exc)`, the traceback and the C-level excepthook.
+    # -----------------------------------------------------------------------------------
+    Spelling(
+        "code-in-the-host",
+        "PSX-HOST-42",
+        f"https://PSX-HOST-42.{RIVAL_DOMAIN}/cart/1:1",
+        host_survives=False,
+    ),
+    Spelling(
+        # A hostname a registrar will sell. The ACE form still contains the ASCII code
+        # (punycode copies basic code points verbatim), so this is the host case wearing a
+        # disguise — and it is the shape `_host_spells`' pass-2 docstring named as a
+        # residual it did not cover.
+        "punycode-host",
+        "PSX-PUNY-9",
+        f"https://xn--psx-puny-9-x1a.{RIVAL_DOMAIN}/cart/1:1",
+        host_survives=False,
+    ),
+    Spelling(
+        # ...and the version that punycode really does hide: a NON-ASCII code, whose ACE
+        # form `xn--psx--42-bkf` contains no substring of it at all. Only decoding the label
+        # recovers it, which is why the detector had to learn punycode rather than be told
+        # the residual was acceptable.
+        "punycode-hides-a-non-ascii-code",
+        "PSX-Ω-42",
+        f"https://xn--psx--42-bkf.{RIVAL_DOMAIN}/cart/1:1",
+        host_survives=False,
+    ),
+    Spelling(
+        # The CRITICAL pass-2 defect. `urlsplit().port` raises `ValueError` on a non-numeric
+        # port, and pass 2 read it outside its own guard — so this shape did not leak, it
+        # CRASHED `redact_url`, took a bare `ValueError` out through `provider.checkout()`,
+        # and destroyed T-202: no `code_created` event, no `orphaned_code`, a live discount
+        # the exchange could neither see nor revoke. The T-202 assertions at the bottom of
+        # this test are what pin that.
+        "non-numeric-port",
+        "PSX-PORT-13",
+        f"https://{RIVAL_DOMAIN}:notaport/cart/1:1?discount=PSX-PORT-13",
+    ),
+    Spelling(
+        # The same crash, with the code IN the offending port — so the `ValueError`'s own
+        # text ("Port could not be cast to integer value as 'PSX99'") published it verbatim
+        # into `denial_reason` and the persisted event.
+        "code-in-the-port",
+        "PSX99",
+        f"https://{RIVAL_DOMAIN}:PSX99/cart/1:1",
+    ),
+    Spelling(
+        # `urlsplit` accepts any `[A-Za-z][A-Za-z0-9+.-]*` as a scheme, and the off-domain
+        # reason quotes the scheme it refused. A third merchant-controlled fragment in the
+        # same sentence, found by the sweep rather than by a failing test.
+        "code-in-the-scheme",
+        "PSX-SCHEME-8",
+        f"PSX-SCHEME-8://{RIVAL_DOMAIN}/cart/1:1",
+    ),
+    Spelling(
+        # `+` is a space in a form-encoded query, and Shopify permits a space in a code.
+        "plus-encoded-permalink",
+        "PSX LIVE 5",
+        f"https://{RIVAL_DOMAIN}/cart/1:1?discount=PSX+LIVE+5",
+    ),
+    Spelling(
+        # What a merchant that round-trips its own reply through JSON hands back.
+        "unicode-escaped-permalink",
+        "PSX-ESC-6",
+        f"https://{RIVAL_DOMAIN}/cart/1:1?discount=" + r"\u0050\u0053\u0058-ESC-6",
     ),
 ]
 
 
-@pytest.mark.parametrize(("label", "code", "permalink"), SPELLINGS, ids=[s[0] for s in SPELLINGS])
-def test_no_spelling_of_the_permalink_leaks_the_code(
-    unwired: None, label: str, code: str, permalink: str
-) -> None:
+def assert_diagnostic_survived(text: str, case: Spelling, surface: str) -> None:
+    """The other half of every assertion here: redaction must not become deletion.
+
+    A message that says nothing satisfies T-215 perfectly and is useless, so each surface is
+    checked for the diagnostic it is still required to carry — the refused host where the
+    host is safe to publish, and the fingerprint that joins to the ``code_created`` record
+    always.
+    """
+    assert code_fingerprint(case.code) in text, (
+        f"[{case.label}] {surface} carries no fingerprint joining it to the code_created "
+        f"event that holds the live code — the refusal is unactionable: {text!r}"
+    )
+    if case.host_survives:
+        assert RIVAL_DOMAIN in text, (
+            f"[{case.label}] the refused host was redacted away with the code; {surface} is "
+            f"now useless to an operator: {text!r}"
+        )
+    else:
+        assert "redacted-host" in text, (
+            f"[{case.label}] the code is spelled IN the host, so the host must be dropped "
+            f"and SAID to have been dropped; {surface} was: {text!r}"
+        )
+
+
+@pytest.mark.parametrize("case", SPELLINGS, ids=[s.label for s in SPELLINGS])
+def test_no_spelling_of_the_permalink_leaks_the_code(unwired: None, case: Spelling) -> None:
     """Neither surface may yield a redeemable code, however the merchant spelled the URL.
 
     The two surfaces are the two that publish: ``denial_reason`` goes back to the client,
@@ -437,6 +667,7 @@ def test_no_spelling_of_the_permalink_leaks_the_code(
     bare string by the published OpenAPI. Both are asserted for every spelling, because the
     defect was that they agreed with each other — and both were wrong.
     """
+    label, code, permalink = case.label, case.code, case.permalink
     live = auction("bid-a", "bid-b")
     merchant = OffDomainMerchant(code, permalink)
 
@@ -453,17 +684,33 @@ def test_no_spelling_of_the_permalink_leaks_the_code(
     assert_code_is_unrecoverable(policy, code, f"[{label}] the persisted policy_event")
 
     # ...and the diagnostic still has to be there, or the redaction has merely deleted the
-    # message. The refused HOST is what an operator acts on.
-    assert RIVAL_DOMAIN in reason, (
-        f"[{label}] the refused host was redacted away with the code; the message is now "
-        f"useless to an operator: {reason!r}"
+    # message. The refused HOST is what an operator acts on, where publishing it is safe.
+    assert_diagnostic_survived(reason, case, "the client-visible denial_reason")
+
+    # T-202 is untouched by any of this: the real code is still recorded, once. This is the
+    # assertion the pass-2 `redact_url` crash broke outright on `non-numeric-port` — the
+    # refusal never became an `OrphanedCheckoutCode`, so there was no orphan to record.
+    assert "code_created" in kinds(result), (
+        f"[{label}] the merchant issued a live discount and the exchange recorded no "
+        f"code_created event for it; events were {kinds(result)}. T-202 is destroyed on "
+        f"this path — the code is live at the merchant and the exchange cannot revoke it."
     )
-    # T-202 is untouched by any of this: the real code is still recorded, once.
     created = event_of(result, "code_created")
     assert created["payload"]["code"] == code, (
         f"[{label}] the recorded code is not the one the merchant minted"
     )
-    assert result.orphaned_code is not None and result.orphaned_code.code == code
+    assert created["payload"].get("orphaned") is True, (
+        f"[{label}] the record must say this code belongs to a REFUSED checkout"
+    )
+    assert result.orphaned_code is not None and result.orphaned_code.code == code, (
+        f"[{label}] T-202: the orphan was not carried out to the caller that can revoke it"
+    )
+    # The refusal must still point AT that record, or an operator holding only the reason
+    # has a fingerprint that joins to nothing.
+    pointer = event_of(result, "policy_event")["payload"].get("orphaned_code")
+    assert isinstance(pointer, dict) and pointer.get("event_id") == created["event_id"], (
+        f"[{label}] the refusal does not name the code_created event holding the live code"
+    )
 
 
 def test_the_leak_detector_itself_detects_a_leak() -> None:
@@ -474,13 +721,44 @@ def test_the_leak_detector_itself_detects_a_leak() -> None:
     is the falsifiability control: the same helper, pointed at text that really does carry
     each spelling, must report every one of them.
     """
-    for _, code, permalink in SPELLINGS[:-1]:
-        leaky = f"refused url={permalink!r}"
+    for case in SPELLINGS:
+        leaky = f"refused url={case.permalink!r}"
+        found = redeemable_spelling(leaky, case.code)
+        if case.detectable_raw:
+            assert found is not None, (
+                f"[{case.label}] the detector missed a recoverable {case.code!r} inside "
+                f"{leaky!r} — every other assertion in this file is unfalsifiable until "
+                f"this passes"
+            )
+        else:
+            assert found is None, (
+                f"[{case.label}] is the control: it spells no code, and a detector that "
+                f"reports one here is crying wolf rather than working"
+            )
+
+    # Each transformation, on its own, against text that carries ONLY that encoding. A
+    # detector that is wide on paper and narrow in fact is how pass 1 and pass 2 both
+    # shipped: the widening is only real if every branch of it is exercised.
+    each_encoding = [
+        ("case", "SUMMER10-LIVE", "refused url='.../cart?discount=summer10-live'"),
+        ("percent", "PSX-LIVE01", "refused '%50%53%58%2D%4C%49%56%45%30%31'"),
+        (
+            "double-percent",
+            "PSX-LIVE01",
+            "refused '%2550%2553%2558%252D%254C%2549%2556%2545%2530%2531'",
+        ),
+        ("plus-as-space", "PSX LIVE 5", "refused '.../cart?discount=PSX+LIVE+5'"),
+        ("unicode-escape", "PSX-ESC-6", r"refused '?discount=\u0050\u0053\u0058-ESC-6'"),
+        ("punycode", "PSX-Ω-42", "refused host='xn--psx--42-bkf.attacker.tld'"),
+    ]
+    for name, code, leaky in each_encoding:
         assert redeemable_spelling(leaky, code) is not None, (
-            f"the detector missed a recoverable {code!r} inside {leaky!r} — every other "
-            f"assertion in this file is unfalsifiable until this passes"
+            f"the {name} branch of the recovery model is dead: {leaky!r} really does yield "
+            f"{code!r} and the detector said it did not. Every negative assertion that "
+            f"relies on that branch is vacuous."
         )
-    # ...and it must not cry wolf on the redacted form or on the control.
+
+    # ...and it must not cry wolf on the redacted forms or on the control.
     assert (
         redeemable_spelling(f"https://{RIVAL_DOMAIN}/<redacted:code:d72a725ef90a>", "PSX-LIVE01")
         is None
@@ -489,6 +767,7 @@ def test_the_leak_detector_itself_detects_a_leak() -> None:
         redeemable_spelling(f"refused url='https://{RIVAL_DOMAIN}/cart/1:1'", "PSX-ABSENT-9")
         is None
     )
+    assert redeemable_spelling("host '<redacted-host:code:bf3c4ccf737c>'", "PSX-HOST-42") is None
 
 
 def test_the_default_string_form_of_the_orphan_does_not_spell_the_code() -> None:
@@ -540,10 +819,8 @@ def test_the_default_string_form_of_the_orphan_does_not_spell_the_code() -> None
     # and the client-visible reason are not.
 
 
-@pytest.mark.parametrize(("label", "code", "permalink"), SPELLINGS, ids=[s[0] for s in SPELLINGS])
-def test_a_naive_new_call_site_cannot_reopen_the_leak(
-    label: str, code: str, permalink: str
-) -> None:
+@pytest.mark.parametrize("case", SPELLINGS, ids=[s.label for s in SPELLINGS])
+def test_a_naive_new_call_site_cannot_reopen_the_leak(case: Spelling) -> None:
     """The "safe by construction" claim, gated directly instead of assumed.
 
     The port's own raise sites scrub the cause before chaining it, so the message they hand
@@ -557,6 +834,7 @@ def test_a_naive_new_call_site_cannot_reopen_the_leak(
     has never read this module would, and nothing but the constructor stands between that
     and the message.
     """
+    label, code, permalink = case.label, case.code, case.permalink
     orphan = OrphanedCode(
         code=code,
         permalink_url=permalink,
@@ -573,9 +851,18 @@ def test_a_naive_new_call_site_cannot_reopen_the_leak(
     assert_code_is_unrecoverable(
         "".join(str(a) for a in exc.args), code, f"[{label}] the args of a naively-built orphan"
     )
-    assert RIVAL_DOMAIN in str(exc), (
-        f"[{label}] the host was redacted away with the code: {str(exc)!r}"
-    )
+    # The orphan carried on the exception is itself a logging surface — `AcceptResult` holds
+    # one and renders it — so it gets the same treatment for every spelling.
+    assert_code_is_unrecoverable(repr(orphan), code, f"[{label}] repr() of the orphan itself")
+    if case.host_survives:
+        assert RIVAL_DOMAIN in str(exc), (
+            f"[{label}] the host was redacted away with the code: {str(exc)!r}"
+        )
+    else:
+        assert "redacted-host-url" in str(exc), (
+            f"[{label}] the code is spelled in the host, so the whole URL must be dropped "
+            f"and said to have been dropped: {str(exc)!r}"
+        )
 
 
 def test_the_c_level_excepthook_cannot_print_the_code() -> None:
@@ -623,6 +910,683 @@ def test_the_c_level_excepthook_cannot_print_the_code() -> None:
         assert RIVAL_DOMAIN in rendered, "the refused host must survive into the traceback"
     else:  # pragma: no cover - the checkout must refuse
         raise AssertionError("the off-domain permalink was not refused")
+
+
+# =====================================================================================
+# T-215 (d) — the redactor is TOTAL, and a redactor that raises destroys T-202
+#
+# Pass 2 read `urlsplit(...).port` outside its own `try`. `urlsplit().port` is a property
+# that parses lazily and raises `ValueError` on a non-numeric or out-of-range port, so a
+# merchant answering `https://attacker.tld:notaport/x` raised a bare ValueError out of
+# `redact_chain` -> `provider.checkout()`. Two things followed, and the second is worse than
+# the leak: the ValueError's own text quotes the offending port (so a code spelled THERE was
+# published verbatim), and the `OrphanedCheckoutCode` that carries the orphan was never
+# constructed — no `code_created`, no `orphaned_code`, a live discount nothing can revoke.
+#
+# A sanitiser that raises on the untrusted input it exists to sanitise is the wrong shape.
+# =====================================================================================
+#: URLs no merchant should send and every merchant may. Each one is fed to the redactor
+#: directly; none of them may raise, whatever else they do.
+HOSTILE_URLS: list[str] = [
+    "https://attacker.tld:notaport/cart/1:1",
+    "https://attacker.tld:PSX-LIVE01/cart",
+    "https://attacker.tld:99999999999/cart",
+    "https://attacker.tld:-1/cart",
+    "https://attacker.tld:/cart",
+    "https://[not-an-ipv6/cart",
+    "https://[::1]:notaport/cart",
+    "http://user:pw@attacker.tld:xx@evil.tld/cart",
+    "javascript:PSX-LIVE01",
+    "data:text/html,PSX-LIVE01",
+    "PSX-LIVE01://attacker.tld/cart",
+    "//attacker.tld:notaport/cart",
+    "",
+    " ",
+    "\x00https://attacker.tld:notaport/",
+    "https://" + "a" * 3000 + ":notaport/cart",
+    "https://attacker.tld:0x50/cart",
+    "https://attacker.tld:٤٢/cart",  # Arabic-Indic digits: int() takes them, urlsplit may not
+    "://",
+    "?discount=PSX-LIVE01",
+]
+
+
+@pytest.mark.parametrize("url", HOSTILE_URLS, ids=[f"url{i}" for i in range(len(HOSTILE_URLS))])
+def test_redact_url_never_raises_on_merchant_input(url: str) -> None:
+    """Totality, stated as the property it is rather than as one regression case.
+
+    Everything reachable from a merchant reply must fail CLOSED, never by exception. The
+    parametrisation is the point: `notaport` is the shape that was measured, and it is one
+    member of a family (bad port, bad IPv6 literal, no host, hostile scheme, NUL byte,
+    kilobyte-long host) that a single regression test would not have covered.
+    """
+    reduced = redact_url(url, "PSX-LIVE01")  # must not raise
+    assert isinstance(reduced, str)
+    assert_code_is_unrecoverable(reduced, "PSX-LIVE01", f"redact_url({url!r})")
+    # ...and it must be idempotent, or redacting an already-redacted message corrupts it.
+    assert_code_is_unrecoverable(
+        redact_url(reduced, "PSX-LIVE01"), "PSX-LIVE01", f"re-reducing redact_url({url!r})"
+    )
+
+
+@pytest.mark.parametrize("url", HOSTILE_URLS, ids=[f"url{i}" for i in range(len(HOSTILE_URLS))])
+def test_redact_code_never_raises_and_fails_closed(url: str) -> None:
+    """The other half: the message-level redactor must not raise either.
+
+    And when it cannot do its job it must drop the PROSE, not return it. Returning the
+    unredacted message on an internal failure is failing open, which is the one outcome
+    worse than losing a diagnostic.
+    """
+    code = "PSX-LIVE01"
+    message = f"refused url={url!r} code={code} lower={code.lower()}"
+    redacted = redact_code(message, code, urls=(url,))  # must not raise
+    assert isinstance(redacted, str)
+    assert_code_is_unrecoverable(redacted, code, f"redact_code(... urls=({url!r},))")
+
+
+def test_a_hostile_port_leaves_the_orphaned_code_recorded_and_revocable(unwired: None) -> None:
+    """T-202 on the exact path the pass-2 redactor crashed. Measured end to end.
+
+    Before this fix the run below produced `kinds == ['policy_event']`, `orphaned_code is
+    None` and `denial_reason == "checkout_refused: ValueError: Port could not be cast to
+    integer value as 'notaport'"` — the buyer was protected, and a live single-use discount
+    sat in the merchant's account with nothing in the exchange naming it.
+    """
+    code = "PSX-PORTKILL-1"
+    live = auction("bid-a", "bid-b")
+    merchant = OffDomainMerchant(code, f"https://{RIVAL_DOMAIN}:notaport/cart/1:1?discount={code}")
+
+    result = accept(live, "bid-a", merchant, "shopify")
+
+    # The refusal itself is unchanged — the buyer is protected and gets the next slot.
+    assert merchant.calls, "the merchant must actually have minted"
+    assert result.accepted is False, "an off-domain permalink was accepted"
+    assert result.permalink_url is None and result.code is None
+    assert result.reoffer_bid_ref == "bid-b", "A5: the buyer got no next slot"
+    assert live["accepted_bid_ref"] is None
+
+    # It refused for the RIGHT reason: an off-domain host, not a crash in the redactor.
+    assert isinstance(result.denial_reason, str)
+    assert "ValueError" not in result.denial_reason, (
+        "the redaction machinery raised instead of redacting; the refusal is now a bug "
+        f"report about urlsplit rather than about the merchant: {result.denial_reason!r}"
+    )
+    assert "OrphanedOffDomainCheckout" in result.denial_reason, (
+        f"the post-mint host check did not produce an orphan refusal: {result.denial_reason!r}"
+    )
+
+    # ...and T-202 holds: the live code is recorded, marked orphaned, and reachable.
+    assert "code_created" in kinds(result), (
+        f"T-202 destroyed: the merchant minted and nothing recorded it. Events: {kinds(result)}"
+    )
+    created = event_of(result, "code_created")
+    assert created["payload"]["code"] == code
+    assert created["payload"].get("orphaned") is True
+    assert result.orphaned_code is not None and result.orphaned_code.code == code
+
+    # ...and the code is still nowhere in either published surface.
+    assert_code_is_unrecoverable(result.denial_reason, code, "denial_reason (hostile port)")
+    assert_code_is_unrecoverable(
+        json.dumps(event_of(result, "policy_event"), default=str), code, "policy_event"
+    )
+
+
+# =====================================================================================
+# T-215 (e) — the leak is closed where the prose is BUILT, not where it is published
+#
+# `assert_on_domain` lives in `checkout/domain.py` and was invisible to two passes because
+# the redaction lived in `checkout/provider.py`. It formats FOUR merchant-controlled
+# fragments into one sentence — the parsed host (lower-cased, so a second copy no boundary
+# redactor holds), the scheme, the text of a urlsplit ValueError, and the URL — and after a
+# mint that sentence is carried verbatim into `denial_reason` and the persisted
+# `policy_event`. These assert the fragment-level contract directly, so a regression is
+# caught at the source rather than three modules downstream.
+# =====================================================================================
+#: ``(label, permalink, code)`` — one per merchant-controlled fragment `_reason` formats.
+REASON_FRAGMENTS: list[tuple[str, str, str]] = [
+    ("host", f"https://PSX-FRAG-HOST.{RIVAL_DOMAIN}/cart", "PSX-FRAG-HOST"),
+    ("scheme", f"PSX-FRAG-SCHEME://{RIVAL_DOMAIN}/cart", "PSX-FRAG-SCHEME"),
+    ("port", f"https://{RIVAL_DOMAIN}:PSX-FRAG-PORT/cart", "PSX-FRAG-PORT"),
+    ("query", f"https://{RIVAL_DOMAIN}/cart?discount=PSX-FRAG-QUERY", "PSX-FRAG-QUERY"),
+    ("path", f"https://{RIVAL_DOMAIN}/discount/PSX-FRAG-PATH", "PSX-FRAG-PATH"),
+    ("fragment", f"https://{RIVAL_DOMAIN}/cart#PSX-FRAG-HASH", "PSX-FRAG-HASH"),
+    ("userinfo", f"https://PSX-FRAG-USER@{RIVAL_DOMAIN}/cart", "PSX-FRAG-USER"),
+    ("bad-ipv6", "https://[PSX-FRAG-IPV6/cart", "PSX-FRAG-IPV6"),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "permalink", "code"), REASON_FRAGMENTS, ids=[f[0] for f in REASON_FRAGMENTS]
+)
+def test_the_off_domain_reason_redacts_every_merchant_fragment_it_formats(
+    label: str, permalink: str, code: str
+) -> None:
+    """Given the code, `assert_on_domain` must publish no fragment that spells it."""
+    with pytest.raises(OffDomainCheckout) as raised:
+        assert_on_domain(permalink, SELLER_DOMAIN, what="permalink_url", secret=code)
+
+    message = str(raised.value)
+    assert message, "a refusal with no reason is not debuggable"
+    assert_code_is_unrecoverable(message, code, f"[{label}] the off-domain reason itself")
+    assert (
+        "registered seller domain" in message
+        or "not one a checkout" in message
+        or ("not a parsable URL" in message)
+    ), f"[{label}] the reason no longer says WHY it refused: {message!r}"
+
+
+def test_the_off_domain_reason_is_unchanged_when_nothing_has_been_minted() -> None:
+    """The pre-mint call passes no secret, and that is deliberate rather than an oversight.
+
+    `CheckoutProvider.checkout` checks the offer's own `checkout_url` BEFORE calling `mint`,
+    so at that point no code exists anywhere in the world and there is nothing to keep out
+    of the message. Redacting there would cost the diagnostic and buy nothing — and every
+    existing caller of `assert_on_domain`/`is_on_domain` relies on the full message.
+    """
+    rival = f"https://{RIVAL_DOMAIN}/cart/1:1?discount=WHATEVER"
+    with pytest.raises(OffDomainCheckout) as raised:
+        assert_on_domain(rival, SELLER_DOMAIN, what="offer checkout_url")
+
+    message = str(raised.value)
+    assert RIVAL_DOMAIN in message, "the pre-mint refusal must still name the refused host"
+    assert rival in message, (
+        f"the pre-mint refusal must still quote the URL it refused: {message!r}"
+    )
+    assert "redacted" not in message, (
+        f"nothing was minted, so nothing should have been redacted: {message!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [s for s in SPELLINGS if not s.host_survives] + [SPELLINGS[8], SPELLINGS[9]],
+    ids=lambda s: s.label,
+)
+def test_the_c_level_excepthook_cannot_print_a_host_or_port_borne_code(case: Spelling) -> None:
+    """The excepthook channel, re-measured against the shapes pass 2 could not survive.
+
+    `test_the_c_level_excepthook_cannot_print_the_code` above covers a code in the query.
+    These are the ones that reach it by a different route: spelled in the HOST, which
+    `redact_url` deliberately keeps, and behind a non-numeric PORT, which used to abort the
+    whole refusal before any exception object existed to print.
+    """
+    merchant = OffDomainMerchant(case.code, case.permalink)
+    try:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=offer(SELLER_DOMAIN),
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+    except OrphanedCheckoutCode as exc:
+        captured = io.StringIO()
+        original = sys.stderr
+        sys.stderr = captured
+        try:
+            sys.excepthook(type(exc), exc, exc.__traceback__)
+        finally:
+            sys.stderr = original
+        rendered = captured.getvalue()
+        assert rendered.strip(), "the excepthook printed nothing; the test proves nothing"
+        assert exc.orphan.code == case.code, "the payload must still hold the real code"
+        assert_code_is_unrecoverable(
+            rendered, case.code, f"[{case.label}] the default sys.excepthook output"
+        )
+        # ...and the traceback rendered through Python-level attribute lookup too.
+        assert_code_is_unrecoverable(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            case.code,
+            f"[{case.label}] traceback.format_exception",
+        )
+    else:  # pragma: no cover - the checkout must refuse
+        raise AssertionError(f"[{case.label}] the off-domain permalink was not refused")
+
+
+def test_a_merchant_reply_with_no_code_field_is_not_dumped_into_the_refusal() -> None:
+    """The sweep's own finding: the one path where redaction is impossible in principle.
+
+    `ShopifyCheckoutProvider.mint` refuses a reply that does not spell its code under
+    ``code`` — and it used to put ``{reply!r}`` in the refusal to say what it got. That
+    branch is by definition "the code is not where we look", so a merchant answering
+    ``{"discount_code": "…"}`` had a live discount dumped verbatim into `denial_reason` and
+    the persisted `policy_event`, with no value available to redact BY. The keys and the
+    type are the diagnostic; the values are not.
+    """
+    live_code = "PSX-UNDECLARED-3"
+
+    class WrongKeyMerchant:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+            self.calls.append(str(store_id))
+            return {"discount_code": live_code, "url": f"https://{RIVAL_DOMAIN}/cart"}
+
+        __call__ = create_code
+
+    live = auction("bid-a", "bid-b")
+    merchant = WrongKeyMerchant()
+    result = accept(live, "bid-a", merchant, "shopify")
+
+    assert merchant.calls, "the merchant must actually have been called"
+    assert result.accepted is False
+    reason = result.denial_reason or ""
+    assert_code_is_unrecoverable(reason, live_code, "denial_reason for an unusable reply")
+    assert_code_is_unrecoverable(
+        json.dumps(event_of(result, "policy_event"), default=str),
+        live_code,
+        "policy_event for an unusable reply",
+    )
+    # The diagnostic an operator needs — WHICH key the merchant used — must survive.
+    assert "discount_code" in reason, (
+        f"the refusal no longer says which keys the merchant's reply carried: {reason!r}"
+    )
+
+
+# =====================================================================================
+# T-215 (f) — the OTHER two post-mint prose sites, and the identifier fields
+#
+# The sweep found four places that format merchant input into a message a live code can
+# reach, not one. `assert_on_domain` is the one that leaked; these three are the ones that
+# were a spelling away from it, and they are gated here so "guarded" is a measurement rather
+# than a claim. Each uses an encoding the literal blacklist layer cannot match — a punycode
+# domain — because a guard whose only test case is the exact spelling is a guard whose
+# removal nothing notices.
+# =====================================================================================
+#: `PSX-Ω-42` in ACE form. Contains no substring of the code; only decoding recovers it.
+PUNY_CODE = "PSX-Ω-42"
+PUNY_SPELLING = "xn--psx--42-bkf"
+
+
+class OnceThenForgetful:
+    """A registry that answers the first lookup and has never heard of the store after that.
+
+    Not contrived: `ShopifyCheckoutProvider.mint` resolves the registered domain a SECOND
+    time inside `default_permalink`, after the merchant has minted, and its own comment
+    names this exact case — "a lookup that answers once and fails once (a dropped
+    connection, a cache eviction) is all it takes".
+    """
+
+    def __init__(self, domain: str) -> None:
+        self.domain = domain
+        self.calls = 0
+
+    def domain_for(self, store_id: str) -> str | None:
+        self.calls += 1
+        return self.domain if self.calls == 1 else None
+
+
+def test_a_post_mint_failure_inside_the_adapter_cannot_publish_the_code() -> None:
+    """`providers.py` formats `{exc}` and `store_id` into its orphan refusal.
+
+    `{exc}` is an arbitrary exception built by code this package does not own — here
+    `registered_domain_for`, which quotes the bid's own `store_domain` claim. A store is
+    free to make that claim a spelling of the code it is about to mint, and the literal
+    blacklist downstream cannot match a punycode one.
+    """
+    registry = OnceThenForgetful(SELLER_DOMAIN)
+
+    class NoPermalinkMerchant:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+            self.calls.append(str(store_id))
+            return {"code": PUNY_CODE}  # no permalink: the adapter must build one
+
+        __call__ = create_code
+
+    merchant = NoPermalinkMerchant()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                # The bid's own claim about its domain, quoted verbatim by the second
+                # lookup's failure message.
+                store_domain=f"{PUNY_SPELLING}.example.com",
+                offer=offer(SELLER_DOMAIN),
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=registry,
+            )
+        )
+
+    exc = raised.value
+    assert merchant.calls, "the merchant must actually have minted"
+    assert registry.calls >= 2, "the second, post-mint lookup did not happen"
+    # T-202: the code is still carried out to whoever can revoke it.
+    assert exc.orphan.code == PUNY_CODE
+    assert_code_is_unrecoverable(str(exc), PUNY_CODE, "str() of an adapter post-mint orphan")
+    assert_code_is_unrecoverable(repr(exc), PUNY_CODE, "repr() of an adapter post-mint orphan")
+    # The C-level excepthook FIRST: `traceback.format_exception` reads `__cause__` through
+    # the redacting property, which mutates the chain in place, so rendering it first would
+    # clean the chain before the excepthook — the one reader that bypasses that property —
+    # ever saw it, and this assertion would be measuring the property instead.
+    assert_code_is_unrecoverable(
+        excepthook_output(exc), PUNY_CODE, "the C-level excepthook, adapter post-mint orphan"
+    )
+    assert_code_is_unrecoverable(
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        PUNY_CODE,
+        "the traceback of an adapter post-mint orphan",
+    )
+    assert code_fingerprint(PUNY_CODE) in str(exc), "the joinable handle must survive"
+
+
+class ShiftingOffer(dict):
+    """An offer whose ``expires_at`` is fine when the port validates it and hostile after.
+
+    The port runs `assert_offer_is_mintable` BEFORE the mint precisely so a malformed
+    `expires_at` cannot reach `code_expiry` with a live code behind it. That ordering is
+    correct and is not what this exercises: a `Mapping` is a merchant's own JSON-shaped
+    object, and "the value I validated is the value I will read next" is an assumption, not
+    a guarantee. `provider.checkout` wraps the result-building step for this reason — its
+    own comment says "cannot normally fail is exactly the assumption that produced this
+    ticket" — and this is the case that reaches that handler.
+    """
+
+    def __init__(self, hostile: str) -> None:
+        super().__init__(
+            product_ref="product-1", unit_price=100.0, total_price=100.0, expires_at=T_FUTURE
+        )
+        self.hostile = hostile
+        self.reads = 0
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "expires_at":
+            self.reads += 1
+            return T_FUTURE if self.reads == 1 else self.hostile
+        return super().get(key, default)
+
+
+def test_a_post_mint_failure_building_the_result_cannot_publish_the_code() -> None:
+    """`provider.checkout`'s own last-resort handler formats `{exc}` too.
+
+    Reached here by `code_expiry` raising while the `CheckoutResult` is assembled — after
+    the permalink has already passed the host check, so this is a refusal with a live code
+    and an on-domain permalink, the one shape neither `redact_url` nor the host guard sees.
+    `UnusableOffer` quotes the offending `expires_at`, and that value is the merchant's.
+    """
+
+    class PlainProvider(CheckoutProvider):
+        name = "test-plain"
+
+        def mint(self, request: CheckoutRequest) -> MintedCheckout:
+            # On-domain permalink, and NO expires_at — so the port computes one itself from
+            # the offer, which is the read that fails.
+            return MintedCheckout(
+                code=PUNY_CODE,
+                permalink_url=f"https://{SELLER_DOMAIN}/cart/1:1",
+                expires_at=None,
+            )
+
+    hostile = ShiftingOffer(f"{PUNY_SPELLING}.example.com")
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        PlainProvider().checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=hostile,
+                mode="redirect",
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+
+    exc = raised.value
+    assert hostile.reads >= 2, "the post-mint read of the offer did not happen"
+    assert exc.orphan.code == PUNY_CODE, "T-202: the orphan must still carry the live code"
+    assert_code_is_unrecoverable(str(exc), PUNY_CODE, "str() of a result-building orphan")
+    # The C-level excepthook FIRST: `traceback.format_exception` reads `__cause__` through
+    # the redacting property, which mutates the chain in place, so rendering it first would
+    # clean the chain before the excepthook — the one reader that bypasses that property —
+    # ever saw it, and this assertion would be measuring the property instead.
+    assert_code_is_unrecoverable(
+        excepthook_output(exc), PUNY_CODE, "the C-level excepthook, result-building orphan"
+    )
+    assert_code_is_unrecoverable(
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        PUNY_CODE,
+        "the traceback of a result-building orphan",
+    )
+    assert code_fingerprint(PUNY_CODE) in str(exc), "the joinable handle must survive"
+
+
+def test_the_orphans_identifier_fields_cannot_spell_the_code_either() -> None:
+    """`store_id`, `auction_id` and `bid_ref` are read off the bid — a merchant's own reply.
+
+    `accept()` takes `store_id` as `str(_read(bid, "store_id"))`, so nothing stops a store
+    naming itself after the discount it is about to mint. The `repr` is the surface that
+    matters: `AcceptResult` holds an `OrphanedCode` and one `logger.debug("%r", result)`
+    publishes whatever it renders.
+    """
+    orphan = OrphanedCode(
+        code=PUNY_CODE,
+        permalink_url=f"https://{RIVAL_DOMAIN}/cart/1:1",
+        provider="shopify",
+        store_id=f"{PUNY_SPELLING}.example.com",
+        auction_id=f"auction-{PUNY_SPELLING}",
+        bid_ref=f"bid-{PUNY_SPELLING}",
+    )
+
+    assert orphan.code == PUNY_CODE, "explicit field access is how the revoker reads it"
+    assert_code_is_unrecoverable(repr(orphan), PUNY_CODE, "repr() of an orphan with hostile ids")
+    assert_code_is_unrecoverable(f"{orphan}", PUNY_CODE, "an f-string of it")
+    assert code_fingerprint(PUNY_CODE) in repr(orphan), "the joinable handle must survive"
+
+
+class SelfRenderingFailure(Exception):
+    """A cause whose message comes from its own fields, not from ``args``.
+
+    Not exotic: ``OSError`` does this, and so does a great deal of client-library code — and
+    a provider is explicitly allowed to delegate to a library this repo has never seen. It
+    matters because BOTH of the mechanisms that redact a chained exception work by rewriting
+    ``args``: ``_redact_chain`` mutates them in place (which is what closes the C-level
+    excepthook) and the ``__cause__`` property re-runs the same rewrite on the way out.
+    Neither can touch a ``__str__`` that ignores ``args`` entirely.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__("a failure occurred")  # the args say nothing
+        self.detail = detail
+
+    def __str__(self) -> str:  # ...and the rendering says everything
+        return f"upstream refused: {self.detail}"
+
+
+def test_a_cause_that_renders_itself_cannot_publish_the_code() -> None:
+    """The channel neither ``args`` rewrite can reach, closed by not chaining that object.
+
+    Both published surfaces AND both traceback renderers are asserted, because this is the
+    shape where they disagree: ``str(orphan_exc)`` is built by this package and is safe by
+    construction, while the traceback and the C-level excepthook render the CAUSE, which is
+    not.
+    """
+
+    # The mint itself failing creates no orphan (nothing was minted), so this routes the
+    # self-rendering failure through the post-mint handler the way a real adapter does:
+    # mint succeeds, and the step that assembles the result raises.
+    class LateFailureProvider(CheckoutProvider):
+        name = "test-late-failure"
+
+        def mint(self, request: CheckoutRequest) -> MintedCheckout:
+            return MintedCheckout(
+                code=PUNY_CODE,
+                permalink_url=f"https://{SELLER_DOMAIN}/cart/1:1",
+                expires_at=None,
+            )
+
+    class ExplodingOffer(dict):
+        def __init__(self) -> None:
+            super().__init__(product_ref="p", unit_price=1.0, total_price=1.0)
+            self.reads = 0
+
+        def get(self, key: str, default: Any = None) -> Any:
+            if key == "expires_at":
+                self.reads += 1
+                if self.reads > 1:
+                    # Spelled in punycode, so the literal-spelling layer cannot match it:
+                    # what has to catch this is the guard at the site that FORMATS `{exc}`.
+                    raise SelfRenderingFailure(
+                        f"the discount at {PUNY_SPELLING}.example.com is already redeemed"
+                    )
+                return None
+            return super().get(key, default)
+
+    hostile = ExplodingOffer()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        LateFailureProvider().checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=hostile,
+                mode="redirect",
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+
+    exc = raised.value
+    assert hostile.reads >= 2, "the post-mint read did not happen; the test proves nothing"
+    assert exc.orphan.code == PUNY_CODE, "T-202: the orphan must still carry the live code"
+    assert_code_is_unrecoverable(str(exc), PUNY_CODE, "str() of a self-rendering-cause orphan")
+
+    # The excepthook FIRST — see the note in the adapter test: rendering the traceback runs
+    # the redacting `__cause__` property, which would clean the chain before the C-level
+    # reader that cannot use that property ever looked at it.
+    assert_code_is_unrecoverable(
+        excepthook_output(exc), PUNY_CODE, "the C-level excepthook with a self-rendering cause"
+    )
+    rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    assert_code_is_unrecoverable(rendered, PUNY_CODE, "traceback with a self-rendering cause")
+
+    # The chain must survive as a chain — a redaction that severed `__cause__` would take
+    # the "why" with it — and it must still name the type that failed.
+    assert exc.__cause__ is not None, "the chained cause was dropped rather than replaced"
+    assert "SelfRenderingFailure" in str(exc.__cause__), (
+        f"the stand-in no longer says what type failed: {str(exc.__cause__)!r}"
+    )
+    assert code_fingerprint(PUNY_CODE) in str(exc), "the joinable handle must survive"
+
+
+def test_a_self_rendering_failure_inside_the_adapter_cannot_publish_the_code() -> None:
+    """The same channel, on the adapter's own post-mint handler rather than the port's.
+
+    `ShopifyCheckoutProvider.mint` has its own `except Exception` — it has to, because the
+    region between the merchant's answer and the return is where the code exists and the
+    port cannot see it — and it formats `{exc}` into its refusal exactly as the port does.
+    Two handlers, one shape, and a fix applied to only one of them is a fix that a provider
+    with no permalink walks straight around.
+    """
+
+    class LateQuantityFailure(dict):
+        """An offer whose `quantity` reads fine for the pre-mint check and then explodes.
+
+        `default_permalink` — reached only when the merchant returns a code with no
+        permalink — calls `offer_quantity` a second time, after the mint.
+        """
+
+        def __init__(self) -> None:
+            super().__init__(product_ref="p", unit_price=1.0, total_price=1.0)
+            self.reads = 0
+
+        def get(self, key: str, default: Any = None) -> Any:
+            if key == "quantity":
+                self.reads += 1
+                if self.reads > 1:
+                    raise SelfRenderingFailure(
+                        f"quantity for {PUNY_SPELLING}.example.com is not orderable"
+                    )
+                return 1
+            return super().get(key, default)
+
+    class NoPermalinkMerchant:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+            self.calls.append(str(store_id))
+            return {"code": PUNY_CODE}
+
+        __call__ = create_code
+
+    hostile = LateQuantityFailure()
+    merchant = NoPermalinkMerchant()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=hostile,
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+
+    exc = raised.value
+    assert merchant.calls, "the merchant must actually have minted"
+    assert hostile.reads >= 2, "the post-mint read did not happen; the test proves nothing"
+    assert exc.orphan.code == PUNY_CODE, "T-202: the orphan must still carry the live code"
+    assert_code_is_unrecoverable(str(exc), PUNY_CODE, "str() of an adapter self-rendering orphan")
+    # Excepthook first — see the note in the adapter test above.
+    assert_code_is_unrecoverable(
+        excepthook_output(exc), PUNY_CODE, "the C-level excepthook, adapter self-rendering orphan"
+    )
+    assert_code_is_unrecoverable(
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        PUNY_CODE,
+        "the traceback of an adapter self-rendering orphan",
+    )
+    assert code_fingerprint(PUNY_CODE) in str(exc), "the joinable handle must survive"
+
+
+def test_a_safe_cause_is_chained_unchanged() -> None:
+    """The control for the stand-in: an ordinary cause must NOT be replaced.
+
+    Substituting the chain is a real loss of information, so it must happen only when the
+    original cannot be made safe. A refusal whose cause says nothing about the code keeps
+    that cause, its type and its message.
+    """
+    merchant = OffDomainMerchant()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=offer(SELLER_DOMAIN),
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, OffDomainCheckout), (
+        f"an ordinary off-domain cause was replaced rather than kept: {cause!r}"
+    )
+    assert not isinstance(cause, RedactedCause), "the stand-in fired on a safe cause"
+    assert RIVAL_DOMAIN in str(cause), "the cause no longer names the bad host"
 
 
 # =====================================================================================

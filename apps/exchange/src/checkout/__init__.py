@@ -93,6 +93,7 @@ from .provider import (
     OrphanedCode,
     OrphanedOffDomainCheckout,
     PortMethodIsFinal,
+    RedactedCause,
     RegisteredDomains,
     code_fingerprint,
     default_permalink,
@@ -100,12 +101,15 @@ from .provider import (
     redact_code,
     redact_url,
     registered_domain_for,
+    safe_token,
+    spells_code,
 )
 from .providers import (
     CheckoutCreatorError,
     ShopifyCheckoutProvider,
     SimulatedRedirectProvider,
 )
+from .redaction import recoverable_spellings
 from .registry import (
     CHECKOUT_MODES,
     DEFAULT_CHECKOUT_MODE,
@@ -145,6 +149,7 @@ __all__ = [
     "OrphanedCheckoutCode",
     "OrphanedCode",
     "OrphanedOffDomainCheckout",
+    "RedactedCause",
     "RegisteredDomains",
     "PortMethodIsFinal",
     "ShopifyCheckoutProvider",
@@ -168,12 +173,15 @@ __all__ = [
     "mint_code",
     "offer_discount_percentage",
     "offer_quantity",
+    "recoverable_spellings",
     "redact_code",
     "redact_url",
     "register_provider",
     "registered_domain_for",
     "registered_modes",
     "resolve_provider",
+    "safe_token",
     "shopify_discount_percentage",
+    "spells_code",
     "unbound_checkout_requests",
 ]
