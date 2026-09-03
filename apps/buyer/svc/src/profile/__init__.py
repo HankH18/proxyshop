@@ -1146,10 +1146,21 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
        what closes that, and it closes the run-together spelling (``danareyes-gear``) with
        it, because the count is taken in slug space rather than token by token.
 
-    Rules 2, 3 and 4 are separate on purpose: the first says a name is never a coincidence,
-    the second says a slug with nothing but the buyer in it is never one, and the third says
-    a *pile* of identity words is never one however much merchandise is stacked beside it.
-    Any one alone leaves a smuggling channel open, and all three together still admit every
+    5. and the *published list* stays inside the same budget, because a disclosure is a
+       property of the profile and not of one value in it. ``category_affinity`` carries up
+       to :data:`CATEGORY_LIMIT` slugs, so a budget charged per slug is satisfied twice over
+       by two orders: ``"dana gear"`` and ``"reyes gear"`` are one collision each and the
+       buyer's whole name between them, and ``park-gear`` — the collision this exemption was
+       built for — stops being one the moment ``lane-gear`` is published beside it. The
+       budget is measured over :func:`coarsen_categories`, which is what a profile actually
+       publishes, so a category bought once and truncated away cannot cost the buyer the
+       exemption on the ones that survive.
+
+    Rules 2 through 5 are separate on purpose: the first says a name is never a coincidence,
+    the second says a slug with nothing but the buyer in it is never one, the third says a
+    *pile* of identity words is never one however much merchandise is stacked beside it, and
+    the fourth says splitting that pile across several slugs does not make it one either. Any
+    one alone leaves a smuggling channel open, and all four together still admit every
     collision the exemption was added for. Being conservative here is close to free: the
     exemption only ever changes an answer for a slug some identity fragment actually matches.
     """
@@ -1170,6 +1181,23 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
         if len(_identity_fragments_in_slug(slug, sources)) > _MAX_INCIDENTAL_FRAGMENTS:
             continue
         exempt.add(slug)
+
+    # Rule 5. The budget is spent by the *release*, not by each slug in it. Charging it per
+    # slug is satisfied twice over by two orders, and the profile publishes a list: "dana
+    # gear" and "reyes gear" are one collision each and the buyer's whole name between them.
+    # Measured over what `coarsen_categories` actually publishes rather than over every slug
+    # the account owns, so a category the buyer bought once and that never reaches the
+    # profile cannot cost them the exemption on the three that do.
+    #
+    # Over budget withdraws the exemption entirely, which is exactly "report every fragment
+    # the published list carries": a slug that carries none is clean whether it is exempt or
+    # not, so nothing else changes answer.
+    carried: set[str] = set()
+    for slug in coarsen_categories(account):
+        if slug in exempt:
+            carried |= _identity_fragments_in_slug(slug, sources)
+    if len(carried) > _MAX_INCIDENTAL_FRAGMENTS:
+        return set()
     return exempt
 
 
