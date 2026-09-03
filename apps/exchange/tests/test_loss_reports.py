@@ -143,9 +143,7 @@ def test_one_report_per_store_with_golden_reason_counts(
     assert _counts(other["cluster-a"]) == {"fit": 0, "price": 1, "commitments": 0, "trust": 0}
 
 
-def test_a_win_is_not_a_loss(
-    loss_report_record: Any, loss_report_window: dict[str, float]
-) -> None:
+def test_a_win_is_not_a_loss(loss_report_record: Any, loss_report_window: dict[str, float]) -> None:
     from apps.exchange.src.reports import build_loss_report
 
     now = loss_report_window["end"]
@@ -176,7 +174,6 @@ def test_window_bounds_are_inclusive_and_everything_outside_is_dropped(
 
 def test_rfc3339_instants_are_understood_on_both_the_rows_and_the_window() -> None:
     from apps.exchange.src.reports import build_loss_report
-
     from apps.exchange.tests._fixtures_loss_reports import _loss_record
 
     window = {"start": "2024-04-01T00:00:00Z", "end": "2024-04-01T23:59:59Z"}
@@ -239,8 +236,14 @@ def test_an_amount_the_projection_never_heard_of_does_not_reach_the_report(
 def test_the_projection_reads_only_what_the_report_is_defined_to_carry() -> None:
     from apps.exchange.src.reports import PROJECTED_FIELDS
 
-    assert set(PROJECTED_FIELDS) == {"store_id", "cluster_id", "reason", "ts", "won",
-                                     "unmet_criteria"}, (
+    assert set(PROJECTED_FIELDS) == {
+        "store_id",
+        "cluster_id",
+        "reason",
+        "ts",
+        "won",
+        "unmet_criteria",
+    }, (
         "widening the projection widens what a report can leak; if a field is added here, "
         "the amount-suppression argument has to be re-made for it"
     )
@@ -280,10 +283,10 @@ def test_unmet_criteria_are_deduplicated_and_ordered(
 
     now = loss_report_window["end"]
     log = [
-        loss_report_record("d-1", "cluster-a", "fit", now - 50.0,
-                           unmet=("weight_kg <= 1", "capacity_l >= 30")),
-        loss_report_record("d-2", "cluster-a", "fit", now - 40.0,
-                           unmet=("capacity_l >= 30",)),
+        loss_report_record(
+            "d-1", "cluster-a", "fit", now - 50.0, unmet=("weight_kg <= 1", "capacity_l >= 30")
+        ),
+        loss_report_record("d-2", "cluster-a", "fit", now - 40.0, unmet=("capacity_l >= 30",)),
     ]
     entry = _by_cluster(_only(build_loss_report(log, loss_report_window), "store-loser"))
     assert list(entry["cluster-a"].unmet_criteria) == ["capacity_l >= 30", "weight_kg <= 1"]
@@ -365,9 +368,9 @@ def test_an_empty_or_fully_filtered_log_yields_no_report(
 def test_the_builder_neither_mutates_its_input_nor_varies_between_calls(
     loss_report_log: list[dict[str, Any]], loss_report_window: dict[str, float]
 ) -> None:
-    from apps.exchange.src.reports import build_loss_report
-
     import copy
+
+    from apps.exchange.src.reports import build_loss_report
 
     before = copy.deepcopy(loss_report_log)
     first = build_loss_report(loss_report_log, loss_report_window)
@@ -390,3 +393,96 @@ def test_rows_may_be_objects_rather_than_mappings(
     assert _counts(entry["cluster-a"]) == {"fit": 1, "price": 0, "commitments": 0, "trust": 1}
     for needle in (189.95, 142.25, "store-rival-alpha"):
         _assert_absent(build_loss_report(rows, loss_report_window), needle)
+
+
+# ---------------------------------------------------------------------------------------
+# 6. Three log shapes the first build got wrong, each one measured before it was fixed.
+# ---------------------------------------------------------------------------------------
+def test_an_amount_smuggled_inside_a_structured_criterion_is_still_redacted(
+    loss_report_record: Any, loss_report_window: dict[str, float]
+) -> None:
+    """A row that writes the winning price twice must not thereby launder it.
+
+    ``unmet_criteria`` is projected, so anything reachable inside it once looked "read" — and
+    a row carrying the same number under ``winning_price`` and inside a structured criterion
+    made ``winning_price`` look read too, so neither copy was residue and the criterion sailed
+    through. Measured: the report came back holding
+    ``"{'field': 'price', 'beat_by': 142.25}"``.
+    """
+    from apps.exchange.src.reports import build_loss_report
+
+    row = loss_report_record(
+        "s-1",
+        "cluster-a",
+        "price",
+        loss_report_window["end"] - 10.0,
+        unmet=({"field": "price", "beat_by": 142.25},),
+        winning_price=142.25,
+    )
+    reports = build_loss_report([row], loss_report_window)
+    entry = _by_cluster(_only(reports, "store-loser"))["cluster-a"]
+    assert list(entry.unmet_criteria) == [], "the structured criterion carried the winning price"
+    assert entry.lost == 1
+    _assert_absent(reports, 142.25)
+
+
+def test_a_rival_that_also_loses_does_not_refuse_the_whole_file(
+    loss_report_record: Any, loss_report_window: dict[str, float]
+) -> None:
+    """In a real auction log every rival is somebody's losing store.
+
+    Measured on the first build: scanning a report against each row's *own* unread scalars
+    flagged ``store-a``'s id inside ``store-a``'s own report — because a different row named
+    it as the rival — and raised ``LossReportLeak`` for every report in the log. A privacy
+    guard that refuses all output is not a stricter guard, it is a broken one.
+    """
+    from apps.exchange.src.reports import build_loss_report
+
+    now = loss_report_window["end"]
+    log = [
+        loss_report_record(
+            "v-1", "cluster-a", "price", now - 10.0, store_id="store-a", rival="store-b"
+        ),
+        loss_report_record(
+            "v-2", "cluster-a", "price", now - 20.0, store_id="store-b", rival="store-a"
+        ),
+    ]
+    reports = build_loss_report(log, loss_report_window)
+    assert [r.store_id for r in reports] == ["store-a", "store-b"]
+    assert all(r.by_cluster[0].lost == 1 for r in reports)
+
+
+def test_a_store_id_that_contains_a_rivals_id_is_not_mistaken_for_a_leak(
+    loss_report_record: Any, loss_report_window: dict[str, float]
+) -> None:
+    """``store-b-north`` losing to ``store-b`` is a substring, not a disclosure."""
+    from apps.exchange.src.reports import build_loss_report
+
+    log = [
+        loss_report_record(
+            "p-1",
+            "cluster-a",
+            "trust",
+            loss_report_window["end"] - 10.0,
+            store_id="store-b-north",
+            rival="store-b",
+        )
+    ]
+    report = _only(build_loss_report(log, loss_report_window), "store-b-north")
+    assert report.by_cluster[0].lost == 1
+
+
+def test_the_log_may_be_any_iterable_and_is_read_once(
+    loss_report_record: Any, loss_report_window: dict[str, float]
+) -> None:
+    from apps.exchange.src.reports import build_loss_report
+
+    now = loss_report_window["end"]
+    rows = [
+        loss_report_record("g-1", "cluster-a", "fit", now - 10.0),
+        loss_report_record("g-2", "cluster-b", "trust", now - 20.0),
+    ]
+    from_generator = build_loss_report((row for row in rows), loss_report_window)
+    from_tuple = build_loss_report(tuple(rows), loss_report_window)
+    assert [r.model_dump() for r in from_generator] == [r.model_dump() for r in from_tuple]
+    assert len(from_generator[0].by_cluster) == 2

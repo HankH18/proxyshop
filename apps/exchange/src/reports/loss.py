@@ -21,16 +21,22 @@ auction log. The suppression here is the other direction, and it has three layer
 
 2. **Redaction of the one free-text channel.** ``unmet_criteria`` is carried verbatim, so it
    is the only place a value can ride through a field that is itself permitted. Every
-   criterion is checked against the *residue* — the scalars of the row that the projection
-   did not read — and dropped if it contains one. A criterion naming the price that beat you
+   criterion is checked against the row's *residue* — the scalars of that row the projection
+   did not keep — and dropped if it contains one. A criterion naming the price that beat you
    is not a criterion, it is the winning price with a sentence around it.
 
-3. **An egress check on the finished report.** Every string and float in the built report is
-   scanned against that same residue, and a hit raises :class:`LossReportLeak` rather than
+3. **An egress check on the finished report.** Every string and number in the built report is
+   scanned against the log's residue, and a hit raises :class:`LossReportLeak` rather than
    returning. Layer 1 is what makes leaking hard; this is what makes a mistake in layer 1
-   loud. The integers are exempt because they are proven, not scanned: the only integers the
-   closed schema has are counts, and each one is checked against the tally the builder itself
-   computed.
+   loud — it is what would catch a future field copied straight off a row. Integers equal to
+   a tally this build computed are passed as proven-derived rather than scanned; every other
+   integer is scanned, so a new integer field cannot quietly become a money field.
+
+The two residues in :func:`_residues` are not redundant. Redaction uses the strict, per-row
+set, because a criterion naming a rival has to go even when that rival loses an auction of
+its own further down the log. The egress scan uses the pooled set, because in a real auction
+log every rival is also somebody's losing store — scanning with the strict set flags the
+store's own id in its own report and refuses every report in the file.
 
 Because the residue is derived from the input rather than from a list of names, a money field
 nobody here has ever heard of is suppressed on the day it is added.
@@ -161,32 +167,76 @@ class _Residue:
         return None
 
 
-def _residue_of(rows: Any) -> _Residue:
-    """Collect, per row, every scalar the projection does not read.
+def _read_of(row: Any, loss: _Loss) -> set[Any]:
+    """The scalars the projection actually kept out of ``row``.
 
-    Per row rather than across the log on purpose. If it were pooled, a rival's store id
-    would stop being residue as soon as that rival appeared as a losing store in some other
-    row — and the criterion naming it would survive into a report it does not belong in.
+    Kept, not *reachable*: the criteria are the strings :func:`_project` produced, and this
+    deliberately does not descend into whatever they were built from. Walking inside
+    ``unmet_criteria`` would let a row smuggle an amount past the residue check by writing it
+    both under a money field and inside a structured criterion — the criterion copy would
+    make the money field look "read", and both would then ride through.
     """
-    texts: set[str] = set()
-    numbers: set[float] = set()
-    numerals: set[str] = set()
-    for row in rows:
-        read: set[Any] = set()
-        for name in PROJECTED_FIELDS:
-            for value in _walk(_get(row, name, None)):
-                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-                    read.add(value)
+    read: set[Any] = set(loss.criteria) | {loss.store_id, loss.cluster_id, loss.reason}
+    for name in ("store_id", "cluster_id", "reason", "ts"):
+        raw = _get(row, name, None)
+        if isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
+            read.add(raw)
+    return read
+
+
+def _residues(pairs: list[tuple[Any, _Loss]]) -> tuple[_Residue, _Residue, frozenset[Any]]:
+    """Two residues over the same log, because they answer two different questions.
+
+    ``strict`` pools each row's *own* unread scalars, and is what a criterion is redacted
+    against: a criterion naming a rival must go even when that rival happens to lose an
+    auction of its own further down the log.
+
+    ``egress`` subtracts everything the projection read *anywhere* in the log, and is what
+    the finished report is scanned against. It has to be the looser of the two, because in a
+    real auction log every rival is also somebody's losing store — scanning a report with
+    the strict set would flag the store's own id in its own report and refuse every report
+    in the file. The third return value is that pooled read set: a value the projection read
+    somewhere is a value the report is entitled to carry.
+    """
+    strict_texts: set[str] = set()
+    strict_numbers: set[float] = set()
+    strict_numerals: set[str] = set()
+    seen_texts: set[str] = set()
+    seen_numbers: set[float] = set()
+    read_global: set[Any] = set()
+
+    for row, loss in pairs:
+        read = _read_of(row, loss)
+        read_global |= read
         for value in _walk(row):
-            if isinstance(value, bool) or value is None or value in read:
+            if isinstance(value, bool) or value is None:
                 continue
             if isinstance(value, str):
-                if len(value.strip()) >= _MIN_NEEDLE:
-                    texts.add(value.casefold())
+                if len(value.strip()) < _MIN_NEEDLE:
+                    continue
+                seen_texts.add(value.casefold())
+                if value not in read:
+                    strict_texts.add(value.casefold())
             elif isinstance(value, (int, float)):
-                numbers.add(float(value))
-                numerals.update(_numeral_forms(value))
-    return _Residue(frozenset(texts), frozenset(numbers), frozenset(numerals))
+                seen_numbers.add(float(value))
+                if value not in read:
+                    strict_numbers.add(float(value))
+                    strict_numerals.update(_numeral_forms(value))
+
+    read_texts = {v.casefold() for v in read_global if isinstance(v, str)}
+    read_numbers = {float(v) for v in read_global if isinstance(v, (int, float))}
+    egress_numbers = seen_numbers - read_numbers
+    egress = _Residue(
+        frozenset(seen_texts - read_texts),
+        frozenset(egress_numbers),
+        frozenset().union(*(_numeral_forms(n) for n in egress_numbers))
+        if egress_numbers
+        else frozenset(),
+    )
+    strict = _Residue(
+        frozenset(strict_texts), frozenset(strict_numbers), frozenset(strict_numerals)
+    )
+    return strict, egress, frozenset(read_global)
 
 
 # ---------------------------------------------------------------------------------------
@@ -238,9 +288,7 @@ def _project(row: Any, index: int) -> _Loss:
         raw_criteria = ()
     if isinstance(raw_criteria, (str, bytes)) or isinstance(raw_criteria, Mapping):
         raw_criteria = [raw_criteria]
-    criteria = tuple(
-        str(item).strip() for item in raw_criteria if str(item).strip()
-    )
+    criteria = tuple(str(item).strip() for item in raw_criteria if str(item).strip())
 
     # A row that does not say whether it won is a loss: an auction log of losses is the
     # common shape, and defaulting the other way would silently empty every report.
@@ -276,17 +324,33 @@ def _window_bounds(window: Any) -> tuple[datetime, datetime, LossWindow]:
     return start, end, LossWindow(start=raw_start, end=raw_end)
 
 
-def _assert_no_residue(report: LossReport, residue: _Residue, counts: frozenset[int]) -> None:
+def _assert_no_residue(
+    report: LossReport,
+    residue: _Residue,
+    counts: frozenset[int],
+    carried: frozenset[Any],
+) -> None:
     """Refuse to hand back a report containing anything the projection did not read.
 
-    Integers are checked against ``counts`` — the tallies this build actually computed —
-    rather than against the residue, because an integer that is one of our own counts is
-    proven derived; anything else in an integer field is scanned like everything else.
+    Three kinds of value are passed without scanning, and each one is passed for a reason
+    that survives a new field being added to the schema:
+
+    ``carried``   a value the projection read somewhere in this log. It is published by
+                  definition — the store's own id, a cluster id, a criterion that survived
+                  redaction — and matching residue *inside* it says only that some rival's
+                  id is a prefix of the store's own.
+    ``counts``    the tallies this build computed. An integer equal to one of them is proven
+                  derived rather than copied; any other integer is scanned like everything
+                  else, so a future integer field cannot quietly become a money field.
+    window bounds the caller's own argument, echoed back to the caller.
     """
+    bounds = {report.window.start, report.window.end}
     for path, value in _dumped(report.model_dump()):
-        if value is None or isinstance(value, bool):
+        if value is None or isinstance(value, bool) or value in bounds:
             continue
         if isinstance(value, str):
+            if value in carried:
+                continue
             needle = residue.hides_in(value)
             if needle is not None:
                 raise LossReportLeak(
@@ -295,10 +359,11 @@ def _assert_no_residue(report: LossReport, residue: _Residue, counts: frozenset[
                 )
         elif isinstance(value, int) and value in counts:
             continue
-        elif isinstance(value, (int, float)) and float(value) in residue.numbers:
-            raise LossReportLeak(
-                f"loss report for {report.store_id!r} carries an unprojected number at {path}"
-            )
+        elif isinstance(value, (int, float)) and value not in carried:
+            if float(value) in residue.numbers:
+                raise LossReportLeak(
+                    f"loss report for {report.store_id!r} carries an unprojected number at {path}"
+                )
 
 
 def _dumped(node: Any, path: str = "") -> Iterator[tuple[str, Any]]:
@@ -329,17 +394,20 @@ def build_loss_report(auction_log: Any, window: Any) -> list[LossReport]:
     """
     rows = list(auction_log)
     start, end, echoed = _window_bounds(window)
-    residue = _residue_of(rows)
+    # Every row is projected before anything is aggregated, and the residue is measured
+    # against what the projection kept — so a malformed row two thousand lines in refuses the
+    # whole report rather than half-building one.
+    pairs = [(row, _project(row, index)) for index, row in enumerate(rows)]
+    strict, egress, carried = _residues(pairs)
 
     tallies: dict[str, dict[str, _Tally]] = {}
-    for index, row in enumerate(rows):
-        loss = _project(row, index)
+    for _row, loss in pairs:
         if loss.won or not (start <= loss.at <= end):
             continue
         tally = tallies.setdefault(loss.store_id, {}).setdefault(loss.cluster_id, _Tally())
         tally.counts[loss.reason] += 1
         # The one channel carried as free text, so the one that needs redacting.
-        tally.criteria.update(c for c in loss.criteria if residue.hides_in(c) is None)
+        tally.criteria.update(c for c in loss.criteria if strict.hides_in(c) is None)
 
     reports: list[LossReport] = []
     for store_id in sorted(tallies):
@@ -357,6 +425,6 @@ def build_loss_report(auction_log: Any, window: Any) -> list[LossReport]:
             {entry.lost for entry in by_cluster}
             | {count for tally in tallies[store_id].values() for count in tally.counts.values()}
         )
-        _assert_no_residue(report, residue, counts)
+        _assert_no_residue(report, egress, counts, carried)
         reports.append(report)
     return reports
