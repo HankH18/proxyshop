@@ -1,0 +1,1265 @@
+{
+  "cycle": 11,
+  "max_cycles": 102,
+  "generated": "2026-09-03T01:39:36",
+  "all_targets_met": false,
+  "harness_integrity": "intact",
+  "harness_notes": [],
+  "pending_remeasure": [
+    7
+  ],
+  "pre_amendment_metrics": [],
+  "errors_recomputed_for": [
+    "acceptance_collected",
+    "e3_exchange_passing",
+    "e4_store_agent_passing",
+    "e6_trust_passing",
+    "e8_proofs_passing"
+  ],
+  "stale_metrics": [],
+  "manual_records": [],
+  "manual_records_trusted": false,
+  "escalated_metrics": [],
+  "goal_amendments": 4,
+  "last_amended_at": "2026-09-03T01:26:53",
+  "last_amend_reason": "ESC-005 / T-117, user-authorized by Hank directly in-session (\"You have my authorization for all three of the proposed changes\"). scripts/verify.sh only; goals.json and .swarm-loop/acceptance/ are untouched by this amend.\n\nTwo changes, neither weakening any assertion:\n\n1. run_pytest now EMITS a SELECTION line after every invocation naming the deselected and skipped counts, with a note that those tests did not run. T-117 acceptance 2 (\"deselected counts are reported, not swallowed, so a green gate names what it did not run\"). Nothing is made easier to pass; a count is printed that was previously invisible.\n\n2. `check` no longer deselects `docker`. That blanket deselection WAS the defect T-117 names: it silently removed all three of T-110's fresh-volume tests including the one grading that ticket's acceptance criterion 2, so a lane reported its own gate green while the tests written to grade it never ran. T-109 replaced the all-or-nothing datastore assumption with per-service reachability, so a docker-marked test now probes the service it needs and skips cleanly when that service is down. This is T-117 acceptance 1 and 3.\n\nVERIFIED BOTH DIRECTIONS BEFORE AMENDING. Still passes with by-design deselection: `verify.sh check` -> exit 0, 3908 passed / 1 deselected (up from ~3520 selected, i.e. ~388 docker tests that every per-ticket gate had been silently dropping); `verify.sh all` -> exit 0, 3908 pytest / 710 vitest / mypy clean on 205 files. Still refuses a gate that selects nothing: pytest exits 5 when everything is deselected (measured: a marker matching nothing gives `801 deselected`, exit 5) and run_pytest maps exit 5 to a FATAL non-zero, a path unchanged by this amend apart from an added explanatory line.\n\nNOT included: ESC-007's change to .swarm-loop/acceptance/test_e4_store_agent.py. It is written and compiles but the acceptance suite cannot be executed in this session (blocked by the auto-mode classifier; pyproject norecursedirs excludes .swarm-loop from pytest collection, so no other route reaches it), and an amend around bytes that were never run is exactly what this mechanism exists to prevent. That file is restored to its frozen bytes and ESC-007 stays open.",
+  "metrics": [
+    {
+      "id": "acceptance_pass_rate",
+      "name": "Acceptance test pass rate (%)",
+      "direction": "maximize",
+      "target": 100.0,
+      "latest_cycle": 11,
+      "latest_value": 62.5,
+      "latest_error": 37.5,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:35:55",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": -4.612657342657343,
+      "r2": 0.7178485528796614,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 3.33,
+          "error": 96.67,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 30.0,
+          "error": 70.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 35.83,
+          "error": 64.17,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 60.83,
+          "error": 39.17,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:22:48"
+        },
+        {
+          "cycle": 11,
+          "value": 62.5,
+          "error": 37.5,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:35:55"
+        }
+      ]
+    },
+    {
+      "id": "e4_store_agent_passing",
+      "name": "E4 Store agent & sellers criteria passing",
+      "direction": "maximize",
+      "target": 20.0,
+      "latest_cycle": 11,
+      "latest_value": 5.0,
+      "latest_error": 15.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:15",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": -0.4125874125874126,
+      "r2": 0.6825044114763743,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 3.0,
+          "error": 17.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 3.0,
+          "error": 17.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 3.0,
+          "error": 17.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:07"
+        },
+        {
+          "cycle": 11,
+          "value": 5.0,
+          "error": 15.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:15"
+        }
+      ]
+    },
+    {
+      "id": "e3_exchange_passing",
+      "name": "E3 Exchange criteria passing",
+      "direction": "maximize",
+      "target": 21.0,
+      "latest_cycle": 11,
+      "latest_value": 9.0,
+      "latest_error": 12.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:14",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": -0.7552447552447552,
+      "r2": 0.617927527018436,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 3.0,
+          "error": 18.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 3.0,
+          "error": 18.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 9.0,
+          "error": 12.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:06"
+        },
+        {
+          "cycle": 11,
+          "value": 9.0,
+          "error": 12.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:14"
+        }
+      ]
+    },
+    {
+      "id": "e7_buyer_passing",
+      "name": "E7 Buyer criteria passing",
+      "direction": "maximize",
+      "target": 9.0,
+      "latest_cycle": 11,
+      "latest_value": 2.0,
+      "latest_error": 7.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:18",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": -0.22377622377622378,
+      "r2": 0.6713286713286712,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:09"
+        },
+        {
+          "cycle": 11,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:18"
+        }
+      ]
+    },
+    {
+      "id": "e5_merchant_passing",
+      "name": "E5 Merchant criteria passing",
+      "direction": "maximize",
+      "target": 10.0,
+      "latest_cycle": 11,
+      "latest_value": 4.0,
+      "latest_error": 6.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:16",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": -0.4125874125874126,
+      "r2": 0.682504411476374,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 2.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:07"
+        },
+        {
+          "cycle": 11,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:16"
+        }
+      ]
+    },
+    {
+      "id": "e8_proofs_passing",
+      "name": "E8 Fixtures & proofs criteria passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 11,
+      "latest_value": 5.0,
+      "latest_error": 3.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:19",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": -0.5594405594405595,
+      "r2": 0.6713286713286712,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:10"
+        },
+        {
+          "cycle": 11,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:19"
+        }
+      ]
+    },
+    {
+      "id": "e2_ingestion_passing",
+      "name": "E2 Ingestion criteria passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 11,
+      "latest_value": 6.0,
+      "latest_error": 2.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:13",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": -0.6188811188811189,
+      "r2": 0.6825044114763741,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 3.0,
+          "error": 5.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:05"
+        },
+        {
+          "cycle": 11,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:13"
+        }
+      ]
+    },
+    {
+      "id": "acceptance_collected",
+      "name": "Acceptance tests collected (count)",
+      "direction": "maximize",
+      "target": 120.0,
+      "latest_cycle": 11,
+      "latest_value": 120.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:35:56",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:22:48"
+        },
+        {
+          "cycle": 11,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:35:56"
+        }
+      ]
+    },
+    {
+      "id": "build_succeeds",
+      "name": "Root verify pipeline is green (0/1)",
+      "direction": "maximize",
+      "target": 1.0,
+      "latest_cycle": 11,
+      "latest_value": 1.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:09",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 1.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:02"
+        },
+        {
+          "cycle": 11,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:09"
+        }
+      ]
+    },
+    {
+      "id": "spec_criteria_passing",
+      "name": "SPEC cross-cutting criteria + S8 release blockers passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 11,
+      "latest_value": 8.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:11",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 4.0,
+          "error": 4.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:03"
+        },
+        {
+          "cycle": 11,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:11"
+        }
+      ]
+    },
+    {
+      "id": "e1_foundation_passing",
+      "name": "E1 Foundation criteria passing",
+      "direction": "maximize",
+      "target": 10.0,
+      "latest_cycle": 11,
+      "latest_value": 10.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:12",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:04"
+        },
+        {
+          "cycle": 11,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:12"
+        }
+      ]
+    },
+    {
+      "id": "e6_trust_passing",
+      "name": "E6 Trust & verification criteria passing",
+      "direction": "maximize",
+      "target": 26.0,
+      "latest_cycle": 11,
+      "latest_value": 26.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T01:39:17",
+      "pre_amendment": false,
+      "n_points": 12,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01"
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32"
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22"
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56"
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02"
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31"
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56"
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45"
+        },
+        {
+          "cycle": 8,
+          "value": 2.0,
+          "error": 24.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52"
+        },
+        {
+          "cycle": 9,
+          "value": 2.0,
+          "error": 24.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09"
+        },
+        {
+          "cycle": 10,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:08"
+        },
+        {
+          "cycle": 11,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:17"
+        }
+      ]
+    }
+  ],
+  "note": "Linear fit over per-cycle error. With <=10 points this is trend detection, not inference; treat slope/projection as a steering signal, not a statistical claim."
+}
