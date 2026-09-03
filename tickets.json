@@ -419,7 +419,7 @@
         "3. Filter tests: blacklisted/expired/bad-domain/hard-fail excluded with exclusion_reasons recorded; slots collapse at 1–3 stores",
         "4. Ranking gate + versioned interface (R12/D54, fail-closed, by DENIAL with a positive control): a BLACKLISTED candidate is excluded before any score is computed with its exclusion_reasons entry recorded, an UNAVAILABLE read and a raising read each exclude rather than admit, and the same candidate with an ELIGIBLE verdict IS ranked and CAN win - so a ranker that excludes everything fails. SELLER_ELIGIBILITY_INTERFACE_VERSION is a non-empty string, the three statuses are distinct, and BOTH boundary gates (solicit_bids and accept_offer) refuse an eligibility source whose interface_version is not the published one while accepting one that is"
       ],
-      "verify": "pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e3_exchange.py .swarm-loop/acceptance/test_spec_criteria.py -k \"rank_score_is_blind_to_fee_and_tier or rank_is_deterministic_and_tie_breaks_in_the_published_order or eligibility_filters_run_before_scoring_and_record_exclusion_reasons or ambiguous_evidence_cannot_satisfy_a_hard_constraint or shortlist_collapses_gracefully_below_four_distinct_stores or shortlist_slots_carry_trust_and_provenance_labels or blacklisted_seller_is_never_eligible or contradicted_hard_constraint_never_wins\"",
+      "verify": "uv run python -m pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e3_exchange.py .swarm-loop/acceptance/test_spec_criteria.py -k \"rank_score_is_blind_to_fee_and_tier or rank_is_deterministic_and_tie_breaks_in_the_published_order or eligibility_filters_run_before_scoring_and_record_exclusion_reasons or ambiguous_evidence_cannot_satisfy_a_hard_constraint or shortlist_collapses_gracefully_below_four_distinct_stores or shortlist_slots_carry_trust_and_provenance_labels or blacklisted_seller_is_never_eligible or contradicted_hard_constraint_never_wins\"",
       "scope": [
         "apps/exchange/src/ranking/**",
         "apps/exchange/tests/test_ranking.py",
@@ -488,7 +488,7 @@
         "2. Exploration slice floor holds for a new store across a window",
         "3. Blacklisted stores draw zero exposure"
       ],
-      "verify": "pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e3_exchange.py -k \"positive_outcomes_raise_a_store_exposure_in_its_cluster or exploration_slice_floor_holds_for_a_low_data_store or blacklisted_stores_draw_zero_exposure\"",
+      "verify": "uv run python -m pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e3_exchange.py -k \"positive_outcomes_raise_a_store_exposure_in_its_cluster or exploration_slice_floor_holds_for_a_low_data_store or blacklisted_stores_draw_zero_exposure\"",
       "scope": [
         "apps/exchange/src/policy/**",
         "apps/exchange/tests/test_bandit.py",
@@ -517,7 +517,7 @@
         "2. Output schema contains no prices/amounts/rival ids (property test)",
         "3. Release delay enforced"
       ],
-      "verify": "pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e3_exchange.py -k \"loss_reports_carry_reason_categories_and_no_amounts\"",
+      "verify": "uv run python -m pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e3_exchange.py -k \"loss_reports_carry_reason_categories_and_no_amounts\"",
       "scope": [
         "apps/exchange/src/reports/**",
         "apps/exchange/tests/test_loss_reports.py",
@@ -636,7 +636,7 @@
         "2. Prior builder rejects/never reads discount fields (schema-level test)",
         "3. Two stores' learned states are independent under identical priors + different outcomes"
       ],
-      "verify": "pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"store_discount_depth_shifts_toward_its_own_winners or network_prior_builder_never_reads_discount_fields or two_stores_learn_independently_from_identical_priors\"",
+      "verify": "uv run python -m pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"store_discount_depth_shifts_toward_its_own_winners or network_prior_builder_never_reads_discount_fields or two_stores_learn_independently_from_identical_priors\"",
       "scope": [
         "packages/store-agent/src/learning/**",
         "packages/store-agent/tests/test_learning.py",
@@ -665,7 +665,7 @@
         "2. Injected trust event changes subsequent bid rationale deterministically under doubles",
         "3. Activation flip submits without restart"
       ],
-      "verify": "pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"shadow_mode_logs_bids_and_submits_nothing or activation_flips_to_submitting_without_restart or an_injected_trust_event_changes_the_next_bid_rationale\"",
+      "verify": "uv run python -m pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"shadow_mode_logs_bids_and_submits_nothing or activation_flips_to_submitting_without_restart or an_injected_trust_event_changes_the_next_bid_rationale\"",
       "scope": [
         "packages/store-agent/src/modes/**",
         "packages/store-agent/tests/test_modes.py",
@@ -700,7 +700,7 @@
         "6. Key rotation (D52): a signer with two live key_id rows verifies under either; a signature naming an unregistered key_id for a known signer rejects with no fallback to that signer's other key; and a second signer reusing the first signer's key_id string under a different secret does not verify - so a lookup keyed on key_id alone fails",
         "7. Replay and freshness (D52): resubmitting an accepted payload rejects; a different nonce from the same signer is still accepted and the same nonce from a DIFFERENT signer is accepted (scoping is per signer); NonceStore.seen stays True after purge_expired at any moment before the auction deadline and becomes False only after it passes; a submission arriving after the auction deadline rejects; and an issued_at outside freshness_window_seconds rejects in both directions, far-past and clock-skewed-future"
       ],
-      "verify": "pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"signed_external_bid_is_accepted_and_enqueued_for_verification or external_bid_with_a_bad_signature_is_rejected or canonical_signing_bytes_are_deterministic_and_cover_every_signed_field or external_bid_missing_any_required_signing_field_is_rejected or signing_metadata_is_covered_by_the_signature or replayed_nonce_is_rejected_and_consumption_persists_until_the_auction_deadline or keyring_supports_key_rotation_and_selects_the_key_by_key_id or issued_at_outside_the_freshness_window_is_rejected\"",
+      "verify": "uv run python -m pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"signed_external_bid_is_accepted_and_enqueued_for_verification or external_bid_with_a_bad_signature_is_rejected or canonical_signing_bytes_are_deterministic_and_cover_every_signed_field or external_bid_missing_any_required_signing_field_is_rejected or signing_metadata_is_covered_by_the_signature or replayed_nonce_is_rejected_and_consumption_persists_until_the_auction_deadline or keyring_supports_key_rotation_and_selects_the_key_by_key_id or issued_at_outside_the_freshness_window_is_rejected\"",
       "scope": [
         "packages/store-agent/src/external/**",
         "packages/store-agent/tests/test_external_bids.py",
@@ -733,7 +733,7 @@
         "2. Aggressive persona's pitches contain exactly the manifest-scripted false/unsupported claims",
         "3. Persona claims arrive as seller_asserted and are marked unverified at intake"
       ],
-      "verify": "pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"aggressive_persona_emits_exactly_the_manifest_scripted_claims\"",
+      "verify": "uv run python -m pytest -q -p no:cacheprovider --confcutdir=.swarm-loop/acceptance .swarm-loop/acceptance/test_e4_store_agent.py -k \"aggressive_persona_emits_exactly_the_manifest_scripted_claims\"",
       "scope": [
         "apps/seller-reference/**"
       ],
