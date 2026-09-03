@@ -16,11 +16,15 @@ containment (``op:     the attribute is a set; the claim names a member. Present
                        unknown.
 boolean                the attribute is a boolean; the claim is parsed as one. An
                        unparseable claim is ``ambiguous``, never ``contradicted``.
-multi-valued equality  the attribute admits SEVERAL values and the claim is an equality.
-                       Naming one of them -> ``verified``; naming none -> ``ambiguous``,
-                       because a region-dependent SKU stocked at both 120 V and 230 V does
-                       not make "works on your mains voltage" false — it makes it
-                       undecidable.
+multi-valued equality  the attribute enumerates SEVERAL values and the claim is an
+                       equality. Naming one of them -> ``verified``. Naming none splits:
+                       a claim the enumeration COULD have held is ``contradicted`` (the
+                       list is a closed assertion — "fair-trade" against
+                       ``["organic"]``), while a claim of the wrong kind or the wrong
+                       granularity is ``ambiguous`` ("works on your mains voltage"
+                       against ``["120 V", "230 V"]``; "the best coffee you will ever
+                       taste" against ``["chocolate", "citrus", "caramel"]``). See
+                       :func:`_claim_reads_in_domain`.
 numeric                both sides parse as quantities. Converted to the unit family's base
                        unit, then compared against the field's published relative
                        tolerance.
@@ -52,6 +56,7 @@ from .normalize import (
 )
 
 __all__ = [
+    "ENUMERATION_CLAIM_WORD_SLACK",
     "FIELD_TOLERANCES",
     "ComparisonOutcome",
     "compare",
@@ -188,23 +193,99 @@ def _compare_boolean(claimed: Any, catalog: bool) -> ComparisonOutcome:
     return ComparisonOutcome("contradicted", catalog, "the boolean values disagree")
 
 
+def _members_domain(members: Sequence[Any]) -> str:
+    """``"quantity"`` when every member reads as a quantity in a recognised unit, else ``"plain"``.
+
+    The *domain* of a list attribute is what decides whether a non-matching claim is false or
+    merely undecidable, so it is worth being precise about. ``["120 V", "230 V"]`` is a
+    quantity domain; ``["organic"]``, ``["arabica beans", "robusta beans"]`` and
+    ``["portafilter-51mm", "bar-9-espresso-machine"]`` are plain identifiers.
+    """
+    if not members:
+        return "plain"
+    for member in members:
+        value, _ = attribute_value(member)
+        quantity = parse_quantity(value)
+        if quantity is None:
+            return "plain"
+        if quantity[1] is not None and unit_family(quantity[1]) is None:
+            return "plain"
+    return "quantity"
+
+
+#: How many words longer than the longest enumerated member a claim may be and still read as
+#: naming one of them. One: "100% single-origin arabica" (3 words) is a candidate member of
+#: ``["arabica beans", "robusta beans"]`` (2); "the best coffee you will ever taste" (7) is not
+#: a candidate member of ``["chocolate", "citrus", "caramel"]`` (1).
+ENUMERATION_CLAIM_WORD_SLACK = 1
+
+
+def _claim_reads_in_domain(claimed: Any, members: Sequence[Any], domain: str) -> bool:
+    """Whether the claim can even be *interpreted* as a candidate member of the enumeration.
+
+    Two ways it can fail to be, and the approved golden set pins one case of each:
+
+    * **wrong kind.** In a quantity domain only a quantity is a candidate: "works on your
+      mains voltage" is not a voltage the way "110 V" is.
+    * **wrong granularity.** The members of a closed enumeration are *terms*. A claim
+      materially longer than any of them is a sentence about the product, not a term the
+      enumeration could hold — "quite simply the best coffee you will ever taste" against
+      tasting notes ``["chocolate", "citrus", "caramel"]``. Calling that *contradicted* would
+      grade a seller for puffery instead of for a false fact, and R19 keeps those apart on
+      purpose: unfalsifiable marketing must move coverage and confidence, never the mean, so
+      it cannot be laundered into trust in EITHER direction.
+
+    The granularity rule is deliberately confined to enumerated attributes. A scalar attribute
+    is a single stated value and a claim that differs from it is simply wrong, however long
+    the claim happens to be.
+    """
+    if domain == "quantity":
+        quantity = parse_quantity(claimed)
+        return quantity is not None and (
+            quantity[1] is None or unit_family(quantity[1]) is not None
+        )
+    claim_words = len(normalize_text(claimed).split())
+    longest_member = max(
+        (len(normalize_text(attribute_value(member)[0]).split()) for member in members),
+        default=1,
+    )
+    return claim_words <= longest_member + ENUMERATION_CLAIM_WORD_SLACK
+
+
 def _compare_multivalued(claimed: Any, catalog: Any, unit: Any) -> ComparisonOutcome:
     """Equality against an attribute that admits several values.
 
-    Matching one member verifies the claim. Matching none is **ambiguous**, not contradicted:
-    the attribute is present and the claim simply does not pick out any of the values it
-    admits, which is a claim that cannot be decided rather than one that is false.
+    Matching one member verifies the claim. Matching none splits, and the split is the whole
+    subtlety of this comparator — the approved golden set pins both halves:
+
+    * the claim names a value the domain admits and the catalog does not list it ->
+      **contradicted**. ``certifications: ["organic"]`` against "fair-trade", ``ingredients:
+      ["arabica beans", "robusta beans"]`` against "100% single-origin arabica",
+      ``compatible_with: ["portafilter-51mm", ...]`` against "portafilter-58mm". An
+      enumerated catalog list is a *closed* assertion, so absence from it is evidence.
+    * the claim cannot be read in the attribute's domain at all -> **ambiguous**.
+      ``voltage: ["120 V", "230 V"]`` against "works on your mains voltage" names no voltage,
+      so nothing has been asserted that the catalog can confirm or deny. Calling that
+      contradicted would grade a seller for vagueness, and calling the previous case
+      ambiguous would let a flat catalog lie go ungraded.
     """
     del unit
-    for member in _members(catalog):
+    members = _members(catalog)
+    for member in members:
         if _member_matches(claimed, member):
             return ComparisonOutcome(
-                "verified", catalog, "the claim names one of the stocked values"
+                "verified", catalog, "the claim names one of the enumerated values"
             )
+    if not members:
+        return ComparisonOutcome("unsupported", catalog, "the catalog attribute is an empty set")
+    if not _claim_reads_in_domain(claimed, members, _members_domain(members)):
+        return ComparisonOutcome(
+            "ambiguous",
+            catalog,
+            "the claim names no value of the kind this attribute enumerates",
+        )
     return ComparisonOutcome(
-        "ambiguous",
-        catalog,
-        "the attribute admits several values and the claim names none of them",
+        "contradicted", catalog, "the value is absent from the enumerated attribute"
     )
 
 

@@ -94,6 +94,11 @@ UNIT_FAMILIES: dict[str, dict[str, float]] = {
         "psi": 0.0689475729,
     },
     "power": {"w": 1.0, "watt": 1.0, "watts": 1.0, "kw": 1000.0},
+    # A percentage is a unit like any other, and it has to be one HERE: a discount claimed
+    # as "20%" against a catalog recording {"value": 20.0, "unit": "percent"} is the same
+    # number, and without this family the two spellings are unrecognised, non-equal unit
+    # texts and the comparison falls through to a string test that reads "20%" != "20.0".
+    "ratio": {"%": 1.0, "pct": 1.0, "percent": 1.0, "percentage": 1.0, "percentage points": 1.0},
     "potential": {"v": 1.0, "volt": 1.0, "volts": 1.0, "kv": 1000.0},
     "time": {
         "s": 1.0,
@@ -119,9 +124,49 @@ UNIT_FAMILIES: dict[str, dict[str, float]] = {
 }
 
 #: Spellings a pitch actually uses for a boolean. Not an exhaustive natural-language parser —
-#: anything outside these two sets is ``None``, i.e. "could not be decided".
-BOOLEAN_TRUE: frozenset[str] = frozenset({"true", "yes", "y", "1", "on", "present", "included"})
-BOOLEAN_FALSE: frozenset[str] = frozenset({"false", "no", "n", "0", "off", "absent", "excluded"})
+#: anything outside these two sets is ``None``, i.e. "could not be decided". The domain words
+#: (``eligible``, ``in stock``, ``compatible``) are here because a catalog stores those facts
+#: as real booleans while a pitch states them in words: ``{"promo_eligibility": {"value":
+#: false}}`` against a claim of "eligible" is a flat contradiction, and without the spelling
+#: it reads as an undecidable claim and the seller is not graded on it at all.
+BOOLEAN_TRUE: frozenset[str] = frozenset(
+    {
+        "true",
+        "yes",
+        "y",
+        "1",
+        "on",
+        "present",
+        "included",
+        "eligible",
+        "available",
+        "in stock",
+        "in_stock",
+        "enabled",
+        "active",
+        "supported",
+        "compatible",
+    }
+)
+BOOLEAN_FALSE: frozenset[str] = frozenset(
+    {
+        "false",
+        "no",
+        "n",
+        "0",
+        "off",
+        "absent",
+        "excluded",
+        "ineligible",
+        "unavailable",
+        "out of stock",
+        "out_of_stock",
+        "disabled",
+        "inactive",
+        "unsupported",
+        "incompatible",
+    }
+)
 
 _QUANTITY = re.compile(r"^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*(.*?)\s*$")
 _WHITESPACE = re.compile(r"\s+")

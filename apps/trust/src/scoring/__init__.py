@@ -75,6 +75,7 @@ from ._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .blacklist import (  # noqa: E402
     BLACKLIST_STATUSES,
     BLOCKING_BLACKLIST_STATUSES,
+    CLEARING_BLACKLIST_STATUSES,
     Blacklist,
     BlacklistEntry,
     InvalidBlacklistState,
@@ -123,6 +124,7 @@ __all__ = [
     "CATALOG_DIMENSION",
     "CLAIM_TYPE_DIMENSIONS",
     "CLAIM_TYPE_DIMENSIONS_SOURCE",
+    "CLEARING_BLACKLIST_STATUSES",
     "CONFIDENCE_EVIDENCE_HALF_LIFE",
     "CONFIDENCE_FLOOR",
     "DECIDING_OBSERVATION_TYPES",

@@ -125,9 +125,19 @@ def manifest_number(key: str, default: float) -> float:
 
 
 def manifest_int(key: str, default: int) -> int:
-    """One integer manifest constant, falling back to its published value."""
+    """One integer manifest constant, falling back to its published value.
+
+    An INTEGRAL float counts. JSON has one number type and a serialiser that round-trips the
+    manifest through a float is free to write ``5.0``; refusing that would silently discard a
+    published value while :func:`manifest_source` still reported the document as live, which
+    is the one failure mode this module's fallback design has to avoid. A genuinely
+    fractional value is refused instead of truncated — ``new_store_prior_n: 4.5`` is a
+    manifest error, and rounding it here would hide it.
+    """
     value = load_manifest().get(key)
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return int(default)
+    if isinstance(value, float) and not value.is_integer():
         return int(default)
     return int(value)
 

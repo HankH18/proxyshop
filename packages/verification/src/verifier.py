@@ -39,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from .comparators import FIELD_TOLERANCES, compare, tolerance_for
@@ -164,6 +165,62 @@ def _lookup_attribute(product: Any, key: Any) -> tuple[Any, str | None]:
     return None, None
 
 
+def _instant(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _is_stale(attribute: Any, snapshot: Any, claim: Any) -> bool:
+    """Whether this ATTRIBUTE's evidence is too old to support or contradict the claim.
+
+    Per attribute, deliberately — not per product and not per snapshot. A six-week-old
+    snapshot's ``roast_level`` is still evidence: a washed light roast does not stop being a
+    light roast. Its ``availability`` is not: that is live state, and confirming "in stock and
+    ships today" from a reading taken in June is treating an old observation as a fresh one,
+    which is the failure the approved golden set's stale-evidence gate exists to catch.
+    Blanket-staling every attribute of a stale snapshot would fail the roast claim too, and
+    the golden set says that one must still verify.
+
+    Two signals, either one sufficient:
+
+    * the attribute record says ``stale: true`` — the capture pipeline already knows;
+    * the attribute carries its OWN ``observed_at`` and that reading is older than the
+      snapshot's published ``freshness_window_days`` measured back from when the claim was
+      made. Only attributes that timestamp themselves are checked this way, which is what
+      keeps immutable facts out of it.
+    """
+    if not isinstance(attribute, Mapping):
+        return False
+    if attribute.get("stale") is True:
+        return True
+    window = _get(snapshot, "freshness_window_days")
+    if isinstance(window, bool) or not isinstance(window, (int, float)) or window <= 0:
+        return False
+    observed = _instant(attribute.get("observed_at"))
+    if observed is None:
+        return False
+    provenance = _get(claim, "provenance")
+    reference = _instant(
+        (provenance.get("observed_at") if isinstance(provenance, Mapping) else None)
+        or _get(snapshot, "captured_at")
+    )
+    if reference is None:
+        return False
+    return (reference - observed).total_seconds() > float(window) * 86400.0
+
+
 def _claim_type(claim: Any, key: Any, location: str | None) -> str | None:
     declared = _get(claim, "claim_type")
     if declared is not None and str(declared).strip():
@@ -282,6 +339,13 @@ def verify(pitch: Any, catalog_snapshot: Any, verifier_version: Any) -> dict[str
                     "unsupported",
                     None,
                     f"the catalog snapshot records no {key!r} for this product",
+                )
+            elif _is_stale(attribute, catalog_snapshot, claim):
+                status, observed, reason = (
+                    "unsupported",
+                    None,
+                    f"the only evidence for {key!r} was observed outside the snapshot's "
+                    "freshness window, so it can neither support nor contradict this claim",
                 )
             else:
                 outcome = compare(claimed, attribute, key=key, op=op)

@@ -30,6 +30,7 @@ from typing import Any
 __all__ = [
     "BLACKLIST_STATUSES",
     "BLOCKING_BLACKLIST_STATUSES",
+    "CLEARING_BLACKLIST_STATUSES",
     "Blacklist",
     "BlacklistEntry",
     "InvalidBlacklistState",
@@ -40,9 +41,22 @@ __all__ = [
 #: Every state a blacklist entry may be recorded in.
 BLACKLIST_STATUSES: tuple[str, ...] = ("active", "under_review", "appealed", "expired")
 
-#: The states that BLOCK. ``expired`` is the only one that does not: a store under review or
-#: mid-appeal has not been cleared, and treating "we have not finished deciding" as "allowed"
-#: is the same fail-open mistake in slower motion.
+#: The states that CLEAR a listing. Exactly one — and this is the frozenset the read path
+#: tests against, deliberately the opposite way round from the obvious one.
+#:
+#: Written as "is this status in BLOCKING?" the read fails OPEN on a status it does not
+#: recognise: a persistent blacklist row carrying a state this module has not heard of reads
+#: as *allowed*, which is the one direction R12 forbids and exactly what the three enumerated
+#: unknowns (no identity, no ``lookup``, a ``lookup`` that raises) are careful not to do.
+#: ``Blacklist.add`` refuses a bad status, but the read path accepts ANY drop-in ``lookup``
+#: — the Postgres ``app.seller_blacklist`` among them — so the write-time gate does not cover
+#: it. Asking "is this status one of the ones that clear?" makes an unrecognised state block,
+#: which is the same answer the other unknowns get.
+CLEARING_BLACKLIST_STATUSES: frozenset[str] = frozenset({"expired"})
+
+#: The states that BLOCK, as recorded. ``expired`` is the only one that does not: a store
+#: under review or mid-appeal has not been cleared, and treating "we have not finished
+#: deciding" as "allowed" is the same fail-open mistake in slower motion.
 BLOCKING_BLACKLIST_STATUSES: frozenset[str] = frozenset({"active", "under_review", "appealed"})
 
 
@@ -62,8 +76,14 @@ class BlacklistEntry:
 
     @property
     def blocking(self) -> bool:
-        """Whether this entry, as recorded, blocks. See :data:`BLOCKING_BLACKLIST_STATUSES`."""
-        return self.status in BLOCKING_BLACKLIST_STATUSES
+        """Whether this entry, as recorded, blocks.
+
+        Tests against :data:`CLEARING_BLACKLIST_STATUSES`, not against the blocking set, so a
+        directly-constructed ``BlacklistEntry(..., status="bogus")`` — which bypasses
+        ``Blacklist.add``'s write-time gate entirely, since this is a frozen dataclass with no
+        ``__post_init__`` — blocks rather than clears.
+        """
+        return self.status not in CLEARING_BLACKLIST_STATUSES
 
     def expired_at(self, as_of: Any) -> bool:
         """Whether the entry's own ``expires_at`` has passed by ``as_of``.
@@ -191,11 +211,15 @@ def is_blacklisted(blacklist: Any, store: Any, *, as_of: Any = None) -> bool:
             never accidentally expire a listing against the wall clock.
 
     Returns:
-        ``True`` when the store is blocked. **``True`` is also the answer when the question
-        could not be answered**: a lookup that raises, and a store record carrying no business
-        identity at all. Both are cases where the system does not know, and R12's fail-closed
-        rule says an unknown is a refusal — the alternative admits precisely the store an
-        outage or a malformed record happens to be hiding.
+        ``True`` when the store is blocked. **``True`` is also the answer whenever the question
+        could not be answered**: a lookup that raises, an object with no ``lookup`` at all, a
+        store record carrying no business identity, and an entry recorded in a status this
+        module does not recognise. All four are cases where the system does not know, and
+        R12's fail-closed rule says an unknown is a refusal — the alternative admits precisely
+        the store an outage, a malformed record or a schema drift happens to be hiding. The
+        last of the four is why the check below asks whether the status CLEARS rather than
+        whether it blocks: the write-time gate in :meth:`Blacklist.add` does not cover a
+        drop-in ``lookup`` against another store's rows.
     """
     identity = business_identity_of(store)
     if identity is None:
@@ -213,7 +237,7 @@ def is_blacklisted(blacklist: Any, store: Any, *, as_of: Any = None) -> bool:
         return False
 
     status = str(_entry_field(entry, "status", "active"))
-    if status not in BLOCKING_BLACKLIST_STATUSES:
+    if status in CLEARING_BLACKLIST_STATUSES:
         return False
     if as_of is not None:
         expiry = _instant(_entry_field(entry, "expires_at", None))
