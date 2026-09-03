@@ -1015,3 +1015,70 @@ def test_the_translation_is_deterministic_and_leaves_reconcile_alone(e6_make_eve
     assert json.dumps(observation_events(emitted), sort_keys=True) == json.dumps(
         observation_events(reconcile(stream)), sort_keys=True
     )
+
+
+def test_a_colon_in_a_store_or_order_reference_cannot_collapse_two_event_ids(e6_make_event):
+    """``event_id`` IS the ledger's idempotency key, so an ambiguous one loses a whole order.
+
+    ``reconciled:{store}:{order}`` scopes by store precisely because a platform ``order_id``
+    is a PER-SHOP number -- but the scoping is only as good as the separator. Store ``s:x``
+    with order ``1`` and store ``s`` with order ``x:1`` both spell ``reconciled:s:x:1``, and
+    the ledger's dedup makes the second append a silent no-op: one shop's integrity finding
+    disappears, which is the exact escape hatch the scoping was added to close.
+
+    Found by this lane's own adversarial pass on the T-188 translation, which inherited the
+    same scheme and doubled the exposure.
+    """
+    from apps.trust.src.reconcile import observation_events
+
+    def _pair(store_id, order_ref, token, tag):
+        return [
+            _accepted(
+                e6_make_event,
+                store_id=store_id,
+                order_ref=order_ref,
+                checkout_token=token,
+                discount=None,
+                event_id=f"ev-accept-{tag}",
+            ),
+            _webhook(
+                e6_make_event,
+                store_id=store_id,
+                order_ref=order_ref,
+                checkout_token=token,
+                total=130.0,
+                discount=None,
+                event_id=f"ev-paid-{tag}",
+            ),
+        ]
+
+    stream = _pair("s:x", "1", "ck-1", "a") + _pair("s", "x:1", "ck-2", "b")
+
+    reconciled = reconcile(stream)
+    assert len(reconciled) == 2, "two distinct orders did not both reconcile"
+    reconciled_ids = [event["event_id"] for event in reconciled]
+    assert len(set(reconciled_ids)) == 2, (
+        f"two unrelated shops' reconciliations share one idempotency key: {reconciled_ids}"
+    )
+
+    observation_ids = [event["event_id"] for event in observation_events(reconciled)]
+    assert len(set(observation_ids)) == len(observation_ids), (
+        f"two unrelated shops' integrity findings share one idempotency key: {observation_ids}"
+    )
+
+
+def test_an_ordinary_reference_keeps_its_plain_readable_event_id(e6_make_event):
+    """The disambiguation must not make the common case unreadable.
+
+    An id nobody can read in a log is its own kind of failure, so the escaping is required to
+    be a no-op for every reference that carries no separator.
+    """
+    from apps.trust.src.reconcile import observation_events
+
+    reconciled = reconcile([_accepted(e6_make_event), _webhook(e6_make_event, total=130.0)])
+
+    assert reconciled[0]["event_id"] == "reconciled:s-1:o-1"
+    assert [event["event_id"] for event in observation_events(reconciled)] == [
+        "offer_integrity:s-1:o-1:price",
+        "offer_integrity:s-1:o-1:discount",
+    ]

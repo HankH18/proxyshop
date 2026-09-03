@@ -197,6 +197,32 @@ _SCOPE_SEPARATOR = "\x1f"
 #: regression.
 _UNATTRIBUTED_SCOPE = ""
 
+#: The separator the emitted ``event_id``s are built from, and the escapes that keep it
+#: unambiguous. ``%`` first, so the escape sequence itself cannot be forged by a reference
+#: that legitimately contains ``%3A``.
+_ID_SEPARATOR = ":"
+_ID_ESCAPES = (("%", "%25"), (_ID_SEPARATOR, "%3A"))
+
+
+def _id_component(value: Any) -> str:
+    """One component of a composed ``event_id``, with the separator escaped out of it.
+
+    ``event_id`` IS the ledger's idempotency key (D16), so two different orders that spell the
+    same id are one order as far as the chain is concerned — the second append is a silent
+    no-op and a whole shop's integrity finding disappears. Scoping ``reconciled:{store}:{order}``
+    by store closes that for a per-shop ``order_id``, but only if the separator is actually a
+    separator: store ``s:x`` order ``1`` and store ``s`` order ``x:1`` both spell
+    ``reconciled:s:x:1``, which is the same escape hatch reached through a different field.
+
+    Escaped rather than rejected: a colon in a merchant's own order reference is not
+    misbehaviour, and refusing to reconcile such an order would let a store suppress its own
+    grading by choosing its reference format.
+    """
+    text = "" if value is None else str(value)
+    for raw, escaped in _ID_ESCAPES:
+        text = text.replace(raw, escaped)
+    return text
+
 
 def _join_keys(event: Any) -> tuple[str, ...]:
     """Every identifier an event can be joined on.
@@ -349,7 +375,7 @@ def reconciled_event(
         # per-shop number, so `reconciled:1001` alone is not a unique event id across shops —
         # and `event_id` IS the ledger's idempotency key, so a collision would make one shop's
         # reconciliation a silent no-op against another's.
-        "event_id": f"reconciled:{store_id}:{order_ref}",
+        "event_id": f"reconciled:{_id_component(store_id)}:{_id_component(order_ref)}",
         "ts": ts,
         "kind": RECONCILED_KIND,
         "store_id": store_id,
@@ -627,7 +653,10 @@ def observation_events(reconciled: Any) -> list[dict[str, Any]]:
         ):
             events.append(
                 {
-                    "event_id": f"{OBSERVATION_KIND}:{store_id}:{order_ref}:{field}",
+                    "event_id": (
+                        f"{OBSERVATION_KIND}:{_id_component(store_id)}"
+                        f":{_id_component(order_ref)}:{field}"
+                    ),
                     "ts": _field(event, "ts"),
                     "kind": OBSERVATION_KIND,
                     "store_id": store_id,
