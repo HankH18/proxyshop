@@ -2798,11 +2798,17 @@ class _HostileEquality:
 
 
 class _UnprintableMember(Exception):
-    """A group member that no renderer can format. Neither ``str`` nor ``repr`` survives.
+    """A group member no renderer can format. Neither ``str`` nor ``repr`` survives.
 
-    Its purpose is not to leak — it cannot — but to make ``TracebackException.format``
-    RAISE, which used to send the render oracle down its ``str(exc)`` fallback and let a
-    *sibling* member's message through as "clean".
+    **Measured, because the obvious guess about this is wrong.** It does NOT make
+    ``TracebackException.format`` raise — CPython wraps every such call in ``_safe_string``
+    and prints ``<exception str() failed>``, and it reports a ``__notes__`` property that
+    raises as ``Ignored error getting __notes__`` rather than propagating. So the renderer
+    survives this member and goes on to print the NEXT one, whose message spells the code.
+
+    What it broke was the *walk*: an ``ExceptionGroup``'s ``args[1]`` is the member LIST, so
+    the sanitiser's ``str(arg)`` on that argument ran this class's ``__repr__`` and raised —
+    taking down the refusal itself rather than any renderer.
     """
 
     def __str__(self) -> str:
@@ -2810,6 +2816,45 @@ class _UnprintableMember(Exception):
 
     def __repr__(self) -> str:
         raise RuntimeError("unreprable")
+
+
+class _NotesPropertyRaises(Exception):
+    """``__notes__`` is a PROPERTY that raises — nothing to do with ``str``.
+
+    This is the channel that pins :func:`~exchange.checkout.provider._redact_node`'s own
+    guard rather than ``spells_code``'s. The walk reaches ``__notes__`` through ``getattr``,
+    and no amount of care inside the detector helps when the attribute access itself is what
+    explodes. A merchant's client library computing its notes lazily is an ordinary shape.
+    """
+
+    @property
+    def __notes__(self) -> list[str]:  # type: ignore[override]
+        raise RuntimeError("notes are computed lazily and the computation failed")
+
+
+class _RefusesArgsAssignment(Exception):
+    """``args`` cannot be written back. The rewrite has nowhere to put its result."""
+
+    @property  # type: ignore[override]
+    def args(self) -> tuple[Any, ...]:
+        return ("the merchant reply was rejected", f"and it named {HOSTILE_CODE}")
+
+
+class _UnrenderableUrl:
+    """A ``permalink_url`` that is not a string and cannot become one.
+
+    Nothing coerces :attr:`MintedCheckout.permalink_url` to ``str`` on the way in, so this is
+    a shape a provider can simply return. It is read in two places that both used an
+    unguarded ``str(...)``: ``domain._reason``, on the post-mint host check, and
+    ``OrphanedCheckoutCode._orphan_urls``, which is reached from ``__cause__`` — i.e. from
+    inside a traceback render, where raising turns a refusal into an unprintable one.
+    """
+
+    def __str__(self) -> str:
+        raise RuntimeError("this url cannot be rendered")
+
+    def __repr__(self) -> str:
+        return f"<permalink ...?discount={HOSTILE_CODE}>"
 
 
 @dataclasses.dataclass
@@ -2849,6 +2894,14 @@ def _hostile_note_object_cause() -> BaseException:
     return exc
 
 
+def _notes_property_raises_cause() -> BaseException:
+    return _NotesPropertyRaises(f"the merchant call failed while holding {HOSTILE_CODE}")
+
+
+def _args_are_read_only_cause() -> BaseException:
+    return _RefusesArgsAssignment()
+
+
 def _nested_container_cause() -> BaseException:
     """The code inside a dict inside a list, never as a top-level string argument."""
     return ValueError("merchant reply rejected", {"discounts": [{"code": HOSTILE_CODE}]})
@@ -2874,20 +2927,25 @@ def _cyclic_cause() -> BaseException:
     return first
 
 
+#: A merchant-chosen code (``POST /codes`` returns whatever the merchant picked, so it need
+#: not look like ``PSX-…``) written into a type NAME — and written in a spelling the boundary
+#: redactor's literal layer cannot match. ``type()`` does not require an identifier, so the
+#: name is percent-encoded: ``redact_code``'s case-insensitive literal replace never sees
+#: ``SUMMER10LIVE`` in it, while a reader percent-decodes it for free.
+_IDENTIFIER_CODE = "SUMMER10LIVE"
+_ENCODED_TYPE_NAME = "%53UMMER10LIVE"
+
+
 def _named_after_the_code_cause() -> BaseException:
     """A merchant library whose EXCEPTION CLASS is named after the code it just minted.
 
-    A merchant's ``POST /codes`` returns a code the merchant chose, so it need not look like
-    ``PSX-…`` at all — and a type name is printed by ``repr``, by the traceback's final
-    line, and by every handler in this package that formats ``type(exc).__name__``. It reads
-    like metadata, which is why it survived five passes.
+    A type name is printed by ``repr``, by the traceback's final line, and by every handler
+    in this package that formats ``type(exc).__name__``. It reads like metadata rather than
+    like merchant input, which is why it survived five passes — and because the name is
+    percent-encoded here, the boundary blacklist cannot stand in for the build-site guard.
     """
-    kind = type(_IDENTIFIER_CODE, (Exception,), {})
+    kind = type(_ENCODED_TYPE_NAME, (Exception,), {})
     return kind("the merchant client refused")
-
-
-#: A merchant-chosen code that is also a legal Python identifier, so it can BE a class name.
-_IDENTIFIER_CODE = "SUMMER10LIVE"
 
 
 HOSTILE_CAUSES: list[tuple[str, Any, str]] = [
@@ -2896,6 +2954,8 @@ HOSTILE_CAUSES: list[tuple[str, Any, str]] = [
     ("argument-whose-eq-raises", _hostile_equality_cause, HOSTILE_CODE),
     ("group-with-an-unprintable-member", _unprintable_group_member_cause, HOSTILE_CODE),
     ("note-that-is-not-a-string", _hostile_note_object_cause, HOSTILE_CODE),
+    ("notes-property-that-raises", _notes_property_raises_cause, HOSTILE_CODE),
+    ("args-that-cannot-be-written-back", _args_are_read_only_cause, HOSTILE_CODE),
     ("code-nested-in-a-dict-in-a-list", _nested_container_cause, HOSTILE_CODE),
     ("code-only-in-repr-not-in-str", _repr_only_cause, HOSTILE_CODE),
     ("code-only-through-implicit-context", _implicit_context_cause, HOSTILE_CODE),
@@ -3036,30 +3096,184 @@ def test_the_redaction_machinery_cannot_be_made_to_raise() -> None:
         assert isinstance(render_can_publish(exc, code), bool)
 
 
-def test_an_exception_no_renderer_can_format_is_treated_as_unsafe() -> None:
-    """Not looking is not the same as seeing nothing, and must not be recorded as it.
+def test_a_hostile_argument_is_REPLACED_rather_than_merely_survived() -> None:
+    """Not "nothing raised" — the argument must actually be gone from the chained cause.
 
-    This is the pass-5 position reversed, and it is reversed because it was measured false.
-    Pass 5 argued a render that failed has published nothing. But ``rendered_exception``
-    falls back to ``str(exc)`` when ``TracebackException.format`` raises, and for an
-    ``ExceptionGroup`` that fallback is the summary line and the member COUNT — clean, while
-    the C-level ``PyErr_Display`` is *more* tolerant than ``TracebackException``: it prints
-    a placeholder for the member it cannot format and goes on to print the next one. So the
-    render this process could not obtain says nothing about what another reader prints, and
-    the only safe reading of it is "replace the object".
+    This is the assertion that tells the fix apart from a bare ``try: … except: pass`` round
+    it, and writing it took a failed experiment to see. ``_redact_node`` guards the whole
+    per-node body, so re-introducing the unguarded ``str(arg)`` inside it produced a suite
+    that was still entirely green: the outer guard swallowed the very error the inner fix
+    exists to prevent, and the two halves of the fix masked each other. A gate that only
+    asks "did the refusal survive?" cannot see the difference between "the hostile value was
+    dropped" and "the whole node was skipped and the value is still in there".
+
+    So this reads the chained cause's ``args`` and requires the unreadable one to have been
+    substituted. It is the only assertion here that fails when the conversion moves back out
+    of :func:`~exchange.checkout.redaction.spells_code`.
     """
-    group = _unprintable_group_member_cause()
-
-    # The proxy is clean — this is the fail-open that the composition used to walk into.
-    assert redeemable_spelling(str(group), HOSTILE_CODE) is None, (
-        "the premise of this test is gone: str() of the group now spells the code, so it "
-        "no longer demonstrates the gap between the two readers"
+    provider = LosesTheCodeAfterMinting(HOSTILE_CODE, _unreadable_arg_cause)
+    request = CheckoutRequest(
+        auction_id="auction-1",
+        bid_ref="bid-a",
+        store_id="store-a",
+        store_domain=SELLER_DOMAIN,
+        offer=offer(SELLER_DOMAIN),
+        mode="replacement-probe",
+        now=T_NOW,
+        registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
     )
-    # ...and the oracle refuses to certify it anyway.
-    assert render_can_publish(group, HOSTILE_CODE) is True, (
-        "an exception this process cannot render was reported as safe to publish"
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        provider.checkout(request)
+
+    cause = raised.value.__cause__
+    assert cause is not None, "the refusal chained nothing, so there is nothing to inspect"
+
+    # Substituting the WHOLE cause also keeps the code out — the render-faithful backstop
+    # does that — but it is the coarse outcome, and this file's standing rule is that
+    # redaction must not become deletion (`assert_diagnostic_survived`). One unreadable
+    # argument must cost that argument, not the entire chained "why".
+    assert not isinstance(cause, RedactedCause), (
+        "one argument that cannot be stringified cost the refusal its whole chained cause. "
+        "The walk skipped the node instead of dropping the value, so the render-faithful "
+        "backstop had to substitute everything — safe, but the operator loses the diagnostic"
+    )
+    survivors = [arg for arg in cause.args if isinstance(arg, _UnreadableValue)]
+    assert not survivors, (
+        "the argument that cannot be stringified is still sitting in the chained cause's "
+        "args. It was not examined and not replaced, which means every renderer still "
+        f"prints its repr. args were {[type(a).__name__ for a in cause.args]}"
+    )
+    assert any("merchant reply rejected" in str(arg) for arg in cause.args), (
+        "the readable half of the cause was thrown away with the unreadable half"
     )
 
-    # A plain, fully renderable, code-free exception is still publishable — otherwise the
-    # assertion above would be satisfied by a function that always says True.
-    assert render_can_publish(ValueError("nothing interesting here"), HOSTILE_CODE) is False
+
+def test_an_argument_whose_equality_explodes_costs_only_that_argument() -> None:
+    """The same requirement, for the other way a merchant object can break the walk.
+
+    ``redacted != node.args`` compared TUPLES, which runs the elements' ``__eq__``. Nothing
+    about redaction was involved — the sanitiser simply asked a hostile object a question it
+    was free to answer with an exception. The change detection is an identity test now, and
+    identity cannot be overridden; this pins that it is, by requiring the cause to survive
+    as itself rather than being substituted wholesale.
+    """
+    provider = LosesTheCodeAfterMinting(HOSTILE_CODE, _hostile_equality_cause)
+    request = CheckoutRequest(
+        auction_id="auction-1",
+        bid_ref="bid-a",
+        store_id="store-a",
+        store_domain=SELLER_DOMAIN,
+        offer=offer(SELLER_DOMAIN),
+        mode="equality-probe",
+        now=T_NOW,
+        registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+    )
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        provider.checkout(request)
+
+    cause = raised.value.__cause__
+    assert cause is not None
+    assert not isinstance(cause, RedactedCause), (
+        "an argument with a hostile __eq__ cost the refusal its whole chained cause: the "
+        "change detection raised, the node was skipped, and the backstop substituted "
+        "everything rather than dropping the one value"
+    )
+    assert not [arg for arg in cause.args if isinstance(arg, _HostileEquality)], (
+        "the argument whose __eq__ explodes is still in the chained cause's args"
+    )
+    assert_no_renderer_publishes(raised.value, HOSTILE_CODE, "a hostile-equality refusal")
+
+
+class ReturnsAnUnrenderablePermalink(CheckoutProvider):
+    """Mints, then hands back a ``permalink_url`` that is not a string and cannot become one."""
+
+    name = "unrenderable-permalink"
+
+    def mint(self, request: CheckoutRequest) -> MintedCheckout:
+        record_minted_code(HOSTILE_CODE)
+        return MintedCheckout(
+            code=HOSTILE_CODE,
+            permalink_url=_UnrenderableUrl(),  # type: ignore[arg-type]
+        )
+
+
+def test_a_permalink_that_cannot_be_stringified_still_refuses_and_still_records() -> None:
+    """The provider's OUTPUT is untrusted too, and nothing coerces it to ``str``.
+
+    Reached by a different door than every case in ``HOSTILE_CAUSES``: those raise out of
+    ``mint``, this one returns successfully and fails in the port's own post-mint host
+    check. Two unguarded conversions were on that path — ``domain._reason``'s ``str(url)``
+    and ``OrphanedCheckoutCode._orphan_urls`` — and the second is read from ``__cause__``,
+    so it fires inside a traceback render rather than on the refusal path.
+    """
+    result = _accept_against(ReturnsAnUnrenderablePermalink(), "unrenderable-permalink")
+
+    assert result.accepted is False
+    assert result.orphaned_code is not None, (
+        "a permalink whose __str__ raises took the post-mint host check down instead of "
+        "refusing, so the minted code was never carried out"
+    )
+    assert result.orphaned_code.code == HOSTILE_CODE
+    assert event_of(result, "code_created")["payload"]["code"] == HOSTILE_CODE
+    assert_code_is_unrecoverable(
+        persisted_bytes(result), HOSTILE_CODE, "an unrenderable-permalink refusal"
+    )
+
+    # ...and the exception itself must still be RENDERABLE. `_orphan_urls` reads
+    # `permalink_url` off the orphan, and it is reached from `__cause__` — so an unguarded
+    # conversion there does not leak, it makes every traceback of this refusal raise, which
+    # is how a refusal stops being actionable. Only a reader that walks the chain sees it.
+    provider = ReturnsAnUnrenderablePermalink()
+    request = CheckoutRequest(
+        auction_id="auction-1",
+        bid_ref="bid-a",
+        store_id="store-a",
+        store_domain=SELLER_DOMAIN,
+        offer=offer(SELLER_DOMAIN),
+        mode="unrenderable-permalink-render",
+        now=T_NOW,
+        registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+    )
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        provider.checkout(request)
+    assert_no_renderer_publishes(raised.value, HOSTILE_CODE, "an unrenderable-permalink")
+
+
+def test_a_render_the_process_cannot_obtain_is_treated_as_unsafe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "I could not look" must not be recorded as "there was nothing to see".
+
+    **This branch is defence in depth, and saying so is the honest version.** The first
+    draft of this test asserted the branch was reachable from merchant input and was
+    VACUOUS: measured on CPython 3.12, ``TracebackException`` is far more defensive than
+    assumed — ``_safe_string`` turns a raising ``__str__`` into ``<exception str() failed>``,
+    a ``__notes__`` property that raises is reported as ``Ignored error getting __notes__``,
+    and an unstringable note becomes ``<note str() failed>``. Nothing constructible here
+    made ``.format()`` raise, so the test passed for the wrong reason — the render succeeded
+    and *did* spell the code.
+
+    The branch is kept because the alternative reading is unsafe on its face: the fallback
+    is ``str(exc)``, which for an ``ExceptionGroup`` is the summary line and the member
+    COUNT, so a reader that failed would certify a group whose members it never looked at.
+    A future CPython, a third-party renderer, or a ``max_group_width`` disagreement is
+    enough. It is pinned by injecting the failure, which is the only honest way to test a
+    branch that merchant input cannot currently reach.
+    """
+    from exchange.checkout import redaction
+
+    leaky = ExceptionGroup("two link attempts failed", [ValueError(f"used {HOSTILE_CODE}")])
+
+    # Unpatched: the render succeeds, sees the member, and says "do not publish".
+    assert render_can_publish(leaky, HOSTILE_CODE) is True
+    assert render_can_publish(ValueError("nothing interesting"), HOSTILE_CODE) is False
+
+    monkeypatch.setattr(redaction, "_rendered", lambda exc: None)
+
+    assert redaction.render_can_publish(leaky, HOSTILE_CODE) is True, (
+        "an exception this process could not render was reported as safe to publish"
+    )
+    assert redaction.render_can_publish(ValueError("clean"), HOSTILE_CODE) is True, (
+        "with no render available the answer must be 'replace it' for every exception, not "
+        "only for ones some other reader happened to flag"
+    )
