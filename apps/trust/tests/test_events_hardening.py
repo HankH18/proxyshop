@@ -20,6 +20,8 @@ An unparameterised read is capped                :func:`test_an_unparameterised_
 A break at genesis reads as a break at genesis   :func:`test_a_break_in_the_first_link_
                                                  does_not_blame_a_predecessor_that_
                                                  does_not_exist`
+The writer connects as trust_rw, not as app      :func:`test_the_ledger_writer_resolves_
+                                                 the_per_role_dsn_variable_d5_grants_it`
 ===============================================  =====================================
 """
 
@@ -654,3 +656,50 @@ def test_a_deployment_that_sets_only_the_generic_app_dsn_keeps_working(
     monkeypatch.setenv(ROLES["app"][0], app_dsn)
 
     assert PostgresEventStore()._resolve_dsn() == app_dsn
+
+
+def test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_var(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_database: str,
+    worker_index: int,
+) -> None:
+    """The ticket's reproduction, automated against the live database.
+
+    Every other test here grades a *string*: which value ``_resolve_dsn`` hands back. That
+    is necessary and not sufficient -- the finding was reported as "start the trust service
+    with only the documented per-role variable and observe it connects as the app role",
+    and only a real connection can answer which role it connected as. So this one sets the
+    environment the way the deployment does, opens a connection through the store's own
+    pool, and asks Postgres.
+
+    Red on the code as shipped for the first reason a deployment would notice: with only
+    ``PROXYSHOP_PG_DSN_TRUST_RW`` set there was no DSN at all and the store raised
+    :class:`StoreUnavailable` before reaching a connection.
+    """
+    from proxyshop_support.postgres import ROLES, role_dsn
+
+    from apps.trust.src.events.pg import PostgresEventStore
+
+    _isolate_ledger_dsn_env(monkeypatch)
+    monkeypatch.setenv(
+        ROLES["trust_rw"][0], role_dsn("trust_rw", worker_index, database=worker_database)
+    )
+
+    store = PostgresEventStore()
+    try:
+        with store._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT current_user")
+            connected_as = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT has_table_privilege(current_user, 'ledger.commerce_events', 'INSERT')"
+            )
+            may_append = cursor.fetchone()[0]
+    finally:
+        store.close()
+
+    assert connected_as == "trust_rw", (
+        f"the deployed ledger writer connected as {connected_as!r}; the environment named "
+        f"trust_rw and nothing else, so any other role is a privilege the deployment did "
+        f"not grant it"
+    )
+    assert may_append, "the role the writer resolved cannot append to the ledger at all"
