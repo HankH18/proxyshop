@@ -51,9 +51,14 @@ already the serialised one — because an in-memory check cannot make a cross-pr
 ``checkout_url`` before the mint, but an offer with *no* URL (the R10 list-price fallback shape)
 has nothing to check, so the first host comparison a delegating provider can fail is the one on
 the permalink it got *back* — after ``POST /codes`` issued a real single-use discount. The buyer
-is still protected (no permalink is returned, and the auction stays open), but that code is live
-and the exchange has no ``code_created`` event for it. See
-``test_accept.py::test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_record``.
+is still protected (no permalink is returned, and the auction stays open) and the live code is
+**no longer lost**: the port carries it out on
+:attr:`~apps.exchange.src.checkout.provider.OrphanedCheckoutCode.orphan`, and :func:`accept`
+reads it and files a ``code_created`` event marked ``orphaned`` so it can be revoked (T-202).
+The code is deliberately absent from :attr:`AcceptResult.denial_reason` and from the persisted
+refusal event, which name only a fingerprint that joins to that record (T-215). See
+``test_accept.py::test_a_merchant_that_answers_off_domain_leaves_a_code_the_exchange_records``
+and ``test_orphaned_code.py``.
 """
 
 from __future__ import annotations

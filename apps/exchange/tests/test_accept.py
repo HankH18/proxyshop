@@ -469,10 +469,10 @@ def test_a_merchant_that_answers_without_a_code_is_a_failure_not_a_local_mint(
     assert len(creator.calls) == 1
 
 
-def test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_record(
+def test_a_merchant_that_answers_off_domain_leaves_a_code_the_exchange_records(
     unwired: None,
 ) -> None:
-    """The residual hazard, pinned rather than papered over.
+    """The hazard, now closed at both ends (T-157 -> T-202).
 
     An offer with **no** ``checkout_url`` is the R10 list-price fallback shape, and it is legal
     — ``collect_bids`` manufactures one for every Tier-0 and silent store. It also means there
@@ -481,10 +481,14 @@ def test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_reco
     ``POST /codes`` has issued a real single-use discount.
 
     What this test locks in is the part accept controls: the buyer is handed nothing, and the
-    auction is left acceptable so the next slot can still be taken. What it cannot lock in is
-    the code itself — it is live at the merchant with no ``code_created`` event anywhere, and
-    only the port could carry it out on the exception (``checkout/provider.py``, the
-    ``assert_on_domain`` after ``mint``). Reported, not silently absorbed.
+    auction is left acceptable so the next slot can still be taken — **and** the live code is
+    recorded. When this test was written the port had no way to carry the code out, so it
+    pinned the hazard with ``assert "code_created" not in kinds(result)``; that assertion
+    described a defect (T-157/T-202, both HIGH) as though it were the contract. The port now
+    carries the code on ``OrphanedCheckoutCode.orphan`` and :func:`accept` files it, so the
+    assertion is inverted here rather than deleted: an orphaned code that no event names is
+    exactly what must never happen again. The code's *absence* from the refusal prose is
+    T-215 and is asserted in ``test_orphaned_code.py``.
     """
 
     class OffDomainMerchant(RecordingCodeCreator):
@@ -506,9 +510,19 @@ def test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_reco
     assert result.code is None
     assert live["accepted_bid_ref"] is None
     assert result.reoffer_bid_ref == "bid-b"
-    # The hazard itself: the merchant WAS invoked, so a real code exists that no event names.
+    # The merchant WAS invoked, so a real code exists — and now an event names it.
     assert len(merchant.calls) == 1
-    assert "code_created" not in kinds(result)
+    assert "code_created" in kinds(result), (
+        "a live single-use discount was issued and the exchange recorded nothing that could "
+        f"revoke it; events were {kinds(result)}"
+    )
+    created = next(event for event in result.events if event["kind"] == "code_created")
+    assert created["payload"]["code"] == merchant.code
+    assert created["payload"]["orphaned"] is True, (
+        "without this flag a reconciler joining code_created to order_paid reads a REFUSED "
+        "checkout as one that merely never converted"
+    )
+    assert result.orphaned_code is not None and result.orphaned_code.code == merchant.code
 
 
 def test_the_re_offer_follows_shortlist_order_when_the_auction_carries_one(

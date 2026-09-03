@@ -28,6 +28,7 @@ carries only a non-reversible fingerprint that joins the two.
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Iterator
 from typing import Any
 
@@ -269,6 +270,44 @@ def test_the_exception_itself_cannot_leak_the_code_at_any_call_site() -> None:
     assert ORPHAN_CODE not in repr(exc), f"repr(exc) leaks the code: {repr(exc)!r}"
     # The diagnostic that must survive: which host was refused, and a joinable handle.
     assert RIVAL_DOMAIN in str(exc), "the refused host is the whole point of the message"
+
+
+def test_the_chained_cause_cannot_leak_the_code_into_a_traceback() -> None:
+    """The second channel, and the one a message-only redaction misses entirely.
+
+    ``raise OrphanedOffDomainCheckout(...) from exc`` attaches the exception that named the
+    offending permalink — and a cart permalink spells the discount in its ``?discount=``. So
+    even with the orphan's own message clean, one ``traceback.format_exc()`` in a log handler
+    republishes the live code. Measured, not theorised: before the ``__cause__`` property this
+    printed the code in full while ``str(exc)`` was already clean.
+    """
+    merchant = OffDomainMerchant()
+    try:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=offer(SELLER_DOMAIN),
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+    except OrphanedCheckoutCode as exc:
+        rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        assert exc.orphan.code == ORPHAN_CODE, "the payload must still hold the real code"
+        assert ORPHAN_CODE not in rendered, (
+            f"the full traceback republishes the live discount code:\n{rendered}"
+        )
+        # The chain itself must survive — a redaction that severs `__cause__` would take the
+        # "why" of the refusal with it.
+        assert exc.__cause__ is not None, "the chained cause was dropped, not redacted"
+        assert RIVAL_DOMAIN in str(exc.__cause__), "the cause no longer names the bad host"
+    else:  # pragma: no cover - the checkout must refuse
+        raise AssertionError("the off-domain permalink was not refused")
 
 
 # =====================================================================================

@@ -111,6 +111,11 @@ def redact_code(message: str, code: str) -> str:
 
     The percent-encoded spellings are covered too, because a permalink built by a merchant
     may have escaped the code on the way in.
+
+    The replacement is unconditional — no minimum length, no word boundary. A merchant that
+    answers with a one-character code would have that character scrubbed everywhere in the
+    message, which is ugly; a message mangled by a pathological merchant is a strictly better
+    outcome than a live discount published into the event stream, so the ugly case wins.
     """
     text = str(message)
     raw = str(code or "")
@@ -129,6 +134,35 @@ def _rebuild_orphaned(
 ) -> OrphanedCheckoutCode:
     """Module-level so :meth:`OrphanedCheckoutCode.__reduce__` is picklable."""
     return kind(*args, orphan=orphan)
+
+
+#: The C-level ``__cause__``/``__context__`` slots, reached past the Python-level properties
+#: :class:`OrphanedCheckoutCode` puts in front of them. ``raise X from Y`` writes the slot
+#: directly (``PyException_SetCause``), so a subclass cannot intercept the *write* — but every
+#: reader, :mod:`traceback` included, goes through ordinary attribute lookup, and that is the
+#: hook these give us.
+_BASE_CAUSE = BaseException.__dict__["__cause__"]
+_BASE_CONTEXT = BaseException.__dict__["__context__"]
+
+
+def _redact_chain(exc: BaseException | None, code: str) -> None:
+    """Redact ``code`` out of ``exc`` and every exception it chains to, in place.
+
+    The exception that *caused* an orphan refusal is the one that named the offending URL —
+    and a cart permalink spells the discount in its ``?discount=``. Redacting only the
+    orphan's own message leaves that spelling one ``traceback.format_exc()`` away, which is
+    precisely how an exception reaches a log file. Rewriting ``args`` is what actually moves
+    the needle: it is what ``str()``, ``repr()`` and the traceback's final line all render.
+    """
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        redacted = tuple(
+            redact_code(arg, code) if isinstance(arg, str) else arg for arg in exc.args
+        )
+        if redacted != exc.args:
+            exc.args = redacted
+        exc = _BASE_CAUSE.__get__(exc) or _BASE_CONTEXT.__get__(exc)
 
 
 @dataclass(frozen=True)
@@ -177,6 +211,13 @@ class OrphanedCheckoutCode(Exception):
     job is to record and revoke it. Redacting in the constructor rather than at each call
     site is the point: a *new* caller that formats this exception naively is safe by
     construction, and cannot re-open the leak by forgetting.
+
+    **The chained exception is redacted too**, which the constructor alone cannot do: the
+    cause is attached by ``raise … from`` only *after* ``__init__`` has returned, and the
+    cause is the exception that named the offending permalink — the one place the code is
+    spelled that redacting this message does not reach. ``exc.__cause__`` is therefore a
+    property here, redacting on the way out, so ``traceback.format_exc()`` is as safe as
+    ``str(exc)`` no matter which call site does the formatting.
     """
 
     def __init__(self, message: str, *, orphan: OrphanedCode) -> None:
@@ -189,6 +230,42 @@ class OrphanedCheckoutCode(Exception):
         # pickled from it. `orphan` still carries the real code for whoever can revoke it.
         super().__init__(redact_code(str(message), orphan.code))
         self.orphan = orphan
+
+    # `raise X from Y` sets the cause through `PyException_SetCause`, which writes the C slot
+    # and never calls a Python-level `__set__` — so the write cannot be intercepted. Every
+    # READ can be: `traceback`, logging's `exc_info`, and `pytest`'s reporter all reach the
+    # chain by ordinary attribute lookup, and this data descriptor on the subclass shadows
+    # `BaseException`'s for that lookup. Redacting here rather than at the three `raise`
+    # sites is deliberate for the same reason the constructor redacts: a NEW site that writes
+    # `raise OrphanedCheckoutCode(...) from exc` is safe without knowing this exists.
+    @property
+    def _orphan_code(self) -> str:
+        # `getattr`, not `self.orphan.code`: these properties are reachable before `__init__`
+        # has finished (a traceback rendered while the exception is being built), and an
+        # AttributeError raised from `__cause__` would turn a refusal into a crash — the exact
+        # A5 outcome this whole path exists to avoid.
+        orphan = getattr(self, "orphan", None)
+        return getattr(orphan, "code", "") or ""
+
+    @property
+    def __cause__(self) -> BaseException | None:
+        cause = _BASE_CAUSE.__get__(self)
+        _redact_chain(cause, self._orphan_code)
+        return cause
+
+    @__cause__.setter
+    def __cause__(self, value: BaseException | None) -> None:
+        _BASE_CAUSE.__set__(self, value)
+
+    @property
+    def __context__(self) -> BaseException | None:
+        context = _BASE_CONTEXT.__get__(self)
+        _redact_chain(context, self._orphan_code)
+        return context
+
+    @__context__.setter
+    def __context__(self, value: BaseException | None) -> None:
+        _BASE_CONTEXT.__set__(self, value)
 
     def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
         # `BaseException.__reduce__` rebuilds an exception by calling its class with

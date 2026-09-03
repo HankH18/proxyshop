@@ -44,6 +44,7 @@ from exchange.checkout import (
     UnusableDiscount,
     UnusableOffer,
     code_expiry,
+    code_fingerprint,
     code_minting_call_sites,
     is_on_domain,
     mint_code,
@@ -830,9 +831,23 @@ def test_a_refusal_after_the_mint_carries_the_live_code_out() -> None:
         "auction-1",
         "bid-a",
     )
-    assert "PSX-REALCODE" in str(raised.value), (
-        "an operator reading the refusal cannot see there is a live code to revoke"
+    # T-215 inverted this assertion. It used to read `"PSX-REALCODE" in str(raised.value)`,
+    # on the reasoning that "an operator reading the refusal cannot see there is a live code
+    # to revoke" — a real requirement, met by the wrong mechanism. `accept()` formats this
+    # message into a PERSISTED `policy_event` payload that the published OpenAPI types as a
+    # bare string, so spelling the code in the prose published a live discount this layer
+    # cannot revoke to anything holding the event stream. The requirement is kept and the
+    # mechanism replaced: the message still says a code is live and must be revoked, and
+    # names a fingerprint that joins to the `code_created` event holding the real code.
+    message = str(raised.value)
+    assert "PSX-REALCODE" not in message, (
+        f"the live discount code is spelled in a message that gets persisted: {message!r}"
     )
+    assert code_fingerprint("PSX-REALCODE") in message, (
+        "an operator reading the refusal has no handle that joins to the recorded code"
+    )
+    assert "revoke" in message, "the refusal does not say a live code needs revoking"
+    assert "attacker.tld" in message, "the refused host is the diagnostic; it must survive"
 
 
 def test_a_refusal_before_the_mint_carries_no_code_because_there_is_none() -> None:
