@@ -1,0 +1,382 @@
+"""T-153 — the price a bid states must follow from the discount it was granted.
+
+`test_hooks_boundary.py` §8 closed the *floor* half of this: a bid stating 1.00 on a product
+whose approved floor is 10.00 is refused, because the floor is a wall on a price and a legal
+percentage is not a licence to state any number under it. That wall is a wall on the *cheapest
+price the merchant will ever accept*, and it is the only price wall there was.
+
+It leaves the arithmetic between `list_price`, the granted depth and the stated price entirely
+unchecked, and that gap is wider than the floor wall makes it look. `prod-cap` lists at 100.00
+with a floor of 10.00 and a 20% cap, so the honest price behind an honest 20% grant is 80.00 —
+and every price from 10.00 to 80.00 clears the floor, clears the cap, and is backed by a genuine
+grant for a genuine depth. 70.00 of unauthorised discount sits inside the walls. The bid says
+"20% off" and charges 88% off, and until now nothing on the path compared the two: the depth is
+a *description* of the price, and nothing made the description true.
+
+So the property under test is not "the price clears a limit" but **the discount the stated price
+implies must be one a hook actually granted**:
+
+    list_price - unit_price  <=  list_price * granted_pct / 100
+
+Read the other way round — `unit_price >= list_price * (100 - granted_pct) / 100` — it is the
+same arithmetic `ToolHooks._evaluate_discount` runs when it decides whether to grant at all, and
+deliberately in the same `(100 - pct) / 100` form, so the wall and the grant cannot come to
+different conclusions about what 20% off 100.00 is.
+
+Only `unit_price` is reconciled. `Offer` carries `total_price` but no quantity, and the quantity
+that would relate the two lives in the checkout path, not on the protocol object — so the
+relation between them is genuinely undecidable at this boundary and is refused as a subject
+rather than guessed at. See `_price_reconciliation_refusal`.
+
+Every refusal test here fails against the tree as it stood before this file was written: the bid
+in each was ADMITTED. The admission tests are the other half — a wall that refuses honest traffic
+is not a wall, it is an outage — and several of them passed before, on purpose.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from contracts import Bid, Discount, Offer
+from store_agent.hooks import (
+    Denied,
+    HookProvenanceError,
+    ToolHooks,
+    enforce_bid_provenance,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ENVELOPE_FIXTURES = REPO_ROOT / "fixtures" / "envelopes"
+
+CLUSTER = "cluster-warm-layers"
+
+#: `prod-cap` in the approved store-alpha envelope: lists at 100.00, floored at 10.00, capped at
+#: 20%. Named rather than repeated so a fixture edit shows up as a failure here, not as a test
+#: that quietly stops testing anything.
+LIST_PRICE = 100.0
+FLOOR = 10.0
+
+
+def _load(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _context_from(fixture: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    envelope = fixture["envelope"]
+    context: dict[str, Any] = {
+        "store_id": envelope["store_id"],
+        "envelope": envelope,
+        "catalog": fixture["catalog"],
+        "live_state": fixture.get("live_state", {}),
+        "learned_policy": None,
+        "network_priors": {CLUSTER: {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]}},
+    }
+    context.update(overrides)
+    return context
+
+
+@pytest.fixture
+def alpha() -> dict[str, Any]:
+    return _load(ENVELOPE_FIXTURES / "store-alpha.approved.json")
+
+
+@pytest.fixture
+def hooks(alpha: dict[str, Any]) -> ToolHooks:
+    return ToolHooks(_context_from(alpha))
+
+
+def _offer(product_ref: str, **overrides: Any) -> Offer:
+    """An offer at list price with no discount — the honest cold-start shape.
+
+    The default is deliberately the *reconciled* one: 100.00 is `prod-cap`'s list price, so a
+    test that changes the price without saying why is changing the thing under test.
+    """
+    fields: dict[str, Any] = {
+        "product_ref": product_ref,
+        "unit_price": LIST_PRICE,
+        "total_price": LIST_PRICE,
+        "currency": "USD",
+        "commitments": [],
+    }
+    fields.update(overrides)
+    return Offer(**fields)
+
+
+def _pct(value: float) -> Discount:
+    return Discount(type="percentage", value=value)
+
+
+def _bid(offer: Offer, claims: list[Any]) -> Bid:
+    return Bid(
+        auction_id="auction-1",
+        store_id="store-alpha",
+        offer=offer,
+        claims=list(claims),
+        agent_version="store-agent/test",
+        schema_version="1.0.0",
+    )
+
+
+def _granted(hooks: ToolHooks, product_ref: str, pct: float) -> Any:
+    grant = hooks.authorize_discount(product_ref, pct)
+    assert not isinstance(grant, Denied), (
+        f"{pct}% on {product_ref} must be inside the envelope's walls, or the test that follows "
+        f"proves nothing: {grant!r}"
+    )
+    return grant
+
+
+# ---------------------------------------------------------------------------------------------
+# The defect: a genuine grant, a legal depth, a price that follows from neither
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_stated_price_that_does_not_follow_from_the_granted_depth_is_refused(
+    hooks: ToolHooks,
+) -> None:
+    """The reported defect, exactly as reported. Everything about this bid is genuine but one number.
+
+    A real `authorize_discount("prod-cap", 20.0)` grant, a real 20% discount on the offer that
+    the grant backs, and a stated unit price of 10.00. 10.00 clears the 10.00 floor, so the floor
+    wall has no objection; the depth is 20% and the cap is 20%, so the cap has no objection; the
+    grant is in the ledger, scoped to this product and unspent, so the provenance walls have no
+    objection. The honest price is 80.00. The bid takes 90.00 off and was granted 20.00.
+    """
+    grant = _granted(hooks, "prod-cap", 20.0)
+    assert hooks.price_floor("prod-cap") == FLOOR, (
+        "the floor must not object, or this is the H3 test"
+    )
+
+    dishonest = _bid(
+        _offer("prod-cap", unit_price=10.0, total_price=10.0, discount=_pct(20.0)), [grant]
+    )
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_bid_provenance(dishonest, hooks)
+
+    reasons = " ".join(reason for _, reason in raised.value.offenders)
+    assert ".offer.unit_price" in reasons, (
+        f"the refusal must name the price it is about, not the discount: {reasons}"
+    )
+    assert "floor" not in reasons, (
+        "10.00 clears the 10.00 floor — a refusal that says 'floor' here is the old wall firing "
+        f"on the wrong evidence, not the reconciliation: {reasons}"
+    )
+
+    # And the honest number passes the identical call, so the test cannot be satisfied by a
+    # boundary that simply refuses every bid carrying a price.
+    honest = _bid(
+        _offer("prod-cap", unit_price=80.0, total_price=80.0, discount=_pct(20.0)),
+        [_granted(hooks, "prod-cap", 20.0)],
+    )
+    assert enforce_bid_provenance(honest, hooks), "100.00 less an authorized 20% is 80.00"
+
+
+def test_a_price_between_the_floor_and_the_honest_price_is_refused(hooks: ToolHooks) -> None:
+    """The whole 10.00-to-80.00 band, not just its bottom, and not just its edge.
+
+    The floor wall makes the defect look like an edge case about implausibly cheap prices. It is
+    not: every price in this band is one the floor admits and the grant does not authorize, and
+    the most dangerous ones are the plausible ones near the top.
+    """
+    for stated in (11.0, 25.0, 50.0, 75.0, 79.5):
+        grant = _granted(hooks, "prod-cap", 20.0)
+        bid = _bid(
+            _offer("prod-cap", unit_price=stated, total_price=stated, discount=_pct(20.0)), [grant]
+        )
+        with pytest.raises(HookProvenanceError, match="unit_price"):
+            enforce_bid_provenance(bid, hooks)
+
+
+def test_a_price_cut_that_declares_no_discount_at_all_is_refused(hooks: ToolHooks) -> None:
+    """The same theft with the paperwork removed rather than forged.
+
+    `_discount_refusal` guards `offer.discount`; an offer that simply omits the field has no
+    discount to guard, and 50.00 on a 100.00 product clears the 10.00 floor. Nothing else on the
+    path looks at `list_price`, so a bid that takes half off in silence was admitted with no
+    grant, no discount and no claim of any kind. A price under list *is* a discount; the boundary
+    should not need it to be announced before it will see it.
+    """
+    silent = _bid(_offer("prod-cap", unit_price=50.0, total_price=50.0), [])
+    with pytest.raises(HookProvenanceError, match="unit_price"):
+        enforce_bid_provenance(silent, hooks)
+
+
+def test_an_undeclared_cut_is_refused_even_with_a_grant_for_that_depth_in_the_bid(
+    hooks: ToolHooks,
+) -> None:
+    """A grant in the bid is not a discount on the offer, and the reconciliation is per offer.
+
+    Fail closed on purpose. Letting a loose grant license any offer's price would make the depth
+    a bid-wide allowance rather than a per-offer authorization — three offers at 80.00 behind one
+    20% grant, which is precisely the "exactly once" property `_discount_refusal` exists to
+    enforce, walked around by pricing instead of discounting. The offer that spends a depth must
+    say so where it is priced.
+    """
+    grant = _granted(hooks, "prod-cap", 20.0)
+    undeclared = _bid(_offer("prod-cap", unit_price=80.0, total_price=80.0), [grant])
+    with pytest.raises(HookProvenanceError, match="unit_price"):
+        enforce_bid_provenance(undeclared, hooks)
+
+
+def test_the_price_is_reconciled_where_the_offer_is_rather_than_bid_wide(hooks: ToolHooks) -> None:
+    """A second offer must not ride the first offer's discount.
+
+    The bid names one product; the boundary collects one price per priced node. A dict-shaped bid
+    can carry a second offer under a key the protocol does not define — which is where the last
+    payload went — and each priced node has to answer for its own number.
+    """
+    grant = _granted(hooks, "prod-cap", 20.0)
+    two_offers = {
+        "claims": [grant],
+        "offer": {
+            "product_ref": "prod-cap",
+            "unit_price": 80.0,
+            "total_price": 80.0,
+            "discount": {"type": "percentage", "value": 20.0},
+        },
+        "bundled": {
+            "product_ref": "prod-cap",
+            "unit_price": 40.0,
+            "total_price": 40.0,
+        },
+    }
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_bid_provenance(two_offers, hooks, product_ref="prod-cap")
+    reasons = " ".join(reason for _, reason in raised.value.offenders)
+    assert ".bundled.unit_price" in reasons, (
+        f"the second priced node is the one that is wrong, and must be the one named: {reasons}"
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# The other half: honest traffic still passes, and rounding is not theft
+# ---------------------------------------------------------------------------------------------
+
+
+def test_an_offer_at_list_price_with_no_discount_is_admitted(hooks: ToolHooks) -> None:
+    """The cold-start bid: no grant, no discount, list price. Zero off is authorized by nothing."""
+    cold = _bid(_offer("prod-cap"), list(hooks.get_owner_commitments(CLUSTER)))
+    assert enforce_bid_provenance(cold, hooks)
+
+
+def test_every_authorized_depth_prices_out_and_is_admitted(hooks: ToolHooks) -> None:
+    """The honest price behind each depth the envelope allows, computed the envelope's own way."""
+    for pct in (0.0, 5.0, 10.0, 15.0, 20.0):
+        grant = _granted(hooks, "prod-cap", pct)
+        price = LIST_PRICE * (100.0 - pct) / 100.0
+        bid = _bid(
+            _offer("prod-cap", unit_price=price, total_price=price, discount=_pct(pct)), [grant]
+        )
+        assert enforce_bid_provenance(bid, hooks), f"{pct}% off {LIST_PRICE} is {price}"
+
+
+def test_a_price_above_the_discounted_one_is_not_a_refusal(hooks: ToolHooks) -> None:
+    """The wall is one-sided, because the harm is one-sided, and this pins that it is deliberate.
+
+    An offer that states MORE than its depth would produce spends less of the envelope than it
+    was granted: the merchant's floor is cleared by a wider margin and the discount actually
+    given is shallower than the one authorized. There is nothing here for a wall about
+    authorization to refuse, and refusing it would turn every rounding-up into an outage.
+
+    What such an offer *is* is a discount advertised and not given, which is a claim-honesty
+    question about what the buyer is told rather than an authorization question about what the
+    merchant approved. It is not this wall's subject and is recorded as a known gap.
+    """
+    grant = _granted(hooks, "prod-cap", 20.0)
+    generous = _bid(
+        _offer("prod-cap", unit_price=LIST_PRICE, total_price=LIST_PRICE, discount=_pct(20.0)),
+        [grant],
+    )
+    assert enforce_bid_provenance(generous, hooks)
+
+
+def test_a_cent_of_currency_rounding_is_not_an_unauthorised_discount(alpha: dict[str, Any]) -> None:
+    """19.99 less 15% is 16.9915, and no bid states that. The wall must survive real money.
+
+    A reconciliation tightened to the float would refuse the honest rounded price of almost every
+    real product, which is how a correct-looking wall becomes an outage. A cent of slack is far
+    below any discount a merchant could feel, and the floor wall still caps how cheap the number
+    may get regardless.
+    """
+    hooks = ToolHooks(
+        _context_from(
+            alpha,
+            catalog={
+                "prod-cap": {"product_ref": "prod-cap", "list_price": 19.99, "material": "merino"}
+            },
+        )
+    )
+    grant = _granted(hooks, "prod-cap", 15.0)
+    rounded = _bid(
+        _offer("prod-cap", unit_price=16.99, total_price=16.99, discount=_pct(15.0)), [grant]
+    )
+    assert enforce_bid_provenance(rounded, hooks), "16.99 is 16.9915 rounded to the cent"
+
+    # A dollar is not rounding.
+    cheating = _bid(
+        _offer("prod-cap", unit_price=15.99, total_price=15.99, discount=_pct(15.0)),
+        [_granted(hooks, "prod-cap", 15.0)],
+    )
+    with pytest.raises(HookProvenanceError, match="unit_price"):
+        enforce_bid_provenance(cheating, hooks)
+
+
+def test_a_product_the_catalog_does_not_list_cannot_be_reconciled_and_is_refused(
+    hooks: ToolHooks,
+) -> None:
+    """No list price, no reconciliation — and "no reconciliation" must not mean "admitted".
+
+    The floor for an unlisted product is 0.0 (the envelope names no floor for it), so the floor
+    wall admits any non-negative number. Refusing rather than guessing is the same choice
+    `_authorization_refusal` makes about an unnamed product.
+    """
+    stranger = _bid(_offer("prod-unlisted", unit_price=1.0, total_price=1.0), [])
+    with pytest.raises(HookProvenanceError, match="unit_price"):
+        enforce_bid_provenance(stranger, hooks)
+
+
+def test_a_facade_that_cannot_report_a_list_price_is_refused_rather_than_trusted(
+    hooks: ToolHooks,
+) -> None:
+    """The same choice `_price_refusal` makes about a facade with no `price_floor`.
+
+    A boundary that skipped the reconciliation whenever the facade could not answer would be a
+    boundary any facade could switch off by not implementing a method.
+    """
+
+    class Blind:
+        """Everything the boundary needs except a list price."""
+
+        def __init__(self, real: ToolHooks) -> None:
+            self._real = real
+            self.emitted_fingerprints = real.emitted_fingerprints
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "list_price":
+                raise AttributeError(name)
+            return getattr(self._real, name)
+
+    grant = _granted(hooks, "prod-cap", 20.0)
+    bid = _bid(_offer("prod-cap", unit_price=80.0, total_price=80.0, discount=_pct(20.0)), [grant])
+    with pytest.raises(HookProvenanceError, match="list price"):
+        enforce_bid_provenance(bid, Blind(hooks))
+
+
+def test_the_floor_wall_is_still_an_independent_second_wall(hooks: ToolHooks) -> None:
+    """Reconciliation does not replace the floor: a floored product refuses a depth outright.
+
+    `prod-floor` lists at 100.00 with a 95.00 floor, so even a 15% grant — comfortably inside the
+    20% cap — is denied by `authorize_discount` before any bid exists. The two walls answer
+    different questions and this pins that both still fire.
+    """
+    assert isinstance(hooks.authorize_discount("prod-floor", 15.0), Denied), (
+        "15% off 100.00 is 85.00, under prod-floor's 95.00 floor"
+    )
+    at_the_floor = _bid(
+        _offer("prod-floor", unit_price=95.0, total_price=95.0, discount=_pct(5.0)),
+        [_granted(hooks, "prod-floor", 5.0)],
+    )
+    assert enforce_bid_provenance(at_the_floor, hooks), "5% off 100.00 lands exactly on the floor"
