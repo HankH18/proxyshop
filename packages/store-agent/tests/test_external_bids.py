@@ -236,9 +236,7 @@ def test_the_key_id_selects_one_secret_and_the_door_never_tries_the_others() -> 
     )
     assert queue.count == 0
 
-    flat, flat_queue, _err3 = _receive(
-        _payload(), sign_bid(_payload(), KEY), keyring={SIGNER: KEY}
-    )
+    flat, flat_queue, _err3 = _receive(_payload(), sign_bid(_payload(), KEY), keyring={SIGNER: KEY})
     assert flat is None or flat.accepted is not True, (
         "a flat {signer_id: secret} keyring cannot express key selection and must not authenticate"
     )
@@ -356,3 +354,158 @@ def test_expiry_blacklist_and_an_unregistered_signer_all_reject_before_enqueue()
         "a signer absent from the keyring has no key to check against and must not be admitted"
     )
     assert unknown_q.count == 0
+
+
+def test_a_blacklisted_signer_cannot_submit_under_an_unblocked_store_id() -> None:
+    """Blocking an actor has to block the actor, not one of the names it answers to.
+
+    `signer_id` and `store_id` are separate fields precisely so one seller may submit for
+    several stores. A blacklist that only read `store_id` would therefore block a *shopfront*
+    and leave the blocked signer submitting through any other shopfront it is registered for —
+    which is the one thing an operator reaches for a blacklist to prevent.
+    """
+    from store_agent.external import sign_bid
+
+    # signer_id stays the blacklisted signer; store_id is a shopfront nobody blocked.
+    disguised = dict(_payload(), store_id="store-front-unblocked")
+    signature = sign_bid(disguised, KEY)
+
+    control, control_queue, _err = _receive(disguised, signature)
+    assert control.accepted is True, (
+        "control: with no blacklist this submission must be admitted, or the rejection below "
+        f"proves nothing about the blacklist: {control!r}"
+    )
+    assert control_queue.count == 1
+
+    blocked, blocked_queue, _err2 = _receive(disguised, signature, blacklist=[SIGNER])
+    assert blocked is None or blocked.accepted is not True, (
+        "a blacklisted SIGNER must reject even when it names a store id that is not blacklisted"
+    )
+    assert blocked_queue.count == 0
+
+
+def test_an_unusable_verification_queue_refuses_before_spending_the_nonce() -> None:
+    """A transport we cannot write to must not cost the submitter their one-shot nonce.
+
+    The nonce is single-use per signer. If the door consumed it and only then discovered it had
+    nowhere to put the work item, an honest submitter's retry of the identical submission would
+    be rejected as a replay — our misconfiguration, charged to them, unrecoverably.
+    """
+    from store_agent.external import NonceStore, receive_bid, sign_bid
+
+    store = NonceStore()
+    payload = _payload()
+    result = receive_bid(
+        payload,
+        sign_bid(payload, KEY),
+        _keyring(),
+        queue=object(),  # no __call__ and none of the known method spellings
+        nonce_store=store,
+        now=NOW,
+        auction_deadline=DEADLINE,
+    )
+    assert result is None or result.accepted is not True, (
+        "a submission that could not be enqueued must not report itself accepted"
+    )
+    assert store.seen(SIGNER, payload["nonce"]) is False, (
+        "the nonce must NOT be consumed when the door never managed to enqueue the bid — "
+        "otherwise the submitter cannot retry the same submission"
+    )
+
+
+def test_a_queue_that_raises_is_never_reported_as_a_successful_admission() -> None:
+    """`accepted is True` is a claim that the work item reached the next stage."""
+    from store_agent.external import NonceStore, receive_bid, sign_bid
+
+    class _ExplodingQueue:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def __call__(self, item) -> None:
+            self.attempts += 1
+            raise RuntimeError("broker unavailable")
+
+    queue = _ExplodingQueue()
+    payload = _payload()
+    result = receive_bid(
+        payload,
+        sign_bid(payload, KEY),
+        _keyring(),
+        queue=queue,
+        nonce_store=NonceStore(),
+        now=NOW,
+        auction_deadline=DEADLINE,
+    )
+    assert queue.attempts == 1, "the door must have genuinely attempted the write exactly once"
+    assert result is None or result.accepted is not True, (
+        "a bid whose enqueue raised must not come back accepted — nothing received it"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "args"),
+    [
+        ("payload is None", (None, "sig", {})),
+        ("payload is a string", ("not-a-submission", "sig", {})),
+        ("payload is a list", ([1, 2, 3], "sig", {})),
+        ("keyring is None", (None, "sig", None)),
+        ("keyring is a string", (None, "sig", "not-a-keyring")),
+        ("keyring is a list", (None, "sig", [SIGNER])),
+        ("signature is a dict", (None, {"sig": 1}, None)),
+        ("signature is bytes", (None, b"\xff\xfe", None)),
+        ("unhashable store_id", ({"store_id": {"a": 1}}, "sig", {})),
+    ],
+)
+def test_the_door_refuses_hostile_input_rather_than_raising(case, args) -> None:
+    """Every caller of this function is anonymous, so an exception here is a 500 for free.
+
+    A door that crashes on a malformed body hands an unauthenticated submitter a way to make the
+    exchange emit stack traces and burn workers, without ever holding a key. `None` payloads
+    below mean "use the real fixture"; the interesting mutation is in the other argument.
+    """
+    from store_agent.external import NonceStore, receive_bid, sign_bid
+
+    raw_payload, signature, keyring = args
+    payload = _payload() if raw_payload is None else raw_payload
+    if signature == "sig":
+        try:
+            signature = sign_bid(_payload(), KEY)
+        except Exception:  # noqa: BLE001 - an unsignable fixture still exercises the door
+            signature = "unsignable"
+
+    queue = _Queue()
+    try:
+        result = receive_bid(
+            payload,
+            signature,
+            keyring,
+            queue=queue,
+            nonce_store=NonceStore(),
+            now=NOW,
+            auction_deadline=DEADLINE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise AssertionError(
+            f"{case}: receive_bid must refuse hostile input, not raise {type(exc).__name__}: {exc}"
+        ) from exc
+
+    assert result is None or result.accepted is not True, f"{case}: must not be accepted"
+    assert queue.count == 0, f"{case}: the queue must not be written to"
+
+
+def test_a_blacklist_the_door_cannot_read_blocks_everything_rather_than_nobody() -> None:
+    """Fail closed. An eligibility input we cannot interpret is not permission to admit."""
+    from store_agent.external import sign_bid
+
+    payload = _payload()
+    signature = sign_bid(payload, KEY)
+
+    for case, blacklist in (
+        ("a non-iterable blacklist", 12345),
+        ("a blacklist of unhashable entries", [{"store_id": SIGNER}]),
+    ):
+        result, queue, _err = _receive(payload, signature, blacklist=blacklist)
+        assert result is None or result.accepted is not True, (
+            f"{case}: an unreadable blacklist must deny, never admit"
+        )
+        assert queue.count == 0, f"{case}: nothing may be enqueued"

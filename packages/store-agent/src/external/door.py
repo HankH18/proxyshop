@@ -125,14 +125,26 @@ def _blacklisted(payload: Mapping[str, Any], blacklist: Iterable[Any] | None) ->
     """
     if blacklist is None:
         return False
-    if isinstance(blacklist, (str, bytes)):
-        blocked = {blacklist}
+    if isinstance(blacklist, str):
+        blocked = [blacklist]
     else:
         try:
-            blocked = {entry for entry in blacklist}
+            blocked = list(blacklist)
         except TypeError:  # a non-iterable blacklist is not a licence to admit everyone
             return True
-    return any(payload.get(field_name) in blocked for field_name in ("store_id", "signer_id"))
+    # Fail closed on a blacklist we cannot read (R12). An entry that is not a store/signer id —
+    # a dict where a string belongs, half-decoded JSON, a `None` from a nullable column — means
+    # the operator asked us to block SOMETHING and we cannot tell what. Ignoring it would turn a
+    # malformed eligibility input into permission, which is the direction this project's
+    # boundary never takes on doubt. Compared with `==` rather than set membership for the same
+    # reason: `unhashable in {...}` raises, and a blacklist that crashes blocks nobody.
+    if any(not isinstance(entry, str) for entry in blocked):
+        return True
+    return any(
+        payload.get(field_name) == entry
+        for field_name in ("store_id", "signer_id")
+        for entry in blocked
+    )
 
 
 def _synthetic_trust_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -302,6 +314,14 @@ def receive_bid(
     if not verdict.ok:
         return _refuse(*verdict.reasons, payload=payload)
 
+    # The transport is resolved BEFORE the nonce is spent. A queue we cannot write to means this
+    # submission is not going to be admitted, and discovering that after consuming the nonce
+    # would burn an honest submitter's one-shot key on our own misconfiguration — they would
+    # then be unable to retry the identical submission at all.
+    enqueue = _resolve_enqueue(queue)
+    if enqueue is None:
+        return _refuse(REASON_QUEUE_UNAVAILABLE, payload=payload)
+
     # 6. Replay. Checked last so a submission refused above never spends the nonce it names —
     #    otherwise anyone could burn an honest signer's nonce with a deliberately broken copy.
     store = nonce_store if nonce_store is not None else NonceStore()
@@ -315,12 +335,12 @@ def receive_bid(
         unverified_claim_indexes=verdict.unverified_claim_indexes or [],
     )
     try:
-        _enqueue(queue, item)
-    except Exception:  # noqa: BLE001 - a queue that cannot take the item did not take it
-        # The nonce has already been consumed, and it stays consumed: the submission WAS
-        # authenticated and admitted, and re-opening its nonce because our own transport failed
-        # would hand a replay window to whoever was watching. The submitter retries with a new
-        # nonce, which is the same thing they would do on any 5xx.
+        enqueue(item)
+    except Exception:  # noqa: BLE001 - a queue that raised did not take the item
+        # The nonce stays consumed. The submission WAS authenticated and admitted, and
+        # re-opening its nonce because the transport threw would hand a replay window to
+        # whoever was watching. The submitter retries with a new nonce, exactly as they would
+        # on any 5xx.
         return _refuse(REASON_QUEUE_UNAVAILABLE, payload=payload)
 
     return ExternalBidReceipt(
@@ -334,23 +354,25 @@ def receive_bid(
     )
 
 
-def _enqueue(queue: Any, item: Mapping[str, Any]) -> None:
-    """Hand `item` to whatever the caller injected, exactly once.
+def _resolve_enqueue(queue: Any) -> Any:
+    """The one-argument callable that writes to `queue`, or `None` when there isn't one.
 
-    A callable is called; otherwise the first method it actually has out of the usual spellings
-    is used. The door does not get to dictate the transport's vocabulary — a `queue.put`, a
-    `queue.enqueue` and a bare function are all the same fact, "this went to the next stage" —
-    but it does insist there be exactly one call, so the alternatives are tried in order and the
-    first that exists wins.
+    A callable queue is called directly; otherwise the first of the usual method spellings the
+    object actually has is used. The door does not get to dictate the transport's vocabulary — a
+    `queue.put`, a `queue.enqueue` and a bare function are all the same fact, "this went to the
+    next stage" — but it does insist on exactly one call, so the alternatives are tried in order
+    and the first that exists wins.
+
+    Resolution is separated from the call so the caller can find out that there is no usable
+    transport *before* any state is spent on the submission. Returning `None` rather than
+    raising keeps `receive_bid` total.
     """
     if queue is None:
-        raise TypeError("receive_bid needs a verification queue to admit a bid into")
+        return None
     if callable(queue):
-        queue(item)
-        return
+        return queue
     for method_name in ("enqueue", "put", "submit", "send", "append", "write", "record", "log"):
         method = getattr(queue, method_name, None)
         if callable(method):
-            method(item)
-            return
-    raise TypeError(f"{type(queue).__name__} is not a queue this door knows how to write to")
+            return method
+    return None
