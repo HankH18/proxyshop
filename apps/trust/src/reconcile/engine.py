@@ -28,9 +28,18 @@ A dropped pixel is not an error: with the webhook alone the order still reconcil
 and the gap is recorded as ``pixel_missing: true``. Refusing to reconcile without the pixel
 would let a store suppress its own grading by breaking its own analytics.
 
-No scoring happens here (T-061 non-goal "no score math"). This module emits one
-``reconciled`` event per order; turning that into trust observations is :mod:`trust.scoring`'s
-job through the published ``claim_type -> dimension`` table.
+No scoring happens here (T-061 non-goal "no score math"): not one arithmetic operation in
+this module touches a Beta, a weight or a score. What it does own is the *translation* --
+:func:`reconciled_observations` and :func:`observation_events` say which dimension each
+verdict lands on and which published observation type it is, and :mod:`trust.scoring` decides
+what that is worth.
+
+That translation lives here rather than in ``trust.ledger`` because for a while it lived
+NOWHERE, and the loop dead-ended at exactly this seam: a ``reconciled`` payload carries
+``price_honored`` / ``discount_honored`` and no ``dim`` and no ``type``, and
+``observations_from_events`` silently skips any event lacking both. Measured, a store that
+promised 100 at 20% off and charged 130 reconciled perfectly to ``price_honored: False`` and
+then moved nothing at all. The consumer's shape is fixed and public, so the emitter meets it.
 """
 
 from __future__ import annotations
