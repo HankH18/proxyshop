@@ -5,6 +5,12 @@
  * same fail-closed rules. A boundary that admitted different bids depending on which language the
  * caller happened to be written in would not be a boundary. `tests/boundary.test.ts` checks the
  * TypeScript verdicts against the same table the Python tests use.
+ *
+ * **A claim is judged by where it CAME FROM, never by which field it was written in.** All three
+ * claim-bearing sites are walked — `bid.claims`, `offer.commitments` and `offer.discount` — since
+ * the Offer is inside the bid boundary. A boundary that inspected only `bid.claims` did not have
+ * an exclusivity property; it had a naming convention, and moving the claim one field over
+ * defeated it outright.
  */
 import type {Bid, BidValidationResult, LedgerEvent} from "../../generated/ts/protocol.schema.d.ts";
 import {validationErrors} from "./schemas.js";
@@ -32,12 +38,29 @@ export const HOOK_PROVENANCE_SOURCES: ReadonlySet<string> = new Set([
 /** The only source no hook produces — an assertion the seller made in free text. */
 export const NON_HOOK_PROVENANCE_SOURCES: ReadonlySet<string> = new Set(["seller_asserted"]);
 
+/**
+ * The claim-bearing sites inside a `Bid` that are NOT `bid.claims`, spelled the way the reason
+ * strings name them. `Claim` and `Discount` are the only objects in the protocol schema carrying a
+ * `provenance` block, and the only ones reachable from a `Bid` are `bid.claims[i]`,
+ * `bid.offer.commitments[i]` and `bid.offer.discount` — `Bid` forbids extra keys, so that list is
+ * closed. Add a site to the schema and it must be added here, or R8 stops covering it.
+ */
+export const OFFER_COMMITMENTS_SITE = "offer.commitments";
+export const OFFER_DISCOUNT_SITE = "offer.discount";
+
 export const REASON_UNKNOWN_PATH = "unknown_path";
 export const REASON_SCHEMA_INVALID = "schema_invalid";
 export const REASON_CLAIM_WITHOUT_PROVENANCE = "claim_without_provenance";
 export const REASON_CLAIM_PROVENANCE_EMPTY_SOURCE = "claim_provenance_empty_source";
 export const REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE = "claim_provenance_unknown_source";
 export const REASON_HOSTED_NON_HOOK_PROVENANCE = "hosted_non_hook_provenance";
+/**
+ * An assertable source at a claim-bearing site the verification queue has no address for.
+ * `unverified_claim_indexes` names positions in `bid.claims`; a `seller_asserted` claim living in
+ * `offer.commitments` or on `offer.discount` cannot be pointed at through it, so the external
+ * path refuses it here rather than admitting something nobody will ever verify.
+ */
+export const REASON_UNVERIFIABLE_CLAIM_SITE = "unverifiable_claim_site";
 export const REASON_OFFER_EXPIRED = "offer_expired";
 export const REASON_OFFER_EXPIRY_MISSING = "offer_expiry_missing";
 export const REASON_OFFER_EXPIRY_UNPARSEABLE = "offer_expiry_unparseable";
@@ -90,9 +113,69 @@ export function parseTimestamp(value: unknown): Date | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 }
 
+/**
+ * Judge ONE provenance-bearing object. Returns its reasons and whether it needs verifying.
+ *
+ * `holder` is anything carrying a `provenance` block — a `Claim` from `bid.claims` or from
+ * `offer.commitments`, or the `Discount` on the offer. Same table for all three: R8 is a rule
+ * about where a statement came from, and it does not become a different rule because the
+ * statement was written in a different field.
+ *
+ * `label` is how the reason names the site: the bare integer index for `bid.claims` (that
+ * spelling is published — `hosted_non_hook_provenance:1:seller_asserted` is asserted verbatim by
+ * both language suites), and a dotted/bracketed path for every other site.
+ *
+ * `addressable` is R18's admit-and-flag, available at `bid.claims` ONLY — see `offerClaimReasons`.
+ */
+function sourceVerdict(
+  holder: unknown,
+  path: BidPathName,
+  label: string,
+  addressable: boolean,
+): {reasons: string[]; needsVerification: boolean} {
+  const record = readRecord(holder);
+  const provenance = readRecord(record?.["provenance"]);
+  if (record === undefined || record["provenance"] === null || record["provenance"] === undefined) {
+    return {reasons: [`${REASON_CLAIM_WITHOUT_PROVENANCE}:${label}`], needsVerification: false};
+  }
+  const source = String(provenance?.["source"] ?? "").trim();
+  if (source === "") {
+    return {reasons: [`${REASON_CLAIM_PROVENANCE_EMPTY_SOURCE}:${label}`], needsVerification: false};
+  }
+  if (HOOK_PROVENANCE_SOURCES.has(source)) return {reasons: [], needsVerification: false};
+  if (NON_HOOK_PROVENANCE_SOURCES.has(source)) {
+    if (path === HOSTED_PATH) {
+      // R8/S5: a hosted agent cannot mint this source through any hook.
+      return {
+        reasons: [`${REASON_HOSTED_NON_HOOK_PROVENANCE}:${label}:${source}`],
+        needsVerification: false,
+      };
+    }
+    // R18: admitted, but it goes to verification before it is shown as fact — and only where
+    // the verification queue has an address for it.
+    if (addressable) return {reasons: [], needsVerification: true};
+    return {
+      reasons: [`${REASON_UNVERIFIABLE_CLAIM_SITE}:${label}:${source}`],
+      needsVerification: false,
+    };
+  }
+  return {
+    reasons: [`${REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE}:${label}:${source}`],
+    needsVerification: false,
+  };
+}
+
+/**
+ * Per-claim provenance verdicts over one list of claims.
+ *
+ * `site` is `undefined` for `bid.claims` — the published, addressable list — and the dotted path
+ * of the containing field for any other list. Only the `bid.claims` walk returns indexes, because
+ * `unverified_claim_indexes` means positions in `bid.claims` and nothing else.
+ */
 function claimProvenanceReasons(
   claims: unknown,
   path: BidPathName,
+  site?: string,
 ): {reasons: string[]; unverified: number[]} {
   const reasons: string[] = [];
   const unverified: number[] = [];
@@ -100,32 +183,54 @@ function claimProvenanceReasons(
   if (!Array.isArray(claims)) return {reasons: [REASON_SCHEMA_INVALID], unverified};
 
   claims.forEach((claim, index) => {
-    const record = readRecord(claim);
-    const provenance = readRecord(record?.["provenance"]);
-    if (record === undefined || record["provenance"] === null || record["provenance"] === undefined) {
-      reasons.push(`${REASON_CLAIM_WITHOUT_PROVENANCE}:${index}`);
-      return;
-    }
-    const source = String(provenance?.["source"] ?? "").trim();
-    if (source === "") {
-      reasons.push(`${REASON_CLAIM_PROVENANCE_EMPTY_SOURCE}:${index}`);
-      return;
-    }
-    if (HOOK_PROVENANCE_SOURCES.has(source)) return;
-    if (NON_HOOK_PROVENANCE_SOURCES.has(source)) {
-      if (path === HOSTED_PATH) {
-        // R8/S5: a hosted agent cannot mint this source through any hook.
-        reasons.push(`${REASON_HOSTED_NON_HOOK_PROVENANCE}:${index}:${source}`);
-      } else {
-        // R18: admitted, but it goes to verification before it is shown as fact.
-        unverified.push(index);
-      }
-      return;
-    }
-    reasons.push(`${REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE}:${index}:${source}`);
+    const label = site === undefined ? String(index) : `${site}[${index}]`;
+    const verdict = sourceVerdict(claim, path, label, site === undefined);
+    reasons.push(...verdict.reasons);
+    if (verdict.needsVerification) unverified.push(index);
   });
 
   return {reasons, unverified};
+}
+
+/**
+ * R8 at the OTHER claim-bearing sites: `offer.commitments` and `offer.discount`.
+ *
+ * **The offer is inside the bid boundary.** `claimProvenanceReasons` used to be handed
+ * `record["claims"]` and nothing else, so the whole exclusivity property was defeated by MOVING
+ * the payload: the identical `seller_asserted` claim, relocated into `offer.commitments`, turned
+ * a rejection into `ok=true, reasons=[]` — with an unauthorised 25% discount riding along. Same
+ * claim, same source, same bid; only the field moved. These are the only two other sites:
+ * `Claim` and `Discount` are the sole objects in the protocol schema carrying a `provenance`
+ * block, and `Bid` forbids extra keys.
+ *
+ * A non-hook source here is REFUSED on both paths, not flagged. R18 does not mean "admitted", it
+ * means "admitted *and routed to verification*", and the only handle the boundary gives the queue
+ * is `unverified_claim_indexes` — a published `number[]` addressing `bid.claims`. Renumbering it
+ * to cover offer sites would point the queue at the wrong claims; admitting a claim it has no
+ * address for would be a worse hole than the one this walk closes. An external agent may still
+ * assert freely — in `bid.claims`, the channel that has an address.
+ */
+function offerClaimReasons(offer: unknown, path: BidPathName): string[] {
+  const record = readRecord(offer);
+  if (record === undefined) return [];
+
+  const reasons = claimProvenanceReasons(
+    record["commitments"],
+    path,
+    OFFER_COMMITMENTS_SITE,
+  ).reasons;
+
+  // Judged only when there IS a discount — `discount` is nullable by schema. But a discount that
+  // is PRESENT and carries no provenance is refused like any other unprovenanced statement: it is
+  // the field that actually moves money, and leaving "no provenance at all" unjudged would reopen
+  // this exploit one step further down — drop the block instead of relabelling it, and the 25%
+  // discount walks again.
+  const discount = record["discount"];
+  if (discount !== null && discount !== undefined) {
+    reasons.push(...sourceVerdict(discount, path, OFFER_DISCOUNT_SITE, false).reasons);
+  }
+
+  return reasons;
 }
 
 function expiryReasons(offer: unknown, now: Date): string[] {
@@ -208,9 +313,13 @@ export function validateBid(bid: unknown, options: ValidateBidOptions): BidValid
 
   const record = readRecord(bid) ?? {};
 
-  // 2. Provenance, per claim. Path-sensitive: this is the whole of R8/R18.
+  // 2. Provenance, at EVERY claim-bearing site. Path-sensitive: this is the whole of R8/R18.
+  //    `bid.claims` is not the only place a claim can be written down — the Offer is inside the
+  //    bid boundary and carries `commitments` and a provenance-stamped `discount` — and a walk
+  //    that covers one site is not an exclusivity property, it is a naming convention.
   const claims = claimProvenanceReasons(record["claims"], path);
   reasons.push(...claims.reasons);
+  reasons.push(...offerClaimReasons(record["offer"], path));
 
   // 3. Offer expiry and 4. seller eligibility — path-insensitive.
   reasons.push(...expiryReasons(record["offer"], evaluatedAt));

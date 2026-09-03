@@ -10,6 +10,15 @@ Two doors lead into the auction and they admit different things:
   so `seller_asserted` is admitted — and flagged, so the claim reaches `packages/verification`
   before it is ever shown to a buyer as fact (R18). Admitted is not the same as trusted.
 
+**A claim is judged by where it CAME FROM, never by which field it was written in.** The Offer is
+inside the bid boundary and carries claim material of its own — `offer.commitments` is a list of
+`Claim`, and `offer.discount` is stamped with the same `provenance` block a claim is — so all
+three sites are walked. A boundary that inspected only `bid.claims` did not have an exclusivity
+property; it had a naming convention, and moving the claim one field over defeated it outright.
+The external path's admit-and-flag applies at `bid.claims` alone, because that is the only site
+`unverified_claim_indexes` can address; a `seller_asserted` source in the offer is refused with
+`unverifiable_claim_site` rather than admitted with nobody assigned to check it.
+
 Four conditions reject on BOTH paths, because none of them is about who is speaking:
 
 * a claim with no `provenance` key at all, or with an empty `source`;
@@ -61,6 +70,14 @@ HOOK_PROVENANCE_SOURCES: frozenset[str] = frozenset(
 #: The only source no hook produces — an assertion the seller made in free text.
 NON_HOOK_PROVENANCE_SOURCES: frozenset[str] = frozenset({ProvenanceSource.seller_asserted.value})
 
+#: The claim-bearing sites inside a `Bid` that are NOT `bid.claims`, spelled the way the reason
+#: strings name them. `Claim` and `Discount` are the only objects in the protocol schema carrying
+#: a `provenance` block, and the only ones reachable from a `Bid` are `bid.claims[i]`,
+#: `bid.offer.commitments[i]` and `bid.offer.discount` — `Bid` forbids extra keys, so that list is
+#: closed. Add a site to the schema and it must be added here, or R8 stops covering it.
+OFFER_COMMITMENTS_SITE = "offer.commitments"
+OFFER_DISCOUNT_SITE = "offer.discount"
+
 #: The two doors. `validate_bid` refuses anything else rather than guessing.
 HOSTED_PATH = "hosted"
 EXTERNAL_PATH = "external"
@@ -74,6 +91,11 @@ REASON_CLAIM_WITHOUT_PROVENANCE = "claim_without_provenance"
 REASON_CLAIM_PROVENANCE_EMPTY_SOURCE = "claim_provenance_empty_source"
 REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE = "claim_provenance_unknown_source"
 REASON_HOSTED_NON_HOOK_PROVENANCE = "hosted_non_hook_provenance"
+#: An assertable source at a claim-bearing site the verification queue has no address for.
+#: `unverified_claim_indexes` names positions in `bid.claims`; a `seller_asserted` claim that
+#: lives in `offer.commitments` or on `offer.discount` cannot be pointed at through it, so the
+#: external path refuses it here instead of admitting something nobody will ever verify.
+REASON_UNVERIFIABLE_CLAIM_SITE = "unverifiable_claim_site"
 REASON_OFFER_EXPIRED = "offer_expired"
 REASON_OFFER_EXPIRY_MISSING = "offer_expiry_missing"
 REASON_OFFER_EXPIRY_UNPARSEABLE = "offer_expiry_unparseable"
@@ -132,8 +154,58 @@ def parse_timestamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def _claim_provenance_reasons(claims: Any, path: str) -> tuple[list[str], list[int]]:
-    """Per-claim provenance verdicts. Returns (reasons, indexes of claims needing verification)."""
+def _source_verdict(
+    holder: Any, path: str, label: str, *, addressable: bool
+) -> tuple[list[str], bool]:
+    """Judge ONE provenance-bearing object. Returns (reasons, needs_verification).
+
+    `holder` is anything carrying a `provenance` block — a `Claim` from `bid.claims` or from
+    `offer.commitments`, or the `Discount` on the offer. They are judged by the same table
+    because they carry the same evidence: R8 is a rule about where a statement came from, and
+    it does not become a different rule because the statement was written in a different field.
+
+    `label` is how the reason names the site. It is the bare integer index for `bid.claims`,
+    because that spelling is published — `hosted_non_hook_provenance:1:seller_asserted` is
+    asserted verbatim by both language suites and read by the exchange's rejection log. Every
+    other site gets a dotted/bracketed path (`offer.commitments[0]`, `offer.discount`), the
+    same breadcrumb shape `store-agent/hooks/provenance.py` already prints for these fields.
+
+    `addressable` is R18's admit-and-flag, and it is available at `bid.claims` ONLY. See
+    `_offer_claim_reasons` for why.
+    """
+    provenance = _get(holder, "provenance")
+    if provenance is None:
+        return [f"{REASON_CLAIM_WITHOUT_PROVENANCE}:{label}"], False
+
+    raw_source = _get(provenance, "source")
+    source = str(getattr(raw_source, "value", raw_source) or "").strip()
+    if not source:
+        return [f"{REASON_CLAIM_PROVENANCE_EMPTY_SOURCE}:{label}"], False
+
+    if source in HOOK_PROVENANCE_SOURCES:
+        return [], False
+    if source in NON_HOOK_PROVENANCE_SOURCES:
+        if path == HOSTED_PATH:
+            # R8/S5. A hosted agent cannot mint this source through any hook, so its presence
+            # means the statement did not come from one.
+            return [f"{REASON_HOSTED_NON_HOOK_PROVENANCE}:{label}:{source}"], False
+        if addressable:
+            # R18. Admitted, but it goes to verification before it is shown as fact.
+            return [], True
+        return [f"{REASON_UNVERIFIABLE_CLAIM_SITE}:{label}:{source}"], False
+
+    return [f"{REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE}:{label}:{source}"], False
+
+
+def _claim_provenance_reasons(
+    claims: Any, path: str, *, site: str | None = None
+) -> tuple[list[str], list[int]]:
+    """Per-claim provenance verdicts. Returns (reasons, indexes of claims needing verification).
+
+    `site` is `None` for `bid.claims` — the published, addressable list — and the dotted path of
+    the containing field for any other list of claims. Only the `bid.claims` walk can return
+    indexes, because `unverified_claim_indexes` means positions in `bid.claims` and nothing else.
+    """
     reasons: list[str] = []
     unverified: list[int] = []
 
@@ -143,32 +215,60 @@ def _claim_provenance_reasons(claims: Any, path: str) -> tuple[list[str], list[i
         return [REASON_SCHEMA_INVALID], unverified
 
     for index, claim in enumerate(claims):
-        provenance = _get(claim, "provenance")
-        if provenance is None:
-            reasons.append(f"{REASON_CLAIM_WITHOUT_PROVENANCE}:{index}")
-            continue
-
-        raw_source = _get(provenance, "source")
-        source = str(getattr(raw_source, "value", raw_source) or "").strip()
-        if not source:
-            reasons.append(f"{REASON_CLAIM_PROVENANCE_EMPTY_SOURCE}:{index}")
-            continue
-
-        if source in HOOK_PROVENANCE_SOURCES:
-            continue
-        if source in NON_HOOK_PROVENANCE_SOURCES:
-            if path == HOSTED_PATH:
-                # R8/S5. A hosted agent cannot mint this source through any hook, so its presence
-                # means the claim did not come from one.
-                reasons.append(f"{REASON_HOSTED_NON_HOOK_PROVENANCE}:{index}:{source}")
-            else:
-                # R18. Admitted, but it goes to verification before it is shown as fact.
-                unverified.append(index)
-            continue
-
-        reasons.append(f"{REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE}:{index}:{source}")
+        label = str(index) if site is None else f"{site}[{index}]"
+        claim_reasons, needs_verification = _source_verdict(
+            claim, path, label, addressable=site is None
+        )
+        reasons.extend(claim_reasons)
+        if needs_verification:
+            unverified.append(index)
 
     return reasons, unverified
+
+
+def _offer_claim_reasons(offer: Any, path: str) -> list[str]:
+    """R8 at the OTHER claim-bearing sites: `offer.commitments` and `offer.discount`.
+
+    **The offer is inside the bid boundary.** `_claim_provenance_reasons` used to be handed
+    `bid.claims` and nothing else, so the whole exclusivity property was defeated by MOVING the
+    payload: the identical `seller_asserted` claim, relocated into `offer.commitments`, turned a
+    rejection into `ok=True, reasons=[]` — with an unauthorised 25% discount riding along on the
+    same offer. Same claim, same source, same bid; only the field moved. These are the only two
+    other sites: `Claim` and `Discount` are the sole objects in the protocol schema that carry a
+    `provenance` block, and `Bid` forbids extra keys, so nothing else reachable from a bid can.
+
+    A non-hook source here is REFUSED on both paths, not flagged, and that asymmetry with
+    `bid.claims` is deliberate. R18 does not mean "admitted"; it means "admitted *and routed to
+    verification*", and the only handle the boundary hands the verification queue is
+    `unverified_claim_indexes`, which is a published `array<integer>` addressing `bid.claims`.
+    Renumbering it to cover offer sites would silently redirect the queue at the wrong claims,
+    and admitting a claim the queue has no address for would create a worse hole than the one
+    this walk closes — an assertion nobody is ever asked to verify. So an external agent may
+    still assert freely; it must do so in `bid.claims`, which is the channel with an address,
+    and `unverifiable_claim_site` says exactly that. When `packages/verification` exists and a
+    path-qualified channel is designed for it, this refusal can become a flag; until then the
+    fail-closed direction is the honest one.
+    """
+    if offer is None:
+        return []
+
+    reasons, _ = _claim_provenance_reasons(
+        _get(offer, "commitments"), path, site=OFFER_COMMITMENTS_SITE
+    )
+
+    # The discount is judged only when there IS one — most offers carry none, and `discount` is
+    # nullable by schema. But a discount that is PRESENT and carries no provenance is refused
+    # like any other unprovenanced statement: it is the field that actually moves money, and
+    # leaving "no provenance at all" unjudged would reopen this very exploit one step further
+    # down — drop the block instead of relabelling it, and the 25% discount walks again.
+    discount = _get(offer, "discount")
+    if discount is not None:
+        discount_reasons, _ = _source_verdict(
+            discount, path, OFFER_DISCOUNT_SITE, addressable=False
+        )
+        reasons.extend(discount_reasons)
+
+    return reasons
 
 
 def _expiry_reasons(offer: Any, now: datetime) -> list[str]:
@@ -289,12 +389,17 @@ def validate_bid(
     except Exception:  # noqa: BLE001 - anything unparseable is simply not a Bid
         reasons.append(REASON_SCHEMA_INVALID)
 
-    # 2. Provenance, per claim. Path-sensitive: this is the whole of R8/R18.
+    # 2. Provenance, at EVERY claim-bearing site. Path-sensitive: this is the whole of R8/R18.
+    #    `bid.claims` is not the only place a claim can be written down — the Offer is inside the
+    #    bid boundary and carries `commitments` and a provenance-stamped `discount` — and a walk
+    #    that covers one site is not an exclusivity property, it is a naming convention.
+    offer = _get(bid, "offer")
     claim_reasons, unverified = _claim_provenance_reasons(_get(bid, "claims"), path)
     reasons.extend(claim_reasons)
+    reasons.extend(_offer_claim_reasons(offer, path))
 
     # 3. Offer expiry and 4. seller eligibility — path-insensitive.
-    reasons.extend(_expiry_reasons(_get(bid, "offer"), evaluated_at))
+    reasons.extend(_expiry_reasons(offer, evaluated_at))
     reasons.extend(_eligibility_reasons(_get(bid, "store_id"), trust_snapshot))
 
     # 5. D52's signing envelope, when the caller is the external door rather than a component
@@ -341,6 +446,8 @@ __all__ = [
     "HOOK_PROVENANCE_SOURCES",
     "HOSTED_PATH",
     "NON_HOOK_PROVENANCE_SOURCES",
+    "OFFER_COMMITMENTS_SITE",
+    "OFFER_DISCOUNT_SITE",
     "REASON_CLAIM_PROVENANCE_EMPTY_SOURCE",
     "REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE",
     "REASON_CLAIM_WITHOUT_PROVENANCE",
@@ -354,6 +461,7 @@ __all__ = [
     "REASON_STORE_BLACKLISTED",
     "REASON_TRUST_SNAPSHOT_UNAVAILABLE",
     "REASON_UNKNOWN_PATH",
+    "REASON_UNVERIFIABLE_CLAIM_SITE",
     "parse_timestamp",
     "validate_bid",
     "validate_external_submission",
