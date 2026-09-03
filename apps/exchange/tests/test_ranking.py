@@ -146,13 +146,25 @@ def _reason_blob(record):
 # ---------------------------------------------------------------------------------
 def test_rank_score_equals_the_published_weighted_combination():
     """The score is exactly the published weights applied to the published features."""
-    from packages.contracts.src.ranking import DEFAULT_RANKING_WEIGHTS
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
 
     from apps.exchange.src.ranking import rank
 
-    weights = dict(DEFAULT_RANKING_WEIGHTS)
+    weights = DEFAULT_RANKING_WEIGHTS.weights
     assert set(weights) == {"w_m", "w_e", "w_t", "w_v", "w_d"}, weights
     assert sum(weights.values()) == pytest.approx(1.0)
+
+    # symbol -> feature comes from contracts, not from this file. Writing the pairing out
+    # here is how it drifts: `w_e` weights `verified_claim_ratio` and `w_v` weights
+    # `price_value`, and swapping the two is invisible in every assertion but this one.
+    features = DEFAULT_RANKING_WEIGHTS.feature_weights
+    assert set(features) == {
+        "intent_match",
+        "verified_claim_ratio",
+        "trust",
+        "price_value",
+        "delivery_fit",
+    }, features
 
     cand = _candidate(
         "bid-a",
@@ -165,11 +177,11 @@ def test_rank_score_equals_the_published_weighted_combination():
     result = rank([cand], _intent(), snapshot, _config())
 
     expected = (
-        weights["w_m"] * 0.95
-        + weights["w_e"] * 0.90
-        + weights["w_t"] * 0.75
-        + weights["w_v"] * 0.80
-        + weights["w_d"] * 0.90
+        features["intent_match"] * 0.95
+        + features["verified_claim_ratio"] * 0.80
+        + features["trust"] * 0.75
+        + features["price_value"] * 0.90
+        + features["delivery_fit"] * 0.90
     )
     row = _by_bid(result)["bid-a"]
     assert row["rank_score"] == pytest.approx(expected), (
