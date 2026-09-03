@@ -539,3 +539,103 @@ def test_the_offset_decides_admit_versus_reject_for_an_offer_at_the_edge() -> No
     dead = check(make_bid(offer=offer), EXTERNAL_PATH, now="2026-01-01T09:00:00Z")
     assert dead.ok is False
     assert any("offer_expired" in reason for reason in dead.reasons)
+
+
+# ---------------------------------------------------------------------------------------------
+# T-135: the exclusivity property must not be defeated by MOVING the claim.
+#
+# `_claim_provenance_reasons` walked `bid.claims` and nothing else. But the Offer is INSIDE the
+# bid boundary and carries claim material of its own: `offer.commitments` is a list of claims,
+# and `offer.discount` is stamped with a `provenance` block exactly like a claim is. So a
+# store-agent that put its seller-asserted claim in `offer.commitments` instead of `bid.claims`
+# — or stamped `seller_asserted` on the discount that prices the offer — walked straight past
+# R8. Same claim, same source, same bid; only the field moved.
+#
+# Measured before the fix, on the hosted path:
+#     claim in bid.claims        -> ok=False ['hosted_non_hook_provenance:1:seller_asserted']
+#     the SAME claim in the offer-> ok=True  []                      (with a 25% discount on it)
+#
+# The store-agent's own hook guard closes this for a Tier-1 seller, but the exchange does not
+# hold the seller's ToolHooks facade and can never call it. `validate_bid` is the only door the
+# exchange can run, so if the walk is not exhaustive here, it is not enforced anywhere.
+# ---------------------------------------------------------------------------------------------
+
+
+def _smuggling_offer(**overrides):
+    """An offer carrying the relocated claim and the discount it was smuggled in to justify."""
+    payload = dict(
+        commitments=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))],
+        discount={"type": "percentage", "value": 25.0, "provenance": dict(ASSERTED_PROVENANCE)},
+    )
+    payload.update(overrides)
+    return make_offer(**payload)
+
+
+def test_a_seller_asserted_claim_relocated_into_the_offer_is_still_refused() -> None:
+    """THE exploit. A hosted bid whose only hook-clean field is `bid.claims`."""
+    smuggled = make_bid(
+        claims=[make_claim("free_returns", "30 days", dict(HOOK_PROVENANCE))],
+        offer=_smuggling_offer(),
+    )
+    result = check(smuggled, HOSTED_PATH)
+    assert result.ok is False, (
+        "a hosted bid carrying a seller_asserted claim in offer.commitments and an unauthorised "
+        "25% discount was ADMITTED — moving the claim out of bid.claims defeated R8 entirely"
+    )
+    assert any(reason.startswith("hosted_non_hook_provenance") for reason in result.reasons), (
+        "the refusal must be the PROVENANCE refusal, not an incidental schema complaint: "
+        f"got {list(result.reasons)}"
+    )
+
+    # Positive control: the identical bid with hook provenance everywhere is admitted, so this
+    # is not "reject every offer that has commitments".
+    control = make_bid(
+        claims=[make_claim("free_returns", "30 days", dict(HOOK_PROVENANCE))],
+        offer=make_offer(
+            commitments=[make_claim("spf", 30, dict(HOOK_PROVENANCE))],
+            discount={
+                "type": "percentage",
+                "value": 25.0,
+                "provenance": dict(HOOK_PROVENANCE),
+            },
+        ),
+    )
+    assert check(control, HOSTED_PATH).ok is True, check(control, HOSTED_PATH).reasons
+
+
+def test_an_offer_commitment_is_walked_on_its_own() -> None:
+    """Isolate the site: the commitment alone rejects, with the discount left hook-clean."""
+    bid = make_bid(
+        offer=make_offer(commitments=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))])
+    )
+    result = check(bid, HOSTED_PATH)
+    assert result.ok is False, f"offer.commitments is not walked: {list(result.reasons)}"
+    assert any(reason.startswith("hosted_non_hook_provenance") for reason in result.reasons)
+
+    control = make_bid(offer=make_offer(commitments=[make_claim("spf", 30, dict(HOOK_PROVENANCE))]))
+    assert check(control, HOSTED_PATH).ok is True
+
+
+def test_the_offer_discount_provenance_is_walked_on_its_own() -> None:
+    """The THIRD claim-bearing site, and the one that actually moves money.
+
+    `offer.discount` is not a claim in the `bid.claims` sense, but it carries the same
+    `provenance` block, and `seller_asserted` on it means exactly what it means anywhere else:
+    no hook minted this. A 25% discount the seller simply asserted is the payload the whole
+    R8 exclusivity property exists to stop.
+    """
+    bid = make_bid(
+        offer=make_offer(
+            discount={
+                "type": "percentage",
+                "value": 25.0,
+                "provenance": dict(ASSERTED_PROVENANCE),
+            }
+        )
+    )
+    result = check(bid, HOSTED_PATH)
+    assert result.ok is False, f"offer.discount.provenance is not walked: {list(result.reasons)}"
+    assert any(reason.startswith("hosted_non_hook_provenance") for reason in result.reasons)
+
+    # Control: the same discount, hook-minted, is admitted. The refusal is about the SOURCE.
+    assert check(make_bid(), HOSTED_PATH).ok is True

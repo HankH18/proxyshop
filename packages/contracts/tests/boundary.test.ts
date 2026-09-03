@@ -408,3 +408,89 @@ describe("F4 — a stated UTC offset is part of the instant, not decoration", ()
     expect(at("2026-01-01T09:00:00Z").ok).toBe(false);
   });
 });
+
+describe("T-135 — the exclusivity property survives MOVING the claim", () => {
+  // `claimProvenanceReasons` walked `record["claims"]` and nothing else. The Offer is inside the
+  // bid boundary and carries claim material of its own: `offer.commitments` is a list of claims,
+  // and `offer.discount` is stamped with the same `provenance` block a claim is. Relocating a
+  // `seller_asserted` claim into either one walked straight past R8 with an unauthorised
+  // discount attached. Same claim, same source, same bid; only the field moved.
+  //
+  // The Python peer asserts this exact table in `test_boundary_dual_path.py`; a fix that landed
+  // on one side only would leave the two doors admitting different bids.
+  const smugglingOffer = () =>
+    makeOffer({
+      commitments: [makeClaim("spf", 30, ASSERTED_PROVENANCE)],
+      discount: {type: "percentage", value: 25.0, provenance: structuredClone(ASSERTED_PROVENANCE)},
+    });
+
+  it("refuses a seller_asserted claim relocated into the offer", () => {
+    const smuggled = makeBid({
+      claims: [makeClaim("free_returns", "30 days", HOOK_PROVENANCE)],
+      offer: smugglingOffer(),
+    });
+    const result = check(smuggled, HOSTED_PATH);
+    expect(
+      result.ok,
+      "a hosted bid with a seller_asserted claim in offer.commitments and an unauthorised 25% " +
+        "discount was ADMITTED — moving the claim out of bid.claims defeated R8",
+    ).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.startsWith(REASON_HOSTED_NON_HOOK_PROVENANCE)),
+      `expected the provenance refusal, not an incidental one: ${result.reasons.join(", ")}`,
+    ).toBe(true);
+
+    // Positive control: hook provenance everywhere is admitted, so this is not "reject every
+    // offer that carries commitments".
+    const control = makeBid({
+      claims: [makeClaim("free_returns", "30 days", HOOK_PROVENANCE)],
+      offer: makeOffer({
+        commitments: [makeClaim("spf", 30, HOOK_PROVENANCE)],
+        discount: {type: "percentage", value: 25.0, provenance: structuredClone(HOOK_PROVENANCE)},
+      }),
+    });
+    const admitted = check(control, HOSTED_PATH);
+    expect(admitted.ok, admitted.reasons.join(", ")).toBe(true);
+  });
+
+  it("walks offer.commitments on its own", () => {
+    const bid = makeBid({
+      offer: makeOffer({commitments: [makeClaim("spf", 30, ASSERTED_PROVENANCE)]}),
+    });
+    const result = check(bid, HOSTED_PATH);
+    expect(result.ok, `offer.commitments is not walked: ${result.reasons.join(", ")}`).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.startsWith(REASON_HOSTED_NON_HOOK_PROVENANCE)),
+    ).toBe(true);
+
+    const control = makeBid({
+      offer: makeOffer({commitments: [makeClaim("spf", 30, HOOK_PROVENANCE)]}),
+    });
+    expect(check(control, HOSTED_PATH).ok).toBe(true);
+  });
+
+  it("walks offer.discount.provenance on its own", () => {
+    // The third claim-bearing site, and the one that actually moves money: a 25% discount the
+    // seller simply asserted is the payload R8 exclusivity exists to stop.
+    const bid = makeBid({
+      offer: makeOffer({
+        discount: {
+          type: "percentage",
+          value: 25.0,
+          provenance: structuredClone(ASSERTED_PROVENANCE),
+        },
+      }),
+    });
+    const result = check(bid, HOSTED_PATH);
+    expect(
+      result.ok,
+      `offer.discount.provenance is not walked: ${result.reasons.join(", ")}`,
+    ).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.startsWith(REASON_HOSTED_NON_HOOK_PROVENANCE)),
+    ).toBe(true);
+
+    // Control: the same discount, hook-minted, is admitted. The refusal is about the SOURCE.
+    expect(check(makeBid(), HOSTED_PATH).ok).toBe(true);
+  });
+});
