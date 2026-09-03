@@ -3506,6 +3506,111 @@
       "defect": "T-174 PRODUCES A FALSE RED IN THE GATE, and both prior accounts of the mechanism were incomplete. OBSERVED, not theorised: `verify.sh check` on main failed with `1 failed, 3755 passed` at test_create_app_installs_a_real_webhook_sink_in_a_fresh_process; the same test passes in isolation; site-packages carried no hidden flag afterwards and a bare import worked. The mechanism: test_bootstrap_provisioning.py:225 runs `chflags -R hidden` on the SHARED .venv site-packages and restores at :265, and the merchant test spawns a BARE interpreter with no .pkgroot on PYTHONPATH. My earlier claim (the window corrupts measurements) was too broad; the C11-measurement lane's correction (pytest is immune because its pythonpath ini re-adds .pkgroot) was right about pytest ITSELF and too narrow \u2014 the ini does not reach a SUBPROCESS the suite spawns. So the window is harmless to pytest's own imports and harmful to exactly the fresh-process probes, of which the merchant one is the only unhardened example (its siblings in packages/contracts and packages/llm defend against it). This is a live false-red generator on main until the C11-measurement fix merges.",
       "finding_id": "21c26087184bf6dcf5946a50dd3e2d5a1621191138c500248ec1d4f38eda3403",
       "reproduction": "Run `verify.sh check` on main and watch test_create_app_installs_a_real_webhook_sink_in_a_fresh_process fail while passing standalone; grep chflags -R hidden at test_bootstrap_provisioning.py:225."
+    },
+    {
+      "id": "T-214",
+      "title": "MY OWN AMENDMENT INTRODUCED AN OPERATIONAL REGRESSION I FAILED TO NAME. Every `graph`-marked test is also `docker`-marked (`-m \"graph and not docker\"` collects ZERO), so the OLD `check` never built the session-scoped `_neo4j_guard` and never took the machine-global flock /tmp/proxyshop-neo4j.lock. The NEW `check` does, and because the fixture is SESSION-scoped it holds the lock to teardown. Measured with a 1 Hz probe alongside a real run: worker 71 held the global lock from t=25.1s to t=220.8s of a 221.78s session \u2014 196s, 88% of the run. A/B against a synthetic 25s holder: old expression `1 deselected in 0.18s` (never touches the lock), new `1 passed in 22.77s` (waited it out). And the queue's end is a real failure: with the lock held past the budget, a graph test ERRORED at 240.43s with Neo4jLockTimeout. EVERY LANE RUNS `check`, so concurrent lanes now serialise on a machine-global lock and the loser fails red for a machine reason \u2014 precisely the false-red class cycles 10-11 have been closing. The fix belongs in the fixture's scope (make _neo4j_guard narrower than session, or release around the lock), not in verify.sh.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "conftest.py (_neo4j_guard, session-scoped) + proxyshop_support/neo4j_lock.py \u2014 regression introduced by MY verify.sh amendment"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "conftest.py (_neo4j_guard, session-scoped) + proxyshop_support/neo4j_lock.py \u2014 regression introduced by MY verify.sh amendment",
+      "defect": "MY OWN AMENDMENT INTRODUCED AN OPERATIONAL REGRESSION I FAILED TO NAME. Every `graph`-marked test is also `docker`-marked (`-m \"graph and not docker\"` collects ZERO), so the OLD `check` never built the session-scoped `_neo4j_guard` and never took the machine-global flock /tmp/proxyshop-neo4j.lock. The NEW `check` does, and because the fixture is SESSION-scoped it holds the lock to teardown. Measured with a 1 Hz probe alongside a real run: worker 71 held the global lock from t=25.1s to t=220.8s of a 221.78s session \u2014 196s, 88% of the run. A/B against a synthetic 25s holder: old expression `1 deselected in 0.18s` (never touches the lock), new `1 passed in 22.77s` (waited it out). And the queue's end is a real failure: with the lock held past the budget, a graph test ERRORED at 240.43s with Neo4jLockTimeout. EVERY LANE RUNS `check`, so concurrent lanes now serialise on a machine-global lock and the loser fails red for a machine reason \u2014 precisely the false-red class cycles 10-11 have been closing. The fix belongs in the fixture's scope (make _neo4j_guard narrower than session, or release around the lock), not in verify.sh.",
+      "finding_id": "e1bdf7f6c582c082fe7c218dc026cba97e8d1c0dfc085bf7ed0b669e898fc2e8",
+      "reproduction": "Run two `verify.sh check` sessions concurrently from different worktrees; probe /tmp/proxyshop-neo4j.lock at 1 Hz and watch one hold it for ~88% of its run while the other waits."
+    },
+    {
+      "id": "T-215",
+      "title": "T-202 CONFIRMED OPEN AND UNDERSTATED. accept() catches the post-mint orphan exceptions but never reads exc.orphan, so the live merchant discount code is still never recorded or revoked \u2014 as ticketed. The part T-202 did NOT record: the handler builds its denial reason as f\"checkout_refused: {type(exc).__name__}: {exc}\", and OrphanedOffDomainCheckout's message text embeds the discount code VERBATIM (provider.py:310). So the live code is not merely dropped \u2014 it is written into a persisted policy_event payload as free prose, in a field the published OpenAPI types as a bare string (see T-204). A code that this layer cannot revoke is being logged where anything reading the event stream can see it.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/accept/offer.py:390 and :283 (_refusal_event -> build_event) \u2014 T-202 is WORSE than recorded"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/accept/offer.py:390 and :283 (_refusal_event -> build_event) \u2014 T-202 is WORSE than recorded",
+      "defect": "T-202 CONFIRMED OPEN AND UNDERSTATED. accept() catches the post-mint orphan exceptions but never reads exc.orphan, so the live merchant discount code is still never recorded or revoked \u2014 as ticketed. The part T-202 did NOT record: the handler builds its denial reason as f\"checkout_refused: {type(exc).__name__}: {exc}\", and OrphanedOffDomainCheckout's message text embeds the discount code VERBATIM (provider.py:310). So the live code is not merely dropped \u2014 it is written into a persisted policy_event payload as free prose, in a field the published OpenAPI types as a bare string (see T-204). A code that this layer cannot revoke is being logged where anything reading the event stream can see it.",
+      "finding_id": "879b6977d2acea39b9a2987270564679796dab8241c7ab4058ac41bdafff6616",
+      "reproduction": "Drive the R10 fallback offer + off-domain merchant permalink path and read the emitted policy_event payload: the discount code appears inside denial_reason."
+    },
+    {
+      "id": "T-216",
+      "title": "THE InvalidSchemaName FLAKE HAS ONE MECHANISM AND IT IS NEITHER OF THE TWO I RECORDED. T-196 called it order-dependence; T-201 called it cross-lane collision on a worker database. The measured cause: the unmarked test at test_events_hardening.py:657 needs the `ledger` schema and requests no migration fixture, so it is graded by whatever the PERSISTENT worker database happens to contain \u2014 and `ledger_migrated` is SESSION-scoped and DROPS all four owned schemas before re-applying the SQL. So a session that runs the migration fixture tears the schema out from under any concurrently-running or subsequently-ordered test that assumed it. That explains every observation the two prior diagnoses could not: the schema demonstrably existing yet not being found, passing standalone immediately after, and four sightings across four different workers. T-196 and T-201 should be superseded by this, not merged with it.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/_fixtures_ledger_schema.py:165-194 (ledger_migrated, session-scoped, drops schemas)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/trust/tests/_fixtures_ledger_schema.py:165-194 (ledger_migrated, session-scoped, drops schemas)",
+      "defect": "THE InvalidSchemaName FLAKE HAS ONE MECHANISM AND IT IS NEITHER OF THE TWO I RECORDED. T-196 called it order-dependence; T-201 called it cross-lane collision on a worker database. The measured cause: the unmarked test at test_events_hardening.py:657 needs the `ledger` schema and requests no migration fixture, so it is graded by whatever the PERSISTENT worker database happens to contain \u2014 and `ledger_migrated` is SESSION-scoped and DROPS all four owned schemas before re-applying the SQL. So a session that runs the migration fixture tears the schema out from under any concurrently-running or subsequently-ordered test that assumed it. That explains every observation the two prior diagnoses could not: the schema demonstrably existing yet not being found, passing standalone immediately after, and four sightings across four different workers. T-196 and T-201 should be superseded by this, not merged with it.",
+      "finding_id": "ef17dbe416835df5c1933c289579de1d4999d35687f9cf7e7080cef32a24d2d0",
+      "reproduction": "Run a session that builds ledger_migrated alongside one that reads the ledger schema without requesting it; the drop-and-recreate window is the failure."
+    },
+    {
+      "id": "T-217",
+      "title": "T-212'S CENTRAL CLAIM IS FALSE AND I SHOULD RETRACT IT. I wrote that the test 'connects to a real database but carries no @pytest.mark.docker, so it cannot skip cleanly', and framed that as a concrete fix distinct from T-201. Measured refutation: the skip is delivered by the FIXTURE, not the marker \u2014 `worker_database` calls `_require_services(\"postgres\")`, which calls reachability.skip_reason and pytest.skip. The test skips cleanly with Postgres down, marker or no marker. Adding @pytest.mark.docker would change nothing about skip behaviour. The real mechanism is the session-scoped schema drop recorded above.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "tickets.json T-212 \u2014 my own ticket, central claim factually WRONG"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "tickets.json T-212 \u2014 my own ticket, central claim factually WRONG",
+      "defect": "T-212'S CENTRAL CLAIM IS FALSE AND I SHOULD RETRACT IT. I wrote that the test 'connects to a real database but carries no @pytest.mark.docker, so it cannot skip cleanly', and framed that as a concrete fix distinct from T-201. Measured refutation: the skip is delivered by the FIXTURE, not the marker \u2014 `worker_database` calls `_require_services(\"postgres\")`, which calls reachability.skip_reason and pytest.skip. The test skips cleanly with Postgres down, marker or no marker. Adding @pytest.mark.docker would change nothing about skip behaviour. The real mechanism is the session-scoped schema drop recorded above.",
+      "finding_id": "cd8c03e141feda3e5e2321bb81f06dda08ceabc0d2d9cc68e072ca915628bb39",
+      "reproduction": "Point PROXYSHOP_PG_DSN_ADMIN at a closed port and run that test: it skips, with no docker marker present."
+    },
+    {
+      "id": "T-218",
+      "title": "T-209 CONFIRMED BUT UNDERSTATED, and the cause is generic rather than specific to commitments. The store-agent's walk short-circuits on ANY None, while --strict-nullable made a growing set of fields non-nullable at the pydantic door. The verifier enumerated at least SIX shapes the store-agent auditor ADMITS that the tightened contracts door now REFUSES. The structural consequence matters more than the six: every future field the generator tightens silently joins the family, and nothing on the store-agent side notices. This wants a property test asserting the two doors agree on nullability, not six more point fixes.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py:523 (`if node is None: return`) \u2014 T-209 is one of a family of at least six"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/store-agent/src/hooks/provenance.py:523 (`if node is None: return`) \u2014 T-209 is one of a family of at least six",
+      "defect": "T-209 CONFIRMED BUT UNDERSTATED, and the cause is generic rather than specific to commitments. The store-agent's walk short-circuits on ANY None, while --strict-nullable made a growing set of fields non-nullable at the pydantic door. The verifier enumerated at least SIX shapes the store-agent auditor ADMITS that the tightened contracts door now REFUSES. The structural consequence matters more than the six: every future field the generator tightens silently joins the family, and nothing on the store-agent side notices. This wants a property test asserting the two doors agree on nullability, not six more point fixes.",
+      "finding_id": "4e8d5b3042b3384ce13aa1a28afeec5e066c401a0f8fddd4f66ef220b351f46a",
+      "reproduction": "Feed each of the six now-non-nullable fields as explicit null through both doors and compare ok."
+    },
+    {
+      "id": "T-219",
+      "title": "NOTHING CONSUMES THE SELECTION COUNT, so T-117's defect is closed for the `docker` marker but not as a class. The line is advisory text on stdout: `grep -rn SELECTION` hits only scripts/verify.sh, and build_succeeds is `if ... make verify ...; then echo 1; else echo 0; fi` \u2014 exit status alone. Demonstrated: `PYTEST_ADDOPTS='-k test_the_corpus_is_the_committed_one' ./scripts/verify.sh pytest` exits 0 and prints `SELECTION: 3975 deselected, 0 skipped` \u2014 a green gate having run 1 test of 3976, with every machine consumer seeing the same green. Making the count visible to a human is not the same as making it binding, and I recorded acceptance 2 as satisfied without drawing that distinction.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "scripts/verify.sh SELECTION line + .swarm-loop/goals.json build_succeeds \u2014 T-117 acceptance 2 is only literally satisfied"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "scripts/verify.sh SELECTION line + .swarm-loop/goals.json build_succeeds \u2014 T-117 acceptance 2 is only literally satisfied",
+      "defect": "NOTHING CONSUMES THE SELECTION COUNT, so T-117's defect is closed for the `docker` marker but not as a class. The line is advisory text on stdout: `grep -rn SELECTION` hits only scripts/verify.sh, and build_succeeds is `if ... make verify ...; then echo 1; else echo 0; fi` \u2014 exit status alone. Demonstrated: `PYTEST_ADDOPTS='-k test_the_corpus_is_the_committed_one' ./scripts/verify.sh pytest` exits 0 and prints `SELECTION: 3975 deselected, 0 skipped` \u2014 a green gate having run 1 test of 3976, with every machine consumer seeing the same green. Making the count visible to a human is not the same as making it binding, and I recorded acceptance 2 as satisfied without drawing that distinction.",
+      "finding_id": "8ff73176e7a19920f9a8529776caff89766a40e5a7501f13dc98f9670a0cdc72",
+      "reproduction": "The PYTEST_ADDOPTS invocation above: exit 0, build_succeeds would record 1."
+    },
+    {
+      "id": "T-220",
+      "title": "The cycle-detection replacement for MAX_SWEEP_DEPTH is correct, but nothing in the suite would notice a depth bound being silently RE-INTRODUCED above 64. The two tests grading 'there is no depth at which a bid stops being checked' parametrize layers as [1, 11, 13, 14, 64] and [1, 13, 14, 64] \u2014 values chosen either side of the OLD bound of 12 \u2014 so any new bound at 65 or beyond is invisible. The tests pin the fix that was made rather than the property that was promised.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/tests/test_price_reconciliation.py (depth parametrization) \u2014 cycle detection has an invisible ceiling"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/store-agent/tests/test_price_reconciliation.py (depth parametrization) \u2014 cycle detection has an invisible ceiling",
+      "defect": "The cycle-detection replacement for MAX_SWEEP_DEPTH is correct, but nothing in the suite would notice a depth bound being silently RE-INTRODUCED above 64. The two tests grading 'there is no depth at which a bid stops being checked' parametrize layers as [1, 11, 13, 14, 64] and [1, 13, 14, 64] \u2014 values chosen either side of the OLD bound of 12 \u2014 so any new bound at 65 or beyond is invisible. The tests pin the fix that was made rather than the property that was promised.",
+      "finding_id": "7132a711b7c984f9020ff3f894f0d501d25e9d91f4e771cff7513d919b4e8ef8",
+      "reproduction": "Re-introduce a depth bound of 65 in _walk and run the suite: green."
     }
   ]
 }
