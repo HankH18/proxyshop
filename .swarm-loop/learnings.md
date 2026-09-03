@@ -412,3 +412,33 @@ worktrees no matter how many exist, then re-dispatch every in-flight ticket into
 APPLY: pass `--worktree-root ../<repo>-worktrees` at `init`. When inheriting a run that lacks it,
 say so in the handoff and in the cycle report — `state.json` is guard-protected against in-place
 rewrites, so it cannot simply be patched, and the gap silently survives every later session.
+
+## "Zero production callers": the discriminator is whether a FROZEN TEST already counts it
+
+Cycle 10 refuted seven findings whose whole content was "this landed symbol has no production
+caller", then minted two HIGH findings of apparently the same shape hours later. The ledger
+regeneration caught the contradiction. Adjudicated at ground truth, and the rule generalises:
+
+**An unwired half is scheduled work. It becomes a DEFECT the moment a frozen acceptance test
+counts it as satisfying a requirement.**
+
+Applied to the actual cases:
+- T-136/T-141/T-142/T-147/T-148/T-150 — no frozen test asserts any of them is wired, so "no
+  caller" means "the consumer is a scheduled ticket". REFUTED, correctly.
+- T-169 — the frozen S8-3 release blocker `test_offdomain_checkout_url_is_refused` PASSES, and
+  it passes by comparing the permalink host against `bid['store_domain']`, a BIDDER-CONTROLLED
+  field, because no registry is ever wired. A bidder that lies consistently (store_domain and
+  checkout_url both attacker.tld) defeats it, and the test cannot see that because it never
+  wires a registry. The metric therefore counts a security property as met that is not enforced.
+  NOT the zero-caller pattern. HIGH stands.
+- T-170 ("the accept package ships no routes.py") — checked: NO frozen test asserts an HTTP
+  accept endpoint (no TestClient in the acceptance suite), and T-052 owns
+  apps/merchant/svc/src/codes/**, not the exchange route. So this IS the zero-caller pattern.
+  DOWNGRADE from HIGH to a graph gap: no ticket in the 123-ticket graph owns
+  apps/exchange/src/accept/routes.py, which is worth recording precisely because nothing will
+  otherwise schedule it.
+
+APPLY: before accepting or refuting any "nothing calls this" finding, ask ONE question — does a
+frozen acceptance test currently pass because of this thing? If yes it is a measurement-
+credibility defect regardless of callers; if no it is unfinished work, and the answer is a
+schedule, not a ticket. Record which answer you got, so the next pass cannot re-litigate it.
