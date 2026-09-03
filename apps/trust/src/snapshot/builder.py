@@ -86,24 +86,28 @@ _POSITIVE_TYPES = frozenset({"verified", "fulfilled"})
 def _episode_floor_dimensions() -> tuple[str, ...]:
     """The dimensions a completed clean episode is counted over.
 
-    The derived floor asks "has a whole round of evidence happened?", and it can only ask
-    that about dimensions a round of evidence can actually LAND on. The approved
-    ``claim_type -> dimension`` table is the answer, read from ground truth rather than
-    listed here: every dimension it routes a claim type onto is one a verification outcome
-    can reach, and reconciliation verdicts land on two of them (``price_honored``,
-    ``discount_honored``) as well.
+    The derived floor asks "has a whole round of evidence happened?", and a round is made of
+    the evidence **the network can obtain on its own initiative** — a claim it verified
+    against the catalog, a promise it reconciled against the webhook. It cannot be made of
+    evidence that only exists if a third party volunteers it.
 
-    The dimension it leaves out is ``feedback_match``, and that is not an accident of this
-    deployment — the manifest states it as policy: "Takes NO verification outcome at all. It
-    is the post-purchase, buyer-reported match between pitch and delivery (R14)". Counting it
-    in the floor made the floor ``min(..., 0)`` for every store that had not yet been left
-    buyer feedback, which pinned it at zero and made ``low_data`` — one of the two flags this
-    package exists to publish — permanently ``True``. Measured before the fix: a store with
-    forty clean rounds over every reachable dimension derived 0 clean episodes.
+    That is the whole distinction, and it lands exactly on ``feedback_match``. The approved
+    manifest states it as policy rather than as an accident of this deployment: that dimension
+    "Takes NO verification outcome at all. It is the post-purchase, buyer-reported match
+    between pitch and delivery (R14)". Buyer feedback IS evidence and IS scored — this
+    package's sibling ``trust.feedback`` produces exactly such observations, and the manifest's
+    own dishonest-store script emits one with ``claim_type: null``. It simply cannot be waited
+    for. Counting it in the floor made the floor ``min(..., 0)`` for every store nobody had
+    yet left feedback about, which pinned it at zero and made ``low_data`` — one of the two
+    flags this package exists to publish — permanently ``True``. Measured: a store with forty
+    clean rounds over every other dimension derived 0 clean episodes.
 
-    Derived, not hard-coded at five, for the obvious reason: if a future approved manifest
-    ever does route a claim type to ``feedback_match``, the floor starts counting it again
-    without anyone remembering to come back here.
+    The approved ``claim_type -> dimension`` table is read as the concrete expression of
+    "network-obtained", because it is ground truth this package does not author and it names
+    precisely the five: the four verification dimensions plus the two reconciliation lands on.
+    It is NOT read as a prediction that a future manifest might route a claim type to
+    ``feedback_match`` — the same manifest forbids that in the line quoted above, so that
+    branch is dead by policy and this is a derivation, not an escape hatch.
     """
     routed = {str(dim) for dim in CLAIM_TYPE_DIMENSIONS.values()}
     reachable = tuple(dim for dim in TRUST_DIMENSIONS if dim in routed)
@@ -140,6 +144,15 @@ def clean_episodes(store: Any, observations: Iterable[Any]) -> int:
     count. A floor taken over "every dimension that carries evidence" would drop an
     established store from five clean episodes to one the moment its first piece of buyer
     feedback arrived, which would make receiving evidence a penalty.
+
+    The three sources answer subtly different questions and can disagree, which matters when
+    reading the number back. Source 2 counts episodes with **no negative outcome**; source 3
+    counts positives and never looks at negatives. So a store with five clean rounds and two
+    hundred contradictions derives 5 here and would tag as 0. Source 3's answer is the one
+    ``low_data`` wants — the flag asks "have we seen enough of this store?", not "was what we
+    saw any good?", and a store with two hundred contradictions is emphatically not unknown;
+    it is known and blacklisted, which is a different field. The divergence was invisible
+    while the derived floor could only ever return 0.
     """
     declared = _field(store, "episodes")
     if isinstance(declared, int) and not isinstance(declared, bool):

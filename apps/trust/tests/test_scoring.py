@@ -1000,3 +1000,118 @@ def test_a_zero_weight_observation_moves_nothing_and_still_costs_coverage(e6_as_
 
     assert (float(entry["alpha"]), float(entry["beta"])) == (PRIOR_ALPHA, PRIOR_BETA)
     assert int(entry["observations"]) == 1, "a zero-weight observation still happened"
+
+
+def test_a_downweighted_observation_buys_proportionally_less_coverage(e6_as_of):
+    """A discounted report must not buy FULL coverage credit for a fraction of the evidence.
+
+    Coverage is ``decided_mass / mass`` and confidence is
+    ``floor + (1-floor) * saturation(evidence) * coverage``. Scaling only ``evidence`` by the
+    per-observation weight left ``decided_mass`` at full strength, so a report discounted to
+    0.25 -- or to 0.0 -- bought the same coverage as a full-weight one. That reopens R14's
+    "a single account cannot outvote the network" through the confidence channel instead of
+    the mean, which is the channel the weight was added to close.
+    """
+
+    def _coverage(weight):
+        snapshot = score(
+            [
+                {
+                    "store_id": "s-1",
+                    "dim": "feedback_match",
+                    "type": "fulfilled",
+                    "observed_at": e6_as_of,
+                    "weight": weight,
+                }
+            ],
+            as_of=e6_as_of,
+        )
+        return float(snapshot["dims"]["feedback_match"]["coverage"])
+
+    assert _coverage(1.0) == 1.0
+    assert _coverage(0.25) == 0.25, "a quarter-weight report bought full coverage credit"
+    assert _coverage(0.0) == 0.0, (
+        "a zero-weight report decided nothing and must cost coverage exactly as `ambiguous` "
+        "does -- otherwise it is free confidence"
+    )
+
+
+def test_zero_weight_padding_cannot_manufacture_confidence(e6_as_of):
+    """The measured attack: pad a real record with weightless 'deciding' observations.
+
+    Measured before the fix: 18.0 units of real evidence plus 360 zero-weight observations
+    took confidence from 0.1728 to 0.5659 (+227%) while ``effective_evidence`` never moved.
+    Confidence that can be bought with evidence nobody weighted is not confidence.
+
+    The record starts with LOW coverage -- three decided outcomes against twelve undecided
+    ones per dimension -- because coverage is the factor the padding inflates. A baseline
+    already at coverage 1.0 has no room to be inflated and would pass this test vacuously.
+    """
+    real = [
+        {"store_id": "s-1", "dim": dim, "type": otype, "observed_at": e6_as_of}
+        for dim in TRUST_DIMENSIONS
+        for otype in (["contradicted"] * 3 + ["ambiguous"] * 12)
+    ]
+    padding = [
+        {
+            "store_id": "s-1",
+            "dim": dim,
+            "type": "fulfilled",
+            "observed_at": e6_as_of,
+            "weight": 0.0,
+        }
+        for dim in TRUST_DIMENSIONS
+        for _ in range(60)
+    ]
+
+    baseline = score(real, as_of=e6_as_of)
+    padded = score([*real, *padding], as_of=e6_as_of)
+
+    assert padded["effective_evidence"] == baseline["effective_evidence"]
+    assert padded["confidence"] <= baseline["confidence"], (
+        f"padding with weightless observations raised confidence from "
+        f"{baseline['confidence']} to {padded['confidence']}"
+    )
+
+
+def test_the_weight_channel_accepts_any_real_number_not_only_int_and_float(e6_as_of):
+    """A ``Decimal`` weight is a perfectly good weight and must not crash the scorer.
+
+    Reachable from any JSON parsed with ``parse_float=Decimal`` or read out of a NUMERIC
+    column -- and ``ledger.trust_observations.weight`` is a ``double precision`` column, so
+    weights really do arrive from a database. Refusing them with "is not a number" takes
+    scoring down for a value that is one.
+    """
+    from decimal import Decimal
+    from fractions import Fraction
+
+    for value in (Decimal("0.25"), Fraction(1, 4)):
+        entry = score(
+            [
+                {
+                    "store_id": "s-1",
+                    "dim": "feedback_match",
+                    "type": "fulfilled",
+                    "observed_at": e6_as_of,
+                    "weight": value,
+                }
+            ],
+            as_of=e6_as_of,
+        )["dims"]["feedback_match"]
+        assert float(entry["alpha"]) == PRIOR_ALPHA + 0.25, f"{type(value).__name__} was refused"
+
+    # ...and the refusals that matter still refuse.
+    for bad in (True, "0.25", None.__class__, float("nan"), float("inf"), Decimal("2")):
+        with pytest.raises(ValueError):
+            score(
+                [
+                    {
+                        "store_id": "s-1",
+                        "dim": "feedback_match",
+                        "type": "fulfilled",
+                        "observed_at": e6_as_of,
+                        "weight": bad,
+                    }
+                ],
+                as_of=e6_as_of,
+            )

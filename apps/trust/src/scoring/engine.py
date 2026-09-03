@@ -44,6 +44,16 @@ An observation with no ``weight`` weighs exactly 1.0, which is what keeps the S3
 assertion honest: ``trust.ledger.replay`` projects only ``{store_id, dim, type, observed_at}``
 onto observations, so every replayed observation takes that default.
 
+**And that is a live gap, not a design.** ``observations_from_events`` DROPS the weight, so a
+*weighted* observation served from memory and the same observation replayed out of the ledger
+score differently — measured, a feedback report at 0.25 serves ``alpha=2.25`` and replays
+``alpha=3.0``. The channel is therefore S3-safe exactly to the extent it is unused, which is
+not a property worth having. ``ledger.trust_observations`` already declares a ``weight
+double precision`` column, so the schema expects the number to travel; the projection that
+feeds this scorer is what has to carry it, and that file is owned elsewhere. Until it does,
+the only producer of weighted observations (``trust.feedback``) must not be routed through
+the ledger. Reported as a NEEDS against ``apps/trust/src/ledger/replay.py``.
+
 Coverage, and why undecided outcomes go there instead of into the mean
 ----------------------------------------------------------------------
 ``unsupported`` and ``ambiguous`` are not evidence *about the store*; they are evidence about
@@ -316,25 +326,39 @@ def relative_observation_weight(observation: Any) -> float:
             approximately: the S3 assertion compares a served snapshot against a replayed one
             with ``==``.
 
+            Any real number is accepted, not only ``int``/``float``: weights arrive from JSON
+            parsed with ``parse_float=Decimal`` and from the ``double precision`` column
+            ``ledger.trust_observations.weight``, and refusing a ``Decimal`` with "is not a
+            number" would take scoring down for a value that is one. ``bool`` is refused
+            because ``True`` is not a weight anybody meant, and ``str`` because a weight that
+            crossed a boundary as text is a producer bug worth seeing.
+
     Returns:
         A float in ``[0.0, MAX_OBSERVATION_WEIGHT]``. ``0.0`` is admissible and means what
         ``ambiguous`` means — it decides nothing and moves neither side of the Beta — which is
         why it is a value here and not a rejection.
 
     Raises:
-        InvalidObservationWeight: the weight is not a number, is negative, is NaN, or exceeds
-            :data:`MAX_OBSERVATION_WEIGHT`.
+        InvalidObservationWeight: the weight is not a real number, is negative, is NaN or
+            infinite, or exceeds :data:`MAX_OBSERVATION_WEIGHT`.
     """
     raw = _field(observation, OBSERVATION_WEIGHT_FIELD)
     if raw is None:
         return 1.0
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    if isinstance(raw, bool) or isinstance(raw, (str, bytes, bytearray)):
         raise InvalidObservationWeight(
             f"observation weight {raw!r} is not a number. The weight channel scales a "
             f"published type weight, so a non-numeric value has no arithmetic meaning and "
             f"coercing it would invent one."
         )
-    value = float(raw)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise InvalidObservationWeight(
+            f"observation weight {raw!r} is not a real number. The weight channel scales a "
+            f"published type weight, so a value with no float of its own has no arithmetic "
+            f"meaning here."
+        ) from None
     # NaN fails both comparisons, which is the intent: it would poison every alpha and beta
     # it touched and the served score would be NaN with nothing naming the observation.
     if not 0.0 <= value <= MAX_OBSERVATION_WEIGHT:
@@ -424,7 +448,8 @@ def score(observations: Iterable[Any], *, as_of: Any) -> dict[str, Any]:
         # The published weight of the KIND of evidence, scaled by what THIS report is worth.
         # Multiplicative and not a replacement: the manifest's table stays the authority on
         # how much a contradiction costs, and the producer only ever discounts its own report.
-        weight = _observation_weight(observation_type) * relative_observation_weight(observation)
+        relative = relative_observation_weight(observation)
+        weight = _observation_weight(observation_type) * relative
         polarity = OBSERVATION_POLARITY.get(observation_type, "negative")
         decay = decay_factor(_field(observation, "observed_at"), as_of)
 
@@ -437,7 +462,22 @@ def score(observations: Iterable[Any], *, as_of: Any) -> dict[str, Any]:
             entry["beta"] = float(entry["beta"]) + weight * decay
         if observation_type in DECIDING_OBSERVATION_TYPES:
             entry["decided"] = int(entry["decided"]) + 1
-            entry["decided_mass"] = float(entry.get("decided_mass", 0.0)) + decay
+            # `decided_mass` is scaled by the RELATIVE weight and not by the published type
+            # weight. Coverage asks "how much of what we saw actually decided something", so
+            # a `contradicted` must not count as four times the coverage of a `verified` — but
+            # a report discounted to a quarter did decide a quarter as much, and one
+            # discounted to zero decided nothing at all.
+            #
+            # Leaving this at the raw decay was measured to be a free-confidence machine: a
+            # store's record padded with 360 zero-weight "deciding" observations took
+            # confidence from 0.216 to 0.748 while `effective_evidence` never moved, because
+            # coverage rose and nothing else did. That reopens R14's "a single account cannot
+            # outvote the network" through the confidence channel rather than the mean.
+            #
+            # `mass` (the denominator) stays unscaled on purpose, which is what makes a
+            # zero-weight deciding observation cost coverage exactly as `ambiguous` does
+            # rather than merely being neutral: it happened, and it settled nothing.
+            entry["decided_mass"] = float(entry.get("decided_mass", 0.0)) + relative * decay
             entry["evidence"] = float(entry["evidence"]) + weight * decay
 
     total_mass = 0.0

@@ -329,8 +329,10 @@ def reconciled_event(
     observed_discount = _discount_percentage(observation)
 
     promised_price = promised.get("total_price")
+    promised_price_basis = "total_price" if promised_price is not None else None
     if promised_price is None:
         promised_price = promised.get("unit_price")
+        promised_price_basis = "unit_price" if promised_price is not None else None
     promised_discount = promised.get("discount_percentage")
 
     # Whether the comparison could be made AT ALL, kept separate from its verdict. A webhook
@@ -340,7 +342,17 @@ def reconciled_event(
     # read `price_comparable` to choose `unsupported` over `contradicted`. Collapsing the two
     # would let a malformed webhook manufacture a contradiction, which is a penalty the store
     # cannot see coming and cannot appeal.
-    price_comparable = observed_price is not None and promised_price is not None
+    #
+    # A promised UNIT price is one of those gaps, and a subtle one. `observed_price` is the
+    # ORDER total, so an offer that named only a unit price is being compared against a
+    # different quantity: measured, 30.00 a unit against a three-unit order billed at 90.00 —
+    # an exactly honest order — read `price_honored: False`. That was harmless while nothing
+    # scored the verdict and became a 2.0 `contradicted` the moment something did.
+    price_comparable = (
+        observed_price is not None
+        and promised_price is not None
+        and promised_price_basis != "unit_price"
+    )
 
     # A promise of 0% — or of no discount at all — has nothing to dishonour, so it is honored
     # trivially and comparably. Requiring an observed discount in that case made an explicitly
@@ -397,6 +409,7 @@ def reconciled_event(
             "observed_price": observed_price,
             "observed_discount_percentage": observed_discount,
             "promised_price": promised_price,
+            "promised_price_basis": promised_price_basis,
             "promised_discount_percentage": promised_discount,
             "authority": WEBHOOK_KIND,
             # the pixel, recorded and never consulted
@@ -535,12 +548,23 @@ def _graded_fields(payload: Mapping[str, Any]) -> list[tuple[str, str, str, Any,
       nothing to dishonour. Translating that into a ``fulfilled`` observation would pay a
       store for a promise it never made, on every order it ever takes: promise no discount,
       collect free positive evidence on ``discount_honored`` forever.
+    * the same is true one epsilon over. The verdict honors on
+      ``observed >= promised - DISCOUNT_TOLERANCE``, so ANY promise at or below the tolerance
+      is auto-honored whatever the webhook reports — measured, a promise of 0.01% against a
+      webhook reporting no discount at all minted a ``fulfilled``. A promise smaller than the
+      smallest difference we can measure is not a promise this system can grade, so it is not
+      graded. The threshold is the comparison tolerance itself, not a number chosen here.
     * a missing promised PRICE is likewise not gradeable. ``unsupported`` there would
       penalise a store for an offer that carried no price rather than for anything it did.
+
+    Numbers are read through :func:`_number`, which yields ``None`` for anything that is not
+    one. This function is documented to accept a whole ledger page, and a payload read back
+    out of the ledger holds whatever was stored; a bare ``ValueError`` out of ``float()`` is
+    not something a caller's ``except ReconciliationInputError`` would ever catch.
     """
     graded: list[tuple[str, str, str, Any, Any]] = []
 
-    promised_price = payload.get("promised_price")
+    promised_price = _number(payload.get("promised_price"))
     if promised_price is not None:
         graded.append(
             (
@@ -555,8 +579,8 @@ def _graded_fields(payload: Mapping[str, Any]) -> list[tuple[str, str, str, Any,
             )
         )
 
-    promised_discount = payload.get("promised_discount_percentage")
-    if promised_discount is not None and float(promised_discount) > 0.0:
+    promised_discount = _number(payload.get("promised_discount_percentage"))
+    if promised_discount is not None and promised_discount > DISCOUNT_TOLERANCE:
         graded.append(
             (
                 "discount",
@@ -603,6 +627,13 @@ def reconciled_observations(reconciled: Any) -> list[dict[str, Any]]:
     for event in _as_reconciled_events(reconciled):
         payload = _payload(event)
         store_id = _field(event, "store_id") or payload.get("store_id")
+        if store_id is None:
+            # A trust observation is a statement ABOUT a store, and there is no honest store
+            # to attribute this one to. `observations_from_events` drops such an event anyway
+            # (replay.py: "there is no honest store to attribute it to"), so emitting one only
+            # seals a permanent, immutable, never-scored finding into an append-only ledger.
+            # The `reconciled` event still records exactly what happened.
+            continue
         observed_at = payload.get("observed_at") or _field(event, "ts")
         for _field_name, dimension, observation_type, _promised, _observed in _graded_fields(
             payload
@@ -646,6 +677,8 @@ def observation_events(reconciled: Any) -> list[dict[str, Any]]:
     for event in _as_reconciled_events(reconciled):
         payload = _payload(event)
         store_id = _field(event, "store_id") or payload.get("store_id")
+        if store_id is None:
+            continue  # see `reconciled_observations` — nothing to attribute the finding to
         order_ref = payload.get("order_ref") or _field(event, "order_ref")
         observed_at = payload.get("observed_at") or _field(event, "ts")
         for field, dimension, observation_type, promised_value, observed_value in _graded_fields(
@@ -657,7 +690,11 @@ def observation_events(reconciled: Any) -> list[dict[str, Any]]:
                         f"{OBSERVATION_KIND}:{_id_component(store_id)}"
                         f":{_id_component(order_ref)}:{field}"
                     ),
-                    "ts": _field(event, "ts"),
+                    # `observed_at`, not the raw `ts`: it already falls back to it, and a
+                    # reconciled event with neither would otherwise emit `ts: None`, which
+                    # `normalise_event` refuses — two unappendable events per order instead
+                    # of the one that was already unappendable.
+                    "ts": observed_at,
                     "kind": OBSERVATION_KIND,
                     "store_id": store_id,
                     "order_ref": order_ref,

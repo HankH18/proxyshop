@@ -90,10 +90,26 @@ FEEDBACK_POSITIVE_TYPE = "fulfilled"
 
 #: The observation type a buyer's "it did not match the pitch" becomes.
 #:
-#: ``mismatch_return`` is the only buyer-reported negative in the approved weight table, and
-#: its published 1.5 sits where a buyer report belongs — above ``unsupported`` (0.5, "no
+#: The approved manifest settles this directly. Its ``dishonest_store.behaviours`` entry
+#: ``pitch_delivery_mismatch`` is ``{dim: feedback_match, type: mismatch_return,
+#: claim_type: null}``, described as "The buyer reports that what arrived **does not match**
+#: what was pitched, and returns it." So ``mismatch_return`` on this dimension is the NEGATIVE
+#: report, which is what is emitted here.
+#:
+#: Note this contradicts the gloss in ``trust.scoring.engine``'s weight table ("the buyer said
+#: it matched and then returned it"), which reads it as the *positive*-report case. Ground
+#: truth is the manifest, not a comment in the engine that consumes it (D18/A3), so the
+#: manifest wins — but the comment is a real divergence and is reported rather than silently
+#: worked around.
+#:
+#: The published 1.5 also sits where a buyer report belongs: above ``unsupported`` (0.5, "no
 #: evidence either way") and below ``contradicted`` (2.0, which is the catalog or the
 #: transaction record saying otherwise, not a person).
+#:
+#: KNOWN GAP: the manifest's behaviour is a mismatch report *and a return*. A buyer who
+#: complains and KEEPS the item is not that behaviour, and the published vocabulary has no
+#: second buyer-reported negative to carry it — so it currently lands at the same 1.5. Closing
+#: that needs a published weight, which is a manifest change and not this engine's to make.
 FEEDBACK_NEGATIVE_TYPE = "mismatch_return"
 
 
@@ -283,9 +299,7 @@ def accept_feedback(
     }
 
 
-def feedback_observation(
-    verdict: Any, *, observed_at: Any, store_id: Any = None
-) -> dict[str, Any] | None:
+def feedback_observation(verdict: Any, *, observed_at: Any) -> dict[str, Any] | None:
     """Turn one :func:`accept_feedback` verdict into the trust observation the scorer consumes.
 
     This is the seam R14's weight travels through. ``accept_feedback`` decides *whether* a
@@ -302,9 +316,13 @@ def feedback_observation(
         verdict: what :func:`accept_feedback` returned.
         observed_at: when the feedback was given. Explicit, never a clock — the scorer decays
             against it and the replay has to reproduce the same number (D17/S3).
-        store_id: overrides the store on the verdict. Normally omitted: the routed-order
-            record is what says which store the buyer was routed to, and a caller free to name
-            a different one could file one store's feedback against another.
+
+    There is deliberately no way to name the store. It comes from the verdict, which got it
+    from the routed-order record — the same record the R14 gate consulted to decide the
+    feedback counts at all. An override parameter shipped here briefly and was removed unused:
+    a caller free to name a different store could file one store's complaint against a rival,
+    and no gate downstream would notice, because by then the report is a perfectly well-formed
+    accepted verdict.
 
     Returns:
         ``{store_id, dim, type, observed_at, weight}`` — or ``None`` when the verdict was not
@@ -342,7 +360,7 @@ def feedback_observation(
         )
 
     positive = bool(_field(verdict, "positive", False))
-    resolved_store = store_id if store_id is not None else _field(verdict, "store_id")
+    resolved_store = _field(verdict, "store_id")
     return {
         "store_id": resolved_store,
         "dim": FEEDBACK_DIMENSION,

@@ -832,3 +832,26 @@ def test_a_verdict_whose_weight_is_not_a_number_is_refused_not_guessed(e6_as_of)
     # does in the scorer.
     without = {key: value for key, value in verdict.items() if key != "weight"}
     assert feedback_observation(without, observed_at=e6_as_of)["weight"] == BASE_FEEDBACK_WEIGHT
+
+
+def test_a_feedback_observation_cannot_be_filed_against_a_store_of_the_callers_choosing(
+    e6_as_of,
+):
+    """R14: the store comes from the routed-order record the gate already consulted.
+
+    An override parameter shipped here briefly. Nothing used it, and a caller free to name a
+    different store could file one store's complaint against a rival -- with nothing
+    downstream to notice, because by then it is a perfectly well-formed accepted verdict.
+    """
+    import inspect
+
+    from apps.trust.src.feedback import feedback_observation
+
+    verdict = accept_feedback("o-1", {"matched_pitch": False}, routed_orders=_routed("o-1"))
+
+    assert feedback_observation(verdict, observed_at=e6_as_of)["store_id"] == "s-1"
+    assert "store_id" not in inspect.signature(feedback_observation).parameters, (
+        "feedback_observation accepts a caller-chosen store_id"
+    )
+    with pytest.raises(TypeError):
+        feedback_observation(verdict, observed_at=e6_as_of, store_id="rival-store")

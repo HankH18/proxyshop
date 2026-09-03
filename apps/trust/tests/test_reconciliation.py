@@ -1082,3 +1082,146 @@ def test_an_ordinary_reference_keeps_its_plain_readable_event_id(e6_make_event):
         "offer_integrity:s-1:o-1:price",
         "offer_integrity:s-1:o-1:discount",
     ]
+
+
+# --------------------------------------------------------------------------------------
+# Adversarial pass on the T-188 translation itself. Each of these turns a verdict that was
+# merely RECORDED before into evidence that MOVES a score, so a verdict that was wrong in a
+# way nobody had to care about is now a penalty or a reward a store cannot appeal.
+# --------------------------------------------------------------------------------------
+
+
+def test_a_promised_discount_at_or_below_the_tolerance_is_not_gradeable(e6_make_event):
+    """A promise smaller than the tolerance we compare with is auto-honored: free evidence.
+
+    ``_graded_fields`` gates on ``promised > 0.0`` while the verdict honors on
+    ``observed >= promised - DISCOUNT_TOLERANCE``, so every promise in ``(0, 0.01]`` was
+    graded AND honored no matter what the webhook reported. Measured: an offer promising
+    0.01% off against a webhook reporting no discount at all minted a ``fulfilled`` on
+    ``discount_honored`` -- on every order, forever, for a discount worth one ten-thousandth
+    of the price. The zero case was already guarded; this is the same hole one epsilon over.
+    """
+    from apps.trust.src.reconcile import reconciled_observations
+
+    reconciled = reconcile(
+        [
+            _accepted(e6_make_event, total=100.0, discount=DISCOUNT_TOLERANCE),
+            _webhook(e6_make_event, total=100.0, discount=0.0),
+        ]
+    )
+    payload = _one(reconciled)["payload"]
+    assert payload["discount_honored"] is True, "the verdict itself is unchanged"
+
+    dims = [row["dim"] for row in reconciled_observations(reconciled)]
+    assert dims == ["price_honored"], (
+        f"a promise of {DISCOUNT_TOLERANCE}% -- at the comparison tolerance -- was graded and "
+        f"auto-honored, minting free positive evidence: {dims}"
+    )
+
+    # ...and a discount big enough to actually be compared is still graded, both ways.
+    honored = reconcile(
+        [
+            _accepted(e6_make_event, total=100.0, discount=10.0),
+            _webhook(e6_make_event, total=100.0, discount=10.0),
+        ]
+    )
+    broken = reconcile(
+        [
+            _accepted(e6_make_event, total=100.0, discount=10.0),
+            _webhook(e6_make_event, total=100.0, discount=0.0),
+        ]
+    )
+    assert ("discount_honored", "fulfilled") in [
+        (row["dim"], row["type"]) for row in reconciled_observations(honored)
+    ]
+    assert ("discount_honored", "contradicted") in [
+        (row["dim"], row["type"]) for row in reconciled_observations(broken)
+    ]
+
+
+def test_a_promised_unit_price_is_not_comparable_to_an_observed_order_total(e6_make_event):
+    """An honest three-unit order must not become the heaviest negative in the table.
+
+    ``promised_price`` falls back to the offer's ``unit_price`` when no ``total_price`` was
+    promised, and the comparison is against the webhook's ORDER TOTAL. Measured: an offer
+    promising 30.00 a unit, three units bought, a webhook total of 90.00 -- an exactly honest
+    order -- read ``price_honored: False``. Harmless while nothing scored it; a 2.0
+    ``contradicted`` the moment the translation landed.
+
+    A unit price and an order total are not the same quantity, so this is precisely what
+    ``price_comparable`` means: the comparison could not be made. The observation is the
+    published gap (``unsupported``), never an accusation.
+    """
+    from apps.trust.src.reconcile import reconciled_observations
+
+    accepted = e6_make_event(
+        "ev-accept",
+        ACCEPTED_KIND,
+        store_id="s-1",
+        order_ref="o-1",
+        payload={"checkout_token": "ck-1", "offer": {"product_ref": "p-1", "unit_price": 30.0}},
+    )
+    reconciled = reconcile([accepted, _webhook(e6_make_event, total=90.0, discount=None)])
+    payload = _one(reconciled)["payload"]
+
+    assert payload["promised_price"] == 30.0
+    assert payload["observed_price"] == 90.0
+    assert payload["price_comparable"] is False, (
+        "a promised UNIT price was compared against an observed ORDER total"
+    )
+
+    assert [(row["dim"], row["type"]) for row in reconciled_observations(reconciled)] == [
+        ("price_honored", "unsupported")
+    ], "an honest multi-unit order was graded as a contradiction"
+
+
+def test_an_observation_event_is_never_emitted_without_a_store_to_attribute_it_to(
+    e6_make_event,
+):
+    """An unattributable finding must not be sealed into the chain unscored.
+
+    ``observations_from_events`` skips any event with no ``store_id``, so emitting one writes
+    a permanent, immutable, never-scored integrity finding into an append-only ledger. The
+    reconciled event still records what happened; there is simply no honest store to charge.
+    """
+    from apps.trust.src.reconcile import observation_events, reconciled_observations
+
+    accepted = _accepted(e6_make_event, store_id=None, discount=None)
+    webhook = _webhook(e6_make_event, store_id=None, total=130.0, discount=None)
+    reconciled = reconcile([accepted, webhook])
+
+    assert _one(reconciled)["payload"]["price_honored"] is False, "the verdict still stands"
+    assert reconciled_observations(reconciled) == []
+    assert observation_events(reconciled) == []
+
+
+def test_a_non_numeric_promised_discount_does_not_crash_the_translation(e6_make_event):
+    """A payload read back out of the ledger is whatever was stored.
+
+    ``reconciled_observations`` is documented to accept a whole ledger page, so a payload
+    field that is not a number has to be a field it cannot grade -- not a bare ``ValueError``
+    from ``float()`` that no caller's error handling recognises.
+    """
+    from apps.trust.src.reconcile import reconciled_observations
+
+    stored = {
+        "event_id": "reconciled:s-1:o-1",
+        "ts": "2026-01-01T00:00:00Z",
+        "kind": RECONCILED_KIND,
+        "store_id": "s-1",
+        "order_ref": "o-1",
+        "payload": {
+            "order_ref": "o-1",
+            "promised_price": 100.0,
+            "observed_price": 100.0,
+            "price_honored": True,
+            "price_comparable": True,
+            "promised_discount_percentage": "twenty",
+            "discount_honored": False,
+            "discount_comparable": False,
+        },
+    }
+
+    assert [(row["dim"], row["type"]) for row in reconciled_observations(stored)] == [
+        ("price_honored", "fulfilled")
+    ]
