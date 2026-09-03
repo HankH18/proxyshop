@@ -60,6 +60,39 @@ def _write(root, rel, doc):
     (root / rel).write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _snapshot(root) -> dict[str, bytes]:
+    """Every file under ``root``, keyed by its path relative to it."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _assert_unchanged(root, before: dict[str, bytes], why: str) -> None:
+    """The whole sandbox is byte-for-byte what it was. This is what "the refusal wrote
+    nothing" actually says, and it is what the refusal tests below assert.
+
+    They used to assert ``approval.approver is None`` instead. That is a *different*
+    statement, and only coincides with this one while the copied manifest happens to be
+    unapproved: :func:`_sandbox` copies the repository's real manifest, so the first
+    legitimate human approval of it turned four tests red without anything having gone
+    wrong — and would have done so on any manifest, approved by anyone, at any time.
+
+    Comparing the tree is also strictly stronger than the assertion it replaces. Once an
+    approval does exist, the dangerous write is not "a name appeared where there was none"
+    but "a refused call overwrote a human's recorded decision with a different one" —
+    which ``is None`` cannot see at all. Nor could it see a re-sealed digest, a rewritten
+    request, or a fabricated approval record dropped beside the manifest.
+    """
+    after = _snapshot(root)
+    changed = sorted(
+        set(before).symmetric_difference(after)
+        | {rel for rel in set(before) & set(after) if before[rel] != after[rel]}
+    )
+    assert not changed, f"{why}: {changed}"
+
+
 def _mutate_golden_label(root) -> str:
     """Tamper with the answer key the way that matters: change a label, keep valid JSON."""
     golden = _read(root, GOLDEN_REL)
@@ -95,20 +128,22 @@ def test_a_refused_approval_writes_nothing_and_re_seals_nothing(tmp_path):
     the tampered file's digest and the manifest marked approved.
     """
     root = _sandbox(tmp_path)
-    before_manifest = (root / MANIFEST_REL).read_text(encoding="utf-8")
     pinned = _read(root, MANIFEST_REL)["golden_set"]["sha256"]
     _mutate_golden_label(root)
+    before = _snapshot(root)
 
     with pytest.raises(ApprovalRefused):
         record_approval("Ada Lovelace", root=root)
 
-    assert (root / MANIFEST_REL).read_text(encoding="utf-8") == before_manifest
-    after = _read(root, MANIFEST_REL)
-    assert after["golden_set"]["sha256"] == pinned, (
+    # Nothing anywhere under the sandbox moved: not the manifest, not the approval record,
+    # not the request. See `_assert_unchanged` for why this replaced `approver is None`.
+    _assert_unchanged(root, before, "a refused approval wrote to the tree")
+
+    # Called out separately because it is the regression by name: the digest still pins the
+    # bytes that were approved, not the tampered ones the refused command happened to read.
+    assert _read(root, MANIFEST_REL)["golden_set"]["sha256"] == pinned, (
         "approving re-sealed the tampered golden set — the digest now proves nothing"
     )
-    assert after["approval"]["approver"] is None
-    assert not (root / APPROVAL_RECORD_REL).exists()
 
 
 def test_record_approval_refuses_a_manifest_body_edited_after_the_request_was_issued(tmp_path):
@@ -117,10 +152,11 @@ def test_record_approval_refuses_a_manifest_body_edited_after_the_request_was_is
     manifest = _read(root, MANIFEST_REL)
     manifest["blacklist_threshold"] = 0.34
     _write(root, MANIFEST_REL, manifest)
+    before = _snapshot(root)
 
     with pytest.raises(ApprovalRefused, match=r"fixtures/manifest\.json"):
         record_approval("Ada Lovelace", root=root)
-    assert _read(root, MANIFEST_REL)["approval"]["approver"] is None
+    _assert_unchanged(root, before, "a refused approval wrote to the tree")
 
 
 def test_record_approval_refuses_when_the_request_pins_a_different_golden_set(tmp_path):
@@ -175,12 +211,12 @@ def test_record_approval_refuses_a_manifest_that_nominates_its_own_approval_requ
         "```\n",
         encoding="utf-8",
     )
+    before = _snapshot(root)
 
     with pytest.raises(ApprovalRefused, match="REQUEST-forged"):
         record_approval("Ada Lovelace", root=root)
 
-    assert _read(root, MANIFEST_REL)["approval"]["approver"] is None
-    assert not (root / APPROVAL_RECORD_REL).exists()
+    _assert_unchanged(root, before, "a refused approval wrote to the tree")
 
 
 def test_a_request_pinning_one_document_at_two_digests_is_refused_not_resolved():
@@ -287,10 +323,21 @@ def test_an_unmutated_set_approves_cleanly(tmp_path):
 
 
 def test_the_approval_tool_still_refuses_automation_before_it_looks_at_anything(tmp_path):
+    """Two claims, and the second is the one this test is named for.
+
+    It refuses automation — and it refuses *first*, before opening a document. Ordering is
+    checked by pointing the tool at a root with nothing in it: a tool that read the manifest
+    before checking the name would refuse for a missing document instead, so only a name
+    check that runs first can still say "automation" here.
+    """
     root = _sandbox(tmp_path)
+    before = _snapshot(root)
     with pytest.raises(ApprovalRefused, match="automation"):
         record_approval("the swarm agent", root=root)
-    assert _read(root, MANIFEST_REL)["approval"]["approver"] is None
+    _assert_unchanged(root, before, "a refused approval wrote to the tree")
+
+    with pytest.raises(ApprovalRefused, match="automation"):
+        record_approval("the swarm agent", root=tmp_path / "no-documents-here")
 
 
 # ------------------------------------------------------------------------------------
