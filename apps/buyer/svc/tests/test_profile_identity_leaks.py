@@ -437,3 +437,197 @@ def test_a_session_still_carries_no_identity_after_the_ceiling_landed() -> None:
     blob = _blob(vars(session))
     for secret in ("dana", "reyes", "example.com"):
         assert secret not in blob
+
+
+# =======================================================================================
+# T-189 — one merchandise token must not launder an unbounded pile of identity
+# =======================================================================================
+
+
+def test_a_name_less_account_cannot_publish_its_name_beside_one_merchandise_word() -> None:
+    """The recorded T-189 repro: append ``gear`` and the T-139 fix stops applying.
+
+    ``_exempt_category_slugs`` rule 3 asks whether the slug has *at least one* token that is
+    merchandise rather than the buyer. It never asks how many tokens are the buyer. So the
+    account ``MagicLinkAuth.redeem`` creates on a first login — ``{"email": email}``, no
+    ``first_name``, no ``last_name``, which is the shape T-071/072/073 hangs orders off —
+    publishes ``dana-reyes-gear`` to the store and ``identity_leaks`` reports clean:
+
+    * rule 2 has nothing to work with, because ``"dana"`` and ``"reyes"`` reach the account
+      only through ``email``, which is deliberately not a naming key;
+    * rule 3 is satisfied by ``"gear"`` alone, and the two name tokens ride out beside it.
+
+    ``dana-reyes`` on the very same account is refused (asserted above). Appending one
+    innocuous word is the whole of the bypass.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile
+
+    redeemed = {
+        "email": "dana.reyes@example.com",
+        "orders": [
+            {"order_ref": f"o{n}", "total": 30.0, "category": "Dana Reyes gear"} for n in range(3)
+        ],
+    }
+    with pytest.raises(IdentityLeak) as caught:
+        build_profile(redeemed, PSEUDONYM)
+    assert caught.value.account_keys == ("email",)
+
+
+def test_padding_identity_with_merchandise_is_refused_on_every_route_it_reaches() -> None:
+    """The same bypass, driven through the four shapes an adversarial pass found.
+
+    Each is a well-formed merchandising slug — under the character cap, under the token cap,
+    no digit run — carrying **two or more** of the account's own identity fragments plus at
+    least one word that is not one. Rule 3 waves every one of them through today.
+
+    * ``dana reyes running shoes`` — the repro at the token cap rather than at three tokens;
+    * ``danareyes gear`` — the same two fragments run together, so no *token* equals either
+      of them and a token-wise rule never fires;
+    * ``espresso fan gear`` — the email local part of the very account the one-token
+      leniency exists for, reassembled;
+    * ``Alder Way Portland gear`` — not a name-less account at all: on the fully populated
+      T-139 record, ``Alder Way Portland`` is refused (asserted above) and appending
+      ``gear`` publishes the buyer's street and city.
+
+    A single collision is the coincidence the exemption exists for. Two is an assembly, and
+    no number of merchandise words beside it makes it one again.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile
+
+    named = {
+        "email": "dana.reyes@example.com",
+        "first_name": "Dana",
+        "last_name": "Reyes",
+        "address": "44 Alder Way, Portland OR 97205",
+        "postal_code": "97205",
+        "region": "US-OR",
+    }
+    for account, category in (
+        ({"email": "dana.reyes@example.com"}, "dana reyes running shoes"),
+        ({"email": "dana.reyes@example.com"}, "danareyes gear"),
+        ({"email": "espresso.fan@example.com"}, "espresso fan gear"),
+        (named, "Alder Way Portland gear"),
+        (PARK_LANE, "park lane gear"),
+    ):
+        record = dict(account)
+        record["orders"] = [
+            {"order_ref": f"o{n}", "total": 30.0, "category": category} for n in range(3)
+        ]
+        with pytest.raises(IdentityLeak, match="R5"):
+            build_profile(record, PSEUDONYM)
+
+
+def test_identity_split_across_several_slugs_is_refused_as_one_disclosure() -> None:
+    """Found by attacking the T-189 fix: the budget was per slug, the profile is a list.
+
+    ``category_affinity`` publishes up to ``CATEGORY_LIMIT`` slugs, and each one earned the
+    exemption on its own. So the fragment budget that refuses ``dana-reyes-gear`` in one slug
+    was satisfied twice over by two orders::
+
+        [{"category": "dana gear"}, {"category": "reyes gear"}]
+        -> category_affinity == ["dana-gear", "reyes-gear"]
+
+    The buyer's full name reaches the store exactly as it did before, spelled across two
+    values instead of inside one. Same for the two halves of a street (``alder-gear`` and
+    ``portland-gear``) and for the Park Lane buyer's own (``park-gear`` and ``lane-gear``),
+    which is the sharpest of the three: ``park-gear`` alone is the collision the exemption
+    was built for, and it stops being a collision the moment ``lane-gear`` is published
+    beside it.
+
+    A disclosure is a property of the profile, not of one value in it.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile
+
+    named = {
+        "email": "dana.reyes@example.com",
+        "first_name": "Dana",
+        "last_name": "Reyes",
+        "address": "44 Alder Way, Portland OR 97205",
+        "postal_code": "97205",
+        "region": "US-OR",
+    }
+    for account, categories in (
+        ({"email": "dana.reyes@example.com"}, ("dana gear", "reyes gear")),
+        (named, ("alder gear", "portland gear")),
+        (PARK_LANE, ("park gear", "lane gear")),
+    ):
+        record = dict(account)
+        record["orders"] = [
+            {"order_ref": f"o{index}-{n}", "total": 30.0, "category": category}
+            for index, category in enumerate(categories)
+            for n in range(3)
+        ]
+        with pytest.raises(IdentityLeak, match="R5"):
+            build_profile(record, PSEUDONYM)
+
+
+def test_the_park_lane_buyer_still_builds_beside_ordinary_merchandise() -> None:
+    """The other half of the release-level budget: one collision is still one collision.
+
+    The list is what is measured, so this is the case that proves the measure did not just
+    become "refuse any account whose profile carries a fragment at all". Park Lane buys
+    ``park-gear`` alongside two categories that have nothing to do with them, and the
+    published list still spells exactly one word of their address.
+    """
+    from buyer_svc.profile import build_profile, identity_leaks
+
+    record = dict(PARK_LANE)
+    record["orders"] = [
+        {"order_ref": f"o{index}-{n}", "total": 30.0, "category": category}
+        for index, category in enumerate(("park-gear", "trail-gear", "camera-lenses"))
+        for n in range(3)
+    ]
+    built = build_profile(record, PSEUDONYM).model_dump()
+    assert built["buckets"]["category_affinity"] == ["camera-lenses", "park-gear", "trail-gear"]
+    assert identity_leaks(built, record) == []
+
+
+def test_a_fragment_the_slug_punctuates_differently_is_still_found() -> None:
+    """The backstop matched fragments verbatim, and a slug cannot spell them verbatim.
+
+    ``_slug`` collapses every run of non-alphanumerics to ``-``, so the phone number the
+    account holds as ``"+1-555-0100"`` can only ever reach a bucket as ``1-555-0100``. The
+    haystack search was ``value in text.casefold()``, the ``+`` was never there to be found,
+    and the buyer's phone number rode out of a gift note with ``identity_leaks`` reporting
+    clean — while the postal code in the *same* note was reported, because a postal code
+    happens to carry no punctuation::
+
+        category "gift +1-555-0100 gear" -> "gift-1-555-0100-gear"   leaks == []
+        category "gift 97205 gear"       -> "gift-97205-gear"        leaks == ["97205"]
+
+    Nothing about that difference is a policy anybody chose. ``_exempt_category_slugs``
+    already counts fragments in slug space (its rules 4 and 5); this is the same comparison
+    on the matching side.
+
+    The one residue this does *not* close, recorded so it is not mistaken for covered: a
+    number regrouped rather than repunctuated — ``"gift 5550100 gear"`` — is a different
+    normalisation question (which digits of a phone number are the number) and is left open.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks
+
+    account = {
+        "email": "b@example.com",
+        "phone": "+1-555-0100",
+        "postal_code": "97205",
+        "orders": [
+            {"order_ref": f"o{n}", "total": 30.0, "category": "gift +1-555-0100 gear"}
+            for n in range(3)
+        ],
+    }
+    with pytest.raises(IdentityLeak, match="R5") as caught:
+        build_profile(account, PSEUDONYM)
+    assert caught.value.account_keys == ("phone",)
+
+    # The contrast that made it visible: same note, same account, no punctuation.
+    postal = dict(account)
+    postal["orders"] = [
+        {"order_ref": f"o{n}", "total": 30.0, "category": "gift 97205 gear"} for n in range(3)
+    ]
+    with pytest.raises(IdentityLeak, match="R5"):
+        build_profile(postal, PSEUDONYM)
+
+    # And the exemptions still hold in slug space rather than being widened by this.
+    park = dict(PARK_LANE)
+    assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "park-gear"}}, park) == [
+        "park"
+    ]
