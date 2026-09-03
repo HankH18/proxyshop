@@ -104,8 +104,24 @@ class RosterEntry(BaseModel):
     because C3/S7 forbids the exchange from ever reading a merchant's `Envelope` — the
     ``.importlinter`` contract ``c3-exchange-cannot-read-envelopes`` enforces exactly that.
 
-    What is closed here is the part that does not wait on that port: a free item cannot be minted
-    through this model whatever the caller writes in it.
+    What is closed here is the part that does not wait on that port: **omitting** ``list_price``
+    is now a 422 rather than a silent 0.00 default, and a bid cannot be priced at nothing on a row
+    that prices the product above zero.
+
+    It is NOT true that "a free item cannot be minted through this model whatever the caller
+    writes in it" — this docstring said that, and it was measured false twice over:
+
+    * ``list_price: 0.0`` is an accepted value (``Field(ge=0.0)``). On such a row a silent store
+      still mints a 0.00 rankable fallback — ``HTTP 201, entries=[{fallback: true,
+      unit_price: 0.0, fallback_reason: 'no_response'}]`` — which is the same free item the 422
+      above closed, reached by writing the zero instead of omitting the field. Negative and
+      ``nan`` unit prices are admitted on that row too.
+    * the zero-price floor is an equality (``priced == 0.0``), so under ``max_discount_pct: 100``
+      an offer at ``unit_price: 0.001`` is admitted through the real door.
+
+    Both live on the untrusted-roster surface this class already documents as the follow-up
+    ticket's scope, and both are fail-closed or pre-existing rather than new. They are written
+    down because an overclaiming comment is how the next reader stops looking.
     """
 
     store_id: str

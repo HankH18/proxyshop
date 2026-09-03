@@ -315,9 +315,20 @@ def _priced_at_nothing(offer: Any, rostered: Mapping[str, Any]) -> bool:
     store answering ``unit_price: "cheap"`` degrades to its list price instead of raising
     ``ValueError`` out of the middle of an auction every other store is bidding in.
 
+    **That last sentence holds only where the roster prices the product above zero, and this
+    function is the reason why.** It returns ``False`` when ``listed <= 0``, so on a row carrying
+    ``list_price: 0.0`` the offer is never judged here and ``float("cheap")`` does raise, out of
+    the middle of the auction, as HTTP 500. Measured through ``POST /auctions``. That is not a
+    regression — ``git show main:`` of this module raises the identical ``ValueError`` — but the
+    protection this paragraph describes is conditional, and the condition is caller-supplied.
+    ``list_price: 0.0`` is an accepted roster value (``Field(ge=0.0)``), so a caller can reach
+    this branch with one keystroke; it is scoped to the derived-authorization follow-up ticket
+    along with the rest of the untrusted-roster surface.
+
     ``False`` when the roster itself prices the product at zero or cannot price it: there is then
-    no free item to detect, and a row that names no ``list_price`` is handled by the boundary's own
-    ``list_price_unavailable`` refusal on the paths that reach it.
+    no free item to detect *by this rule* — see the paragraph above for what that costs — and a
+    row that names no ``list_price`` is handled by the boundary's own ``list_price_unavailable``
+    refusal on the paths that reach it.
     """
     listed = _number(rostered.get("list_price"))
     if listed is None or listed <= 0.0:
