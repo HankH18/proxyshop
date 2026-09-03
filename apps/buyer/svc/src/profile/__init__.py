@@ -1015,7 +1015,9 @@ _CLOSED_VOCABULARY: frozenset[str] = frozenset(
 #: incidental.
 _BUCKET_VOCABULARY: dict[str, frozenset[str]] = {
     "budget_band": frozenset(
-        {label for _low, _high, label in BUDGET_BANDS} | {TOP_BUDGET_BAND} | set(COARSE_BUDGET_BANDS)
+        {label for _low, _high, label in BUDGET_BANDS}
+        | {TOP_BUDGET_BAND}
+        | set(COARSE_BUDGET_BANDS)
     ),
     "frequency_tier": frozenset(
         {tier for _ceiling, tier in FREQUENCY_TIERS} | set(COARSE_FREQUENCY_TIERS)
@@ -1110,9 +1112,7 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
         if any(token in naming for token in tokens):
             continue
         disqualifying = beyond_email if len(tokens) == 1 else set(sources)
-        if not any(
-            len(token) >= _MIN_LEAKABLE and token not in disqualifying for token in tokens
-        ):
+        if not any(len(token) >= _MIN_LEAKABLE and token not in disqualifying for token in tokens):
             continue
         exempt.add(slug)
     return exempt

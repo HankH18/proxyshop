@@ -148,9 +148,7 @@ class InMemorySessionStore(SessionStore):
         cost proportional to the work being asked for rather than needing a timer.
         """
         dead = [
-            session_id
-            for session_id, session in self._sessions.items()
-            if session.expired(now)
+            session_id for session_id, session in self._sessions.items() if session.expired(now)
         ]
         for session_id in dead:
             del self._sessions[session_id]

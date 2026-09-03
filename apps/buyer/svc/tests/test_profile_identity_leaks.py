@@ -362,9 +362,7 @@ def test_the_profile_route_answers_a_leak_without_disclosing_it() -> None:
     client = TestClient(app, raise_server_exceptions=False)
 
     assert (
-        client.post(
-            "/buyer/auth/magic-link", json={"email": CONTAMINATED["email"]}
-        ).status_code
+        client.post("/buyer/auth/magic-link", json={"email": CONTAMINATED["email"]}).status_code
         == 202
     )
     created = client.post("/buyer/auth/session", json={"token": tokens[-1]})
@@ -410,9 +408,7 @@ def test_the_session_store_sweeps_the_dead_and_refuses_rather_than_evicting() ->
 
     now = {"t": datetime(2026, 3, 1, 12, 0, tzinfo=UTC)}
     vault = PseudonymVault()
-    sessions = InMemorySessionStore(
-        clock=lambda: now["t"], ttl=timedelta(hours=1), max_sessions=8
-    )
+    sessions = InMemorySessionStore(clock=lambda: now["t"], ttl=timedelta(hours=1), max_sessions=8)
 
     for index in range(8):
         sessions.open(vault.issue(f"buyer{index}@example.com"))
