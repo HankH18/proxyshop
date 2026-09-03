@@ -36,6 +36,7 @@ What the layout buys, module by module:
 :mod:`.registry`   ``CHECKOUT_MODE`` -> provider; an unregistered mode **raises**
 :mod:`.domain`     the exact-host check the port applies to every provider (D22/C10)
 :mod:`.codes`      the ONLY place a code is minted and a permalink is built (D22)
+:mod:`.discounts`  the ONLY place a protocol percent becomes a Shopify fraction (T-183)
 :mod:`.lint`       the mechanical proof that no code is minted outside this package
 =================  ================================================================
 
@@ -55,8 +56,19 @@ from .codes import (
     assert_offer_is_mintable,
     build_cart_permalink,
     code_expiry,
+    expiry_epoch,
     mint_code,
     offer_quantity,
+)
+from .discounts import (
+    FIXED_AMOUNT_DISCOUNT_TYPES,
+    MAX_DISCOUNT_PERCENT,
+    PERCENT_PER_UNIT_FRACTION,
+    PERCENTAGE_DISCOUNT_TYPES,
+    UnusableDiscount,
+    discount_percent,
+    offer_discount_percentage,
+    shopify_discount_percentage,
 )
 from .domain import OffDomainCheckout, assert_on_domain, is_on_domain
 from .lint import (
@@ -77,6 +89,9 @@ from .provider import (
     CheckoutRequest,
     CheckoutResult,
     MintedCheckout,
+    OrphanedCheckoutCode,
+    OrphanedCode,
+    OrphanedOffDomainCheckout,
     PortMethodIsFinal,
     RegisteredDomains,
     default_permalink,
@@ -106,7 +121,11 @@ __all__ = [
     "CODE_BODY_LENGTH",
     "CODE_PREFIX",
     "DEFAULT_CHECKOUT_MODE",
+    "FIXED_AMOUNT_DISCOUNT_TYPES",
     "MAX_CODE_TTL_SECONDS",
+    "MAX_DISCOUNT_PERCENT",
+    "PERCENT_PER_UNIT_FRACTION",
+    "PERCENTAGE_DISCOUNT_TYPES",
     "INDIRECT_LOOKUPS",
     "MINTING_CALLEES",
     "MINTING_CLIENTS",
@@ -120,6 +139,9 @@ __all__ = [
     "MintingCallSite",
     "NoRegisteredDomains",
     "OffDomainCheckout",
+    "OrphanedCheckoutCode",
+    "OrphanedCode",
+    "OrphanedOffDomainCheckout",
     "RegisteredDomains",
     "PortMethodIsFinal",
     "ShopifyCheckoutProvider",
@@ -127,6 +149,7 @@ __all__ = [
     "SimulatedRedirectProvider",
     "UnboundCheckoutRequest",
     "UnknownCheckoutMode",
+    "UnusableDiscount",
     "UnusableOffer",
     "assert_offer_is_mintable",
     "assert_on_domain",
@@ -134,13 +157,17 @@ __all__ = [
     "code_expiry",
     "code_minting_call_sites",
     "default_permalink",
+    "discount_percent",
     "domain_is_platform_verified",
+    "expiry_epoch",
     "is_on_domain",
     "mint_code",
+    "offer_discount_percentage",
     "offer_quantity",
     "register_provider",
     "registered_domain_for",
     "registered_modes",
     "resolve_provider",
+    "shopify_discount_percentage",
     "unbound_checkout_requests",
 ]
