@@ -6,9 +6,25 @@ each other's assertions no matter how careful each is. The scheduler already avo
 running two graph tickets together; this ``flock`` is the backstop for when it does not
 (a rerun, a manual invocation, an audit loop).
 
-The lock is taken **session-scoped** by ``services/ingest/tests/conftest.py`` and
-``apps/exchange/tests/conftest.py``, and the graph reset happens *inside* it
-(:func:`reset_graph`, called by the ``neo4j_driver`` fixture).
+The lock is taken **per test** by ``_neo4j_guard`` in the root ``conftest.py``, and the
+graph reset happens *inside* it (:func:`reset_graph`, called by the ``neo4j_driver``
+fixture on every acquisition).
+
+Held for the graph work, not for the session (T-214)
+----------------------------------------------------
+``_neo4j_guard`` was ``scope="session"`` until T-214, which meant the first Neo4j-touching
+test in a run took this MACHINE-GLOBAL lock and the run then held it to teardown. Measured
+on a real ``scripts/verify.sh check``: held from t=25.1 s to t=220.8 s of a 221.78 s
+session — 88 % of it — with ~3 800 tests that never touch Neo4j running inside the hold.
+Every lane runs ``check``, so concurrent lanes serialised on one lock and the loser raised
+:class:`Neo4jLockTimeout` for a machine reason. The guard is function-scoped now, so a
+sibling worker waits out one graph test rather than a whole suite.
+
+The consequence for callers: the lock is **dropped between tests**, so another process may
+write the graph in the gap. That is why :func:`reset_graph` runs on every acquisition
+rather than once per session — serialization without a reset at each hand-off is not
+isolation. ``proxyshop_support/tests/test_neo4j_lock_scope.py`` pins both halves: the hold
+is short, and two concurrent sessions still exclude each other.
 
 Re-entrancy — the reason this is not a bare ``fcntl.flock`` call
 ---------------------------------------------------------------
@@ -46,8 +62,8 @@ LOCK_PATH = Path(os.environ.get("PROXYSHOP_NEO4J_LOCK", "/tmp/proxyshop-neo4j.lo
 #:
 #: **This number is not free.** It has to end, with margin, INSIDE ``pyproject.toml``'s
 #: repo-wide ``--timeout`` for pytest, because the only production caller —
-#: ``_neo4j_guard`` in the root ``conftest.py`` — takes the lock during session-fixture
-#: setup, and pytest-timeout covers setup. It used to be 600 against a 300 s budget, which
+#: ``_neo4j_guard`` in the root ``conftest.py`` — takes the lock during fixture setup, and
+#: pytest-timeout covers setup. It used to be 600 against a 300 s budget, which
 #: made the raise below unreachable under real contention: pytest killed the run first,
 #: with a message naming neither Neo4j nor the lock, ``make verify`` ERRORED rather than
 #: failed, and ``build_succeeds`` was recorded 0 for a machine condition. The relationship

@@ -39,6 +39,7 @@ FIXTURE_SERVICES: dict[str, str] = {
     "pg_admin": "postgres",
     "pg_role": "postgres",
     "_neo4j_guard": "neo4j-bolt",
+    "_neo4j_connection": "neo4j-bolt",
     "neo4j_driver": "neo4j-bolt",
     "neo4j_session": "neo4j-bolt",
     "redis_client": "redis",
