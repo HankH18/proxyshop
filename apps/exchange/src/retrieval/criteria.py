@@ -48,6 +48,7 @@ from ingest.graph.model import canonical_text, slug
 __all__ = [
     "CONSTRAINT_OPS",
     "DEFAULT_CANDIDATE_LIMIT",
+    "MAX_CANDIDATE_LIMIT",
     "NEUTRAL_ALIGNMENT",
     "PREFERENCE_DIRECTIONS",
     "CriterionVerdict",
@@ -74,6 +75,12 @@ NEUTRAL_ALIGNMENT = 0.5
 
 #: How many candidates a retrieval returns when the caller does not say.
 DEFAULT_CANDIDATE_LIMIT = 20
+
+#: The largest limit a caller may ask for. A ceiling, not a preference: the limit is
+#: multiplied by ``LOCAL_FILTER_OVERSAMPLE`` and again by ``candidate_products``' own
+#: ``oversample``, so an unchecked ``limit=10**9`` becomes a ~4e10-row Cypher ``LIMIT`` —
+#: a caller-controlled denial of service against the shared Neo4j, from one integer.
+MAX_CANDIDATE_LIMIT = 500
 
 
 class MalformedIntent(ValueError):
@@ -459,6 +466,12 @@ def build_query(intent: Any, *, limit: int | None = None) -> RetrievalQuery:
     resolved_limit = DEFAULT_CANDIDATE_LIMIT if limit is None else int(limit)
     if resolved_limit <= 0:
         raise MalformedIntent(f"limit must be positive, got {resolved_limit}")
+    if resolved_limit > MAX_CANDIDATE_LIMIT:
+        raise MalformedIntent(
+            f"limit {resolved_limit} exceeds MAX_CANDIDATE_LIMIT ({MAX_CANDIDATE_LIMIT}); the "
+            f"limit is multiplied by the local-filter oversample and again by the index "
+            f"oversample, so an unbounded one is a caller-controlled scan of the whole graph"
+        )
 
     criteria = tuple(
         HardCriterion.from_mapping(raw) for raw in (fields.get("hard_constraints") or ())

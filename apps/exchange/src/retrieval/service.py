@@ -26,11 +26,12 @@ published so a gate, a metric or a test can decide what to do about it.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ingest.graph import Candidate
+from ingest.graph.model import canonical_text
 
 from .criteria import NEUTRAL_ALIGNMENT, RetrievalQuery, SoftPreference, build_query
 from .fit import FitAssessment, FitFeatures
@@ -103,7 +104,13 @@ class RetrievalResult:
 
 
 class CandidateRetrieval:
-    """Retrieve candidates for an intent and score their fit."""
+    """Retrieve candidates for an intent and score their fit.
+
+    **Not thread-safe when the source is not.** :class:`GraphCandidateSource` holds a
+    ``neo4j.Session``, and a Session is explicitly single-threaded, so one shared
+    ``CandidateRetrieval`` serving concurrent requests corrupts it. Build one per request (or
+    per session); the object is cheap and holds no state of its own between calls.
+    """
 
     def __init__(
         self,
@@ -111,6 +118,7 @@ class CandidateRetrieval:
         *,
         reranker: Reranker | None = None,
         budget_ms: float = RETRIEVAL_LATENCY_BUDGET_MS,
+        require_status: str | None = "active",
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         """
@@ -122,6 +130,13 @@ class CandidateRetrieval:
                 :class:`~exchange.retrieval.rerank.DeterministicReranker`, which is what A2
                 requires every offline verify to run.
             budget_ms: the latency budget reported on each result.
+            require_status: the product status a candidate must carry, re-decided **here**
+                rather than trusted to the source. ``None`` disables the check. T-012 states
+                the requirement ("discontinued products do not silently enter a shortlist")
+                and ``GraphCandidateSource`` passes it to Cypher, but a filter that only the
+                source applies is a filter this module does not have: any other source — a
+                cache, a lenient stub, a future adapter — would admit a discontinued product
+                and nothing here would notice.
             clock: monotonic clock, injectable so a test can drive it. Deliberately
                 ``perf_counter`` and not the wall clock: the ``frozen_clock`` fixture stops
                 ``datetime.now()`` but explicitly does **not** stop ``time.monotonic()``, and
@@ -130,6 +145,7 @@ class CandidateRetrieval:
         self.source = source
         self.reranker: Reranker = reranker if reranker is not None else DeterministicReranker()
         self.budget_ms = float(budget_ms)
+        self.require_status = require_status
         self.clock = clock
 
     def retrieve(self, intent: Any, *, limit: int | None = None) -> RetrievalResult:
@@ -150,12 +166,12 @@ class CandidateRetrieval:
         """
         started = self.clock()
         query = build_query(intent, limit=limit)
-        fetched = list(self.source.fetch(query))
+        fetched = _first_per_product(self.source.fetch(query))
 
         eligible: list[Candidate] = []
         excluded: list[ExcludedCandidate] = []
         for candidate in fetched:
-            reasons = query.exclusion_reasons(candidate.attributes)
+            reasons = self._exclusions(query, candidate)
             if reasons:
                 excluded.append(
                     ExcludedCandidate(candidate.product_id, candidate.canonical_name, reasons)
@@ -194,6 +210,48 @@ class CandidateRetrieval:
             source=str(getattr(self.source, "name", type(self.source).__name__)),
             reranker=reranker_name,
         )
+
+    def _exclusions(self, query: RetrievalQuery, candidate: Candidate) -> tuple[str, ...]:
+        """Every reason this candidate is not eligible. Empty means it is.
+
+        Three predicates, all re-decided locally, for one reason: a filter that only the
+        *source* applies is not a filter this module has. The hard constraints are R19's;
+        category and status are the two structured predicates a source can push down, and
+        pushing them down does not make them decided.
+        """
+        reasons = list(query.exclusion_reasons(candidate.attributes))
+        if query.category is not None:
+            wanted = canonical_text(query.category)
+            if wanted not in {canonical_text(str(name)) for name in candidate.categories}:
+                reasons.append(
+                    f"category {query.category!r}: the candidate is in "
+                    f"{sorted(candidate.categories)}, which does not include it"
+                )
+        if self.require_status is not None and candidate.status != self.require_status:
+            reasons.append(
+                f"status {candidate.status!r}: only {self.require_status!r} products may enter "
+                f"a shortlist, so a discontinued one is excluded here and not merely unasked-for"
+            )
+        return tuple(reasons)
+
+
+def _first_per_product(fetched: Iterable[Candidate]) -> list[Candidate]:
+    """Keep the first candidate per ``product_id``, discarding later duplicates.
+
+    A source returning one product twice is a source bug, but the failure it used to cause
+    here was worse than the bug: ``RetrievalResult.fit_for`` scans and returns the **first**
+    match while the ledger's product→assessment map keeps the **last**, so the same auction
+    would report one fit score to the ranker and log a different one for audit. Collapsing on
+    arrival makes the two disagreements impossible rather than merely unlikely.
+    """
+    seen: set[str] = set()
+    unique: list[Candidate] = []
+    for candidate in fetched:
+        if candidate.product_id in seen:
+            continue
+        seen.add(candidate.product_id)
+        unique.append(candidate)
+    return unique
 
 
 def _rerank_items(query: RetrievalQuery, eligible: Sequence[Candidate]) -> list[RerankItem]:
@@ -237,9 +295,15 @@ def _preference_alignments(
     * a degenerate range — every candidate carrying the same value, or one candidate — scores
       :data:`~exchange.retrieval.criteria.NEUTRAL_ALIGNMENT`, because there is nothing to
       discriminate on;
-    * a candidate missing the attribute scores neutral too, never 0.0: absence of evidence is
-      not evidence of a bad match, and scoring it worst would let a preference act as a hard
-      filter, which R19 reserves for hard constraints.
+    * a candidate missing a **numeric** preference's attribute scores neutral too, never 0.0:
+      the preference asks "how much", the catalog does not say, and scoring the gap worst
+      would let a ``maximize`` act as a hard filter over missing extraction rather than over
+      any fact about the product — which R19 reserves for hard constraints.
+
+    ``prefer`` is the deliberate exception, and the asymmetry is the point: it asks "does this
+    product have the attribute at all", so absence is a genuine, observed answer (0.0) rather
+    than a gap in what was measured. Scoring it neutral would make ``prefer`` unable to prefer
+    anything.
     """
     count = len(eligible)
     if count == 0:

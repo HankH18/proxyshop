@@ -55,6 +55,7 @@ from __future__ import annotations
 from .criteria import (
     CONSTRAINT_OPS,
     DEFAULT_CANDIDATE_LIMIT,
+    MAX_CANDIDATE_LIMIT,
     NEUTRAL_ALIGNMENT,
     PREFERENCE_DIRECTIONS,
     CriterionVerdict,
@@ -70,6 +71,8 @@ from .fit import (
     FitAssessment,
     FitFeatures,
     FitLogError,
+    annotate_bid_payload,
+    intent_match_by_bid,
     record_fit_scores,
 )
 from .rerank import (
@@ -103,6 +106,7 @@ __all__ = [
     "DETERMINISTIC_RERANKER_SIMILARITY_SHARE",
     "FIT_LEDGER_KIND",
     "LOCAL_FILTER_OVERSAMPLE",
+    "MAX_CANDIDATE_LIMIT",
     "NEUTRAL_ALIGNMENT",
     "NEUTRAL_SIMILARITY",
     "PREFERENCE_DIRECTIONS",
@@ -127,8 +131,10 @@ __all__ = [
     "RetrievalResult",
     "SoftPreference",
     "UndecidableCriterion",
+    "annotate_bid_payload",
     "attribute_rows",
     "build_query",
+    "intent_match_by_bid",
     "make_candidate",
     "read_rerank",
     "record_fit_scores",

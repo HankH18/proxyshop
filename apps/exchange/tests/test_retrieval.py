@@ -32,6 +32,7 @@ discards a satisfying candidate leaves every offline assertion green — see
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import random
 from typing import Any
@@ -41,6 +42,7 @@ from contracts.ledger import validate_ledger_payload
 from exchange.auction import InMemoryLedgerSink, LedgerRecorder
 from exchange.retrieval import (
     DETERMINISTIC_RERANKER_SIMILARITY_SHARE,
+    MAX_CANDIDATE_LIMIT,
     NEUTRAL_ALIGNMENT,
     NEUTRAL_SIMILARITY,
     RERANKER_INTERFACE_VERSION,
@@ -54,7 +56,9 @@ from exchange.retrieval import (
     RerankerContractError,
     RerankItem,
     UndecidableCriterion,
+    annotate_bid_payload,
     build_query,
+    intent_match_by_bid,
     make_candidate,
     record_fit_scores,
 )
@@ -226,8 +230,16 @@ def test_a_candidate_missing_the_constrained_attribute_is_excluded() -> None:
             {"decaf": False},
             {"decaf": True},
         ),
+        (
+            # The case whose absence let a fail-open numeric `eq` survive every mutation:
+            # replacing `_equals`' numeric branch with "any numeric reading satisfies any
+            # numeric eq" killed no test, because nothing asserted the DROPPING direction.
+            {"field": "caffeine_mg_per_serving", "op": "eq", "value": 120},
+            {"caffeine_mg_per_serving": 120},
+            {"caffeine_mg_per_serving": 121},
+        ),
     ],
-    ids=["eq-string", "lte", "gte", "in", "contains", "eq-bool"],
+    ids=["eq-string", "lte", "gte", "in", "contains", "eq-bool", "eq-number"],
 )
 def test_every_constraint_op_admits_the_satisfying_and_drops_the_violating(
     constraint: dict[str, Any],
@@ -296,6 +308,87 @@ def test_every_excluded_candidate_carries_a_reason_naming_its_constraint() -> No
     assert len(excluded.reasons) == 2
     assert any("roast_level" in reason for reason in excluded.reasons)
     assert any("origin" in reason for reason in excluded.reasons)
+
+
+def test_a_candidate_outside_the_intents_category_is_excluded_locally() -> None:
+    """`category` is a structured predicate, and pushing it down does not make it decided.
+
+    Measured before this was fixed: `intent.category='coffee'` against a candidate in
+    `['tea']` RETURNED the candidate, because exclusion_reasons() only ever walked the hard
+    constraints. Cypher applied the predicate, so the graph path was clean and every offline
+    test was clean — the module's headline claim ("a property of THIS module, not of whichever
+    source is plugged in") was false for exactly the two predicates a source can push down.
+    """
+    result = service(
+        [
+            product("p-coffee", categories=("coffee",)),
+            product("p-tea", categories=("tea",)),
+            product("p-uncategorised", categories=()),
+        ]
+    ).retrieve(intent(constraints=[], category="coffee"))
+
+    assert result.product_ids == ("p-coffee",)
+    excluded = {row.product_id: row.reasons for row in result.excluded}
+    assert set(excluded) == {"p-tea", "p-uncategorised"}
+    assert any("category" in reason for reason in excluded["p-tea"])
+
+
+def test_a_discontinued_product_cannot_enter_a_shortlist() -> None:
+    """T-012 states the rule; only GraphCandidateSource enforced it, so it was source-deep.
+
+    Measured before the fix: forcing `GraphCandidateSource(status=None)` left all 46 offline
+    tests green — nothing in the exchange observed product status at all.
+    """
+    records = [
+        {**product("p-live"), "status": "active"},
+        {**product("p-dead"), "status": "discontinued"},
+    ]
+    result = service(records).retrieve(intent(constraints=[]))
+
+    assert result.product_ids == ("p-live",)
+    (excluded,) = result.excluded
+    assert excluded.product_id == "p-dead"
+    assert any("discontinued" in reason for reason in excluded.reasons)
+
+    # ...and the check is disableable on purpose, so "no status filter" is a visible decision.
+    unfiltered = CandidateRetrieval(LenientSource(records), require_status=None).retrieve(
+        intent(constraints=[])
+    )
+    assert set(unfiltered.product_ids) == {"p-live", "p-dead"}
+
+
+def test_an_unbounded_limit_is_refused() -> None:
+    """The limit is multiplied by two oversamples before it reaches Cypher."""
+    from exchange.retrieval import MAX_CANDIDATE_LIMIT
+
+    build_query(intent(), limit=MAX_CANDIDATE_LIMIT)  # the ceiling itself is allowed
+    with pytest.raises(MalformedIntent):
+        build_query(intent(), limit=MAX_CANDIDATE_LIMIT + 1)
+    with pytest.raises(MalformedIntent):
+        build_query(intent(), limit=10**9)
+
+
+def test_a_source_returning_one_product_twice_cannot_disagree_with_itself() -> None:
+    """`fit_for` scanned for the FIRST match while the ledger map kept the LAST, so a
+    duplicated product reported one score to the ranker and logged another for audit."""
+    duplicated = [
+        product("p-dup", attributes={"roast_level": "light"}, similarity=0.9),
+        product("p-dup", attributes={"roast_level": "light"}, similarity=0.1),
+    ]
+    result = service(duplicated).retrieve(
+        intent(constraints=[{"field": "roast_level", "op": "eq", "value": "light"}])
+    )
+
+    assert result.product_ids == ("p-dup",)
+    sink = InMemoryLedgerSink()
+    record_fit_scores(
+        LedgerRecorder(sink),
+        auction_id="auction-dup",
+        bids=[bid("store-a", "p-dup")],
+        assessments=result.assessments,
+    )
+    (event,) = sink.events
+    assert event["payload"]["fit_score"] == pytest.approx(result.fit_for("p-dup"))
 
 
 def test_pushdown_expresses_what_cypher_can_and_declines_what_it_cannot() -> None:
@@ -430,19 +523,39 @@ FIT_RECORDS = [
 ]
 
 
+def test_the_five_published_constants_are_pinned_to_their_literal_values() -> None:
+    """Every expectation below is hand-written, not imported.
+
+    A test that writes its expectations *from* the constant it is checking pins nothing: the
+    five values here could each be changed to anything and the rest of this file stays green
+    — measured, all five. ``RETRIEVAL_LATENCY_BUDGET_MS`` is the worst of them, because
+    widening it 360x silently retires acceptance criterion 3.
+    """
+    assert DETERMINISTIC_RERANKER_SIMILARITY_SHARE == 0.6
+    assert NEUTRAL_SIMILARITY == 0.5
+    assert NEUTRAL_ALIGNMENT == 0.5
+    assert RERANKER_INTERFACE_VERSION == "reranker/1.0.0"
+    assert RETRIEVAL_LATENCY_BUDGET_MS == 250.0
+    assert MAX_CANDIDATE_LIMIT == 500
+
+
 def test_the_deterministic_double_computes_the_blend_it_publishes() -> None:
-    share = DETERMINISTIC_RERANKER_SIMILARITY_SHARE
+    """Hand-written arithmetic against share=0.6, so the share itself is what is asserted."""
     items = [
         RerankItem("p-1", "one", similarity=1.0, preference_alignment=0.0),
         RerankItem("p-2", "two", similarity=0.0, preference_alignment=1.0),
         RerankItem("p-3", "three", similarity=None, preference_alignment=1.0),
+        RerankItem("p-4", "four", similarity=0.25, preference_alignment=0.75),
     ]
     scores = list(DeterministicReranker().rerank("anything", items))
 
-    assert scores[0] == pytest.approx(share)
-    assert scores[1] == pytest.approx(1.0 - share)
-    assert scores[2] == pytest.approx(share * NEUTRAL_SIMILARITY + (1.0 - share))
-    assert DeterministicReranker().interface_version == RERANKER_INTERFACE_VERSION
+    assert scores[0] == pytest.approx(0.6)  # 0.6*1.0 + 0.4*0.0
+    assert scores[1] == pytest.approx(0.4)  # 0.6*0.0 + 0.4*1.0
+    assert scores[2] == pytest.approx(0.7)  # 0.6*0.5 (neutral) + 0.4*1.0
+    assert scores[3] == pytest.approx(0.45)  # 0.6*0.25 + 0.4*0.75
+    assert DeterministicReranker(similarity_share=0.5).rerank(
+        "anything", [items[0]]
+    ) == pytest.approx([0.5])
 
 
 def test_a_pinned_similarity_is_rescaled_the_way_the_cosine_index_reports_it() -> None:
@@ -520,21 +633,31 @@ def test_an_unscored_candidate_uses_the_neutral_similarity_not_the_zero_sentinel
     used instead, and the feature record says ``None`` rather than a number nobody measured.
     """
     structured = InMemoryCandidateSource(
-        [product("p-structured", attributes={"roast_level": "light"}, similarity=None)],
+        [
+            product(
+                "p-structured",
+                attributes={"roast_level": "light", "certs": ["organic"]},
+                similarity=None,
+            )
+        ],
         scored=False,
     )
     result = CandidateRetrieval(structured).retrieve(
-        intent(constraints=[{"field": "roast_level", "op": "eq", "value": "light"}], preferences=[])
+        intent(
+            constraints=[{"field": "roast_level", "op": "eq", "value": "light"}],
+            preferences=[{"field": "certs", "direction": "prefer", "weight": 1.0}],
+        )
     )
 
     (assessment,) = result.assessments
     assert assessment.features.similarity is None
-    expected = (
-        DETERMINISTIC_RERANKER_SIMILARITY_SHARE * NEUTRAL_SIMILARITY
-        + (1.0 - DETERMINISTIC_RERANKER_SIMILARITY_SHARE) * NEUTRAL_ALIGNMENT
-    )
-    assert assessment.fit_score == pytest.approx(expected)
-    assert assessment.fit_score != 0.0
+    # Alignment is 1.0 (the `prefer` attribute is present), so the fit is
+    # 0.6*NEUTRAL_SIMILARITY + 0.4*1.0 = 0.7. Reading the 0.0 sentinel as a similarity would
+    # give 0.6*0.0 + 0.4*1.0 = 0.4. The two neutrals both being 0.5 is what made the previous
+    # arithmetic here decorative — it came to 0.5 for every possible share.
+    assert assessment.features.preference_alignment == pytest.approx(1.0)
+    assert assessment.fit_score == pytest.approx(0.7)
+    assert assessment.fit_score != pytest.approx(0.4)
 
 
 def test_a_preference_moves_fit_in_the_direction_it_declares() -> None:
@@ -699,7 +822,14 @@ def test_the_reranker_is_consulted_behind_the_interface_and_its_answer_is_the_fi
 
 
 def test_the_reranker_receives_the_measured_features_not_raw_catalog_rows() -> None:
-    reranker = RecordingReranker({})
+    """R11 blindness is structural: the port cannot carry a commercial field.
+
+    The FIELD SET is the assertion. A future edit widening ``RerankItem`` to pass the
+    candidate through — or adding ``tier`` "just for the LLM prompt" — fails here, where an
+    assertion about values would happily pass a reranker handed the whole product. The
+    previous body asserted ``reranker.seen == []`` on an object it never wired to anything,
+    which was true by construction.
+    """
     captured: list[Any] = []
 
     class Capturing(RecordingReranker):
@@ -711,7 +841,13 @@ def test_the_reranker_receives_the_measured_features_not_raw_catalog_rows() -> N
     CandidateRetrieval(LenientSource(list(FIT_RECORDS)), reranker=Capturing({})).retrieve(
         FIT_INTENT
     )
-    assert reranker.seen == []
+
+    assert {f.name for f in dataclasses.fields(RerankItem)} == {
+        "product_id",
+        "canonical_name",
+        "similarity",
+        "preference_alignment",
+    }
     assert captured
     for item in captured:
         assert 0.0 <= item.preference_alignment <= 1.0
@@ -737,7 +873,7 @@ def test_a_reranker_speaking_another_interface_version_is_refused() -> None:
         ).retrieve(FIT_INTENT)
 
 
-def test_fit_is_blind_to_tier_and_network_fee(caplog: pytest.LogCaptureFixture) -> None:
+def test_fit_is_blind_to_tier_and_network_fee() -> None:
     """R11: ranking inputs are fee-blind and tier-blind. `intent_match` is a ranking input."""
     plain = [
         product("p-a", attributes={"roast_level": "light", "caffeine_mg_per_serving": 160}),
@@ -876,6 +1012,102 @@ def test_logging_survives_a_sink_that_is_down() -> None:
     assert len(recorder.failures) == 1
 
 
+def test_annotating_a_bid_payload_emits_nothing_at_all() -> None:
+    """The frozen ledger counts are why enrichment is the primary path, not a second event.
+
+    ``bid_placed``'s count is load-bearing twice over: T-082 asserts an exact per-kind
+    multiset (``bid_placed == n_stores_solicited``), and T-086 proves shadow mode by the
+    ABSENCE of any ``bid_placed`` for the auction. A fit event per bid doubles the first and
+    breaks the second — and D24 forbids inventing a nineteenth kind to escape to. So the fit
+    rides inside the bid's own event, and this asserts that annotating writes no event.
+    """
+    result = service(list(FIT_RECORDS)).retrieve(FIT_INTENT)
+    sink = InMemoryLedgerSink()
+    LedgerRecorder(sink)  # a live recorder that must stay untouched
+
+    annotated = annotate_bid_payload(
+        {"bid_id": "bid-7", "store_id": "store-northroast", "offer": {"product_ref": "p-a"}},
+        result.assessments,
+    )
+
+    assert sink.events == []
+    assert annotated["bid_ref"] == "bid-7"  # an existing bid_id is kept, never overwritten
+    assert annotated["fit_score"] == pytest.approx(result.fit_for("p-a"))
+    assert validate_ledger_payload("bid_placed", annotated) == []
+
+
+def test_annotation_neither_mutates_nor_aliases_the_caller_s_bid() -> None:
+    result = service(list(FIT_RECORDS)).retrieve(FIT_INTENT)
+    original = {
+        "bid_id": "bid-9",
+        "store_id": "store-northroast",
+        "offer": {"product_ref": "p-a", "discount": {"type": "pct", "value": 10}},
+    }
+    annotated = annotate_bid_payload(original, result.assessments)
+
+    assert "fit_score" not in original
+    annotated["offer"]["discount"]["value"] = 99
+    assert original["offer"]["discount"]["value"] == 10
+
+
+def test_fit_logging_composes_with_the_auction_layers_bid_entries() -> None:
+    """``collect_bids`` yields ``BidEntry`` DATACLASSES, not mappings.
+
+    Requiring every caller to unwrap ``entry.bid`` first is an API that reads as though it
+    composes and does not — this used to raise ``FitLogError('... got BidEntry')``.
+    """
+    from exchange.auction import BidEntry
+
+    result = service(list(FIT_RECORDS)).retrieve(FIT_INTENT)
+    entries = [
+        BidEntry(
+            store_id="store-northroast",
+            tier=1,
+            fallback=False,
+            bid={
+                "bid_id": "bid-real",
+                "store_id": "store-northroast",
+                "offer": {"product_ref": "p-a", "unit_price": 21.5, "total_price": 21.5},
+            },
+        )
+    ]
+    sink = InMemoryLedgerSink()
+    record_fit_scores(
+        LedgerRecorder(sink), auction_id="auction-11", bids=entries, assessments=result.assessments
+    )
+
+    (event,) = sink.events
+    assert event["payload"]["bid_ref"] == "bid-real"
+    assert event["payload"]["fit_score"] == pytest.approx(result.fit_for("p-a"))
+
+
+def test_intent_match_by_bid_does_the_product_to_bid_join_the_ranker_needs() -> None:
+    """T-032 consumes one float per BID named ``intent_match``; this module measures one per
+    PRODUCT named ``fit_score``, and ``ShortlistSlot.fit_score`` is a third concept (D29).
+
+    Doing that join by hand at the call site is where the three get conflated, so it lives
+    here — keyed on ``bid_id``, which is what the frozen ranking candidate keys on.
+    """
+    result = service(list(FIT_RECORDS)).retrieve(FIT_INTENT)
+    matched = intent_match_by_bid(
+        [
+            {"bid_id": "bid-a", "store_id": "store-northroast", "offer": {"product_ref": "p-a"}},
+            {"bid_id": "bid-b", "store_id": "store-slowreply", "offer": {"product_ref": "p-b"}},
+            {"bid_id": "bid-c", "store_id": "store-brightbean", "offer": {"product_ref": "p-c"}},
+        ],
+        result.assessments,
+    )
+
+    assert set(matched) == {"bid-a", "bid-b", "bid-c"}
+    assert matched["bid-a"] == pytest.approx(result.fit_for("p-a"))
+    assert matched["bid-b"] == pytest.approx(result.fit_for("p-b"))
+    # p-c failed the hard constraint. None, never a substituted neutral: there is no published
+    # `intent_match_when_absent` in NormalizationBounds for this module to honour, so the
+    # ranker must decide what an unmeasured bid means rather than be handed a guess.
+    assert matched["bid-c"] is None
+    assert all(v is None or 0.0 <= v <= 1.0 for v in matched.values())
+
+
 # =====================================================================================
 # Acceptance 3 — latency budget under fixture load
 # =====================================================================================
@@ -943,13 +1175,26 @@ def test_the_budget_verdict_can_actually_fail() -> None:
 
 def test_the_hard_filter_still_holds_at_fixture_scale() -> None:
     records = fixture_load()
-    result = service(records).retrieve(LOAD_INTENT, limit=len(records))
+    result = service(records).retrieve(LOAD_INTENT, limit=MAX_CANDIDATE_LIMIT)
 
     by_id = {record["product_id"]: record for record in records}
     for assessment in result.assessments:
         attributes = by_id[assessment.product_id]["attributes"]
-        assert attributes["roast_level"] == "light"
+        assert attributes.get("roast_level") == "light"
         assert attributes["net_weight"]["value"] <= 300
+    # The partition identity below is true BY CONSTRUCTION (retrieve() splits `fetched` into
+    # exactly these two lists), so on its own it survives a filter that excludes EVERYTHING —
+    # measured. The exact count is what pins the filter: both over- and under-admission move
+    # it, and a vacuous loop over zero assessments no longer passes.
+    expected_eligible = sum(
+        1
+        for record in records
+        if record["attributes"].get("roast_level") == "light"
+        and record["attributes"]["net_weight"]["value"] <= 300
+    )
+    assert expected_eligible == 29
+    assert len(result.assessments) == expected_eligible
+    assert result.eligible_count == expected_eligible
     assert len(result.assessments) + len(result.excluded) == len(records)
 
 
