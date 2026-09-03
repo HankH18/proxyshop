@@ -11,6 +11,8 @@ import {
   HOOK_PROVENANCE_SOURCES,
   HOSTED_PATH,
   NON_HOOK_PROVENANCE_SOURCES,
+  OFFER_COMMITMENTS_SITE,
+  OFFER_DISCOUNT_SITE,
   REASON_CLAIM_PROVENANCE_EMPTY_SOURCE,
   REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE,
   REASON_CLAIM_WITHOUT_PROVENANCE,
@@ -23,6 +25,7 @@ import {
   REASON_STORE_BLACKLISTED,
   REASON_TRUST_SNAPSHOT_UNAVAILABLE,
   REASON_UNKNOWN_PATH,
+  REASON_UNVERIFIABLE_CLAIM_SITE,
   parseTimestamp,
   validateBid,
   validateExternalSubmission,
@@ -406,5 +409,313 @@ describe("F4 — a stated UTC offset is part of the instant, not decoration", ()
       });
     expect(at("2026-01-01T04:00:00Z").ok, "a live Pacific offer was rejected as expired").toBe(true);
     expect(at("2026-01-01T09:00:00Z").ok).toBe(false);
+  });
+});
+
+describe("T-135 — the exclusivity property survives MOVING the claim", () => {
+  // `claimProvenanceReasons` walked `record["claims"]` and nothing else. The Offer is inside the
+  // bid boundary and carries claim material of its own: `offer.commitments` is a list of claims,
+  // and `offer.discount` is stamped with the same `provenance` block a claim is. Relocating a
+  // `seller_asserted` claim into either one walked straight past R8 with an unauthorised
+  // discount attached. Same claim, same source, same bid; only the field moved.
+  //
+  // The Python peer asserts this exact table in `test_boundary_dual_path.py`; a fix that landed
+  // on one side only would leave the two doors admitting different bids.
+  const smugglingOffer = () =>
+    makeOffer({
+      commitments: [makeClaim("spf", 30, ASSERTED_PROVENANCE)],
+      discount: {type: "percentage", value: 25.0, provenance: structuredClone(ASSERTED_PROVENANCE)},
+    });
+
+  it("refuses a seller_asserted claim relocated into the offer", () => {
+    const smuggled = makeBid({
+      claims: [makeClaim("free_returns", "30 days", HOOK_PROVENANCE)],
+      offer: smugglingOffer(),
+    });
+    const result = check(smuggled, HOSTED_PATH);
+    expect(
+      result.ok,
+      "a hosted bid with a seller_asserted claim in offer.commitments and an unauthorised 25% " +
+        "discount was ADMITTED — moving the claim out of bid.claims defeated R8",
+    ).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.startsWith(REASON_HOSTED_NON_HOOK_PROVENANCE)),
+      `expected the provenance refusal, not an incidental one: ${result.reasons.join(", ")}`,
+    ).toBe(true);
+
+    // Positive control: hook provenance everywhere is admitted, so this is not "reject every
+    // offer that carries commitments".
+    const control = makeBid({
+      claims: [makeClaim("free_returns", "30 days", HOOK_PROVENANCE)],
+      offer: makeOffer({
+        commitments: [makeClaim("spf", 30, HOOK_PROVENANCE)],
+        discount: {type: "percentage", value: 25.0, provenance: structuredClone(HOOK_PROVENANCE)},
+      }),
+    });
+    const admitted = check(control, HOSTED_PATH);
+    expect(admitted.ok, admitted.reasons.join(", ")).toBe(true);
+  });
+
+  it("walks offer.commitments on its own", () => {
+    const bid = makeBid({
+      offer: makeOffer({commitments: [makeClaim("spf", 30, ASSERTED_PROVENANCE)]}),
+    });
+    const result = check(bid, HOSTED_PATH);
+    expect(result.ok, `offer.commitments is not walked: ${result.reasons.join(", ")}`).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.startsWith(REASON_HOSTED_NON_HOOK_PROVENANCE)),
+    ).toBe(true);
+
+    const control = makeBid({
+      offer: makeOffer({commitments: [makeClaim("spf", 30, HOOK_PROVENANCE)]}),
+    });
+    expect(check(control, HOSTED_PATH).ok).toBe(true);
+  });
+
+  it("walks offer.discount.provenance on its own", () => {
+    // The third claim-bearing site, and the one that actually moves money: a 25% discount the
+    // seller simply asserted is the payload R8 exclusivity exists to stop.
+    const bid = makeBid({
+      offer: makeOffer({
+        discount: {
+          type: "percentage",
+          value: 25.0,
+          provenance: structuredClone(ASSERTED_PROVENANCE),
+        },
+      }),
+    });
+    const result = check(bid, HOSTED_PATH);
+    expect(
+      result.ok,
+      `offer.discount.provenance is not walked: ${result.reasons.join(", ")}`,
+    ).toBe(false);
+    expect(
+      result.reasons.some((reason) => reason.startsWith(REASON_HOSTED_NON_HOOK_PROVENANCE)),
+    ).toBe(true);
+
+    // Control: the same discount, hook-minted, is admitted. The refusal is about the SOURCE.
+    expect(check(makeBid(), HOSTED_PATH).ok).toBe(true);
+  });
+});
+
+/**
+ * The CROSS-LANGUAGE parity table for the claim-bearing sites.
+ *
+ * `boundary.py` is the other implementation of this door, and two doors that admit different bids
+ * are worse than one door with a hole — the seller simply picks whichever one lets the bid
+ * through. So these verdicts are asserted verbatim here and, case for case and string for string,
+ * in `test_boundary_dual_path.py::PARITY_TABLE`. Changing one side alone turns the other red.
+ *
+ * `schema_invalid` reasons are filtered out of the comparison and only there: ajv and pydantic
+ * spell a location differently and that text was never a cross-language contract. Every
+ * provenance reason IS.
+ */
+const PARITY_TABLE: Record<
+  string,
+  {ok: boolean; reasons: string[]; requires_verification: boolean; unverified_claim_indexes: number[]}
+> = {
+  "claims_seller_asserted/hosted": {
+    ok: false,
+    reasons: ["hosted_non_hook_provenance:0:seller_asserted"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "claims_seller_asserted/external": {
+    ok: true,
+    reasons: [],
+    requires_verification: true,
+    // R18 still routes a bid.claims assertion to verification, by index. Untouched.
+    unverified_claim_indexes: [0],
+  },
+  "offer_commitment_seller_asserted/hosted": {
+    ok: false,
+    reasons: ["hosted_non_hook_provenance:offer.commitments[0]:seller_asserted"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "offer_commitment_seller_asserted/external": {
+    ok: false,
+    // NOT flagged: `unverified_claim_indexes` addresses `bid.claims`, so there is no handle to
+    // hand the verification queue for this site. Refused, with the site named.
+    reasons: ["unverifiable_claim_site:offer.commitments[0]:seller_asserted"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "offer_commitment_unknown_source/hosted": {
+    ok: false,
+    reasons: ["claim_provenance_unknown_source:offer.commitments[0]:vibes"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "offer_commitment_without_provenance/hosted": {
+    ok: false,
+    reasons: ["claim_without_provenance:offer.commitments[0]"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "offer_discount_seller_asserted/hosted": {
+    ok: false,
+    reasons: ["hosted_non_hook_provenance:offer.discount:seller_asserted"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "offer_discount_seller_asserted/external": {
+    ok: false,
+    reasons: ["unverifiable_claim_site:offer.discount:seller_asserted"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "offer_discount_without_provenance/hosted": {
+    ok: false,
+    // `Discount.provenance` is optional by schema, so this payload is schema-VALID. It is still
+    // refused: the discount is the field that moves money, and "no provenance at all" is not a
+    // weaker version of `seller_asserted`, it is the same statement with the label torn off.
+    reasons: ["claim_without_provenance:offer.discount"],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "offer_without_a_discount/hosted": {
+    ok: true,
+    reasons: [],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "all_hook_provenanced/hosted": {
+    ok: true,
+    reasons: [],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+  "all_hook_provenanced/external": {
+    ok: true,
+    reasons: [],
+    requires_verification: false,
+    unverified_claim_indexes: [],
+  },
+};
+
+/** The payload for one parity case. Mirrored by `parity_bid` in `test_boundary_dual_path.py`. */
+function parityBid(name: string): unknown {
+  switch (name) {
+    case "claims_seller_asserted":
+      return makeBid({claims: [makeClaim("spf", 30, ASSERTED_PROVENANCE)]});
+    case "offer_commitment_seller_asserted":
+      return makeBid({offer: makeOffer({commitments: [makeClaim("spf", 30, ASSERTED_PROVENANCE)]})});
+    case "offer_commitment_unknown_source":
+      return makeBid({
+        offer: makeOffer({
+          commitments: [makeClaim("spf", 30, {...HOOK_PROVENANCE, source: "vibes"})],
+        }),
+      });
+    case "offer_commitment_without_provenance":
+      return makeBid({offer: makeOffer({commitments: [makeClaim("spf", 30, null)]})});
+    case "offer_discount_seller_asserted":
+      return makeBid({
+        offer: makeOffer({
+          discount: {
+            type: "percentage",
+            value: 25.0,
+            provenance: structuredClone(ASSERTED_PROVENANCE),
+          },
+        }),
+      });
+    case "offer_discount_without_provenance":
+      return makeBid({offer: makeOffer({discount: {type: "percentage", value: 25.0}})});
+    case "offer_without_a_discount":
+      return makeBid({offer: makeOffer({discount: null})});
+    case "all_hook_provenanced":
+      return makeBid({offer: makeOffer({commitments: [makeClaim("spf", 30, HOOK_PROVENANCE)]})});
+    default:
+      throw new Error(`unknown parity case ${name}`);
+  }
+}
+
+describe("T-135 parity — the claim-site verdicts match the Python peer", () => {
+  it.each(Object.keys(PARITY_TABLE).sort())("%s", (caseName) => {
+    const cut = caseName.lastIndexOf("/");
+    const [name, path] = [caseName.slice(0, cut), caseName.slice(cut + 1)];
+    const expected = PARITY_TABLE[caseName]!;
+    const result = check(parityBid(name), path);
+
+    const provenanceReasons = result.reasons.filter((r) => !r.startsWith("schema_invalid"));
+    expect(provenanceReasons, caseName).toEqual(expected.reasons);
+    expect(result.ok, `${caseName}: ${result.reasons.join(", ")}`).toBe(expected.ok);
+    expect(result.requires_verification, caseName).toBe(expected.requires_verification);
+    expect(result.unverified_claim_indexes, caseName).toEqual(expected.unverified_claim_indexes);
+  });
+
+  it("covers every claim-bearing site on both paths", () => {
+    // Guards the `it.each`: an emptied table would register zero tests, which reads as green.
+    const cases = Object.keys(PARITY_TABLE);
+    expect(cases.length).toBe(12);
+    const sites = new Set(cases.map((c) => c.slice(0, c.lastIndexOf("/"))));
+    for (const site of [
+      "claims_seller_asserted",
+      "offer_commitment_seller_asserted",
+      "offer_discount_seller_asserted",
+    ]) {
+      expect(sites.has(site), site).toBe(true);
+    }
+    for (const path of BOTH_PATHS) {
+      expect(cases.some((c) => c.endsWith(`/${path}`)), path).toBe(true);
+    }
+
+    // The site labels the reasons are built from are the contract the table pins, and they are
+    // the same literals the Python peer exports.
+    expect(OFFER_COMMITMENTS_SITE).toBe("offer.commitments");
+    expect(OFFER_DISCOUNT_SITE).toBe("offer.discount");
+    expect(REASON_UNVERIFIABLE_CLAIM_SITE).toBe("unverifiable_claim_site");
+  });
+});
+
+describe("T-135 — the offer walk refuses hostile shapes rather than throwing", () => {
+  // The relocation exploit's next move is a malformed relocation: put the claim somewhere the
+  // walk has to guess at. Both doors must REFUSE every one of these, and neither may throw.
+  //
+  // Only `ok` is compared with the Python peer here, not the reason text: ajv and pydantic
+  // disagree about how to spell a shape error (`commitments` as an object is `schema_invalid`
+  // here and an enumerable-of-keys there), and that spelling was never a cross-language
+  // contract. "Is this bid admitted" is, and it is what an attacker cares about.
+  const hostile: Record<string, unknown> = {
+    "commitments as an object": makeOffer({commitments: {0: makeClaim("x", 1, ASSERTED_PROVENANCE)}}),
+    "commitments as a string": makeOffer({commitments: "free_returns"}),
+    "discount as a list": makeOffer({
+      discount: [{type: "percentage", value: 25.0, provenance: structuredClone(ASSERTED_PROVENANCE)}],
+    }),
+    "discount as a bare number": makeOffer({discount: 25.0}),
+    "discount with a null provenance": makeOffer({
+      discount: {type: "percentage", value: 25.0, provenance: null},
+    }),
+    "discount with an empty provenance source": makeOffer({
+      discount: {type: "percentage", value: 25.0, provenance: {...HOOK_PROVENANCE, source: ""}},
+    }),
+    "discount with an unknown provenance source": makeOffer({
+      discount: {type: "percentage", value: 25.0, provenance: {...HOOK_PROVENANCE, source: "vibes"}},
+    }),
+  };
+
+  it.each(Object.keys(hostile))("refuses %s on both paths", (name) => {
+    for (const path of BOTH_PATHS) {
+      const result = check(makeBid({offer: hostile[name]}), path);
+      expect(result.ok, `${name}/${path} was admitted`).toBe(false);
+      expect(result.reasons.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("still admits the offer shapes that are legitimately quiet", () => {
+    // The positive controls, so the block above is not "reject every offer".
+    for (const offer of [
+      makeOffer({discount: null}),
+      makeOffer({commitments: []}),
+      makeOffer({commitments: [makeClaim("x", 1, HOOK_PROVENANCE)]}),
+      makeOffer(),
+    ]) {
+      for (const path of BOTH_PATHS) {
+        const result = check(makeBid({offer}), path);
+        expect(result.ok, `${JSON.stringify(offer)}/${path}: ${result.reasons.join(", ")}`).toBe(
+          true,
+        );
+      }
+    }
   });
 });
