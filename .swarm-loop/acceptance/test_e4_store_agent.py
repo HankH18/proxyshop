@@ -24,7 +24,11 @@ reference personas:
 * R18 / S8 / A3 — the aggressive reference persona emits exactly the claims the
         human-approved fixture manifest scripts, all tagged `seller_asserted`.
 * S4  — the store-side half of the seeded-determinism criterion.
-* S5  — the hosted-trace half: every claim in an emitted bid traces to a hook call.
+* S5  — the hosted-trace half: every claim in an emitted bid traces to a hook call,
+        `offer.discount` included. (Harness amendment 6, ESC-007: a `Discount` carries
+        provenance but no `key`, so identifying it by `key` collapsed every discount onto
+        one identity no hook claim can equal and read a legitimate hook-granted discount
+        as smuggled. It is identified by the grant it cites instead.)
 
 Authoring rules (see `.swarm-loop/acceptance/README.md`), both binding:
 
@@ -180,16 +184,99 @@ def _source_of(claim) -> str:
     return str(prov or "")
 
 
+#: Identity slot for a provenance-bearing node that carries no `key` of its own.
+#: Chosen so it can never collide with a real claim key: `contracts` claim keys are
+#: snake_case identifiers, and this is not one.
+UNKEYED = "<unkeyed>"
+
+#: The ONLY hook claim an unkeyed node may cite. `contracts.Discount` is the one
+#: provenance-bearing model in the protocol with no `key` (`Claim.key` is required,
+#: `min_length=1`), and `runtime.bidding._discount` builds it by copying the
+#: `authorized_discount_pct` grant's own provenance onto the granted depth. So the
+#: unkeyed identity is lent to that grant and to nothing else — matching production's
+#: own `hooks.provenance.PRODUCT_SCOPED_CLAIM_KEYS`, which is the same single key.
+DISCOUNT_GRANT_KEY = "authorized_discount_pct"
+
+
 def _claim_identity(claim) -> tuple:
+    """A ledger identity for one provenance-bearing node: (key, value, source, ref).
+
+    Harness amendment 6 (ESC-007). A `Claim` has a `key` and identifies by it. `offer.discount`
+    does NOT — `contracts.Discount` is `(type, value, provenance)` — and since T-135 the bid
+    boundary REQUIRES it to carry a provenance block, because otherwise an attacker drops the
+    block instead of relabelling it and the discount walks through. So the discount is a
+    provenance-bearing node with no key, and reading `node.get("key")` off it produced the
+    string `"None"` for every discount ever emitted: every discount collapsed onto one identity
+    that no hook claim can ever equal, and a legitimate hook-granted discount read as smuggled.
+    Measured before this amendment, on a bid discounted by the envelope's intro rule:
+    ``smuggled == [('None', '15.0', 'envelope_rule',
+    'envelope:store-alpha:v3#max_discount_pct@prod-cap')]``.
+
+    So an unkeyed node is identified by the provenance it cites instead of by a key it does not
+    have. This LOOSENS NOTHING. A discount is admissible because a real `authorized_discount_pct`
+    grant was issued beside it, and it cites that grant by carrying the grant's provenance,
+    copied — same `source`, same product-scoped `ref` — at the depth the grant actually
+    authorized. `value`, `source` and `ref` must ALL still match something a hook really emitted
+    (see :func:`_hook_identities`), so a discount deeper than its grant, or citing a grant that
+    was never issued, still fails to trace. It only lets the helper SEE a node it previously
+    could not match at all.
+    """
     node = _plain(claim)
-    prov = node.get("provenance") if isinstance(node, dict) else {}
+    node = node if isinstance(node, dict) else {}
+    prov = node.get("provenance")
     prov = prov if isinstance(prov, dict) else {}
     return (
-        str(node.get("key")),
+        str(node["key"]) if "key" in node else UNKEYED,
         json.dumps(node.get("value"), sort_keys=True, default=str),
         str(prov.get("source")),
         str(prov.get("ref")),
     )
+
+
+def _hook_identities(claim) -> set:
+    """Every identity a bid node may legitimately present as having come from `claim`.
+
+    For almost every hook claim: exactly ONE — the claim's own keyed identity. A `list_price`,
+    a `units_left`, a `material`, a `policy_action` authorizes nothing keyless; it is quoted in
+    a bid as a `Claim`, under its own key, and it identifies by that key.
+
+    The single exception is the `authorized_discount_pct` grant, which gets a SECOND identity:
+    the one an UNKEYED node citing it would carry. That is what `offer.discount` presents —
+    `runtime.bidding._discount` copies the grant's own `provenance` onto the granted depth, so
+    the discount repeats the grant's `value`, `source` and `ref` and has no key of its own.
+
+    **Why the restriction is the whole point.** Lending the unkeyed slot to every hook claim
+    weakens this criterion instead of preserving it: a forged discount could then copy ANY real
+    emission's (value, source, ref) and trace. Measured against this file's own discounted
+    fixture, with the widening unrestricted, all three of these read as fully traced —
+
+    * ``value=100.0`` carrying the scraped list price's provenance verbatim (`scraped`,
+      ``catalog:store-alpha:prod-cap#list_price``) — a 100%-off discount no `authorize_discount`
+      call ever granted;
+    * ``value=7`` carrying `pixel_feed` / ``pixel:store-alpha:prod-cap#units_left``;
+    * ``value=100.0`` carrying the `prod-floor` list-price ref.
+
+    None of the three can be produced by `authorize_discount`, and all three are caught again
+    once the widening is confined to the grant.
+
+    So: a keyed bid node can never match the unkeyed form (a node that has a key always
+    identifies by it), and an unkeyed node can only ever match the ONE grant claim, at the value
+    AND source AND ref that grant actually carried. A discount deeper than its grant, citing a
+    ref that was never minted, wearing a relabelled source, or piggybacking on a non-grant
+    emission, all still fail to trace.
+    """
+    keyed = _claim_identity(claim)
+    if keyed[0] != DISCOUNT_GRANT_KEY:
+        return {keyed}
+    return {keyed, (UNKEYED,) + keyed[1:]}
+
+
+def _hook_granted_identities(hook_claims) -> set:
+    """The union of :func:`_hook_identities` over everything the hooks emitted."""
+    granted: set = set()
+    for claim in hook_claims:
+        granted |= _hook_identities(claim)
+    return granted
 
 
 def _norm(value) -> str:
@@ -236,6 +323,12 @@ CLUSTER = "cluster-warm-layers"
 STORE_ID = "store-alpha"
 LIST_PRICE = 100.0
 
+#: The envelope's cold-start intro discount rule (DESIGN.md R10: "list price, envelope standing
+#: commitments, intro discount rule if the envelope defines one"). Inside the 20% cap and far
+#: above the `prod-cap` floor, so the envelope grants it and the bid really is discounted.
+INTRO_DISCOUNT_KEY = "intro_discount_pct"
+INTRO_DISCOUNT_PCT = 15.0
+
 
 def _prov(source: str, ref: str) -> dict:
     return {
@@ -272,6 +365,13 @@ def _envelope() -> dict:
         ],
         "activation": "shadow",
     }
+
+
+def _envelope_with_intro_rule(pct: float = INTRO_DISCOUNT_PCT) -> dict:
+    """The approved envelope plus an intro discount rule, so a cold bid carries a discount."""
+    envelope = _envelope()
+    envelope[INTRO_DISCOUNT_KEY] = pct
+    return envelope
 
 
 def _store_context(**overrides) -> dict:
@@ -663,8 +763,91 @@ def test_every_claim_in_a_hosted_bid_traces_to_a_hook_call():
     hook_claims = _claims_in(getattr(hooks, "emitted_claims", []))
     assert hook_claims, "the hooks facade must expose the claims it emitted"
 
-    smuggled = {_claim_identity(c) for c in bid_claims} - {_claim_identity(c) for c in hook_claims}
+    granted = _hook_granted_identities(hook_claims)
+    smuggled = {_claim_identity(c) for c in bid_claims} - granted
     assert not smuggled, f"these bid claims did not come from a tool hook: {sorted(smuggled)}"
+
+    # ---- Harness amendment 6 (ESC-007): the same criterion at the DISCOUNT site. ----
+    #
+    # The context above is cold and the envelope defines no intro rule, so it produces no
+    # discount at all — which is why this criterion passed for reasons that had nothing to do
+    # with the discount site. `offer.discount` is the one claim-bearing node in a bid that has
+    # no `key`, and since T-135 the boundary requires it to carry provenance, so it is exactly
+    # the node most likely to be waved through or misread. Bid it for real.
+    intro_context = _store_context(envelope=_envelope_with_intro_rule())
+    intro_hooks = _build_hooks(ToolHooks, intro_context)
+    discounted = make_bid(_bid_request("auc-0002"), intro_context, hooks=intro_hooks)
+
+    offer = _first_value(_plain(discounted), "offer")
+    discount = offer.get("discount") if isinstance(offer, dict) else None
+    assert isinstance(discount, dict), (
+        f"an envelope stating {INTRO_DISCOUNT_KEY}={INTRO_DISCOUNT_PCT} must produce a discounted "
+        f"cold-start bid, or this criterion never reaches the discount site: {_plain(discounted)!r}"
+    )
+    provenance = discount.get("provenance")
+    assert isinstance(provenance, dict), (
+        "an emitted discount must cite the grant that authorized it by carrying that grant's "
+        f"provenance: {discount!r}"
+    )
+
+    intro_hook_claims = _claims_in(getattr(intro_hooks, "emitted_claims", []))
+    assert intro_hook_claims, "the hooks facade must expose the claims it emitted"
+    intro_granted = _hook_granted_identities(intro_hook_claims)
+
+    smuggled = {_claim_identity(c) for c in _claims_in(discounted)} - intro_granted
+    assert not smuggled, (
+        "a discount that cites a real grant — same depth, same provenance source and ref — "
+        f"traces to a hook call and must not read as smuggled: {sorted(smuggled)}"
+    )
+
+    # And the other direction, which is the whole point of the criterion: a discount whose
+    # provenance does NOT trace to a grant the hooks actually issued is still caught. Neither
+    # forgery could be produced by `authorize_discount` — the first asks past the 20% cap, the
+    # second cites a rule reference that was never minted.
+    deeper_than_granted = dict(discount, value=float(discount["value"]) + 10.0)
+    assert _claim_identity(deeper_than_granted) not in intro_granted, (
+        "a discount deeper than the grant it cites must NOT trace to a hook call: "
+        f"{deeper_than_granted!r}"
+    )
+
+    forged_ref = dict(
+        discount, provenance=dict(provenance, ref=f"{provenance.get('ref')}-never-issued")
+    )
+    assert _claim_identity(forged_ref) not in intro_granted, (
+        f"a discount citing a grant that was never issued must NOT trace to a hook call: "
+        f"{forged_ref!r}"
+    )
+
+    fabricated = dict(
+        discount,
+        provenance=dict(provenance, source="seller_asserted", ref="whatever:never-minted"),
+    )
+    assert _claim_identity(fabricated) not in intro_granted, (
+        "a discount whose provenance traces to no hook call at all must NOT trace to a hook "
+        f"call: {fabricated!r}"
+    )
+
+    # And the unkeyed slot belongs to the GRANT alone. A discount that copies some OTHER real
+    # hook emission's (value, source, ref) — the scraped list price, the pixel feed's stock
+    # count — cites nothing that ever authorized a discount, and must not trace either. When
+    # the unkeyed slot was lent to every hook claim instead, a 100%-off discount wearing the
+    # scraped list-price claim's provenance verbatim read as fully traced.
+    non_grant = [c for c in intro_hook_claims if _claim_identity(c)[0] != DISCOUNT_GRANT_KEY]
+    assert non_grant, (
+        "this auction must emit hook claims other than the discount grant, or the next check "
+        "cannot bite"
+    )
+    for other in non_grant:
+        _, value_json, source, ref = _claim_identity(other)
+        piggyback = {
+            "type": discount.get("type"),
+            "value": json.loads(value_json),
+            "provenance": dict(provenance, source=source, ref=ref),
+        }
+        assert _claim_identity(piggyback) not in intro_granted, (
+            "a discount piggybacking on a hook emission that granted no discount must NOT "
+            f"trace to a hook call: {piggyback!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

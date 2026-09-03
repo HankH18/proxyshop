@@ -1,6 +1,6 @@
 {
-  "frozen_at": "2026-09-03T02:42:15",
-  "amendments": 5,
+  "frozen_at": "2026-09-03T11:11:47",
+  "amendments": 6,
   "files": {
     ".swarm-loop/acceptance/README.md": "650910301dc909eb6fb13bd1fcebabc4766e372e0c08210d08e18d84e42e596e",
     ".swarm-loop/acceptance/conftest.py": "298928bc45944aaaa58dcf39d2d1e7b5515b879c89d7658adae3aff03f7796bf",
@@ -8,16 +8,17 @@
     ".swarm-loop/acceptance/test_e1_foundation.py": "4f74f0a98b7684bdabd56abb29e4b9c9a4ebb2331796265a2873611fdb452ef1",
     ".swarm-loop/acceptance/test_e2_ingestion.py": "fca567c99011abcfc235c036d75bdbabb97ab2475d5771495d0530942b6e1558",
     ".swarm-loop/acceptance/test_e3_exchange.py": "efa7ad99c1363d96ee81f14f3d4cf12e1abf9eabdad9d44ff574c23b064f3f20",
-    ".swarm-loop/acceptance/test_e4_store_agent.py": "3bbe07e0d0aa709019f86bd37c2eb7dac0c9f4a3c9ff083b60fe4772ce300373",
+    ".swarm-loop/acceptance/test_e4_store_agent.py": "ad27deb55be16392f5ead5721c88793ff371ca98baf5efc0fac1bc16824dcecf",
     ".swarm-loop/acceptance/test_e5_merchant.py": "9bb88595444ba09252025c3f3d520f56370863cc8339e4e3efce5f15ca9b95ac",
     ".swarm-loop/acceptance/test_e6_trust.py": "497ff4da42a4c8ad789edab32bd0fc6d992ee686f175218590fdd89b381e2ff8",
     ".swarm-loop/acceptance/test_e7_buyer.py": "9eb36ab742687abaa06f125c6bc73274c4780b4937d1334ce87e98468882da1c",
     ".swarm-loop/acceptance/test_e8_proofs.py": "da6af18421977cafa1945a3d0f1c2b926da4a575906d22b648b9500fed301d98",
     ".swarm-loop/acceptance/test_spec_criteria.py": "47e7bd7a58d05b3855e6a32a06c116b6b42f0f0a57ec4728bf2b3dabb4df43d5",
-    ".swarm-loop/goals.json": "d9d91a26e27746ccb3b463e008260591446de00b964f306f61a2a2857f07cc77",
+    ".swarm-loop/goals.json": "9ab1146302219c707f8275f330a154f0f7399e7c9453295b868aeadb9793ba09",
     "Makefile": "5667e65a172b98035e56e39d12b5cf44063e29de592cb0f93a91322eacc89c62",
     "scripts/verify.sh": "dea3c2974e02ffcd52e4b0e5c5ccecf3557b32378609805c1ac3752976e94622",
-    "scripts/check_verify_contracts.py": "f41ee158357ba9027649c11732044f3c7c167d9777c4403d0735b1d4015dd1e5"
+    "scripts/check_verify_contracts.py": "f41ee158357ba9027649c11732044f3c7c167d9777c4403d0735b1d4015dd1e5",
+    "tickets.json": "bc953b86301209739a2fff8ed93cd6ba6c28689c9752dafe391634af035d4809"
   },
   "targets": {
     "acceptance_pass_rate": 100.0,
@@ -34,5 +35,5 @@
     "e8_proofs_passing": 8.0
   },
   "goals_canon": "968c4996d90b13565555da6796be7101e63de4db96a152c9af20b9e78cfe728e",
-  "log_seq": 5
+  "log_seq": 6
 }

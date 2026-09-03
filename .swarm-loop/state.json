@@ -108,7 +108,8 @@
     ".swarm-loop/goals.json",
     "Makefile",
     "scripts/verify.sh",
-    "scripts/check_verify_contracts.py"
+    "scripts/check_verify_contracts.py",
+    "tickets.json"
   ],
   "pending_remeasure": [
     7
