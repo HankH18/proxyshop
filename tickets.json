@@ -2696,6 +2696,21 @@
       "defect": "SYSTEMIC GATE-CREDIBILITY DEFECT: tests that swallow a missing subject with `except ImportError` are VACUOUS until the subject exists, and report green the whole time. test_checkout_provider.py:406 counted accept()'s no-default positionals but was wrapped so it tolerated accept not existing at all \u2014 it had therefore NEVER run for real until T-033 created the module, at which point it immediately went red. This is the third vacuous gate found in cycle 10 alone: red-check independently proved T-111's and T-123's gates EXIT 0 with their defects live. The class is 'a gate that cannot fail is indistinguishable from a gate that passes', and it is what let earlier waves report T-109/T-111/T-123 fixed when git says the files were never touched. Needs a repo-wide sweep for except-ImportError-tolerant tests and skip/xfail guards whose condition is permanently true.",
       "finding_id": "6f077a3bc3ab2f21765b33d17c8a1cb289e1c72e6e42f5235748fa1ed0f78dc6",
       "reproduction": "git grep -n 'except ImportError' -- '*test*' and check each for an assertion that only runs when the import succeeds. Compare with the T-111/T-123 red-check output: 'VACUOUS \u2014 EXITS 0 with nothing implemented'."
+    },
+    {
+      "id": "T-160",
+      "title": "These three tickets' recorded `verify` commands pass IDENTICALLY with and without their defect, which is the precise mechanism by which all three were reported closed twice while the defects stayed live. red-check measured it this cycle: T-111's `./scripts/bootstrap.sh && ./scripts/verify.sh check` and T-123's `bootstrap.sh && pytest packages/llm && python -c 'import contracts, llm, trust'` both exit 0 with nothing implemented (3046 and 210 tests selected), and T-109's `pytest apps/trust -q && pytest proxyshop_support -q` was green on the parent commit. A ticket whose gate cannot distinguish the two states must not be closable on that gate. Companion to T-159 (except-ImportError vacuity) \u2014 same class, different mechanism. The lane has now written real gates; the graph's verify strings should be repaired to point at them.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "tickets.json (T-109, T-111, T-123 verify fields)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "tickets.json (T-109, T-111, T-123 verify fields)",
+      "defect": "These three tickets' recorded `verify` commands pass IDENTICALLY with and without their defect, which is the precise mechanism by which all three were reported closed twice while the defects stayed live. red-check measured it this cycle: T-111's `./scripts/bootstrap.sh && ./scripts/verify.sh check` and T-123's `bootstrap.sh && pytest packages/llm && python -c 'import contracts, llm, trust'` both exit 0 with nothing implemented (3046 and 210 tests selected), and T-109's `pytest apps/trust -q && pytest proxyshop_support -q` was green on the parent commit. A ticket whose gate cannot distinguish the two states must not be closable on that gate. Companion to T-159 (except-ImportError vacuity) \u2014 same class, different mechanism. The lane has now written real gates; the graph's verify strings should be repaired to point at them.",
+      "finding_id": "0569559a8a667e914fbc6bf39f46837c573642def982011bf2eeebc9a22dfe75",
+      "reproduction": "python3 <skill>/scripts/swarmloop.py red-check --ticket T-109,T-111,T-123 \u2014 reports VACUOUS for T-111 and T-123 and WEAK for T-109."
     }
   ]
 }
