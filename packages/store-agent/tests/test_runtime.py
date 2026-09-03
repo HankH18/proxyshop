@@ -438,6 +438,57 @@ class _MuteFacade(ToolHooks):
         raise HookInputError(f"nothing known about {product_ref!r}")
 
 
+def test_every_provenance_bearing_node_in_a_cold_bid_traces_by_the_frozen_identity_rule() -> None:
+    """The frozen S5 criterion's OWN rule, re-stated here and run against the cold bid.
+
+    `.swarm-loop/acceptance` measures traceability differently from `claim_fingerprint`: it
+    walks every node carrying a `provenance` — a `Discount` included, since T-135's tightening
+    requires one there — and identifies it by the 4-tuple below. A `Discount` has no `key`, so
+    its first element is `None` and it can never equal the grant's, which means the two rules
+    only agree while a bid carries no discount.
+
+    The cold bid is exactly the bid that frozen test solicits, so THIS is the property that has
+    to hold, and it is asserted here rather than left to a suite this lane must not edit. The
+    identity rule is restated rather than imported: `.swarm-loop` is outside `testpaths` and a
+    test that reached into it would couple this gate to a file it is forbidden to change.
+    """
+
+    def identity(node: dict[str, Any]) -> tuple[str, str, str, str]:
+        prov = node.get("provenance") or {}
+        return (
+            str(node.get("key")),
+            json.dumps(node.get("value"), sort_keys=True, default=str),
+            str(prov.get("source")),
+            str(prov.get("ref")),
+        )
+
+    def provenance_bearing(obj: Any) -> list[dict[str, Any]]:
+        found, stack = [], [obj]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                if isinstance(node.get("provenance"), (dict, str)):
+                    found.append(node)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        return found
+
+    hooks = ToolHooks(_context())
+    answer = _bid(hooks=hooks)
+
+    in_bid = {identity(n) for n in provenance_bearing(answer.model_dump(mode="json"))}
+    emitted = {
+        identity(n)
+        for n in provenance_bearing([c.model_dump(mode="json") for c in hooks.emitted_claims])
+    }
+    assert in_bid, "a cold bid with no provenance-bearing node makes this criterion vacuous"
+    assert not in_bid - emitted, (
+        f"these nodes do not trace to a hook emission under the frozen identity rule: "
+        f"{sorted(in_bid - emitted)}"
+    )
+
+
 def test_the_runtime_asks_the_hooks_before_it_asks_the_catalog() -> None:
     """A facade that answers nothing must produce no bid, not a bid assembled around it.
 
@@ -541,11 +592,6 @@ def test_an_intro_rule_inside_the_walls_prices_the_offer_and_carries_its_grant()
     assert answer.offer.total_price == 85.0
     assert answer.offer.discount is not None
     assert (answer.offer.discount.type, answer.offer.discount.value) == ("percentage", 15.0)
-    assert answer.offer.discount.provenance is None, (
-        "a Discount is not a Claim: it has no key and therefore no ledger identity, and a "
-        "provenance on it would read as a claim no hook emitted"
-    )
-
     grants = [c for c in answer.claims if c.key == "authorized_discount_pct"]
     assert [c.value for c in grants] == [15.0], "the grant that backs the discount rides in the bid"
     assert grants[0].provenance.ref.endswith("@prod-cap"), (
@@ -553,6 +599,21 @@ def test_an_intro_rule_inside_the_walls_prices_the_offer_and_carries_its_grant()
     )
     assert claim_fingerprint(grants[0]) in hooks.spent_fingerprints, (
         "the boundary spends the grant, so it cannot furnish a second offer's discount"
+    )
+
+    # The discount CITES that grant, by carrying its provenance verbatim.
+    #
+    # Required by `contracts.boundary.validate_bid`, which walks `offer.discount` as a
+    # claim-bearing site and refuses one present with no provenance at all — otherwise an
+    # attacker drops the provenance block rather than relabelling it. Asserted field by field
+    # against the grant rather than merely "is not None", so a separately-minted block, or one
+    # built by hand, fails here: two assertions about where an authorization came from can
+    # disagree, and only one of them went through the ledger.
+    assert answer.offer.discount.provenance is not None
+    assert answer.offer.discount.provenance == grants[0].provenance
+    assert answer.offer.discount.provenance.source.value == "envelope_rule"
+    assert answer.offer.discount.provenance is not grants[0].provenance, (
+        "copied, not aliased: editing the discount must not rewrite the grant's own citation"
     )
 
 

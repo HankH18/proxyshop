@@ -282,6 +282,36 @@ def citable_as_a_grant(store_id: str) -> bool:
     return CLAIM_SCOPE_SEPARATOR not in str(store_id)
 
 
+def _discount(grant: Claim | None, depth: float) -> Discount | None:
+    """The offer's discount, citing the grant that authorized it. `None` when there is no grant.
+
+    **The provenance is the grant's own, copied — never one built here.** A `Discount` is not a
+    `Claim`: it has no `key`, so it has no ledger identity and cannot be checked against the
+    ledger directly. What makes it admissible is the `authorized_discount_pct` grant beside it
+    in `bid.claims`, and stamping the grant's provenance onto it is that citation made explicit
+    — same `source` (`envelope_rule`), same `ref` (the rule scoped to this product), same
+    `observed_at`, same `authority_rank`.
+
+    `contracts.boundary.validate_bid` requires it. It walks `bid.claims`, `offer.commitments`
+    AND `offer.discount`, and refuses a discount that is PRESENT WITH NO PROVENANCE AT ALL —
+    otherwise an attacker drops the provenance block instead of relabelling it and the discount
+    walks through. This runtime is the first producer whose bids reach that door, so it is the
+    first code that can satisfy it.
+
+    Copied deep rather than aliased: sharing one `Provenance` instance between the grant and the
+    discount means editing either edits the other, and "the discount cites the grant" must not
+    become "editing the discount silently rewrites the grant's citation".
+
+    Nothing here is minted. `mint_provenance` would produce an equally valid block, but a
+    *separately minted* one is a second assertion about where the authorization came from, and
+    two assertions can disagree. The runtime never builds a `Claim`; by the same argument it
+    never builds this either — it repeats what the hook already said.
+    """
+    if grant is None:
+        return None
+    return Discount(type=PERCENTAGE, value=depth, provenance=grant.provenance.model_copy(deep=True))
+
+
 def _priced(list_price: float, depth: float) -> float:
     """The price after a granted depth.
 
@@ -422,12 +452,7 @@ def _assemble(request: Any, context: Any, hooks: Any | None) -> Bid | Decline:
         product_ref=chosen.product_ref,
         unit_price=unit_price,
         currency=ctx.currency,
-        # No `provenance` on the discount, deliberately. A `Discount` is not a `Claim` — it has
-        # no key, so it has no ledger identity — and the frozen S5 criterion reads every node
-        # carrying a `provenance` as a claim that must trace to a hook emission. A discount
-        # wearing one would be a claim no hook emitted. What authorizes it is the grant beside
-        # it in `claims`, which is exactly what the boundary matches it against.
-        discount=Discount(type=PERCENTAGE, value=depth) if grant is not None else None,
+        discount=_discount(grant, depth),
         commitments=list(commitments),
         total_price=unit_price,
         # Not optional in practice: `contracts.boundary.validate_bid` refuses an offer that
