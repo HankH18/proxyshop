@@ -362,7 +362,7 @@
     "approver": null,
     "approved_at": null,
     "artifact": null,
-    "content_hash": "130608ab82568409e6e0e2a2086bf6eccb3d535338f5a32fe9dccb72a9205ce6",
+    "content_hash": "0ce80606248b6afe996a5309630359b4bc5fce65fb74d66d3fbc1aae73bffa27",
     "request": "fixtures/approval/REQUEST-manifest-approval.md",
     "how_to_approve": "A HUMAN runs:  PROXYSHOP_WORKER=<n> ./.venv/bin/python -m fixtures.approval --approver \"<your full name>\"",
     "note": "T-080 is a human gate (EXECUTION.md rule 6). No agent may fill approver/approved_at/artifact. `content_hash` is a computed digest of this document's body (this block excluded) and is NOT itself an approval; it is recorded so downstream readers can detect drift, and so the human approves a document whose digest is already published rather than one an agent hashes afterwards.",
