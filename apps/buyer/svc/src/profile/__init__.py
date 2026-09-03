@@ -229,6 +229,21 @@ CATEGORY_TAXONOMY: tuple[str, ...] = (
 #: we have no coarse name for" — never a per-buyer bucket.
 CATEGORY_FALLBACK = "other"
 
+#: The longest a string can be and still be a merchandising slug. ``camera-lenses`` is 13
+#: characters; ``gift-for-dana-reyes-44-alder-way-portland-97205`` is 47 and is a gift note
+#: somebody typed into the category field. See :func:`_is_merchandising_slug`.
+CATEGORY_SLUG_MAX_CHARS = 32
+
+#: The most hyphen-separated tokens a merchandising slug may carry. Real ones are one to
+#: three words; an address is nine.
+CATEGORY_SLUG_MAX_TOKENS = 4
+
+#: Two or more digits in a row. Postal codes, house numbers, phone numbers and account ids
+#: all carry one; a merchandising slug does not need one, and treating "has a digit run" as
+#: "is not a merchandising slug" costs nothing real and closes the highest-value fragment
+#: family there is.
+_DIGIT_RUN = re.compile(r"\d{2,}")
+
 #: Slug token -> taxonomy label. Matched against the hyphen-separated *tokens* of a slug, and
 #: tried in :data:`CATEGORY_TAXONOMY` order, so "running-shoes" lands in ``footwear`` rather
 #: than ``sports`` and "category-of-the-month" is not filed under ``pets`` for containing
@@ -420,6 +435,21 @@ IDENTITY_ACCOUNT_KEYS: tuple[str, ...] = (
 #: are not leak-checked; nothing in the allowlist can emit one anyway.
 _MIN_LEAKABLE = 4
 
+#: Identity keys that name a **person or an account** rather than a place. A merchandising
+#: slug whose token spells one of these is not a coincidence — nobody's shop sells
+#: ``dana-reyes`` — so the exemption in :func:`_exempt_category_slugs` never covers it.
+#:
+#: ``address`` and ``street`` are deliberately *not* here: place words genuinely collide with
+#: merchandise (Park Lane and ``park-gear``, Beacon Street and ``beacon-lamps``), and
+#: refusing those is the denial of service the exemption exists to prevent. Neither is
+#: ``email``, which the buyer chooses themselves and which is why ``espresso.fan@example.com``
+#: may buy espresso.
+_NAMING_IDENTITY_KEYS: frozenset[str] = frozenset(IDENTITY_ACCOUNT_KEYS) - {
+    "address",
+    "email",
+    "street",
+}
+
 _REGION_SEPARATORS = re.compile(r"[-_/,\s]+")
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
@@ -430,7 +460,19 @@ class IdentityLeak(AssertionError):
     Raised by :func:`build_profile`, never caught inside this module. A profile that leaks is
     not degraded, it is disclosive, and returning it would be the failure R5 exists to
     prevent.
+
+    The message names the **account keys** that leaked and never their values, and never the
+    session subject either. An exception raised *because* identity escaped is read by a log
+    sink and, if a route forgets to catch it, by an HTTP client: interpolating the values it
+    is complaining about turned the backstop itself into the disclosure path it exists to
+    close (T-133). :attr:`account_keys` carries the same information structurally, for a
+    caller that wants to log it without parsing prose.
     """
+
+    def __init__(self, message: str, *, account_keys: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        #: The ``account`` keys whose values reached the profile. Names, never values.
+        self.account_keys: tuple[str, ...] = tuple(account_keys)
 
 
 # --------------------------------------------------------------------------------------
@@ -860,54 +902,74 @@ def anonymise_cohort(
 # --------------------------------------------------------------------------------------
 
 
-def _identity_values(account: Mapping[str, Any]) -> set[str]:
-    """Every case-folded identity value on ``account`` worth matching on.
+def _identity_sources(account: Mapping[str, Any]) -> dict[str, set[str]]:
+    """Every case-folded identity fragment on ``account``, and which keys contributed it.
 
     An address is also split into its words, so a profile that shipped ``"Portland"`` out of
     ``"44 Alder Way, Portland OR 97205"`` is caught even though the whole string is not
     present verbatim.
-    """
-    found: set[str] = set()
 
-    def add(text: str) -> None:
+    The *provenance* is what :func:`_exempt_category_slugs` and :func:`_leak_report` need and
+    what a bare set of strings cannot give them: ``"dana"`` reached by way of ``first_name``
+    is a name, and ``"park"`` reached by way of ``address`` is a place, and the two earn
+    different answers from the backstop.
+    """
+    found: dict[str, set[str]] = {}
+
+    def add(text: str, key: str) -> None:
         text = text.strip().casefold()
         if len(text) >= _MIN_LEAKABLE:
-            found.add(text)
+            found.setdefault(text, set()).add(key)
 
     for key in IDENTITY_ACCOUNT_KEYS:
         value = account.get(key)
         if not isinstance(value, str) or not value.strip():
             continue
-        add(value)
+        add(value, key)
         for word in re.split(r"[\s,]+", value):
-            add(word)
+            add(word, key)
         if key == "email" and "@" in value:
             local, _, domain = value.partition("@")
-            add(local)
-            add(domain)
+            add(local, key)
+            add(domain, key)
             for word in re.split(r"[.\-_+]+", local):
-                add(word)
+                add(word, key)
     return found
 
 
-def _text_values(value: Any, _depth: int = 0) -> Iterable[str]:
-    """Every string *value* reachable inside a plain nested structure.
+def _identity_values(account: Mapping[str, Any]) -> set[str]:
+    """Every case-folded identity value on ``account`` worth matching on."""
+    return set(_identity_sources(account))
 
-    Keys are deliberately skipped. ``BuyerProfile`` and ``ProfileBuckets`` are both
-    ``extra="forbid"``, so the key set is fixed by the contract and cannot carry buyer data —
-    while scanning keys would make a buyer whose surname happened to be "Region" fail to log
-    in. Only values can leak, so only values are searched.
+
+def _bucket_texts(
+    value: Any, bucket: str | None = None, _depth: int = 0
+) -> Iterable[tuple[str | None, str]]:
+    """Every string *value* reachable inside a plain nested structure, with its bucket.
+
+    Keys are deliberately never *matched against*. ``BuyerProfile`` and ``ProfileBuckets``
+    are both ``extra="forbid"``, so the key set is fixed by the contract and cannot carry
+    buyer data — while scanning keys would make a buyer whose surname happened to be
+    "Region" fail to log in. Only values can leak, so only values are searched.
+
+    Keys are *read* for one thing only: to say which of :data:`BUCKET_KEYS` a string was
+    found under. That is what makes the exemptions below per-bucket rather than account-wide,
+    which is the whole of T-139's second half — a value that is unremarkable inside
+    ``category_affinity`` is a disclosure inside ``region``, and the flat walk this replaced
+    could not tell the two apart. A string outside any bucket yields ``None`` and is
+    therefore exempt from nothing.
     """
     if _depth > 12:
         return
     if isinstance(value, str):
-        yield value
+        yield bucket, value
     elif isinstance(value, Mapping):
-        for sub in value.values():
-            yield from _text_values(sub, _depth + 1)
+        for key, sub in value.items():
+            child = key if isinstance(key, str) and key in BUCKET_KEYS else bucket
+            yield from _bucket_texts(sub, child, _depth + 1)
     elif isinstance(value, (list, tuple, set, frozenset)):
         for sub in value:
-            yield from _text_values(sub, _depth + 1)
+            yield from _bucket_texts(sub, bucket, _depth + 1)
 
 
 #: Hex digits. See :func:`_distinguishable_from_entropy`.
@@ -945,13 +1007,51 @@ _CLOSED_VOCABULARY: frozenset[str] = frozenset(
     | set(CATEGORY_TAXONOMY)
 )
 
+#: The same vocabulary, split by the bucket that can actually emit each label — because a
+#: label is only unremarkable in the bucket whose coarsener owns it. ``"footwear"`` turning up
+#: in ``region`` is not a taxonomy label, it is a coarsener that was rewired, and holding it
+#: out of the haystack account-wide meant the backstop could not say so. Buckets absent here
+#: (``region``, ``first_time``) have no fixed vocabulary at all, so nothing in them is ever
+#: incidental.
+_BUCKET_VOCABULARY: dict[str, frozenset[str]] = {
+    "budget_band": frozenset(
+        {label for _low, _high, label in BUDGET_BANDS} | {TOP_BUDGET_BAND} | set(COARSE_BUDGET_BANDS)
+    ),
+    "frequency_tier": frozenset(
+        {tier for _ceiling, tier in FREQUENCY_TIERS} | set(COARSE_FREQUENCY_TIERS)
+    ),
+    "category_affinity": frozenset(CATEGORY_TAXONOMY),
+}
+
+
+def _is_merchandising_slug(slug: str) -> bool:
+    """Could ``slug`` be a category a shop actually sells under?
+
+    ``orders[].category`` is free text and nothing validates it, which is the whole of T-139:
+    an order whose category reads ``"gift for Dana Reyes, 44 Alder Way Portland 97205"``
+    slugs to a 47-character, nine-token string carrying a house number and a postal code, and
+    :func:`coarsen_categories` publishes it because it is what the account said it bought.
+
+    Three cheap bounds separate a merchandising slug from a note somebody typed in the wrong
+    field. Nothing in :data:`CATEGORY_TAXONOMY`, and nothing in any fixture or generated
+    population in this repo, is anywhere near them::
+
+        >>> _is_merchandising_slug("camera-lenses")
+        True
+        >>> _is_merchandising_slug("gift-for-dana-reyes-44-alder-way-portland-97205")
+        False
+        >>> _is_merchandising_slug("97205")
+        False
+    """
+    if not slug or len(slug) > CATEGORY_SLUG_MAX_CHARS:
+        return False
+    if len(slug.split("-")) > CATEGORY_SLUG_MAX_TOKENS:
+        return False
+    return _DIGIT_RUN.search(slug) is None
+
 
 def _account_category_slugs(account: Mapping[str, Any]) -> set[str]:
-    """The slugs :func:`coarsen_categories` may legitimately emit for ``account``.
-
-    A slug here came from ``orders[].category`` — the buyer's merchandising taxonomy, which
-    is not an identity field and which the allowlist publishes on purpose.
-    """
+    """Every slug :func:`coarsen_categories` can emit for ``account``, admissible or not."""
     slugs: set[str] = set()
     for order in _orders(account):
         category = order.get("category")
@@ -962,30 +1062,60 @@ def _account_category_slugs(account: Mapping[str, Any]) -> set[str]:
     return slugs
 
 
-def _incidental_bucket_values(account: Mapping[str, Any]) -> set[str]:
-    """Bucket values that cannot be a disclosure however they got into the profile.
+def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
+    """This account's own category slugs that a leak report would be wrong about.
 
-    Substring matching an account's identity fragments against the whole serialized profile
-    is the right *shape* for a backstop and the wrong granularity on its own: it cannot tell
-    a coarsener that copied the postal code into ``region`` from a coarsener that emitted its
-    own canonical label which happens to spell a word out of the buyer's address.
+    ``category_affinity`` is the one open-vocabulary bucket: its values are slugs of the
+    account's own ``orders[].category``. Holding *all* of them out of the haystack is what
+    let the buyer who lives on Park Lane keep buying ``park-gear`` — and it is also what let
+    an address typed into the category field ride out verbatim while the backstop reported
+    clean. So a slug earns the exemption instead of being handed it, on three tests:
 
-    The second is not hypothetical and it is not rare. ``none@example.com`` has no orders, so
-    ``frequency_tier`` is ``"none"``, so the local part of their address appears inside their
-    own profile and the build refuses — that is the default state of *every* brand-new
-    signup. ``espresso.fan@example.com`` who buys espresso is the same collision one bucket
-    over. Both used to fail closed, and failing closed on a value the account could not have
-    supplied is a denial of service, not a privacy guarantee.
+    1. it is a plausible merchandising slug at all (:func:`_is_merchandising_slug`) — which
+       is what an address, a postal code or a gift note fails;
+    2. no token of it *is* an identity fragment contributed by a key that names a person or
+       an account (:data:`_NAMING_IDENTITY_KEYS`) — which is what ``dana-reyes`` and
+       ``dana-gear`` fail, while ``cookware`` for a buyer named Cook passes, because
+       ``"cookware"`` is not ``"cook"``;
+    3. it has at least one token that is merchandise rather than the buyer — long enough to
+       be leak-checked at all (:data:`_MIN_LEAKABLE`), and not an identity fragment. What
+       counts as "an identity fragment" here is the one place the email is treated more
+       leniently than everything else, and only for a **one-token** slug:
 
-    So two families of value are held out of the haystack, and only these two:
+       * a slug of one token may collide with an email-derived fragment and still be exempt,
+         which is what lets ``espresso.fan@example.com`` buy ``espresso``. A one-word
+         collision with a self-chosen address is the coincidence the exemption exists for;
+       * a slug of several tokens may not. Every token being an identity fragment is how
+         ``dana-reyes`` gets assembled out of ``dana.reyes@example.com`` — and an account
+         with no name fields at all is exactly what a first magic-link redemption creates,
+         so this is the reachable shape, not a hypothetical one. ``park-gear`` still passes,
+         on ``"gear"``; ``alder-way-portland`` does not, because ``"way"`` is too short to
+         count and the other two tokens are words of the buyer's address.
 
-    * anything in :data:`_CLOSED_VOCABULARY` — a label from a fixed table;
-    * a slug of one of *this* account's own order categories.
-
-    Everything else — a region code, an unrecognised string, anything a rewired coarsener
-    invents — is still matched in full.
+    Rules 2 and 3 are separate on purpose: the first says a name is never a coincidence, the
+    second says a *pile* of identity words is never a coincidence either. Either one alone
+    leaves a smuggling channel open, and both together still admit every collision the
+    exemption was added for. Being conservative here is close to free: the exemption only
+    ever changes an answer for a slug some identity fragment actually matches.
     """
-    return set(_CLOSED_VOCABULARY) | _account_category_slugs(account)
+    sources = _identity_sources(account)
+    naming = {value for value, keys in sources.items() if keys & _NAMING_IDENTITY_KEYS}
+    beyond_email = {value for value, keys in sources.items() if keys - {"email"}}
+
+    exempt: set[str] = set()
+    for slug in _account_category_slugs(account):
+        if not _is_merchandising_slug(slug):
+            continue
+        tokens = slug.split("-")
+        if any(token in naming for token in tokens):
+            continue
+        disqualifying = beyond_email if len(tokens) == 1 else set(sources)
+        if not any(
+            len(token) >= _MIN_LEAKABLE and token not in disqualifying for token in tokens
+        ):
+            continue
+        exempt.add(slug)
+    return exempt
 
 
 def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
@@ -993,11 +1123,18 @@ def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
 
     Empty means clean. This is the backstop behind the allowlist in :func:`build_buckets`,
     and it refuses things the allowlist alone would not notice — a coarsener rewired to
-    return the postal code, or a caller who passes the buyer's email as the pseudonym::
+    return the postal code, an address typed into an order's category field, or a caller who
+    passes the buyer's email as the pseudonym::
 
         >>> account = {"email": "dana.reyes@example.com", "postal_code": "97205"}
         >>> identity_leaks({"pseudonym": "psn-1", "buckets": {"region": "97205"}}, account)
         ['97205']
+
+    Two families of value are held out of the haystack, both **per bucket** and neither
+    account-wide (T-139): the fixed vocabulary the bucket's own coarsener emits
+    (:data:`_BUCKET_VOCABULARY`), and — in ``category_affinity`` only — the account's own
+    category slugs that earn it (:func:`_exempt_category_slugs`). Everything else is matched
+    in full, substring and all.
     """
     data = _serialise(profile)
     pseudonym: Any = None
@@ -1007,14 +1144,19 @@ def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
         body = {key: value for key, value in data.items() if key != "pseudonym"}
 
     fragments = _identity_values(account)
-    incidental = _incidental_bucket_values(account)
+    exempt_slugs = _exempt_category_slugs(account)
     # Each bucket value is searched on its own. Joining them first made a fragment able to
     # match across the seam between two unrelated values, which is a leak report about a
     # string no bucket ever held.
-    searchable = [
-        text.casefold() for text in _text_values(body) if text.strip().casefold() not in incidental
-    ]
-    leaked = {value for value in fragments if any(value in text for text in searchable)}
+    leaked: set[str] = set()
+    for bucket, text in _bucket_texts(body):
+        folded = text.strip().casefold()
+        if folded in _BUCKET_VOCABULARY.get(bucket or "", frozenset()):
+            continue
+        if bucket == "category_affinity" and folded in exempt_slugs:
+            continue
+        haystack = text.casefold()
+        leaked |= {value for value in fragments if value in haystack}
     if isinstance(pseudonym, str):
         name = pseudonym.casefold()
         leaked |= {
@@ -1029,6 +1171,27 @@ def _serialise(value: Any) -> Any:
     if callable(dump):
         return dump()
     return value
+
+
+def _leak_report(account: Mapping[str, Any], leaked: Sequence[str]) -> IdentityLeak:
+    """The refusal :func:`build_profile` raises — carrying no identity of its own (T-133).
+
+    The message names how many values escaped and which ``account`` keys they came from. It
+    does **not** name the values, and it does not name the session subject either: the
+    realistic way this exception is read is a log line or, if a route forgets to catch it, a
+    500 traceback, and both of those are places the buyer's address must not be. The subject
+    is withheld for the same reason — the one mistake worth catching here is a caller passing
+    the email in as the pseudonym, so echoing it discloses exactly when it matters most.
+    """
+    sources = _identity_sources(account)
+    keys = sorted({key for value in leaked for key in sources.get(value, ())})
+    return IdentityLeak(
+        f"R5: buyer identity reached the store-facing profile — {len(leaked)} value(s) from "
+        f"account key(s): {', '.join(keys) or 'unknown'}. The values and the session subject "
+        f"are withheld deliberately; naming them here is what made this refusal a disclosure "
+        f"path of its own.",
+        account_keys=keys,
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -1064,10 +1227,7 @@ def build_profile(account: Mapping[str, Any], pseudonym: str) -> BuyerProfile:
 
     leaked = identity_leaks(profile, account)
     if leaked:
-        raise IdentityLeak(
-            f"R5: buyer identity reached the store-facing profile for pseudonym "
-            f"{pseudonym!r}: {leaked!r}"
-        )
+        raise _leak_report(account, leaked)
     return profile
 
 
@@ -1112,10 +1272,7 @@ def build_profiles(
         profile = BuyerProfile(pseudonym=name, buckets=buckets)
         leaked = identity_leaks(profile, account)
         if leaked:
-            raise IdentityLeak(
-                f"R5: buyer identity reached the store-facing profile for pseudonym "
-                f"{name!r}: {leaked!r}"
-            )
+            raise _leak_report(account, leaked)
         profiles.append(profile)
     return profiles
 
