@@ -99,5 +99,6 @@
   "pending_remeasure": [
     7
   ],
-  "goal_stall_count": 0
+  "goal_stall_count": 0,
+  "last_retire_at": "2026-09-02T23:57:32"
 }
