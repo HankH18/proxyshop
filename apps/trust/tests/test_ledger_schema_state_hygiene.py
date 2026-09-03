@@ -36,6 +36,11 @@ Every live test declares the schema it needs                :func:`test_every_li
 ...and it survives a database in the drop window            :func:`test_the_live_trust_rw_
                                                             test_is_not_graded_against_an_
                                                             unmigrated_database`
+...set up on a throwaway database, never the shared one     :func:`_throwaway_worker_
+                                                            database`
+This module's own drop gives up instead of hanging          :func:`test_this_gates_own_drop_
+                                                            gives_up_instead_of_blocking_
+                                                            the_whole_database`
 No other session can SEE the drop window at all             :func:`test_a_concurrent_reader_
                                                             never_sees_the_owned_schemas_
                                                             disappear`
@@ -63,17 +68,41 @@ What actually closes it is that PostgreSQL's DDL is transactional: drop and re-a
 **one** transaction and there is no intermediate state for anyone to observe.
 :func:`test_a_concurrent_reader_never_sees_the_owned_schemas_disappear` is the measurement
 that says so, and it is written to fail against the advisory-lock-only version.
+
+...and a note on the second correction, which is about this file
+----------------------------------------------------------------
+Fixing ``rebuild_owned_schemas`` and leaving this module's own ``DROP SCHEMA`` alone fixed
+one of the two copies. Both defects an independent verifier then found were in the gate
+itself, and both are measured in the docstrings of the code that closes them:
+
+* :func:`_drop_owned_schemas` ran the identical unbounded drop. Behind one CF-4 reader it
+  hung with no output, survived the kill that ended the run, and committed anyway when the
+  reader released -- leaving the shared worker database with no owned schemas, which is the
+  state this whole module exists to keep it out of. It is bounded and transactional now, and
+  :func:`test_this_gates_own_drop_gives_up_instead_of_blocking_the_whole_database` says so.
+* The gate that used that helper held the shared database schema-less for the whole of a
+  child pytest run: 2091 concurrent reads died ``InvalidSchemaName`` during one *passing*
+  1.38s run of it. The destructive premise now lives in a throwaway database
+  (:func:`_throwaway_worker_database`), so the gate cannot manufacture the flake it grades.
+
+The general lesson, worth more than either fix: a test module that owns destructive
+machinery is subject to its own rules. Every statement in here that drops, truncates or
+migrates is bounded and named as such below.
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
 import os
+import re
+import secrets
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -132,30 +161,143 @@ READER_SELECT_SQL = "select count(*) from ledger.commerce_events"
 #: shows no red, and leaves the shared worker database poisoned behind it.
 GATE_STATEMENT_TIMEOUT = "10s"
 
+#: ``lock_timeout`` for this module's OWN ``DROP SCHEMA`` (:func:`_drop_owned_schemas`).
+#: Same value and the same reasoning as ``_fixtures_ledger_schema.REBUILD_DROP_LOCK_TIMEOUT``
+#: and ``apps/exchange/tests/test_scaffold_datastores.py``'s ``d5_grant_model`` teardown.
+#:
+#: The bound is not decoration; the unbounded version shipped here and was measured. With
+#: one session holding ``ACCESS SHARE`` on ``ledger.commerce_events`` -- the CF-4 shape the
+#: fixtures module documents as routine -- the helper emitted nothing and sat in
+#: ``pg_stat_activity`` as ``state='active', wait_event_type='Lock', wait_event='relation'``
+#: with the four schemas still standing after 8s. Worse, killing the run does not undo it:
+#: a backend blocked on a lock never notices its client is gone, so the DROP stayed *queued*
+#: and landed the instant the reader rolled back -- ``schemas=[] tables=0`` on a database
+#: shared with every other session on this worker.
+GATE_DROP_LOCK_TIMEOUT = "15s"
+
+#: How long the schema *restore* may spend on any one statement. It is a separate bound from
+#: the drop's because it guards a different failure: ``apply_migrations`` opens with an
+#: unconditional, blocking ``pg_advisory_lock`` (``apps/trust/src/ledger/migrations.py``:157)
+#: which no ``lock_timeout`` covers -- that setting governs heavyweight locks only. A
+#: ``statement_timeout`` does cancel it, because a waiting ``pg_advisory_lock`` is a running
+#: statement. Generous, because what it caps is four SQL files (measured: 0.04s for the
+#: whole set, re-applied against this worker's already-migrated database).
+GATE_RESTORE_STATEMENT_TIMEOUT = "60s"
+
+#: Timeouts are interpolated into ``SET``, which takes no query parameters, so the value is
+#: constrained to a literal rather than trusted. Same guard as the fixtures module's.
+_INTERVAL_LITERAL = re.compile(r"^\d+(?:ms|s)$")
+
+#: Scratch worker indices for :func:`_throwaway_worker_database` start here. High enough
+#: that ``proxyshop_w<index>`` cannot collide with a real ``$PROXYSHOP_WORKER`` (D38), and
+#: spread by the real index plus a random suffix so two workers -- or two runs on one
+#: worker -- never pick the same throwaway name.
+SCRATCH_WORKER_BASE = 800_000
+
+#: ``statement_timeout`` set on every connection :func:`_admin_connection` hands out. Those
+#: connections are driven from background threads, and one of them
+#: (``run_blocked_read``) deliberately issues a statement that *waits on another session's
+#: open transaction*. Every such wait is already bounded by the rebuild's own timeouts, so
+#: this is the outer envelope for the case that reasoning is wrong -- a daemon thread parked
+#: in the server cannot be interrupted from Python, and closing its connection from the main
+#: thread while a query is in flight is not something to rely on.
+GATE_CONNECTION_STATEMENT_TIMEOUT = "60s"
+
+
+class GateSetupBlocked(AssertionError):
+    """This module's own destructive setup could not take its locks in time.
+
+    An :class:`AssertionError` because that is precisely what it is: the gate could not
+    establish the premise it grades, and has to say so in red. The alternative -- waiting
+    on the lock -- is the failure this exception exists to prevent: a gate that hangs
+    produces no red, burns the job to its timeout, and leaves a queued ``DROP SCHEMA``
+    behind that fires as soon as whoever it was waiting for lets go.
+    """
+
 
 def _repo_root() -> Path:
     """The checkout this file belongs to -- ``apps/trust/tests/`` is three levels down."""
     return Path(__file__).resolve().parents[3]
 
 
-def _drop_owned_schemas(pg_admin: Any) -> None:
-    """Put the database into exactly the state ``ledger_migrated``'s DROP leaves behind.
+def _drop_owned_schemas(pg_admin: Any, *, lock_timeout: str = GATE_DROP_LOCK_TIMEOUT) -> None:
+    """Put ``pg_admin``'s database into the state ``ledger_migrated``'s DROP leaves behind.
 
-    This is also, byte for byte, the state a freshly created ``proxyshop_w<n>`` is in.
+    That is also, byte for byte, the state a freshly created ``proxyshop_w<n>`` is in --
+    which is why the only caller runs this against a *throwaway* database (see
+    :func:`_throwaway_worker_database`): the state is destructive to be in, and no session
+    that did not ask for it should ever be able to observe it.
+
+    **Bounded, and inside a transaction.** ``DROP SCHEMA ... CASCADE`` needs
+    ``ACCESS EXCLUSIVE`` on every table underneath it, so one session merely reading one of
+    them blocks it -- and an unbounded block here is not a slow test, it is a silent one:
+    measured, this helper's previous form parked in the server behind a CF-4 reader with no
+    output, survived an external kill, and then committed its DROP the moment the reader
+    released. ``SET LOCAL lock_timeout`` turns that into :class:`GateSetupBlocked` in
+    seconds with a diagnostic, and the enclosing transaction means a drop that gives up
+    leaves the four schemas exactly as it found them.
+
+    Args:
+        pg_admin: an **autocommit** admin connection. The drop runs in one explicit
+            transaction on it and commits, because the caller needs the dropped state to be
+            visible to a separate pytest process.
+        lock_timeout: PostgreSQL interval literal the drop waits for its relation locks.
+
+    Raises:
+        GateSetupBlocked: the drop could not take its locks in ``lock_timeout``. Nothing was
+            dropped.
+        ValueError: ``lock_timeout`` is not a bare interval literal.
     """
-    with pg_admin.cursor() as cur:
-        cur.execute(f"drop schema if exists {', '.join(OWNED_SCHEMAS)} cascade")
+    import psycopg
+
+    if not _INTERVAL_LITERAL.match(lock_timeout):
+        raise ValueError(
+            f"lock_timeout={lock_timeout!r} is interpolated into SET LOCAL, which takes no "
+            f"query parameters; it must look like '15s' or '500ms'"
+        )
+    with pg_admin.transaction(), pg_admin.cursor() as cur:
+        cur.execute(f"set local lock_timeout = '{lock_timeout}'")  # noqa: S608
+        try:
+            cur.execute(f"drop schema if exists {', '.join(OWNED_SCHEMAS)} cascade")
+        except psycopg.errors.LockNotAvailable as exc:
+            raise GateSetupBlocked(
+                f"this gate could not drop {', '.join(OWNED_SCHEMAS)} within {lock_timeout}: "
+                f"another session holds a relation lock on one of those tables, most likely "
+                f"a pg_role connection left idle in transaction (CF-4). Nothing was dropped. "
+                f"Waiting instead would produce no output at all, and the drop would still "
+                f"land later -- a backend blocked on a lock does not notice its client is "
+                f"gone. Server said: {exc}"
+            ) from exc
 
 
 def _restore_owned_schemas(pg_admin: Any) -> None:
-    """Put the four schemas back with the checkout's own SQL.
+    """Put the four schemas back with the checkout's own SQL, without ever hanging.
 
     Deliberately calls the migration runner directly rather than the fixture helper the
     tests below grade, so that a teardown here can never be the thing that fails.
+
+    Bounded for the same reason everything else in this module is. ``apply_migrations``
+    opens with a blocking ``pg_advisory_lock`` and then issues ``CREATE``/``GRANT`` against
+    the four schemas, so a second session holding the migration lock, or one reading an
+    owned table, can park this call indefinitely -- in a ``finally``, where a hang means the
+    test that was about to report a real failure never reports anything and the database is
+    left as the failing test made it. ``statement_timeout`` covers the advisory wait (which
+    ``lock_timeout`` does not: that governs heavyweight locks only) and ``lock_timeout``
+    covers the relation waits. Both are session-level ``SET`` on an autocommit connection --
+    ``SET LOCAL`` would not survive into the transaction ``apply_migrations`` opens per
+    file -- so both are reset on the way out.
     """
     from apps.trust.src.ledger import apply_migrations
 
-    apply_migrations(pg_admin)
+    with pg_admin.cursor() as cur:
+        cur.execute(f"set statement_timeout = '{GATE_RESTORE_STATEMENT_TIMEOUT}'")  # noqa: S608
+        cur.execute(f"set lock_timeout = '{GATE_DROP_LOCK_TIMEOUT}'")  # noqa: S608
+    try:
+        apply_migrations(pg_admin)
+    finally:
+        with pg_admin.cursor() as cur:
+            cur.execute("reset statement_timeout")
+            cur.execute("reset lock_timeout")
 
 
 def _present_schemas(pg_admin: Any) -> list[str]:
@@ -186,33 +328,122 @@ def _migration_lock_holders(pg_admin: Any) -> int:
         return int(cur.fetchone()[0])
 
 
-def _admin_connection(worker_index: int, worker_database: str) -> Any:
-    """A fresh autocommit admin connection, independent of the session-scoped ``pg_admin``.
+def _admin_connection(worker_index: int, worker_database: str, *, autocommit: bool = True) -> Any:
+    """A fresh admin connection, independent of the session-scoped ``pg_admin``.
 
-    The concurrency gates below drive a rebuild from a background thread. They do it on a
-    connection of their own rather than on ``pg_admin`` because ``pg_admin`` is *session*
-    scoped: a thread that left it mid-transaction would take every later test in the run
-    down with it.
+    The concurrency gates below drive a rebuild, a reader and a lock holder from
+    connections of their own rather than from ``pg_admin`` because ``pg_admin`` is
+    *session* scoped: a thread -- or a CF-4 reader -- that left it mid-transaction would
+    take every later test in the run down with it.
+
+    **Every connection this module opens gets its statement cap here**, in one place, so
+    that no statement any gate issues can wait in the server without end. That is the
+    property this module is about, and it applies to the module itself.
+
+    Args:
+        autocommit: ``False`` for the CF-4 readers, which must stay *idle in transaction*
+            holding ``ACCESS SHARE``. The cap is committed before the connection is handed
+            back, because ``SET`` is transactional: left uncommitted, the reader's own
+            ``rollback()`` would silently take the cap away with it.
     """
     import psycopg
 
     from proxyshop_support.postgres import role_dsn
 
-    return psycopg.connect(
+    connection = psycopg.connect(
         role_dsn("admin", worker_index, database=worker_database),
-        autocommit=True,
+        autocommit=autocommit,
         connect_timeout=5,
     )
+    with connection.cursor() as cur:
+        cur.execute(f"set statement_timeout = '{GATE_CONNECTION_STATEMENT_TIMEOUT}'")  # noqa: S608
+    if not autocommit:
+        connection.commit()
+    return connection
 
 
-def _run_pytest(nodeid: str) -> subprocess.CompletedProcess[str]:
-    """Run one test in a **fresh** pytest session against this worker's database.
+@contextlib.contextmanager
+def _throwaway_worker_database(pg_admin: Any, worker_index: int) -> Iterator[tuple[int, str]]:
+    """A database of this test's own to be destructive in, dropped again on the way out.
+
+    The gate below needs a database with **no owned schemas** -- that is the premise it
+    grades. Establishing that premise on the shared ``proxyshop_w<N>`` is not a private act:
+    measured on this worker during one ordinary *passing* 1.38s run of that gate, a session
+    in another process polling the target test's own statement against ``proxyshop_w4`` saw
+    ``2091`` failures, every one of them
+    ``InvalidSchemaName: schema "ledger" does not exist``, across a window held open for
+    0.87s. That is the T-216 symptom itself, manufactured on the shared database by the
+    ticket's own gate, every time it runs. So the premise is established somewhere nobody
+    else is looking, exactly as ``_fixtures_ledger_schema.ledger_second_database`` does for
+    the D39 migration tests.
+
+    Created from bare ``template1`` rather than from ``proxyshop_template``: a fresh
+    template1 database *is* the unmigrated state, and ``test_schema_grants.py``'s
+    ``test_a_bare_database_gets_structurally_the_same_schema`` is the standing proof that
+    the migrations bring one up column-for-index identical to this worker's.
+
+    Named ``proxyshop_w<scratch index>`` rather than with a random word, because the
+    subprocess the caller launches can only be pointed at a database *by worker index*
+    (``role_dsn`` rewrites the database component of every DSN to ``proxyshop_w<worker>``,
+    so no ``$PROXYSHOP_PG_DSN_*`` override can redirect it). The index is
+    :data:`SCRATCH_WORKER_BASE` plus this worker's own index plus a random suffix, so it
+    collides neither with a real worker nor with another run of this test.
+
+    Yields:
+        ``(scratch worker index, database name)``.
+    """
+    import psycopg
+
+    from proxyshop_support.postgres import database_name
+
+    scratch_index = SCRATCH_WORKER_BASE + worker_index * 1000 + secrets.randbelow(1000)
+    name = database_name(scratch_index)
+    with pg_admin.cursor() as cur:
+        cur.execute(f'create database "{name}" template template1')
+    try:
+        yield scratch_index, name
+    finally:
+        # Dropped whatever happened: a leaked database is exactly the kind of shared-state
+        # residue this whole ticket is about.
+        last: Exception | None = None
+        for attempt in range(5):
+            try:
+                with pg_admin.cursor() as cur:
+                    cur.execute(
+                        "select pg_terminate_backend(pid) from pg_stat_activity "
+                        " where datname = %s and pid <> pg_backend_pid()",
+                        (name,),
+                    )
+                    cur.execute(f'drop database if exists "{name}"')
+                break
+            except psycopg.errors.ObjectInUse as exc:  # a backend has not gone away yet
+                last = exc
+                time.sleep(0.5 * (attempt + 1))
+        else:
+            raise GateSetupBlocked(
+                f"the throwaway database {name!r} could not be dropped: {last}"
+            ) from last
+
+
+def _run_pytest(nodeid: str, *, worker: int | None = None) -> subprocess.CompletedProcess[str]:
+    """Run one test in a **fresh** pytest session, against the database ``worker`` names.
 
     A subprocess rather than an in-process re-entry because the thing under test is a
     *session*-scoped fixture: only a new session can decide afresh whether to build it.
+
+    Args:
+        nodeid: the test to run, relative to the repo root.
+        worker: ``$PROXYSHOP_WORKER`` for the child. Every Postgres fixture derives the
+            database it connects to from this and from nothing else (D38), so it is the only
+            way to point a whole pytest session at a database other than this worker's --
+            which is what keeps a destructive run off the shared one.
     """
     root = _repo_root()
     env = dict(os.environ)
+    if worker is not None:
+        from proxyshop_support.worker import ENV_VAR as WORKER_ENV_VAR
+
+        env[WORKER_ENV_VAR] = str(worker)
     # The `.pkgroot` packages resolve to THIS checkout, never to whichever tree a stray
     # `.pth` file in the shared virtualenv points at.
     env["PYTHONPATH"] = os.pathsep.join(
@@ -233,7 +464,11 @@ def _run_pytest(nodeid: str) -> subprocess.CompletedProcess[str]:
         env=env,
         capture_output=True,
         text=True,
-        timeout=600,
+        # Measured at 1.4s for the whole child session. The cap is a backstop against a
+        # child that blocks in the server -- generous, but not the ten silent minutes it
+        # was: this module's whole subject is destructive machinery that must fail loudly
+        # rather than wait.
+        timeout=180,
         check=False,
     )
 
@@ -334,24 +569,62 @@ def test_every_live_test_that_names_an_owned_table_declares_the_migration_fixtur
 @pytest.mark.docker("postgres")
 def test_the_live_trust_rw_test_is_not_graded_against_an_unmigrated_database(
     pg_admin: Any,
+    worker_index: int,
 ) -> None:
-    """The reproduction, made deterministic: drop the schemas, then run the real test.
+    """The reproduction, made deterministic: a database with no ledger, then the real test.
 
-    The dropped state is not hypothetical -- it is the exact state ``ledger_migrated``
-    leaves the database in between its ``DROP SCHEMA ... CASCADE`` and the last migration
+    The unmigrated state is not hypothetical -- it is the exact state ``ledger_migrated``
+    leaves a database in between its ``DROP SCHEMA ... CASCADE`` and the last migration
     file, and the state every fresh ``proxyshop_w<n>`` starts in. Before the fix this run
     ends ``psycopg.errors.InvalidSchemaName: schema "ledger" does not exist``; after it, the
     test builds the schema it needs and passes.
 
-    The database is rebuilt on the way out whatever happens, so a red here cannot poison the
-    rest of the session.
+    **On a throwaway database, because the state is contagious.** This gate used to
+    establish that premise by dropping the four schemas on the *shared* ``proxyshop_w<N>``
+    and holding them dropped for the whole child pytest run. Measured during one ordinary
+    passing 1.38s run of exactly that version, with a session in another process polling the
+    target test's own statement against the shared database::
+
+        database=proxyshop_w4 polled=45s reads_ok=182254 failures=2091
+          2091 x InvalidSchemaName: schema "ledger" does not exist
+          window observed open for 0.87s
+
+    Which is the T-216 flake, reproduced on the shared database by the gate that exists to
+    close it. So the premise now lives in a database of this test's own
+    (:func:`_throwaway_worker_database`), and the child session is pointed at it by worker
+    index -- the only lever that redirects a whole pytest session's Postgres fixtures (D38).
+    A fresh ``template1`` database is a *stronger* premise than a mid-drop shared one, not a
+    weaker one: it has never had the schemas at all, and
+    ``test_schema_grants.py::test_a_bare_database_gets_structurally_the_same_schema`` is the
+    standing proof the migrations bring one up identical to this worker's.
+
+    Nothing needs rebuilding on the way out and no ``finally`` has to repair anything: the
+    database this test damages ceases to exist.
     """
-    _drop_owned_schemas(pg_admin)
-    assert _present_schemas(pg_admin) == [], "the drop did not take; the premise is not set up"
-    try:
-        result = _run_pytest(TARGET_NODEID)
-    finally:
-        _restore_owned_schemas(pg_admin)
+    import psycopg
+
+    with _throwaway_worker_database(pg_admin, worker_index) as (scratch_index, scratch_database):
+        scratch = _admin_connection(scratch_index, scratch_database)
+        try:
+            _drop_owned_schemas(scratch)
+            assert _present_schemas(scratch) == [], (
+                f"{scratch_database} was created from bare template1 and dropped from "
+                f"again, and still reports owned schemas; the premise is not set up"
+            )
+            # The premise, armed rather than assumed: this is the database state in which
+            # the statement the flake was reported from actually fails. A green child run
+            # against a database where it could never have failed would prove nothing.
+            with pytest.raises(psycopg.Error) as unmigrated, scratch.cursor() as cur:
+                cur.execute(READER_PRIVILEGE_SQL)
+        finally:
+            scratch.close()
+
+        assert type(unmigrated.value).__name__ in {"InvalidSchemaName", "UndefinedTable"}, (
+            f"{READER_PRIVILEGE_SQL} raised {unmigrated.value!r} against a database with no "
+            f"owned schemas, rather than the T-216 symptom. The premise this gate grades is "
+            f"not the reported one."
+        )
+        result = _run_pytest(TARGET_NODEID, worker=scratch_index)
 
     output = result.stdout + result.stderr
     assert "InvalidSchemaName" not in output, (
@@ -360,8 +633,101 @@ def test_the_live_trust_rw_test_is_not_graded_against_an_unmigrated_database(
         f"inherit the schema from whatever ran before it.\n{output[-4000:]}"
     )
     assert result.returncode == 0, (
-        f"running {TARGET_NODEID} against a database in the migration fixture's drop "
-        f"window exited {result.returncode}.\n{output[-4000:]}"
+        f"running {TARGET_NODEID} against a database with none of the owned schemas -- the "
+        f"migration fixture's drop window, and every fresh worker database -- exited "
+        f"{result.returncode}.\n{output[-4000:]}"
+    )
+
+
+@pytest.mark.docker("postgres")
+def test_this_gates_own_drop_gives_up_instead_of_blocking_the_whole_database(
+    pg_admin: Any,
+    worker_database: str,
+    worker_index: int,
+) -> None:
+    """The bound on :func:`_drop_owned_schemas`, asserted the only way that means anything.
+
+    The sibling gate below asserts this property of ``rebuild_owned_schemas``. This module
+    then shipped a *second* copy of the same unbounded statement in its own setup helper,
+    which is why the property is now asserted about both. Measured on this worker against
+    the unbounded version, with one session holding ``ACCESS SHARE`` on
+    ``ledger.commerce_events`` (the CF-4 shape ``_fixtures_ledger_schema`` documents as
+    routine)::
+
+        after 8.0s: drop returned=False error=[]
+          pg_stat_activity: ('active', 'Lock', 'relation', 'drop schema if exists ...')
+        while blocked: schemas=['app', 'ledger', 'sealed', 'vault'] tables=29
+        releasing the reader...
+        after release: schemas=[] tables=0
+
+    Two things in that transcript, not one. The helper hangs -- the whole test run emits
+    nothing and has to be killed from outside -- and the DROP it queued is **not** cancelled
+    by that kill: a backend waiting on a lock never learns its client is gone, so the drop
+    lands the moment the other session lets go, on a database shared with every other test
+    on this worker.
+
+    ``statement_timeout`` here is this gate's own safety net, for the same reason its
+    siblings have one: the failure being guarded against is an unbounded block *inside the
+    server*, which no Python-side timeout can interrupt, so a regressed version would hang
+    this test rather than fail it. ``lock_timeout='1s'`` keeps the run to a second rather
+    than to the fifteen the helper defaults to; the mechanism asserted is the same one.
+    """
+    import psycopg
+
+    from apps.trust.tests._fixtures_ledger_schema import rebuild_owned_schemas
+
+    rebuild_owned_schemas(pg_admin)
+    before = _present_schemas(pg_admin)
+    assert before == sorted(OWNED_SCHEMAS), f"setup failed: only {before} are present"
+
+    # Deliberately NOT autocommit: the SELECT leaves this session idle in transaction
+    # holding ACCESS SHARE on ledger.commerce_events, which is the CF-4 shape exactly.
+    reader = _admin_connection(worker_index, worker_database, autocommit=False)
+    message = ""
+    try:
+        with reader.cursor() as cur:
+            cur.execute(READER_SELECT_SQL)
+            cur.fetchone()
+        with pg_admin.cursor() as cur:
+            cur.execute(f"set statement_timeout = '{GATE_STATEMENT_TIMEOUT}'")  # noqa: S608
+
+        started = time.monotonic()
+        try:
+            _drop_owned_schemas(pg_admin, lock_timeout="1s")
+        except GateSetupBlocked as exc:
+            message = str(exc)
+        except psycopg.errors.QueryCanceled as exc:
+            pytest.fail(
+                f"this module's own DROP waited on the reader's ACCESS SHARE lock with no "
+                f"bound of its own and was stopped only by the {GATE_STATEMENT_TIMEOUT} "
+                f"statement_timeout this test sets. Unbounded it blocks silently until "
+                f"something outside kills the run, and the drop it queued still commits "
+                f"afterwards -- leaving this worker's shared database with no owned schemas "
+                f"at all. Set lock_timeout before the drop. Server said: {exc}"
+            )
+        else:
+            pytest.fail(
+                "the DROP succeeded while another session held ACCESS SHARE on "
+                "ledger.commerce_events, which Postgres does not permit -- the premise of "
+                "this test is not set up"
+            )
+        finally:
+            elapsed = time.monotonic() - started
+            with pg_admin.cursor() as cur:
+                cur.execute("reset statement_timeout")
+    finally:
+        reader.rollback()
+        reader.close()
+        if _present_schemas(pg_admin) != sorted(OWNED_SCHEMAS):
+            _restore_owned_schemas(pg_admin)
+
+    assert elapsed < 8.0, (
+        f"the blocked drop took {elapsed:.1f}s to give up on a lock it was told to wait 1s for"
+    )
+    assert "lock" in message.lower(), message
+    assert _present_schemas(pg_admin) == before, (
+        "the drop timed out and still tore the schemas down. Running it inside a "
+        "transaction is what makes a drop that cannot complete leave nothing behind."
     )
 
 
@@ -535,11 +901,7 @@ def test_the_rebuilds_drop_gives_up_instead_of_blocking_the_whole_database(
 
     # Deliberately NOT autocommit: the SELECT leaves this session idle in transaction
     # holding ACCESS SHARE on ledger.commerce_events, which is the CF-4 shape exactly.
-    from proxyshop_support.postgres import role_dsn
-
-    reader = psycopg.connect(
-        role_dsn("admin", worker_index, database=worker_database), connect_timeout=5
-    )
+    reader = _admin_connection(worker_index, worker_database, autocommit=False)
     message = ""
     try:
         with reader.cursor() as cur:
@@ -629,21 +991,30 @@ def test_the_schema_rebuild_refuses_to_drop_while_another_session_holds_the_migr
         LedgerSchemaRebuildError,
         rebuild_owned_schemas,
     )
-    from proxyshop_support.postgres import role_dsn
 
     rebuild_owned_schemas(pg_admin)
     before = _present_schemas(pg_admin)
     assert before == sorted(OWNED_SCHEMAS), f"setup failed: only {before} are present"
 
-    blocker = psycopg.connect(
-        role_dsn("admin", worker_index, database=worker_database),
-        autocommit=True,
-        connect_timeout=5,
-    )
+    blocker = _admin_connection(worker_index, worker_database)
     message = ""
     try:
         with blocker.cursor() as cur:
-            cur.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+            try:
+                # Blocking, not `pg_try_advisory_lock`: this test's premise is that the key
+                # is HELD while the rebuild runs. It is bounded by the cap
+                # `_admin_connection` puts on this connection, because a key some *other*
+                # session already holds would otherwise park the premise itself forever --
+                # the same unbounded-wait failure this module grades everywhere else.
+                cur.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+            except psycopg.errors.QueryCanceled as exc:
+                pytest.fail(
+                    f"another session on this database already holds the migration "
+                    f"advisory lock ({MIGRATION_LOCK_KEY}), so this test could not take it "
+                    f"and its premise cannot be set up. Two pytest sessions sharing one "
+                    f"proxyshop_w<N> means two runs share a $PROXYSHOP_WORKER (D38). "
+                    f"Server said: {exc}"
+                )
         with pg_admin.cursor() as cur:
             cur.execute(f"set statement_timeout = '{GATE_STATEMENT_TIMEOUT}'")  # noqa: S608
         started = time.monotonic()

@@ -186,6 +186,14 @@ REBUILD_LOCK_TIMEOUT_SECONDS = 60.0
 #: ``apps/exchange/tests/test_scaffold_datastores.py``'s ``d5_grant_model`` teardown.
 REBUILD_DROP_LOCK_TIMEOUT = "15s"
 
+#: ``lock_timeout`` for :func:`ledger_clean`'s ``TRUNCATE``. Same bound as the rebuild's
+#: drop, and there for the same reason in a milder form: ``TRUNCATE`` needs
+#: ``ACCESS EXCLUSIVE`` on every table it names, so one ``pg_role`` connection left idle in
+#: transaction (CF-4 above) blocks it -- and with no bound it does not fail, it *hangs*,
+#: which reads as a stuck test with nothing in the output to point at. That is the exact
+#: symptom CF-4 documents; this makes it a red fixture with a diagnosis instead.
+CLEAN_TRUNCATE_LOCK_TIMEOUT = REBUILD_DROP_LOCK_TIMEOUT
+
 #: ``lock_timeout`` is interpolated into ``SET LOCAL``, which takes no query parameters, so
 #: the value is constrained to a literal rather than trusted.
 _LOCK_TIMEOUT_PATTERN = re.compile(r"^\d+(?:ms|s)$")
@@ -193,6 +201,10 @@ _LOCK_TIMEOUT_PATTERN = re.compile(r"^\d+(?:ms|s)$")
 
 class LedgerSchemaRebuildError(RuntimeError):
     """The four owned schemas could not be rebuilt, or were not there afterwards."""
+
+
+class LedgerCleanBlockedError(RuntimeError):
+    """``ledger_clean`` could not take the locks its ``TRUNCATE`` needs (CF-4)."""
 
 
 def rebuild_owned_schemas(
@@ -399,9 +411,23 @@ def ledger_clean(ledger_migrated: str, pg_admin: Any) -> Iterator[Any]:
     ``pg_role`` connection, which is what keeps it clear of CF-4. A test that truncates
     again mid-body must call ``ledger_roles.reset()`` first.
     """
+    import psycopg
+
     tables = ", ".join((*LEDGER_TABLES, *APP_TABLES, *SEALED_TABLES, *VAULT_TABLES))
-    with pg_admin.cursor() as cur:
-        cur.execute(f"truncate table {tables} restart identity cascade")  # noqa: S608
+    with pg_admin.transaction(), pg_admin.cursor() as cur:
+        cur.execute(f"set local lock_timeout = '{CLEAN_TRUNCATE_LOCK_TIMEOUT}'")  # noqa: S608
+        try:
+            cur.execute(f"truncate table {tables} restart identity cascade")  # noqa: S608
+        except psycopg.errors.LockNotAvailable as exc:
+            raise LedgerCleanBlockedError(
+                f"ledger_clean could not TRUNCATE the owned tables within "
+                f"{CLEAN_TRUNCATE_LOCK_TIMEOUT}: another session holds a lock on one of "
+                f"them. Inside this run that is CF-4 above -- a pg_role connection left "
+                f"idle in transaction by an earlier test; roll it back or close it (or go "
+                f"through LedgerRoleRunner, which does it for you) before asking for this "
+                f"fixture. Nothing was truncated. Unbounded, this does not fail, it hangs, "
+                f"and a hung fixture reports nothing at all. Server said: {exc}"
+            ) from exc
     yield pg_admin
 
 
