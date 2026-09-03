@@ -755,3 +755,106 @@ def test_two_candidates_sharing_a_bid_id_never_produce_two_identical_slots():
     assert len(set(refs)) == len(refs), f"a bid_ref occupies two slots: {refs}"
     assert len(set(kinds)) == len(kinds), f"a slot name is used twice: {kinds}"
     assert refs == ["bid-dup", "bid-c"]
+
+
+# ---------------------------------------------------------------------------------
+# NaN. Its own section because it is not "a wrong number" — it is a value that makes
+# the sort comparator INCONSISTENT, and `sorted()` given an inconsistent comparator
+# returns an order that depends on where the poisoned element sat in the input. That
+# is R11's "input order must not decide output order" lost, silently.
+# ---------------------------------------------------------------------------------
+import itertools  # noqa: E402
+import math  # noqa: E402
+
+_NAN = float("nan")
+
+
+@pytest.mark.parametrize(
+    "field", ["intent_match", "price_value", "delivery_fit", "verified_claim_ratio"]
+)
+@pytest.mark.parametrize("bad", [_NAN, float("inf"), float("-inf")])
+def test_a_non_finite_feature_never_reaches_the_score(field, bad):
+    """A feature that is not a finite number is unreadable, so it reads the published
+    neutral — exactly as an absent one does — rather than propagating into rank_score."""
+    from apps.exchange.src.ranking import rank
+
+    cand = make_candidate("bid-a", "store-a", **{field: bad})
+    result = rank([cand], make_intent(), make_trust_snapshot(["store-a"]), make_config())
+    row = _by_bid(result)["bid-a"]
+    assert math.isfinite(row["rank_score"]), f"{field}={bad!r} produced {row['rank_score']}"
+    assert all(math.isfinite(v) for v in row["components"].values()), row["components"]
+    assert row["features"][field] == 0.5, "an unreadable feature must read the neutral value"
+
+
+def test_a_non_finite_trust_score_never_reaches_the_score():
+    from apps.exchange.src.ranking import rank
+
+    snapshot = make_trust_snapshot(["store-a"])
+    snapshot["store-a"]["score"] = _NAN
+    result = rank([make_candidate("bid-a", "store-a")], make_intent(), snapshot, make_config())
+    row = _by_bid(result)["bid-a"]
+    assert math.isfinite(row["rank_score"])
+    assert row["trust"] is None, "an unreadable trust score must not masquerade as a number"
+
+
+def test_an_unreadable_policy_penalty_takes_the_maximum_not_zero():
+    """`min(nan, cap)` is nan. Of the two safe answers, assuming the worst is the one that
+    does not reward a producer whose penalty arithmetic broke."""
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+
+    from apps.exchange.src.ranking import rank
+
+    cap = float(DEFAULT_RANKING_WEIGHTS.penalties.max_total_penalty)
+    for bad in (_NAN, float("inf"), "not-a-number"):
+        cand = make_candidate("bid-a", "store-a", policy_penalties=bad)
+        row = _by_bid(rank([cand], make_intent(), make_trust_snapshot(["store-a"]), make_config()))[
+            "bid-a"
+        ]
+        assert math.isfinite(row["rank_score"]), f"policy_penalties={bad!r}"
+        assert row["components"]["policy_penalties"] == pytest.approx(-cap), bad
+
+
+def test_a_nan_candidate_cannot_make_the_order_depend_on_input_position():
+    """The regression that matters: with a NaN in play the ranked order used to come out
+    four different ways across the six permutations of three candidates, and the poisoned
+    candidate took the top shortlist slot whenever it happened to be passed first."""
+    from apps.exchange.src.ranking import rank
+
+    best = make_candidate(
+        "bid-best",
+        "store-b",
+        intent_match=1.0,
+        price_value=1.0,
+        delivery_fit=1.0,
+        verified_claim_ratio=1.0,
+    )
+    worst = make_candidate(
+        "bid-worst",
+        "store-w",
+        intent_match=0.0,
+        price_value=0.0,
+        delivery_fit=0.0,
+        verified_claim_ratio=0.0,
+    )
+    poisoned = make_candidate(
+        "bid-nan",
+        "store-n",
+        intent_match=_NAN,
+        price_value=1.0,
+        delivery_fit=1.0,
+        verified_claim_ratio=1.0,
+    )
+    snapshot = make_trust_snapshot(["store-b", "store-w", "store-n"])
+
+    orders = set()
+    slot_leads = set()
+    for perm in itertools.permutations([best, worst, poisoned]):
+        result = rank(list(perm), make_intent(), snapshot, make_config())
+        orders.add(tuple(_order(result)))
+        slot_leads.add(_slot_refs(result)[0])
+
+    assert len(orders) == 1, f"input order decided the ranked order: {sorted(orders)}"
+    assert len(slot_leads) == 1, f"input order decided the leading slot: {slot_leads}"
+    assert next(iter(orders))[0] == "bid-best", (
+        "the genuinely best candidate must lead; a poisoned one must not outrank it"
+    )

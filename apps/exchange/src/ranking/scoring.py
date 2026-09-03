@@ -26,6 +26,7 @@ quietly stop having if the code merely multiplied five numbers together:
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RANK_FEATURES, RankingWeights
@@ -48,12 +49,25 @@ CANDIDATE_FEATURES: tuple[str, ...] = (
 
 
 def _number(value: Any) -> float | None:
+    """`value` as a finite float, or `None` when it is not one.
+
+    NaN is why this rejects rather than merely converts. NaN survives `float()`, then defeats
+    `_clamp` (both `<` and `>` are False against it, so it passes through unchanged) and
+    reaches `rank_score`. A NaN score is not just a wrong number: it makes the sort
+    comparator INCONSISTENT, and `sorted()` over an inconsistent comparator returns an order
+    that depends on where the poisoned element sat in the input — measured at four different
+    orders over the six permutations of three candidates, with the NaN candidate taking the
+    top shortlist slot whenever it was passed first. That is precisely the "input order must
+    not decide output order" guarantee (R11) being lost, so the value is refused here, at the
+    edge, rather than defended against downstream.
+    """
     if isinstance(value, bool) or value is None:
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _clamp(value: float, weights: RankingWeights) -> float:
@@ -81,10 +95,10 @@ def feature_vector(
 
     vector: dict[str, float] = {}
     for name in RANK_FEATURES:
-        if name == "trust":
-            raw = trust_score
-        else:
-            raw = _number(read(candidate, name, None))
+        # `trust` goes through the same guard as the rest: a snapshot whose `score` is NaN is
+        # as unreadable as one that omits it, and reading it as a number would poison the
+        # score of every candidate from that store.
+        raw = _number(trust_score) if name == "trust" else _number(read(candidate, name, None))
         if raw is None:
             raw = when_absent.get(name, midpoint)
         vector[name] = _clamp(float(raw), weights)
@@ -98,12 +112,24 @@ def penalty_of(candidate: Any, weights: RankingWeights) -> float:
     its open policy events hands a number in `policy_penalties`, and one that has the raw
     event kinds hands them in `policy_events`. Both go through the published catalogue's
     `max_total_penalty`, so neither can drive a score arbitrarily negative.
+
+    A penalty that is PRESENT but not a finite number takes the published maximum rather than
+    zero. `min(nan, 1.0)` is `nan`, which would poison the score; and of the two safe answers,
+    "we could not read this store's penalty, so assume the worst" is the one that does not
+    reward a producer whose penalty arithmetic broke. `inf` already behaved this way — it is
+    only NaN that needed saying out loud.
     """
     kinds = read(candidate, "policy_events", None)
     if kinds:
-        return float(weights.total_penalty(kinds))
-    raw = _number(read(candidate, "policy_penalties", None))
-    if raw is None or raw <= 0.0:
+        total = float(weights.total_penalty(kinds))
+        return total if math.isfinite(total) else float(weights.penalties.max_total_penalty)
+    declared = read(candidate, "policy_penalties", None)
+    if declared is None:
+        return 0.0
+    raw = _number(declared)
+    if raw is None:
+        return float(weights.penalties.max_total_penalty)
+    if raw <= 0.0:
         return 0.0
     return min(raw, float(weights.penalties.max_total_penalty))
 

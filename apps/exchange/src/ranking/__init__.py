@@ -110,14 +110,18 @@ def _auction_id(candidates: Sequence[Any], intent: Any, config: Any) -> str:
 
 
 def _price_of(offer: Any) -> float | None:
+    """The offer's price for the published price tie-break, or `None` when there is not a
+    finite one. A NaN price would make the tie-break comparator inconsistent."""
     for name in ("total_price", "unit_price", "price"):
         raw = read(offer, name, None)
         if raw is None or isinstance(raw, bool):
             continue
         try:
-            return float(raw)
+            price = float(raw)
         except (TypeError, ValueError):
             continue
+        if math.isfinite(price):
+            return price
     return None
 
 
@@ -128,7 +132,12 @@ def _sort_key(row: Mapping[str, Any], tie_breakers: Sequence[str]) -> tuple:
     deployment that publishes a different order gets that order applied instead of this
     module's opinion of it.
     """
-    key: list[Any] = [-float(row["rank_score"])]
+    # Belt and braces against a non-finite score. `scoring._number` refuses NaN at the edge
+    # so this cannot fire today, but the cost of being wrong here is not a wrong order — it
+    # is an INCONSISTENT comparator, and `sorted()` given one returns an order that depends
+    # on input position. A guard that keeps the comparator total is worth one line.
+    raw_score = float(row["rank_score"])
+    key: list[Any] = [-raw_score if math.isfinite(raw_score) else math.inf]
     for name in tie_breakers:
         direction = TIE_BREAK_DIRECTIONS.get(name, 1)
         value = row.get(name)
@@ -140,13 +149,14 @@ def _sort_key(row: Mapping[str, Any], tie_breakers: Sequence[str]) -> tuple:
                 raise ValueError(f"tie-breaker {name!r} is a string and cannot sort descending")
             key.append(value)
             continue
-        if value is None:
+        number = None if value is None else float(value)
+        if number is None or not math.isfinite(number):
             # An unreadable tie-break value sorts LAST whichever way the field sorts. The
             # alternative — reading it as 0.0 — would make an unknown price the cheapest one
-            # in the auction.
+            # in the auction, and a NaN one would make the comparator inconsistent.
             key.append(math.inf)
             continue
-        key.append(direction * float(value))
+        key.append(direction * number)
     if "bid_id" not in tie_breakers:
         key.append(str(row["bid_id"]))
     return tuple(key)
@@ -202,9 +212,14 @@ def rank(
             raw_trust = read(row_of_store, "score", None)
             if raw_trust is not None and not isinstance(raw_trust, bool):
                 try:
-                    trust_score = float(raw_trust)
+                    candidate_trust = float(raw_trust)
                 except (TypeError, ValueError):
-                    trust_score = None
+                    candidate_trust = None
+                # A snapshot score that is not a finite number is unreadable, not a number.
+                # Leaving it as NaN here would put NaN in the `trust` tie-break as well as in
+                # the score, and both comparators need it to be a real number or absent.
+                if candidate_trust is not None and math.isfinite(candidate_trust):
+                    trust_score = candidate_trust
         offer = read(candidate, "offer", None)
 
         row: dict[str, Any] = {
