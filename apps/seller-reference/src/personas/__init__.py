@@ -66,6 +66,7 @@ from contracts import (
     canonical_authority_rank,
     claim_id,
 )
+
 from fixtures.manifest import load_manifest
 
 #: The ONLY provenance an unharnessed seller may assert. See the module docstring: the other
@@ -187,7 +188,9 @@ def build_persona(name: str, *, manifest: Any = None) -> Persona:
         )
     block = personas[name]
     if not isinstance(block, dict):
-        raise PersonaError(f"manifest.personas.{name} must be an object, got {type(block).__name__}")
+        raise PersonaError(
+            f"manifest.personas.{name} must be an object, got {type(block).__name__}"
+        )
 
     scripted = block.get("scripted_claims") or block.get("claims")
     if not isinstance(scripted, list) or not scripted:
@@ -196,7 +199,9 @@ def build_persona(name: str, *, manifest: Any = None) -> Persona:
             "ground truth to be graded against"
         )
 
-    script = tuple(_validate_entry(entry, persona=name, index=i) for i, entry in enumerate(scripted))
+    script = tuple(
+        _validate_entry(entry, persona=name, index=i) for i, entry in enumerate(scripted)
+    )
     return Persona(
         name=name,
         store_id=_optional_str(block.get("store_id")),
