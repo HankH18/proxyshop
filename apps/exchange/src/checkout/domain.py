@@ -116,10 +116,26 @@ def _reason(url: str, registered_domain: str, *, secret: str = "") -> str | None
         # defeated pass 2: a boundary redactor holding the URL as a value never contained
         # this string, and `.lower()` put it out of reach of a case-sensitive literal layer.
         # It is guarded HERE, where it is known to have come off a merchant reply.
+        #
+        # `expected` is guarded for a reason that is easy to miss and is the whole of the
+        # build-site claim. It reads like the PLATFORM's value — and it is, on a call site
+        # that wired `CheckoutRequest.registered_domains`. On the DEFAULT unwired path,
+        # which is the legacy behaviour the frozen contract pins,
+        # `registered_domain_for` returns `request.store_domain`, read straight off the bid
+        # — so it is merchant-authored, it is a *third* independently normalised string
+        # (`.strip().lower().rstrip(".")`) that no boundary redactor holds as a value, and a
+        # store is free to spell the code it is about to mint in it. Measured at the build
+        # site: with `secret="PSX-Ω-42"` and a bid claiming `xn--psx--42-bkf.example.com`,
+        # this sentence published a recoverable code. Downstream fail-closed layers happened
+        # to catch it end to end, which is precisely why it must be guarded here: the claim
+        # this module makes is that EVERY merchant-controlled fragment renders through a
+        # guard at the point it is built, and a fragment that relies on a later layer is a
+        # fragment the next refactor publishes.
         return (
             f"checkout_url host {safe_token(actual, secret, label='host')!r} is not the "
-            f"registered seller domain {expected!r} — hosts are compared by exact equality "
-            f"(D22/C10)"
+            f"registered seller domain "
+            f"{safe_token(expected, secret, label='registered-domain')!r} — hosts are "
+            f"compared by exact equality (D22/C10)"
         )
     return None
 

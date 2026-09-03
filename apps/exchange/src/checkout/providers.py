@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .codes import code_expiry, mint_code
+from .codes import code_expiry, mint_code, record_minted_code
 from .provider import (
     CheckoutProvider,
     CheckoutRequest,
@@ -128,7 +128,16 @@ class ShopifyCheckoutProvider(CheckoutProvider):
                 f"{_reply_shape(reply)}"
             )
 
-        # From here the merchant's code EXISTS. `CheckoutProvider.checkout` cannot guard this
+        # From here the merchant's code EXISTS — so the FIRST thing done with it is to
+        # report it into the port's minting ledger, before anything that could raise. The
+        # port opens that ledger around its call to `mint` and reads it in its own handler,
+        # so this adapter is covered by the port's T-202 guarantee the same way
+        # `SimulatedRedirectProvider` is, and the handler below is the more informative
+        # inner layer rather than the only one. A merchant's code is not minted through
+        # `mint_code`, which reports itself — so it has to be reported here.
+        record_minted_code(str(code))
+
+        # `CheckoutProvider.checkout` cannot guard this
         # region — it only wraps what happens after `mint` returns — so anything that raises
         # between the merchant's answer and that return would lose the code exactly the way
         # T-157 lost it one level up. Nothing below is *expected* to raise: the port already

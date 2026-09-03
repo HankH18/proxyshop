@@ -58,7 +58,9 @@ from .codes import (
     code_expiry,
     expiry_epoch,
     mint_code,
+    minting_ledger,
     offer_quantity,
+    record_minted_code,
 )
 from .discounts import (
     FIXED_AMOUNT_DISCOUNT_TYPES,
@@ -109,7 +111,7 @@ from .providers import (
     ShopifyCheckoutProvider,
     SimulatedRedirectProvider,
 )
-from .redaction import recoverable_spellings
+from .redaction import recoverable_spellings, rendered_exception
 from .registry import (
     CHECKOUT_MODES,
     DEFAULT_CHECKOUT_MODE,
@@ -171,14 +173,17 @@ __all__ = [
     "expiry_epoch",
     "is_on_domain",
     "mint_code",
+    "minting_ledger",
     "offer_discount_percentage",
     "offer_quantity",
+    "record_minted_code",
     "recoverable_spellings",
     "redact_code",
     "redact_url",
     "register_provider",
     "registered_domain_for",
     "registered_modes",
+    "rendered_exception",
     "resolve_provider",
     "safe_token",
     "shopify_discount_percentage",

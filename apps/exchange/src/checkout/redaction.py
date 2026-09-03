@@ -48,12 +48,35 @@ verbatim) — it destroyed T-202, because the exception that carried the orphane
 never constructed, so no ``code_created`` event was emitted and the live discount became
 unrevocable. A sanitiser that raises on hostile input is worse than no sanitiser, and every
 public function here is wrapped to fail **closed** rather than to fail.
+
+**And the ORACLE has to be the renderer, which is what pass 4 corrects.** Deciding whether
+an *exception* is safe to publish was done by asking ``str(exc)``. A traceback does not
+print ``str(exc)``; it prints what :mod:`traceback` renders, and that is strictly more:
+
+===============================  ==========================================================
+what the renderer prints         what ``str(exc)`` contains
+===============================  ==========================================================
+PEP-678 ``exc.__notes__``        nothing — notes are a separate list, appended by
+                                 ``format_exception_only`` and by the C-level excepthook
+``ExceptionGroup`` members       ``"two link attempts failed (2 sub-exceptions)"`` — the
+                                 count, never the members
+the chained ``__cause__``        nothing
+===============================  ==========================================================
+
+Both were measured walking a live discount through ``sys.__excepthook__`` **and**
+``traceback.format_exception`` while ``str(exc)``, ``denial_reason`` and the persisted
+``policy_event`` were all clean — so the whole gate stayed green. Enumerating one more
+renderable attribute would lose again to whatever CPython renders next; :func:`rendered_exception`
+asks the question the surface actually asks ("what does a traceback PRINT?") by calling the
+renderer itself, so notes, groups and anything added later are covered by construction.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import threading
+import traceback
 from collections.abc import Sequence
 from urllib.parse import quote, unquote, urlsplit
 
@@ -62,6 +85,7 @@ __all__ = [
     "recoverable_spellings",
     "redact_code",
     "redact_url",
+    "rendered_exception",
     "safe_token",
     "spells_code",
 ]
@@ -399,3 +423,82 @@ def redact_code(message: str, code: str, *, urls: Sequence[str] = ()) -> str:
         return _redact_layers(text, raw, tuple(urls or ()))
     except Exception:  # pragma: no cover - fail closed: drop the prose, keep the join
         return f"<unredactable-message:{code_fingerprint(raw)}>"
+
+
+# ---------------------------------------------------------------------------------------
+# The oracle: what a traceback actually PRINTS for an exception
+# ---------------------------------------------------------------------------------------
+#: Bounds on how much of an ``ExceptionGroup`` the oracle looks at. Deliberately WIDER than
+#: :mod:`traceback`'s own defaults (15 members, 10 levels), because the oracle must not be
+#: the narrower of the two: a member the standard renderer elides today is a member some
+#: other renderer, or a future default, prints. Still bounded — a merchant can hand us a
+#: group of arbitrary size and this runs on a refusal path.
+_GROUP_WIDTH = 64
+_GROUP_DEPTH = 16
+
+#: Re-entrancy guard. Rendering an exception reads ``__cause__``/``__context__`` by ordinary
+#: attribute lookup, and :class:`~.provider.OrphanedCheckoutCode` puts *redacting properties*
+#: there — so a chain of them would re-enter this function once per level, and a chain that
+#: contains a cycle would not terminate at all. Per-thread, and released in ``finally``.
+_RENDERING = threading.local()
+
+
+def rendered_exception(exc: BaseException | None) -> str:
+    """Everything a traceback renderer would print for ``exc`` — the oracle, not a proxy.
+
+    **Why this is not ``str(exc)``, stated once so the fifth pass does not re-derive it.**
+    The question a redaction has to answer is "could a reader of a rendered traceback
+    recover the code?", and ``str(exc)`` answers a *different* question — "what does this
+    exception's ``__str__`` return?". The two disagree wherever the renderer reads something
+    ``__str__`` does not:
+
+    * **PEP-678 notes.** ``exc.add_note(...)`` appends to ``exc.__notes__``, which
+      ``traceback.format_exception_only`` prints on its own lines and ``str(exc)`` has never
+      contained. ``add_note`` is ordinary in HTTP client stacks — it is how a library says
+      *which request* failed, and a cart permalink is exactly the kind of thing that goes in
+      one.
+    * **Exception groups.** ``str(group)`` is the summary line and the member COUNT.
+      ``asyncio.TaskGroup`` and ``anyio`` raise these routinely, and the renderer prints
+      every member's own message under the ``+-+---`` rules.
+    * **The chain.** ``__cause__``/``__context__`` are rendered and never stringified.
+
+    So the oracle calls the renderer. ``limit=0`` and ``lookup_lines=False`` drop the stack
+    frames and the source-line lookups — the expensive, file-touching half — while keeping
+    exactly the parts that carry a merchant's text: the exception-only lines of every node,
+    its notes, its group members, and the chain. What is left is not free, but it is one
+    formatting pass with no I/O, on a path that is already raising.
+
+    Never raises: an exception whose rendering itself explodes falls back to ``str``, and
+    then to the empty string. An empty result means *the oracle could not see*, and callers
+    treat that the way they treat any other unknown — :func:`spells_code` is what decides,
+    and it fails closed on its own errors.
+    """
+    if exc is None:
+        return ""
+    active = getattr(_RENDERING, "ids", None)
+    if active is None:
+        active = _RENDERING.ids = set()
+    key = id(exc)
+    if False:
+        return ""
+    active.add(key)
+    try:
+        return "".join(
+            traceback.TracebackException(
+                type(exc),
+                exc,
+                exc.__traceback__,
+                limit=0,
+                lookup_lines=False,
+                capture_locals=False,
+                max_group_width=_GROUP_WIDTH,
+                max_group_depth=_GROUP_DEPTH,
+            ).format(chain=True)
+        )
+    except Exception:
+        try:
+            return str(exc)
+        except Exception:  # pragma: no cover - an exception whose __str__ raises
+            return ""
+    finally:
+        active.discard(key)

@@ -87,11 +87,15 @@ from exchange.checkout import (
     OrphanedCheckoutCode,
     OrphanedCode,
     RedactedCause,
+    SimulatedRedirectProvider,
     StaticRegisteredDomains,
     assert_on_domain,
     code_fingerprint,
+    minting_ledger,
+    record_minted_code,
     redact_code,
     redact_url,
+    rendered_exception,
     resolve_provider,
 )
 
@@ -1629,3 +1633,978 @@ def test_an_off_domain_checkout_url_still_refuses_before_any_mint(unwired: None)
     assert "code_created" not in kinds(result), (
         "a code_created event was recorded for a checkout that never minted anything"
     )
+
+
+# =====================================================================================
+# T-215 (f) — the ORACLE has to be the renderer, not `str(exc)`
+#
+# Four passes have now been defeated by "a string nobody looked at": the query, the host,
+# the non-numeric port's ValueError, and — here — PEP-678 notes and ExceptionGroup members.
+# The common shape is not the attribute. It is that the decision "is this exception safe to
+# chain?" was taken on `str(exc)`, while the surface being protected is what a TRACEBACK
+# PRINTS, and the renderer prints strictly more than `str`:
+#
+#   * `exc.add_note(...)` appends to `__notes__`, which `format_exception_only` prints on
+#     its own lines and `str(exc)` has never contained. `add_note` is ordinary in HTTP
+#     client stacks — it is how a library says WHICH request failed, and a cart permalink is
+#     exactly the sort of thing that goes in one.
+#   * `str(ExceptionGroup(...))` is the summary line and the member COUNT
+#     (`"two link attempts failed (2 sub-exceptions)"`); the renderer prints every member's
+#     own message. `asyncio.TaskGroup` and `anyio` raise these routinely, and `.exceptions`
+#     is not `__cause__`, so walking the chain never reached them either.
+#
+# Both were measured leaking through `sys.__excepthook__` AND `traceback.format_exception`
+# while `str(exc)`, `denial_reason` and the persisted `policy_event` were all clean — so all
+# 380 tests stayed green. Enumerating a fifth attribute would lose to whatever CPython
+# renders next; these tests pin the oracle to the renderer instead.
+# =====================================================================================
+ORACLE_CODE = "PSX-RENDER-3F"
+
+
+class RenderOracleProvider(CheckoutProvider):
+    """Mints cleanly on-domain, so the failure below is a genuinely post-mint one."""
+
+    name = "test-render-oracle"
+
+    def mint(self, request: CheckoutRequest) -> MintedCheckout:
+        return MintedCheckout(
+            code=ORACLE_CODE,
+            permalink_url=f"https://{SELLER_DOMAIN}/cart/1:1",
+            expires_at=None,
+        )
+
+
+class RaisingOffer(dict):
+    """An offer that reads cleanly for the pre-mint check and raises after the mint.
+
+    The port validates the offer's fields BEFORE minting, which is correct and is not what
+    is under test here: this is the "the value I validated is the value I will read next"
+    assumption, and `provider.checkout` wraps the result-building step precisely because it
+    is an assumption. The second read is the one that happens with a live code behind it.
+    """
+
+    def __init__(self, make_exc: Any) -> None:
+        super().__init__(product_ref="p", unit_price=1.0, total_price=1.0)
+        self.make_exc = make_exc
+        self.reads = 0
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "expires_at":
+            self.reads += 1
+            if self.reads > 1:
+                raise self.make_exc()
+            return None
+        return super().get(key, default)
+
+
+def post_mint_orphan(make_exc: Any) -> OrphanedCheckoutCode:
+    """Drive one post-mint refusal whose CAUSE is ``make_exc()``, and hand back the orphan."""
+    hostile = RaisingOffer(make_exc)
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        RenderOracleProvider().checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=hostile,
+                mode="redirect",
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+    assert hostile.reads >= 2, "the post-mint read did not happen; the test proves nothing"
+    return raised.value
+
+
+def assert_no_renderer_publishes(exc: OrphanedCheckoutCode, code: str, label: str) -> None:
+    """Every reader of this exception, with the C-level one asserted FIRST.
+
+    The order is load-bearing and is the reason a previous version of this assertion could
+    have been vacuous. `traceback.format_exception` reaches `__cause__` through
+    `OrphanedCheckoutCode`'s redacting property, and that property MUTATES the chain in
+    place (and, since pass 4, writes a substituted stand-in back into the C-level slot). So
+    rendering the traceback first would clean the chain before `sys.__excepthook__` — the
+    one reader that bypasses the property entirely, reading the C slot through
+    `PyException_GetCause` — ever looked at it, and the excepthook assertion would then be
+    measuring the property rather than the channel it cannot use.
+    """
+    assert_code_is_unrecoverable(
+        excepthook_output(exc), code, f"[{label}] the C-level sys.excepthook"
+    )
+    assert_code_is_unrecoverable(
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        code,
+        f"[{label}] traceback.format_exception",
+    )
+    assert_code_is_unrecoverable(str(exc), code, f"[{label}] str() of the refusal")
+    assert_code_is_unrecoverable(repr(exc), code, f"[{label}] repr() of the refusal")
+    assert exc.orphan.code == code, f"[{label}] T-202: the orphan must still carry the code"
+    assert code_fingerprint(code) in str(exc), f"[{label}] the joinable handle must survive"
+
+
+def _note_cause() -> BaseException:
+    exc = RuntimeError("link build failed")
+    exc.add_note(f"upstream permalink was https://a.tld/cart?discount={ORACLE_CODE}")
+    return exc
+
+
+def _group_cause() -> BaseException:
+    return ExceptionGroup(
+        "two link attempts failed",
+        [
+            RuntimeError(f"link build failed for ?discount={ORACLE_CODE}"),
+            RuntimeError("the second attempt timed out"),
+        ],
+    )
+
+
+def _nested_group_cause() -> BaseException:
+    """A group inside a group, with the code on a NOTE of an inner member.
+
+    The sweep's shape rather than the measured one: nothing here is reached by walking
+    `__cause__`, and nothing here is in any `args` — the member is two containers deep and
+    the code is on its `__notes__`. An oracle that is the renderer covers it without being
+    told it exists; an oracle that enumerates attributes has to have thought of it.
+    """
+    inner = RuntimeError("the retry also failed")
+    inner.add_note(f"cart was https://a.tld/discount/{ORACLE_CODE}")
+    return ExceptionGroup(
+        "outer",
+        [ExceptionGroup("inner", [inner, ValueError("unrelated")]), TimeoutError("slow")],
+    )
+
+
+def _noted_group_cause() -> BaseException:
+    """A note on the GROUP itself — the container, not a member."""
+    group = ExceptionGroup("attempts failed", [RuntimeError("first"), RuntimeError("second")])
+    group.add_note(f"the discount in play was {ORACLE_CODE}")
+    return group
+
+
+def _self_rendering_with_note() -> BaseException:
+    """Both channels at once: a `__str__` that ignores args AND a note.
+
+    Pass 3 closed the first by substituting the object. This proves the substitution is
+    driven by the render rather than by `__str__` — the note alone would be enough.
+    """
+    exc = SelfRenderingFailure("nothing interesting")
+    exc.add_note(f"context: ?discount={ORACLE_CODE}")
+    return exc
+
+
+class LazilyNotedFailure(Exception):
+    """A cause whose ``__notes__`` are COMPUTED, not stored.
+
+    The note analogue of :class:`SelfRenderingFailure`, and natural for the same reason: a
+    client library that wants to say which request failed can build that line when it is
+    asked for rather than when it raises. PEP 678 fixes what ``add_note`` does; it does not
+    make ``__notes__`` a plain list, and every renderer reads it by ordinary attribute
+    lookup.
+
+    It is here because it is the shape the in-place rewrite CANNOT fix: redacting the list
+    it returns edits a temporary, so the object still renders the original. Only an oracle
+    that asks the renderer sees it — which is the whole claim of this section.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__("a failure occurred")  # the args say nothing
+        self.detail = detail
+
+    @property
+    def __notes__(self) -> list[str]:  # type: ignore[override]
+        return [f"while fetching {self.detail}"]
+
+
+def _lazy_note_cause() -> BaseException:
+    return LazilyNotedFailure(f"https://a.tld/cart?discount={ORACLE_CODE}")
+
+
+def _group_of_self_rendering_cause() -> BaseException:
+    """A group whose MEMBER renders itself — args rewriting cannot reach it either.
+
+    ``asyncio.TaskGroup`` wrapping an ``OSError`` (whose ``__str__`` is built from
+    ``errno``/``strerror``/``filename``, not from ``args``) is this shape verbatim. Neither
+    half of the in-place walk helps: the member is behind ``.exceptions`` rather than
+    ``__cause__``, and its message is behind ``__str__`` rather than ``args``.
+    """
+    return ExceptionGroup(
+        "two link attempts failed",
+        [SelfRenderingFailure(f"?discount={ORACLE_CODE}"), TimeoutError("slow")],
+    )
+
+
+RENDER_ORACLE_CAUSES: list[tuple[str, Any]] = [
+    ("pep678-note-on-the-cause", _note_cause),
+    ("exception-group-member", _group_cause),
+    ("note-on-a-member-of-a-nested-group", _nested_group_cause),
+    ("note-on-the-group-itself", _noted_group_cause),
+    ("self-rendering-cause-with-a-note", _self_rendering_with_note),
+    # The two below are the ones ONLY the render-faithful oracle closes. Everything above
+    # is also reachable by rewriting `args`/`__notes__` in place, so a gate made only of
+    # those measures the backstop and reports the oracle.
+    ("lazily-computed-notes", _lazy_note_cause),
+    ("self-rendering-member-of-a-group", _group_of_self_rendering_cause),
+]
+
+
+def test_the_oracle_reads_what_the_renderer_prints_not_what_str_returns() -> None:
+    """The falsifiability control for the whole section, and the reason it exists.
+
+    If `rendered_exception` ever regresses to `str(exc)` — or to any proxy for it — this
+    fails first and says why, rather than the leak being found by a sixth verifier. Each
+    case below is a string the RENDERER prints and `str()` does not contain, so the two
+    assertions together pin the gap the oracle exists to close.
+    """
+    noted = RuntimeError("plain")
+    noted.add_note("NOTE-VISIBLE-ONLY-TO-THE-RENDERER")
+    assert "NOTE-VISIBLE-ONLY-TO-THE-RENDERER" not in str(noted), (
+        "str() suddenly includes __notes__; the premise of this section has changed"
+    )
+    assert "NOTE-VISIBLE-ONLY-TO-THE-RENDERER" in rendered_exception(noted), (
+        "the oracle cannot see a PEP-678 note, so it disagrees with every renderer"
+    )
+
+    group = ExceptionGroup("summary", [RuntimeError("MEMBER-VISIBLE-ONLY-TO-THE-RENDERER")])
+    assert "MEMBER-VISIBLE-ONLY-TO-THE-RENDERER" not in str(group), (
+        "str() suddenly includes group members; the premise of this section has changed"
+    )
+    assert "MEMBER-VISIBLE-ONLY-TO-THE-RENDERER" in rendered_exception(group), (
+        "the oracle cannot see an ExceptionGroup member, so it disagrees with every renderer"
+    )
+
+    # ...and it agrees with the renderer it is standing in for, on both.
+    for exc in (noted, group):
+        printed = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        for line in rendered_exception(exc).splitlines():
+            assert line.strip() in printed, (
+                f"the oracle reports {line.strip()!r}, which the renderer does not print — "
+                f"an oracle that is not the renderer is the defect this section is about"
+            )
+
+    # Totality: the oracle is fed merchant-shaped exceptions on a refusal path.
+    assert rendered_exception(None) == ""
+    assert isinstance(rendered_exception(RuntimeError()), str)
+
+
+@pytest.mark.parametrize(
+    ("label", "make_exc"), RENDER_ORACLE_CAUSES, ids=[c[0] for c in RENDER_ORACLE_CAUSES]
+)
+def test_no_renderable_attribute_of_a_chained_cause_can_publish_the_code(
+    label: str, make_exc: Any
+) -> None:
+    """Measured leaking at a5a41a7 through BOTH renderers, with every other surface clean."""
+    assert_no_renderer_publishes(post_mint_orphan(make_exc), ORACLE_CODE, label)
+
+
+@pytest.mark.parametrize(
+    ("label", "make_exc"), RENDER_ORACLE_CAUSES, ids=[c[0] for c in RENDER_ORACLE_CAUSES]
+)
+def test_no_renderable_attribute_reaches_the_published_surfaces(label: str, make_exc: Any) -> None:
+    """The same causes, driven through `accept()` to the two surfaces that PUBLISH.
+
+    The exception-level assertions above are the sharp ones; these are the ones that say why
+    anybody cares. `denial_reason` goes back to the client and the `policy_event` is
+    persisted with its reason typed as a bare string by the published OpenAPI.
+    """
+
+    class NotedMerchant:
+        """Mints, then fails while the adapter builds the permalink, carrying `make_exc()`."""
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+            self.calls.append(str(store_id))
+            return {"code": ORACLE_CODE, "permalink_url": f"https://{RIVAL_DOMAIN}/cart/1:1"}
+
+        __call__ = create_code
+
+    live = auction("bid-a", "bid-b")
+    # The offer's own expiry read raises after the mint, so the failure is post-mint and its
+    # cause is the shape under test.
+    live["bids"][0]["offer"] = RaisingOffer(make_exc)
+    merchant = NotedMerchant()
+
+    result = accept(live, "bid-a", merchant, "shopify")
+
+    assert merchant.calls, f"[{label}] the merchant must actually have minted"
+    assert result.accepted is False, f"[{label}] a post-mint failure was accepted"
+    reason = result.denial_reason or ""
+    assert reason, f"[{label}] a refusal with no reason is not debuggable"
+    assert_code_is_unrecoverable(reason, ORACLE_CODE, f"[{label}] the denial_reason")
+    assert_code_is_unrecoverable(
+        json.dumps(event_of(result, "policy_event"), default=str),
+        ORACLE_CODE,
+        f"[{label}] the persisted policy_event",
+    )
+    # T-202: the code is still recorded and still revocable.
+    assert "code_created" in kinds(result), (
+        f"[{label}] the merchant minted and nothing recorded it: {kinds(result)}"
+    )
+    assert event_of(result, "code_created")["payload"]["code"] == ORACLE_CODE
+    assert result.orphaned_code is not None and result.orphaned_code.code == ORACLE_CODE
+
+
+def test_a_visible_context_cannot_publish_the_code() -> None:
+    """`__suppress_context__` is not a lock, so the context must be safe on its own.
+
+    `raise X from cause` sets `__suppress_context__ = True`, and CPython's renderer skips
+    `__context__` whenever a `__cause__` is present — which is why this channel is quiet
+    today. Both of those are properties of how the refusal happens to be raised, not of the
+    redaction, and the object sitting in `__context__` is the ORIGINAL exception rather than
+    the stand-in that replaced it as the cause. So the flag is flipped here deliberately: if
+    a future change stops chaining a cause, this is what fails.
+    """
+    exc = post_mint_orphan(_note_cause)
+    assert exc.__suppress_context__ is True, "raise ... from no longer suppresses the context"
+    exc.__suppress_context__ = False
+    assert_no_renderer_publishes(exc, ORACLE_CODE, "context-visible")
+
+
+def test_the_render_oracle_terminates_on_a_cyclic_chain() -> None:
+    """Totality again: the oracle renders a CHAIN, and a chain can be a cycle.
+
+    Nothing in this repo builds one, and a merchant's client library is not obliged to be
+    careful. An oracle that renders a cycle forever turns a refusal into a hang, which is
+    strictly worse than the leak it was added to close.
+    """
+    first = RuntimeError(f"?discount={ORACLE_CODE}")
+    second = RuntimeError("second")
+    first.__cause__ = second
+    second.__cause__ = first  # the cycle
+
+    rendered = rendered_exception(first)  # must terminate
+    assert isinstance(rendered, str)
+    assert ORACLE_CODE in rendered, "the oracle must still SEE the code it terminates on"
+
+
+# =====================================================================================
+# T-215 (g) — the `store_id` guard, which had no test at all
+#
+# Mutation V15: replacing `safe_token(request.store_id, minted.code, label='store')!r` with
+# `request.store_id!r` at BOTH post-mint handlers left all 380 tests green. `store_id` is
+# read straight off the bid (`accept()` does `str(_read(bid, "store_id"))`), so a store is
+# free to name itself after the discount it is about to mint — and a fully percent-encoded
+# spelling is not one of the three literal spellings the boundary blacklist replaces.
+#
+# The surface asserted for the persisted event is `payload.reason` — the PROSE, which is
+# what the published OpenAPI types as a bare string. The event's top-level `store_id` field
+# is the store's own name verbatim by design: it is the ledger's join key, written
+# identically on the `code_created` record that legitimately holds the live code. Redacting
+# an identifier that every event in the auction is keyed by would break the join and hide
+# nothing, since the code is in that same event stream by construction.
+# =====================================================================================
+STORE_CODE = "PSX-STORE-11"
+#: Every character percent-encoded. `redact_code`'s literal layer replaces `raw`,
+#: `quote(raw, safe="")` and `quote(raw)` — for a code of only URL-safe characters all three
+#: ARE the raw spelling, so this form is one the boundary cannot match and only the
+#: build-site guard removes.
+STORE_ID_SPELLING = "".join(f"%{ord(c):02X}" for c in STORE_CODE)
+
+
+def policy_reason(result: Any) -> str:
+    return str(event_of(result, "policy_event")["payload"]["reason"])
+
+
+def test_a_store_id_that_spells_the_code_is_not_published_by_the_host_check_handler(
+    unwired: None,
+) -> None:
+    """`provider.checkout`'s post-mint host-check handler formats `store_id` into its prose."""
+    live = auction("bid-a", "bid-b")
+    live["bids"][0]["store_id"] = STORE_ID_SPELLING
+    merchant = OffDomainMerchant(STORE_CODE, f"https://{RIVAL_DOMAIN}/cart/1:1")
+
+    result = accept(live, "bid-a", merchant, "shopify")
+
+    assert merchant.calls, "the merchant must actually have minted"
+    assert result.accepted is False
+    assert_code_is_unrecoverable(
+        result.denial_reason or "", STORE_CODE, "denial_reason with a code-spelling store_id"
+    )
+    assert_code_is_unrecoverable(
+        policy_reason(result), STORE_CODE, "the persisted policy_event's reason"
+    )
+    # ...and the refusal is still the diagnostic it was.
+    assert code_fingerprint(STORE_CODE) in (result.denial_reason or "")
+    assert RIVAL_DOMAIN in (result.denial_reason or ""), "the refused host must survive"
+    # T-202 is untouched.
+    assert result.orphaned_code is not None and result.orphaned_code.code == STORE_CODE
+
+
+def test_a_store_id_that_spells_the_code_is_not_published_by_the_adapter_handler() -> None:
+    """`ShopifyCheckoutProvider.mint`'s own post-mint handler formats `store_id` too.
+
+    Two handlers, one shape — a guard applied to only one of them is a guard a merchant that
+    returns no permalink walks straight around.
+    """
+    registry = OnceThenForgetful(SELLER_DOMAIN)
+
+    class NoPermalinkMerchant:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+            self.calls.append(str(store_id))
+            return {"code": STORE_CODE}
+
+        __call__ = create_code
+
+    merchant = NoPermalinkMerchant()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id=STORE_ID_SPELLING,
+                store_domain=SELLER_DOMAIN,
+                offer=offer(SELLER_DOMAIN),
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=registry,
+            )
+        )
+
+    exc = raised.value
+    assert merchant.calls, "the merchant must actually have minted"
+    assert registry.calls >= 2, "the second, post-mint lookup did not happen"
+    assert_no_renderer_publishes(exc, STORE_CODE, "adapter handler, code-spelling store_id")
+
+
+def test_a_store_id_that_spells_the_code_is_not_published_by_the_result_handler() -> None:
+    """...and `provider.checkout`'s last-resort result-building handler, the third site."""
+    hostile = RaisingOffer(lambda: RuntimeError("assembling the result failed"))
+    store_id = "".join(f"%{ord(c):02X}" for c in ORACLE_CODE)
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        RenderOracleProvider().checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id=store_id,
+                store_domain=SELLER_DOMAIN,
+                offer=hostile,
+                mode="redirect",
+                now=T_NOW,
+                # The platform knows this store by the name the store chose, whatever that
+                # name spells — the registry is keyed by store_id, not by taste.
+                registered_domains=StaticRegisteredDomains({store_id: SELLER_DOMAIN}),
+            )
+        )
+
+    assert hostile.reads >= 2, "the post-mint read did not happen"
+    assert_no_renderer_publishes(
+        raised.value, ORACLE_CODE, "result handler, code-spelling store_id"
+    )
+
+
+def test_the_chained_arg_guard_fails_closed_on_a_spelling_redact_code_cannot_reach() -> None:
+    """Mutation M11: `_redact_arg` must CHECK its own output, not just best-effort it.
+
+    `redact_code` is a blacklist plus a structural URL reduction; a chained cause is neither
+    prose this package formatted nor a URL it holds, so a punycode spelling in some other
+    module's message survives both layers. `_redact_arg` therefore re-checks what it
+    produced and drops the ARGUMENT whole when the check still finds a code.
+
+    **What is asserted is the diagnostic, and that is deliberate.** Since pass 4 the
+    render-faithful oracle would catch this argument too — by replacing the entire cause
+    with a stand-in. Safety is therefore no longer the thing this guard buys; PRECISION is.
+    Dropping one argument keeps the cause's real type, its other arguments and its place in
+    the chain, and an operator reading the refusal still learns that a domain lookup failed.
+    Letting it fall through to the substitution costs all of that. So the test says what the
+    guard is now for: the cause survives AS ITSELF, and carries nothing redeemable.
+    """
+    registry = OnceThenForgetful(SELLER_DOMAIN)
+
+    class NoPermalinkMerchant:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+            self.calls.append(str(store_id))
+            return {"code": PUNY_CODE}
+
+        __call__ = create_code
+
+    merchant = NoPermalinkMerchant()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                # Quoted verbatim by the failing second lookup's own message.
+                store_domain=f"{PUNY_SPELLING}.example.com",
+                offer=offer(SELLER_DOMAIN),
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=registry,
+            )
+        )
+
+    assert merchant.calls, "the merchant must actually have minted"
+    cause = raised.value.__cause__
+    assert cause is not None, "the chained cause was dropped rather than made safe"
+    assert isinstance(cause, OffDomainCheckout) and not isinstance(cause, RedactedCause), (
+        f"the offending ARGUMENT was not dropped, so the whole cause had to be replaced and "
+        f"the refusal lost the type that says what failed: {cause!r}"
+    )
+    for index, arg in enumerate(cause.args):
+        assert_code_is_unrecoverable(
+            str(arg), PUNY_CODE, f"the chained cause's args[{index}] as an ARGUMENT"
+        )
+
+
+# =====================================================================================
+# T-215 (h) — `{expected!r}`, the last unguarded fragment in `_reason`
+#
+# Every merchant fragment in that sentence goes through `safe_token` except the registered
+# domain, which reads like the PLATFORM's value. On a call site that wired
+# `CheckoutRequest.registered_domains` it is. On the DEFAULT unwired path —
+# the legacy behaviour the frozen contract pins, and what the `unwired` fixture in this file
+# exercises — `registered_domain_for` returns `request.store_domain`, read straight off the
+# bid. It is then a THIRD independently normalised string (`.strip().lower().rstrip(".")`)
+# that no boundary redactor holds as a value, reaching both published surfaces.
+# =====================================================================================
+def test_the_registered_domain_the_reason_quotes_is_guarded_at_its_build_site() -> None:
+    """Measured at a5a41a7: recoverable straight out of `assert_on_domain`."""
+    with pytest.raises(OffDomainCheckout) as raised:
+        assert_on_domain(
+            f"https://{RIVAL_DOMAIN}/cart",
+            f"{PUNY_SPELLING}.example.com",
+            what="permalink_url",
+            secret=PUNY_CODE,
+        )
+
+    message = str(raised.value)
+    assert_code_is_unrecoverable(message, PUNY_CODE, "the off-domain reason's registered domain")
+    assert RIVAL_DOMAIN in message, "the refused host is the diagnostic and must survive"
+
+
+def test_a_bid_authored_registered_domain_cannot_publish_the_code_end_to_end(
+    unwired: None,
+) -> None:
+    """The same fragment on the path it is actually merchant-authored on.
+
+    With no platform registry wired, the domain the refusal quotes as "the registered seller
+    domain" is the bid's own `store_domain` claim — which is why the guard cannot be skipped
+    on the grounds that the value is the platform's.
+    """
+    live = auction("bid-a", "bid-b")
+    live["bids"][0]["store_domain"] = f"{PUNY_SPELLING}.example.com"
+    merchant = OffDomainMerchant(PUNY_CODE, f"https://{RIVAL_DOMAIN}/cart/1:1")
+
+    result = accept(live, "bid-a", merchant, "shopify")
+
+    assert merchant.calls, "the merchant must actually have minted"
+    assert result.accepted is False
+    assert_code_is_unrecoverable(
+        result.denial_reason or "", PUNY_CODE, "denial_reason with a bid-authored domain"
+    )
+    assert_code_is_unrecoverable(
+        json.dumps(event_of(result, "policy_event"), default=str),
+        PUNY_CODE,
+        "the persisted policy_event with a bid-authored domain",
+    )
+    assert result.orphaned_code is not None and result.orphaned_code.code == PUNY_CODE
+
+
+def test_the_pre_mint_reason_still_quotes_the_registered_domain_unchanged() -> None:
+    """The control for the guard above: nothing minted means nothing redacted.
+
+    `safe_token` with an empty secret returns its input untouched, so the pre-mint message
+    every existing caller of `assert_on_domain`/`is_on_domain` reads is byte-identical.
+    """
+    with pytest.raises(OffDomainCheckout) as raised:
+        assert_on_domain(f"https://{RIVAL_DOMAIN}/cart", SELLER_DOMAIN, what="offer checkout_url")
+
+    message = str(raised.value)
+    assert SELLER_DOMAIN in message, "the pre-mint refusal must still name the expected domain"
+    assert RIVAL_DOMAIN in message, "...and the host it refused"
+    assert "redacted" not in message, f"nothing was minted, so nothing should go: {message!r}"
+
+
+# =====================================================================================
+# T-202 (b) — the guarantee belongs to the PORT, not to the one adapter that remembered
+#
+# `CheckoutProvider.checkout` guards everything after `mint` RETURNS. But a code comes into
+# existence in the MIDDLE of `mint`, and `mint`'s only channel back is its return value — so
+# an exception raised between the mint and the return carries nothing and the refusal has no
+# orphan. `SimulatedRedirectProvider` is D45's REQUIRED starting implementation and does
+# exactly that: `mint_code()`, then `default_permalink()`, which resolves the registered
+# domain a second time. Only `ShopifyCheckoutProvider` had closed this, with an `except` of
+# its own — a guarantee one implementation remembered is not a guarantee.
+# =====================================================================================
+class OnceThenEvicted:
+    """Answers the first lookup and raises on the second.
+
+    Precisely the case `providers.py` documents as the reason its own handler exists — "a
+    lookup that answers once and fails once (a dropped connection, a cache eviction)" — and
+    it is the port, not that adapter, that has to survive it for every provider.
+    """
+
+    def __init__(self, domain: str) -> None:
+        self.domain = domain
+        self.calls = 0
+
+    def domain_for(self, store_id: str) -> str | None:
+        self.calls += 1
+        if self.calls == 1:
+            return self.domain
+        raise RuntimeError("registry cache evicted")
+
+
+def simulated_request(registry: Any) -> CheckoutRequest:
+    return CheckoutRequest(
+        auction_id="auction-1",
+        bid_ref="bid-a",
+        store_id="store-a",
+        store_domain=SELLER_DOMAIN,
+        offer=offer(SELLER_DOMAIN),
+        mode="redirect",
+        now=T_NOW,
+        registered_domains=registry,
+    )
+
+
+def test_the_simulated_provider_cannot_lose_a_code_when_the_registry_evicts() -> None:
+    """Measured at a5a41a7: a bare `OffDomainCheckout`, and the minted code simply gone."""
+    registry = OnceThenEvicted(SELLER_DOMAIN)
+
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        SimulatedRedirectProvider().checkout(simulated_request(registry))
+
+    exc = raised.value
+    assert registry.calls >= 2, "the second, post-mint lookup did not happen"
+    assert exc.orphan.code.startswith("PSX-"), (
+        f"T-202: the port did not carry the minted code out: {exc.orphan.code!r}"
+    )
+    assert exc.orphan.provider == "simulated-redirect", "the orphan must name who minted it"
+    # It is still an off-domain refusal, so every existing `except OffDomainCheckout`
+    # keeps catching it — the fix must not narrow what callers can catch.
+    assert isinstance(exc, OffDomainCheckout), (
+        f"the port turned an off-domain refusal into something else: {type(exc).__name__}"
+    )
+    # ...and the refusal publishes nothing the merchant could redeem.
+    assert_no_renderer_publishes(exc, exc.orphan.code, "simulated provider, registry evicted")
+
+
+def test_the_simulated_providers_orphan_is_recorded_end_to_end(unwired: None) -> None:
+    """The half that makes T-202 mean something: `accept()` files the revocable record."""
+    registry = OnceThenEvicted(SELLER_DOMAIN)
+    live = auction("bid-a", "bid-b")
+
+    result = accept(live, "bid-a", None, "redirect", registered_domains=registry)
+
+    assert result.accepted is False, "a failed permalink build was accepted"
+    assert registry.calls >= 2, "the second, post-mint lookup did not happen"
+    assert "code_created" in kinds(result), (
+        f"T-202: a code was minted and nothing recorded it. Events: {kinds(result)}. The "
+        f"discount is live and the exchange cannot revoke it."
+    )
+    created = event_of(result, "code_created")
+    assert created["payload"].get("orphaned") is True, (
+        "the record must say this code belongs to a REFUSED checkout"
+    )
+    assert result.orphaned_code is not None, "the orphan never reached the caller"
+    assert created["payload"]["code"] == result.orphaned_code.code
+    assert result.orphaned_code.code.startswith("PSX-")
+    # The refusal points at the record that holds the live code.
+    pointer = event_of(result, "policy_event")["payload"].get("orphaned_code")
+    assert isinstance(pointer, dict) and pointer.get("event_id") == created["event_id"]
+    # A5: the buyer still gets the next slot rather than a stack trace.
+    assert result.reoffer_bid_ref == "bid-b"
+
+
+def test_a_provider_that_mints_nothing_still_refuses_without_an_orphan() -> None:
+    """The control, and the reason the port cannot simply wrap `mint` in a blanket handler.
+
+    A failure BEFORE anything is minted must stay exactly what it was. Inventing an orphan
+    for it would file a `code_created` event for a discount that does not exist, which is a
+    reconciler's nightmare in the opposite direction.
+    """
+
+    class MintsNothing(CheckoutProvider):
+        name = "test-mints-nothing"
+
+        def mint(self, request: CheckoutRequest) -> MintedCheckout:
+            raise RuntimeError("the merchant is down")
+
+    with pytest.raises(RuntimeError) as raised:
+        MintsNothing().checkout(
+            simulated_request(StaticRegisteredDomains({"store-a": SELLER_DOMAIN}))
+        )
+
+    assert not isinstance(raised.value, OrphanedCheckoutCode), (
+        "the port invented an orphan for a checkout that minted nothing"
+    )
+    assert str(raised.value) == "the merchant is down", "the refusal shape changed"
+
+
+def test_the_adapters_own_orphan_is_not_re_wrapped_by_the_port() -> None:
+    """The other control: a provider that already carried its code out knows more than we do.
+
+    `ShopifyCheckoutProvider` raises `OrphanedCheckoutCode` from inside `mint`, holding the
+    merchant's permalink and its own account of the failure. The port must re-raise that
+    untouched rather than replacing it with a poorer one built from the ledger.
+    """
+    registry = OnceThenForgetful(SELLER_DOMAIN)
+
+    class NoPermalinkMerchant:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+            self.calls.append(str(store_id))
+            return {"code": ORPHAN_CODE}
+
+        __call__ = create_code
+
+    merchant = NoPermalinkMerchant()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=offer(SELLER_DOMAIN),
+                mode="shopify",
+                code_creator=merchant,
+                now=T_NOW,
+                registered_domains=registry,
+            )
+        )
+
+    exc = raised.value
+    assert merchant.calls, "the merchant must actually have minted"
+    assert exc.orphan.code == ORPHAN_CODE
+    assert exc.orphan.provider == "shopify", (
+        f"the port replaced the adapter's own orphan: provider is {exc.orphan.provider!r}"
+    )
+    assert "mint()" not in str(exc), (
+        f"the port re-wrapped an orphan the adapter had already built: {str(exc)!r}"
+    )
+
+
+# =====================================================================================
+# T-215 (i) — the two mechanisms are not interchangeable, so both are pinned
+#
+# The redaction of a chained cause now has two layers, and a gate that only asserts "no
+# code is recoverable" cannot tell them apart — either layer alone satisfies it, so removing
+# EITHER leaves the suite green and the fix silently half-gone. The layers do different
+# jobs and the difference is the diagnostic:
+#
+#   * `_redact_chain` rewrites `args`, `__notes__` and group members IN PLACE. When it
+#     succeeds the cause survives as itself — its real type, its other arguments, its place
+#     in the chain — and only the offending fragment is a placeholder.
+#   * `_sanitised_cause` renders the exception the way a traceback does and, if anything is
+#     still recoverable, replaces the WHOLE object with a `RedactedCause`. That is total,
+#     and it costs the type and everything else the object was going to say.
+#
+# So these assert on WHICH outcome happened, not only that the code is gone.
+# =====================================================================================
+def test_a_note_that_can_be_rewritten_is_rewritten_rather_than_costing_the_cause() -> None:
+    """A note quoting a permalink must be reduced in place, not answered by substitution."""
+    exc = post_mint_orphan(_note_cause)
+    cause = exc.__cause__
+
+    assert cause is not None, "the cause was dropped entirely"
+    assert not isinstance(cause, RedactedCause), (
+        f"a note this package CAN rewrite cost the refusal its whole cause; the type that "
+        f"failed and every other thing it said are gone: {cause!r}"
+    )
+    assert type(cause).__name__ == "RuntimeError", f"the cause changed type: {cause!r}"
+    notes = list(getattr(cause, "__notes__", []))
+    assert notes, "the note was deleted rather than redacted; the diagnostic is gone"
+    for note in notes:
+        assert_code_is_unrecoverable(str(note), ORACLE_CODE, "the rewritten note")
+    assert any("upstream permalink" in str(n) for n in notes), (
+        f"the note no longer says what it was about: {notes!r}"
+    )
+
+
+def test_a_group_whose_members_can_be_rewritten_survives_as_a_group() -> None:
+    """The same contract for `ExceptionGroup.exceptions`, which is not part of the chain."""
+    exc = post_mint_orphan(_group_cause)
+    cause = exc.__cause__
+
+    assert cause is not None, "the cause was dropped entirely"
+    assert not isinstance(cause, RedactedCause), (
+        f"group members this package CAN rewrite cost the refusal its whole cause: {cause!r}"
+    )
+    assert isinstance(cause, BaseExceptionGroup), f"the group was flattened away: {cause!r}"
+    members = list(cause.exceptions)
+    assert len(members) == 2, f"a member was dropped rather than redacted: {members!r}"
+    for index, member in enumerate(members):
+        assert_code_is_unrecoverable(
+            str(member), ORACLE_CODE, f"the rewritten group member [{index}]"
+        )
+    assert any("timed out" in str(m) for m in members), (
+        f"the innocent member was destroyed with the guilty one: {members!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "make_exc"),
+    [("lazily-computed-notes", _lazy_note_cause),
+     ("self-rendering-member-of-a-group", _group_of_self_rendering_cause)],
+    ids=["lazily-computed-notes", "self-rendering-member-of-a-group"],
+)
+def test_a_cause_the_rewrite_cannot_reach_is_replaced_whole(label: str, make_exc: Any) -> None:
+    """...and the other outcome, asserted as an outcome rather than inferred from silence.
+
+    These are the shapes no in-place edit can fix — a computed `__notes__`, a group member
+    that renders from its own fields. The contract there is substitution: the object goes,
+    and what is left still names the type that failed and the fingerprint that joins to the
+    `code_created` record, so the refusal is poorer but not useless.
+    """
+    exc = post_mint_orphan(make_exc)
+    cause = exc.__cause__
+
+    assert isinstance(cause, RedactedCause), (
+        f"[{label}] a cause the rewrite cannot reach was chained unchanged: {cause!r}"
+    )
+    assert code_fingerprint(ORACLE_CODE) in str(cause), (
+        f"[{label}] the stand-in does not join to the code_created record: {str(cause)!r}"
+    )
+    assert exc.__cause__ is cause, (
+        "reading the cause twice built a second stand-in; the substitution must be stored"
+    )
+
+
+def test_a_naive_new_call_site_is_closed_by_the_reading_properties_too() -> None:
+    """The LAZY half of the defence, on a shape only the render-faithful oracle catches.
+
+    Every `raise ... from` site in this package sanitises the cause eagerly, because that is
+    the only edit the C-level excepthook can see. The redacting `__cause__`/`__context__`
+    properties exist so that a site which forgets — a new one, written next year — is still
+    safe for every reader that goes through attribute lookup. That half used to run only the
+    in-place rewrite, which is strictly weaker: a computed `__notes__` walked straight
+    through it. Both halves now make the same decision from the same oracle.
+    """
+    naive_cause = _lazy_note_cause()
+    orphan = OrphanedCode(
+        code=ORACLE_CODE,
+        permalink_url=f"https://{RIVAL_DOMAIN}/cart/1:1",
+        provider="naive",
+        store_id="store-a",
+        auction_id="auction-1",
+        bid_ref="bid-a",
+    )
+    try:
+        try:
+            raise naive_cause
+        except LazilyNotedFailure as exc:
+            # No `_sanitised_cause` anywhere: exactly what a call site that has not read
+            # this module writes.
+            raise OrphanedCheckoutCode("post-mint refusal", orphan=orphan) from exc
+    except OrphanedCheckoutCode as exc:
+        assert_code_is_unrecoverable(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            ORACLE_CODE,
+            "traceback of a naive call site's refusal",
+        )
+        assert isinstance(exc.__cause__, RedactedCause), (
+            f"the reading property chained the unreachable cause unchanged: {exc.__cause__!r}"
+        )
+        assert exc.orphan.code == ORACLE_CODE, "T-202: the orphan must still carry the code"
+    else:  # pragma: no cover - the raise above cannot fall through
+        raise AssertionError("nothing was raised")
+
+
+def test_the_merchants_code_is_reported_into_the_ports_minting_ledger() -> None:
+    """The adapter's half of the port-level T-202 guarantee.
+
+    `mint_code` reports itself, so every provider that mints locally is covered without
+    knowing the ledger exists. A merchant's `POST /codes` does not go through `mint_code`,
+    so `ShopifyCheckoutProvider` reports the code the moment it reads it — before anything
+    that could raise. Without that line the port's backstop is blind on the one path where
+    the code is somebody else's, and the adapter's own handler is again the only cover.
+    """
+    merchant = OffDomainMerchant(ORPHAN_CODE, f"https://{SELLER_DOMAIN}/cart/1:1")
+    request = CheckoutRequest(
+        auction_id="auction-1",
+        bid_ref="bid-a",
+        store_id="store-a",
+        store_domain=SELLER_DOMAIN,
+        offer=offer(SELLER_DOMAIN),
+        mode="shopify",
+        code_creator=merchant,
+        now=T_NOW,
+        registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+    )
+
+    with minting_ledger() as recorded:
+        minted = resolve_provider("shopify").mint(request)
+
+    assert minted.code == ORPHAN_CODE
+    assert recorded == [ORPHAN_CODE], (
+        f"the merchant's code never reached the port's ledger, so a failure between the "
+        f"merchant's answer and mint()'s return has nothing to carry out: {recorded!r}"
+    )
+
+    # ...and the same for a provider that mints locally, which reports from `mint_code`.
+    with minting_ledger() as locally:
+        SimulatedRedirectProvider().mint(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=offer(SELLER_DOMAIN),
+                mode="redirect",
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+    assert len(locally) == 1 and locally[0].startswith("PSX-"), (
+        f"mint_code did not report into the ledger: {locally!r}"
+    )
+
+
+def test_the_ledger_is_empty_outside_a_checkout_and_does_not_leak_between_them() -> None:
+    """Two controls, both of which a global would fail.
+
+    `record_minted_code` outside a ledger must be a no-op rather than an error — it is
+    called from the exact region where raising would lose the code it is reporting — and one
+    checkout must never see another's code, or the port would attach the wrong live discount
+    to a refusal.
+    """
+    record_minted_code("PSX-NO-LEDGER")  # must not raise
+
+    with minting_ledger() as outer:
+        record_minted_code("PSX-OUTER")
+        with minting_ledger() as inner:
+            record_minted_code("PSX-INNER")
+        assert inner == ["PSX-INNER"], f"the inner ledger saw the outer's code: {inner!r}"
+        assert outer == ["PSX-OUTER"], f"the outer ledger saw the inner's code: {outer!r}"
+
+
+def test_the_oracle_terminates_on_a_cycle_through_the_redacting_properties() -> None:
+    """The cycle the re-entrancy guard actually exists for.
+
+    `test_the_render_oracle_terminates_on_a_cyclic_chain` uses plain exceptions, and
+    :mod:`traceback` handles those cycles itself. This one runs the cycle through
+    `OrphanedCheckoutCode`'s redacting properties, which is the path the standard library's
+    own bookkeeping cannot see: each read asks the oracle, and the oracle's render performs
+    the next read. Without the guard in `rendered_exception` the pair recurses until the
+    interpreter stops it.
+    """
+    orphan = OrphanedCode(
+        code=ORACLE_CODE,
+        permalink_url=f"https://{RIVAL_DOMAIN}/cart/1:1",
+        provider="cyclic",
+        store_id="store-a",
+        auction_id="auction-1",
+        bid_ref="bid-a",
+    )
+    first = OrphanedCheckoutCode("first refusal", orphan=orphan)
+    second = OrphanedCheckoutCode("second refusal", orphan=orphan)
+    first.__cause__ = second
+    second.__cause__ = first  # the cycle, through two redacting properties
+
+    rendered = rendered_exception(first)  # must terminate
+    assert isinstance(rendered, str)
+    assert_code_is_unrecoverable(rendered, ORACLE_CODE, "a cyclic chain of orphan refusals")

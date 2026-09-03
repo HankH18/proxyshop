@@ -38,9 +38,22 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
 from ..auction.ledger import build_event
-from .codes import assert_offer_is_mintable, build_cart_permalink, code_expiry, offer_quantity
+from .codes import (
+    assert_offer_is_mintable,
+    build_cart_permalink,
+    code_expiry,
+    minting_ledger,
+    offer_quantity,
+)
 from .domain import OffDomainCheckout, assert_on_domain
-from .redaction import code_fingerprint, redact_code, redact_url, safe_token, spells_code
+from .redaction import (
+    code_fingerprint,
+    redact_code,
+    redact_url,
+    rendered_exception,
+    safe_token,
+    spells_code,
+)
 
 __all__ = [
     "CHECKOUT_EVENT_KINDS",
@@ -104,6 +117,13 @@ def _rebuild_orphaned(
 _BASE_CAUSE = BaseException.__dict__["__cause__"]
 _BASE_CONTEXT = BaseException.__dict__["__context__"]
 
+#: How many exception objects one in-place redaction pass will visit. A chain is short in
+#: practice; an ``ExceptionGroup`` a merchant's client library builds need not be, and this
+#: runs on a refusal path. Exceeding it costs only the best-effort rewrite — the guarantee
+#: is :func:`_sanitised_cause`, which drops the whole object when the RENDER still spells
+#: the code, and does not depend on this walk having reached everything.
+_MAX_CHAIN_NODES = 256
+
 
 def _redact_chain(exc: BaseException | None, code: str, urls: Sequence[str] = ()) -> None:
     """Redact ``code`` and ``urls`` out of ``exc`` and every exception it chains to, in place.
@@ -128,14 +148,47 @@ def _redact_chain(exc: BaseException | None, code: str, urls: Sequence[str] = ()
     exception whose ``__str__`` ignores ``args`` renders from its own fields and is
     untouched by anything here. :func:`_sanitised_cause` is what handles that, by not
     chaining such an object at all.
+
+    **What this walk covers, and why it walks more than the chain (pass 4).** ``args`` is
+    not the only thing a renderer prints. PEP-678 ``__notes__`` are printed on their own
+    lines by ``format_exception_only``; an ``ExceptionGroup``'s members are printed under
+    the ``+-+---`` rules and are reachable only through ``.exceptions``, which is neither
+    ``__cause__`` nor ``__context__``. Both are rewritten in place here so that a note or a
+    member that merely quotes a permalink is REDUCED and survives as a diagnostic, instead
+    of costing the whole cause its place in the chain.
+
+    This is still the best-effort half. The guarantee is :func:`_sanitised_cause`, which
+    asks the renderer itself whether anything is left and drops the entire object when it
+    is — so a form this walk cannot reach is covered without this walk having to name it.
     """
     seen: set[int] = set()
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        redacted = tuple(_redact_arg(arg, code, urls) for arg in exc.args)
-        if redacted != exc.args:
-            exc.args = redacted
-        exc = _BASE_CAUSE.__get__(exc) or _BASE_CONTEXT.__get__(exc)
+    frontier: list[BaseException] = [exc] if exc is not None else []
+    while frontier and len(seen) < _MAX_CHAIN_NODES:
+        node = frontier.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+
+        redacted = tuple(_redact_arg(arg, code, urls) for arg in node.args)
+        if redacted != node.args:
+            node.args = redacted
+
+        # PEP-678 notes: a separate list, printed by the renderer, absent from `str()`.
+        notes = getattr(node, "__notes__", None)
+        if isinstance(notes, list):
+            for index, note in enumerate(notes):
+                cleaned = _redact_arg(note, code, urls)
+                if cleaned != note:
+                    notes[index] = cleaned
+
+        # `ExceptionGroup.exceptions` — members the renderer prints and the chain omits.
+        members = getattr(node, "exceptions", None)
+        if isinstance(members, tuple):
+            frontier.extend(m for m in members if isinstance(m, BaseException))
+
+        for nxt in (_BASE_CAUSE.__get__(node), _BASE_CONTEXT.__get__(node)):
+            if nxt is not None:
+                frontier.append(nxt)
 
 
 def _redact_arg(arg: Any, code: str, urls: Sequence[str]) -> Any:
@@ -185,20 +238,36 @@ def _sanitised_cause(exc: BaseException, code: str, urls: Sequence[str]) -> Base
     ``code_created`` record; it drops the rendered message, which is the part that could not
     be made safe. Chaining nothing at all would be worse — the refusal would lose its "why"
     — and chaining the original is the thing that leaks.
+
+    **The ORACLE is the renderer, and that is the pass-4 correction.** This decision used to
+    be taken on ``str(exc)``, which is not what a traceback prints. Two ordinary shapes
+    walked straight through it, measured on both ``traceback.format_exception`` and the
+    C-level ``sys.__excepthook__`` while ``str(exc)``, ``denial_reason`` and the persisted
+    ``policy_event`` were all clean:
+
+    * a cause carrying ``exc.add_note(f"upstream permalink was …?discount={code}")`` — PEP-678
+      notes are printed by the renderer and are not part of ``str``; and
+    * an ``ExceptionGroup``, whose ``str`` is ``"… (2 sub-exceptions)"`` while the renderer
+      prints every member's own message. ``.exceptions`` is not ``__cause__``, so the walk
+      above did not reach it either.
+
+    The lesson is not "notes and groups too". It is that an oracle which disagrees with the
+    renderer it exists to protect will keep losing to whatever CPython renders next, so the
+    oracle now IS the renderer — :func:`~.redaction.rendered_exception`. And because the
+    render covers the whole chain, its members and their notes, the ACTION is total by
+    construction: one object is substituted and everything reachable from it goes with it,
+    rather than each renderable attribute being rewritten in place and hoped complete.
     """
     _redact_chain(exc, code, urls)
     if not code:
         return exc
-    try:
-        rendered = str(exc)
-    except Exception:  # pragma: no cover - a cause whose __str__ raises is already opaque
-        rendered = ""
-    if not spells_code(rendered, code):
+    if not spells_code(rendered_exception(exc), code):
         return exc
     replacement: BaseException = RedactedCause(
         f"{type(exc).__name__}: <redacted-cause:{code_fingerprint(code)}> — this chained "
-        f"exception rendered a recoverable discount code through its own __str__, which "
-        f"rewriting args cannot reach, so the exception itself was replaced (T-215)"
+        f"exception RENDERED a recoverable discount code (through its own __str__, a PEP-678 "
+        f"note, or an ExceptionGroup member), which rewriting args cannot reach, so the "
+        f"exception itself was replaced (T-215)"
     )
     try:
         replacement = replacement.with_traceback(exc.__traceback__)
@@ -353,11 +422,36 @@ class OrphanedCheckoutCode(Exception):
         orphan = getattr(self, "orphan", None)
         return (str(getattr(orphan, "permalink_url", "") or ""),)
 
+    def _sanitised_slot(self, slot: Any) -> BaseException | None:
+        """One chained-exception slot, made safe on the way out — and written back.
+
+        Pass 3 ran only :func:`_redact_chain` here, which rewrites ``args`` and nothing
+        else, so this lazy half was strictly weaker than the eager half at the ``raise``
+        sites: a cause carrying a PEP-678 note or an ``ExceptionGroup`` member survived it.
+        It now runs the same :func:`_sanitised_cause` the ``raise`` sites do, so both halves
+        make the identical decision from the identical render-faithful oracle.
+
+        **The write-back is the point, not a side effect.** Substituting only in the value
+        returned would leave the C-level slot still pointing at the leaking object, and the
+        C-level excepthook reads that slot directly — so a reader that went through
+        attribute lookup would be safe while ``PyErr_Display`` published the code. Storing
+        the stand-in repairs the slot for every subsequent reader, whichever door it uses.
+        """
+        current = slot.__get__(self)
+        if current is None:
+            return None
+        code = self._orphan_code
+        if not code:
+            _redact_chain(current, code, self._orphan_urls)
+            return current
+        safe = _sanitised_cause(current, code, self._orphan_urls)
+        if safe is not current:
+            slot.__set__(self, safe)
+        return safe
+
     @property
     def __cause__(self) -> BaseException | None:
-        cause = _BASE_CAUSE.__get__(self)
-        _redact_chain(cause, self._orphan_code, self._orphan_urls)
-        return cause
+        return self._sanitised_slot(_BASE_CAUSE)
 
     @__cause__.setter
     def __cause__(self, value: BaseException | None) -> None:
@@ -365,9 +459,7 @@ class OrphanedCheckoutCode(Exception):
 
     @property
     def __context__(self) -> BaseException | None:
-        context = _BASE_CONTEXT.__get__(self)
-        _redact_chain(context, self._orphan_code, self._orphan_urls)
-        return context
+        return self._sanitised_slot(_BASE_CONTEXT)
 
     @__context__.setter
     def __context__(self, value: BaseException | None) -> None:
@@ -485,7 +577,9 @@ class CheckoutProvider:
 
     #: Methods the port performs on every provider's behalf. Overriding one would let an
     #: implementation opt out of a guarantee the port makes, so it is refused.
-    _FINAL_METHODS: ClassVar[frozenset[str]] = frozenset({"checkout"})
+    _FINAL_METHODS: ClassVar[frozenset[str]] = frozenset(
+        {"checkout", "_mint_recording_orphans"}
+    )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -540,7 +634,16 @@ class CheckoutProvider:
         #    adapter, one the merchant's `POST /codes` has already issued — so every failure
         #    below is a refusal that leaves a live discount behind. It is carried out on the
         #    exception rather than dropped; see `OrphanedCheckoutCode`.
-        minted = self.mint(request)
+        #
+        #    ...and INSIDE `mint` too, which is what the ledger is for. A code exists from
+        #    the middle of `mint`, not from its return: `SimulatedRedirectProvider` (D45's
+        #    required starting implementation) calls `mint_code` and then
+        #    `default_permalink`, which resolves the registered domain a second time — and a
+        #    lookup that answers once and fails once loses the code, because an exception
+        #    out of `mint` has no channel to carry it. Only the Shopify adapter had closed
+        #    that, with its own `except`; a guarantee one implementation remembered is not a
+        #    guarantee, so it lives here where `__init_subclass__` makes it unavoidable.
+        minted = self._mint_recording_orphans(request)
         orphan = OrphanedCode(
             code=minted.code,
             permalink_url=minted.permalink_url,
@@ -637,6 +740,83 @@ class CheckoutProvider:
                 f"is live and must be recorded and revoked",
                 orphan=orphan,
             ) from cause
+
+    # --- T-202, held by the PORT rather than by each provider -------------------------
+    def _mint_recording_orphans(self, request: CheckoutRequest) -> MintedCheckout:
+        """Call ``mint``, and turn a failure *after* a code exists into an orphan refusal.
+
+        **The gap this closes.** ``checkout`` wraps everything after ``mint`` returns,
+        because that is where T-157 lost a code. But the code comes into existence in the
+        middle of ``mint``, and ``mint``'s only channel back is its return value — so an
+        exception raised between the mint and the return carries nothing, and the port
+        raises an ordinary refusal with ``orphaned_code`` ``None``. ``accept()`` then files
+        no ``code_created`` event and the live discount is neither recorded nor revocable:
+        the original T-157 defect, moved one frame deeper.
+
+        Measured on ``SimulatedRedirectProvider`` — D45's *required* starting
+        implementation, the one the whole starting-slice demo runs on — with a
+        ``registered_domains`` lookup that answers the first call and raises
+        ``RuntimeError('registry cache evicted')`` on the second, which is precisely the
+        case ``providers.py`` documents ("a dropped connection, a cache eviction"). It mints
+        with :func:`~.codes.mint_code`, then calls ``default_permalink``, which resolves the
+        domain a second time. Before this method the run raised a bare ``OffDomainCheckout``
+        and the code was gone.
+
+        ``ShopifyCheckoutProvider`` had closed the same hole with an ``except`` block of its
+        own. That is one implementation remembering, and D45 exists to invite more: a
+        provider written next year gets this the way it gets the domain check — by being
+        unable to opt out of it.
+
+        **Three cases, deliberately different:**
+
+        * the provider already carried the code out itself (an ``OrphanedCheckoutCode``, as
+          the Shopify adapter raises) — re-raised untouched, because it knows more than this
+          method does: the merchant's permalink, its own name for the failure;
+        * nothing was minted — re-raised untouched. A merchant that is simply down created
+          no code, and inventing an orphan for it would file a ``code_created`` event for a
+          discount that does not exist. This is the ``ExplodingMerchant`` control, and its
+          refusal shape must not move;
+        * a code exists and the provider lost it — the refusal becomes an orphan refusal
+          carrying that code. ``OrphanedOffDomainCheckout`` when the failure was an
+          off-domain one, so every existing ``except OffDomainCheckout`` keeps catching it.
+        """
+        with minting_ledger() as recorded:
+            try:
+                return self.mint(request)
+            except OrphanedCheckoutCode:
+                raise
+            except Exception as exc:
+                code = recorded[-1] if recorded else ""
+                if not code:
+                    raise
+                # Every merchant-controlled fragment is guarded at THIS site, which is the
+                # site that builds the sentence: `{exc}` is arbitrary post-mint text (the
+                # failing domain lookup quotes the bid's own `store_domain` claim), and
+                # `store_id` is read off the bid.
+                cause = _sanitised_cause(exc, code, (request.checkout_url,))
+                kind: type[OrphanedCheckoutCode] = (
+                    OrphanedOffDomainCheckout
+                    if isinstance(exc, OffDomainCheckout)
+                    else OrphanedCheckoutCode
+                )
+                raise kind(
+                    f"{type(exc).__name__}: "
+                    f"{safe_token(exc, code, label='cause')} — raised INSIDE "
+                    f"{self.name!r}'s mint(), after {code_fingerprint(code)} had already "
+                    f"been minted for store "
+                    f"{safe_token(request.store_id, code, label='store')!r}; the code is "
+                    f"live and must be recorded and revoked",
+                    orphan=OrphanedCode(
+                        code=code,
+                        # The permalink is what `mint` had not finished building; there is
+                        # none to report. The CODE is what has to be revoked.
+                        permalink_url="",
+                        provider=self.name,
+                        store_id=request.store_id,
+                        auction_id=request.auction_id,
+                        bid_ref=request.bid_ref,
+                    ),
+                ) from cause
 
     # --- the extension point --------------------------------------------------------
     def mint(self, request: CheckoutRequest) -> MintedCheckout:
