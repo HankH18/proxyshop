@@ -2606,6 +2606,96 @@
       "defect": "A bid's stated price is not reconciled against its granted discount. The floor wall exists, but unit_price ~= list_price * (1 - pct) is NOT verified. A real Bid with an honest 20% grant and unit_price=1.00 under a 10.00 floor was admitted before the floor wall; the arithmetic relation is still unchecked because quantity/currency semantics for total_price are undecided. contracts.boundary.validate_bid does schema + provenance + expiry + eligibility but NO price/floor reconciliation, which is why this was invisible everywhere.",
       "finding_id": "3958348dc2ef784a4510d6bb464db93f8c0ba6441eb87a3d39c440463fa96462",
       "reproduction": "Construct a Bid whose unit_price does not follow from list_price and the granted discount pct; the boundary admits it."
+    },
+    {
+      "id": "T-154",
+      "title": "EVENTS_ROLE = \"app\", and its comment asserts app is 'the role the writer connects as... deliberately not trust_rw'. That statement is now false: compose, .env.example, proxyshop_support.postgres.ROLES and the T-151 fix all say the shipped ledger writer is trust_rw. Consequence: every DB-backed test in apps/trust exercises a database principal the deployment does not use, against a DIFFERENT grant set (app has SELECT+INSERT on ledger plus full DML on app and sealed; trust_rw has full DML on ledger, read-only on app, nothing in sealed). The suite's DB coverage is therefore evidence about the wrong role.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/_fixtures_events.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/trust/tests/_fixtures_events.py:42",
+      "defect": "EVENTS_ROLE = \"app\", and its comment asserts app is 'the role the writer connects as... deliberately not trust_rw'. That statement is now false: compose, .env.example, proxyshop_support.postgres.ROLES and the T-151 fix all say the shipped ledger writer is trust_rw. Consequence: every DB-backed test in apps/trust exercises a database principal the deployment does not use, against a DIFFERENT grant set (app has SELECT+INSERT on ledger plus full DML on app and sealed; trust_rw has full DML on ledger, read-only on app, nothing in sealed). The suite's DB coverage is therefore evidence about the wrong role.",
+      "finding_id": "8839686827cae7e2ae56604411c8f4576f80989c2b221ffcbfc9b7490d918da4",
+      "reproduction": "Read apps/trust/tests/_fixtures_events.py:42 and compare with proxyshop_support.postgres.ROLES and apps/trust/compose.yaml. Then run apps/trust tests and observe the connected principal is 'app' while the service ships as 'trust_rw'. Reported by the T-151 lane, which added the only test covering the real principal."
+    },
+    {
+      "id": "T-155",
+      "title": "MAX_SWEEP_DEPTH = 12 truncates the provenance walk SILENTLY. A priced node, a claim, or a discount nested 13+ levels deep in a dict-shaped bid is admitted having been inspected by nothing. This bypasses EVERY boundary wall \u2014 the claim provenance walk, the floor wall and the new price reconciliation alike \u2014 not merely the price checks, so it is strictly wider than the T-153 defect that surfaced it. Raising the bound does not fix it, and refusing everything past the bound would refuse an honestly deep metadata blob, which _sweep is explicitly written to tolerate. The bound's stated purpose is to stop a self-referential dict hanging the boundary, so the correct fix is CYCLE DETECTION replacing the depth bound.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "CRITICAL",
+      "location": "packages/store-agent/src/hooks/provenance.py:447",
+      "defect": "MAX_SWEEP_DEPTH = 12 truncates the provenance walk SILENTLY. A priced node, a claim, or a discount nested 13+ levels deep in a dict-shaped bid is admitted having been inspected by nothing. This bypasses EVERY boundary wall \u2014 the claim provenance walk, the floor wall and the new price reconciliation alike \u2014 not merely the price checks, so it is strictly wider than the T-153 defect that surfaced it. Raising the bound does not fix it, and refusing everything past the bound would refuse an honestly deep metadata blob, which _sweep is explicitly written to tolerate. The bound's stated purpose is to stop a self-referential dict hanging the boundary, so the correct fix is CYCLE DETECTION replacing the depth bound.",
+      "finding_id": "3c9909f89b365f202e71ce026fcee623d47318e6310222c579e8ed57055abcae",
+      "reproduction": "On the current tree, wrap {\"product_ref\": \"prod-cap\", \"unit_price\": 1.0} in 14 nested dicts and pass it through the boundary: the node is ADMITTED. Measured by the T-153 lane. Compare against the same node at depth < 12, which is collected and refused."
+    },
+    {
+      "id": "T-156",
+      "title": "offer.total_price is never reconciled against unit_price: an offer stating unit_price=80.0 with total_price=1.0 is admitted. Offer carries no quantity, and the quantity that would relate the two lives in apps/exchange/src/checkout/codes.py:111, so the relation is not decidable from a bid alone. The T-153 lane scoped this out explicitly and documented it in the refusal's docstring rather than leaving it silent. Closing it requires deciding where quantity enters the bid \u2014 a design question, not a bug fix.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/hooks/provenance.py (_price_reconciliation_refusal)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/store-agent/src/hooks/provenance.py (_price_reconciliation_refusal)",
+      "defect": "offer.total_price is never reconciled against unit_price: an offer stating unit_price=80.0 with total_price=1.0 is admitted. Offer carries no quantity, and the quantity that would relate the two lives in apps/exchange/src/checkout/codes.py:111, so the relation is not decidable from a bid alone. The T-153 lane scoped this out explicitly and documented it in the refusal's docstring rather than leaving it silent. Closing it requires deciding where quantity enters the bid \u2014 a design question, not a bug fix.",
+      "finding_id": "1096f78cc52da904315c756c6858dceb18657a18d2bd083aa8afb36f3ae50686",
+      "reproduction": "Construct an Offer with unit_price=80.0 and total_price=1.0 and pass it through enforce_bid_provenance: admitted."
+    },
+    {
+      "id": "T-157",
+      "title": "An off-domain permalink from a delegating merchant client leaves a LIVE single-use discount code with no ledger record. The offer's checkout_url is checked BEFORE the mint, but an offer with NO url \u2014 the legal R10 list-price fallback shape that collect_bids manufactures \u2014 gives that check nothing to look at. The first failable host comparison is therefore the one on the permalink returned BY mint, i.e. AFTER POST /codes has already issued a real discount code. Measured on task/T-033: merchant invoked once, code PSX-REALCODE live, accept correctly returns no permalink and leaves the auction open, and NO code_created event exists for that code. Carrying the minted code out on OffDomainCheckout so the exchange can revoke it is T-036's file.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/checkout/provider.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/checkout/provider.py:209-222",
+      "defect": "An off-domain permalink from a delegating merchant client leaves a LIVE single-use discount code with no ledger record. The offer's checkout_url is checked BEFORE the mint, but an offer with NO url \u2014 the legal R10 list-price fallback shape that collect_bids manufactures \u2014 gives that check nothing to look at. The first failable host comparison is therefore the one on the permalink returned BY mint, i.e. AFTER POST /codes has already issued a real discount code. Measured on task/T-033: merchant invoked once, code PSX-REALCODE live, accept correctly returns no permalink and leaves the auction open, and NO code_created event exists for that code. Carrying the minted code out on OffDomainCheckout so the exchange can revoke it is T-036's file.",
+      "finding_id": "988147bfae9b113330152cf1b212e487cbd7a98a3dda948cce39c49211690469",
+      "reproduction": "See test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_record in apps/exchange/tests/test_accept.py on branch task/T-033."
+    },
+    {
+      "id": "T-158",
+      "title": "The one-accept-per-auction guard is only as durable as the record handed in. accept() stamps the auction OBJECT it receives. A route that loads an AuctionRecord from RedisAuctionStore, accepts, and does not save it back leaves an unstamped record for the next request; and two concurrent requests reading it can both pass the guard, because the check-then-act window spans the whole provider call including merchant I/O. The durable guard belongs on AuctionStateMachine's already-serialised ACCEPTED transition.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/accept/offer.py (module docstring) + AuctionStateMachine"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/accept/offer.py (module docstring) + AuctionStateMachine",
+      "defect": "The one-accept-per-auction guard is only as durable as the record handed in. accept() stamps the auction OBJECT it receives. A route that loads an AuctionRecord from RedisAuctionStore, accepts, and does not save it back leaves an unstamped record for the next request; and two concurrent requests reading it can both pass the guard, because the check-then-act window spans the whole provider call including merchant I/O. The durable guard belongs on AuctionStateMachine's already-serialised ACCEPTED transition.",
+      "finding_id": "6c6e8e16d09a3cae7e73a4d346f494655796680c216f345bb77062cc06fda633",
+      "reproduction": "Load an AuctionRecord from RedisAuctionStore, call accept(), discard the object without saving; the next accept on a freshly loaded record passes the guard and mints a second code."
+    },
+    {
+      "id": "T-159",
+      "title": "SYSTEMIC GATE-CREDIBILITY DEFECT: tests that swallow a missing subject with `except ImportError` are VACUOUS until the subject exists, and report green the whole time. test_checkout_provider.py:406 counted accept()'s no-default positionals but was wrapped so it tolerated accept not existing at all \u2014 it had therefore NEVER run for real until T-033 created the module, at which point it immediately went red. This is the third vacuous gate found in cycle 10 alone: red-check independently proved T-111's and T-123's gates EXIT 0 with their defects live. The class is 'a gate that cannot fail is indistinguishable from a gate that passes', and it is what let earlier waves report T-109/T-111/T-123 fixed when git says the files were never touched. Needs a repo-wide sweep for except-ImportError-tolerant tests and skip/xfail guards whose condition is permanently true.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/tests/test_checkout_provider.py:406 (and repo-wide)"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/tests/test_checkout_provider.py:406 (and repo-wide)",
+      "defect": "SYSTEMIC GATE-CREDIBILITY DEFECT: tests that swallow a missing subject with `except ImportError` are VACUOUS until the subject exists, and report green the whole time. test_checkout_provider.py:406 counted accept()'s no-default positionals but was wrapped so it tolerated accept not existing at all \u2014 it had therefore NEVER run for real until T-033 created the module, at which point it immediately went red. This is the third vacuous gate found in cycle 10 alone: red-check independently proved T-111's and T-123's gates EXIT 0 with their defects live. The class is 'a gate that cannot fail is indistinguishable from a gate that passes', and it is what let earlier waves report T-109/T-111/T-123 fixed when git says the files were never touched. Needs a repo-wide sweep for except-ImportError-tolerant tests and skip/xfail guards whose condition is permanently true.",
+      "finding_id": "6f077a3bc3ab2f21765b33d17c8a1cb289e1c72e6e42f5235748fa1ed0f78dc6",
+      "reproduction": "git grep -n 'except ImportError' -- '*test*' and check each for an assertion that only runs when the import succeeds. Compare with the T-111/T-123 red-check output: 'VACUOUS \u2014 EXITS 0 with nothing implemented'."
     }
   ]
 }
