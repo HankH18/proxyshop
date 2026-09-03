@@ -524,3 +524,133 @@ def test_a_break_in_a_later_link_still_names_its_real_predecessor() -> None:
     assert report["broken_at"] == 1
     assert "index 0" in report["detail"]
     assert "'ev-0'" in report["detail"]
+
+
+# ======================================================================================
+# 6. [HIGH] the ledger writer must connect as the role D5 grants it, not as `app`
+# ======================================================================================
+#: Every environment variable that could hand the writer a DSN. A test that cleared only
+#: ``DEFAULT_DSN_ENV`` would track whatever that tuple happens to say and could therefore
+#: never observe a variable missing *from* it -- which is precisely the defect below.
+_ALL_LEDGER_DSN_ENV = (
+    "PROXYSHOP_LEDGER_DSN",
+    "PROXYSHOP_PG_DSN_TRUST_RW",
+    "PROXYSHOP_PG_DSN_APP",
+)
+
+
+def _isolate_ledger_dsn_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset every DSN variable the writer could read, from either source of truth."""
+    from apps.trust.src.events.pg import DEFAULT_DSN_ENV
+
+    for name in (*_ALL_LEDGER_DSN_ENV, *DEFAULT_DSN_ENV):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_the_ledger_writer_resolves_the_per_role_dsn_variable_d5_grants_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment that sets only the documented per-role variable must be served by it.
+
+    Red first. ``DEFAULT_DSN_ENV`` was ``("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_APP")``
+    and never named ``PROXYSHOP_PG_DSN_TRUST_RW`` -- the variable
+    ``proxyshop_support.postgres.ROLES["trust_rw"]`` designates for this exact writer and
+    the one ``.env.example`` documents. So a deployment that configured the ledger the
+    documented way got :class:`StoreUnavailable` ("no database to write to") while the
+    correct DSN sat in the environment unread.
+
+    The variable name is taken from the role registry rather than typed as a literal, so
+    this test grades "the writer reads *its own role's* variable", not "the writer reads
+    some string that happens to be spelled this way today".
+    """
+    from proxyshop_support.postgres import ROLES
+
+    from apps.trust.src.events.pg import PostgresEventStore
+
+    per_role_env = ROLES["trust_rw"][0]
+    trust_rw_dsn = "postgresql://trust_rw:pw@db.example:5432/proxyshop_w0"
+
+    _isolate_ledger_dsn_env(monkeypatch)
+    monkeypatch.setenv(per_role_env, trust_rw_dsn)
+
+    assert PostgresEventStore()._resolve_dsn() == trust_rw_dsn, (
+        f"the ledger writer ignored {per_role_env}, the per-role DSN D5 grants it; a "
+        f"deployment configured the documented way cannot write the ledger at all"
+    )
+
+
+def test_the_per_role_ledger_dsn_outranks_the_generic_app_dsn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With both set, the writer connects as ``trust_rw`` -- never as ``app``.
+
+    This is the privilege-confusion half, and it is the half that fails *silently*: with
+    ``PROXYSHOP_PG_DSN_APP`` also present the writer connected happily, just as the wrong
+    role, so nothing in the logs or the response said a thing. ``app`` is a different grant
+    set from the one D5 gives the ledger; a writer that silently borrows it is exercising
+    privileges the deployment did not intend to give it.
+    """
+    from proxyshop_support.postgres import ROLES
+
+    from apps.trust.src.events.pg import DEFAULT_DSN_ENV, PostgresEventStore
+
+    per_role_env, app_env = ROLES["trust_rw"][0], ROLES["app"][0]
+    trust_rw_dsn = "postgresql://trust_rw:pw@db.example:5432/proxyshop_w0"
+    app_dsn = "postgresql://app:pw@db.example:5432/proxyshop_w0"
+
+    _isolate_ledger_dsn_env(monkeypatch)
+    monkeypatch.setenv(per_role_env, trust_rw_dsn)
+    monkeypatch.setenv(app_env, app_dsn)
+
+    resolved = PostgresEventStore()._resolve_dsn()
+    assert resolved == trust_rw_dsn, (
+        f"the ledger writer resolved {resolved!r}; with {per_role_env} set it must connect "
+        f"as trust_rw, not fall through to the generic {app_env} role"
+    )
+    assert DEFAULT_DSN_ENV.index(per_role_env) < DEFAULT_DSN_ENV.index(app_env), (
+        "the per-role variable must be consulted before the generic app DSN, or the "
+        "precedence above holds only by accident of which one a deployment sets"
+    )
+
+
+def test_an_explicit_ledger_dsn_override_still_outranks_the_per_role_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The documented escape hatch survives the fix: ``PROXYSHOP_LEDGER_DSN`` wins.
+
+    ``apps/trust/compose.yaml`` sets it deliberately to point the writer somewhere without
+    disturbing the per-role variables. Inserting ``trust_rw`` ahead of it would have turned
+    that deployment's explicit instruction into a no-op.
+    """
+    from proxyshop_support.postgres import ROLES
+
+    from apps.trust.src.events.pg import PostgresEventStore
+
+    override = "postgresql://ledger_override:pw@elsewhere.example:5432/ledger"
+
+    _isolate_ledger_dsn_env(monkeypatch)
+    monkeypatch.setenv("PROXYSHOP_LEDGER_DSN", override)
+    monkeypatch.setenv(ROLES["trust_rw"][0], "postgresql://trust_rw:pw@db.example:5432/w0")
+
+    assert PostgresEventStore()._resolve_dsn() == override
+
+
+def test_a_deployment_that_sets_only_the_generic_app_dsn_keeps_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compatibility control: adding a name must not remove one.
+
+    Three of the four services still hand the writer only ``PROXYSHOP_PG_DSN_APP``. A fix
+    that dropped the generic fallback instead of ranking below it would take those
+    deployments from "wrong role" to "no ledger at all", which is worse.
+    """
+    from proxyshop_support.postgres import ROLES
+
+    from apps.trust.src.events.pg import PostgresEventStore
+
+    app_dsn = "postgresql://app:pw@db.example:5432/proxyshop_w0"
+
+    _isolate_ledger_dsn_env(monkeypatch)
+    monkeypatch.setenv(ROLES["app"][0], app_dsn)
+
+    assert PostgresEventStore()._resolve_dsn() == app_dsn
