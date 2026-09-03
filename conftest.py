@@ -277,53 +277,17 @@ def pg_role(
 
 
 @pytest.fixture(scope="session")
-def _neo4j_guard() -> Iterator[bool]:
-    """Take the cross-worker Neo4j lock for this whole session (D37). Always.
+def _neo4j_connection() -> Iterator[Any]:
+    """The Bolt connection to the compose Neo4j (D6: 5.26 Community) — **and nothing else**.
 
-    Yields ``True``: every pytest session that touches Neo4j holds the ``flock`` on
-    ``/tmp/proxyshop-neo4j.lock`` and therefore owns the single Community-edition database
-    (D4: there is exactly ONE, so this lock is the only isolation that exists) exclusively
-    for as long as it runs.
+    Session-scoped because a TCP connection is expensive and shareable; deliberately
+    **lock-free** because the D37 flock is not. Splitting the two is the whole of T-214: the
+    connection wants to live for the session, the machine-global lock must not.
 
-    **This used to yield ``False`` by default and be overridden to ``True`` in exactly two
-    lane conftests, and that shape was unsound twice over.** Measured, both:
+    Nothing outside this file should request this. Take :func:`neo4j_driver`, which hands
+    you the same connection with the lock held and the graph reset.
 
-    1. Any directory without an override — ``e2e/`` most importantly, where three tickets
-       read a graph a fourth one writes — got no lock *and* no :func:`reset_graph`. An e2e
-       test finished in 0.45 s while an ingest lane held the flock for 6 s, and read a node
-       a previous lane had left behind.
-    2. ``neo4j_driver`` below is **session**-scoped, so pytest builds it once and caches it.
-       Only the *first* requester's ``_neo4j_guard`` is ever consulted. In a whole-repo run
-       collecting ``apps/`` before ``e2e/`` that happened to be a lane with the override —
-       but reorder the collection, or run ``pytest e2e apps/exchange``, and the guardless
-       directory wins for the entire session and silently disarms the lanes that do care.
-
-    A single unconditional definition removes both failure modes: there is no override to
-    resolve, so there is nothing for the cache to pick the wrong answer from.
-
-    Cost is nil when no graph test runs: this fixture is only ever built as a dependency of
-    :func:`neo4j_driver`, which nothing but a Neo4j test requests. The stack-reachability
-    check happens **before** the lock is taken, so a session running against a down stack
-    skips immediately instead of making every sibling worker wait out its 600 s timeout.
-
-    The flock is re-entrant within a process (see ``proxyshop_support.neo4j_lock``), so a
-    nested acquisition — a test that takes it explicitly, a lane conftest that still wraps
-    it — costs nothing and cannot self-deadlock.
-    """
-    _require_services("neo4j-bolt")
-    with neo4j_flock():
-        yield True
-
-
-@pytest.fixture(scope="session")
-def neo4j_driver(_neo4j_guard: bool) -> Iterator[Any]:
-    """Session-scoped ``neo4j.Driver`` for the compose Neo4j (D6: 5.26 Community).
-
-    ``_neo4j_guard`` has already taken the D37 lock, so the graph is reset once, here,
-    *inside* the lock — before any test runs and while no other worker can be writing.
-    Without that, one lane's nodes are still present when the next lane asserts.
-
-    Requires ``@pytest.mark.docker`` (and, for writes, ``@pytest.mark.graph``).
+    Requires ``@pytest.mark.docker``.
     """
     from neo4j import GraphDatabase
 
@@ -338,11 +302,86 @@ def neo4j_driver(_neo4j_guard: bool) -> Iterator[Any]:
         driver.close()
         pytest.skip(f"neo4j is not reachable at {uri}: {exc}")
     try:
-        if _neo4j_guard:
-            reset_graph(driver)
         yield driver
     finally:
         driver.close()
+
+
+@pytest.fixture
+def _neo4j_guard() -> Iterator[bool]:
+    """Hold the cross-worker Neo4j lock (D37) for **one test**. Always.
+
+    Yields ``True``: every test that touches Neo4j holds the ``flock`` on
+    ``/tmp/proxyshop-neo4j.lock`` while it runs, and therefore owns the single
+    Community-edition database (D4: there is exactly ONE, so this lock is the only
+    isolation that exists) for the duration of that test.
+
+    **Function-scoped, and that is the point (T-214).** This fixture used to be
+    ``scope="session"``. A session fixture is torn down at the END of the session, so the
+    first Neo4j-touching test took a MACHINE-GLOBAL lock and the run kept it until it
+    exited. That was invisible while ``scripts/verify.sh check`` deselected ``docker``
+    tests; the moment it stopped (T-117/ESC-005), it became the dominant failure mode.
+    Measured on a real ``check``: the flock was held from t=25.1 s to t=220.8 s of a
+    221.78 s session — 88 % of the run — with the ~3 800 tests that never touch Neo4j
+    executing inside the hold. **Every lane runs ``check``**, so concurrent lanes serialised
+    on one lock and the loser died with ``Neo4jLockTimeout`` at 240 s for a machine reason
+    that had nothing to do with its code. Narrowing the scope is what fixes that: the lock
+    is now held for a graph test's own runtime and released between tests, so a sibling
+    worker's wait is bounded by one test rather than by a whole session.
+
+    Because the lock is dropped between tests, another process may write the graph in the
+    gap — so the reset moved with it: :func:`neo4j_driver` resets **per acquisition**, not
+    once per session. Serialization without a reset at each hand-off would be no isolation
+    at all.
+
+    **This used to be an override rather than one unconditional definition, and that shape
+    was unsound twice over.** Measured, both:
+
+    1. Any directory without an override — ``e2e/`` most importantly, where three tickets
+       read a graph a fourth one writes — got no lock *and* no :func:`reset_graph`. An e2e
+       test finished in 0.45 s while an ingest lane held the flock for 6 s, and read a node
+       a previous lane had left behind.
+    2. ``neo4j_driver`` was **session**-scoped, so pytest built it once and cached it. Only
+       the *first* requester's ``_neo4j_guard`` was ever consulted. In a whole-repo run
+       collecting ``apps/`` before ``e2e/`` that happened to be a lane with the override —
+       but reorder the collection, or run ``pytest e2e apps/exchange``, and the guardless
+       directory won for the entire session and silently disarmed the lanes that did care.
+
+    A single unconditional definition removes both failure modes: there is no override to
+    resolve, so there is nothing for the cache to pick the wrong answer from.
+    ``proxyshop_support/tests/test_scaffold_wiring.py`` keeps it that way.
+
+    Cost is nil when no graph test runs: this fixture is only ever built as a dependency of
+    :func:`neo4j_driver`, which nothing but a Neo4j test requests. The stack-reachability
+    check happens **before** the lock is taken, so a test running against a down stack skips
+    immediately instead of making every sibling worker wait out the timeout.
+
+    The flock is re-entrant within a process (see ``proxyshop_support.neo4j_lock``), so a
+    nested acquisition — a test that takes it explicitly, a lane conftest that still wraps
+    it — costs nothing and cannot self-deadlock.
+    """
+    _require_services("neo4j-bolt")
+    with neo4j_flock():
+        yield True
+
+
+@pytest.fixture
+def neo4j_driver(_neo4j_guard: bool, _neo4j_connection: Any) -> Iterator[Any]:
+    """The session's ``neo4j.Driver``, handed out with the D37 lock held and a clean graph.
+
+    Function-scoped, over a session-scoped connection: ``_neo4j_guard`` takes the lock for
+    this test, and the graph is reset *inside* it, before the test body runs and while no
+    other worker can be writing. The reset is per test rather than per session precisely
+    because the lock is now released between tests (T-214) — whatever a sibling worker did
+    in the gap is deleted before this test looks at the graph.
+
+    The connection itself is **not** rebuilt per test; only the lock and the reset are.
+
+    Requires ``@pytest.mark.docker`` (and, for writes, ``@pytest.mark.graph``).
+    """
+    if _neo4j_guard:
+        reset_graph(_neo4j_connection)
+    yield _neo4j_connection
 
 
 @pytest.fixture
