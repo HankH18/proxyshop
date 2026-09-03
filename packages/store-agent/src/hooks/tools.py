@@ -579,6 +579,31 @@ class ToolHooks:
                 floor = max(floor, float(entry.get("min_price") or 0.0))
         return floor
 
+    def list_price(self, product_ref: str) -> float | None:
+        """The catalog's undiscounted price for a product, or `None` when there is no usable one.
+
+        The number every discount is a percentage *of*. It was already read here — inside
+        :meth:`_evaluate_discount`, to work out what a requested depth prices out at — but only
+        ever for the hook's own decision, so the bid boundary had no way to ask what 20% off was
+        supposed to come to and could only check the price against the floor. Exposed as a method
+        beside :meth:`price_floor` for the same reason that one is: the boundary and the hook must
+        read the merchant's numbers from one place, or they will eventually disagree about them.
+
+        `None` rather than `0.0` for a product the catalog does not list, or one whose entry
+        carries no usable `list_price`. The distinction matters at the boundary: 0.0 is a list
+        price that makes every stated price look generous, while `None` is "unanswerable", and
+        :func:`~.provenance._price_reconciliation_refusal` refuses rather than guesses when it is
+        handed one.
+        """
+        listing = self.catalog.get(str(product_ref))
+        if listing is None:
+            return None
+        try:
+            value = float(listing.get("list_price"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
     def authorize_discount(self, product_ref: str, requested_pct: float) -> Claim | Denied:
         """Authorize a discount against the envelope, or refuse. `envelope_rule` provenance.
 
@@ -659,9 +684,11 @@ class ToolHooks:
             rule = self.envelope_ref("max_discount_pct")
             return (REASON_OVER_MAX_DISCOUNT, cap, rule), 0.0, 0.0, cap
 
-        list_price = float(listing.get("list_price") or 0.0)
+        list_price = self.list_price(product_ref) or 0.0
         # `list_price * (100 - pct) / 100` rather than `list_price * (1 - pct/100)`: the first
-        # keeps whole percentages exact (100 * 97 / 100 == 97.0), the second does not.
+        # keeps whole percentages exact (100 * 97 / 100 == 97.0), the second does not. The bid
+        # boundary reconciles a stated price against this same expression, through
+        # `list_price()`, so the two cannot round differently and call it fraud.
         resulting_price = list_price * (100.0 - pct) / 100.0
         floor = self.price_floor(product_ref)
         if resulting_price + WALL_TOLERANCE < floor:
