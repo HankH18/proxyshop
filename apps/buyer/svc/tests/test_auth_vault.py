@@ -497,7 +497,19 @@ def test_build_profile_raises_when_a_coarsener_is_rewired_to_leak(
     monkeypatch.setattr(profile_module, "coarsen_region", lambda value: "97205")
     with pytest.raises(profile_module.IdentityLeak) as caught:
         profile_module.build_profile(DANA, "psn-rewired")
-    assert "97205" in str(caught.value)
+
+    # T-133 (a). This assertion used to read `assert "97205" in str(caught.value)` — it
+    # required the buyer's postal code to be interpolated into the refusal. That is a
+    # disclosure asserted as a contract, and it was wrong on the tree as it stood rather than
+    # merely inconvenient to a fix: `read_profile` caught only `SessionError`, so this
+    # exception left the process as a 500 whose traceback carried the value out to an
+    # unauthenticated peer, and SPEC R5 ("stores never receive buyer identity") is exactly
+    # what that breaks. What the test was really reaching for — the backstop is wired into
+    # the builder, and the refusal says enough to act on — is asserted precisely instead, in
+    # both directions, which is strictly stronger than the line it replaces.
+    assert "postal_code" in str(caught.value)
+    assert "97205" not in str(caught.value), str(caught.value)
+    assert caught.value.account_keys == ("address", "postal_code")
 
 
 def test_build_profile_refuses_a_missing_pseudonym() -> None:

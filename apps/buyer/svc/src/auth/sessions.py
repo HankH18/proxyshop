@@ -57,6 +57,10 @@ class NotAPseudonym(SessionError, ValueError):
     ``sessions.open(email)`` — which would produce a perfectly working session whose
     "pseudonym" is the buyer's address, and would put that address into every bid request
     the buyer's intent ever fans out.
+
+    Which is exactly why the message never echoes the subject it refused. The value this
+    exception exists to catch *is* the buyer's email address; printing it into a log line or
+    a traceback would make the R5 guard the shortest path to an R5 disclosure (T-133).
     """
 
 
@@ -127,7 +131,8 @@ class InMemorySessionStore(SessionStore):
         if not isinstance(pseudonym, str) or not pseudonym.startswith(PSEUDONYM_PREFIX):
             raise NotAPseudonym(
                 f"R5: a session subject must be a vault-issued pseudonym "
-                f"(prefix {PSEUDONYM_PREFIX!r}), got {pseudonym!r}"
+                f"(prefix {PSEUDONYM_PREFIX!r}); the value offered is withheld from this "
+                f"message because the mistake this catches is passing the buyer's email"
             )
         issued_at = self._clock()
         session = Session(
