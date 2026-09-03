@@ -21,9 +21,13 @@ The three acceptance criteria, and what each is actually asserted against here:
    own negative control (:func:`test_the_budget_verdict_can_actually_fail`) so a
    ``within_budget`` hardcoded to ``True`` fails.
 
-Everything outside the one ``@pytest.mark.docker`` graph test runs offline against the
+Everything outside the two ``@pytest.mark.docker`` graph tests runs offline against the
 deterministic doubles A2 requires: no Neo4j, no network, no clock sensitivity except the
-latency section, which is about wall-clock behaviour and says so.
+latency section, which is about wall-clock behaviour and says so. Those two exist because one
+class of defect is invisible to any double: a *pushdown* narrower than the rule this module
+publishes. The doubles apply no filter at all, so a graph-side predicate that silently
+discards a satisfying candidate leaves every offline assertion green — see
+:func:`test_a_pushdown_narrower_than_the_rule_would_lose_this_candidate`.
 """
 
 from __future__ import annotations
@@ -311,6 +315,30 @@ def test_pushdown_expresses_what_cypher_can_and_declines_what_it_cannot() -> Non
     assert numeric is not None
     assert numeric.min_number == 30.0
     assert numeric.as_parameter()["key"] == "spf"
+
+
+def test_numeric_equality_declines_pushdown_because_cypher_is_narrower_than_the_rule() -> None:
+    """A pushdown may never exclude a candidate the local decision would admit.
+
+    The Cypher predicate is ``a.value_number = f.equals_number`` — exact float equality —
+    while the local rule compares with ``math.isclose``. A reading stored as
+    ``0.30000000000000004`` against a constraint of ``0.3`` is dropped by Neo4j and admitted
+    here, so pushing numeric ``eq`` down would make the graph path strictly narrower than the
+    rule this module publishes, in a way no double can reveal. ``lte``/``gte`` are safe:
+    both sides compare the same two floats with the same operator.
+    """
+    assert HardCriterion("net_weight", "eq", 0.3).pushdown() is None
+    assert HardCriterion("grams", "eq", 250).pushdown() is None
+    # ...and the local rule is the tolerant one, which is what makes the decline necessary.
+    noisy = [{"key": "net_weight", "value_number": 0.1 + 0.2, "value_string": None, "unit": None}]
+    assert HardCriterion("net_weight", "eq", 0.3).decide(noisy).satisfied is True
+    assert (0.1 + 0.2) != 0.3  # the exact comparison Cypher would have made
+
+    query = build_query(
+        intent(constraints=[{"field": "net_weight", "op": "eq", "value": 0.3}], category=None)
+    )
+    assert query.attribute_filters == ()
+    assert tuple(c.field for c in query.local_only_criteria) == ("net_weight",)
 
 
 def test_the_query_pushes_the_expressible_filters_at_the_source() -> None:
@@ -996,3 +1024,61 @@ def test_the_graph_source_retrieves_vector_plus_attribute_candidates(
     (assessment,) = result.assessments
     assert assessment.features.similarity is not None
     assert 0.0 <= assessment.features.similarity <= 1.0
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_a_pushdown_narrower_than_the_rule_would_lose_this_candidate(
+    neo4j_session: Any,
+) -> None:
+    """The regression test for the pushdown invariant, against the real Cypher.
+
+    ``0.1 + 0.2`` is stored, ``0.3`` is asked for. The local rule admits it; Neo4j's
+    ``a.value_number = f.equals_number`` does not. Re-enable the numeric-``eq`` pushdown in
+    :meth:`HardCriterion.pushdown` and this candidate disappears from the graph path while
+    every offline test in this file stays green — which is exactly why the assertion lives
+    here, on the real database, rather than against a double.
+    """
+    from exchange.retrieval import GraphCandidateSource
+    from ingest.embeddings import HashEmbedding
+    from ingest.graph import (
+        AttributeValue,
+        Source,
+        apply_schema,
+        reembed_products,
+        seed_products,
+    )
+
+    apply_schema(neo4j_session)
+    seed_products(
+        neo4j_session,
+        [
+            {
+                "product_id": "t031-noisy",
+                "canonical_name": "Altura Washed Single Origin decimal weight",
+                "category": "coffee",
+                "attributes": [AttributeValue(key="net_weight", value_number=0.1 + 0.2, unit="kg")],
+            }
+        ],
+        source=Source(
+            source_id="src-t031-noisy",
+            url="https://northroast.example/catalog",
+            content_hash="sha256:t031noisy",
+            observed_at=CREATED_AT,
+            extractor_version="t031@1",
+            confidence=0.9,
+            source_class="scraped",
+        ),
+    )
+    provider = HashEmbedding()
+    reembed_products(neo4j_session, provider)
+
+    result = CandidateRetrieval(GraphCandidateSource(neo4j_session, provider=provider)).retrieve(
+        intent(
+            query="single origin whole beans",
+            constraints=[{"field": "net_weight", "op": "eq", "value": 0.3, "unit": "kg"}],
+            category="coffee",
+        )
+    )
+
+    assert "t031-noisy" in result.product_ids

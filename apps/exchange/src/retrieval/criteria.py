@@ -185,17 +185,36 @@ class HardCriterion:
     def pushdown(self) -> AttributeFilter | None:
         """The graph-side filter for this constraint, or ``None`` when Cypher cannot say it.
 
+        **The invariant, and the only one that matters here: a pushdown may never exclude a
+        candidate the local decision would admit.** Pushdown is an optimisation; if it is
+        narrower than the rule, the graph path silently returns fewer satisfying candidates
+        than the rule promises — and no offline test can see it, because the double does not
+        apply the filter at all. Every ``None`` below is that invariant being kept.
+
         Returns:
-            An :class:`~ingest.graph.AttributeFilter` for ``eq``/``lte``/``gte``; ``None``
-            for ``in`` and ``contains``, which have no ``AttributeFilter`` spelling. Never an
-            approximation: a filter that merely *narrowed towards* ``in`` would discard rows
-            the local decision would have admitted, and nothing downstream could see it.
+            An :class:`~ingest.graph.AttributeFilter` for ``lte``/``gte`` and for ``eq`` on a
+            string or a bool; ``None`` for:
+
+            * ``in`` and ``contains`` — ``AttributeFilter`` has no disjunction and no
+              substring predicate, and a filter that merely *narrowed towards* them would
+              discard rows the local decision would have admitted;
+            * ``eq`` on a **number** — measured: the Cypher predicate is
+              ``a.value_number = f.equals_number``, exact float equality, while
+              :meth:`_equals` uses :func:`math.isclose`. A reading stored as
+              ``0.30000000000000004`` against a constraint of ``0.3`` is dropped by Neo4j and
+              admitted here, so pushing it down would make the graph strictly narrower than
+              the rule. ``lte``/``gte`` are safe because both sides compare the same two
+              floats with the same operator.
+
+        The declined ops become :attr:`RetrievalQuery.local_only_criteria`, which is what
+        makes :data:`~exchange.retrieval.sources.LOCAL_FILTER_OVERSAMPLE` fetch headroom for
+        them.
         """
         if self.op == "eq":
             if isinstance(self.value, bool):
                 return AttributeFilter(self.field, value_bool=self.value, unit=self.unit)
             if _is_number(self.value):
-                return AttributeFilter(self.field, equals_number=float(self.value), unit=self.unit)
+                return None
             return AttributeFilter(self.field, value_string=str(self.value), unit=self.unit)
         if self.op == "lte":
             return AttributeFilter(self.field, max_number=float(self.value), unit=self.unit)
