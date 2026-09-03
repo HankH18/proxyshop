@@ -515,3 +515,68 @@ def test_padding_identity_with_merchandise_is_refused_on_every_route_it_reaches(
         ]
         with pytest.raises(IdentityLeak, match="R5"):
             build_profile(record, PSEUDONYM)
+
+
+def test_identity_split_across_several_slugs_is_refused_as_one_disclosure() -> None:
+    """Found by attacking the T-189 fix: the budget was per slug, the profile is a list.
+
+    ``category_affinity`` publishes up to ``CATEGORY_LIMIT`` slugs, and each one earned the
+    exemption on its own. So the fragment budget that refuses ``dana-reyes-gear`` in one slug
+    was satisfied twice over by two orders::
+
+        [{"category": "dana gear"}, {"category": "reyes gear"}]
+        -> category_affinity == ["dana-gear", "reyes-gear"]
+
+    The buyer's full name reaches the store exactly as it did before, spelled across two
+    values instead of inside one. Same for the two halves of a street (``alder-gear`` and
+    ``portland-gear``) and for the Park Lane buyer's own (``park-gear`` and ``lane-gear``),
+    which is the sharpest of the three: ``park-gear`` alone is the collision the exemption
+    was built for, and it stops being a collision the moment ``lane-gear`` is published
+    beside it.
+
+    A disclosure is a property of the profile, not of one value in it.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile
+
+    named = {
+        "email": "dana.reyes@example.com",
+        "first_name": "Dana",
+        "last_name": "Reyes",
+        "address": "44 Alder Way, Portland OR 97205",
+        "postal_code": "97205",
+        "region": "US-OR",
+    }
+    for account, categories in (
+        ({"email": "dana.reyes@example.com"}, ("dana gear", "reyes gear")),
+        (named, ("alder gear", "portland gear")),
+        (PARK_LANE, ("park gear", "lane gear")),
+    ):
+        record = dict(account)
+        record["orders"] = [
+            {"order_ref": f"o{index}-{n}", "total": 30.0, "category": category}
+            for index, category in enumerate(categories)
+            for n in range(3)
+        ]
+        with pytest.raises(IdentityLeak, match="R5"):
+            build_profile(record, PSEUDONYM)
+
+
+def test_the_park_lane_buyer_still_builds_beside_ordinary_merchandise() -> None:
+    """The other half of the release-level budget: one collision is still one collision.
+
+    The list is what is measured, so this is the case that proves the measure did not just
+    become "refuse any account whose profile carries a fragment at all". Park Lane buys
+    ``park-gear`` alongside two categories that have nothing to do with them, and the
+    published list still spells exactly one word of their address.
+    """
+    from buyer_svc.profile import build_profile, identity_leaks
+
+    record = dict(PARK_LANE)
+    record["orders"] = [
+        {"order_ref": f"o{index}-{n}", "total": 30.0, "category": category}
+        for index, category in enumerate(("park-gear", "trail-gear", "camera-lenses"))
+        for n in range(3)
+    ]
+    built = build_profile(record, PSEUDONYM).model_dump()
+    assert built["buckets"]["category_affinity"] == ["camera-lenses", "park-gear", "trail-gear"]
+    assert identity_leaks(built, record) == []
