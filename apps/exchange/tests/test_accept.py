@@ -32,6 +32,7 @@ inverted into a regression test.
 from __future__ import annotations
 
 import ast
+import inspect
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -325,6 +326,23 @@ def test_the_unbound_lint_flags_this_ticket_s_own_call_site_when_the_keyword_is_
 # =====================================================================================
 # R3 / C11 — the permalink and the golden event sequence
 # =====================================================================================
+def test_accept_keeps_exactly_four_required_positionals() -> None:
+    """D45: registering a further provider must add no parameter to ``accept``.
+
+    Kept here as well as in ``test_checkout_provider.py`` because that is where it went red:
+    the count is of positionals with **no default**, so giving ``mode`` a default silently
+    drops it out of the published signature — and a defaulted ``mode`` also means a caller
+    that forgot ``CHECKOUT_MODE`` gets the simulated path in a real deployment.
+    """
+    required = [
+        name
+        for name, parameter in inspect.signature(accept).parameters.items()
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        and parameter.default is parameter.empty
+    ]
+    assert required == ["auction", "bid_id", "code_creator", "mode"], required
+
+
 @pytest.mark.parametrize("mode", ["redirect", "shopify_stub", "shopify"])
 def test_accept_returns_a_permalink_on_the_sellers_domain_and_the_golden_events(
     mode: str, unwired: None
@@ -449,6 +467,48 @@ def test_a_merchant_that_answers_without_a_code_is_a_failure_not_a_local_mint(
     assert result.accepted is False
     assert result.code is None
     assert len(creator.calls) == 1
+
+
+def test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_record(
+    unwired: None,
+) -> None:
+    """The residual hazard, pinned rather than papered over.
+
+    An offer with **no** ``checkout_url`` is the R10 list-price fallback shape, and it is legal
+    — ``collect_bids`` manufactures one for every Tier-0 and silent store. It also means there
+    is no untrusted host for the port to check *before* the mint, so a delegating provider's
+    first failable host comparison is the one on the permalink it got back, by which time
+    ``POST /codes`` has issued a real single-use discount.
+
+    What this test locks in is the part accept controls: the buyer is handed nothing, and the
+    auction is left acceptable so the next slot can still be taken. What it cannot lock in is
+    the code itself — it is live at the merchant with no ``code_created`` event anywhere, and
+    only the port could carry it out on the exception (``checkout/provider.py``, the
+    ``assert_on_domain`` after ``mint``). Reported, not silently absorbed.
+    """
+
+    class OffDomainMerchant(RecordingCodeCreator):
+        def create_code(self, store_id: Any, offer: Any) -> dict[str, Any]:
+            self.calls.append((str(store_id), dict(offer)))
+            return {
+                "code": self.code,
+                "permalink_url": f"https://{RIVAL_DOMAIN}/cart/1:1?discount={self.code}",
+            }
+
+    live = auction("bid-a", "bid-b")
+    del live["bids"][0]["offer"]["checkout_url"]
+    merchant = OffDomainMerchant()
+
+    result = accept(live, "bid-a", merchant, "shopify")
+
+    assert result.accepted is False, "an off-domain permalink from the merchant was accepted"
+    assert result.permalink_url is None
+    assert result.code is None
+    assert live["accepted_bid_ref"] is None
+    assert result.reoffer_bid_ref == "bid-b"
+    # The hazard itself: the merchant WAS invoked, so a real code exists that no event names.
+    assert len(merchant.calls) == 1
+    assert "code_created" not in kinds(result)
 
 
 def test_the_re_offer_follows_shortlist_order_when_the_auction_carries_one(

@@ -34,6 +34,26 @@ so a failed accept leaves the auction acceptable and a successful one closes it.
 code creation fails, the buyer is not left holding nothing: the result names
 :attr:`AcceptResult.reoffer_bid_ref` — the next slot on the shortlist, or the next bid when the
 auction carries no shortlist — and the auction stays open so that accept can be called again.
+
+Two limits of this layer, stated so the next caller does not assume otherwise
+-----------------------------------------------------------------------------
+
+**The one-accept guard is only as durable as the record you hand in.** :func:`accept` stamps
+the auction it is *given*. A route that loads an ``AuctionRecord`` from
+:class:`~apps.exchange.src.auction.state.RedisAuctionStore`, accepts against it and does not
+save it back has an unstamped record for the next request to read, and two concurrent requests
+reading the same unstamped record can both pass the guard. Whoever writes the accept route
+must persist the stamp — ideally through
+:class:`~apps.exchange.src.auction.state.AuctionStateMachine`, whose ``ACCEPTED`` transition is
+already the serialised one — because an in-memory check cannot make a cross-process guarantee.
+
+**A merchant client that answers off-domain has already minted.** The port checks the offer's
+``checkout_url`` before the mint, but an offer with *no* URL (the R10 list-price fallback shape)
+has nothing to check, so the first host comparison a delegating provider can fail is the one on
+the permalink it got *back* — after ``POST /codes`` issued a real single-use discount. The buyer
+is still protected (no permalink is returned, and the auction stays open), but that code is live
+and the exchange has no ``code_created`` event for it. See
+``test_accept.py::test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_record``.
 """
 
 from __future__ import annotations
@@ -43,12 +63,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..auction.ledger import build_event
-from ..checkout import (
-    DEFAULT_CHECKOUT_MODE,
-    CheckoutRequest,
-    CheckoutResult,
-    resolve_provider,
-)
+from ..checkout import CheckoutRequest, CheckoutResult, resolve_provider
 
 __all__ = [
     "ACCEPT_REFUSED",
@@ -88,6 +103,15 @@ def use_registered_domains(source: Any | None) -> Any | None:
     :class:`~apps.exchange.src.checkout.sellers.NoRegisteredDomains` is the fail-closed one.
 
     The previous value is returned so a test (or a request-scoped override) can restore it.
+
+    .. warning::
+       This module is reachable under **two** module names — ``exchange.accept.offer`` (through
+       the tracked ``.pkgroot`` symlink, which is how the service imports it) and
+       ``apps.exchange.src.accept.offer`` (the repo-root path the frozen acceptance suite uses)
+       — and module state does not cross that boundary the way the relative imports and ``str``
+       constants elsewhere in this tree do. Wire through the ``exchange.*`` name, which is the
+       one :mod:`exchange.main` builds the app from. A caller that cannot be sure passes
+       ``registered_domains=`` explicitly, which is unaffected.
     """
     global _platform_domains
     previous = _platform_domains
@@ -263,8 +287,8 @@ def _refused(
 def accept(
     auction: Any,
     bid_id: Any,
-    code_creator: Any = None,
-    mode: str = DEFAULT_CHECKOUT_MODE,
+    code_creator: Any,
+    mode: str,
     *,
     registered_domains: Any = _UNSET,
 ) -> AcceptResult:
@@ -272,15 +296,18 @@ def accept(
 
     The four positional parameters are the published signature (D45) and gain nothing when a
     new provider is registered: ``mode`` is the registry's selector and ``code_creator`` rides
-    on the request.
+    on the request. **All four are required**, with no defaults —
+    ``test_checkout_provider.py::test_registering_a_further_provider_widens_nothing`` counts
+    exactly this, and a defaulted ``mode`` would also mean a caller that forgot to pass
+    ``CHECKOUT_MODE`` silently got the simulated path in a deployment configured for a real one.
 
     Args:
         auction: ``{auction_id, bids, accepted_bid_ref, now, ...}`` as a mapping or a record.
             It is **stamped** with the accepted bid ref on success, which is what makes the
             second accept a refusal.
         bid_id: which bid is being accepted.
-        code_creator: the merchant ``POST /codes`` client. Used by the Shopify adapter only;
-            the simulated redirect provider mints locally and never touches it.
+        code_creator: the merchant ``POST /codes`` client, or ``None``. Used by the Shopify
+            adapter only; the simulated redirect provider mints locally and never touches it.
         mode: ``CHECKOUT_MODE``. Resolved through the registry, which **raises** on a mode
             nobody registered rather than quietly running the simulated path.
         registered_domains: the platform's ``store_id -> registered domain`` lookup. Omitted,
