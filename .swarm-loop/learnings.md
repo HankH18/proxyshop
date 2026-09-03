@@ -67,6 +67,20 @@ here.
 
 ## Orchestrator conduct
 
+- **Phase 8 does not end at the ledger commit — it ends at `push-gate` and the push. Run
+  both in the SAME turn as the commit.** Measured, cycle 13: the ledger was committed at
+  `15958ab` and the orchestrator went straight into an approved amendment and a seven-lane
+  dispatch. `push-gate` was never run, so nothing was pushed, and the omission was silent —
+  an orchestrator that never pushes prints nothing about not pushing. It surfaced only
+  because the user asked why. By then **31 commits** were unpushed: the whole of cycle 13
+  plus a merged HIGH security fix, with both remotes still sitting on the cycle-12 record.
+  The failure mode is treating the commit as the end of the phase because it *feels* like
+  the closing act; the gate's own last condition is that the commit has already happened,
+  which is exactly what makes it the step AFTER, not a step you can defer to "later in the
+  cycle." There is no later — the next dispatch consumes the turn.
+  **Score the two operator conditions explicitly rather than skipping them**, and read the
+  push back with `git ls-remote` rather than trusting `git push`'s exit code.
+
 - **The orchestrator did delegable work itself during Phase 0/1 and burned context for it —
   do not repeat this.** Recorded at the user's instruction, because it happened despite the
   rule being known and written down. Specifically: the orchestrator personally ran the
