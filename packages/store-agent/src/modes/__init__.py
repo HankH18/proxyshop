@@ -15,9 +15,10 @@ The public surface:
 
 **This module is sealed state.** `.importlinter`'s `c3-exchange-cannot-read-envelopes` contract
 names `store_agent.modes` in `forbidden_modules`: nothing under `apps/exchange/src` may import
-it, directly or transitively. The contract was vacuous while this package was empty and is live
-from this commit. The exchange solicits bids over the protocol; it never reaches into a store's
-own activation state.
+it, directly or transitively. The contract was already enforceable before this package had
+content — an empty ``__init__.py`` is still a node in grimp's graph — so what changed here is
+only that there is now something worth forbidding. The exchange solicits bids over the protocol;
+it never reaches into a store's own activation state.
 
 Import path: both ``store_agent.modes`` (the flat-src namespace, via ``.pkgroot``) and
 ``packages.store_agent.src.modes`` (the repo-root dotted path the frozen suite binds to) resolve

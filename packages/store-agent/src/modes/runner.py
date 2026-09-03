@@ -41,6 +41,8 @@ order rather than in the order events happened to arrive.
 
 from __future__ import annotations
 
+import copy
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -100,12 +102,15 @@ def _as_mode(value: Any) -> EnvelopeActivation:
     raise ValueError(f"unknown activation {value!r}; the envelope's vocabulary is {known}")
 
 
-def _envelope_activation(context: Any) -> EnvelopeActivation:
+def _envelope_states(context: Any) -> EnvelopeActivation:
     """The activation the approved envelope states — and `shadow` when it states none.
 
-    Fail-closed on purpose. An envelope this module cannot read is not evidence that the owner
-    activated the store; defaulting anywhere but `shadow` would let a malformed or missing
-    envelope produce a submitting agent, which is the one default nobody can undo after the fact.
+    Fail-closed on purpose, at BOTH of the two ways an envelope can fail to say anything:
+    a missing or unreadable `activation` (no envelope at all, an envelope that is not a mapping,
+    a key that is not there) and an `activation` outside the vocabulary (`"on"`, `7`, `""`).
+    Neither is evidence that the owner activated the store, and defaulting anywhere but `shadow`
+    would let a malformed or absent envelope produce a submitting agent — the one default nobody
+    can undo after the fact.
     """
     stated = _field(_field(context, "envelope"), "activation")
     if stated is None:
@@ -116,28 +121,60 @@ def _envelope_activation(context: Any) -> EnvelopeActivation:
         return EnvelopeActivation.shadow
 
 
-def _emit(collaborator: Any, payload: Any, *, role: str) -> None:
-    """Hand ``payload`` to an injected sink or submitter, exactly once.
+def _delivery(collaborator: Any) -> Any | None:
+    """The one bound call that would deliver to ``collaborator``, or `None` if there is none.
 
-    Callables are called; otherwise the first of :data:`COLLABORATOR_METHODS` the object exposes
-    is used. Both shapes are accepted because a sink is somebody else's object — a queue with
-    `put`, a logger with `record`, a plain function — and the runner has no business dictating
-    the spelling. Exactly one of the two paths runs, so nothing is ever delivered twice.
+    Callables deliver by being called; otherwise the first of :data:`COLLABORATOR_METHODS` the
+    object exposes is used. Both shapes are accepted because a sink is somebody else's object —
+    a queue with `put`, a logger with `record`, a plain function — and the runner has no business
+    dictating the spelling.
+
+    Resolving the delivery WITHOUT performing it is what lets an unusable collaborator be
+    refused at the activation flip instead of at the first auction. `submitter is None` is not a
+    sufficient test: `0`, `""` and a bare `object()` are all not-None and all blow up with a
+    `TypeError` at the first bid, which is exactly the "activated into a void" outcome the check
+    exists to prevent.
     """
     if collaborator is None:
-        raise ValueError(f"this runner has no {role} to hand the answer to")
+        return None
     if callable(collaborator):
-        collaborator(payload)
-        return
+        return collaborator
     for name in COLLABORATOR_METHODS:
         method = getattr(collaborator, name, None)
         if callable(method):
-            method(payload)
-            return
-    raise TypeError(
-        f"a {role} must be callable or expose one of {COLLABORATOR_METHODS}; "
-        f"got {type(collaborator).__name__}"
-    )
+            return method
+    return None
+
+
+def _emit(collaborator: Any, payload: Any, *, role: str) -> None:
+    """Hand ``payload`` to an injected sink or submitter, exactly once.
+
+    Exactly one of the delivery paths runs, so nothing is ever delivered twice — an object that
+    is both callable AND carries a `.submit` receives one call, not two.
+    """
+    deliver = _delivery(collaborator)
+    if deliver is None:
+        raise TypeError(
+            f"a {role} must be callable or expose one of {COLLABORATOR_METHODS}; "
+            f"got {type(collaborator).__name__}"
+        )
+    deliver(payload)
+
+
+def _isolated(answer: Any) -> Any:
+    """A private copy of an answer, so a collaborator cannot reach back into the audit trail.
+
+    `contracts.Bid` is a mutable pydantic model, and :class:`BidLogEntry` being frozen freezes
+    only the REFERENCE to it. Handing the submitter the very object the log holds means a
+    submitter that normalizes a price in place silently rewrites an audit row that was already
+    written — measured: `entry.answer.offer.unit_price` became `1.0` while `entry.rationale`
+    still read `offer prod-cap at 100.00 USD`. A log that a later reader can edit is not a log,
+    so the submitter gets its own copy and the entry keeps the original.
+    """
+    copy_deep = getattr(answer, "model_copy", None)
+    if callable(copy_deep):
+        return copy_deep(deep=True)
+    return copy.deepcopy(answer)
 
 
 def _amount(value: Any) -> str:
@@ -149,7 +186,16 @@ def _amount(value: Any) -> str:
 
 
 def _signed(value: float) -> str:
-    return f"{value:+.2f}"
+    """A signed magnitude that never renders non-zero evidence as zero.
+
+    ``f"{-1e-9:+.2f}"`` is ``-0.00``, which sits in the audit log next to the word `guarded` and
+    contradicts it. Anything that would round away to nothing is written in exponent form
+    instead, so the number and the stance beside it always agree.
+    """
+    rounded = f"{value:+.2f}"
+    if value != 0.0 and float(rounded) == 0.0:
+        return f"{value:+.2e}"
+    return rounded
 
 
 def _plural(count: int, noun: str) -> str:
@@ -285,8 +331,16 @@ class AgentRunner:
     `sink` is REQUIRED. Shadow mode *is* the log — a runner with nowhere to write has no shadow
     to observe, and accepting one would make the un-activated default silently useless.
     `submitter` is optional, because a store that has never been activated has no submission path
-    yet; activating without one is refused at the flip rather than discovered at the first
-    auction, so a store cannot be switched on into a void and look live while bidding nowhere.
+    yet; activating without a USABLE one is refused at the flip rather than discovered at the
+    first auction, so a store cannot be switched on into a void and look live while bidding
+    nowhere.
+
+    **What is snapshotted and what is live.** `mode` is a snapshot taken at construction (or at
+    the last explicit flip) — it has to be, because an explicit activation must survive an
+    envelope that still reads `shadow`. Everything else about the context is live: `bid()`
+    re-reads `catalog`, `live_state` and the envelope's floors and caps on every `run()`, so a
+    merchant edit lands on the next auction. The single exception, `killed`, is re-read too; see
+    :attr:`killed_by_envelope` for why that asymmetry points the only safe way.
     """
 
     __slots__ = ("_context", "_deltas", "_mode", "_sink", "_store_id", "_submitter")
@@ -310,7 +364,7 @@ class AgentRunner:
         self._submitter = submitter
         self._deltas: dict[TrustDimension, list[float]] = {}
         # Through the setter, so construction and a later flip enforce the same rules.
-        self.mode = _envelope_activation(context) if mode is None else mode
+        self.mode = _envelope_states(context) if mode is None else mode
 
     # -- activation ---------------------------------------------------------
 
@@ -322,17 +376,34 @@ class AgentRunner:
     @mode.setter
     def mode(self, value: Any) -> None:
         mode = _as_mode(value)
-        if mode in SUBMITTING_MODES and self._submitter is None:
+        if mode in SUBMITTING_MODES and _delivery(self._submitter) is None:
             raise ValueError(
-                f"cannot flip to {mode} with no submitter: an activated store with no "
-                "submission path looks live and bids nowhere"
+                f"cannot flip to {mode} with no usable submitter: an activated store whose "
+                f"submitter is {self._submitter!r} looks live and bids nowhere"
             )
         self._mode = mode
 
     @property
+    def killed_by_envelope(self) -> bool:
+        """Whether the store context's envelope currently reads `killed`.
+
+        The mode is a SNAPSHOT — an explicit ``runner.mode = "active"`` must survive an envelope
+        that still says `shadow`, which is what "activation without a restart" means and what the
+        frozen goal asserts. So the envelope is not re-read to decide activation.
+
+        `killed` is the one exception, and it is re-read on every auction. The asymmetry is
+        deliberate and it only ever goes one way: this can suppress a submission and can never
+        cause one. A merchant who pulls the kill switch by writing it into the envelope must not
+        have to also reach a live object, and the alternative — a kill switch that quietly does
+        not kill because the process holds a stale snapshot — is the one failure direction that
+        cannot be walked back.
+        """
+        return _envelope_states(self._context) is EnvelopeActivation.killed
+
+    @property
     def submits(self) -> bool:
-        """Whether the current mode sends answers to the exchange."""
-        return self._mode in SUBMITTING_MODES
+        """Whether an answer computed right now would be sent to the exchange."""
+        return self._mode in SUBMITTING_MODES and not self.killed_by_envelope
 
     @property
     def store_id(self) -> str:
@@ -355,33 +426,62 @@ class AgentRunner:
             )
         )
 
-    def ingest_trust_event(self, event: Any) -> TrustEventPayload:
-        """Take one pushed `TrustEventPayload` — a mapping or the model — into the posture.
+    def _accept(self, event: Any) -> TrustEventPayload:
+        """Validate one pushed event against every rule, WITHOUT recording it.
 
-        Two refusals, both loud:
+        Three refusals, all loud:
 
         * an event that is not a readable `TrustEventPayload` never reaches the posture.
           `pydantic.ValidationError` is a `ValueError`, so it arrives at a caller as one and is
           deliberately not re-wrapped: the field-level detail is the useful part.
         * an event naming a DIFFERENT store is a routing bug, not this store's news. Sealed
           state is per store; absorbing a neighbour's feedback would quietly corrupt the posture
-          of both, and nothing downstream could ever detect it.
-
-        Returns the validated payload, so a caller that handed over a mapping can see what was
-        actually taken in.
+          of both, and nothing downstream could ever detect it. The comparison is UNCONDITIONAL:
+          guarding it with ``if self._store_id`` turned the seal OFF for a runner whose context
+          carried no readable `store_id` — a typo'd `storeId` key was enough — and such a runner
+          then absorbed every store's feedback. With no store of its own to compare against, a
+          runner refuses every event instead of accepting every event.
+        * a delta that is not a finite number is not evidence. `TrustEventPayload` admits `nan`
+          and `inf`, and one `nan` poisons a dimension permanently: the sum stays `nan` forever,
+          and because ``nan < 0`` and ``nan > 0`` are both False the stance silently reads
+          `neutral`. Measured: one `nan` followed by twenty −5.0 events still reported `neutral`.
         """
         payload = TrustEventPayload.model_validate(event)
-        if self._store_id and payload.store_id != self._store_id:
+        if payload.store_id != self._store_id:
             raise ValueError(
                 f"trust event names store {payload.store_id!r}; this runner advocates for "
                 f"{self._store_id!r}, and one store's feedback is never another's evidence"
             )
+        if not math.isfinite(payload.delta):
+            raise ValueError(
+                f"trust event {payload.event.event_id!r} carries a non-finite delta "
+                f"({payload.delta!r}); it would blind the {payload.dim} dimension permanently"
+            )
+        return payload
+
+    def ingest_trust_event(self, event: Any) -> TrustEventPayload:
+        """Take one pushed `TrustEventPayload` — a mapping or the model — into the posture.
+
+        Returns the validated payload, so a caller that handed over a mapping can see what was
+        actually taken in. See :meth:`_accept` for what is refused.
+        """
+        payload = self._accept(event)
         self._deltas.setdefault(payload.dim, []).append(float(payload.delta))
         return payload
 
     def ingest_trust_events(self, events: Iterable[Any]) -> tuple[TrustEventPayload, ...]:
-        """:meth:`ingest_trust_event` over a batch, refusing the whole batch on the first bad one."""
-        return tuple(self.ingest_trust_event(event) for event in events)
+        """:meth:`ingest_trust_event` over a batch — all of it, or none of it.
+
+        Every event is validated BEFORE any is recorded. Folding over
+        :meth:`ingest_trust_event` instead would half-apply a batch whose third event is
+        misrouted: the first two stay absorbed, the caller sees a raise, and retrying the
+        corrected batch double-counts them. Measured before this was fixed — a four-event batch
+        left `price_honored -2.00` behind, then `-4.00` after the retry.
+        """
+        accepted = tuple(self._accept(event) for event in events)
+        for payload in accepted:
+            self._deltas.setdefault(payload.dim, []).append(float(payload.delta))
+        return accepted
 
     # -- the loop ------------------------------------------------------------
 
@@ -394,6 +494,11 @@ class AgentRunner:
         Then the entry is logged. Only then, and only when the mode says so, is the answer
         handed to the submitter: a sink that throws aborts the run with nothing submitted,
         which is the failure direction that leaves no unlogged bid behind.
+
+        The submitter receives its OWN copy of the answer — equal field for field, never the
+        same object. See :func:`_isolated`: the entry is frozen, but that freezes the reference
+        and not the mutable `Bid` behind it, and a submitter that adjusts a price in place would
+        otherwise rewrite an audit row that had already been written.
         """
         answer = bid(request, self._context)
         posture = self.trust_posture
@@ -408,7 +513,7 @@ class AgentRunner:
         )
         _emit(self._sink, entry, role="sink")
         if entry.submitting:
-            _emit(self._submitter, answer, role="submitter")
+            _emit(self._submitter, _isolated(answer), role="submitter")
         return entry
 
 
