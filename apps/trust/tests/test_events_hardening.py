@@ -698,3 +698,46 @@ def test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_
         f"not grant it"
     )
     assert may_append, "the role the writer resolved cannot append to the ledger at all"
+
+
+def test_the_writer_appends_to_the_real_ledger_as_trust_rw(
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_clean: Any,
+    worker_database: str,
+    worker_index: int,
+) -> None:
+    """Resolving the right role is only worth anything if that role can do the work.
+
+    The privilege sets are genuinely different, not nested: 0004 grants ``app``
+    ``SELECT, INSERT`` on ``ledger`` plus full DML on the ``app`` and ``sealed`` schemas,
+    while ``trust_rw`` gets full DML on ``ledger``, read-only on ``app``, and nothing in
+    ``sealed``. So swapping the writer's role is a real change to what a write can touch,
+    and "it connected" would not prove the append path -- advisory lock, insert, the
+    ``AFTER INSERT`` trigger that maintains ``ledger.chain_head`` -- still works under it.
+    This appends through the store's public entry point and reads the chain back.
+
+    Every other database-backed test in this package connects as ``app``
+    (``_fixtures_events.EVENTS_ROLE``), so without this one nothing would exercise the
+    role the deployment actually ships.
+    """
+    from proxyshop_support.postgres import ROLES, role_dsn
+
+    _isolate_ledger_dsn_env(monkeypatch)
+    monkeypatch.setenv(
+        ROLES["trust_rw"][0], role_dsn("trust_rw", worker_index, database=worker_database)
+    )
+
+    store = PostgresEventStore()
+    try:
+        outcome = append(store, _event("ev-trust-rw-1"))
+        assert outcome.seq == 1
+        assert outcome.event["prev_hash"] == GENESIS_HASH
+
+        anchor = store.anchor()
+        assert anchor["length"] == 1
+        assert anchor["head_hash"] == outcome.event["event_hash"], (
+            "the chain_head trigger did not fire for a row written by trust_rw"
+        )
+        assert store.verify()["ok"] is True
+    finally:
+        store.close()
