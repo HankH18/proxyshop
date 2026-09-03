@@ -1,0 +1,3 @@
+{"base": "main", "base_sha": "7279452daf19b0f04e983054382ee8df6ee5bdcf", "cmd": "pytest apps/exchange/tests/test_ranking.py -q", "mode": "pre-dispatch", "selection": null, "ticket": "T-032", "timestamp": "2026-09-03T13:25:19", "verdict": "weak"}
+{"base": "main", "base_sha": "7279452daf19b0f04e983054382ee8df6ee5bdcf", "cmd": "pytest packages/store-agent/tests/test_external_bids.py -q", "mode": "pre-dispatch", "selection": null, "ticket": "T-044", "timestamp": "2026-09-03T13:27:04", "verdict": "weak"}
+{"base": "main", "base_sha": "7279452daf19b0f04e983054382ee8df6ee5bdcf", "cmd": "pytest apps/seller-reference -q", "mode": "pre-dispatch", "selection": null, "ticket": "T-045", "timestamp": "2026-09-03T13:27:04", "verdict": "weak"}
