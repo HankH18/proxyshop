@@ -210,38 +210,39 @@
       }
     ]
   },
+  "expected_trust_trajectory_replay_rule": "ESC-006. The scores below are what THIS DOCUMENT'S OWN observation_weights produce, recomputed with the shipped scoring engine rather than authored, and they assume the replay schedule stated here — the schedule is part of the contract. All SEVEN dishonest_store.behaviours are replayed ONCE PER EPISODE, one episode per day, with decay measured from each observation's own date against the published half_life_days. A simulator that replays a different subset, or spaces episodes differently, will not reproduce these numbers and must not be graded against them. The superseded values (0.42 / 0.33 / 0.26 / 0.19 / 0.13) were unreachable under any reading of the published weights: every non-zero episode fell outside its own stated band, which made this document self-contradictory and would have failed T-084 and mis-graded T-081 through no fault of either.",
   "expected_trust_trajectory": [
     {
       "episode": 0,
       "score": 0.5,
-      "tolerance": 0.08,
+      "tolerance": 0.03,
       "note": "the neutral Beta(2,2) prior, above the blacklist threshold: a store that starts below it proves nothing"
     },
     {
       "episode": 2,
-      "score": 0.42,
-      "tolerance": 0.08
+      "score": 0.235,
+      "tolerance": 0.03
     },
     {
       "episode": 4,
-      "score": 0.33,
-      "tolerance": 0.07
+      "score": 0.158,
+      "tolerance": 0.03
     },
     {
       "episode": 6,
-      "score": 0.26,
-      "tolerance": 0.06
+      "score": 0.12,
+      "tolerance": 0.03
     },
     {
       "episode": 9,
-      "score": 0.19,
-      "tolerance": 0.05
+      "score": 0.09,
+      "tolerance": 0.03
     },
     {
       "episode": 12,
-      "score": 0.13,
-      "tolerance": 0.05,
-      "note": "S2: below the 0.35 blacklist threshold even at the top of the tolerance band, inside the 12-episode budget"
+      "score": 0.073,
+      "tolerance": 0.03,
+      "note": "S2: below the 0.35 blacklist threshold even at the top of the tolerance band, inside the 12-episode budget. NOTE the crossing is far earlier than the superseded values implied: replaying all seven behaviours every episode puts this store under 0.35 at EPISODE 1 (0.317), not at 4-6. That is what the published weights say. If a slower, more illustrative decline is wanted for a demo, the lever is the replay SCHEDULE in expected_trust_trajectory_replay_rule — fewer behaviours per episode — not these numbers."
     }
   ],
   "personas": {
