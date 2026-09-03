@@ -6,43 +6,62 @@ Entries are injected selectively into task packets — only those relevant to a 
 **This file holds process habits only.** Defects, design rules and anything actionable about
 the harness, the gates or the measurement apparatus live in `harness-review.md` (entries
 H-1..H-29), which is where the harness work is tracked. A cycle-1 curation pass moved every
-issue-shaped entry there and left the seventeen below. If you are about to append something
-that names a bug, a tool that misbehaves, or a fix someone should make — it belongs in
-`harness-review.md`, not here.
+issue-shaped entry there; the cycle-13 pass merged eight near-duplicates into their siblings
+and left the **31** entries below. If you are about to append something that names a bug, a
+tool that misbehaves, or a fix someone should make — it belongs in `harness-review.md`, not
+here.
 
 ---
 
 ## Pre-dispatch and scheduling
 
-- **Probe the runtime environment live before writing a single packet.** Reading DESIGN told
-  us Neo4j needed a 1024-dim cosine vector index; only standing the container up proved it
-  works on this machine — and, in the same session, proved Neo4j Community cannot create a
-  second database, which reshapes the entire parallel-isolation design. Doc claims about the
-  environment are hypotheses until a container answers.
+- **Probe the runtime environment live before writing a single packet, and probe the HOST as
+  well as the stack.** Reading DESIGN told us Neo4j needed a 1024-dim cosine vector index; only
+  standing the container up proved it works on this machine — and, in the same session, proved
+  Neo4j Community cannot create a second database, which reshapes the entire parallel-isolation
+  design. The host half is the same lesson at a different layer: this machine was already
+  running Supabase (11 containers), OpenEMR, MariaDB and a pgvector Postgres, consuming ~2.7 GiB
+  of a 7.75 GiB Docker VM and holding port 55432, which failed the first compose attempt
+  instantly. Doc claims about the environment are hypotheses until a container answers, and port
+  and RAM budgets are measured facts, never defaults.
 
-- **Check the host for pre-existing containers and bound ports before choosing any port or
-  memory budget.** This machine was already running Supabase (11 containers), OpenEMR,
-  MariaDB and a pgvector Postgres, consuming ~2.7 GiB of a 7.75 GiB Docker VM and holding
-  port 55432 — which failed the first compose attempt instantly. Port and RAM budgets are
-  measured facts, never defaults.
+- **Write per-file ownership into `scope` at intake; a directory glob silently serializes
+  lanes whose real ownership is disjoint.** `check-wave` intersects the globs, not the truth,
+  so six ProxyShop tickets declaring `apps/exchange/tests/**` and `packages/store-agent/tests/**`
+  were vetoed against each other in every pair — only one of each trio could ever be in flight,
+  for thirteen cycles, while their real ownership (`test_ranking.py` / `test_bandit.py` /
+  `test_loss_reports.py`) never overlapped at all. Globs describe neighbourhoods; verify
+  commands and per-file scopes describe addresses. **When a veto fires, check whether it is a
+  real collision or a coarse glob before you split the wave** — and narrow the scope rather
+  than serializing, because narrowing makes the veto SHARPER: two lanes that would genuinely
+  write the same file are still refused, and no lane gains a file it could not touch before.
 
-- **Derive the file-ownership map from the tickets' `verify` commands, not their `scope`
-  globs.** Six ProxyShop tickets declare `apps/exchange/tests/**` and seven declare
-  `apps/trust/tests/**`, which reads as a mass collision; each ticket's verify command names
-  one distinct test file, which is the real ownership. Globs describe neighbourhoods,
-  verify commands describe addresses.
+- **Author a greenfield ticket's `verify` against the FROZEN acceptance tests it is graded by,
+  never against a test file the lane must itself create.** Such a gate can NEVER satisfy the
+  retro red-check: at the merge base the named file does not exist, pytest exits 4 with nothing
+  selected, and red-check stamps WEAK — permanently, because the stamp is a fact about the
+  COMMAND, not about the branch, so re-running it re-stamps WEAK forever. The veto is right and
+  must not be weakened (a gate that selects nothing is the vacuous-gate failure this repo has
+  been bitten by repeatedly); what is wrong is the command. A correct gate is red at the base
+  **with tests genuinely selected**.
 
-- **Install the complete dependency set in the scaffold ticket.** Parallel workers may never
-  edit a manifest, so any dependency discovered mid-wave becomes a serialized blocking
-  ticket. Enumerate every dependency all tickets will need while planning, and buy it once.
+- **Install the complete dependency set in the scaffold ticket, and provision every worktree
+  from EVERY committed lockfile — not just the first one found.** Parallel workers may never
+  edit a manifest, so any dependency discovered mid-wave becomes a serialized blocking ticket.
+  This repo carries both `package-lock.json` and `uv.lock`; provisioning ran only `uv sync`, so
+  every lane came up without `node_modules`, and two lanes independently burned time diagnosing
+  the same npx failure as if it were their own bug. Enumerate the lockfiles, not the ecosystem
+  you happen to be thinking about.
 
-- **Rush a human-gated ticket to the front of the frontier regardless of its depth.** T-080
-  sits at depth 2 but transitively blocks 15 of 44 tickets behind a human approval. Scheduled
-  by depth it would be reached late, and the gate would then idle the run; scheduled by
-  leverage, the approval request reaches the human while they are still awake. Extend the
-  same reasoning one hop back: **T-013 is not the highest-unblock ticket on the frontier but
-  it is T-080's only parent**, so it inherits the gate's urgency. Rank by *distance to the
-  human*, not by unblock count alone.
+- **Rank the frontier by GRADED-METRIC ERROR CONTRIBUTION, never by `unblocks` count.**
+  `unblocks` measures graph *shape* and is blind to the goals you are actually scored on, so a
+  ticket worth fifteen acceptance points ranks below a scaffold ticket that gates six cheap
+  ones. Thirteen cycles of it left the largest single block of error in the run **never
+  dispatched** — zero records across 114 dispatch entries — while adjacent defect tickets were
+  polished. The same correction covers the human-gate case that first exposed it: T-080 sat at
+  depth 2 but held 15 of 44 tickets behind an approval, and T-013, its only parent, inherited
+  that urgency without ever topping the unblock count. Rank by *what moves the measured error*,
+  including distance to a human whose signature is on the critical path.
 
 ---
 
@@ -64,6 +83,12 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   and the protocol — everything else, including environment probing and document authoring,
   goes to a subagent. Route large intake artifacts to FILES that subagents read, never
   through the orchestrator's window.**
+  **When you do delegate, hand over the numbers AND tell the agent to re-derive them.** The
+  ledger agent was given 28 verified unblock counts and instructed to re-derive rather than
+  copy. It reproduced all 28, caught an error in the orchestrator's own framing (four of five
+  frontier tickets moved +1, not +2), and independently found four defects nobody had flagged
+  — including that `acceptance_collected` is pinned at 120 rather than 103. Handing over facts
+  saves the agent's context; demanding re-derivation is what makes the handoff safe.
 
 - **Probe the environment AFTER dispatch too — and correct the packets in flight.** Three facts
   arrived from the readiness probe minutes after the wave went out: `make deps-up` exits non-zero
@@ -73,13 +98,6 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   decision claims the dispatcher exports do not exist anywhere in the repo. All three were sent
   to the affected workers as corrections. A packet is not immutable once dispatched — the cost
   of a follow-up message is trivial against a worker debugging a phantom.
-
-- **Give the file-writing recon agent the numbers AND tell it to re-derive them.** The ledger
-  agent was handed 28 verified unblock counts and instructed to re-derive rather than copy. It
-  reproduced all 28, caught an error in the orchestrator's own framing (four of five frontier
-  tickets moved +1, not +2), and independently found four defects nobody had flagged — including
-  that `acceptance_collected` is pinned at 120 rather than 103. Handing over facts saves the
-  agent's context; demanding re-derivation is what makes the handoff safe.
 
 ---
 
@@ -99,12 +117,10 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   defect (`from_url` letting the URL's `/1` beat the explicit `db=` kwarg, so every worker
   shared DB 1 and each `flushdb()` wiped its siblings) was found by an independent client
   written from the docs, not by reading the wrapper.
-
-- **The first defect found by a BUILDER rather than an auditor was found by executing a
-  document.** Every other defect this run came from an adversarial reader. D6 came from an
-  agent that tried to run the thing and watched it fail. Auditors read for contradiction;
-  builders discover unrunnability. Both are needed, and a review programme made only of
-  readers has a blind spot shaped exactly like this.
+  **The corollary is that a review programme made only of readers has a shaped blind spot.**
+  The first defect this run found by a BUILDER rather than an auditor was found by *executing a
+  document* — D6 came from an agent that tried to run the thing and watched it fail. Auditors
+  read for contradiction; builders discover unrunnability. Staff for both.
 
 ---
 
@@ -118,11 +134,17 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   drift. Diff them mechanically, then pin the winner as a decision (D42) so no worker
   re-litigates it.
 
-- **A green gate proves nothing until you have made it go red on purpose.** `build_succeeds`
-  was only trusted after an unused import drove it to 0 and removing the import drove it back
-  to 1. Sabotage every binary gate once, in both directions, before recording its baseline —
-  a gate that has never been observed failing is indistinguishable from a gate that cannot
-  fail.
+- **A green gate proves nothing until you have made it go red on purpose — and check that it
+  is reading the right artifact at all.** `build_succeeds` was only trusted after an unused
+  import drove it to 0 and removing the import drove it back to 1. Sabotage every binary gate
+  once, in both directions, before recording its baseline: a gate that has never been observed
+  failing is indistinguishable from a gate that cannot fail. The worst instance of "cannot
+  fail" this run was an integrity check written against `freeze-log.jsonl` alone — the log
+  records that a freeze happened and when, and carries **no per-file digest**, so a gate that
+  iterates its entries and reports "no drift" is structurally incapable of detecting drift, in
+  the one place where a false green is most expensive. The hash map lives in `manifest.json`'s
+  16-entry `files` map. Point the check at a mutated copy and watch it go red before trusting
+  a green.
 
 - **Prove the shared fixture layer in one place, before dispatch, or every ticket
   re-discovers it separately.** `pg_role` — the least-privilege factory ~10 tickets depend on,
@@ -137,13 +159,18 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   describes the deleted override. Agents read those docstrings to learn the model, so a stale
   one is a defect that propagates into other tickets' code.
 
-- **Re-derive the ticket graph from the executable source at every dispatch, never from the
-  ledger's own prose.** `backlog.md` claimed 45 tickets; `tickets.json` had 47. A user-approved
-  harness amendment had rewritten five dependency edges, added two tickets, retitled two and
-  widened one scope — and the ledger, which is what the scheduler reads, recorded none of it.
-  The frontier happened to be unchanged, so nothing was mis-dispatched, but that was luck: the
-  same staleness had already moved the deepest ticket, the gate count and every unblock number.
-  A ledger is a cache of the graph, and a cache nobody invalidated is the default state.
+- **Re-derive the ticket graph from the executable source at every dispatch, give `frontier` a
+  closure source EVERY time, and reconcile the ledger against the graph at every resume.**
+  `backlog.md` claimed 45 tickets; `tickets.json` had 47. A user-approved harness amendment had
+  rewritten five dependency edges, added two tickets, retitled two and widened one scope — and
+  the ledger, which is what the scheduler reads, recorded none of it. The frontier happened to
+  be unchanged, so nothing was mis-dispatched, but that was luck. The sharper form of the same
+  failure: with no closure source wired, `frontier` reported **`0 closed` on every invocation**
+  for thirteen cycles. That is a **broken instrument, not a scheduling opinion** — with nothing
+  recorded as closed it degenerates to the graph's roots and ranks the already-built scaffold
+  first, forever. Treat a suspiciously round `0 closed` as an error to diagnose, never as an
+  answer to act on. A ledger is a cache of the graph, and a cache nobody invalidated is the
+  default state.
 
 - **Read a ticket's own acceptance text against the frozen fixtures before quoting it into a
   packet — the ticket can be the wrong one.** T-010's acceptance 5 says a `Bid` missing any of
@@ -172,14 +199,13 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   files with each lane's *working scope*. Five of seven lanes had zero intersection and were
   correctly left alone mid-flight; two were building on rewritten ground. A blanket rebase and
   a blanket shrug are both wrong.
-
-- **A lane need not EDIT a changed file to DEPEND on one, so scope-intersection is necessary
-  but not sufficient.** The follow-up check is a reference scan of each lane's own directory
-  (not the whole worktree — every worktree is a full checkout, so an unscoped grep counts files
-  no lane owns and returns junk). Four of five "inert" lanes did reference changed modules;
-  reading the diffs is what settled it — ~1050 of 1198 insertions were new tests, and the `src/`
-  changes were docstring and comment corrections plus one strictly-stricter regex and one purely
-  additive class. Ancestry says *whether* to look; the diff says whether it *matters*.
+  **Scope-intersection is necessary and not sufficient — a lane need not EDIT a changed file to
+  DEPEND on one.** The follow-up check is a reference scan of each lane's own directory (not the
+  whole worktree — every worktree is a full checkout, so an unscoped grep counts files no lane
+  owns and returns junk). Four of five "inert" lanes did reference changed modules; reading the
+  diffs is what settled it — ~1050 of 1198 insertions were new tests, and the `src/` changes were
+  docstring corrections plus one strictly-stricter regex and one purely additive class. Ancestry
+  says *whether* to look; the diff says whether it *matters*.
 
 - **When a session's findings are "lost with its context", search `git log --all --format=%B`
   before concluding they are gone.** Two of four HIGH defects believed unrecoverable were sitting
@@ -191,24 +217,13 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   WIP message was read and mined, the sibling WIP message on another branch never was, and an
   agent was dispatched to re-derive blind a defect the repository already recorded in full.
   Read every preservation commit's body, not just the one that happens to be in front of you.
-
-- **A recovered defect's *required test* is worth forwarding even when the code is already
-  fixed.** The T-040 agent had independently derived the fix (binding a discount claim to its
-  product ref) before the original text was recovered. What the recovered text still added was
-  the acceptance criterion: "mint for product A and prove it cannot be used for B." An agent
-  that derived only the ref-format change would naturally assert on the ref *string*, and that
-  assertion passes while cross-product replay still works. The fix and the proof of the fix are
-  separately losable; recovering one does not recover the other.
-
-- **A preservation commit's INTENT is reliable; its PROGRESS estimate is not. Check whether the
-  preserved code is wired before crediting it.** `7cdc9db` described itself as "probably less
-  than half the fix." It was 0% effective: the 51 lines it added had zero call sites repo-wide,
-  were absent from both `__all__` lists, never touched the enforcement function, and carried
-  docstrings asserting behaviour ("refuses one presented in a bid about a different product")
-  that did not exist. The suite was green over a fully live HIGH. Dead code that *describes* the
-  guarantee reads exactly like code that *provides* it — in a diff, in a review, and to the next
-  agent. The cheap discriminator is a call-site grep and an `__all__` check, not reading the
-  implementation.
+  **And forward a recovered defect's *required test* even when the code is already fixed.** The
+  T-040 agent had independently derived the fix (binding a discount claim to its product ref)
+  before the original text was recovered. What the recovered text still added was the acceptance
+  criterion: "mint for product A and prove it cannot be used for B." An agent that derived only
+  the ref-format change would naturally assert on the ref *string*, and that assertion passes
+  while cross-product replay still works. The fix and the proof of the fix are separately
+  losable; recovering one does not recover the other.
 
 - **Measure a weak guard's actual catch rate instead of accepting the reported one.** The
   store-agent lint was recorded as "at least three ordinary spellings pass it." Measured, it
@@ -217,16 +232,18 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   the difference is one experiment. Every fix for such a guard needs a negative test too, or the
   repair is just a guard that matches more of everything.
 
-  *Refinement, from the sibling commit.* `935ddaa` — same author, same session, same kill —
-  described itself as "substantially fixed" and the wiring check found it genuinely wired at two
-  independent points on the real command path, with the dangerous alternative (`refresh_digests`)
-  having zero call sites anywhere in that path. So self-assessed progress is not reliably biased
-  generous; it was 100% generous on one commit and roughly accurate on its sibling. The rule that
-  survives both cases is narrower and cheaper: **run the call-site-and-`__all__` check on every
-  preserved commit regardless of what its message claims in either direction.** Treating "it said
-  less than half" as informative would have wasted effort; treating "it said substantially fixed"
-  as informative would have under-credited the previous session. Neither prose reading was the
-  discriminator — a two-command grep was.
+  *The same rule applied to preserved work: INTENT is reliable, PROGRESS estimates are not.*
+  `7cdc9db` described itself as "probably less than half the fix" and was 0% effective — its 51
+  lines had zero call sites repo-wide, were absent from both `__all__` lists, never touched the
+  enforcement function, and carried docstrings asserting behaviour that did not exist, so the
+  suite was green over a fully live HIGH. Its sibling `935ddaa` — same author, same session, same
+  kill — described itself as "substantially fixed" and the wiring check found it genuinely wired
+  at two independent points on the real command path. Self-assessed progress is therefore not
+  reliably biased in either direction; it was 100% generous on one and roughly accurate on the
+  other. **Run the call-site-and-`__all__` check on every preserved commit regardless of what its
+  message claims.** Neither prose reading was the discriminator — a two-command grep was. And
+  note why this class is so expensive: dead code that *describes* the guarantee reads exactly like
+  code that *provides* it, in a diff, in a review, and to the next agent.
 
   *And the static check does not finish the job.* Wiring proves the call exists on the path, not
   that the refusal fires. In the fixtures case `load_manifest()` was already raising
@@ -274,39 +291,31 @@ that names a bug, a tool that misbehaves, or a fix someone should make — it be
   "for each capability you built, name its production call site, or state that it has none."
   A local reasoner does not spontaneously ask whether anything upstream calls it.
 
-- **Check whether a prescribed fix actually covers the reporter's own repro before prescribing it.**
-  I forwarded a recovered defect with a fix — "match whole normalised tokens against individual
-  bucket values, not unanchored substrings of a concatenation" — and it would NOT have closed the
-  lane's own broader case: `none@example.com` on a fresh account, where `frequency_tier == "none"`
-  makes the fragment `"none"` EQUAL a bucket value exactly rather than a substring of one. The
-  lane's independent fix (hold the coarseners' closed vocabulary and the account's own category
-  slugs out of the search) covered my case; mine did not cover theirs. Both halves were needed.
-  A prescribed fix derived from one exemplar is a hypothesis about the defect class, not a
-  solution — hand over the repro and the constraint, and let the lane derive the fix.
-
-- **"That file was rewritten on main" does not imply its public surface moved. Measure the surface,
-  not the diff.** A watchdog correctly flagged that a lane was building over a stale copy of
-  `apps/trust/src/ledger/__init__.py`, which wave 4 had rewritten. The ancestry fact was true and
-  the warning was worth sending. But the CONSEQUENCE inferred from it — "the module's public
-  surface may have moved, so re-derive against it" — was wrong, and the lane checked rather than
-  believing it: the rewrite (T-126) was entirely import-sequencing machinery, `__all__` and the
-  `_LAZY` map were BYTE-IDENTICAL to the stale copy, and `canonical.py`, `chain.py`, `store.py`,
-  `replay.py`, `errors.py` were untouched. Only a line number moved (141 -> ~208). So: cite line
-  numbers as hints that may have drifted, never as contract; and when warning a lane about
-  staleness, hand it the ancestry fact and let it measure the impact, rather than shipping an
-  inference about impact as if it were measured. The resync was still correct — it taught that lane
-  a real defect (`trust.events` would have shipped the identical two-spellings bug) — but for a
-  reason nobody predicted.
-
 - **Dispatch briefs carried three factual errors in one wave; every one was caught by an agent
   measuring the premise instead of accepting it. Instruct for that explicitly.** The errors, all
-  mine: (1) I cited `apps/trust/src/ledger/__init__.py:141` and warned the public surface "may have
-  moved" — the surface was byte-identical and only the line number moved; (2) I forwarded a
-  recovered defect WITH a prescribed fix that did not cover the reporting lane's own broader repro;
-  (3) I told the T-020 lane to build and test against the shopify-stub, and the stub is an
-  Admin-GraphQL/control-plane service with no `/products.json`, `/robots.txt`, `/password` or
-  product HTML — structurally incapable of being a storefront. That lane verified the routes,
-  concluded the brief was wrong, and built its own raw-ASGI storefront fixture in its own scope.
+  mine, and each is its own transferable trap:
+  1. *"That file was rewritten on main" does not imply its public surface moved — measure the
+     surface, not the diff.* I cited `apps/trust/src/ledger/__init__.py:141` and warned a lane
+     that the public surface "may have moved". The ancestry fact was true; the inferred
+     consequence was wrong. The rewrite (T-126) was entirely import-sequencing machinery,
+     `__all__` and the `_LAZY` map were BYTE-IDENTICAL to the stale copy, and `canonical.py`,
+     `chain.py`, `store.py`, `replay.py`, `errors.py` were untouched — only a line number moved
+     (141 → ~208). Cite line numbers as hints that may have drifted, never as contract; hand a
+     lane the ancestry fact and let it measure impact, rather than shipping an inference about
+     impact as if it were measured.
+  2. *A prescribed fix derived from one exemplar is a hypothesis about the defect class, not a
+     solution.* I forwarded a recovered defect with a fix — "match whole normalised tokens
+     against individual bucket values, not unanchored substrings of a concatenation" — that would
+     NOT have closed the lane's own broader case: `none@example.com` on a fresh account, where
+     `frequency_tier == "none"` makes the fragment `"none"` EQUAL a bucket value exactly rather
+     than be a substring of one. The lane's independent fix covered my case; mine did not cover
+     theirs. Hand over the repro and the constraint, and let the lane derive the fix.
+  3. *A named build target can simply be the wrong one.* I told the T-020 lane to build against
+     the shopify-stub, which is an Admin-GraphQL/control-plane service with no `/products.json`,
+     `/robots.txt`, `/password` or product HTML — structurally incapable of being a storefront.
+     That lane verified the routes, concluded the brief was wrong, and built its own raw-ASGI
+     storefront fixture in its own scope.
+
   None of the three cost real work, because each lane checked before building. The transferable
   rule: **a brief is a hypothesis, and should say so.** Tell every agent that file:line references
   may have drifted, that a named test target may be the wrong one, and that a prescribed fix is a
@@ -340,7 +349,7 @@ Found by the lane that was told to implement it, which is the point: a brief is 
 hypothesis, and the agent executing it is the one positioned to falsify it. Say so in
 every packet.
 
-## A build lane's OWN sub-agents must not mutate the lane's worktree concurrently
+## Disjoint file scopes are not disjoint state — the worktree AND the scratchpad are shared
 
 Cycle 10, T-031. The lane did what its packet asked — ran its own adversarial pass — but
 spawned sub-agents that mutated the SAME worktree it was building in. Two of them collided:
@@ -350,14 +359,31 @@ were unusable. Worse, one sub-agent had been told it could revert source files w
 `git checkout` — which would have silently destroyed 112 lines of uncommitted fix sitting in
 the tree. The PreToolUse git-guard is what stood between that instruction and the loss.
 
-The skill's isolation invariant is written about the ORCHESTRATOR's waves; the same physics
-applies one level down, and nothing in the packet said so. Disjoint file scopes are not
-disjoint state.
+Cycle 13 produced the second surface of the same physics: **the orchestrator's scratchpad
+directory is SHARED across a session's subagents, not per-lane.** One lane overwrote another
+lane's probe script mid-run, with no error from either side — same filename, same directory,
+two writers.
 
-APPLY: every task packet that tells a lane to run its own adversarial pass must also say —
-your sub-agents are READ-ONLY in your worktree; if one must mutate to test (sabotage, mutation
-testing), it works on its own copy outside the tree, never in yours; and no sub-agent may run
-a repo-global git op, ever.
+The skill's isolation invariant is written about the ORCHESTRATOR's waves; the same physics
+applies one level down, and nothing in the packet said so.
+
+APPLY, in every packet:
+- your sub-agents are READ-ONLY in your worktree; if one must mutate to test (sabotage,
+  mutation testing), it works on its own copy outside the tree, never in yours;
+- no sub-agent may run a repo-global git op, ever;
+- **prefix every scratch filename with your ticket id** (`T-044-probe.py`, not `probe.py`),
+  because the scratchpad is one directory shared by every lane in the session.
+
+## Name task branches `task/<ticket-id>` exactly — a cycle prefix silently breaks three commands
+
+Cycle 13. A branch named `task/C14-T044` rather than `task/T-044` breaks three harness commands
+that parse the ticket id out of the branch name: `conflicts`, `frontier --closed-from-merged`,
+and `check-wave`'s fork accounting. None of them errors. Each reports "nothing to compare" or
+`0 closed` — a plausible, quiet, wrong answer, which is the most expensive failure shape this
+repo has, and the same shape as the `0 closed` frontier above.
+
+APPLY: the branch name is a machine key, not a label. No cycle prefix, no lane number, no
+description — `task/<ticket-id>` and nothing else. Put the cycle in the commit message.
 
 ## Assert a lane's worktree is CLEAN before believing anything it reported
 
