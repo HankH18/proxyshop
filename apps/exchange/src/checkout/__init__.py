@@ -111,7 +111,7 @@ from .providers import (
     ShopifyCheckoutProvider,
     SimulatedRedirectProvider,
 )
-from .redaction import recoverable_spellings, rendered_exception
+from .redaction import recoverable_spellings, render_can_publish, rendered_exception
 from .registry import (
     CHECKOUT_MODES,
     DEFAULT_CHECKOUT_MODE,
@@ -178,6 +178,7 @@ __all__ = [
     "offer_quantity",
     "record_minted_code",
     "recoverable_spellings",
+    "render_can_publish",
     "redact_code",
     "redact_url",
     "register_provider",

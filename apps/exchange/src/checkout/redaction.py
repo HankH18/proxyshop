@@ -84,6 +84,7 @@ __all__ = [
     "recoverable_spellings",
     "redact_code",
     "redact_url",
+    "render_can_publish",
     "rendered_exception",
     "safe_token",
     "spells_code",
@@ -215,7 +216,7 @@ def recoverable_spellings(text: str) -> list[str]:
     return list(seen)
 
 
-def spells_code(text: str, code: str) -> bool:
+def spells_code(text: object, code: str) -> bool:
     """Whether a reader of ``text`` could recover something the merchant would redeem.
 
     **This is a detector used to fail CLOSED, not a scrubber**, and the distinction is the
@@ -226,6 +227,20 @@ def spells_code(text: str, code: str) -> bool:
     decided is merchant-controlled, and the alternative to applying it is publishing that
     value unexamined.
 
+    **``text`` is an OBJECT, not a string, and the conversion happens INSIDE the guard —
+    pass 6.** It used to be typed ``str``, which pushed ``str(...)`` out to every call site
+    and put it *outside* the one ``try`` in this module that is allowed to decide. Measured
+    on this tree: ``provider._redact_arg`` called ``spells_code(str(arg), code)``, and an
+    exception argument whose ``__str__`` raises therefore made the SANITISER raise. That is
+    the failure mode this module's header already records for pass 2's ``redact_url`` and it
+    has the same two costs — the ``OrphanedCheckoutCode`` is never constructed, so no
+    ``code_created`` event is filed and the live discount becomes unrevokable (T-202
+    destroyed), and the raw exception propagates instead, publishing whatever its ``repr``
+    spells. Four shapes reached it: an argument, a PEP-678 note, a list of group members,
+    and a ``permalink_url`` that is not a string.
+
+    A value this function cannot read is a value it cannot clear, so it answers ``True``.
+
     The residual is stated rather than papered over: a Unicode-homoglyph spelling (Cyrillic
     ``Р`` for ``P``) is not normalised here and would survive. Closing that would need a
     confusables table; what closed the previously-stated punycode residual is
@@ -235,8 +250,8 @@ def spells_code(text: str, code: str) -> bool:
         needle = str(code or "").casefold()
         if not needle:
             return False
-        return any(needle in form for form in recoverable_spellings(text))
-    except Exception:  # pragma: no cover - defence in depth; a detector must not raise
+        return any(needle in form for form in recoverable_spellings(str(text)))
+    except Exception:
         return True  # unsure means REDACT
 
 
@@ -462,10 +477,16 @@ def rendered_exception(exc: BaseException | None) -> str:
     formatting pass with no I/O, on a path that is already raising.
 
     Never raises: an exception whose rendering itself explodes falls back to ``str``, and
-    then to the empty string. That fallback is the one place this function is not the
-    renderer, so it is deliberately the *narrower* of the two — a render that failed has
-    published nothing, and the caller is choosing between an exception it could not read and
-    no cause at all.
+    then to the empty string. **That fallback is a BLIND SPOT, not a clean bill of health,
+    and a caller deciding whether to publish must not read it as one** — which is what
+    :func:`render_can_publish` exists to say and what pass 5 got backwards. Its reasoning
+    was "a render that failed has published nothing"; measured on this tree, that is false.
+    An ``ExceptionGroup`` whose first member has a raising ``__repr__`` makes
+    ``TracebackException.format`` raise, so this function falls back to ``str(group)`` —
+    ``"link attempts failed (2 sub-exceptions)"``, perfectly clean — while the C-level
+    ``PyErr_Display`` is *more* tolerant than ``TracebackException``: it prints
+    ``<unprintable …>`` for the member it cannot render and then goes on to print the NEXT
+    member, whose message spelled the code. One reader failing is not every reader failing.
 
     **Where the re-entrancy guard is, and why it is not here.** Rendering reads
     ``__cause__``/``__context__`` by ordinary attribute lookup, and
@@ -477,6 +498,16 @@ def rendered_exception(exc: BaseException | None) -> str:
     object when it happens. Guarding here instead would mean returning a truncated string —
     a blind spot in the oracle — for the exact shape the oracle exists to inspect. See
     :meth:`~.provider.OrphanedCheckoutCode._sanitised_slot`.
+    """
+    return _rendered(exc) or ""
+
+
+def _rendered(exc: BaseException | None) -> str | None:
+    """The render, or ``None`` when this reader could not obtain one. Never raises.
+
+    The three-valued return is the whole point and is why :func:`rendered_exception` cannot
+    be the thing a publishing decision is taken on: ``""`` from *it* means "nothing to see"
+    and "I could not look" indistinguishably, and only one of those is safe.
     """
     if exc is None:
         return ""
@@ -494,7 +525,31 @@ def rendered_exception(exc: BaseException | None) -> str:
             ).format(chain=True)
         )
     except Exception:
-        try:
-            return str(exc)
-        except Exception:  # an exception whose __str__ raises is opaque to every reader
-            return ""
+        return None
+
+
+def render_can_publish(exc: BaseException | None, code: str) -> bool:
+    """Could ANY renderer of ``exc`` print something a merchant would redeem as ``code``?
+
+    This is the question :func:`~.provider._sanitised_cause` has to answer, and it is not
+    ``spells_code(rendered_exception(exc), code)`` — that composition silently treats "the
+    renderer this process happens to use raised" as "the exception is clean", which is the
+    fail-open :func:`rendered_exception` now documents. Here the two outcomes are separated:
+
+    * a render this reader obtained, which does not spell the code -> ``False``, publish it;
+    * a render that spells the code -> ``True``, replace the object;
+    * **no render at all** -> ``True``. An exception this process cannot format is one whose
+      contents are unknown, and unknown contents next to a live discount are not evidence of
+      safety. The cost of being wrong here is one chained diagnostic; the cost of being
+      wrong the other way is a discount nobody can revoke.
+
+    Never raises, for the same reason nothing else in this module does: it runs on a path
+    that is already refusing, one frame from a persisted event.
+    """
+    try:
+        text = _rendered(exc)
+        if text is None:
+            return True
+        return spells_code(text, code)
+    except Exception:
+        return True

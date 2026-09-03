@@ -171,7 +171,8 @@ class ShopifyCheckoutProvider(CheckoutProvider):
                 # messages — and `store_id` is read off the bid the merchant wrote. Both go
                 # through the fail-closed guard at the site that BUILDS this sentence,
                 # because the constructor downstream can only remove values it was handed.
-                f"{type(exc).__name__}: {safe_token(exc, str(code), label='cause')} — "
+                f"{safe_token(type(exc).__name__, str(code), label='cause-type')}: "
+                f"{safe_token(exc, str(code), label='cause')} — "
                 f"raised AFTER the merchant issued {code_fingerprint(str(code))} for store "
                 f"{safe_token(request.store_id, str(code), label='store')!r}; the code is "
                 f"live and must be recorded and revoked",

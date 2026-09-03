@@ -50,7 +50,7 @@ from .redaction import (
     code_fingerprint,
     redact_code,
     redact_url,
-    rendered_exception,
+    render_can_publish,
     safe_token,
     spells_code,
 )
@@ -179,27 +179,64 @@ def _redact_chain(exc: BaseException | None, code: str, urls: Sequence[str] = ()
         if node is None or id(node) in seen:
             continue
         seen.add(id(node))
-
-        redacted = tuple(_redact_arg(arg, code, urls) for arg in node.args)
-        if redacted != node.args:
-            node.args = redacted
-
-        # PEP-678 notes: a separate list, printed by the renderer, absent from `str()`.
-        notes = getattr(node, "__notes__", None)
-        if isinstance(notes, list):
-            for index, note in enumerate(notes):
-                cleaned = _redact_arg(note, code, urls)
-                if cleaned != note:
-                    notes[index] = cleaned
+        _redact_node(node, code, urls)
 
         # `ExceptionGroup.exceptions` — members the renderer prints and the chain omits.
-        members = getattr(node, "exceptions", None)
+        try:
+            members = getattr(node, "exceptions", None)
+        except Exception:
+            members = None
         if isinstance(members, tuple):
             frontier.extend(m for m in members if isinstance(m, BaseException))
 
         for nxt in (_BASE_CAUSE.__get__(node), _BASE_CONTEXT.__get__(node)):
             if nxt is not None:
                 frontier.append(nxt)
+
+
+def _redact_node(node: BaseException, code: str, urls: Sequence[str]) -> None:
+    """Rewrite one exception's ``args`` and ``__notes__`` in place. **Cannot raise.**
+
+    Every line here touches an object a merchant's library authored, and each of the four
+    ways that can bite was measured on this tree rather than imagined:
+
+    * ``str(arg)`` on an argument whose ``__str__`` raises. Now inside
+      :func:`~.redaction.spells_code`, which fails closed;
+    * ``redacted != node.args`` — a tuple comparison runs the *elements'* ``__eq__``, so an
+      argument with a hostile ``__eq__`` made the comparison raise. It is an IDENTITY test
+      now: :func:`_redact_arg` returns the argument itself or a fresh string, so ``is not``
+      answers "did anything change?" exactly, and identity cannot be overridden;
+    * ``__notes__`` is not always a plain list — ``LazilyNotedFailure`` in the gate makes it
+      a *property*, and a property can raise or return a fresh list each read (in which case
+      writing into it edits a temporary and the object still renders the original); and
+    * assigning ``node.args`` at all, which a class with a custom ``args`` setter can refuse.
+
+    A node this fails on is left as it was, and that is safe *because this walk is the
+    best-effort half*: the guarantee is :func:`_sanitised_cause`, which asks whether any
+    renderer can still publish and substitutes the whole object when the answer is "yes, or
+    I cannot tell". Raising here instead skipped that guarantee entirely — the
+    ``OrphanedCheckoutCode`` was never constructed, so ``accept()`` filed no ``code_created``
+    event and the live discount became unrevokable, which is T-202 restored by the very code
+    written to close T-215.
+    """
+    try:
+        args = node.args
+        redacted = tuple(_redact_arg(arg, code, urls) for arg in args)
+        if any(new is not old for new, old in zip(redacted, args, strict=True)):
+            node.args = redacted
+    except Exception:
+        pass
+
+    # PEP-678 notes: a separate list, printed by the renderer, absent from `str()`.
+    try:
+        notes = getattr(node, "__notes__", None)
+        if isinstance(notes, list):
+            for index, note in enumerate(notes):
+                cleaned = _redact_arg(note, code, urls)
+                if cleaned is not note:
+                    notes[index] = cleaned
+    except Exception:
+        pass
 
 
 def _redact_arg(arg: Any, code: str, urls: Sequence[str]) -> Any:
@@ -223,7 +260,13 @@ def _redact_arg(arg: Any, code: str, urls: Sequence[str]) -> Any:
     # A non-string argument still renders into `str(exc)`, so it is checked too — but only
     # REPLACED when it actually spells the code, because rewriting an unrelated library's
     # argument tuple is a change with its own blast radius.
-    if code and spells_code(str(arg), code):
+    #
+    # The object goes in WHOLE. This read `spells_code(str(arg), code)` until pass 6, and
+    # that `str(...)` sat outside every guard in this package: an argument whose `__str__`
+    # raises took the sanitiser down with it. `spells_code` converts inside its own `try` and
+    # answers "yes, redact" for anything it cannot read, so an unreadable argument is now
+    # dropped rather than being the thing that destroys the refusal.
+    if code and spells_code(arg, code):
         return f"<redacted-chained-arg:{code_fingerprint(code)}>"
     return arg
 
@@ -272,13 +315,15 @@ def _sanitised_cause(exc: BaseException, code: str, urls: Sequence[str]) -> Base
     _redact_chain(exc, code, urls)
     if not code:
         return exc
-    if not spells_code(rendered_exception(exc), code):
+    if not render_can_publish(exc, code):
         return exc
     replacement: BaseException = RedactedCause(
-        f"{type(exc).__name__}: <redacted-cause:{code_fingerprint(code)}> — this chained "
-        f"exception RENDERED a recoverable discount code (through its own __str__, a PEP-678 "
-        f"note, or an ExceptionGroup member), which rewriting args cannot reach, so the "
-        f"exception itself was replaced (T-215)"
+        f"{safe_token(type(exc).__name__, code, label='cause-type')}: "
+        f"<redacted-cause:{code_fingerprint(code)}> — this chained exception could not be "
+        f"shown to be safe to render (its own __str__, a PEP-678 note or an ExceptionGroup "
+        f"member spelled a recoverable discount code, or it could not be rendered at all), "
+        f"and rewriting args cannot reach any of those, so the exception itself was "
+        f"replaced (T-215)"
     )
     try:
         replacement = replacement.with_traceback(exc.__traceback__)
@@ -298,13 +343,23 @@ class OrphanedCode:
     **The default dataclass ``repr`` is suppressed, and that is load-bearing (T-215).** The
     whole point of this class is to carry a live discount past a refusal, and the generated
     ``repr`` would spell that discount — and the merchant's permalink — in the ordinary
-    string form of the object. It reaches a log the moment anything does ``f"{result}"`` on
-    an :class:`~apps.exchange.src.accept.offer.AcceptResult`, whose own generated ``repr``
-    renders this one as a nested field; suppressing it here is what makes that nesting safe
-    without a second ``repr`` on every dataclass that holds one. The code is therefore
-    reachable only through explicit field access — ``orphan.code``, which is exactly the
-    deliberate act the revocation caller performs and the accidental act a log formatter
-    does not.
+    string form of *this* object, which reaches a log the moment anything formats it. The
+    code is therefore reachable only through explicit field access — ``orphan.code``, which
+    is exactly the deliberate act the revocation caller performs and the accidental act a
+    log formatter does not.
+
+    **What that does NOT buy, corrected in pass 6 because the docstring claimed it and the
+    claim is measurably false.** It does not make ``f"{result}"`` safe for an
+    :class:`~apps.exchange.src.accept.offer.AcceptResult` holding one. Measured: an
+    ``AcceptResult`` from a refused off-domain checkout renders the live code through
+    ``repr`` anyway, because :attr:`~apps.exchange.src.accept.offer.AcceptResult.events`
+    carries the ``code_created`` event whose ``payload["code"]`` is the code in full — and on
+    the *accepted* path :attr:`AcceptResult.code` is the code, as a plain top-level field.
+    Neither is a defect: a result that hands the buyer a discount is *made of* that discount,
+    and the ``code_created`` event is the sanctioned home this ticket deliberately puts it in.
+    The surface T-215 protects is the persisted ``policy_event`` and the prose that reaches
+    it, not the in-process result object, and the two must not be confused — believing the
+    result object is scrubbed is how something starts logging it.
     """
 
     code: str
@@ -429,9 +484,19 @@ class OrphanedCheckoutCode(Exception):
 
     @property
     def _orphan_urls(self) -> tuple[str, ...]:
-        """The merchant URLs this exception holds as VALUES, for the structural redaction."""
+        """The merchant URLs this exception holds as VALUES, for the structural redaction.
+
+        ``str(...)`` is inside the guard because a ``permalink_url`` is whatever the provider
+        put on :class:`MintedCheckout` — nothing coerces it to ``str`` on the way in — and
+        this property is reached from ``__cause__``, i.e. from inside a traceback render. An
+        unguarded conversion here turns "the merchant answered oddly" into "rendering the
+        refusal raises", and a refusal nobody can render is a refusal nobody can act on.
+        """
         orphan = getattr(self, "orphan", None)
-        return (str(getattr(orphan, "permalink_url", "") or ""),)
+        try:
+            return (str(getattr(orphan, "permalink_url", "") or ""),)
+        except Exception:
+            return ()
 
     def _sanitised_slot(self, slot: Any) -> BaseException | None:
         """One chained-exception slot, made safe on the way out — and written back.
@@ -781,7 +846,13 @@ class CheckoutProvider:
                 # site. It goes through `safe_token` whole: a message that could spell the
                 # code is dropped rather than published, and the type name, the fingerprint
                 # and the store still say what happened.
-                f"{type(exc).__name__}: "
+                #
+                # The type NAME is merchant-controlled too, which is easy to miss because it
+                # reads like metadata: a provider may delegate to a library, and a class
+                # named after the code it is about to mint puts that code into every renderer
+                # — `repr(exc)`, the traceback's final line, this sentence. It is a value a
+                # merchant chose, so it is rendered like one.
+                f"{safe_token(type(exc).__name__, minted.code, label='cause-type')}: "
                 f"{safe_token(exc, minted.code, label='cause')} — raised AFTER "
                 f"{self.name!r} minted {code_fingerprint(minted.code)} for store "
                 f"{safe_token(request.store_id, minted.code, label='store')!r}; the code "
@@ -848,7 +919,10 @@ class CheckoutProvider:
                     else OrphanedCheckoutCode
                 )
                 raise kind(
-                    f"{type(exc).__name__}: "
+                    # The type name is a merchant-controlled fragment for the same reason as
+                    # at the matching site in `checkout`: a delegating provider's library
+                    # chooses the class, and a class name renders everywhere a message does.
+                    f"{safe_token(type(exc).__name__, code, label='cause-type')}: "
                     f"{safe_token(exc, code, label='cause')} — raised INSIDE "
                     f"{self.name!r}'s mint(), after {code_fingerprint(code)} had already "
                     f"been minted for store "

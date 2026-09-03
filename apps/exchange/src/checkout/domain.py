@@ -67,7 +67,26 @@ class OffDomainCheckout(ValueError):
     """A checkout URL whose host is not the seller's registered domain (C10, D22)."""
 
 
-def _reason(url: str, registered_domain: str, *, secret: str = "") -> str | None:
+def _as_text(value: object) -> str:
+    """``str(value)`` for a value a merchant supplied, or a placeholder. **Cannot raise.**
+
+    Nothing coerces ``MintedCheckout.permalink_url`` or an offer's ``checkout_url`` to
+    ``str`` on the way in, so both of the values this module is handed can be arbitrary
+    objects. Measured on this tree: a provider returning a ``permalink_url`` whose
+    ``__str__`` raises made :func:`_reason` raise out of ``CheckoutProvider.checkout``, so
+    the post-mint host check died instead of refusing — no ``OrphanedCheckoutCode``, no
+    ``code_created`` event, and a live discount nobody could revoke. An unreadable URL is a
+    refusal, never an exception out of the refusal path.
+    """
+    if value is None:
+        return ""
+    try:
+        return str(value)
+    except Exception:
+        return "<unrenderable-url>"
+
+
+def _reason(url: object, registered_domain: str, *, secret: str = "") -> str | None:
     """Return why ``url`` is off-domain, or ``None`` when it is on-domain.
 
     ``secret`` is a live discount code that must not be recoverable from the returned prose.
@@ -80,11 +99,15 @@ def _reason(url: str, registered_domain: str, *, secret: str = "") -> str | None
     """
     if not registered_domain or not str(registered_domain).strip():
         return "the seller has no registered domain to compare against"
-    if not url or not str(url).strip():
+    # `_as_text` first, then the emptiness test on the TEXT: `if not url` would run the
+    # object's own `__bool__`/`__len__`, which is one more merchant-authored hook on the
+    # refusal path.
+    text = _as_text(url)
+    if not text.strip():
         return "the offer carries no checkout_url"
 
     try:
-        parts = urlsplit(str(url))
+        parts = urlsplit(text)
     except ValueError as exc:
         # The ValueError's own text QUOTES the offending fragment of the merchant's URL,
         # so it is merchant-controlled prose and gets the same treatment as the URL itself.
@@ -140,13 +163,13 @@ def _reason(url: str, registered_domain: str, *, secret: str = "") -> str | None
     return None
 
 
-def is_on_domain(url: str, registered_domain: str) -> bool:
+def is_on_domain(url: object, registered_domain: str) -> bool:
     """True when ``url``'s host is exactly ``registered_domain``."""
     return _reason(url, registered_domain) is None
 
 
 def assert_on_domain(
-    url: str, registered_domain: str, *, what: str = "checkout_url", secret: str = ""
+    url: object, registered_domain: str, *, what: str = "checkout_url", secret: str = ""
 ) -> None:
     """Raise :class:`OffDomainCheckout` unless ``url``'s host is the registered domain.
 
@@ -162,5 +185,9 @@ def assert_on_domain(
         # a downstream replace to find: the reduction is the same one `redact_code`'s
         # structural layer would apply, done at the point the prose is built so that no
         # unreduced spelling of the URL ever exists in a string anyone might copy.
-        shown = redact_url(url, secret) if secret else url
+        #
+        # `_as_text` first for the same reason `_reason` uses it: `{url!r}` runs the
+        # object's `__repr__`, and the object came off a merchant reply.
+        text = _as_text(url)
+        shown = redact_url(text, secret) if secret else text
         raise OffDomainCheckout(f"{what}: {reason} (url={shown!r})")
