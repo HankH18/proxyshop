@@ -182,6 +182,7 @@ def test_every_claims_source_span_indexes_its_own_value_in_the_pitch_text(intent
     assert pitch.claims, "the persona emitted nothing"
     for claim in pitch.claims:
         span = claim.source_span
+        assert span is not None, f"claim {claim.key!r} carries no source_span at all"
         assert span.pitch_ref == pitch.pitch_ref
         assert pitch.text[span.start : span.end] == str(claim.value), (
             f"claim {claim.key!r} span ({span.start},{span.end}) selects "
