@@ -23,7 +23,9 @@ tree rather than by convention.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Protocol
 from urllib.parse import quote
 
@@ -41,7 +43,9 @@ __all__ = [
     "code_expiry",
     "expiry_epoch",
     "mint_code",
+    "minting_ledger",
     "offer_quantity",
+    "record_minted_code",
 ]
 
 
@@ -63,16 +67,77 @@ class RandomSource(Protocol):
     def choice(self, seq: Any) -> Any: ...
 
 
+#: Codes minted inside the innermost :func:`minting_ledger` block, in mint order.
+#:
+#: A ``ContextVar`` rather than a module global: two checkouts running in the same process
+#: must not see each other's codes, and the port opens one ledger per call.
+_MINTED_CODES: ContextVar[list[str] | None] = ContextVar("proxyshop_minted_codes", default=None)
+
+
+@contextmanager
+def minting_ledger() -> Iterator[list[str]]:
+    """Record every code minted inside this block, so a failure can still name it (T-202).
+
+    **The problem this exists for.** ``CheckoutProvider.checkout`` guards everything that
+    happens *after* ``mint`` returns, because that is where a refusal can strand a live
+    discount. But a code comes into existence in the MIDDLE of ``mint``, and the port has no
+    way to see it: ``mint``'s only channel back is its return value, and an exception raised
+    after the code exists carries nothing. ``SimulatedRedirectProvider`` — D45's required
+    starting implementation — does exactly that: :func:`mint_code` first,
+    ``default_permalink`` second, and the second resolves the registered domain again. A
+    lookup that answers once and fails once (a dropped connection, a cache eviction) loses
+    the code, and the port raises an ordinary refusal with no orphan attached.
+
+    ``ShopifyCheckoutProvider`` closed the same hole with its own ``except`` block. That is
+    a fix one provider remembered, and D45 invites more providers: the guarantee belongs to
+    the port, where no implementation can opt out of it, exactly like the domain check.
+
+    The ledger is that channel. It is opened by the port around its call to ``mint``, and
+    anything that mints reports into it — :func:`mint_code` does so unconditionally, so
+    every provider that uses this package's own minting surface is covered without
+    knowing this exists. A provider that mints somewhere else (the merchant's
+    ``POST /codes``) calls :func:`record_minted_code` itself.
+
+    Yields the live list, so the caller reads what was minted even when ``mint`` raised.
+    """
+    recorded: list[str] = []
+    token = _MINTED_CODES.set(recorded)
+    try:
+        yield recorded
+    finally:
+        _MINTED_CODES.reset(token)
+
+
+def record_minted_code(code: str) -> None:
+    """Report a code into the enclosing :func:`minting_ledger`, if there is one.
+
+    A no-op outside one, so calling it is always safe — and it never raises, because it is
+    called from the exact region where a raised exception loses the code it was reporting.
+    """
+    try:
+        ledger = _MINTED_CODES.get()
+        if ledger is not None and code:
+            ledger.append(str(code))
+    except Exception:  # pragma: no cover - reporting must never be the thing that fails
+        pass
+
+
 def mint_code(*, rng: RandomSource | None = None) -> str:
     """Mint one single-use discount code: ``PSX-`` + 8 random Crockford base32 characters.
 
     ``rng`` exists so a test can pin the output. Left unset — which is every production
     call — the characters come from :func:`secrets.choice`, so the code is not derivable
     from the offer, the auction, or anything else an outsider can see.
+
+    The code is reported to the enclosing :func:`minting_ledger` **before** it is returned:
+    from this line on a real discount exists, and everything between here and the caller's
+    ``return`` is a region where an exception would otherwise strand it (T-202).
     """
     pick = rng.choice if rng is not None else secrets.choice
     body = "".join(str(pick(CODE_ALPHABET)) for _ in range(CODE_BODY_LENGTH))
-    return f"{CODE_PREFIX}{body}"
+    code = f"{CODE_PREFIX}{body}"
+    record_minted_code(code)
+    return code
 
 
 def expiry_epoch(expires_at: Any) -> float:
