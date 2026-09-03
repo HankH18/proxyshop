@@ -26,7 +26,12 @@ belongs to no feature package:
     D37's cross-worker ``flock`` on ``/tmp/proxyshop-neo4j.lock``.
 ``reachability``
     Non-blocking TCP probes used to *skip* ``@pytest.mark.docker`` tests with an explicit
-    message when the compose stack is down. Never hangs.
+    message when the compose stack is down. Never hangs, and answers **per service** (T-109)
+    so one datastore's outage cannot empty another datastore's gate.
+``service_markers``
+    The rule that turns one collected item into the set of compose services it needs — an
+    explicit ``@pytest.mark.docker("postgres")`` argument, else the datastore fixtures it
+    requests, else the whole stack.
 """
 
 __all__ = [
@@ -37,5 +42,6 @@ __all__ = [
     "neo4j_lock",
     "reachability",
     "redis_client",
+    "service_markers",
     "worker",
 ]
