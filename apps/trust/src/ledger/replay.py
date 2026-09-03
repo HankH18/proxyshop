@@ -37,8 +37,19 @@ __all__ = ["SCORING_MODULES", "observations_from_events", "replay"]
 #: is how the member packages import each other).
 SCORING_MODULES = ("trust.scoring", "apps.trust.src.scoring")
 
-#: Fields a trust observation carries (T-062's ``score`` reads exactly these).
-OBSERVATION_FIELDS = ("store_id", "dim", "type", "observed_at")
+#: Fields a trust observation carries. ``dim``, ``type``, ``observed_at`` and ``weight`` are
+#: what T-062's ``score`` reads; ``store_id`` is what :func:`replay` groups by. ``weight`` is
+#: the only optional one -- absent means exactly 1.0, decided by
+#: ``trust.scoring.relative_observation_weight`` and by nothing here.
+OBSERVATION_FIELDS = ("store_id", "dim", "type", "observed_at", "weight")
+
+#: The optional per-observation field that scales an observation type's published weight
+#: (R14). Spelled here rather than imported from ``trust.scoring``: this module must stay
+#: importable before the scorer lands, and a projection that had to import the scorer to know
+#: a field's name would put the two in a cycle. It is asserted equal to
+#: ``trust.scoring.engine.OBSERVATION_WEIGHT_FIELD`` by the replay-determinism gate, so the
+#: two spellings cannot drift apart unnoticed.
+OBSERVATION_WEIGHT_FIELD = "weight"
 
 
 def observations_from_events(events: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -56,10 +67,26 @@ def observations_from_events(events: Iterable[Mapping[str, Any]]) -> list[dict[s
             sequence.
 
     Returns:
-        ``[{"store_id", "dim", "type", "observed_at"}, ...]``. ``store_id`` is taken from
-        the event, falling back to the payload; ``observed_at`` from the payload, falling
-        back to the event's ``ts`` -- so an observation always carries the instant the
+        ``[{"store_id", "dim", "type", "observed_at"[, "weight"]}, ...]``. ``store_id`` is
+        taken from the event, falling back to the payload; ``observed_at`` from the payload,
+        falling back to the event's ``ts`` -- so an observation always carries the instant the
         scorer decays against.
+
+        ``weight`` -- R14's per-observation discount, in ``[0, 1]`` -- is carried through
+        verbatim when the payload has one, and omitted when it does not. Both halves are
+        load-bearing for S3 (*replaying the ledger reproduces the served snapshot bit for
+        bit*), and until T-206 neither was true: the projection dropped the field, so a
+        buyer report discounted to 0.25 served ``alpha = 2.25`` from memory and replayed at
+        ``alpha = 3.0`` -- full strength, exactly as if the buyer's own return had never
+        contradicted them. The write path was never the problem; a ``weight`` in an event
+        payload survives ``jsonb`` and ``read_events`` unchanged, measured. This projection
+        was the only place it was lost.
+
+        No number is *validated* here, only moved: ``trust.scoring`` owns the rule about
+        what an admissible weight is (D49), and a range check in this file would be a second
+        copy of it free to drift. An observation with no ``weight`` keeps the four-field
+        shape rather than carrying an explicit ``None``, because the scorer already reads an
+        absent weight as exactly 1.0 and S3's assertion is an ``==`` over these values.
 
         An event naming a ``dim`` and a ``type`` but **no** ``store_id`` is skipped: a trust
         observation is a statement about a store, and there is no honest store to attribute
@@ -77,14 +104,29 @@ def observations_from_events(events: Iterable[Mapping[str, Any]]) -> list[dict[s
         store_id = event.get("store_id") or payload.get("store_id")
         if store_id is None:
             continue
-        observations.append(
-            {
-                "store_id": store_id,
-                "dim": dim,
-                "type": observation_type,
-                "observed_at": payload.get("observed_at") or event.get("ts"),
-            }
-        )
+        observation = {
+            "store_id": store_id,
+            "dim": dim,
+            "type": observation_type,
+            "observed_at": payload.get("observed_at") or event.get("ts"),
+        }
+        # R14's per-observation weight, carried verbatim and only when the event actually
+        # has one. Verbatim because whether a number is an admissible weight is decided in
+        # exactly one place -- `trust.scoring.relative_observation_weight` -- and a second
+        # opinion here (a clamp, a float() coercion, a default) would be a number this
+        # module invented, which is the one thing D49 says it may never do.
+        #
+        # Only when present because "absent" already means exactly 1.0 to the scorer, and an
+        # observation projected with `weight: None` is a different VALUE from the one the
+        # producer emitted even though it scores the same -- and S3 compares those values.
+        #
+        # `is not None` and not a truth test: 0.0 is an admissible weight meaning "this
+        # report decided nothing", and `payload.get("weight") or default` would quietly
+        # restore it to full strength.
+        weight = payload.get(OBSERVATION_WEIGHT_FIELD)
+        if weight is not None:
+            observation[OBSERVATION_WEIGHT_FIELD] = weight
+        observations.append(observation)
     return observations
 
 

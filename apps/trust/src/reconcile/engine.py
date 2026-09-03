@@ -653,10 +653,13 @@ def observation_events(reconciled: Any) -> list[dict[str, Any]]:
     """The same translation, as ledger events the existing replay consumer already reads.
 
     ``apps/trust/src/ledger/**`` belongs to another ticket and
-    ``observations_from_events`` projects exactly ``{store_id, dim, type, observed_at}`` off
-    any event whose payload names a ``dim`` and a ``type``. So the translation lives on the
-    EMITTER side: these events are shaped to what that consumer already requires, rather than
-    the consumer being asked to learn what a ``reconciled`` payload means.
+    ``observations_from_events`` projects ``{store_id, dim, type, observed_at}`` -- plus an
+    optional ``weight`` when the payload names one -- off any event whose payload names a
+    ``dim`` and a ``type``. So the translation lives on the EMITTER side: these events are
+    shaped to what that consumer already requires, rather than the consumer being asked to
+    learn what a ``reconciled`` payload means. Reconciliation emits no ``weight`` (see
+    :func:`observations` below on why a machine comparison is worth its full published type
+    weight), so these events take the absent-means-1.0 branch.
 
     One event per graded promise, not one per order, because an observation is about exactly
     one dimension and ``observations_from_events`` reads exactly one ``dim`` per event.

@@ -40,19 +40,21 @@ a return is downweighted" and "a single account cannot outvote the network". Wit
 channel into the fold, both were properties of a number nothing consumed. The cap at 1.0 is
 the second property stated as an invariant; see :data:`MAX_OBSERVATION_WEIGHT`.
 
-An observation with no ``weight`` weighs exactly 1.0, which is what keeps the S3 replay
-assertion honest: ``trust.ledger.replay`` projects only ``{store_id, dim, type, observed_at}``
-onto observations, so every replayed observation takes that default.
+An observation with no ``weight`` weighs exactly 1.0, and an observation that names one is
+worth its type's published weight times that number. Both halves survive a ledger round trip:
+``trust.ledger.replay.observations_from_events`` projects ``{store_id, dim, type,
+observed_at}`` plus ``weight`` when the event carries one, and omits the key when it does not
+— so a replayed observation lands on the same branch of that rule the served one did.
 
-**And that is a live gap, not a design.** ``observations_from_events`` DROPS the weight, so a
-*weighted* observation served from memory and the same observation replayed out of the ledger
-score differently — measured, a feedback report at 0.25 serves ``alpha=2.25`` and replays
-``alpha=3.0``. The channel is therefore S3-safe exactly to the extent it is unused, which is
-not a property worth having. ``ledger.trust_observations`` already declares a ``weight
-double precision`` column, so the schema expects the number to travel; the projection that
-feeds this scorer is what has to carry it, and that file is owned elsewhere. Until it does,
-the only producer of weighted observations (``trust.feedback``) must not be routed through
-the ledger. Reported as a NEEDS against ``apps/trust/src/ledger/replay.py``.
+That is what makes the S3 assertion (*replaying the ledger reproduces the served snapshot bit
+for bit*) mean something over weighted evidence. It did not hold until T-206: the projection
+dropped the weight, and a feedback report at 0.25 served ``alpha=2.25`` while replaying
+``alpha=3.0`` — full strength, as if the buyer's own return had never contradicted them. The
+channel was S3-safe exactly to the extent nothing used it, which is not a property worth
+having, and routing ``trust.feedback`` through the ledger was prohibited on those grounds.
+That prohibition is lifted; the gate that keeps it lifted is
+``apps/trust/tests/test_replay_weight_determinism.py``, which scores the same weighted
+observation in memory and after a real Postgres round trip and requires the two to be equal.
 
 Coverage, and why undecided outcomes go there instead of into the mean
 ----------------------------------------------------------------------
@@ -320,11 +322,11 @@ def relative_observation_weight(observation: Any) -> float:
     "a single account cannot outvote the network" was a property of a number no Beta ever saw.
 
     Args:
-        observation: the observation record. A missing ``weight`` — which is every observation
-            the ledger projects, since ``trust.ledger.replay.observations_from_events``
-            carries only ``{store_id, dim, type, observed_at}`` — means exactly ``1.0``, not
+        observation: the observation record. A missing ``weight`` means exactly ``1.0``, not
             approximately: the S3 assertion compares a served snapshot against a replayed one
-            with ``==``.
+            with ``==``. ``trust.ledger.replay.observations_from_events`` omits the key
+            entirely for an event that carries no weight, so "absent" is the same value on
+            both sides of that comparison rather than an explicit ``None`` on one of them.
 
             Any real number is accepted, not only ``int``/``float``: weights arrive from JSON
             parsed with ``parse_float=Decimal`` and from the ``double precision`` column
