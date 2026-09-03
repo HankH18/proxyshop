@@ -66,9 +66,30 @@ __all__ = [
 ]
 
 #: Environment variables consulted, in order, for the ledger DSN when none is passed.
-#: ``PROXYSHOP_LEDGER_DSN`` first so a deployment can point the writer somewhere without
+#:
+#: ``PROXYSHOP_LEDGER_DSN`` first, so a deployment can point the writer somewhere without
 #: disturbing the per-role variables the rest of the system reads.
-DEFAULT_DSN_ENV: tuple[str, ...] = ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_APP")
+#:
+#: ``PROXYSHOP_PG_DSN_TRUST_RW`` second, because that is *this writer's own role*: it is
+#: what ``proxyshop_support.postgres.ROLES["trust_rw"]`` designates, what ``.env.example``
+#: documents, and what D5 grants the ledger. Leaving it out was a live defect rather than
+#: an omission -- a deployment that configured the ledger the documented way got
+#: :class:`StoreUnavailable` while the correct DSN sat unread in its environment, and a
+#: deployment that set the generic variable too got something worse than an error: a
+#: writer that connected happily as ``app``, a role with a different grant set, and said
+#: nothing anywhere about having done so. ``apps/trust/compose.yaml`` still carries the
+#: workaround that bug forced (an explicit ``PROXYSHOP_LEDGER_DSN``) and is now free to
+#: drop it.
+#:
+#: ``PROXYSHOP_PG_DSN_APP`` last, and only last. It stays because three of the four
+#: services hand this process nothing else, and removing it would turn their "wrong role"
+#: into "no ledger at all"; it ranks below the per-role variable so that wherever both are
+#: present the writer uses the privileges it was actually granted.
+DEFAULT_DSN_ENV: tuple[str, ...] = (
+    "PROXYSHOP_LEDGER_DSN",
+    "PROXYSHOP_PG_DSN_TRUST_RW",
+    "PROXYSHOP_PG_DSN_APP",
+)
 
 #: Constraints that mean "somebody else is already at this position in the chain". Both are
 #: forks, not duplicates: the incoming event is fine and its predecessor moved.

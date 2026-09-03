@@ -59,9 +59,20 @@ policy's chosen `discount_pct` inside its value. Every discount-bearing claim is
 re-asked against the envelope, whatever its key — a rule that watched one key would be a rule
 about a spelling.
 
+**The fourth wall: the depth is a description, and the price is the thing.** Every wall above is
+about the *depth*, and a depth only describes a price. `prod-cap` lists at 100.00 with a 10.00
+floor and a 20% cap, so an honest 20% grant makes the honest price 80.00 — and every price from
+10.00 to 80.00 clears the floor, clears the cap and is backed by a genuine grant for a genuine
+depth. Seventy currency units of unauthorised discount sat inside the walls, because nothing on
+the path had ever compared what a bid *charges* with what it was *granted*. So an offer's stated
+`unit_price` is reconciled against its own declared depth and the catalog's list price
+(:func:`_price_reconciliation_refusal`), independently of the floor
+(:func:`_price_refusal`) — the two answer different questions and both are hard.
+
 The property on offer is therefore "every claim anywhere in this bid is one the hooks emitted,
-every authorization in it was granted for this bid and spent once, and every discount in it is
-backed by such an authorization" — which is what is checked.
+every authorization in it was granted for this bid and spent once, every discount in it is
+backed by such an authorization, and every price in it is the one that authorization prices out
+at" — which is what is checked.
 
 Nothing here reads a wall clock. `observed_at` comes from the evidence or from an explicit
 ``as_of``, falling back to :data:`UNKNOWN_OBSERVED_AT` — a hosted bid has to be reproducible
@@ -145,6 +156,15 @@ DISCOUNT_VALUE_KEYS: tuple[str, ...] = ("discount_pct",)
 #: floats that travelled through JSON; without this a grant of 15.0 could fail to back a discount
 #: of 15.0. Far below anything a merchant could feel, for the same reason as `WALL_TOLERANCE`.
 DISCOUNT_MATCH_TOLERANCE = 1e-9
+
+#: Slack when reconciling a stated price against the price its granted depth prices out at, as an
+#: absolute amount of currency rather than a float epsilon. `DISCOUNT_MATCH_TOLERANCE` is the
+#: right size for comparing two numbers that are *meant* to be equal; these two are not. 19.99
+#: less an honest 15% is 16.9915, and no bid states that — money is quoted to the cent, so the
+#: honest rounded price is a fraction of a cent under the exact one and a wall tightened to the
+#: float would refuse almost every real product. One cent is far below any discount a merchant
+#: could feel, and the floor wall independently caps how cheap the number may get regardless.
+PRICE_RECONCILIATION_TOLERANCE = 0.01
 
 
 class HookProvenanceError(RuntimeError):
@@ -456,6 +476,13 @@ def _walk(
     unexamined behind a fingerprint that matches. That is the original defect with one more layer
     of paint, so such a node is walked as a container AND recorded in `disguises` for refusal.
 
+    **And an offer's fields are its price as much as its discount.** `_structural_fields` names
+    only the four claim-carrying ones, so a claim-shaped node carrying `product_ref` and
+    `unit_price` — and *neither* a discount nor commitments — had no structural fields at all,
+    was taken for a leaf, and was admitted on a fingerprint that genuinely matched: the price it
+    named was collected by nothing and was therefore outside the floor wall and the
+    reconciliation alike. A priced node is offer material whatever else it is wearing.
+
     `strict` says what to do with something that is neither a claim, a container nor a
     collection. Where the contract says claims live — the argument itself, `claims`,
     `commitments` — an unrecognized object is collected anyway, so `_refusal` refuses it and
@@ -468,7 +495,8 @@ def _walk(
 
     fields = _structural_fields(node)
     claim_shaped = _is_claim_shaped(node)
-    if claim_shaped and not fields:
+    priced = _read(node, PRODUCT_FIELD) is not None and _read(node, PRICE_FIELD) is not None
+    if claim_shaped and not fields and not priced:
         found.claims.append(node)
         return
     if claim_shaped:
@@ -490,6 +518,22 @@ def _walk(
             found.prices.append((f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), price))
         _sweep(node, path, found, depth)
         return
+
+    # A priced node that carries none of the claim-bearing fields above. `Offer` always carries
+    # `commitments`, so the branch above catches every offer built as a model — and a bid built
+    # as a *dict* can put `{"product_ref": ..., "unit_price": ...}` under any key it likes, where
+    # nothing collected it and therefore neither price wall ever saw it. Both walls were
+    # evadable that way, the floor one included.
+    #
+    # It takes BOTH names to be treated as a price: a node that names a product *and* prices it
+    # is an offer by any reading, while a `metadata` blob with a stray `unit_price` in it names
+    # nothing and is left alone, which is the same line `_sweep` already draws. Collected rather
+    # than returned on, so a non-claim in a place the contract says holds claims is still refused
+    # for being one — and so a claim-shaped one is still recorded as the disguise it is.
+    if priced:
+        found.prices.append(
+            (f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), _read(node, PRICE_FIELD))
+        )
 
     if _is_sequence(node):
         for index, item in enumerate(node):
@@ -743,6 +787,86 @@ def _price_refusal(path: str, product_ref: Any, price: Any, hooks: Any) -> str |
     return None
 
 
+def _price_reconciliation_refusal(
+    path: str, product_ref: Any, price: Any, declared_pct: float, hooks: Any
+) -> str | None:
+    """Why the price an offer states does not follow from the depth it declares, or `None`.
+
+    The floor wall above is a wall on the *cheapest price the merchant will ever accept*, and for
+    a while it was the only price wall there was. It makes the defect look like an edge case
+    about implausibly cheap numbers, and it is not. `prod-cap` lists at 100.00 with a 10.00 floor
+    and a 20% cap, so the honest price behind an honest 20% grant is 80.00 — and every price from
+    10.00 to 80.00 clears the floor, clears the cap, and is backed by a genuine grant for a
+    genuine depth. Seventy currency units of unauthorised discount sit *inside* the walls,
+    because a depth is a description of a price and nothing here made the description true.
+
+    So the question this asks is not "is the price legal" but **is the discount the price implies
+    one a hook granted**::
+
+        list_price - unit_price  <=  list_price * declared_pct / 100
+
+    written the other way round — ``unit_price >= list_price * (100 - declared_pct) / 100`` — in
+    the same ``(100 - pct) / 100`` form as
+    :meth:`~store_agent.hooks.tools.ToolHooks._evaluate_discount`, and reading the list price
+    through :meth:`~store_agent.hooks.tools.ToolHooks.list_price` rather than from a catalog of
+    its own, so the wall that grants and the wall that checks cannot disagree about what 20% off
+    100.00 comes to.
+
+    `declared_pct` is the depth *this offer* declares, not the deepest grant in the bid. An
+    unspent grant sitting beside an offer is an authorization nobody has claimed; letting it
+    license a price would make a depth a bid-wide allowance rather than a per-offer one, and
+    three offers at 80.00 behind a single 20% grant is exactly the "exactly once" property
+    :func:`_discount_refusal` exists to enforce, walked around by pricing instead of discounting.
+    An offer that spends a depth must say so where it is priced, and a price under list with no
+    declared discount is a discount that entered the bid through no hook at all.
+
+    **One-sided, deliberately.** A price *above* what the depth prices out at spends less of the
+    envelope than was granted — the discount actually given is shallower and the floor is cleared
+    by a wider margin — so there is nothing here for a wall about authorization to refuse, and
+    refusing it would turn every rounding-up into an outage. Such an offer is a discount
+    advertised and not given, which is a question about what the buyer is told rather than about
+    what the merchant approved, and is not this wall's subject.
+
+    **`unit_price` only.** `Offer` carries a `total_price` and no quantity; the quantity that
+    would relate the two lives in the checkout path, not on the protocol object. The relation is
+    therefore not decidable from a bid, and this refuses it as a subject rather than guessing at
+    it — a boundary that guessed would be deciding what an offer means instead of checking it.
+
+    Anything the floor wall already refuses — a non-numeric price, a negative one, a price with
+    no product named — returns `None` here, so one bad number is reported once and by the wall
+    whose subject it is.
+    """
+    stated = _as_depth(price)
+    if stated is None or stated < 0.0 or not product_ref:
+        return None
+    listed_by = getattr(hooks, "list_price", None)
+    if not callable(listed_by):
+        return (
+            f"{type(hooks).__name__} cannot report a list price (no `list_price`), so whether "
+            f"the {stated} at {path} is the {declared_pct}% off {str(product_ref)!r} it claims "
+            "to be is unknowable here; refusing"
+        )
+    listed = _as_depth(listed_by(str(product_ref)))
+    if listed is None:
+        return (
+            f"the offer at {path} states {stated} for {str(product_ref)!r}, which the catalog "
+            "does not list a price for: there is no number for that discount to be a percentage "
+            "of, so nothing can be reconciled; refusing rather than admitting an unpriceable "
+            "product"
+        )
+    honest = listed * (100.0 - declared_pct) / 100.0
+    if stated + PRICE_RECONCILIATION_TOLERANCE < honest:
+        implied = (listed - stated) / listed * 100.0 if listed else float("inf")
+        return (
+            f"the offer at {path} states {stated} for {str(product_ref)!r}, which is "
+            f"{implied:.4g}% off its list price of {listed} while the offer declares "
+            f"{declared_pct}% (an authorized {declared_pct}% prices out at {honest}): the depth "
+            "is a description of the price, and a bid does not get to take more off than the "
+            "depth it was granted merely by writing a smaller number"
+        )
+    return None
+
+
 def _discount_refusal(
     path: str, discount: Any, unspent: list[tuple[float, str]], product_ref: str | None
 ) -> str | None:
@@ -904,14 +1028,45 @@ def enforce_hook_provenance(
         reason = _discount_refusal(path, discount, unspent_grants, product_ref)
         if reason is not None:
             extras.append(reason)
+
+    # What each priced node *declares* it is taking off, keyed by the node rather than by the
+    # bid. `_walk` records a discount at `<node>.discount` and a price at `<node>.unit_price`, so
+    # trimming the field name off both is what pairs the two halves of one offer — and pairing
+    # them per node is the whole point: a grant is spent by the offer that declares it, and an
+    # offer that declares nothing is taking nothing off, whatever else the bid is carrying.
+    # A depth that is not a percentage contributes nothing, so it cannot license a price while
+    # `_discount_refusal` is separately refusing it for being unauthorizable.
+    declared: dict[str, float] = {}
+    for path, discount in discounts:
+        depth = _as_depth(_enum_value(_read(discount, "value")))
+        kind = str(_enum_value(_read(discount, "type")) or "")
+        if depth is None or depth < 0.0 or kind.lower() not in PERCENTAGE_DISCOUNT_TYPES:
+            continue
+        node = path[: -len(DISCOUNT_FIELD) - 1] if path.endswith(f".{DISCOUNT_FIELD}") else path
+        declared[node] = max(declared.get(node, 0.0), depth)
+
     for path, named, price in found.prices:
-        reason = _price_refusal(path, named if named is not None else product_ref, price, hooks)
+        for_product = named if named is not None else product_ref
+        reason = _price_refusal(path, for_product, price, hooks)
+        if reason is not None:
+            extras.append(reason)
+        node = path[: -len(PRICE_FIELD) - 1] if path.endswith(f".{PRICE_FIELD}") else path
+        reason = _price_reconciliation_refusal(
+            path, for_product, price, declared.get(node, 0.0), hooks
+        )
         if reason is not None:
             extras.append(reason)
     for path, node in found.disguises:
+        # The price fields count as offer material here as well as in `_walk`, or the node that
+        # smuggled a price behind a claim's identity would be refused with an empty list of what
+        # it was carrying — a true refusal that names none of the evidence for itself.
+        carried = sorted(
+            {*_structural_fields(node)}
+            | {name for name in (PRODUCT_FIELD, PRICE_FIELD) if _read(node, name) is not None}
+        )
         extras.append(
             f"the node at {path or '<root>'} carries a claim's identity AND an offer's fields "
-            f"({sorted(_structural_fields(node))}): a claim fingerprint covers the claim, not an "
+            f"({carried}): a claim fingerprint covers the claim, not an "
             "offer wrapped around it, so this would ride a genuine claim's identity into the bid"
         )
     for offset, reason in enumerate(extras):
@@ -968,6 +1123,7 @@ __all__ = [
     "DISCOUNT_VALUE_KEYS",
     "NESTED_OBJECT_FIELDS",
     "PERCENTAGE_DISCOUNT_TYPES",
+    "PRICE_RECONCILIATION_TOLERANCE",
     "PRICE_FIELD",
     "PRODUCT_FIELD",
     "PRODUCT_SCOPED_CLAIM_KEYS",
