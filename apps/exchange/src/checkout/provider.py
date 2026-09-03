@@ -307,10 +307,18 @@ def _sanitised_cause(exc: BaseException, code: str, urls: Sequence[str]) -> Base
 
     The lesson is not "notes and groups too". It is that an oracle which disagrees with the
     renderer it exists to protect will keep losing to whatever CPython renders next, so the
-    oracle now IS the renderer — :func:`~.redaction.rendered_exception`. And because the
-    render covers the whole chain, its members and their notes, the ACTION is total by
-    construction: one object is substituted and everything reachable from it goes with it,
-    rather than each renderable attribute being rewritten in place and hoped complete.
+    oracle now IS the renderer — :func:`~.redaction.render_can_publish`, which calls it. And
+    because the render covers the whole chain, its members and their notes, the ACTION is
+    total by construction: one object is substituted and everything reachable from it goes
+    with it, rather than each renderable attribute being rewritten in place and hoped
+    complete.
+
+    **Pass 6 changed which way the oracle fails**, not what it asks. It used to be
+    ``spells_code(rendered_exception(exc), code)``, and that composition cannot tell "the
+    render was clean" from "the render could not be obtained" — both arrive as a string that
+    does not spell the code. :func:`~.redaction.render_can_publish` separates them and treats
+    the second as unsafe. See its docstring for why "one reader failed" is not "no reader
+    can print it".
     """
     _redact_chain(exc, code, urls)
     if not code:
