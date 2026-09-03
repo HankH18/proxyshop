@@ -88,6 +88,23 @@ IDENTITY_KEY_SUBSTRINGS: tuple[str, ...] = (
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _LONG_DIGITS = re.compile(r"\b\d{9,}\b")
 
+#: A *formatted* number — a phone number or a grouped account number — that the contiguous
+#: pattern above misses entirely. `555-123-4567`, `(415) 555-0100` and `12 3456 7890` all
+#: survived free-text scanning before this, which the module docstring already claimed to
+#: cover.
+#:
+#: The separator class is deliberately narrow: no ``:`` and no letters. Widening it to
+#: "anything non-alphanumeric" makes ``2026-01-01T00:00:00Z`` a fourteen-digit match, and
+#: redacting the timestamps out of a pushed ledger event would break the very thing the push
+#: exists to deliver. With this class the worst that matches inside an RFC-3339 instant is the
+#: eight-digit date, which :func:`_redact_grouped_digits` declines — see its threshold.
+_GROUPED_DIGITS = re.compile(r"(?<![\w.])\(?\+?\d[\d\-. ()]{7,}\d(?![\w.])")
+
+#: How many digits a formatted run must carry before it is treated as identity. Ten: the
+#: length of a national phone number and of most account numbers, and comfortably above the
+#: eight digits of an ISO date — which is what keeps ``2026-01-01`` readable.
+_GROUPED_DIGIT_THRESHOLD = 10
+
 
 def _is_identity_key(key: object) -> bool:
     name = str(key).strip().lower()
@@ -96,10 +113,24 @@ def _is_identity_key(key: object) -> bool:
     return any(fragment in name for fragment in IDENTITY_KEY_SUBSTRINGS)
 
 
+def _redact_grouped_digits(match: re.Match[str]) -> str:
+    """Redact a formatted digit run only when it carries enough digits to be identity."""
+    text = match.group(0)
+    if sum(character.isdigit() for character in text) >= _GROUPED_DIGIT_THRESHOLD:
+        return REDACTED
+    return text
+
+
 def _redact_text(value: str) -> str:
-    """Redact identity that survived under an innocent key (a note, a description)."""
+    """Redact identity that survived under an innocent key (a note, a description).
+
+    Three patterns, in order: e-mail addresses, unbroken digit runs, and formatted digit
+    groups. The third is the one that is easy to leave out and easy to get wrong — see
+    :data:`_GROUPED_DIGITS` for why its separator class stops where it does.
+    """
     redacted = _EMAIL.sub(REDACTED, value)
-    return _LONG_DIGITS.sub(REDACTED, redacted)
+    redacted = _LONG_DIGITS.sub(REDACTED, redacted)
+    return _GROUPED_DIGITS.sub(_redact_grouped_digits, redacted)
 
 
 def _as_plain(value: Any) -> Any:

@@ -25,6 +25,7 @@ would be a comparator whose verdict an injected instruction in the pitch text co
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -216,13 +217,21 @@ def parse_quantity(value: Any) -> tuple[float, str | None] | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value), None
+        number = float(value)
+        # A non-finite value is not a quantity. Letting infinity or NaN through here
+        # reaches the numeric comparator, where the tolerance allowance is itself infinite
+        # and `inf <= inf` made an infinite claim compare EQUAL to every number in the
+        # catalog. `json.loads` accepts `Infinity` by default, so that is reachable from a
+        # crafted pitch.
+        return (number, None) if math.isfinite(number) else None
     match = _QUANTITY.match(str(value))
     if match is None:
         return None
     try:
         number = float(match.group(1))
-    except ValueError:  # pragma: no cover - the regex already constrains this
+    except (ValueError, OverflowError):  # pragma: no cover - the regex already constrains this
+        return None
+    if not math.isfinite(number):
         return None
     remainder = match.group(2).strip()
     return number, remainder or None

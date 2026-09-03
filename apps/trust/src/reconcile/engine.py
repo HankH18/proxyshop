@@ -105,19 +105,20 @@ def _discount_percentage(payload: Mapping[str, Any]) -> float | None:
     applications = payload.get("discountApplications")
     if not isinstance(applications, Sequence) or isinstance(applications, (str, bytes)):
         return _number(payload.get("discount_percentage"))
+    # A PRESENT `discountApplications` list is a complete statement, so an empty one — or one
+    # holding only fixed-amount applications — means "no percentage discount was applied",
+    # which is 0.0 and not "unknown". Returning None here made a promised discount permanently
+    # incomparable against the commonest webhook shape there is.
     total = 0.0
-    seen = False
     for application in applications:
         if not isinstance(application, Mapping):
             continue
         if str(application.get("type", "percentage")).lower() != "percentage":
             continue
         value = _number(application.get("value"))
-        if value is None:
-            continue
-        total += value
-        seen = True
-    return total if seen else None
+        if value is not None:
+            total += value
+    return total
 
 
 def _promised(accepted: Any) -> dict[str, Any]:
@@ -139,8 +140,24 @@ def _promised(accepted: Any) -> dict[str, Any]:
     }
 
 
+#: Separator between a store scope and a join key. A control character, so it cannot occur
+#: inside a checkout token or an order reference and collapse two keys into one.
+_SCOPE_SEPARATOR = "\x1f"
+
+#: The scope events whose store could not be determined are filed under. They join each other
+#: and nothing else, which is the pre-existing behaviour — not an improvement, just not a
+#: regression.
+_UNATTRIBUTED_SCOPE = ""
+
+
 def _join_keys(event: Any) -> tuple[str, ...]:
-    """Every identifier an event can be joined on: ``checkout_token`` and ``order_ref``."""
+    """Every identifier an event can be joined on.
+
+    ``checkout_token`` and ``order_ref`` are network-issued and globally unique. ``order_id``
+    is NOT: it is the platform's own order number, and Shopify numbers orders **per shop**, so
+    two unrelated stores both legitimately have order ``1001``. That is why the caller scopes
+    every one of these by store before joining — see :func:`_scoped_keys`.
+    """
     payload = _payload(event)
     keys = []
     for candidate in (
@@ -152,6 +169,27 @@ def _join_keys(event: Any) -> tuple[str, ...]:
         if candidate is not None and str(candidate).strip():
             keys.append(str(candidate).strip())
     return tuple(dict.fromkeys(keys))
+
+
+def _store_of(event: Any) -> str | None:
+    store = _field(event, "store_id") or _payload(event).get("store_id")
+    if store is None:
+        return None
+    text = str(store).strip()
+    return text or None
+
+
+def _scoped_keys(keys: tuple[str, ...], scope: str) -> tuple[str, ...]:
+    """Namespace a set of join keys by the store they belong to.
+
+    Without this, one platform ``order_id`` shared by two shops merges their orders into a
+    single group and ``setdefault`` keeps whichever webhook and whichever offer arrived first.
+    Measured before the fix: two stores each with order_id ``1001`` produced ONE reconciled
+    event, and the second store's 10x overcharge was never graded and never raised — the order
+    simply disappeared. That is the reconciliation escape hatch :class:`ReconciliationInputError`
+    exists to close, reached through a field a store does not even have to omit.
+    """
+    return tuple(f"{scope}{_SCOPE_SEPARATOR}{key}" for key in keys)
 
 
 class _Groups:
@@ -228,7 +266,15 @@ def reconciled_event(
     # would let a malformed webhook manufacture a contradiction, which is a penalty the store
     # cannot see coming and cannot appeal.
     price_comparable = observed_price is not None and promised_price is not None
-    discount_comparable = promised_discount is None or observed_discount is not None
+
+    # A promise of 0% — or of no discount at all — has nothing to dishonour, so it is honored
+    # trivially and comparably. Requiring an observed discount in that case made an explicitly
+    # promised `discount: {"type": "percentage", "value": 0}` impossible to honor: the promise
+    # was 0.0 rather than None, so the code demanded a discount observation that a correct
+    # webhook has no reason to carry, and an honest store failed `discount_honored`.
+    promised_discount_pct = 0.0 if promised_discount is None else float(promised_discount)
+    discount_required = promised_discount_pct > 0.0
+    discount_comparable = not discount_required or observed_discount is not None
 
     # `price_honored` is one-sided on purpose: charging LESS than promised is not a broken
     # promise, and grading it as one would penalise a store for a goodwill discount.
@@ -237,9 +283,9 @@ def reconciled_event(
         and promised_price is not None
         and observed_price <= promised_price + PRICE_TOLERANCE
     )
-    discount_honored = promised_discount is None or (
+    discount_honored = not discount_required or (
         observed_discount is not None
-        and observed_discount >= promised_discount - DISCOUNT_TOLERANCE
+        and observed_discount >= promised_discount_pct - DISCOUNT_TOLERANCE
     )
 
     pixel_price = _number(_payload(pixel).get("total_price")) if pixel is not None else None
@@ -250,7 +296,11 @@ def reconciled_event(
     )
 
     return {
-        "event_id": f"reconciled:{order_ref}",
+        # Scoped by store for the same reason the join keys are: a platform `order_id` is a
+        # per-shop number, so `reconciled:1001` alone is not a unique event id across shops —
+        # and `event_id` IS the ledger's idempotency key, so a collision would make one shop's
+        # reconciliation a silent no-op against another's.
+        "event_id": f"reconciled:{store_id}:{order_ref}",
         "ts": ts,
         "kind": RECONCILED_KIND,
         "store_id": store_id,
@@ -297,12 +347,18 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         ReconciliationInputError: a webhook carrying no join key at all, which cannot be
             attributed to an order and must not be silently dropped.
     """
-    # TWO passes, and the split is load-bearing: two join keys only become known to be the
-    # same order when some event carries both, which may be the LAST event in the stream.
-    # Filing events into groups while the groups are still merging leaves a webhook and its
-    # offer in two different buckets, and the order then silently never reconciles.
-    groups = _Groups()
-    relevant: list[tuple[str, Any, tuple[str, ...]]] = []
+    # THREE passes, and each split is load-bearing.
+    #
+    # 1. Collect, and record which store claims which raw join key. Join keys are namespaced
+    #    by store because `order_id` is a PER-SHOP number: two shops both have order 1001, and
+    #    joining on it unscoped merges their orders into one group.
+    # 2. Union. Two keys only become known to be the same order when some event carries both,
+    #    which may be the LAST event in the stream — so nothing may be filed into a group
+    #    while the groups are still merging, or a webhook and its offer end up in different
+    #    buckets and the order silently never reconciles.
+    # 3. File and emit.
+    collected: list[tuple[str, Any, tuple[str, ...], str | None]] = []
+    key_stores: dict[str, set[str]] = {}
     for event in events:
         kind = str(_field(event, "kind", ""))
         if kind not in (ACCEPTED_KIND, PIXEL_KIND, WEBHOOK_KIND):
@@ -316,8 +372,27 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
                     "would let a store escape reconciliation by omitting a field."
                 )
             continue
-        groups.union(keys)
-        relevant.append((kind, event, keys))
+        store = _store_of(event)
+        if store is not None:
+            for key in keys:
+                key_stores.setdefault(key, set()).add(store)
+        collected.append((kind, event, keys, store))
+
+    groups = _Groups()
+    relevant: list[tuple[str, Any, tuple[str, ...]]] = []
+    for kind, event, keys, store in collected:
+        if store is None:
+            # A client-side pixel often knows the checkout token and not the shop. Adopt the
+            # store only when exactly one store claims one of its keys; two candidates is
+            # precisely the collision this scoping exists to catch, so it stays unattributed
+            # rather than being guessed into somebody's order.
+            candidates: set[str] = set()
+            for key in keys:
+                candidates |= key_stores.get(key, set())
+            store = next(iter(candidates)) if len(candidates) == 1 else None
+        scoped = _scoped_keys(keys, store if store is not None else _UNATTRIBUTED_SCOPE)
+        groups.union(scoped)
+        relevant.append((kind, event, scoped))
 
     members: dict[str, dict[str, Any]] = {}
     order: list[str] = []
@@ -335,9 +410,12 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         if webhook is None or accepted is None:
             continue
         order_ref = _field(webhook, "order_ref") or _payload(webhook).get("order_id")
+        # The fallback strips the store scope back off: `root` is a namespaced key, and a
+        # control character has no business appearing in an emitted order reference.
+        fallback = root.split(_SCOPE_SEPARATOR, 1)[-1]
         emitted.append(
             reconciled_event(
-                order_ref=str(order_ref) if order_ref is not None else root,
+                order_ref=str(order_ref) if order_ref is not None else fallback,
                 store_id=_field(webhook, "store_id") or _field(accepted, "store_id"),
                 checkout_token=_payload(webhook).get("checkout_token")
                 or _payload(accepted).get("checkout_token"),

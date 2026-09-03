@@ -42,6 +42,7 @@ number is what lets a comparison be argued about without editing a comparator.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
@@ -312,6 +313,16 @@ def _compare_numeric(
     elif catalog_family is None and claimed_family is not None:
         catalog_base, _ = to_base_unit(catalog[0], claimed[1])
 
+    if not (math.isfinite(claimed_base) and math.isfinite(catalog_base)):
+        # `allowance` below is `tolerance * max(...)`, which for an infinite operand is itself
+        # infinite — and `inf <= inf` is True, so a claimed value of `float("inf")` VERIFIED
+        # against every numeric attribute in the catalog. `json.loads` accepts `Infinity` by
+        # default, so that is reachable from a crafted pitch, and "verified" is the one verdict
+        # it must never be. A non-finite quantity is not a claim about the goods at all.
+        return ComparisonOutcome(
+            "ambiguous", observed, "the claimed or recorded value is not a finite quantity"
+        )
+
     tolerance = tolerance_for(key)
     allowance = tolerance * max(abs(claimed_base), abs(catalog_base), 1e-9)
     if abs(claimed_base - catalog_base) <= allowance:
@@ -377,6 +388,15 @@ def compare(claimed: Any, attribute: Any, *, key: Any, op: Any = None) -> Compar
 
     if claimed is None or (isinstance(claimed, str) and not claimed.strip()):
         return ComparisonOutcome("ambiguous", catalog, "the claim carries no value to check")
+
+    if isinstance(claimed, float) and not math.isfinite(claimed):
+        # Not "false" — unanswerable. A claim of infinity grams asserts nothing the catalog
+        # could confirm or deny, and `parse_quantity` refuses it, so without this branch it
+        # would fall through to the string comparator and be graded `contradicted`, which
+        # reads as evidence the seller was wrong about something.
+        return ComparisonOutcome(
+            "ambiguous", attribute_value(attribute)[0], "the claimed value is not a finite number"
+        )
 
     if catalog is None:
         # The attribute is PRESENT but holds no value. That is silence, not contradiction —

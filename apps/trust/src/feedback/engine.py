@@ -201,6 +201,19 @@ def accept_feedback(
           discarded: the buyer's own behaviour contradicts their answer, but discarding the
           answer would let a store erase feedback by provoking a return.
     """
+    # Argument validation FIRST, before the routing gate. A bad `buyer_track_record` is a
+    # caller bug, and a caller bug that only surfaces for routed orders is one that ships:
+    # the same call raised on one order and passed silently on the next, and which it did
+    # depended on data rather than on the code under test.
+    factor = 1.0
+    if buyer_track_record is not None:
+        factor = float(buyer_track_record)
+        if not 0.0 < factor <= 1.0:
+            raise FeedbackRejected(
+                f"buyer_track_record must be a multiplier in (0, 1], got {buyer_track_record!r}. "
+                "A factor above 1 would let one account outweigh the rest of the network."
+            )
+
     key = str(order_ref)
     record = routed_orders.get(key) if isinstance(routed_orders, Mapping) else None
     if record is None:
@@ -223,12 +236,6 @@ def accept_feedback(
         reasons.append("contradicted_by_return")
 
     if buyer_track_record is not None:
-        factor = float(buyer_track_record)
-        if not 0.0 < factor <= 1.0:
-            raise FeedbackRejected(
-                f"buyer_track_record must be a multiplier in (0, 1], got {buyer_track_record!r}. "
-                "A factor above 1 would let one account outweigh the rest of the network."
-            )
         weight *= factor
         reasons.append("buyer_track_record")
 
