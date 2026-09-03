@@ -615,3 +615,56 @@ def test_an_undecidable_hard_constraint_excludes_rather_than_admits():
     assert row["rank_score"] is None
     assert "constraint" in _reason_blob(row)
     assert _slot_refs(result) == []
+
+
+@pytest.mark.parametrize(
+    ("url", "on_domain"),
+    [
+        ("https://store-a.example.com/cart/1:1", True),
+        ("https://STORE-A.EXAMPLE.COM/cart/1:1", True),
+        ("https://store-a.example.com:443/cart/1:1", True),
+        # A rooted FQDN is the same host. The published rule normalises the trailing dot;
+        # this filter's first draft did not, and refused a legitimate seller.
+        ("https://store-a.example.com./cart/1:1", True),
+        ("https://store-a.example.com@attacker.tld/cart", False),
+        ("https://evil.store-a.example.com/cart", False),
+        ("https://store-a.example.com.attacker.tld/cart", False),
+        # No scheme: on-domain but not a destination a browser can be redirected to.
+        ("//store-a.example.com/cart", False),
+        ("store-a.example.com/cart", False),
+        ("javascript:alert(1)", False),
+        ("", False),
+    ],
+)
+def test_the_checkout_domain_filter_is_the_published_rule(url, on_domain):
+    """C10/D22: the ranker refuses exactly what `checkout.domain` refuses.
+
+    This is the same rule the S8-3 release blocker is graded on. It is imported rather than
+    restated, and these cases are the ones that catch a restatement drifting.
+    """
+    from apps.exchange.src.ranking import rank
+
+    cand = make_candidate("bid-a", "store-a", checkout_url=url, intent_match=0.9)
+    result = rank([cand], make_intent(), make_trust_snapshot(["store-a"]), make_config())
+    row = _by_bid(result)["bid-a"]
+    assert row["eligible"] is on_domain, row["exclusion_reasons"]
+    if not on_domain:
+        assert "domain" in _reason_blob(row)
+        assert _slot_refs(result) == []
+
+
+def test_an_offer_with_no_checkout_url_is_not_shortlisted():
+    """`checkout.domain` leaves "absent" to its caller because an R10 list-price fallback
+    bid carries no URL. For RANKING the answer is deny: a candidate whose checkout
+    destination cannot be established is one the buyer cannot be sent to, so it must not
+    occupy a shortlist slot."""
+    from apps.exchange.src.ranking import rank
+
+    cand = make_candidate("bid-a", "store-a", intent_match=0.9)
+    cand["offer"].pop("checkout_url")
+    result = rank([cand], make_intent(), make_trust_snapshot(["store-a"]), make_config())
+    row = _by_bid(result)["bid-a"]
+    assert row["eligible"] is False
+    assert row["rank_score"] is None
+    assert "domain" in _reason_blob(row)
+    assert _slot_refs(result) == []

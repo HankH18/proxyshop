@@ -14,10 +14,10 @@ The four filters, and why each one denies rather than discounts:
 * **Expiry.** An offer whose `expires_at` has passed against the caller-supplied `now` is
   not an offer. `now` is passed in rather than read from the clock so a shortlist is
   reproducible from its inputs alone.
-* **Checkout domain (C10/D22).** The offer's checkout URL is compared host-for-host against
-  the seller's registered `store_domain`. Exact equality, never a prefix or a suffix test:
-  a subdomain defeats `endswith`, a look-alike host defeats a substring test, and userinfo
-  before an `@` defeats `startswith` on the raw URL.
+* **Checkout domain (C10/D22).** The offer's checkout URL must be on the seller's registered
+  `store_domain`. The comparison is `checkout.domain.is_on_domain`, imported rather than
+  restated — that module is where the release-blocker rule lives, and a security boundary
+  with two implementations is a boundary with two answers.
 * **Hard constraints (R19).** A constraint is satisfied by a `verified` supporting claim and
   by nothing else. Ambiguous, unsupported and contradicted evidence are all *absent*
   evidence as far as this filter is concerned — they are dropped before the constraint is
@@ -33,8 +33,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import urlsplit
 
+from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
 from .reasons import (
     REASON_BLACKLIST_UNREADABLE,
@@ -175,9 +175,21 @@ def expiry_reason(offer: Any, now: float) -> str | None:
 def domain_reason(candidate: Any, offer: Any) -> str | None:
     """The reason this offer's checkout URL is refused, or `None` when it is on-domain.
 
-    The comparison is `urlsplit(...).hostname` against the registered `store_domain`, lower
-    cased on both sides. `hostname` is what strips a port and any `user:pass@` prefix, so
-    the exact comparison below is genuinely exact rather than exact-looking.
+    The comparison itself is :func:`~exchange.checkout.domain.is_on_domain` — imported, not
+    restated. C10/D22 is a release-blocker boundary, and a boundary with two implementations
+    is a boundary with two answers: this filter's first draft compared hosts itself and had
+    already drifted from the published rule in two ways (it admitted a scheme-relative
+    ``//host/path`` URL that no browser can be redirected to, and it refused the rooted
+    ``host.`` spelling that the published rule normalises). Neither disagreement was visible
+    to any test. The import is what makes the next drift impossible rather than merely
+    unlikely.
+
+    What this function still owns is what "absent" means HERE. `checkout.domain` deliberately
+    leaves that to its caller, because a list-price fallback bid (R10) carries no checkout URL
+    at all and refusing it as a spoof would refuse every fallback the exchange built for
+    itself. For ranking the answer is deny: a candidate whose checkout destination cannot be
+    established is one the buyer cannot be sent to, and admitting it would put an
+    unreachable offer in a shortlist slot.
     """
     registered = read(candidate, "store_domain", None) or read(candidate, "domain", None)
     url = read(offer, "checkout_url", None) or read(candidate, "checkout_url", None)
@@ -186,19 +198,15 @@ def domain_reason(candidate: Any, offer: Any) -> str | None:
             f"{REASON_OFF_DOMAIN}: the candidate names no registered seller domain, so its "
             f"checkout URL cannot be shown to be on-domain; failing closed (C10)"
         )
-    if not url:
+    if not url or not isinstance(url, str) or not url.strip():
         return (
-            f"{REASON_OFF_DOMAIN}: the offer carries no checkout URL to compare against the "
-            f"registered domain {registered!r}; failing closed (C10)"
+            f"{REASON_OFF_DOMAIN}: the offer carries no usable checkout URL to compare "
+            f"against the registered domain {registered!r}; failing closed (C10)"
         )
-    try:
-        host = urlsplit(str(url)).hostname
-    except ValueError:
-        host = None
-    if host is None or host.lower() != str(registered).strip().lower():
+    if not is_on_domain(url, str(registered)):
         return (
-            f"{REASON_OFF_DOMAIN}: the checkout URL host {host!r} is not the registered "
-            f"seller domain {registered!r} (C10/D22)"
+            f"{REASON_OFF_DOMAIN}: the checkout URL {url!r} is not on the registered seller "
+            f"domain {registered!r}; hosts are compared by exact equality (C10/D22)"
         )
     return None
 
