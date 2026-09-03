@@ -565,9 +565,8 @@ def test_the_ledger_writer_resolves_the_per_role_dsn_variable_d5_grants_it(
     this test grades "the writer reads *its own role's* variable", not "the writer reads
     some string that happens to be spelled this way today".
     """
-    from proxyshop_support.postgres import ROLES
-
     from apps.trust.src.events.pg import PostgresEventStore
+    from proxyshop_support.postgres import ROLES
 
     per_role_env = ROLES["trust_rw"][0]
     trust_rw_dsn = "postgresql://trust_rw:pw@db.example:5432/proxyshop_w0"
@@ -592,9 +591,8 @@ def test_the_per_role_ledger_dsn_outranks_the_generic_app_dsn(
     set from the one D5 gives the ledger; a writer that silently borrows it is exercising
     privileges the deployment did not intend to give it.
     """
-    from proxyshop_support.postgres import ROLES
-
     from apps.trust.src.events.pg import DEFAULT_DSN_ENV, PostgresEventStore
+    from proxyshop_support.postgres import ROLES
 
     per_role_env, app_env = ROLES["trust_rw"][0], ROLES["app"][0]
     trust_rw_dsn = "postgresql://trust_rw:pw@db.example:5432/proxyshop_w0"
@@ -624,9 +622,8 @@ def test_an_explicit_ledger_dsn_override_still_outranks_the_per_role_variable(
     disturbing the per-role variables. Inserting ``trust_rw`` ahead of it would have turned
     that deployment's explicit instruction into a no-op.
     """
-    from proxyshop_support.postgres import ROLES
-
     from apps.trust.src.events.pg import PostgresEventStore
+    from proxyshop_support.postgres import ROLES
 
     override = "postgresql://ledger_override:pw@elsewhere.example:5432/ledger"
 
@@ -646,9 +643,8 @@ def test_a_deployment_that_sets_only_the_generic_app_dsn_keeps_working(
     that dropped the generic fallback instead of ranking below it would take those
     deployments from "wrong role" to "no ledger at all", which is worse.
     """
-    from proxyshop_support.postgres import ROLES
-
     from apps.trust.src.events.pg import PostgresEventStore
+    from proxyshop_support.postgres import ROLES
 
     app_dsn = "postgresql://app:pw@db.example:5432/proxyshop_w0"
 
@@ -676,9 +672,8 @@ def test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_
     ``PROXYSHOP_PG_DSN_TRUST_RW`` set there was no DSN at all and the store raised
     :class:`StoreUnavailable` before reaching a connection.
     """
-    from proxyshop_support.postgres import ROLES, role_dsn
-
     from apps.trust.src.events.pg import PostgresEventStore
+    from proxyshop_support.postgres import ROLES, role_dsn
 
     _isolate_ledger_dsn_env(monkeypatch)
     monkeypatch.setenv(
