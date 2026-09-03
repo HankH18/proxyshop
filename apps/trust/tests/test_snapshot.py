@@ -612,3 +612,105 @@ def test_store_entry_and_build_snapshot_publish_the_same_entry(e6_as_of, e6_obs)
     built = build_snapshot([store], blacklist=blacklist, as_of=e6_as_of)["stores"]["s-1"]
 
     assert direct == built
+
+
+# --------------------------------------------------------------------------------------
+# T-187 — ``low_data`` has to be able to clear
+#
+# The derived floor was min(positive observations) over ALL SIX dimensions. Five of the six
+# are reachable: the human-approved ``claim_type -> dimension`` table routes verification
+# outcomes onto them, and reconciliation verdicts land on two of them. ``feedback_match`` is
+# reachable by NO claim type -- the manifest says so in as many words -- so the min was
+# pinned at 0 forever and ``low_data``, one of the two flags this snapshot exists to publish,
+# was True for every store in every state. Measured before the fix: 40 clean rounds over the
+# five reachable dimensions gave episodes=0 and low_data=True at a score of 0.8788.
+# --------------------------------------------------------------------------------------
+
+
+def _reachable_dimensions(manifest: dict) -> tuple[str, ...]:
+    """The dimensions the approved routing table can actually deliver evidence onto.
+
+    Read off ``fixtures/manifest.json`` rather than imported from the engine: a test that
+    asked the builder which dimensions it counts, and then checked it counted those, would
+    pass no matter which set it chose.
+    """
+    routed = {str(dim) for dim in dict(manifest["claim_type_dimensions"]).values()}
+    return tuple(dim for dim in TRUST_DIMENSIONS if dim in routed)
+
+
+def test_the_manifest_routes_no_claim_type_to_feedback_match(e6_manifest):
+    """Ground truth for the fix, asserted rather than assumed.
+
+    If a future manifest DID route a claim type to ``feedback_match``, the floor should count
+    it again -- which is why the reachable set is derived from the table instead of being a
+    hard-coded five.
+    """
+    routed = set(dict(e6_manifest["claim_type_dimensions"]).values())
+
+    assert "feedback_match" not in routed
+    assert len(_reachable_dimensions(e6_manifest)) == len(TRUST_DIMENSIONS) - 1
+
+
+def test_low_data_clears_for_a_store_evidenced_on_every_reachable_dimension(
+    e6_as_of, e6_manifest, e6_obs
+):
+    """The exact reproduction: 40 clean rounds over the five reachable dimensions.
+
+    A store the network has watched forty times over is not a store we know nothing about,
+    and an exploration slice told otherwise starves it forever. This is the flag failing
+    open in the direction that never self-corrects.
+    """
+    reachable = _reachable_dimensions(e6_manifest)
+    rounds = 40
+    observations = [
+        e6_obs("s-1", dim, "verified", e6_as_of) for _ in range(rounds) for dim in reachable
+    ]
+
+    entry = store_entry(_store("s-1", "bi-1", observations), blacklist=Blacklist(), as_of=e6_as_of)
+
+    assert entry["episodes"] == rounds, (
+        f"a store with {rounds} clean rounds over every reachable dimension derived "
+        f"{entry['episodes']} clean episodes -- the floor is pinned by a dimension no "
+        "producer in this repo can emit"
+    )
+    assert entry["low_data"] is False, "low_data can never clear"
+
+
+def test_the_floor_still_requires_every_reachable_dimension(e6_as_of, e6_manifest, e6_obs):
+    """The fix must not become "count whatever we happened to observe".
+
+    Dropping the unreachable dimension from the floor is not the same as dropping every
+    dimension a store simply has not been observed on -- that second move would read a store
+    dense on one axis as established on all of them, which is the mistake ``low_data`` exists
+    to prevent.
+    """
+    reachable = _reachable_dimensions(e6_manifest)
+    dense_on_one = [e6_obs("s-1", reachable[0], "verified", e6_as_of) for _ in range(20)]
+
+    assert clean_episodes({"store_id": "s-1"}, dense_on_one) == 0
+
+    thin_on_one = [
+        e6_obs("s-1", dim, "verified", e6_as_of)
+        for dim in reachable
+        for _ in range(1 if dim == reachable[-1] else 6)
+    ]
+    assert clean_episodes({"store_id": "s-1"}, thin_on_one) == 1
+
+
+def test_feedback_match_evidence_can_never_lower_the_derived_floor(e6_as_of, e6_manifest, e6_obs):
+    """Buyer feedback is evidence; arriving late it must not demote an established store.
+
+    A floor computed over "every dimension that carries evidence" would drop a store from
+    five clean episodes to one the moment its first piece of buyer feedback landed, which
+    would make receiving evidence a penalty.
+    """
+    reachable = _reachable_dimensions(e6_manifest)
+    base = [e6_obs("s-1", dim, "verified", e6_as_of) for _ in range(5) for dim in reachable]
+
+    before = clean_episodes({"store_id": "s-1"}, base)
+    after = clean_episodes(
+        {"store_id": "s-1"}, [*base, e6_obs("s-1", "feedback_match", "fulfilled", e6_as_of)]
+    )
+
+    assert before == 5
+    assert after == before, "one piece of buyer feedback demoted an established store"
