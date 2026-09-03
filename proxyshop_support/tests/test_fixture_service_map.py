@@ -27,7 +27,12 @@ that does. That derived mapping must equal ``FIXTURE_SERVICES`` exactly:
 
 * drop or rename a key → red;
 * add a datastore fixture to conftest without mapping it → red;
-* leave a stale key behind for a fixture conftest no longer defines → red.
+* leave a key behind that names no conftest fixture at all → red.
+
+A key that names a real conftest fixture the AST did not classify as a datastore one
+is deliberately *allowed*: the map may legitimately be wider than the derivation can
+see (a fixture that reaches a store without going through ``_require_services``), and
+failing that case would punish someone for correctly widening the map.
 
 ``conftest.py`` is orchestrator-owned and frozen, which is what makes deriving from it
 sound: it is the single place these fixtures can be defined.
@@ -48,33 +53,58 @@ CONFTEST = REPO_ROOT / "conftest.py"
 #: quietly reducing this whole file to "0 fixtures found, all consistent".
 GUARD_CALL = "_require_services"
 
+#: How many ``@pytest.fixture`` functions the root conftest defines. A floor, not an
+#: equality, so adding a fixture does not fail this file — but a walk that silently finds
+#: FEWER than exist is the failure mode that makes every assertion here vacuous, and that
+#: is what this catches. Counted from the AST, not from conftest's docstring table (which
+#: lists ten and omits ``worker_index``, ``_neo4j_guard`` and ``neo4j_driver``).
+CONFTEST_FIXTURE_COUNT = 13
+
+#: ``@pytest.fixture`` applies to both, and they are unrelated AST node types.
+_Def = ast.FunctionDef | ast.AsyncFunctionDef
+
 
 # --------------------------------------------------------------------------------------
 # derivation
 # --------------------------------------------------------------------------------------
 
 
-def _is_fixture(node: ast.FunctionDef) -> bool:
-    """``@pytest.fixture`` or ``@pytest.fixture(scope=...)``, bare or called."""
+def _is_fixture(node: _Def) -> bool:
+    """``@pytest.fixture``/``@pytest.fixture(...)``, and the bare ``@fixture`` import too.
+
+    Both spellings are matched because missing one does not fail — it silently shrinks the
+    derived map, which is the exact shape of defect this file exists to catch.
+    """
     for decorator in node.decorator_list:
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
         if isinstance(target, ast.Attribute) and target.attr == "fixture":
             return True
+        if isinstance(target, ast.Name) and target.id == "fixture":
+            return True
     return False
 
 
-def _requested_fixtures(node: ast.FunctionDef) -> list[str]:
+def _requested_fixtures(node: _Def) -> list[str]:
     args = node.args
     return [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
 
 
-def _directly_required_services(node: ast.FunctionDef) -> set[str]:
-    """The services this fixture body names in its own ``_require_services(...)`` call."""
+def _directly_required_services(node: _Def) -> set[str]:
+    """The services this fixture body names in its own ``_require_services(...)`` call.
+
+    A BARE ``_require_services()`` means the whole stack (``conftest.py`` documents it that
+    way), so it is expanded rather than read as "no datastore" — otherwise a whole-stack
+    fixture would be classified as needing nothing and drop out of the derived map
+    entirely, which is the silent narrowing this file is here to prevent.
+    """
     services: set[str] = set()
     for call in ast.walk(node):
         if not isinstance(call, ast.Call):
             continue
         if not (isinstance(call.func, ast.Name) and call.func.id == GUARD_CALL):
+            continue
+        if not call.args:
+            services.update(reachability.SERVICES)
             continue
         for arg in call.args:
             assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
@@ -85,6 +115,35 @@ def _directly_required_services(node: ast.FunctionDef) -> set[str]:
     return services
 
 
+def _conftest_fixtures() -> dict[str, _Def]:
+    """Every ``@pytest.fixture`` the root conftest defines, by name.
+
+    Parsed, never imported: importing a conftest outside pytest's plugin machinery is its
+    own adventure, and this only needs the source shape.
+    """
+    source = CONFTEST.read_text()
+    assert GUARD_CALL in source, (
+        f"the root conftest no longer mentions `{GUARD_CALL}`, so this file would derive "
+        f"an empty map and agree with anything. Point GUARD_CALL at whatever replaced it."
+    )
+    tree = ast.parse(source)
+    fixtures = {
+        node.name: node
+        for node in ast.walk(tree)
+        # AsyncFunctionDef is a SEPARATE node type, not a subclass: `asyncio_mode = "auto"`
+        # makes async fixtures idiomatic here, and matching only FunctionDef would let an
+        # async datastore fixture go unmapped while this file stayed green.
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _is_fixture(node)
+    }
+    assert len(fixtures) >= CONFTEST_FIXTURE_COUNT, (
+        f"only {len(fixtures)} fixtures were found in {CONFTEST}, which defines "
+        f"{CONFTEST_FIXTURE_COUNT}. The AST shape this file matches on has probably "
+        f"changed, and a walk that finds fewer fixtures than exist makes every assertion "
+        f"below vacuous rather than red. Found: {sorted(fixtures)}"
+    )
+    return fixtures
+
+
 def _conftest_datastore_fixtures() -> dict[str, set[str]]:
     """Every conftest fixture that reaches a datastore -> the services it reaches.
 
@@ -93,24 +152,7 @@ def _conftest_datastore_fixtures() -> dict[str, set[str]]:
     ``pg_admin`` and ``pg_role`` reach Postgres only through ``worker_database``, and
     ``neo4j_session`` reaches Neo4j only through ``neo4j_driver``.
     """
-    source = CONFTEST.read_text()
-    assert GUARD_CALL in source, (
-        f"the root conftest no longer mentions `{GUARD_CALL}`, so this file would derive "
-        f"an empty map and agree with anything. Point GUARD_CALL at whatever replaced it."
-    )
-
-    tree = ast.parse(source)
-    fixtures = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and _is_fixture(node)
-    }
-    assert len(fixtures) >= 8, (
-        f"only {len(fixtures)} fixtures were found in {CONFTEST}; the conftest documents "
-        f"ten. The AST shape this file matches on has probably changed, which would make "
-        f"every assertion below vacuous."
-    )
-
+    fixtures = _conftest_fixtures()
     direct = {name: _directly_required_services(node) for name, node in fixtures.items()}
 
     # Transitive closure over the fixture request graph, to a fixed point.
@@ -151,11 +193,18 @@ def test_the_fixture_service_map_covers_every_datastore_fixture_conftest_defines
         f"in the frozen metrics (T-109/T-180)."
     )
 
-    stale = sorted(set(service_markers.FIXTURE_SERVICES) - set(derived))
-    assert not stale, (
-        f"FIXTURE_SERVICES maps {stale}, which the root conftest does not define as a "
-        f"datastore fixture. Either the fixture was renamed — in which case the real name "
-        f"is now unmapped and silently widened to the whole stack — or the entry is dead."
+    # A key that names NO conftest fixture at all is a rename or a dead entry, and either
+    # way the real fixture is now unmapped. A key that names a fixture this derivation did
+    # not classify is NOT an error: the map may legitimately be wider than the AST can see
+    # (a fixture that reaches a datastore without going through _require_services). Being
+    # strict there would make correctly widening FIXTURE_SERVICES fail this test, which
+    # would push the map back towards incomplete — the opposite of the point.
+    defined = set(_conftest_fixtures())
+    unknown = sorted(set(service_markers.FIXTURE_SERVICES) - defined)
+    assert not unknown, (
+        f"FIXTURE_SERVICES maps {unknown}, which the root conftest does not define as a "
+        f"fixture at all. Either the fixture was renamed — in which case the real name is "
+        f"now unmapped and silently widened to the whole stack — or the entry is dead."
     )
 
 

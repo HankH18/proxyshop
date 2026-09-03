@@ -259,9 +259,14 @@ def _isolated_venv_tree(tmp_path: Path) -> Path:
       so ``sys.prefix`` lands on the scratch tree and its OWN ``site-packages`` is the one
       ``site`` scans;
     * ``pyvenv.cfg``, which is what makes the symlink a venv rather than a bare interpreter;
-    * ``lib/python3.12/site-packages/_proxyshop.pth``, the same three-line shape ``uv sync``
-      writes — this repo, ``.pkgroot``, and (additionally) the checkout's installed
-      packages, so ``python -m pytest`` works here without a second ``uv sync``;
+    * ``lib/python3.12/site-packages/_proxyshop.pth``. ``uv sync`` writes TWO lines here
+      (this repo and ``.pkgroot``, from ``dev-mode-dirs``); this one adds a third pointing
+      at the checkout's installed packages, so ``python -m pytest`` works without a second
+      ``uv sync``. That makes the scratch tree break slightly HARDER than the real one when
+      hidden — the real venv keeps its installed packages importable because site-packages
+      is a site dir in its own right, whereas here they arrive through the ``.pth``. The
+      assertions only observe the flat namespaces, which fail identically either way, and
+      the alternative (a 314 MB venv copy per run) buys nothing the assertions can see.
     * ``scripts/bootstrap.sh``, copied, because ``--check-namespaces`` derives its root from
       the script's own location and therefore repairs THIS tree.
 
@@ -375,9 +380,24 @@ def test_the_flat_namespaces_survive_a_pytest_run(tmp_path: Path) -> None:
             capture_output=True,
             text=True,
             timeout=120,
-            env={**os.environ, "PROXYSHOP_WORKER": os.environ["PROXYSHOP_WORKER"]},
+            # VIRTUAL_ENV/PYTHONPATH are dropped so the child cannot reach .pkgroot by
+            # inheritance — the whole question is whether the REPAIRED .pth gets it there.
+            # PYTHONDONTWRITEBYTECODE keeps this nested run from littering __pycache__ in
+            # the real tree, which is the one thing it still touches outside tmp_path.
+            env={
+                k: v
+                for k, v in {
+                    **os.environ,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                }.items()
+                if k not in ("PYTHONPATH", "VIRTUAL_ENV")
+            },
         )
         assert suite.returncode == 0, suite.stdout[-4000:] + suite.stderr[-2000:]
+        assert "passed" in suite.stdout, (
+            f"the nested suite exited 0 without reporting any passing test, so it proves "
+            f"nothing about the repaired .pth: {suite.stdout[-2000:]}"
+        )
 
         after = _bare_import(python=scratch_python)
         assert after.returncode == 0, (
@@ -392,45 +412,119 @@ def test_the_shared_site_packages_is_never_hidden_by_this_module() -> None:
     """T-174 — no test in this file may put the checkout's SHARED venv into the broken state.
 
     The guarantee above is real and has to keep being proven, but proving it by hiding
-    ``$REPO_ROOT/.venv/lib/python3.12/site-packages`` blinds every other Python process in
-    the checkout for the length of the window. ``PROXYSHOP_WORKER`` isolates the Postgres
-    database, the Redis DB index and the Redis key prefix; it does not and cannot isolate
-    site-packages, so this is the one piece of state a worker can wreck for everybody —
-    including for whatever is reading the frozen metrics at that moment.
+    ``$REPO_ROOT/.venv/lib/python3.12/site-packages`` kills every process in this checkout
+    that reaches the flat namespaces through the ``.pth`` file — every service entry point,
+    every bare import from an unrelated cwd — for the whole window. ``PROXYSHOP_WORKER``
+    isolates the Postgres database, the Redis DB index and the Redis key prefix; it does
+    not and cannot isolate site-packages, so this is the one piece of state a worker can
+    wreck for everybody else on the machine.
 
-    Structural rather than behavioural on purpose: the behaviour is a *window*, so a test
-    that watched for it would have to race it. Reading the source cannot race.
+    Structural rather than behavioural on purpose: the hazard is a *window*, so a test that
+    watched for it would have to race it. Reading the source cannot race.
+
+    **What this does and does not cover.** It reads every ``chflags`` command this module
+    builds — as an argv list, as a plain string, or as an f-string — and rejects one whose
+    target mentions the identifiers that denote the checkout (``SITE_PACKAGES``,
+    ``REPO_ROOT``) or spells the real path literally. It additionally bans ``shell=True``
+    and ``os.system`` outright in this module, because both turn the command into text this
+    check would have to re-parse. It cannot follow a path laundered through an
+    arbitrarily-named local variable; that residue is why the round-trip test also asserts,
+    at runtime, that the checkout's own interpreter still imports mid-window.
     """
     module = Path(__file__)
     tree = ast.parse(module.read_text())
 
-    hidden_targets: list[str] = []
-    for call in ast.walk(tree):
-        if not isinstance(call, ast.Call) or not call.args:
-            continue
-        argv = call.args[0]
-        if not isinstance(argv, ast.List) or not argv.elts:
-            continue
-        head = argv.elts[0]
-        if not (isinstance(head, ast.Constant) and head.value == "chflags"):
-            continue
-        for element in argv.elts[1:]:
-            for name in ast.walk(element):
-                if isinstance(name, ast.Name):
-                    hidden_targets.append(name.id)
-
-    assert hidden_targets, (
-        "no `chflags` invocation was found in this module at all, so this guard is "
-        "watching nothing. If the round-trip test stopped exercising UF_HIDDEN, T-123's "
-        "guarantee is no longer proven and this check needs rewriting, not deleting."
+    # This guard's own prose and assertion messages talk about chflags and name
+    # SITE_PACKAGES, so scanning them would make it fail on itself. Skip its body; every
+    # other statement in the module is in scope.
+    this_test = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_the_shared_site_packages_is_never_hidden_by_this_module"
     )
-    assert "SITE_PACKAGES" not in hidden_targets, (
-        f"a test in this module runs chflags against SITE_PACKAGES — the checkout's real, "
+    excluded = set(range(this_test.lineno, (this_test.end_lineno or this_test.lineno) + 1))
+
+    # No escape hatches: both of these would smuggle the command past the argv scan below.
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or call.lineno in excluded:
+            continue
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "system":
+            raise AssertionError(
+                "os.system() in this module: a shell string is not checkable by the argv "
+                "scan below, so the T-174 guard cannot see what it hides. Use "
+                "subprocess.run([...]) with a list."
+            )
+        for keyword in call.keywords:
+            if keyword.arg == "shell" and getattr(keyword.value, "value", False) is True:
+                raise AssertionError(
+                    "shell=True in this module: the command becomes a string the T-174 "
+                    "guard cannot inspect. Pass an argv list instead."
+                )
+
+    forbidden = {"SITE_PACKAGES", "REPO_ROOT"}
+    targets: list[str] = []  # identifiers appearing in a chflags command
+    literals: list[str] = []  # string fragments appearing in a chflags command
+
+    def _harvest(node: ast.AST) -> None:
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Name):
+                targets.append(inner.id)
+            elif isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                literals.append(inner.value)
+
+    def _invokes_chflags(node: ast.AST) -> bool:
+        """A string or f-string whose literal text runs ``chflags``."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return "chflags" in node.value
+        if isinstance(node, ast.JoinedStr):
+            return "chflags" in "".join(
+                v.value
+                for v in node.values
+                if isinstance(v, ast.Constant) and isinstance(v.value, str)
+            )
+        return False
+
+    # Only CALL ARGUMENTS are scanned, never bare strings: a docstring that discusses
+    # chflags is not a command, and treating it as one is how this guard fails on itself.
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call) or call.lineno in excluded:
+            continue
+        arguments = [*call.args, *(k.value for k in call.keywords)]
+        if arguments:
+            argv = arguments[0]
+            # form 1: subprocess.run(["chflags", ...]) / Popen([...])
+            if isinstance(argv, ast.List) and argv.elts:
+                head = argv.elts[0]
+                if isinstance(head, ast.Constant) and str(head.value).endswith("chflags"):
+                    for element in argv.elts[1:]:
+                        _harvest(element)
+                    continue
+        # form 2: the command passed as text (shell=True is banned above, but a helper
+        # could still build one), including an f-string interpolating the path.
+        for argument in arguments:
+            if _invokes_chflags(argument):
+                _harvest(argument)
+
+    assert targets, (
+        "no `chflags` invocation was found in this module at all, so this guard is watching "
+        "nothing. If the round-trip test stopped exercising UF_HIDDEN, T-123's guarantee is "
+        "no longer proven and this check needs rewriting, not deleting."
+    )
+
+    offending = sorted(forbidden.intersection(targets))
+    assert not offending, (
+        f"a chflags command in this module targets {offending} — the checkout's real, "
         f"SHARED {SITE_PACKAGES}. Until the flag is cleared, every process in this checkout "
         f"that reaches the flat namespaces through the .pth file fails with "
         f"ModuleNotFoundError: every service entry point, and every bare import from an "
-        f"unrelated cwd. A pytest run survives it, which is precisely why this went "
-        f"unnoticed — nothing goes red. Build an isolated tree with _isolated_venv_tree() "
-        f"and break that instead (T-174). chflags targets found: "
-        f"{sorted(set(hidden_targets))}"
+        f"unrelated cwd. A pytest run survives it, which is exactly why this went unnoticed "
+        f"for six cycles — nothing goes red. Build an isolated tree with "
+        f"_isolated_venv_tree() and break that instead (T-174)."
+    )
+
+    spelled_out = [text for text in literals if str(SITE_PACKAGES) in text or ".venv" in text]
+    assert not spelled_out, (
+        f"a chflags command in this module names the checkout's venv as a literal path, "
+        f"which sidesteps the identifier check above: {spelled_out} (T-174)"
     )

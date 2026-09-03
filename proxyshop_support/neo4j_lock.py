@@ -73,10 +73,17 @@ class _Holding:
     depth: int
 
 
-#: Guards :data:`_HELD`. Held only for the duration of an acquisition attempt, so a thread
-#: that arrives while another thread of this process already owns the flock does not wait
-#: on the kernel at all — it just increments the depth.
-_MUTEX = threading.Lock()
+#: Guards :data:`_HELD`. A thread that arrives while another thread of this process already
+#: owns the flock does not wait on the kernel at all — it just increments the depth.
+#:
+#: **Re-entrant on purpose.** The whole contended wait — up to :data:`DEFAULT_TIMEOUT` —
+#: runs inside this lock, and that wait now invokes a caller-supplied ``report`` callback.
+#: With a plain ``threading.Lock`` a callback as ordinary as
+#: ``lambda m: log.info(m, depth=held_depth())`` would deadlock permanently on its own
+#: thread. ``RLock`` makes that same-thread re-entry work. A callback still must not block:
+#: a *different* thread calling :func:`held_depth` or releasing waits for the acquisition
+#: to finish, which is pre-existing behaviour of the wait itself, not of the callback.
+_MUTEX = threading.RLock()
 
 #: resolved lock path -> the flock this process holds on it.
 _HELD: dict[Path, _Holding] = {}
@@ -89,18 +96,28 @@ def _key(path: Path | str | None) -> Path:
 def lock_holder(path: Path | str | None = None) -> str:
     """Best-effort description of whoever currently holds the lock file.
 
-    The holder stamps ``pid=<n> worker=<n>`` into the file immediately after taking the
-    flock (see :func:`_acquire`), so while anybody holds it this line is that holder's. An
-    unheld lock keeps its last holder's stale line, which is why every caller of this only
-    asks once it already knows it is blocked.
+    The holder stamps ``pid=<n> worker=<n>`` into the file just after taking the flock (see
+    :func:`_acquire`), and an unheld lock keeps its last holder's line — which is why every
+    caller of this asks only once it already knows it is blocked.
+
+    **Best effort, and not always current.** Taking the flock and stamping the file are two
+    steps, so a waiter that reads between them sees the *previous* holder's line (or, in the
+    window between ``truncate`` and ``flush``, nothing at all). Treat the answer as a strong
+    hint about who to go look at, not as proof. It is a diagnostic string, never a decision
+    input.
 
     Returns:
         The stamped line, or a string containing ``"unknown"`` when the file is missing,
-        empty or unreadable. Never raises: a diagnostic that can fail is worse than none.
+        empty or unreadable. Never raises: a diagnostic that can fail is worse than none,
+        and this one is called while *building* a failure message.
     """
     try:
         stamped = _key(path).read_text().strip()
-    except OSError:
+    except Exception:
+        # Deliberately broad. OSError is the expected case, but `read_text` also raises
+        # UnicodeDecodeError on a corrupt lock file and `_key`'s expanduser() raises
+        # RuntimeError with no resolvable home — and either one would replace the whole
+        # Neo4jLockTimeout diagnostic with a traceback about the diagnostic.
         return "unknown (the lock file could not be read)"
     if not stamped:
         return "unknown (the holder has not stamped the lock file yet)"
@@ -108,7 +125,16 @@ def lock_holder(path: Path | str | None = None) -> str:
 
 
 def _report_to_stderr(message: str) -> None:
-    """Default progress sink. Unbuffered stderr, so an unattended log shows it live."""
+    """Default progress sink: this process's stderr, flushed per line.
+
+    **Under pytest this is captured, and that caps what it can do.** The only production
+    caller is ``_neo4j_guard`` in the root ``conftest.py``, which runs during session-fixture
+    setup, and ``scripts/verify.sh`` invokes pytest without ``-s``. So these lines land in
+    the item's "Captured stderr setup" buffer and are replayed only if that item fails or
+    errors — i.e. on the path that ends in :class:`Neo4jLockTimeout`, which is the path
+    where the diagnosis is needed. A wait that succeeds after four minutes still looks
+    silent to a live log tail; pass ``report=`` (or run with ``-s``) if you need it live.
+    """
     print(message, file=sys.stderr, flush=True)
 
 
@@ -161,10 +187,13 @@ def neo4j_flock(
             about cross-worker contention.
         poll: seconds between attempts.
         path: override the lock file (tests use this; production always uses the default).
-        report: where progress goes while blocked. Defaults to stderr. Called once when the
-            wait starts and every ``report_every`` seconds after that, never when the lock
-            is free — an uncontended acquisition is silent.
-        report_every: seconds between heartbeats.
+        report: where progress goes while blocked. Defaults to :func:`_report_to_stderr`
+            (read its note on pytest capture). Called once when the wait starts and every
+            ``report_every`` seconds after that, never when the lock is free — an
+            uncontended acquisition is completely silent. It runs while this module's
+            re-entrant ``_MUTEX`` is held, so it may call back into this module from its own
+            thread but must not block.
+        report_every: seconds between heartbeats. ``0`` reports on every poll.
 
     Yields:
         The lock file path, so a caller can log who is waiting on what.

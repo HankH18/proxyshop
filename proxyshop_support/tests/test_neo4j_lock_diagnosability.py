@@ -76,9 +76,26 @@ MIN_MARGIN_SECONDS = 30.0
 
 
 def _configured_pytest_timeout() -> float:
-    """The ``--timeout=N`` every pytest item in this repo actually runs under."""
+    """The ``--timeout=N`` every pytest item in this repo actually runs under.
+
+    Also asserts the premise the whole module rests on: that the budget covers **setup**.
+    pytest-timeout arms its timer in ``pytest_runtest_protocol`` — setup, call and teardown
+    together — but only while ``timeout_func_only`` is off. Turning that ini on would move
+    the budget to the test body alone, leaving ``_neo4j_guard``'s wait uncapped, and every
+    assertion in this file would stay green with its reason gone.
+    """
     config = tomllib.loads(PYPROJECT.read_text())
-    addopts = config["tool"]["pytest"]["ini_options"]["addopts"]
+    ini = config["tool"]["pytest"]["ini_options"]
+    addopts = ini["addopts"]
+
+    assert not ini.get("timeout_func_only"), (
+        "pyproject.toml sets `timeout_func_only`, which limits pytest's timeout to the test "
+        "body. `_neo4j_guard` takes the Neo4j lock during SESSION-FIXTURE SETUP, so the "
+        "budget this file balances against would no longer apply to it and the comparison "
+        "below would be meaningless."
+    )
+    assert "func_only" not in addopts, f"addopts changes the timeout scope: {addopts!r}"
+
     found = re.findall(r"--timeout[= ]([0-9.]+)", addopts)
     assert found, (
         "pyproject.toml's pytest addopts no longer carry a --timeout. This test exists "
@@ -212,12 +229,18 @@ def test_the_wait_reports_what_it_is_waiting_for_while_it_waits(tmp_path: Path) 
     reported: list[str] = []
     try:
         with pytest.raises(Neo4jLockTimeout):
+            # report_every=0.0 makes the heartbeat due on the FIRST blocked poll, so this
+            # asserts on the reporting logic rather than on the machine's scheduler. With a
+            # wall-clock spacing (say 0.2 s inside a 1 s budget) a single scheduler stall on
+            # a box running dozens of workers yields the announcement and nothing else, and
+            # the test flakes red for load — which is precisely the kind of machine-
+            # dependent number this lane exists to remove.
             with neo4j_flock(
                 timeout=1.0,
                 poll=0.02,
                 path=lock,
                 report=reported.append,
-                report_every=0.2,
+                report_every=0.0,
             ):
                 pytest.fail("acquired a lock another process holds")
     finally:
@@ -231,8 +254,40 @@ def test_the_wait_reports_what_it_is_waiting_for_while_it_waits(tmp_path: Path) 
         f"the opening report does not say who it is waiting for: {opening}"
     )
     assert "not a hang" in opening.lower(), opening
-    assert len(reported) >= 2, f"no heartbeat during a 1 s wait with report_every=0.2: {reported}"
-    assert any("still waiting" in line for line in reported[1:]), reported
+    assert len(reported) >= 2, f"the wait announced itself but never beat: {reported}"
+    heartbeats = [line for line in reported[1:] if "still waiting" in line]
+    assert heartbeats, reported
+    assert str(lock) in heartbeats[0], heartbeats[0]
+    assert f"pid={holder.pid}" in heartbeats[0], heartbeats[0]
+
+
+def test_the_default_report_sink_writes_to_stderr(tmp_path: Path, capsys) -> None:
+    """Every other test here injects ``report=``, so the shipped default was never run.
+
+    Production never passes ``report``: ``_neo4j_guard`` calls ``neo4j_flock()`` bare. A
+    default sink that raised — or wrote to the wrong stream — would therefore turn a
+    contended wait into an unrelated crash, and no test would have noticed.
+    """
+    lock = tmp_path / "neo4j.lock"
+    holder = _hold_the_lock_in_another_process(lock, tmp_path / "ready")
+    try:
+        with pytest.raises(Neo4jLockTimeout):
+            with neo4j_flock(timeout=0.3, poll=0.02, path=lock, report_every=0.0):
+                pytest.fail("acquired a lock another process holds")
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+
+    captured = capsys.readouterr()
+    assert "[neo4j-lock]" in captured.err, (
+        f"the default report sink wrote nothing to stderr: err={captured.err!r} "
+        f"out={captured.out!r}"
+    )
+    assert str(lock) in captured.err, captured.err
+    assert "[neo4j-lock]" not in captured.out, (
+        f"progress went to stdout, where -q pytest output and any machine-read report "
+        f"stream live: {captured.out}"
+    )
 
 
 def test_the_lock_file_names_its_holder(tmp_path: Path) -> None:
