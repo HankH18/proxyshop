@@ -31,6 +31,7 @@ in a commit message.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
@@ -161,36 +162,150 @@ class LedgerRoleRunner:
 #: The schemas T-011 owns end to end. Dropped and rebuilt once per session -- see below.
 OWNED_SCHEMAS = ("ledger", "sealed", "vault", "app")
 
+#: One table per owned schema that the migrations MUST have produced. Checked after every
+#: rebuild -- see :func:`rebuild_owned_schemas`.
+REBUILD_WITNESS_TABLES = (
+    "ledger.commerce_events",
+    "sealed.envelopes",
+    "vault.payment_methods",
+    "app.sellers",
+)
+
+#: How long :func:`rebuild_owned_schemas` waits for the migration advisory lock before it
+#: gives up. Generous, because the thing it waits on is another session applying four SQL
+#: files; finite, because a wait with no end is a hung unattended build.
+REBUILD_LOCK_TIMEOUT_SECONDS = 60.0
+
+
+class LedgerSchemaRebuildError(RuntimeError):
+    """The four owned schemas could not be rebuilt, or were not there afterwards."""
+
+
+def rebuild_owned_schemas(
+    pg_admin: Any, *, lock_timeout: float = REBUILD_LOCK_TIMEOUT_SECONDS
+) -> list[str]:
+    """Drop and re-apply T-011's four schemas, holding the migration lock the whole time.
+
+    **Why the lock (T-216).** ``DROP SCHEMA ... CASCADE`` followed by four migration files is
+    not an instant, it is a *window*, and for as long as it is open the ``ledger`` schema
+    genuinely does not exist. Any other session on this same database that touches
+    ``ledger.*`` in that window gets
+    ``psycopg.errors.InvalidSchemaName: schema "ledger" does not exist`` -- and then passes
+    on a retry seconds later, against a database in which the schema demonstrably exists.
+    That is the whole shape of the flake this function was extracted to close.
+
+    :func:`apply_migrations` already serialises itself on ``MIGRATION_LOCK_KEY``, a
+    session-level advisory lock whose tag carries the database OID. The bare drop in front of
+    it took no lock at all, so it could land in the middle of another session's migration
+    run. Taking the *same* key here, before dropping, makes drop-plus-apply one indivisible
+    step as far as anything else that respects that lock is concerned. Advisory locks are
+    re-entrant per session, so ``apply_migrations`` taking it again below is a no-op.
+
+    ``pg_try_advisory_lock`` in a bounded poll rather than the blocking ``pg_advisory_lock``:
+    a blocking wait is not covered by ``lock_timeout`` (that governs heavyweight locks only),
+    so a stuck holder would hang the session with no diagnostic.
+
+    **Why it still drops.** Every migration is ``CREATE ... IF NOT EXISTS`` and
+    ``proxyshop_w<N>`` keeps its schema between runs -- so a fixture that only *applied* the
+    migrations was grading whatever the database happened to already contain. Measured: with
+    ``apply_migrations`` stubbed to execute nothing at all, 61 of 62 tests stayed green,
+    including every schema, foreign-key, index, grant and chain test. Three of T-011's own
+    acceptance criteria could then be broken in the SQL with nothing turning red -- dropping
+    the ``ledger.claims`` foreign key, making ``app.bid_nonces`` globally unique on ``nonce``
+    instead of per signer, keying ``app.seller_endpoints`` on ``key_id`` alone -- each
+    verified to kill zero tests. Those are exactly the properties the ticket exists to
+    establish. Dropping first makes the schema in front of every test the schema *this
+    checkout's SQL produces*.
+
+    The blast radius is this worker's own database and only the four schemas T-011 owns;
+    ``db/init/00-roles.sql`` and the cluster-global roles are untouched, and ``DROP SCHEMA``
+    also clears the per-grantor ``pg_default_acl`` rows, so the default privileges are
+    freshly graded too.
+
+    Args:
+        pg_admin: an **autocommit** superuser connection to this worker's database.
+        lock_timeout: seconds to wait for the migration advisory lock.
+
+    Returns:
+        The migration filenames applied, in order.
+
+    Raises:
+        LedgerSchemaRebuildError: the lock could not be taken inside ``lock_timeout``
+            (nothing was dropped), or the migrations returned without producing the schemas.
+            The second case is the one that arms the flake for every session that follows:
+            a database left with no ledger schema at all looks exactly like a fresh one.
+    """
+    from apps.trust.src.ledger import apply_migrations
+    from apps.trust.src.ledger.migrations import MIGRATION_LOCK_KEY
+
+    deadline = time.monotonic() + lock_timeout
+    while True:
+        with pg_admin.cursor() as cur:
+            cur.execute("select pg_try_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+            acquired = bool(cur.fetchone()[0])
+        if acquired:
+            break
+        if time.monotonic() >= deadline:
+            raise LedgerSchemaRebuildError(
+                f"another session on this database has held the migration advisory lock "
+                f"({MIGRATION_LOCK_KEY}) for more than {lock_timeout:g}s, so the four owned "
+                f"schemas were NOT dropped. Dropping anyway would tear them out from under "
+                f"whatever that session is doing, which is exactly the InvalidSchemaName "
+                f"flake T-216 closed. Two pytest sessions sharing one proxyshop_w<N> means "
+                f"two runs share a $PROXYSHOP_WORKER (D38)."
+            )
+        time.sleep(0.05)
+
+    try:
+        with pg_admin.cursor() as cur:
+            cur.execute(f"drop schema if exists {', '.join(OWNED_SCHEMAS)} cascade")
+        applied = apply_migrations(pg_admin)
+        missing = _absent_witnesses(pg_admin)
+        if missing:
+            raise LedgerSchemaRebuildError(
+                f"the migrations ran ({', '.join(applied) or 'nothing applied'}) but "
+                f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} not there "
+                f"afterwards. The four owned schemas were dropped and not rebuilt, so this "
+                f"worker's database is now indistinguishable from a fresh one and every "
+                f"later session that assumes a ledger schema will fail."
+            )
+    finally:
+        with pg_admin.cursor() as cur:
+            cur.execute("select pg_advisory_unlock(%s)", (MIGRATION_LOCK_KEY,))
+    return applied
+
+
+def _absent_witnesses(pg_admin: Any) -> list[str]:
+    """Which of :data:`REBUILD_WITNESS_TABLES` the catalog does not hold, in order."""
+    with pg_admin.cursor() as cur:
+        cur.execute(
+            "select ns.nspname || '.' || cl.relname from pg_class cl "
+            "  join pg_namespace ns on ns.oid = cl.relnamespace "
+            " where ns.nspname = any(%s) and cl.relkind = 'r'",
+            (list(OWNED_SCHEMAS),),
+        )
+        present = {row[0] for row in cur.fetchall()}
+    return [name for name in REBUILD_WITNESS_TABLES if name not in present]
+
 
 @pytest.fixture(scope="session")
 def ledger_migrated(pg_admin: Any) -> str:
     """Rebuild T-011's four schemas from ``db/migrations/*.sql``, once per session.
 
-    **Why it drops first.** Every migration is ``CREATE ... IF NOT EXISTS``, and
-    ``proxyshop_w<N>`` keeps its schema between runs -- so a fixture that only *applied* the
-    migrations was grading whatever the database happened to already contain. Measured: with
-    ``apply_migrations`` stubbed to execute nothing at all, 61 of 62 tests stayed green,
-    including every schema, foreign-key, index, grant and chain test. Three of this ticket's
-    own acceptance criteria could then be broken in the SQL with nothing turning red --
-    dropping the ``ledger.claims`` foreign key, making ``app.bid_nonces`` globally unique on
-    ``nonce`` instead of per signer, keying ``app.seller_endpoints`` on ``key_id`` alone --
-    each verified to kill zero tests. Those are exactly the properties the ticket exists to
-    establish.
+    Every test that reads or writes ``ledger.*``, ``sealed.*``, ``vault.*`` or ``app.*`` over
+    a real connection must request this fixture (or :func:`ledger_clean`, which builds on
+    it) **even when it only reads**. Requesting it is the only thing that makes the schema
+    exist on purpose rather than by inheritance from whatever ran last; a test that skips the
+    declaration is graded against the persistent ``proxyshop_w<N>`` database's ambient state,
+    and is therefore invisible until that state changes (T-216).
 
-    Dropping first makes the schema in front of every test the schema *this checkout's SQL
-    produces*. The blast radius is this worker's own database and only the four schemas this
-    ticket owns; ``db/init/00-roles.sql`` and the cluster-global roles are untouched, and
-    ``DROP SCHEMA`` also clears the per-grantor ``pg_default_acl`` rows, so the default
-    privileges are freshly graded too.
+    All the work, and the reasoning behind the drop and the lock, is in
+    :func:`rebuild_owned_schemas`.
 
     Returns:
         The space-separated filenames applied -- used only in failure messages.
     """
-    from apps.trust.src.ledger import apply_migrations
-
-    with pg_admin.cursor() as cur:
-        cur.execute(f"drop schema if exists {', '.join(OWNED_SCHEMAS)} cascade")
-    return " ".join(apply_migrations(pg_admin))
+    return " ".join(rebuild_owned_schemas(pg_admin))
 
 
 @pytest.fixture

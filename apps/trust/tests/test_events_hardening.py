@@ -656,6 +656,7 @@ def test_a_deployment_that_sets_only_the_generic_app_dsn_keeps_working(
 
 def test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_var(
     monkeypatch: pytest.MonkeyPatch,
+    ledger_migrated: str,
     worker_database: str,
     worker_index: int,
 ) -> None:
@@ -671,6 +672,15 @@ def test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_
     Red on the code as shipped for the first reason a deployment would notice: with only
     ``PROXYSHOP_PG_DSN_TRUST_RW`` set there was no DSN at all and the store raised
     :class:`StoreUnavailable` before reaching a connection.
+
+    ``ledger_migrated`` is requested because the ``has_table_privilege`` call below names
+    ``ledger.commerce_events``, and that schema has to exist *on purpose*. Without the
+    declaration this test was graded against whatever the persistent ``proxyshop_w<N>``
+    database happened to hold when it ran -- which meant a fresh database failed it outright
+    with ``InvalidSchemaName``, and a session that rebuilt the schemas underneath it failed
+    it intermittently, four times across four workers, always blamed on an unrelated lane
+    (T-216). It also makes the privilege assertion mean something: the grant being read back
+    is the one *this checkout's* ``0004_object_grants.sql`` just applied, not a leftover.
     """
     from apps.trust.src.events.pg import PostgresEventStore
     from proxyshop_support.postgres import ROLES, role_dsn
