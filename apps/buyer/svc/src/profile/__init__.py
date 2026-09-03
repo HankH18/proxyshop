@@ -450,6 +450,19 @@ _NAMING_IDENTITY_KEYS: frozenset[str] = frozenset(IDENTITY_ACCOUNT_KEYS) - {
     "street",
 }
 
+#: How many of the account's own identity fragments one category slug may carry and still be
+#: read as a coincidence. **One** — every case the exemption was ever added for is a single
+#: collision (Park Lane and ``park-gear``, Cook and ``cookware``, ``espresso.fan@`` and
+#: ``espresso``), and no legitimate merchandising slug has ever needed two.
+#:
+#: Two is where a coincidence stops being one. ``dana-reyes-gear``, ``danareyes-gear``,
+#: ``espresso-fan-gear``, ``alder-way-portland-gear``, ``park-lane-gear`` — each is a
+#: perfectly well-formed slug that spells the buyer, plus a word that does not, and counting
+#: the buyer's fragments is the only thing that separates them from the collisions above.
+#: Raising this to 2 reopens every one of them; lowering it to 0 is the denial of service
+#: :func:`_exempt_category_slugs` exists to prevent.
+_MAX_INCIDENTAL_FRAGMENTS = 1
+
 _REGION_SEPARATORS = re.compile(r"[-_/,\s]+")
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 
@@ -1064,6 +1077,35 @@ def _account_category_slugs(account: Mapping[str, Any]) -> set[str]:
     return slugs
 
 
+def _identity_fragments_in_slug(slug: str, sources: Iterable[str]) -> set[str]:
+    """The distinct identity fragments of ``sources`` that ``slug`` carries.
+
+    Fragments are compared in *slug space* — ``_slug(fragment) in slug`` — rather than
+    against the slug's hyphen-separated tokens, and that is the whole point of the function.
+    A token-wise comparison sees ``dana-reyes-gear`` and ``danareyes-gear`` as completely
+    different strings: the first has two tokens that are identity fragments, the second has
+    none, because ``"danareyes"`` is not ``"dana"`` and is not ``"reyes"``. They publish the
+    same name. Substring matching in slug space sees both, and it is also what already makes
+    ``cookware`` count as *one* collision for a buyer named Cook rather than zero.
+
+    Comparing in slug space is what catches the compound fragments too: the email local part
+    ``dana.reyes`` slugs to ``dana-reyes``, so a slug that reassembles it is counted for the
+    local part *and* for each of its words, which is three fragments and never a coincidence.
+
+    The returned set is keyed by the *slugged* fragment, so two source values that slug to
+    the same string (``"Dana Reyes"`` from ``full_name`` and ``dana.reyes`` from ``email``)
+    count once between them. Fragments whose slug is shorter than :data:`_MIN_LEAKABLE` —
+    or empty, which punctuation-only values produce and which would otherwise match every
+    slug there is — are not counted at all, exactly as they are not leak-checked.
+    """
+    found: set[str] = set()
+    for value in sources:
+        folded = _slug(value)
+        if len(folded) >= _MIN_LEAKABLE and folded in slug:
+            found.add(folded)
+    return found
+
+
 def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
     """This account's own category slugs that a leak report would be wrong about.
 
@@ -1094,11 +1136,22 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
          on ``"gear"``; ``alder-way-portland`` does not, because ``"way"`` is too short to
          count and the other two tokens are words of the buyer's address.
 
-    Rules 2 and 3 are separate on purpose: the first says a name is never a coincidence, the
-    second says a *pile* of identity words is never a coincidence either. Either one alone
-    leaves a smuggling channel open, and both together still admit every collision the
-    exemption was added for. Being conservative here is close to free: the exemption only
-    ever changes an answer for a slug some identity fragment actually matches.
+    4. it carries no more than :data:`_MAX_INCIDENTAL_FRAGMENTS` of this account's identity
+       fragments at all (:func:`_identity_fragments_in_slug`). Rule 3 asks whether *some*
+       token is merchandise; until T-189 nothing asked how many tokens were the buyer, and
+       one innocuous word therefore laundered any amount of identity beside it. On the
+       name-less account ``dana-reyes`` is refused by rule 3 and ``dana-reyes-gear`` was
+       exempt; ``Alder Way Portland`` is refused and ``alder-way-portland-gear`` was exempt.
+       Counting fragments rather than testing for the presence of one merchandise word is
+       what closes that, and it closes the run-together spelling (``danareyes-gear``) with
+       it, because the count is taken in slug space rather than token by token.
+
+    Rules 2, 3 and 4 are separate on purpose: the first says a name is never a coincidence,
+    the second says a slug with nothing but the buyer in it is never one, and the third says
+    a *pile* of identity words is never one however much merchandise is stacked beside it.
+    Any one alone leaves a smuggling channel open, and all three together still admit every
+    collision the exemption was added for. Being conservative here is close to free: the
+    exemption only ever changes an answer for a slug some identity fragment actually matches.
     """
     sources = _identity_sources(account)
     naming = {value for value, keys in sources.items() if keys & _NAMING_IDENTITY_KEYS}
@@ -1113,6 +1166,8 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
             continue
         disqualifying = beyond_email if len(tokens) == 1 else set(sources)
         if not any(len(token) >= _MIN_LEAKABLE and token not in disqualifying for token in tokens):
+            continue
+        if len(_identity_fragments_in_slug(slug, sources)) > _MAX_INCIDENTAL_FRAGMENTS:
             continue
         exempt.add(slug)
     return exempt
