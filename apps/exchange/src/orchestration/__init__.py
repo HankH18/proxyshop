@@ -16,13 +16,16 @@ They sit **above** the pure functions ``collect_bids(roster, responses, now)`` a
 gain no required parameter. Those two compute correctly on clean input; this layer is what
 decides the input is clean, and R12's fail-closed promise is a property of this layer.
 
-⚠️ **T-033 adds ``accept_offer`` here and must not modify ``solicit_bids``.** Put it in a new
-module beside :mod:`.solicitation` and export it below; the two never run concurrently, since
-T-033 depends on T-030.
+⚠️ **T-033 adds ``accept_offer`` here and must not modify ``solicit_bids``.** Done: the gate
+itself lives in :mod:`apps.exchange.src.accept.gate`, beside the ``accept`` it guards, and is
+re-exported below. Putting the *implementation* in the accept package rather than in a module
+here keeps this file's diff to one import — ``solicitation.py`` is untouched, which matters
+because a separate ticket owns it.
 """
 
 from __future__ import annotations
 
+from ..accept import accept_offer
 from .solicitation import Denial, SolicitationResult, solicit_bids
 
-__all__ = ["Denial", "SolicitationResult", "solicit_bids"]
+__all__ = ["Denial", "SolicitationResult", "accept_offer", "solicit_bids"]
