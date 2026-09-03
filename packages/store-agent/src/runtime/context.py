@@ -37,6 +37,16 @@ from contracts.signing import canonical_json
 #: like every other: naming a rule in an envelope is not the same as clearing the walls.
 INTRO_DISCOUNT_KEY = "intro_discount_pct"
 
+#: The store-context key stating how long an offer this agent makes stands, as an ISO instant.
+#:
+#: `contracts.boundary.validate_bid` refuses a bid whose offer states no expiry at all —
+#: "an offer with no stated expiry is an offer nobody can price the risk of" — so this is not
+#: optional decoration, it is what makes a bid admissible. It arrives on the context because an
+#: expiry is a MERCHANT decision and because computing one would mean reading a clock, which
+#: ends byte-identical reproduction (S4). When the context states none, the advocate falls back
+#: to the request's own `respond_by`; see :meth:`AuctionContext.offer_expires_at`.
+OFFER_EXPIRES_AT_KEY = "offer_expires_at"
+
 
 def as_mapping(value: Any, what: str) -> dict[str, Any]:
     """Read a mapping out of a dict or a pydantic model, so fixtures and models behave alike."""
@@ -107,7 +117,9 @@ class AuctionContext:
     network_priors: Mapping[str, Any]
     intent: Mapping[str, Any]
     profile: Mapping[str, Any]
+    respond_by: str
     store_currency: str | None
+    stated_offer_expiry: str | None
 
     @property
     def cluster_id(self) -> str:
@@ -159,6 +171,25 @@ class AuctionContext:
         """The envelope's cold-start intro depth, or 0.0 when it defines no intro rule."""
         depth = as_number(self.envelope.get(INTRO_DISCOUNT_KEY))
         return depth if depth is not None and depth > 0.0 else 0.0
+
+    @property
+    def offer_expires_at(self) -> str | None:
+        """When an offer made in this auction stops standing. Never computed from a clock.
+
+        The merchant's own :data:`OFFER_EXPIRES_AT_KEY` when the context states one, and
+        otherwise the request's `respond_by`: the offer stands at least as long as the auction it
+        was solicited for. That fallback is a FLOOR, and a deliberately conservative one — an
+        offer that expires exactly when the auction closes is honest about what the agent was
+        actually authorized to promise, where an invented "+48h" would be the agent committing
+        the merchant to a window nobody approved. A store that wants its offers to outlive the
+        auction says so, once, on its context.
+
+        Stated as the ISO instant `contracts.Offer.expires_at` is typed as; `validate_bid` reads
+        it with `parse_timestamp` and refuses an offer that states none at all.
+        """
+        if self.stated_offer_expiry:
+            return self.stated_offer_expiry
+        return self.respond_by or None
 
     @property
     def is_cold(self) -> bool:
@@ -217,6 +248,7 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
     req = as_mapping(request, "bid request")
     envelope = as_mapping(ctx.get("envelope"), "envelope")
     currency = ctx.get("currency")
+    stated_expiry = ctx.get(OFFER_EXPIRES_AT_KEY) or envelope.get(OFFER_EXPIRES_AT_KEY)
     return AuctionContext(
         auction_id=str(req.get("auction_id") or ""),
         store_id=str(ctx.get("store_id") or envelope.get("store_id") or ""),
@@ -230,7 +262,9 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
         network_priors=as_mapping(ctx.get("network_priors"), "network_priors"),
         intent=as_mapping(req.get("intent"), "intent"),
         profile=as_mapping(req.get("profile"), "buyer profile"),
+        respond_by=str(req.get("respond_by") or ""),
         store_currency=str(currency) if currency else None,
+        stated_offer_expiry=str(stated_expiry) if stated_expiry else None,
     )
 
 
@@ -279,6 +313,7 @@ def satisfies(op: str, observed: Any, wanted: Any) -> bool:
 
 __all__ = [
     "INTRO_DISCOUNT_KEY",
+    "OFFER_EXPIRES_AT_KEY",
     "AuctionContext",
     "HardConstraint",
     "as_mapping",

@@ -48,6 +48,7 @@ from store_agent.hooks import (
 from store_agent.runtime import (
     AGENT_VERSION,
     INTRO_DISCOUNT_KEY,
+    OFFER_EXPIRES_AT_KEY,
     AuctionContext,
     Decline,
     DeclineReason,
@@ -225,7 +226,7 @@ def test_the_cold_bid_is_the_documented_default_offer() -> None:
             },
         ],
         "total_price": LIST_PRICE,
-        "expires_at": None,
+        "expires_at": "2999-01-01T00:00:00Z",
         "checkout_url": None,
         "delivery_estimate_days": None,
     }
@@ -582,6 +583,49 @@ def test_the_price_floor_and_not_only_the_cap_bounds_the_price() -> None:
     assert answer.offer.product_ref == "prod-floor"
     assert answer.offer.unit_price == LIST_PRICE, "90.00 is under the 95.00 floor, so no discount"
     assert answer.offer.discount is None
+
+
+# ---------------------------------------------------------------------------------------------
+# 5b. The bid has to survive the door it is bid through
+# ---------------------------------------------------------------------------------------------
+
+
+SNAPSHOT = {STORE_ID: {"store_id": STORE_ID, "score": 0.7, "blacklisted": False}}
+
+
+@pytest.mark.parametrize(
+    "context_of", [_context, lambda: _with_intro(15.0), lambda: _with_policy(10.0)]
+)
+def test_the_bid_is_admissible_at_the_exchanges_own_hosted_door(context_of: Any) -> None:
+    """The gate this runtime's output is actually judged by, run against it.
+
+    A bid this module considers finished is not finished if `contracts.boundary.validate_bid`
+    refuses it, and the two live in different packages, so nothing else would have noticed. It
+    already caught one: the offer stated no `expires_at`, and the boundary refuses that outright
+    ("an offer with no stated expiry is an offer nobody can price the risk of") — every bid this
+    runtime made would have been turned away at the door.
+    """
+    from contracts.boundary import validate_bid
+
+    result = validate_bid(
+        _bid(context=context_of()),
+        path="hosted",
+        trust_snapshot=SNAPSHOT,
+        now="2026-01-02T00:00:00Z",
+    )
+    assert result.ok, (
+        f"the exchange refused a bid this runtime considered finished: {result.reasons}"
+    )
+    assert list(result.reasons) == []
+
+
+def test_the_offer_states_an_expiry_taken_from_the_context_never_from_a_clock() -> None:
+    stated = _context()
+    stated[OFFER_EXPIRES_AT_KEY] = "2026-06-01T00:00:00Z"
+    assert _bid(context=stated).offer.expires_at == "2026-06-01T00:00:00Z"
+
+    # With none stated, the floor: the offer stands at least as long as the auction it answers.
+    assert _bid().offer.expires_at == _request()["respond_by"]
 
 
 # ---------------------------------------------------------------------------------------------

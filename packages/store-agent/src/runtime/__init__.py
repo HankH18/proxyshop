@@ -37,6 +37,7 @@ from .bidding import (
 )
 from .context import (
     INTRO_DISCOUNT_KEY,
+    OFFER_EXPIRES_AT_KEY,
     AuctionContext,
     HardConstraint,
     assemble_context,
@@ -88,6 +89,7 @@ __all__ = [
     "AGENT_VERSION",
     "CANONICAL_MODULE",
     "INTRO_DISCOUNT_KEY",
+    "OFFER_EXPIRES_AT_KEY",
     "IN_STOCK_KEY",
     "LIST_PRICE_KEY",
     "PERCENTAGE",

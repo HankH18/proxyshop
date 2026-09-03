@@ -303,6 +303,11 @@ def bid(request: Any, context: Any, *, hooks: Any | None = None) -> Bid | Declin
         discount=Discount(type=PERCENTAGE, value=depth) if grant is not None else None,
         commitments=list(commitments),
         total_price=unit_price,
+        # Not optional in practice: `contracts.boundary.validate_bid` refuses an offer that
+        # states no expiry, because an offer nobody can price the risk of is not an offer. It
+        # comes off the context (or, failing that, off the auction's own `respond_by`) rather
+        # than out of a `now() + ttl`, which would be the one clock read on this path.
+        expires_at=ctx.offer_expires_at,
     )
     assembled = Bid(
         auction_id=ctx.auction_id,
