@@ -808,3 +808,27 @@ def test_a_negative_report_lands_as_the_published_buyer_reported_negative(e6_as_
     )
     entry = score([observation], as_of=e6_as_of)["dims"]["feedback_match"]
     assert float(entry["beta"]) > 2.0 and float(entry["alpha"]) == 2.0
+
+
+def test_a_verdict_whose_weight_is_not_a_number_is_refused_not_guessed(e6_as_of):
+    """Neither default is safe, so neither is picked.
+
+    Defaulting a lost weight to 1.0 admits an unverified report at full force; defaulting it
+    to 0.0 erases a buyer's complaint. Which one a silent default did would depend on whether
+    the report happened to be positive, which is the worst possible way for it to be decided.
+    """
+    from apps.trust.src.feedback import feedback_observation
+
+    verdict = accept_feedback("o-1", {"matched_pitch": True}, routed_orders=_routed("o-1"))
+
+    with pytest.raises(FeedbackRejected):
+        feedback_observation({**verdict, "weight": None}, observed_at=e6_as_of)
+    with pytest.raises(FeedbackRejected):
+        feedback_observation({**verdict, "weight": "1.0"}, observed_at=e6_as_of)
+    with pytest.raises(FeedbackRejected):
+        feedback_observation({**verdict, "weight": True}, observed_at=e6_as_of)
+
+    # A verdict with no `weight` KEY at all is a different thing and means 1.0, exactly as it
+    # does in the scorer.
+    without = {key: value for key, value in verdict.items() if key != "weight"}
+    assert feedback_observation(without, observed_at=e6_as_of)["weight"] == BASE_FEEDBACK_WEIGHT

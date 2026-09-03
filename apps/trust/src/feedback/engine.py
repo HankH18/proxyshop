@@ -316,12 +316,30 @@ def feedback_observation(
         store a dial on its own coverage for the price of some fake reviews — which is the
         thing the routed-buyer gate exists to prevent.
 
-        The ``weight`` is carried through unclamped and unvalidated ON PURPOSE. It is checked
-        where it is applied, by ``trust.scoring.relative_observation_weight``, so there is one
-        rule about what a weight may be and not a second copy here that could drift from it.
+        The ``weight`` is carried through in RANGE terms unvalidated on purpose: whether a
+        number is an admissible weight is decided where it is applied, by
+        ``trust.scoring.relative_observation_weight``, so there is one rule about that and not
+        a second copy here free to drift from it. What IS checked here is that it is a number
+        at all — see below.
+
+    Raises:
+        FeedbackRejected: the verdict carries a ``weight`` that is not a number. Neither
+            available default is safe to pick for it: treating it as 1.0 would admit an
+            unverified report at full force, and treating it as 0.0 would erase a buyer's
+            complaint — which of those a silent default did would depend on whether the report
+            happened to be positive. A missing ``weight`` key is different and is fine: it
+            means 1.0, exactly as it does in the scorer.
     """
     if not bool(_field(verdict, "accepted", False)):
         return None
+
+    raw_weight = _field(verdict, "weight", BASE_FEEDBACK_WEIGHT)
+    if isinstance(raw_weight, bool) or not isinstance(raw_weight, (int, float)):
+        raise FeedbackRejected(
+            f"feedback verdict carries weight {raw_weight!r}, which is not a number. The "
+            "weight is what R14's two properties are made of; a verdict that lost it is a "
+            "producer bug, and guessing a replacement would silently pick a side."
+        )
 
     positive = bool(_field(verdict, "positive", False))
     resolved_store = store_id if store_id is not None else _field(verdict, "store_id")
@@ -330,5 +348,5 @@ def feedback_observation(
         "dim": FEEDBACK_DIMENSION,
         "type": FEEDBACK_POSITIVE_TYPE if positive else FEEDBACK_NEGATIVE_TYPE,
         "observed_at": observed_at,
-        "weight": float(_field(verdict, "weight", BASE_FEEDBACK_WEIGHT) or 0.0),
+        "weight": float(raw_weight),
     }
