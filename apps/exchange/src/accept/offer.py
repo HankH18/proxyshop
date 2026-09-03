@@ -54,7 +54,9 @@ the permalink it got *back* — after ``POST /codes`` issued a real single-use d
 is still protected (no permalink is returned, and the auction stays open) and the live code is
 **no longer lost**: the port carries it out on
 :attr:`~apps.exchange.src.checkout.provider.OrphanedCheckoutCode.orphan`, and :func:`accept`
-reads it and files a ``code_created`` event marked ``orphaned`` so it can be revoked (T-202).
+reads it and files a ``code_created`` event marked ``orphaned``, which is what makes the live
+code visible to reconciliation and revocable *at all* — nothing in this repo consumes that
+event yet, so "recorded", not "cleaned up", is the claim (T-202).
 The code is deliberately absent from :attr:`AcceptResult.denial_reason` and from the persisted
 refusal event, which name only a fingerprint that joins to that record (T-215). See
 ``test_accept.py::test_a_merchant_that_answers_off_domain_leaves_a_code_the_exchange_records``
@@ -164,10 +166,15 @@ class AcceptResult:
     reoffer_bid_ref: str | None = None
     #: Set when this refusal happened AFTER the merchant had already issued a real
     #: single-use discount (T-202). It carries the code itself, so a caller that can reach
-    #: the merchant's revoke API does not have to parse it back out of an event — and it is
-    #: the reason ``denial_reason`` may not name the code: the structured field is for the
-    #: process that revokes, the prose is for the log, and only one of those is a safe place
-    #: for a live discount. ``None`` means nothing was minted and there is nothing to revoke.
+    #: the merchant's revoke API — none exists in this repo yet — would not have to parse it
+    #: back out of an event. It is also the reason ``denial_reason`` may not name the code:
+    #: the structured field is for a process that revokes, the prose is for the log, and
+    #: only one of those is a safe place for a live discount. ``None`` means nothing was
+    #: minted and there is nothing to revoke.
+    #:
+    #: Reading ``.code`` off this is the ONLY way to get the discount out of an
+    #: ``AcceptResult``: ``OrphanedCode`` suppresses its generated ``repr`` (T-215), so
+    #: formatting the result — which is what a log statement does — cannot publish it.
     orphaned_code: OrphanedCode | None = None
     events: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
@@ -262,17 +269,27 @@ def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any]:
     This is the whole of T-202's fix, and it is a ``code_created`` for the plain reason that
     a code **was** created: the merchant's ``POST /codes`` returned before anything failed,
     the discount is live in the merchant's system, and ``code_created`` is the frozen kind
-    (D24) whose published body — ``code``, ``permalink_url``, ``expires_at`` — is exactly
-    what revocation and reconciliation read. Inventing a kind is not open to the exchange,
-    and filing the code anywhere else would mean the one process that revokes codes had to
-    learn a second place to look.
+    (D24) whose published body — ``code``, ``permalink_url``, ``expires_at`` — is the one
+    shaped to hold it. Inventing a kind is not open to the exchange, and filing the code in
+    some second place would guarantee a future revoker had two places to look.
 
-    ``orphaned: True`` is what keeps that honest. Without it a reconciler joining
+    **What this record is NOT, stated plainly: consumed.** There is no revocation path
+    anywhere in this repository. ``git grep -ri revoke`` across ``apps``, ``packages`` and
+    ``services`` outside this package returns SQL ``GRANT``/``REVOKE`` prose and
+    key-rotation comments and nothing else, and the only occurrence of ``code_created``
+    outside the exchange is a membership entry in the kind vocabulary at
+    ``apps/trust/src/events/store.py``. So this event is a durable, joinable record that
+    makes revocation *possible* and makes the orphan *visible to reconciliation* — the
+    thing whose absence was the T-157/T-202 defect. Calling it "the revocation path" would
+    be describing a consumer that does not exist, and an overclaim in a comment is how the
+    next reader is misled into thinking the code is already being cleaned up.
+
+    ``orphaned: True`` is what keeps the record honest. Without it a reconciler joining
     ``code_created`` to ``order_paid`` would read this as a checkout that simply never
-    converted, rather than as one the exchange itself refused; with it, the code is on the
-    revoke list rather than the follow-up list. The event is emitted **beside** the refusal,
-    never instead of it, and no ``accepted`` or ``checkout_redirect`` accompanies it — the
-    buyer was handed nothing, and the C11 trio describes a checkout that completed.
+    converted, rather than as one the exchange itself refused. The event is emitted
+    **beside** the refusal, never instead of it, and no ``accepted`` or
+    ``checkout_redirect`` accompanies it — the buyer was handed nothing, and the C11 trio
+    describes a checkout that completed.
     """
     return build_event(
         "code_created",
@@ -312,7 +329,9 @@ def _refusal_event(
     The split is deliberate and is T-215: ``reason`` is free prose in a payload the published
     API types as a bare string, so a live discount must not be in it, while
     ``orphaned_code.fingerprint`` and ``orphaned_code.event_id`` let an operator holding only
-    the refusal walk straight to the ``code_created`` event that names the revocable code.
+    the refusal walk straight to the ``code_created`` event that names the code itself.
+    (An *operator*, today — see :func:`_orphan_record` on why calling that event's consumer
+    "the revocation path" would be inventing one.)
     """
     events: list[Mapping[str, Any]] = []
     pointer: dict[str, Any] | None = None
@@ -496,10 +515,13 @@ def accept(
             auction,
             ref,
             mode,
-            # `{exc}` is safe to persist BECAUSE `OrphanedCheckoutCode` redacts the code out
-            # of its own message (T-215). This reason lands in a `policy_event` payload the
-            # published API types as a bare string; the code goes to the `code_created`
-            # event `_refused` emits alongside, which is where a code can be revoked from.
+            # `{exc}` is safe to persist BECAUSE `OrphanedCheckoutCode` redacts its own
+            # message (T-215) — and redacts it STRUCTURALLY: every URL it holds as a value
+            # is reduced to its scheme and host, so the merchant's spelling of the code
+            # inside a path or query cannot survive whatever encoding it chose. This reason
+            # lands in a `policy_event` payload the published API types as a bare string;
+            # the code itself goes to the `code_created` event `_refused` emits alongside,
+            # which is the only place it is written down.
             f"checkout_refused: {type(exc).__name__}: {exc}",
             store_id=store_id,
             reoffer_bid_ref=next_slot(auction, ref),

@@ -28,6 +28,7 @@ from .provider import (
     MintedCheckout,
     OrphanedCheckoutCode,
     OrphanedCode,
+    _redact_chain,
     code_fingerprint,
     default_permalink,
 )
@@ -123,6 +124,11 @@ class ShopifyCheckoutProvider(CheckoutProvider):
                 details={"minted_by": self.name, "delegated_to": type(creator).__name__},
             )
         except Exception as exc:
+            # The cause is redacted BEFORE it is chained, for the reason spelled out at the
+            # matching site in `provider.py`: the default excepthook reads the C-level cause
+            # slot and never runs `OrphanedCheckoutCode`'s reading properties, so only an
+            # in-place edit of this object's `args` closes that channel.
+            _redact_chain(exc, str(code), (str(permalink or ""),))
             raise OrphanedCheckoutCode(
                 f"{type(exc).__name__}: {exc} — raised AFTER the merchant issued "
                 f"{code_fingerprint(str(code))} for store {request.store_id!r}; the code is "

@@ -37,7 +37,7 @@ import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from ..auction.ledger import build_event
 from .codes import assert_offer_is_mintable, build_cart_permalink, code_expiry, offer_quantity
@@ -57,6 +57,7 @@ __all__ = [
     "code_fingerprint",
     "default_permalink",
     "redact_code",
+    "redact_url",
     "registered_domain_for",
 ]
 
@@ -85,8 +86,8 @@ def code_fingerprint(code: str) -> str:
     A refusal message has to be debuggable — an operator reading a ``policy_event`` must be
     able to say *which* code was orphaned — and it must not be the place the code itself is
     published. The fingerprint is the join: the same code always produces the same handle, so
-    the redacted prose and the ``code_created`` event that holds the real, revocable code can
-    be matched to each other, while the handle alone buys an attacker nothing.
+    the redacted prose and the ``code_created`` event that holds the real code can be
+    matched to each other, while the handle alone buys an attacker nothing.
 
     Truncated to 12 hex characters deliberately: this is a correlation token within one
     ledger, not a commitment, and a full digest in every message is noise.
@@ -97,20 +98,101 @@ def code_fingerprint(code: str) -> str:
     return "code:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
-def redact_code(message: str, code: str) -> str:
-    """Replace every occurrence of ``code`` in ``message`` with its fingerprint.
+def _host_spells(host: str, code: str) -> bool:
+    """Whether ``host`` still contains ``code`` after the normalisations a host can hide in.
 
-    Substring replacement rather than a whole-message blank on purpose. The code reaches a
-    refusal message by **two** routes and both have to close while the rest of the message
-    survives:
+    :func:`redact_url` keeps the host and throws the rest away, so the host is the ONE
+    merchant-controlled value that survives into prose — and a merchant is free to answer
+    with ``https://PSX-LIVE01.attacker.tld/``. This is the guard on that, and it fails
+    **closed**: a host it is unsure about is dropped, not published.
 
-    * spelled out — ``the discount code 'PSX-…' was ALREADY minted``; and
-    * carried inside a URL — a cart permalink is ``…/cart/1:1?discount=PSX-…``, and the
-      off-domain reason quotes the URL it refused. Blanking the whole URL would delete the
-      refused *host*, which is the one fact the message exists to report.
+    Its normalisations (case-folding, repeated percent-decoding) are a blacklist, and are
+    named as one. They are acceptable *here* and nowhere else in this module because the
+    thing being searched is a single short hostname rather than free prose, and because
+    being wrong costs a diagnostic rather than a discount. Punycode and Unicode-homoglyph
+    spellings of a code inside a hostname are NOT decoded and would survive: a residual,
+    stated rather than papered over.
+    """
+    if not code:
+        return False
+    needle = code.casefold()
+    candidate = host.casefold()
+    for _ in range(3):  # bounded: `%2550` is a percent-encoded percent-encoding
+        if needle in candidate:
+            return True
+        decoded = unquote(candidate).casefold()
+        if decoded == candidate:
+            return False
+        candidate = decoded
+    return needle in candidate
 
-    The percent-encoded spellings are covered too, because a permalink built by a merchant
-    may have escaped the code on the way in.
+
+def redact_url(url: str, code: str = "") -> str:
+    """Reduce a URL to the only part of it that is a diagnostic: its scheme and host.
+
+    **This is the structural half of the redaction and the reason T-215's first attempt was
+    not a fix.** That attempt scrubbed three literal spellings of the code out of the
+    message — ``raw``, ``quote(raw, safe="")``, ``quote(raw)``. But the code and the
+    ``permalink_url`` are two INDEPENDENT fields off the merchant's reply
+    (``providers.py`` validates the shape of neither), so nothing requires them to agree on
+    spelling. A merchant that lower-cases its own permalink — ordinary CDN and
+    link-building behaviour, and this repo's own Shopify stub matches codes
+    case-insensitively on redemption (``services/shopify-stub/src/codes.py``) — defeats the
+    blacklist with no hostile intent at all. Percent-encoding each character defeats it
+    deliberately. Case-folding and percent-decoding the blacklist would only move the bar:
+    the next encoding wins again.
+
+    So the URL is not searched for the code. It is **parsed, and everything that could
+    carry a code is discarded**: userinfo, path, query and fragment all go, because a
+    discount can be spelled in any of them (``/discount/CODE``, ``?discount=CODE``,
+    ``#CODE``) and the reduction must not depend on knowing which. What is kept is the
+    scheme and the host — which is precisely the diagnostic the message exists to report,
+    since the refusal *is* "this host is not the registered one".
+
+    A value that cannot be parsed is dropped whole. See :func:`_host_spells` for the one
+    guard on the retained host.
+    """
+    raw = str(url or "")
+    if not raw:
+        return raw
+    handle = code_fingerprint(code) if code else "code:n/a"
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+    except ValueError:
+        return f"<unparsable-url:{handle}>"
+    if not host:
+        # `javascript:PSX-…`, `data:…`, a bare fragment: no host means no diagnostic worth
+        # keeping, and the whole opaque remainder is merchant-controlled. Drop it.
+        return f"<hostless-url:{handle}>"
+    if _host_spells(host, str(code or "")):
+        return f"<redacted-host-url:{handle}>"
+    scheme = parts.scheme.lower() or "?"
+    port = f":{parts.port}" if parts.port else ""
+    # No trailing slash and no space: the result must be re-reducible to ITSELF, so that
+    # redacting an already-redacted message is a no-op rather than a slow corruption.
+    return f"{scheme}://{host.lower()}{port}/<redacted:{handle}>"
+
+
+def redact_code(message: str, code: str, *, urls: Sequence[str] = ()) -> str:
+    """Strip a live discount out of ``message`` while leaving the diagnostic standing.
+
+    Two layers, and the ORDER of importance is the opposite of the order they were written:
+
+    1. **Structural (``urls``).** Every URL the caller *holds as a value* — the orphan's
+       ``permalink_url``, the offer's ``checkout_url`` — is replaced by its
+       :func:`redact_url` reduction. This cannot miss, because it never asks how the URL
+       spells the code: it replaces an exact string the caller already has with a form
+       built only from that string's scheme and host. Both the raw spelling and the
+       ``repr``-escaped spelling are replaced, since ``assert_on_domain`` embeds the URL as
+       ``{url!r}`` and ``repr`` escapes backslashes and quotes.
+
+    2. **Literal spellings of the code (the old behaviour, kept as a second layer).** The
+       code also reaches a message spelled out on its own — ``the discount code 'PSX-…'
+       was ALREADY minted`` — with no URL involved, and layer 1 says nothing about that.
+       This layer is a blacklist and is only sound for the case it was written for: prose
+       *this module* formats, where the spelling is ``orphan.code`` itself. It is not, and
+       must never again be treated as, the defence against a merchant-controlled string.
 
     The replacement is unconditional — no minimum length, no word boundary. A merchant that
     answers with a one-character code would have that character scrubbed everywhere in the
@@ -119,8 +201,21 @@ def redact_code(message: str, code: str) -> str:
     """
     text = str(message)
     raw = str(code or "")
+
+    # Layer 1 — exact values, not guesses about spelling. Longest first for the same reason
+    # as below: one URL may be a prefix of another.
+    for url in sorted({str(u or "") for u in urls if u}, key=len, reverse=True):
+        reduced = redact_url(url, raw)
+        if reduced == url:
+            continue
+        for spelling in (url, repr(url)[1:-1]):
+            if spelling:
+                text = text.replace(spelling, reduced)
+
     if not raw:
         return text
+
+    # Layer 2 — the code spelled out in prose this module built.
     handle = f"<redacted {code_fingerprint(raw)}>"
     # Longest first: a shorter spelling that is a prefix of a longer one must not eat it.
     for spelling in sorted({raw, quote(raw, safe=""), quote(raw)}, key=len, reverse=True):
@@ -145,33 +240,53 @@ _BASE_CAUSE = BaseException.__dict__["__cause__"]
 _BASE_CONTEXT = BaseException.__dict__["__context__"]
 
 
-def _redact_chain(exc: BaseException | None, code: str) -> None:
-    """Redact ``code`` out of ``exc`` and every exception it chains to, in place.
+def _redact_chain(exc: BaseException | None, code: str, urls: Sequence[str] = ()) -> None:
+    """Redact ``code`` and ``urls`` out of ``exc`` and every exception it chains to, in place.
 
     The exception that *caused* an orphan refusal is the one that named the offending URL —
     and a cart permalink spells the discount in its ``?discount=``. Redacting only the
     orphan's own message leaves that spelling one ``traceback.format_exc()`` away, which is
     precisely how an exception reaches a log file. Rewriting ``args`` is what actually moves
     the needle: it is what ``str()``, ``repr()`` and the traceback's final line all render.
+
+    **Called eagerly at every ``raise … from`` site in this package, not only lazily from
+    the properties below.** The properties are a Python-level attribute lookup, and the
+    interpreter's default excepthook is not: C-level ``PyErr_Display`` walks the chain
+    through ``PyException_GetCause``, reads the C slot directly, and never performs the
+    lookup a ``property`` depends on — measured, it printed ``?discount=PSX-SECRET-ABC123``
+    in full. Mutating ``args`` in place is what closes that channel, because it changes the
+    object the C slot points AT rather than what a Python reader sees. It is written to be
+    idempotent so that running eagerly and again lazily cannot corrupt the message.
     """
     seen: set[int] = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
         redacted = tuple(
-            redact_code(arg, code) if isinstance(arg, str) else arg for arg in exc.args
+            redact_code(arg, code, urls=urls) if isinstance(arg, str) else arg for arg in exc.args
         )
         if redacted != exc.args:
             exc.args = redacted
         exc = _BASE_CAUSE.__get__(exc) or _BASE_CONTEXT.__get__(exc)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class OrphanedCode:
     """A discount code that EXISTS in the merchant's system for a checkout that was refused.
 
-    Everything the exchange needs to record it and revoke it, and nothing it has to go and
-    look up: the code itself, where it would have sent the buyer, which provider issued it,
-    and the three identifiers that place it in the ledger.
+    Everything the exchange needs to record it and eventually revoke it, and nothing it has
+    to go and look up: the code itself, where it would have sent the buyer, which provider
+    issued it, and the three identifiers that place it in the ledger.
+
+    **The default dataclass ``repr`` is suppressed, and that is load-bearing (T-215).** The
+    whole point of this class is to carry a live discount past a refusal, and the generated
+    ``repr`` would spell that discount — and the merchant's permalink — in the ordinary
+    string form of the object. It reaches a log the moment anything does ``f"{result}"`` on
+    an :class:`~apps.exchange.src.accept.offer.AcceptResult`, whose own generated ``repr``
+    renders this one as a nested field; suppressing it here is what makes that nesting safe
+    without a second ``repr`` on every dataclass that holds one. The code is therefore
+    reachable only through explicit field access — ``orphan.code``, which is exactly the
+    deliberate act the revocation caller performs and the accidental act a log formatter
+    does not.
     """
 
     code: str
@@ -181,6 +296,15 @@ class OrphanedCode:
     auction_id: str
     bid_ref: str
     expires_at: float | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"OrphanedCode(code=<{code_fingerprint(self.code)}>, "
+            f"permalink_url={redact_url(self.permalink_url, self.code)!r}, "
+            f"provider={self.provider!r}, store_id={self.store_id!r}, "
+            f"auction_id={self.auction_id!r}, bid_ref={self.bid_ref!r}, "
+            f"expires_at={self.expires_at!r})"
+        )
 
 
 class OrphanedCheckoutCode(Exception):
@@ -206,18 +330,34 @@ class OrphanedCheckoutCode(Exception):
     via ``accept()`` — inside a persisted ``policy_event`` payload that the published API
     types as a bare string, readable by anything with the event stream. A live discount this
     layer cannot revoke must not be published there, so :meth:`__init__` runs the message
-    through :func:`redact_code` and every spelling of the code becomes
-    :func:`code_fingerprint`. The real code stays on :attr:`orphan`, for the one caller whose
-    job is to record and revoke it. Redacting in the constructor rather than at each call
-    site is the point: a *new* caller that formats this exception naively is safe by
-    construction, and cannot re-open the leak by forgetting.
+    through :func:`redact_code`. The real code stays on :attr:`orphan`, for the caller whose
+    job is to record it. Redacting in the constructor rather than at each call site is the
+    point: a *new* caller that formats this exception naively is safe by construction.
+
+    **What "safe by construction" costs, and why the first attempt did not have it.** That
+    attempt redacted by replacing three literal spellings of ``orphan.code``. But the
+    message it redacts embeds the merchant's ``permalink_url``, and the code and the
+    permalink are two independent merchant-authored fields that nothing requires to agree
+    on spelling — so a lower-cased or percent-encoded permalink walked the live code
+    through, into both the persisted event and the client-visible reason. The constructor
+    now passes ``urls=(orphan.permalink_url,)``, and :func:`redact_url` reduces that URL —
+    an exact value this exception already holds — to its scheme and host. The redaction no
+    longer asks how the merchant spelled anything, which is the only version of this that
+    a new encoding cannot defeat.
 
     **The chained exception is redacted too**, which the constructor alone cannot do: the
     cause is attached by ``raise … from`` only *after* ``__init__`` has returned, and the
-    cause is the exception that named the offending permalink — the one place the code is
-    spelled that redacting this message does not reach. ``exc.__cause__`` is therefore a
-    property here, redacting on the way out, so ``traceback.format_exc()`` is as safe as
-    ``str(exc)`` no matter which call site does the formatting.
+    cause is the exception that named the offending permalink. That is handled in two
+    places, deliberately, because one of them cannot reach every reader:
+
+    * every ``raise … from`` site in this package calls :func:`_redact_chain` on the cause
+      **before** chaining it, mutating ``args`` in place. This is what closes the
+      interpreter's default excepthook, which reads the C-level cause slot through
+      ``PyException_GetCause`` and runs no Python-level property at all; and
+    * ``__cause__``/``__context__`` are properties here as well, redacting on the way out,
+      so a future ``raise`` site that forgets the first half is still safe for every reader
+      that goes through attribute lookup — :mod:`traceback`, ``logging(exc_info=True)``,
+      pytest's reporter.
     """
 
     def __init__(self, message: str, *, orphan: OrphanedCode) -> None:
@@ -228,7 +368,12 @@ class OrphanedCheckoutCode(Exception):
         # that does the same. Because the redaction happens before `Exception.__init__`, the
         # code is absent from `args`, `str()`, `repr()`, the traceback line and anything
         # pickled from it. `orphan` still carries the real code for whoever can revoke it.
-        super().__init__(redact_code(str(message), orphan.code))
+        #
+        # `urls=` is what makes this structural rather than a spelling blacklist. The orphan
+        # ALREADY holds the merchant's permalink, so the message's copy of it is replaced by
+        # exact string match with a scheme-and-host reduction — no question is asked about
+        # how that URL spells the code, which is the question the first attempt got wrong.
+        super().__init__(redact_code(str(message), orphan.code, urls=(orphan.permalink_url,)))
         self.orphan = orphan
 
     # `raise X from Y` sets the cause through `PyException_SetCause`, which writes the C slot
@@ -248,9 +393,15 @@ class OrphanedCheckoutCode(Exception):
         return getattr(orphan, "code", "") or ""
 
     @property
+    def _orphan_urls(self) -> tuple[str, ...]:
+        """The merchant URLs this exception holds as VALUES, for the structural redaction."""
+        orphan = getattr(self, "orphan", None)
+        return (str(getattr(orphan, "permalink_url", "") or ""),)
+
+    @property
     def __cause__(self) -> BaseException | None:
         cause = _BASE_CAUSE.__get__(self)
-        _redact_chain(cause, self._orphan_code)
+        _redact_chain(cause, self._orphan_code, self._orphan_urls)
         return cause
 
     @__cause__.setter
@@ -260,7 +411,7 @@ class OrphanedCheckoutCode(Exception):
     @property
     def __context__(self) -> BaseException | None:
         context = _BASE_CONTEXT.__get__(self)
-        _redact_chain(context, self._orphan_code)
+        _redact_chain(context, self._orphan_code, self._orphan_urls)
         return context
 
     @__context__.setter
@@ -455,11 +606,19 @@ class CheckoutProvider:
         try:
             assert_on_domain(minted.permalink_url, registered, what=f"{self.name} permalink_url")
         except OffDomainCheckout as exc:
+            # Redact the CAUSE before chaining it, not only through the reading properties
+            # below. `raise … from exc` stores this object in the C-level cause slot, and
+            # the interpreter's default excepthook reads that slot with
+            # `PyException_GetCause` — no Python attribute lookup, so no property runs.
+            # Rewriting `exc.args` here changes the object itself, which is the only edit
+            # `PyErr_Display` can see. Measured leaking before this line existed.
+            _redact_chain(exc, minted.code, (minted.permalink_url, request.checkout_url))
             raise OrphanedOffDomainCheckout(
                 # The fingerprint, not the code: this message is formatted into a persisted
-                # `policy_event` by `accept()` (T-215). `{exc}` is left as it is because the
-                # refused HOST is the diagnostic — the code it also carries, inside the
-                # permalink's `?discount=`, is redacted by `OrphanedCheckoutCode.__init__`.
+                # `policy_event` by `accept()` (T-215). `{exc}` survives because the refused
+                # HOST is the diagnostic — and by this point `exc` names the host and NOT
+                # the permalink it was parsed from, so there is no merchant-controlled path
+                # or query left in it for a code to be spelled in.
                 f"{exc} — the discount code {code_fingerprint(minted.code)} was ALREADY "
                 f"minted by {self.name!r} for store {request.store_id!r} and is live in the "
                 f"merchant's system; record and revoke it via the code_created event",
@@ -488,6 +647,7 @@ class CheckoutProvider:
             # exactly the assumption that produced this ticket, and the cost of being wrong
             # is another unrevokable discount. A failure here is reported with the code
             # attached like any other post-mint refusal.
+            _redact_chain(exc, minted.code, (minted.permalink_url, request.checkout_url))
             raise OrphanedCheckoutCode(
                 f"{type(exc).__name__}: {exc} — raised AFTER {self.name!r} minted "
                 f"{code_fingerprint(minted.code)} for store {request.store_id!r}; the code "

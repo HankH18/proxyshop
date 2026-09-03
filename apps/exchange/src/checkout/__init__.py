@@ -98,6 +98,7 @@ from .provider import (
     default_permalink,
     domain_is_platform_verified,
     redact_code,
+    redact_url,
     registered_domain_for,
 )
 from .providers import (
@@ -168,6 +169,7 @@ __all__ = [
     "offer_discount_percentage",
     "offer_quantity",
     "redact_code",
+    "redact_url",
     "register_provider",
     "registered_domain_for",
     "registered_modes",
