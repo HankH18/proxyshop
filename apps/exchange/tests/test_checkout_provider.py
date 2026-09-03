@@ -1048,3 +1048,51 @@ def test_an_orphan_refusal_survives_being_serialised() -> None:
     assert isinstance(revived, OffDomainCheckout)
     assert revived.orphan == original.orphan
     assert str(revived) == "refused"
+
+
+class HostileReply:
+    """A merchant reply whose second read raises — the handler must not read it again."""
+
+    def __init__(self, code: str = "PSX-HOSTILE1") -> None:
+        self.code = code
+        self.reads = 0
+
+    def get(self, key: str) -> Any:
+        self.reads += 1
+        if key == "code":
+            return self.code
+        raise RuntimeError("reply object exploded on the second read")
+
+
+class HostileReplyCreator:
+    def __init__(self) -> None:
+        self.reply = HostileReply()
+        self.calls: list[tuple[str, Any]] = []
+
+    def create_code(self, store_id: str, offer_payload: Any) -> HostileReply:
+        self.calls.append((store_id, offer_payload))
+        return self.reply
+
+
+def test_a_reply_that_raises_while_being_read_still_yields_its_code() -> None:
+    """An exception raised *inside* the orphan handler would lose the orphan again.
+
+    The handler therefore reads the permalink off a local, never back off the reply object.
+    The code is what has to be revoked; the permalink is a nicety.
+    """
+    creator = HostileReplyCreator()
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        resolve_provider("shopify").checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer=dict(FALLBACK_OFFER),
+                mode="shopify",
+                code_creator=creator,
+                now=T_NOW,
+                registered_domains=SELLERS,
+            )
+        )
+    assert raised.value.orphan.code == "PSX-HOSTILE1"

@@ -107,6 +107,7 @@ class ShopifyCheckoutProvider(CheckoutProvider):
         # "already proved" is a claim about a previous call, and `default_permalink` resolves
         # the domain a *second* time — a lookup that answers once and fails once (a dropped
         # connection, a cache eviction) is all it takes.
+        permalink: Any = ""
         try:
             permalink = _read(reply, "permalink_url") or _read(reply, "permalink")
             if not permalink:
@@ -127,7 +128,11 @@ class ShopifyCheckoutProvider(CheckoutProvider):
                 f"recorded and revoked",
                 orphan=OrphanedCode(
                     code=str(code),
-                    permalink_url=str(_read(reply, "permalink_url") or ""),
+                    # Read off the local, never back off `reply`: if `_read(reply, ...)` is
+                    # what raised, reading it again raises inside the handler and the orphan
+                    # is lost — which is the exact failure this block exists to prevent. The
+                    # permalink is a nicety here anyway; the CODE is what has to be revoked.
+                    permalink_url=str(permalink or ""),
                     provider=self.name,
                     store_id=request.store_id,
                     auction_id=request.auction_id,
