@@ -31,7 +31,8 @@ second answer to a question that has one.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import math
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from ..checkout.domain import is_on_domain
@@ -161,6 +162,14 @@ def expiry_reason(offer: Any, now: float) -> str | None:
         expires_at = float(raw)
     except (TypeError, ValueError):
         return f"{REASON_EXPIRED}: expires_at {raw!r} is not a readable instant; failing closed"
+    if not math.isfinite(expires_at):
+        # NaN in particular: EVERY comparison against it is False, so a plain `expires_at <=
+        # now` test says "not expired" and a NaN-expiry offer walks straight into a shortlist
+        # slot. An instant that is not a finite number is not an instant.
+        return (
+            f"{REASON_EXPIRED}: expires_at {raw!r} is not a finite instant, so the offer "
+            f"cannot be shown to be live; failing closed"
+        )
     if expires_at <= now:
         return (
             f"{REASON_EXPIRED}: the offer expired at {expires_at!r}, which is not after the "
@@ -257,17 +266,44 @@ def read_criteria(intent: Any) -> tuple[list[HardCriterion], str | None]:
     An intent this module cannot parse denies every candidate rather than admitting them
     all: "I could not evaluate the constraint" and "the constraint is satisfied" must never
     be the same outcome (R19).
+
+    That is why an ABSENT `hard_constraints` is a denial while an EMPTY one is not. They look
+    alike and they are opposites: a buyer who asked for nothing mandatory has an empty list,
+    while an intent with no such field at all is not a record this module knows how to read,
+    and treating it as "no constraints" would silently admit every candidate for every
+    unrecognised intent shape. An empty list, being a readable answer, admits.
     """
-    raw = read(intent, "hard_constraints", None) or ()
+
+    def refused(detail: str) -> tuple[list[HardCriterion], str]:
+        return [], (
+            f"{REASON_UNDECIDABLE_INTENT}: {detail}; a constraint this exchange cannot decide "
+            f"excludes rather than counting as satisfied (R19)"
+        )
+
+    raw = read(intent, "hard_constraints", _MISSING)
+    if raw is _MISSING or raw is None:
+        return refused(
+            f"the intent {type(intent).__name__} carries no readable hard_constraints, so "
+            f"this exchange cannot tell an unconstrained request from an unread one"
+        )
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Iterable):
+        return refused(f"hard_constraints {raw!r} is not a list of constraints")
+    try:
+        entries = list(raw)
+    except Exception as exc:  # a constraint list that cannot even be walked
+        return refused(f"hard_constraints could not be read ({type(exc).__name__}: {exc})")
+
     criteria: list[HardCriterion] = []
-    for entry in raw:
+    for entry in entries:
         try:
             criteria.append(HardCriterion.from_mapping(entry))
         except MalformedIntent as exc:
-            return [], (
-                f"{REASON_UNDECIDABLE_INTENT}: {exc}; a constraint this exchange cannot decide "
-                f"excludes rather than counting as satisfied (R19)"
-            )
+            return refused(str(exc))
+        except Exception as exc:
+            # `from_mapping` promises MalformedIntent for a constraint it understands to be
+            # wrong; anything else reaching here is a shape it did not anticipate, and an
+            # unanticipated shape is still undecidable rather than satisfied.
+            return refused(f"constraint {entry!r} could not be read ({type(exc).__name__}: {exc})")
     return criteria, None
 
 

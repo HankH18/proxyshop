@@ -103,61 +103,78 @@ def trust_summary(store_id: str, trust_row: Any) -> dict[str, Any]:
 
 
 def _best_bid_per_store(ranked: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The leading bid from each distinct store, keeping the ranking's order."""
-    seen: set[str] = set()
+    """The leading bid from each distinct store, keeping the ranking's order.
+
+    Distinct by `bid_id` as well as by `store_id`. Two rows sharing a `bid_id` are two bids
+    the exchange cannot tell apart, and a shortlist naming the same `bid_ref` twice is a
+    shortlist whose slots cannot be resolved back to offers — a buyer clicking either one
+    reaches an ambiguous bid. Ranking still reports both rows; only the slots are deduped,
+    because inventing an eligibility rule for a shape the spec does not describe would be a
+    bigger change than keeping the published invariant.
+    """
+    seen_stores: set[str] = set()
+    seen_bids: set[str] = set()
     pool: list[dict[str, Any]] = []
     for row in ranked:
         store_id = str(row["store_id"])
-        if store_id in seen:
+        bid_id = str(row["bid_id"])
+        if store_id in seen_stores or bid_id in seen_bids:
             continue
-        seen.add(store_id)
+        seen_stores.add(store_id)
+        seen_bids.add(bid_id)
         pool.append(row)
     return pool
 
 
-def assign_slot_names(pool: Sequence[dict[str, Any]]) -> dict[str, str]:
-    """`{bid_id: slot_name}` — each pool member gets the name it leads on.
+def assign_slot_names(pool: Sequence[dict[str, Any]]) -> list[str | None]:
+    """One slot name per pool member, in pool order — each gets the name it leads on.
 
     Greedy over :data:`SLOT_NAMES` in order: each name goes to the highest-scoring unclaimed
     member on that name's dimension, with the ranking's own order breaking a draw. That
     ordering is what makes the assignment deterministic; a tie broken by dictionary order
     would make the slot labels depend on which candidate arrived first.
+
+    The result is a LIST indexed by position, not a map keyed by `bid_id`. Two candidates can
+    arrive carrying the same `bid_id` — the ranker is handed whatever the auction collected,
+    and duplicate ids are exactly the kind of thing that arrives from a misbehaving fan-out —
+    and a map keyed by id gave both of them one entry, so the second silently inherited the
+    first's name and the shortlist published two slots called "value". Position is unique by
+    construction; `bid_id` is not.
     """
-    remaining = list(pool)
-    assigned: dict[str, str] = {}
-    positions = {str(row["bid_id"]): index for index, row in enumerate(pool)}
+    remaining = list(range(len(pool)))
+    names: list[str | None] = [None] * len(pool)
     for name in SLOT_NAMES:
         if not remaining:
             break
         dimension = SLOT_DIMENSIONS[name]
         winner = max(
             remaining,
-            key=lambda row: (
-                float(row["features"].get(dimension, 0.0)),
-                -positions[str(row["bid_id"])],
-            ),
+            key=lambda index: (float(pool[index]["features"].get(dimension, 0.0)), -index),
         )
-        assigned[str(winner["bid_id"])] = name
+        names[winner] = name
         remaining.remove(winner)
-    return assigned
+    # `None` only for a pool larger than the slot vocabulary, which `build` caps away. It is
+    # returned rather than dropped so the result stays index-aligned with `pool`.
+    return names
 
 
 def build(
     ranked: Sequence[dict[str, Any]], auction_id: str, *, max_slots: int = MAX_SLOTS
 ) -> dict[str, Any]:
     """The shortlist for one ranking, as plain data validated against the contract type."""
-    pool = _best_bid_per_store(ranked)[:max_slots]
+    pool = _best_bid_per_store(ranked)[: min(max_slots, len(SLOT_NAMES))]
     names = assign_slot_names(pool)
 
     slots = [
         ShortlistSlot(
-            slot=ShortlistSlotName(names[str(row["bid_id"])]),
+            slot=ShortlistSlotName(name),
             bid_ref=str(row["bid_id"]),
             fit_score=float(row["rank_score"]),
             trust_summary=dict(row["trust_summary"]),
             provenance_labels=list(row["provenance_labels"]),
         )
-        for row in pool
+        for row, name in zip(pool, names, strict=True)
+        if name is not None
     ]
     return Shortlist(auction_id=auction_id, slots=slots).model_dump(mode="json")
 

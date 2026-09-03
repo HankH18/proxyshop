@@ -668,3 +668,90 @@ def test_an_offer_with_no_checkout_url_is_not_shortlisted():
     assert row["rank_score"] is None
     assert "domain" in _reason_blob(row)
     assert _slot_refs(result) == []
+
+
+# ---------------------------------------------------------------------------------
+# Fail-closed holes found by adversarial review. Each of these admitted a candidate
+# it should have refused, and none of them was visible to the frozen acceptance suite.
+# ---------------------------------------------------------------------------------
+@pytest.mark.parametrize("expires_at", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_expiry_is_not_a_live_offer(expires_at):
+    """NaN is the dangerous one: every comparison against it is False, so a plain
+    `expires_at <= now` test reads "not expired" and the offer walks into a slot."""
+    from apps.exchange.src.ranking import rank
+
+    cand = make_candidate("bid-a", "store-a", expires_at=expires_at, intent_match=1.0)
+    result = rank([cand], make_intent(), make_trust_snapshot(["store-a"]), make_config())
+    row = _by_bid(result)["bid-a"]
+    assert row["eligible"] is False, f"expires_at={expires_at!r} was accepted as live"
+    assert row["rank_score"] is None
+    assert "expir" in _reason_blob(row)
+    assert _slot_refs(result) == []
+
+
+@pytest.mark.parametrize(
+    "intent",
+    [
+        None,
+        "a 30 litre commuter backpack",
+        {},
+        {"intent_id": "intent-1"},
+        {"intent_id": "intent-1", "hard_constraints": None},
+        {"intent_id": "intent-1", "hard_constraints": 5},
+        {"intent_id": "intent-1", "hard_constraints": "capacity_l >= 30"},
+        {"intent_id": "intent-1", "hard_constraints": [{"field": "capacity_l"}]},
+        {"intent_id": "intent-1", "hard_constraints": [7]},
+    ],
+)
+def test_an_unreadable_intent_excludes_everyone_rather_than_admitting_everyone(intent):
+    """R19: an intent whose constraints cannot be read must not be read as "no constraints".
+
+    They are opposite outcomes that look alike, and getting them confused admits every
+    candidate for every intent shape this exchange does not recognise. `rank()` must also
+    not raise — an unreadable intent is a decision, not a crash.
+    """
+    from apps.exchange.src.ranking import rank
+
+    cand = make_candidate("bid-a", "store-a", intent_match=1.0)
+    result = rank([cand], intent, make_trust_snapshot(["store-a"]), make_config())
+    row = _by_bid(result)["bid-a"]
+    assert row["eligible"] is False, f"intent {intent!r} admitted a candidate unchecked"
+    assert row["rank_score"] is None
+    assert "constraint" in _reason_blob(row)
+    assert _slot_refs(result) == []
+
+
+def test_an_intent_with_an_explicitly_empty_constraint_list_admits():
+    """The other half of the rule above: an EMPTY list is a readable answer — the buyer
+    asked for nothing mandatory — and must not be confused with an absent one."""
+    from apps.exchange.src.ranking import rank
+
+    cand = make_candidate("bid-a", "store-a", intent_match=1.0)
+    result = rank([cand], make_intent([]), make_trust_snapshot(["store-a"]), make_config())
+    assert _by_bid(result)["bid-a"]["eligible"] is True
+    assert _slot_refs(result) == ["bid-a"]
+
+
+def test_two_candidates_sharing_a_bid_id_never_produce_two_identical_slots():
+    """A slot is addressed by `bid_ref`. Two rows carrying one id are two bids the exchange
+    cannot tell apart, so at most one of them may occupy a slot — and the slot NAMES must
+    still be distinct, which a name map keyed by bid_id could not guarantee."""
+    from apps.exchange.src.ranking import rank
+
+    candidates = [
+        make_candidate("bid-dup", "store-a", intent_match=0.9),
+        make_candidate("bid-dup", "store-b", intent_match=0.8),
+        make_candidate("bid-c", "store-c", intent_match=0.7),
+    ]
+    result = rank(
+        candidates,
+        make_intent(),
+        make_trust_snapshot(["store-a", "store-b", "store-c"]),
+        make_config(),
+    )
+    slots = result["shortlist"]["slots"]
+    refs = [s["bid_ref"] for s in slots]
+    kinds = [s["slot"] for s in slots]
+    assert len(set(refs)) == len(refs), f"a bid_ref occupies two slots: {refs}"
+    assert len(set(kinds)) == len(kinds), f"a slot name is used twice: {kinds}"
+    assert refs == ["bid-dup", "bid-c"]
