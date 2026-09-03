@@ -30,14 +30,21 @@ The order of the two overrides, which is the whole trick
 --------------------------------------------------------
 Two R12 rules sit on top of the sampled shares, and they are applied in this order:
 
-1. **The exploration floor, per low-data store.** Every store the trust snapshot marks
-   ``low_data`` is lifted to at least ``config["exploration_floor"]``. It is a floor
-   *each* such store gets, not one slice they divide: with a floor of 0.25 and one
-   low-data store among five, that store takes 0.25 and the other four share the
-   remaining 0.75. The lift is a water-filling loop, so pinning one store cannot push a
-   second low-data store back under the floor. If the low-data stores would between them
-   claim more than the whole cluster, the floor is capped at ``1/n`` rather than
-   overdrawn.
+1. **The exploration floor, per eligible low-data store.** Every store the trust snapshot
+   marks ``low_data`` and does not blacklist is lifted to at least
+   ``config["exploration_floor"]``. It is a floor *each* such store gets, not one slice
+   they divide: with a floor of 0.25 and one low-data store among five, that store takes
+   0.25 and the other four share the remaining 0.75; with two low-data stores they take
+   0.25 *each* and the rest share 0.50. The lift is a water-filling loop, so pinning one
+   store cannot push a second low-data store back under the floor.
+
+   The slice is bounded twice. A blacklisted store claims none of it -- budgeting
+   exploration for a store that can never be exposed only starves an eligible new one --
+   and the pinned mass as a whole is capped at :data:`EXPLORATION_BUDGET` whenever any
+   eligible store has a record to exploit, falling back to ``1/n`` of the cluster when
+   nobody is exploiting. Both caps exist for the same reason: ``len(low_data) * floor >=
+   1`` used to leave every established store at *exactly* 0.0, and 0.0 is the value this
+   module reserves for "banned".
 
 2. **The blacklist, and it never gives anything back.** Every store whose eligibility
    answer is anything other than an explicit "not blacklisted" is set to exactly 0.0, and
@@ -69,6 +76,7 @@ from typing import Any
 
 __all__ = [
     "DEFAULT_DRAWS",
+    "EXPLORATION_BUDGET",
     "PRIOR_WEIGHT",
     "BanditState",
     "Posterior",
@@ -84,6 +92,13 @@ DEFAULT_DRAWS = 512
 #: Maximum pseudo-observations the trust snapshot may contribute to a starting posterior,
 #: before the snapshot's own ``confidence`` scales it down.
 PRIOR_WEIGHT = 4.0
+
+#: Most of a cluster the exploration floor may pin, when there is any eligible store with a
+#: record to exploit. Exploration that takes 100% is not exploration, it is a lottery: the
+#: stores that earned their exposure would each be left at exactly 0.0, the value this
+#: module reserves for "banned". The remaining tenth is shared out by the sampler, so a
+#: store with a real conversion record is never mistaken for a banned one.
+EXPLORATION_BUDGET = 0.9
 
 #: Tolerance for the water-filling comparison, so float noise cannot re-pin a store that
 #: is already sitting exactly on the floor.
@@ -215,7 +230,11 @@ def initial_state(
     if draws < 1:
         raise ValueError(f"draws must be at least 1, got {draws!r}")
 
-    snapshot: Mapping[str, Any] = trust_snapshot or {}
+    # Store ids are stringified by `_unique`, so the snapshot is keyed the same way before
+    # lookup. Without this a snapshot keyed by, say, the int 5 misses the store id "5" and
+    # the store is fail-closed banned -- the right default, reached for the wrong reason.
+    raw_snapshot: Mapping[Any, Any] = trust_snapshot or {}
+    snapshot = {str(key): value for key, value in raw_snapshot.items()}
     records = {sid: _read(snapshot, sid, _MISSING) for sid in store_ids}
 
     blacklisted = frozenset(sid for sid in store_ids if _is_blacklisted(records[sid]))
@@ -311,7 +330,9 @@ def exposure(state: BanditState, cluster_id: str, seed: Any) -> dict[str, float]
 
     order = state.stores
     sampled = _probability_of_best(state.posteriors[key], order, _rng(key, seed), state.draws)
-    floored = _apply_exploration_floor(sampled, order, state.low_data, state.exploration_floor)
+    floored = _apply_exploration_floor(
+        sampled, order, state.low_data, state.blacklisted, state.exploration_floor
+    )
     return _apply_blacklist(floored, order, state.blacklisted)
 
 
@@ -365,25 +386,47 @@ def _apply_exploration_floor(
     shares: Mapping[str, float],
     order: Sequence[str],
     low_data: frozenset[str],
+    blacklisted: frozenset[str],
     floor: float,
 ) -> dict[str, float]:
-    """Lift every low-data store to at least ``floor`` (R12's guaranteed exploration slice).
+    """Lift every eligible low-data store to at least ``floor`` (R12's exploration slice).
 
     The floor is per low-data store, not one slice divided among them. Water-filling:
     pin the stores that fall short, rescale what is left over the rest, and look again --
     because pinning one store shrinks the pool and can drop a second low-data store under
     the floor it had cleared a moment ago.
 
-    If the low-data stores would together claim more than the whole cluster, the effective
-    floor is capped at ``1/len(low_data)``. Overdrawing would make the shares sum to more
-    than one, and a "guarantee" that cannot be met for everyone it names is better reported
-    as an equal split than as a number that does not add up.
+    Two things bound the slice, and both exist because without them the guarantee eats the
+    cluster:
+
+    **Blacklisted stores claim no slice.** A banned store can never be exposed, so
+    budgeting exploration for it buys nothing and takes the slice out of an eligible new
+    store's mouth. Reading eligibility here is not "applying the blacklist first": the
+    banned store still competes in the sampled draw above and is still reported, at 0.0, by
+    :func:`_apply_blacklist` below -- and the slice is still never handed back to it.
+
+    **Exploration never takes the whole cluster.** If exploitation has any eligible store at
+    all, the pinned mass is capped at :data:`EXPLORATION_BUDGET`, so the stores with a real
+    record keep a positive share between them. Without that cap, ``len(low_data) * floor >=
+    1`` left every established store at *exactly* 0.0 -- which is the value this module
+    reserves for "banned", so ten new stores at a 0.10 floor could silently retire three
+    stores with six hundred conversions apiece. The per-store floor is only reduced when it
+    genuinely cannot be paid: nine low-data stores at 0.10 still get 0.10 each.
+
+    When no eligible store is exploiting, the budget is the whole cluster and the floor is
+    capped at ``1/len(lows)`` -- a guarantee that cannot be met for everyone it names is
+    better reported as an equal split than as a number that does not add up.
     """
-    lows = [store_id for store_id in order if store_id in low_data]
+    lows = [store_id for store_id in order if store_id in low_data and store_id not in blacklisted]
     if floor <= 0.0 or not lows:
         return dict(shares)
 
-    effective = min(floor, 1.0 / len(lows))
+    exploiting = [
+        store_id for store_id in order if store_id not in blacklisted and store_id not in low_data
+    ]
+    budget = EXPLORATION_BUDGET if exploiting else 1.0
+    effective = min(floor, budget / len(lows))
+    entitled = frozenset(lows)
     pinned: dict[str, float] = {}
 
     while True:
@@ -397,12 +440,12 @@ def _apply_exploration_floor(
             short = [
                 store_id
                 for store_id in free
-                if store_id in low_data and shares[store_id] * scale < effective - _EPS
+                if store_id in entitled and shares[store_id] * scale < effective - _EPS
             ]
         else:
             even = remaining / len(free)
             short = [
-                store_id for store_id in free if store_id in low_data and even < effective - _EPS
+                store_id for store_id in free if store_id in entitled and even < effective - _EPS
             ]
         if not short:
             break
@@ -430,13 +473,18 @@ def _apply_blacklist(
 ) -> dict[str, float]:
     """Zero every blacklisted store and renormalize over the survivors.
 
-    Applied **after** the exploration floor, and it does not re-run it. A blacklisted
-    low-data store is holding the exploration slice at this point; zeroing it here is what
-    makes it report 0.0 rather than the floor, and the mass goes to the survivors in
-    proportion to what they already held -- never back to the store just removed.
+    Applied **after** the exploration floor, and it does not re-run it. A blacklisted store
+    still carried its sampled share into the floor step; zeroing it here is what makes it
+    report 0.0, and its mass goes to the survivors in proportion to what they already held
+    -- never back to the store just removed.
 
     Blacklisted stores stay in the result at 0.0 rather than disappearing, so a caller can
     tell "banned" from "not in this cluster's roster".
+
+    Note for anyone changing the floor above: this renormalization is unconditional, so it
+    will quietly rescale a malformed floor result -- shares summing to 1.6, or to 0.0 --
+    into something that looks well-formed. That is why ``test_bandit.py`` asserts the
+    floor's own output is a distribution rather than only checking what comes out here.
     """
     out = {
         store_id: (0.0 if store_id in blacklisted else float(shares[store_id]))

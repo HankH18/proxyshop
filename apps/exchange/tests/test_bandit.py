@@ -81,7 +81,11 @@ def test_positive_outcomes_raise_exposure_only_in_the_outcome_cluster() -> None:
 
 
 def test_losses_lower_a_store_relative_to_a_store_with_no_record_at_all() -> None:
-    """A losing record is worse than no record: the bandit still explores the unknown store."""
+    """A losing record is worse than no outcomes at all: the bandit still explores the unknown.
+
+    Both stores carry a full trust-snapshot record; what ``store-quiet`` has none of is
+    conversion outcomes.
+    """
     from exchange.policy import exposure, initial_state, update
 
     stores = ["store-loser", "store-quiet"]
@@ -149,9 +153,10 @@ def test_exploration_floor_holds_for_a_low_data_store_across_a_seeded_window() -
 def test_the_floor_is_per_low_data_store_and_leaves_the_rest_to_be_shared() -> None:
     """One low-data store at a 0.25 floor takes 0.25 — the other four share 0.75, not 0.75/5.
 
-    This is the ordering that is easy to get backwards: a single global exploration slice
-    split among the low-data stores, or a floor applied to every store, both satisfy the
-    previous test and get this one wrong.
+    This case pins "the floor is not spread over everybody": a floor applied to every store
+    gets it wrong. It does NOT distinguish a per-store floor from one global slice — with a
+    single low-data store the two are the same number. That discrimination is
+    ``test_two_low_data_stores_each_get_the_whole_floor_not_half_of_one`` below.
     """
     from exchange.policy import exposure, initial_state, update
 
@@ -404,3 +409,220 @@ def _reference_exposure() -> dict[str, float]:
     state = initial_state(stores, ["cluster-1"], snapshot, {FLOOR: 0.1})
     state = update(state, build_outcomes(12, ["store-a"]))
     return exposure(state, "cluster-1", 4)
+
+
+# ---------------------------------------------------------------------------------
+# R12 — what an adversarial verifier found the tests above could not see.
+# ---------------------------------------------------------------------------------
+def test_two_low_data_stores_each_get_the_whole_floor_not_half_of_one() -> None:
+    """THE discriminator: per-store floor vs one shared exploration slice.
+
+    Every other floor test in this file uses a single low-data store, where "0.25 each" and
+    "0.25 between them" are the same number — so an implementation that hands the low-data
+    stores one slice to divide passes them all. Two low-data stores is the smallest case
+    that tells the two designs apart: per-store gives 0.25 + 0.25 and leaves 0.50 for the
+    three established stores; a shared slice would give 0.125 each.
+    """
+    from exchange.policy import exposure, initial_state, update
+
+    established = ["store-a", "store-b", "store-c"]
+    newcomers = ["store-new-1", "store-new-2"]
+    stores = [*established, *newcomers]
+    floor = 0.25
+    state = initial_state(
+        stores,
+        ["cluster-1"],
+        build_trust_snapshot(stores, low_data=newcomers),
+        {FLOOR: floor},
+    )
+    updated = update(state, build_outcomes(60, established))
+
+    for seed in range(5):
+        shares = _shares(exposure(updated, "cluster-1", seed))
+        for sid in newcomers:
+            assert shares[sid] == pytest.approx(floor, abs=1e-6), (
+                f"seed {seed}: {sid} got {shares[sid]}, not the whole floor {floor} — "
+                f"this is one slice split two ways: {shares}"
+            )
+        rest = sum(shares[sid] for sid in established)
+        assert rest == pytest.approx(1.0 - 2 * floor, abs=1e-6), shares
+
+
+def test_an_established_store_is_never_starved_to_the_value_that_means_banned() -> None:
+    """Ten new stores at a 0.10 floor must not retire three stores with 600 conversions.
+
+    ``len(low_data) * floor >= 1`` is the case where a naive per-store floor consumes the
+    entire cluster and leaves every exploiting store at *exactly* 0.0 — indistinguishable,
+    to any caller reading these shares, from blacklisted. The exploration budget exists to
+    stop that, and this is the test that holds it in place.
+    """
+    from exchange.policy import exposure, initial_state, update
+
+    established = ["est-1", "est-2", "est-3"]
+    newcomers = [f"new-{i}" for i in range(10)]
+    stores = [*established, *newcomers]
+    state = initial_state(
+        stores,
+        ["cluster-1"],
+        build_trust_snapshot(stores, low_data=newcomers),
+        {FLOOR: 0.10},
+    )
+    updated = update(state, build_outcomes(200, established))
+
+    for seed in range(5):
+        shares = _shares(exposure(updated, "cluster-1", seed))
+        for sid in established:
+            assert shares[sid] > 0.0, (
+                f"seed {seed}: {sid} has 200 conversions and reads {shares[sid]!r}, which is "
+                f"the value reserved for a banned store: {shares}"
+            )
+        assert sum(shares.values()) == pytest.approx(1.0, abs=1e-6), shares
+
+
+def test_a_blacklisted_store_claims_no_exploration_slice_from_an_eligible_one() -> None:
+    """A banned low-data store must not shrink the floor an eligible new store is owed.
+
+    Budgeting the exploration slice for a store that can never be exposed takes it straight
+    out of the eligible newcomer's mouth, and — when the arithmetic runs out — leaves the
+    established store on exactly zero.
+    """
+    from exchange.policy import exposure, initial_state
+
+    stores = ["store-a", "store-new", "store-banned"]
+    state = initial_state(
+        stores,
+        ["cluster-1"],
+        build_trust_snapshot(
+            stores, blacklisted=("store-banned",), low_data=("store-new", "store-banned")
+        ),
+        {FLOOR: 0.60},
+    )
+
+    for seed in range(6):
+        shares = _shares(exposure(state, "cluster-1", seed))
+        assert shares["store-banned"] == 0.0, shares
+        assert shares["store-new"] >= 0.60 - 1e-9, (
+            f"seed {seed}: the banned store ate the eligible newcomer's floor: {shares}"
+        )
+        assert shares["store-a"] > 0.0, (
+            f"seed {seed}: the only eligible established store was starved to zero: {shares}"
+        )
+
+
+@pytest.mark.parametrize("floor", [0.0, 0.05, 0.1, 0.25, 0.34, 0.5, 0.6, 0.9, 1.0])
+@pytest.mark.parametrize("n_low", [0, 1, 2, 3, 5, 10])
+def test_no_eligible_store_ever_reads_exactly_zero(floor: float, n_low: int) -> None:
+    """Swept invariant: 0.0 is reserved for blacklisted stores, at every floor and roster.
+
+    ``exposure``'s own docstring promises this ("a share of exactly 0.0 means blacklisted
+    and nothing else"). It is the invariant both the missing budget cap and the blacklisted
+    store's floor claim broke, and neither showed up in any single hand-written case.
+    """
+    from exchange.policy import exposure, initial_state, update
+
+    established = ["est-1", "est-2"]
+    newcomers = [f"new-{i}" for i in range(n_low)]
+    stores = [*established, *newcomers, "banned"]
+    state = initial_state(
+        stores,
+        ["cluster-1"],
+        build_trust_snapshot(stores, low_data=newcomers, blacklisted=("banned",)),
+        {FLOOR: floor},
+    )
+    updated = update(state, build_outcomes(40, established))
+
+    for seed in range(3):
+        shares = _shares(exposure(updated, "cluster-1", seed))
+        assert shares["banned"] == 0.0, shares
+        for sid in [*established, *newcomers]:
+            assert shares[sid] > 0.0, (
+                f"floor={floor} n_low={n_low} seed={seed}: eligible store {sid} reads exactly "
+                f"0.0, which this module reserves for banned: {shares}"
+            )
+        assert sum(shares.values()) == pytest.approx(1.0, abs=1e-6), shares
+
+
+@pytest.mark.parametrize("floor", [0.0, 0.1, 0.25, 0.4, 0.6, 1.0])
+@pytest.mark.parametrize("n_low", [0, 1, 2, 4, 7])
+def test_the_floor_step_alone_produces_a_distribution(floor: float, n_low: int) -> None:
+    """Assert on the floor's OWN output, because the blacklist step would hide a broken one.
+
+    ``_apply_blacklist`` renormalizes unconditionally, so a floor that emitted shares
+    summing to 1.6 — or to 0.0, or containing negatives — comes out the far end looking
+    perfectly well-formed. Checking only ``exposure()`` therefore cannot see a broken floor
+    at all; this reaches past it.
+    """
+    from exchange.policy.bandit import _apply_exploration_floor
+
+    established = ["est-1", "est-2"]
+    newcomers = [f"new-{i}" for i in range(n_low)]
+    order = (*established, *newcomers, "banned")
+    raw = dict.fromkeys(order, 1.0 / len(order))
+
+    out = _apply_exploration_floor(raw, order, frozenset(newcomers), frozenset({"banned"}), floor)
+
+    assert set(out) == set(order), out
+    assert all(value >= 0.0 for value in out.values()), f"negative share: {out}"
+    assert sum(out.values()) == pytest.approx(1.0, abs=1e-9), f"sum {sum(out.values())}: {out}"
+
+
+# ---------------------------------------------------------------------------------
+# The trust snapshot seeds the prior — the ticket objective's own words.
+# ---------------------------------------------------------------------------------
+def test_the_trust_score_seeds_the_prior_before_any_outcome_exists() -> None:
+    """R12/T-034: a well-rated store starts ahead of a badly-rated one, with zero outcomes.
+
+    Every snapshot the frozen suite builds gives every store ``score=0.5, confidence=0.4``,
+    so the prior is invisible to it: an implementation that ignored the trust snapshot
+    entirely would pass all three frozen tests.
+    """
+    from exchange.policy import exposure, initial_state
+
+    stores = ["store-trusted", "store-doubted"]
+    snapshot = build_trust_snapshot(stores, scores={"store-trusted": 0.95, "store-doubted": 0.05})
+    state = initial_state(stores, ["cluster-1"], snapshot, {FLOOR: 0.0})
+
+    for seed in range(5):
+        shares = _shares(exposure(state, "cluster-1", seed))
+        assert shares["store-trusted"] > shares["store-doubted"], (
+            f"seed {seed}: the trust snapshot did not seed the prior at all ({shares})"
+        )
+
+
+def test_a_snapshot_with_no_confidence_leaves_the_prior_neutral() -> None:
+    """The prior is scaled by the snapshot's own confidence, so a 0.95 nobody stands behind
+    starts level with a 0.05 nobody stands behind."""
+    from exchange.policy import exposure, initial_state
+
+    stores = ["store-trusted", "store-doubted"]
+    snapshot = build_trust_snapshot(stores, scores={"store-trusted": 0.95, "store-doubted": 0.05})
+    for record in snapshot.values():
+        record["confidence"] = 0.0
+    state = initial_state(stores, ["cluster-1"], snapshot, {FLOOR: 0.0})
+
+    gaps = []
+    for seed in range(20):
+        shares = _shares(exposure(state, "cluster-1", seed))
+        gaps.append(shares["store-trusted"] - shares["store-doubted"])
+    assert abs(sum(gaps) / len(gaps)) < 0.05, (
+        f"a zero-confidence score still moved the prior; mean gap {sum(gaps) / len(gaps)}"
+    )
+
+
+def test_a_snapshot_keyed_by_a_non_string_store_id_is_still_found() -> None:
+    """Store ids are stringified; the snapshot lookup must be too, or the store is banned.
+
+    Fail-closed is the right default for a store the snapshot does not describe — but a
+    store the snapshot DOES describe, under a key of a different type, is described.
+    """
+    from exchange.policy import exposure, initial_state
+
+    snapshot = {
+        5: {"score": 0.5, "confidence": 0.4, "blacklisted": False, "low_data": False},
+        "store-b": {"score": 0.5, "confidence": 0.4, "blacklisted": False, "low_data": False},
+    }
+    state = initial_state([5, "store-b"], ["cluster-1"], snapshot, {FLOOR: 0.0})
+
+    shares = _shares(exposure(state, "cluster-1", 1))
+    assert shares["5"] > 0.0, f"an int-keyed snapshot record was missed and fail-closed: {shares}"
+    assert shares["store-b"] > 0.0, shares
