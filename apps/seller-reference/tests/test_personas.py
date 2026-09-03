@@ -165,3 +165,54 @@ def test_an_unscripted_persona_name_raises(intent) -> None:
 
     with pytest.raises(UnknownPersonaError):
         build_persona("no-such-persona")
+
+
+def test_every_claims_source_span_indexes_its_own_value_in_the_pitch_text(intent) -> None:
+    """D25: a `source_span` that points nowhere makes the claim unverifiable.
+
+    Nothing above this line reads `pitch.text` at all, so the offsets `_render` computes were
+    free to be arbitrary and every other assertion in this file — and the frozen criterion —
+    would still have been green. A `VerificationResult` addresses a claim through its
+    `claim_ref`/span, so an off-by-one here is only discovered by the verifier that cannot
+    quote the sentence it is supposed to be checking.
+    """
+    from seller_reference.personas import build_persona
+
+    pitch = build_persona("aggressive").pitch(intent)
+    assert pitch.claims, "the persona emitted nothing"
+    for claim in pitch.claims:
+        span = claim.source_span
+        assert span.pitch_ref == pitch.pitch_ref
+        assert pitch.text[span.start : span.end] == str(claim.value), (
+            f"claim {claim.key!r} span ({span.start},{span.end}) selects "
+            f"{pitch.text[span.start : span.end]!r}, not its value {claim.value!r}"
+        )
+
+
+def test_every_scripted_persona_answers_the_fixture_intent_concurrently(intent, manifest) -> None:
+    """T-045 acceptance 1: every scripted persona answers the one fixture intent at once.
+
+    The personas are scripted and LLM-free, so the "LLM doubles" of the acceptance criterion
+    are vacuously in place — there is no model call to stub. What is worth asserting is that a
+    pitch holds no cross-persona shared state: two personas built and pitched from separate
+    threads must produce exactly what each produces alone, or the simulator's concurrent
+    episode schedule would be reading one seller's claims out of another's pitch.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from seller_reference.personas import build_persona, persona_names
+
+    names = persona_names()
+    assert set(names) == set(manifest["personas"]), names
+
+    def answer(name: str):
+        return _plain(build_persona(name).pitch(intent))
+
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        concurrent = list(pool.map(answer, names, timeout=30))
+
+    serial = [answer(name) for name in names]
+    assert concurrent == serial
+    for name, pitch in zip(names, concurrent, strict=True):
+        scripted = manifest["personas"][name]["scripted_claims"]
+        assert {c["key"] for c in _claims_in(pitch)} == {c["key"] for c in scripted}
