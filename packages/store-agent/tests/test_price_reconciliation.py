@@ -252,6 +252,70 @@ def test_the_price_is_reconciled_where_the_offer_is_rather_than_bid_wide(hooks: 
 
 
 # ---------------------------------------------------------------------------------------------
+# Two places a price could hide from BOTH walls, found while trying to defeat this one
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_priced_node_carrying_no_claim_fields_is_still_collected(hooks: ToolHooks) -> None:
+    """The walker recorded a price only off a node that had a claim-bearing field to begin with.
+
+    `Offer` always carries `commitments`, so every offer built as a model was collected and the
+    gap never showed. A bid built as a *dict* can write `{"product_ref": ..., "unit_price": ...}`
+    under any key it likes, and that node reached neither the floor wall nor the reconciliation —
+    it was not in `ClaimMaterial.prices` at all. Both price walls were evadable this way, the
+    floor one included, which is why this is pinned as a property of the walker rather than only
+    as a case of the wall above.
+    """
+    from store_agent.hooks.provenance import collect_claim_material
+
+    bid = {
+        "claims": [],
+        "offer": {"product_ref": "prod-cap", "unit_price": LIST_PRICE, "total_price": LIST_PRICE},
+        "alternates": [{"product_ref": "prod-cap", "unit_price": 3.0, "total_price": 3.0}],
+    }
+    collected = collect_claim_material(bid)
+    assert [path for path, _, _ in collected.prices] == [
+        ".offer.unit_price",
+        ".alternates[0].unit_price",
+    ], f"every priced node in the bid must be in the boundary's field of view: {collected.prices}"
+
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_bid_provenance(bid, hooks, product_ref="prod-cap")
+    reasons = " ".join(reason for _, reason in raised.value.offenders)
+    assert "floor" in reasons and ".alternates[0].unit_price" in reasons, (
+        f"3.00 is under the 10.00 floor AND 97% off list; both walls should say so: {reasons}"
+    )
+
+
+def test_a_price_hidden_behind_a_genuine_claims_identity_is_refused(hooks: ToolHooks) -> None:
+    """The disguise test's sibling, with the disguise stripped down to what actually hid a price.
+
+    `test_an_offer_wearing_a_genuine_claims_identity_is_refused` bolts a discount and commitments
+    onto a real claim, and those fields are what made the walker treat the node as a container.
+    Take them away and leave only `product_ref` and `unit_price` — the two fields that make a
+    node an offer — and it was claim-shaped with no structural fields at all: a leaf, admitted on
+    a fingerprint that genuinely matched, carrying a 1.00 price that no wall ever saw. A claim's
+    identity covers the claim, not a price stapled to it.
+    """
+    real = hooks.get_owner_commitments(CLUSTER)[0].model_dump()
+    assert "product_ref" not in real and "unit_price" not in real, (
+        "a genuine commitment carries neither field, so the two below are the smuggled ones"
+    )
+    payload = {**real, "product_ref": "prod-cap", "unit_price": 1.0}
+
+    with pytest.raises(HookProvenanceError) as raised:
+        enforce_bid_provenance([payload], hooks, product_ref="prod-cap")
+    reasons = " ".join(reason for _, reason in raised.value.offenders)
+    assert "unit_price" in reasons, f"the price it smuggled must be named: {reasons}"
+    assert "unit_price" in reasons.split("identity AND an offer's fields")[-1][:80], (
+        f"and the disguise refusal must list the offer fields it found, not an empty set: {reasons}"
+    )
+
+    # The same claim without the two bolted-on fields is exactly what it says it is.
+    assert enforce_bid_provenance([dict(real)], hooks, product_ref="prod-cap")
+
+
+# ---------------------------------------------------------------------------------------------
 # The other half: honest traffic still passes, and rounding is not theft
 # ---------------------------------------------------------------------------------------------
 
