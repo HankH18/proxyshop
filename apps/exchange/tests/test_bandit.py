@@ -182,9 +182,7 @@ def test_a_store_with_ample_data_is_not_lifted_by_the_exploration_floor() -> Non
     from exchange.policy import exposure, initial_state, update
 
     stores = ["store-strong", "store-weak"]
-    state = initial_state(
-        stores, ["cluster-1"], build_trust_snapshot(stores), {FLOOR: 0.40}
-    )
+    state = initial_state(stores, ["cluster-1"], build_trust_snapshot(stores), {FLOOR: 0.40})
     updated = update(state, build_outcomes(80, ["store-strong"], ["store-weak"]))
 
     shares = _shares(exposure(updated, "cluster-1", 2))

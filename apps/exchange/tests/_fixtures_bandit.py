@@ -66,8 +66,7 @@ def build_trust_snapshot(
             "score": float(scores.get(sid, 0.5)),
             "confidence": 0.4,
             "dims": {
-                dim: {"alpha": 2.0, "beta": 2.0, "decayed_at": T_PAST}
-                for dim in TRUST_DIMENSIONS
+                dim: {"alpha": 2.0, "beta": 2.0, "decayed_at": T_PAST} for dim in TRUST_DIMENSIONS
             },
             "blacklisted": sid in blacklisted,
             "low_data": sid in low_data,

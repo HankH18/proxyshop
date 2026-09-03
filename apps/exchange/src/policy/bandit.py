@@ -222,9 +222,7 @@ def initial_state(
     low_data = frozenset(
         sid for sid in store_ids if bool(_read(records[sid], "low_data", False) or False)
     )
-    priors = {
-        sid: _prior(None if records[sid] is _MISSING else records[sid]) for sid in store_ids
-    }
+    priors = {sid: _prior(None if records[sid] is _MISSING else records[sid]) for sid in store_ids}
 
     return BanditState(
         stores=store_ids,
@@ -255,9 +253,7 @@ def update(state: BanditState, outcomes: Iterable[Mapping[str, Any]]) -> BanditS
             omits ``converted``. A misrouted outcome is loud on purpose: dropping it
             silently would leave a posterior wrong with nothing to show for it.
     """
-    posteriors = {
-        cid: dict(per_store) for cid, per_store in state.posteriors.items()
-    }
+    posteriors = {cid: dict(per_store) for cid, per_store in state.posteriors.items()}
 
     for index, outcome in enumerate(outcomes):
         cluster_id = _read(outcome, "cluster_id", _MISSING)
@@ -311,9 +307,7 @@ def exposure(state: BanditState, cluster_id: str, seed: Any) -> dict[str, float]
     """
     key = str(cluster_id)
     if key not in state.posteriors:
-        raise ValueError(
-            f"unknown cluster {key!r}; this state covers {sorted(state.posteriors)}"
-        )
+        raise ValueError(f"unknown cluster {key!r}; this state covers {sorted(state.posteriors)}")
 
     order = state.stores
     sampled = _probability_of_best(state.posteriors[key], order, _rng(key, seed), state.draws)
