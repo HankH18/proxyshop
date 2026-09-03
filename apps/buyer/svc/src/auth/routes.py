@@ -23,6 +23,7 @@ need the mailbox, and the whole scheme would be an open door.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 from typing import Annotated, Any
@@ -30,9 +31,12 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
+from ..profile import IdentityLeak
 from ..vault import PostgresPseudonymStore, PseudonymVault
 from .magic_link import MagicLinkAuth, MagicLinkError, MagicLinkThrottled
 from .sessions import SessionError
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "VAULT_DSN_ENV",
@@ -278,6 +282,22 @@ def read_profile(service: ServiceDep, x_buyer_session: SessionHeader = None) -> 
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="no live buyer session"
         ) from exc
+    except IdentityLeak as exc:
+        # The one exception raised *because* buyer identity escaped must not be the thing
+        # that carries it out of the process. Unhandled, FastAPI renders it as a 500 whose
+        # traceback holds the message; so it is caught here, answered with a body that names
+        # nothing, and logged as the account keys involved and never their values (T-133).
+        # `from None` is deliberate: chaining would put the original message back into the
+        # traceback this exists to keep clean.
+        _log.error(
+            "R5: refused to serve a buyer profile that failed the identity backstop; "
+            "account key(s): %s",
+            ", ".join(exc.account_keys) or "unknown",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="this profile could not be built safely",
+        ) from None
     dumped = profile.model_dump()
     return ProfileView(pseudonym=dumped["pseudonym"], buckets=dumped["buckets"])
 
