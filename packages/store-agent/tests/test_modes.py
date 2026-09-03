@@ -41,7 +41,6 @@ import dataclasses
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 1. Shadow mode: logs everything, submits nothing.
 # ---------------------------------------------------------------------------
@@ -107,9 +106,7 @@ def test_every_logged_entry_carries_a_fully_formed_offer_and_a_rationale(
     )
 
 
-def test_the_sink_is_called_exactly_once_per_auction(
-    modes_context, modes_request, modes_recorder
-):
+def test_the_sink_is_called_exactly_once_per_auction(modes_context, modes_request, modes_recorder):
     """One auction, one log entry — a double-logged bid is a double-counted shadow result."""
     from store_agent.modes import AgentRunner
 
@@ -184,9 +181,7 @@ def test_the_bid_is_logged_before_it_is_submitted(modes_context, modes_request, 
         def __call__(self, *args, **kwargs):
             raise RuntimeError("the audit sink is down")
 
-    runner = AgentRunner(
-        modes_context(), sink=_ExplodingSink(), submitter=submitter, mode="active"
-    )
+    runner = AgentRunner(modes_context(), sink=_ExplodingSink(), submitter=submitter, mode="active")
 
     with pytest.raises(RuntimeError, match="audit sink is down"):
         runner.run(modes_request("auc-0001"))

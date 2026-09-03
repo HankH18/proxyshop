@@ -117,7 +117,9 @@ def _plain(obj: Any, _depth: int = 0) -> Any:
     namespace = getattr(obj, "__dict__", None)
     if isinstance(namespace, dict) and namespace:
         return {
-            str(k): _plain(v, _depth + 1) for k, v in namespace.items() if not str(k).startswith("_")
+            str(k): _plain(v, _depth + 1)
+            for k, v in namespace.items()
+            if not str(k).startswith("_")
         }
     return str(obj)
 
