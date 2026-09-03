@@ -16,9 +16,9 @@ Re-entrancy — the reason this is not a bare ``fcntl.flock`` call
 one process produce two descriptions, and the second ``LOCK_EX`` blocks on the first. A
 whole-repo ``pytest`` run collects **both** graph lanes, so both session-scoped guards are
 instantiated in one interpreter — and a naive implementation self-deadlocks there until
-the 600 s timeout, which in an unattended run is indistinguishable from a hung build. It
-cannot be caught by any single ticket's verify, because every ticket verify runs one
-directory.
+:data:`DEFAULT_TIMEOUT` expires, which in an unattended run is indistinguishable from a
+hung build. It cannot be caught by any single ticket's verify, because every ticket verify
+runs one directory.
 
 So the lock is **re-entrant within a process and exclusive between processes**, which is
 exactly what D37 asks for: one interpreter holds one real ``flock`` however many times it
@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import fcntl
 import os
+import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,24 @@ from typing import IO, Any
 
 #: Deliberately outside the repo: worktrees are per-ticket, but the Neo4j container is not.
 LOCK_PATH = Path(os.environ.get("PROXYSHOP_NEO4J_LOCK", "/tmp/proxyshop-neo4j.lock"))
+
+#: How long a contended acquisition waits before raising :class:`Neo4jLockTimeout` (T-191).
+#:
+#: **This number is not free.** It has to end, with margin, INSIDE ``pyproject.toml``'s
+#: repo-wide ``--timeout`` for pytest, because the only production caller —
+#: ``_neo4j_guard`` in the root ``conftest.py`` — takes the lock during session-fixture
+#: setup, and pytest-timeout covers setup. It used to be 600 against a 300 s budget, which
+#: made the raise below unreachable under real contention: pytest killed the run first,
+#: with a message naming neither Neo4j nor the lock, ``make verify`` ERRORED rather than
+#: failed, and ``build_succeeds`` was recorded 0 for a machine condition. The relationship
+#: is pinned by ``proxyshop_support/tests/test_neo4j_lock_diagnosability.py``, which parses
+#: the real ``addopts`` — so changing either number, here or there, fails loudly.
+DEFAULT_TIMEOUT = 240.0
+
+#: Seconds between "still waiting" heartbeats while contended. A wait that says nothing for
+#: four minutes during session setup is indistinguishable from a hang, which is how this
+#: cost several unattended runs before anyone looked at the frame it was stopped in.
+REPORT_EVERY = 30.0
 
 
 class Neo4jLockTimeout(RuntimeError):
@@ -67,6 +86,55 @@ def _key(path: Path | str | None) -> Path:
     return Path(path if path is not None else LOCK_PATH).expanduser().resolve()
 
 
+def lock_holder(path: Path | str | None = None) -> str:
+    """Best-effort description of whoever currently holds the lock file.
+
+    The holder stamps ``pid=<n> worker=<n>`` into the file immediately after taking the
+    flock (see :func:`_acquire`), so while anybody holds it this line is that holder's. An
+    unheld lock keeps its last holder's stale line, which is why every caller of this only
+    asks once it already knows it is blocked.
+
+    Returns:
+        The stamped line, or a string containing ``"unknown"`` when the file is missing,
+        empty or unreadable. Never raises: a diagnostic that can fail is worse than none.
+    """
+    try:
+        stamped = _key(path).read_text().strip()
+    except OSError:
+        return "unknown (the lock file could not be read)"
+    if not stamped:
+        return "unknown (the holder has not stamped the lock file yet)"
+    return stamped.splitlines()[0]
+
+
+def _report_to_stderr(message: str) -> None:
+    """Default progress sink. Unbuffered stderr, so an unattended log shows it live."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def _timeout_message(lock_path: Path, timeout: float) -> str:
+    """The :class:`Neo4jLockTimeout` text. The FIRST LINE has to be the whole diagnosis.
+
+    An unattended run's log, a CI summary and a ``-q`` pytest error line all show one line.
+    Before T-191 that line was ``Failed: Timeout (>300.0s) from pytest-timeout``, which
+    reads like a hung build and sent several sessions looking for a product bug that was
+    never there.
+    """
+    return (
+        f"another ProxyShop worker process holds the Neo4j lock (D37) — waited "
+        f"{timeout:g}s for it and gave up.\n"
+        f"  lock file: {lock_path}\n"
+        f"  holder:    {lock_holder(lock_path)}\n"
+        f"  this run:  pid={os.getpid()} worker={os.environ.get('PROXYSHOP_WORKER')}\n"
+        f"Neo4j Community has exactly ONE database (D4), so every pytest session that "
+        f"touches the graph is serialized on this single machine-global flock — it is "
+        f"deliberately outside every worktree, so a parallel swarm contends on it as a "
+        f"matter of course. Nothing is hung and nothing is wrong with the code under test: "
+        f"a sibling worker's graph lane is still running. Re-run this lane once it "
+        f"finishes, or run it on its own."
+    )
+
+
 def held_depth(path: Path | str | None = None) -> int:
     """How many nested :func:`neo4j_flock` blocks this process currently holds (0 = none)."""
     with _MUTEX:
@@ -76,20 +144,27 @@ def held_depth(path: Path | str | None = None) -> int:
 
 @contextmanager
 def neo4j_flock(
-    timeout: float = 600.0,
+    timeout: float = DEFAULT_TIMEOUT,
     poll: float = 0.5,
     *,
     path: Path | str | None = None,
+    report: Callable[[str], None] | None = None,
+    report_every: float = REPORT_EVERY,
 ) -> Iterator[Path]:
     """Hold an exclusive, process-re-entrant ``flock`` on :data:`LOCK_PATH`.
 
     Args:
-        timeout: seconds to wait for another *process* before giving up. The default is
-            generous because the holder is a whole pytest session on the graph lane. A
-            nested acquisition inside the same process never waits, so this timeout is
-            only ever about cross-worker contention.
+        timeout: seconds to wait for another *process* before giving up. Defaults to
+            :data:`DEFAULT_TIMEOUT`, which is chosen to expire INSIDE pytest's own
+            per-item budget — read that constant's note before changing it. A nested
+            acquisition inside the same process never waits, so this timeout is only ever
+            about cross-worker contention.
         poll: seconds between attempts.
         path: override the lock file (tests use this; production always uses the default).
+        report: where progress goes while blocked. Defaults to stderr. Called once when the
+            wait starts and every ``report_every`` seconds after that, never when the lock
+            is free — an uncontended acquisition is silent.
+        report_every: seconds between heartbeats.
 
     Yields:
         The lock file path, so a caller can log who is waiting on what.
@@ -97,17 +172,24 @@ def neo4j_flock(
     Raises:
         Neo4jLockTimeout: another **process** held the lock for longer than ``timeout``.
             This is a loud failure on purpose — silently proceeding would interleave
-            writes.
+            writes. Its first line names the contention explicitly; see
+            :func:`_timeout_message`.
     """
     lock_path = _key(path)
-    _acquire(lock_path, timeout, poll)
+    _acquire(lock_path, timeout, poll, report or _report_to_stderr, report_every)
     try:
         yield lock_path
     finally:
         _release(lock_path)
 
 
-def _acquire(lock_path: Path, timeout: float, poll: float) -> None:
+def _acquire(
+    lock_path: Path,
+    timeout: float,
+    poll: float,
+    report: Callable[[str], None],
+    report_every: float,
+) -> None:
     with _MUTEX:
         holding = _HELD.get(lock_path)
         if holding is not None:
@@ -116,18 +198,36 @@ def _acquire(lock_path: Path, timeout: float, poll: float) -> None:
 
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = lock_path.open("a+")
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
+        announced = False
+        next_report = started + report_every
         try:
             while True:
                 try:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except OSError:
-                    if time.monotonic() >= deadline:
-                        raise Neo4jLockTimeout(
-                            f"could not acquire {lock_path} within {timeout}s — another "
-                            f"ProxyShop worker process is still using Neo4j (D37)."
-                        ) from None
+                    now = time.monotonic()
+                    if not announced:
+                        # Only ever reached when the lock is genuinely held elsewhere, so
+                        # an uncontended run stays silent.
+                        announced = True
+                        report(
+                            f"[neo4j-lock] waiting up to {timeout:g}s for {lock_path} — "
+                            f"held by {lock_holder(lock_path)}. Neo4j Community has ONE "
+                            f"database (D4/D37) so graph sessions run one at a time; this "
+                            f"is cross-worker contention, not a hang."
+                        )
+                    if now >= deadline:
+                        raise Neo4jLockTimeout(_timeout_message(lock_path, timeout)) from None
+                    if now >= next_report:
+                        next_report = now + report_every
+                        report(
+                            f"[neo4j-lock] still waiting {now - started:.0f}s of "
+                            f"{timeout:g}s for {lock_path} — held by "
+                            f"{lock_holder(lock_path)}."
+                        )
                     time.sleep(poll)
             handle.seek(0)
             handle.truncate()
