@@ -28,21 +28,46 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _plain(obj):
-    """The frozen suite's normalizer, in miniature: product objects -> plain Python."""
+def _plain(obj, _depth: int = 0):
+    """The frozen suite's normalizer — a FAITHFUL copy, not a miniature.
+
+    This used to be an abridged version, and the abridgement was load-bearing in the wrong
+    direction: it lacked the frozen walker's `obj.__dict__` fallback, so it stopped at
+    `str(obj)` exactly where the frozen walker descends into a plain object's attributes.
+    `test_the_pitch_carries_no_provenance_bearing_node_beyond_its_claims` exists to pre-empt
+    the frozen rule, and a normalizer weaker than that rule cannot do it — redesigning
+    `PersonaPitch` into a non-dataclass would have kept this file green while the frozen
+    criterion started counting nodes it had never seen. Kept byte-comparable with
+    `.swarm-loop/acceptance/test_e4_store_agent.py::_plain` on purpose.
+    """
+    if _depth > 40:
+        return str(obj)
     if obj is None or isinstance(obj, (bool, int, float, str)):
         return obj
     if isinstance(obj, (list, tuple)):
-        return [_plain(v) for v in obj]
+        return [_plain(v, _depth + 1) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        items = [_plain(v, _depth + 1) for v in obj]
+        return sorted(items, key=lambda v: json.dumps(v, sort_keys=True, default=str))
     if isinstance(obj, dict):
-        return {str(k): _plain(v) for k, v in obj.items()}
+        return {str(k): _plain(v, _depth + 1) for k, v in obj.items()}
     for attr in ("model_dump", "_asdict", "to_dict", "dict"):
         fn = getattr(obj, attr, None)
         if callable(fn):
-            return _plain(fn())
+            try:
+                return _plain(fn(), _depth + 1)
+            except Exception:  # pragma: no cover - fall through to the next shape
+                pass
     fields = getattr(obj, "__dataclass_fields__", None)
     if fields:
-        return {str(f): _plain(getattr(obj, f, None)) for f in fields}
+        return {str(f): _plain(getattr(obj, f, None), _depth + 1) for f in fields}
+    namespace = getattr(obj, "__dict__", None)
+    if isinstance(namespace, dict) and namespace:
+        return {
+            str(k): _plain(v, _depth + 1)
+            for k, v in namespace.items()
+            if not str(k).startswith("_")
+        }
     return str(obj)
 
 
@@ -217,3 +242,152 @@ def test_every_scripted_persona_answers_the_fixture_intent_concurrently(intent, 
     for name, pitch in zip(names, concurrent, strict=True):
         scripted = manifest["personas"][name]["scripted_claims"]
         assert {c["key"] for c in _claims_in(pitch)} == {c["key"] for c in scripted}
+
+
+# ---------------------------------------------------------------------------------------
+# Regression teeth. An adversarial review mutated the module five ways and every test above
+# this line stayed green under all five: a real wall-clock `observed_at`; an `observed_at`
+# hard-coded so the approval instant is never read; `claim_id` set to None on every claim;
+# `provenance.ref` collapsed to the bare `pitch_ref` so all five claims cite one pointer; and
+# the script emitted in REVERSE manifest order. Each test below fails under exactly the
+# mutation it names — verified by re-running the mutation after writing it.
+# ---------------------------------------------------------------------------------------
+
+
+def test_observed_at_is_the_approval_instant_and_not_a_clock(intent, manifest) -> None:
+    """The determinism claim, asserted rather than assumed.
+
+    `test_the_pitch_is_deterministic` compares two builds in one process, so ANY clock coarser
+    than a microsecond survives it. This pins the value to the document instead: `observed_at`
+    is the instant the human approved the script being replayed, so replaying an episode a
+    year later reproduces the same bytes.
+    """
+    from seller_reference.personas import build_persona
+
+    approved_at = manifest["approval"]["approved_at"]
+    assert approved_at, "the approved manifest records no approval instant"
+    for claim in build_persona("aggressive").pitch(intent).claims:
+        assert claim.provenance.observed_at == approved_at
+
+
+def test_a_manifest_with_no_approval_falls_back_to_a_constant_not_a_clock(intent, manifest) -> None:
+    """The fallback path must also be reproducible — a missing approval is not a licence to."""
+    from seller_reference.personas import build_persona
+
+    undated = json.loads(json.dumps(manifest))
+    undated.pop("approval")
+    first = build_persona("aggressive", manifest=undated).pitch(intent)
+    second = build_persona("aggressive", manifest=undated).pitch(intent)
+    observed = {c.provenance.observed_at for c in first.claims}
+    assert observed == {"1970-01-01T00:00:00Z"}, observed
+    assert _plain(first) == _plain(second)
+
+
+def test_each_claim_carries_its_own_claim_id_and_evidence_pointer(intent) -> None:
+    """D25: one claim, one identity, one pointer to where it was said.
+
+    Nothing else in this file reads `claim_id` at all, and `provenance.ref` was asserted only
+    for truthiness — so deleting every claim id, or pointing all five claims at the same ref,
+    was invisible. Both defeat the ledger's ability to tell two statements apart.
+    """
+    from seller_reference.personas import build_persona
+
+    claims = build_persona("aggressive").pitch(intent).claims
+    ids = [c.claim_id for c in claims]
+    refs = [c.provenance.ref for c in claims]
+    assert all(ids), f"a claim carries no claim_id: {ids}"
+    assert len(set(ids)) == len(ids), f"claim_id collision across scripted claims: {ids}"
+    assert len(set(refs)) == len(refs), f"claims share an evidence pointer: {refs}"
+    for claim, ref in zip(claims, refs, strict=True):
+        assert ref.endswith(f"#{claim.key}"), ref
+
+
+def test_claims_are_emitted_in_the_manifests_own_order(intent, manifest) -> None:
+    """`PersonaPitch.claims` is documented "in the manifest's own order" — so assert the order.
+
+    Every other key comparison in this file and in the frozen criterion is a SET comparison,
+    which reversal survives. Order is what makes `pitch.text` read as the sentence the script
+    describes, and the `source_span` offsets follow it.
+    """
+    from seller_reference.personas import build_persona
+
+    scripted = manifest["personas"]["aggressive"]["scripted_claims"]
+    emitted = build_persona("aggressive").pitch(intent).claims
+    assert [c.key for c in emitted] == [c["key"] for c in scripted]
+    assert [c.value for c in emitted] == [c["value"] for c in scripted]
+
+
+def test_a_caller_cannot_rewrite_the_approved_script_through_the_persona(intent) -> None:
+    """A3: the persona owns no answer key, and it must not be given one after the fact.
+
+    `@dataclass(frozen=True)` freezes the attribute binding, not the dicts behind it, so with
+    a plain-dict script `persona.script[0]["value"] = ...` silently rewrote the approved claim
+    for every later `pitch()` — the persona supplying its own answer key, one assignment away.
+    """
+    from seller_reference.personas import build_persona
+
+    persona = build_persona("aggressive")
+    before = persona.pitch(intent).claims[0].value
+    with pytest.raises(TypeError):
+        persona.script[0]["value"] = "MUTATED BY CALLER"  # type: ignore[index]
+    assert persona.pitch(intent).claims[0].value == before
+
+
+def test_an_unusable_script_is_refused_at_build_time_not_pitch_time(intent, manifest) -> None:
+    """The module promises build-time refusal; `build_persona` alone must raise.
+
+    Deliberately does NOT call `.pitch()`. The existing provenance test wraps both calls in one
+    `pytest.raises`, so it cannot tell a build-time refusal from a pitch-time crash — which is
+    the distinction the module docstring makes and the one a caller needs, since a pitch-time
+    failure surfaces as a `contracts` exception nobody here has reason to catch.
+    """
+    from seller_reference.personas import PersonaError, UnharnessedProvenanceError, build_persona
+
+    def mutated(fn):
+        doc = json.loads(json.dumps(manifest))
+        fn(doc["personas"]["aggressive"]["scripted_claims"])
+        return doc
+
+    forged = mutated(lambda cl: cl[0].__setitem__("provenance", {"source": "scraped"}))
+    with pytest.raises(UnharnessedProvenanceError):
+        build_persona("aggressive", manifest=forged)
+
+    bare_source = mutated(lambda cl: cl[0].__setitem__("source", "envelope_rule"))
+    with pytest.raises(UnharnessedProvenanceError):
+        build_persona("aggressive", manifest=bare_source)
+
+    for label, mutate in (
+        ("structured value", lambda cl: cl[0].__setitem__("value", {"provenance": {"s": 1}})),
+        ("list value", lambda cl: cl[0].__setitem__("value", [{"provenance": "scraped"}])),
+        ("uncanonicalizable value", lambda cl: cl[0].__setitem__("value", float("inf"))),
+        ("duplicate key", lambda cl: cl.append({"key": cl[0]["key"], "value": "9.99"})),
+        ("unpublished claim_type", lambda cl: cl[0].__setitem__("claim_type", "not_a_type")),
+    ):
+        with pytest.raises(PersonaError):
+            build_persona("aggressive", manifest=mutated(mutate)), label
+
+
+def test_a_structured_scripted_value_cannot_smuggle_an_extra_provenance_node(
+    intent, manifest
+) -> None:
+    """The invariant the frozen criterion actually counts on.
+
+    `contracts.Claim.value` is typed `Any`, so a structured value rides through `model_dump()`
+    intact and the frozen walker — which counts EVERY reachable node carrying a `provenance`
+    key — sees a sixth, keyless claim. Measured before the fix: `extra=['none']`. The module
+    refuses the script instead, so the invariant `PersonaPitch` documents is enforced rather
+    than merely true of today's manifest.
+    """
+    from seller_reference.personas import PersonaError, build_persona
+
+    smuggled = json.loads(json.dumps(manifest))
+    smuggled["personas"]["aggressive"]["scripted_claims"][0]["value"] = {
+        "amount": "18.50",
+        "provenance": {"source": "scraped"},
+    }
+    with pytest.raises(PersonaError):
+        build_persona("aggressive", manifest=smuggled)
+
+    # And the property itself, on the approved script: node count == claim count.
+    pitch = build_persona("aggressive").pitch(intent)
+    assert len(_claims_in(pitch)) == len(pitch.claims)

@@ -19,6 +19,13 @@ holds no claim text at all. Every claim it emits is read from
 drifted from the digest the approval covers. Change the approved script and the pitch changes
 with it; there is no second copy to drift.
 
+That non-circularity argument covers the DEFAULT path only. :func:`build_persona` takes a
+``manifest=`` keyword, and a document handed in that way has been through no digest check at
+all — it never went near :func:`~fixtures.manifest.load_manifest`. The keyword exists so a
+test can swap the script and watch the pitch follow it (which is how A3 is demonstrated
+rather than asserted) and so a *foreign* manifest can be graded; it is not a second source of
+truth for this repository, and production code should never pass it.
+
 **The persona has exactly one provenance available to it (R8 / S5).**
 ``seller_asserted`` is the only :class:`contracts.ProvenanceSource` an external agent can
 assert freely — it is what ``contracts.NON_HOOK_PROVENANCE_SOURCES`` names, and the hosted
@@ -33,11 +40,16 @@ the script, and silently rewriting it would hide the one thing the criterion is 
 Determinism. A pitch has no clock and no randomness in it. ``observed_at`` is the instant the
 human approved the script being replayed (``manifest.approval.approved_at``), not "now", so
 two runs of the same persona against the same intent produce byte-identical pitches — which
-is what lets S4's seeded-determinism criterion and the simulator's replay schedule mean
-anything.
+is what lets the simulator replay an episode schedule and get the same trust trajectory the
+manifest predicts. (This is *not* one of SPEC's S4 criteria: the frozen S4 tests grade the
+seed generator, the bandit and the store agent's discount sampling, none of which touch a
+persona. Determinism here is a property this module owes the replay schedule, and it is
+graded by this ticket's own tests.)
 
-Offline by construction: no network, no LLM, no database. Reading the approved manifest off
-disk is the only I/O.
+Offline by construction: no network, no LLM, no database, no clock. The only I/O is reading
+the approved manifest off disk — which, because :func:`~fixtures.manifest.load_manifest`
+verifies the whole digest chain on every call, also reads and hashes the golden set and the
+seed catalog the manifest points at. Three file reads per :func:`build_persona`, not one.
 """
 
 from __future__ import annotations
@@ -54,7 +66,9 @@ __all__ = [
 ]
 
 import copy
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from contracts import (
@@ -78,9 +92,20 @@ PERSONA_PROVENANCE_SOURCE = ProvenanceSource.seller_asserted
 #: docstring on determinism.
 _UNDATED_SCRIPT_OBSERVED_AT = "1970-01-01T00:00:00Z"
 
-#: Separator between the per-claim segments of a pitch's prose. One character wide so the
-#: `source_span` offsets stay easy to reason about.
+#: Separator between the per-claim segments of a pitch's prose. Any width works — `_render`
+#: measures it with `len()` rather than assuming — but it must be non-empty, or two adjacent
+#: claim values would abut and a reader could not tell where one claim ended.
 _SEGMENT_SEPARATOR = " "
+
+#: Scripted `value` types a persona may emit. Deliberately scalars only, and enforced in
+#: `_validate_entry` rather than left to convention: `contracts.Claim.value` is typed `Any`,
+#: so a structured value flows through `model_dump()` untouched, and the frozen acceptance
+#: criterion counts EVERY dict node reachable from a pitch that carries a `provenance` key.
+#: A scripted value of `{"amount": "18.50", "provenance": {...}}` therefore arrives at the
+#: grader as a sixth, keyless "claim" the persona was never scripted to emit — measured:
+#: `extra=['none']`. A scalar cannot do that, and a scalar is also the only thing `_render`
+#: can put into prose and address with a `source_span`.
+_SCALAR_VALUE_TYPES = (str, bool, int, float, type(None))
 
 
 class PersonaError(ValueError):
@@ -90,9 +115,11 @@ class PersonaError(ValueError):
 class UnknownPersonaError(PersonaError):
     """The approved manifest scripts no persona under the requested name.
 
-    Loud rather than empty: a persona that answered an unknown name with a pitch carrying no
-    claims would satisfy "emits nothing it was not scripted to emit" trivially, and S8 would
-    pass against a seller that does not exist.
+    Loud rather than empty. The frozen T-045 criterion does assert ``emitted`` is non-empty,
+    so an empty pitch would fail it rather than sneak past — but every *other* consumer of a
+    persona (the simulator's episode schedule, the honest control S2 needs) would read "this
+    seller said nothing" where the truth is "this seller does not exist", and those two are
+    not the same fact.
     """
 
 
@@ -108,6 +135,11 @@ class PersonaPitch:
     :attr:`claims`, which matters: the frozen acceptance criterion counts *every*
     provenance-bearing node reachable from a pitch, so a stray one — an echoed intent, a
     nested envelope — would read as an extra claim the persona was never scripted to emit.
+
+    That is an enforced invariant, not a convention this class merely observes. The one way a
+    caller could smuggle an extra provenance-bearing node in is through a scripted ``value``,
+    since :attr:`contracts.Claim.value` is typed ``Any``; ``_validate_entry`` refuses a
+    non-scalar value for exactly that reason. See :data:`_SCALAR_VALUE_TYPES`.
     """
 
     #: The manifest key this pitch was built from (`aggressive`, `honest`).
@@ -131,8 +163,15 @@ class Persona:
     name: str
     store_id: str | None
     description: str | None
-    #: The approved script, deep-copied at build time so a caller cannot mutate it afterwards.
-    script: tuple[dict[str, Any], ...]
+    #: The approved script: a tuple of READ-ONLY views over private deep copies.
+    #:
+    #: Both halves are load-bearing. The deep copy is what stops a persona reaching back into
+    #: the manifest dict its caller owns; the `MappingProxyType` wrapper is what stops the
+    #: caller reaching into the persona. `@dataclass(frozen=True)` does neither — it freezes
+    #: the attribute binding, so `persona.script[0]["value"] = "..."` on a plain dict would
+    #: have silently rewritten the approved script for every later `pitch()`, which is the
+    #: exact "the persona supplies its own answer key" failure A3 exists to prevent.
+    script: tuple[Mapping[str, Any], ...]
 
     def pitch(self, intent: Any) -> PersonaPitch:
         """Answer `intent` with exactly the scripted claims — no more, no fewer.
@@ -175,9 +214,15 @@ def build_persona(name: str, *, manifest: Any = None) -> Persona:
     `manifest` is for tests and for grading a *foreign* manifest; left unset, the persona reads
     the repository's own approved document, digests and all.
 
-    Raises :class:`UnknownPersonaError` if no such persona is scripted, and
+    Every defect this can detect is detected HERE, not at pitch time. A script is a document a
+    human approved; if it is unusable, the useful moment to say so is when it is read, with the
+    offending entry's path in the message — not several frames deep inside a pitch, in an
+    exception type from another package that no caller of this module has any reason to catch.
+
+    Raises :class:`UnknownPersonaError` if no such persona is scripted,
     :class:`UnharnessedProvenanceError` if the script asks for a provenance an unharnessed
-    seller may not assert.
+    seller may not assert, and :class:`PersonaError` for every other unusable script — a
+    duplicate claim key, a non-scalar or uncanonicalizable value, an unpublished claim type.
     """
     document = _resolve_manifest(manifest)
     personas = _personas_block(document)
@@ -202,6 +247,7 @@ def build_persona(name: str, *, manifest: Any = None) -> Persona:
     script = tuple(
         _validate_entry(entry, persona=name, index=i) for i, entry in enumerate(scripted)
     )
+    _reject_duplicate_keys(script, persona=name)
     return Persona(
         name=name,
         store_id=_optional_str(block.get("store_id")),
@@ -239,8 +285,12 @@ def _script_observed_at(document: dict[str, Any]) -> str:
     return text or _UNDATED_SCRIPT_OBSERVED_AT
 
 
-def _validate_entry(entry: Any, *, persona: str, index: int) -> dict[str, Any]:
-    """Check one scripted claim and return a private copy of it."""
+def _validate_entry(entry: Any, *, persona: str, index: int) -> Mapping[str, Any]:
+    """Check one scripted claim and return a read-only private copy of it.
+
+    The copy is deep (the persona must not alias the caller's manifest) and the view returned
+    over it is read-only (the caller must not reach into the persona). See :attr:`Persona.script`.
+    """
     where = f"manifest.personas.{persona}.scripted_claims[{index}]"
     if not isinstance(entry, dict):
         raise PersonaError(f"{where} must be an object, got {type(entry).__name__}")
@@ -262,7 +312,17 @@ def _validate_entry(entry: Any, *, persona: str, index: int) -> dict[str, Any]:
             ) from exc
 
     _reject_hook_provenance(entry, where=where)
-    return copy.deepcopy(entry)
+    _reject_unemittable_value(entry["value"], where=where, key=key)
+
+    validated = copy.deepcopy(entry)
+    # Normalize the key ONCE, here, so the emitted `Claim.key` and `provenance.ref` cannot
+    # disagree with the key this function validated. Before this, validation stripped the key
+    # and emission did not, so a scripted `"  unit_price  "` was accepted and then emitted
+    # verbatim into `provenance.ref` while `contracts.claim_id` hashed the stripped form —
+    # two spellings of one claim, invisible to the frozen criterion because its `_norm`
+    # strips too.
+    validated["key"] = key
+    return MappingProxyType(validated)
 
 
 def _reject_hook_provenance(entry: dict[str, Any], *, where: str) -> None:
@@ -271,6 +331,13 @@ def _reject_hook_provenance(entry: dict[str, Any], *, where: str) -> None:
     Refuse, never rewrite. Downgrading the source to `seller_asserted` would make the script
     and the emitted claim disagree in exactly the direction R8 exists to catch, and it would do
     so silently.
+
+    Both `provenance` and a bare `source` field are checked, and ANY value in either that is
+    not `seller_asserted` is refused — including one that is no provenance at all, such as a
+    citation URL. That is deliberate over-refusal: this module has exactly one provenance to
+    give, so it has no use for a second field describing where a claim came from, and reading
+    such a field as harmless is how a `"source": "scraped"` would eventually be let through.
+    A script that wants to record a citation should name the field something else.
     """
     for field in ("provenance", "source"):
         raw = entry.get(field)
@@ -282,11 +349,69 @@ def _reject_hook_provenance(entry: dict[str, Any], *, where: str) -> None:
         source = str(getattr(source, "value", source))
         if source != PERSONA_PROVENANCE_SOURCE.value:
             raise UnharnessedProvenanceError(
-                f"{where} asks for provenance source {source!r}, but an unharnessed seller can "
+                f"{where} carries {field}={source!r}, but an unharnessed seller can "
                 f"only assert {PERSONA_PROVENANCE_SOURCE.value!r}. The other sources are minted "
                 "by tool hooks, and a persona able to stamp one would let the adversary "
-                "self-certify (R8/S5)."
+                "self-certify (R8/S5). If this was meant as a citation rather than a "
+                f"provenance, do not call the field {field!r}."
             )
+
+
+def _reject_unemittable_value(value: Any, *, where: str, key: str) -> None:
+    """Refuse a scripted value this persona cannot honestly turn into a claim.
+
+    Two distinct failures, both of which used to surface late or not at all:
+
+    1. A NON-SCALAR value (see :data:`_SCALAR_VALUE_TYPES`). `contracts.Claim.value` is `Any`,
+       so a dict or list rides through `model_dump()` intact, and the frozen criterion counts
+       every `provenance`-bearing node reachable from the pitch. A scripted
+       ``{"amount": "18.50", "provenance": {"source": "scraped"}}`` therefore reaches the
+       grader as an extra keyless claim — measured as ``extra=['none']`` — and it also has no
+       sensible rendering into prose for `source_span` to index.
+    2. A value `contracts.claim_id` cannot canonicalize: an integer wider than the canonical
+       form allows, a NaN, an infinity. These raise `CanonicalisationError` from inside
+       `contracts.signing` — a package this module's callers have no reason to catch — at
+       PITCH time, several frames from the script that caused it. Probing the real
+       canonicalizer here (rather than reimplementing its rules, which would drift) turns that
+       into a located `PersonaError` at build time.
+    """
+    if not isinstance(value, _SCALAR_VALUE_TYPES):
+        raise PersonaError(
+            f"{where}.value must be a scalar (str/int/float/bool/null), got "
+            f"{type(value).__name__}. A structured value reaches the acceptance grader as an "
+            "extra provenance-bearing node and cannot be addressed by a `source_span`."
+        )
+    try:
+        claim_id(pitch_ref=f"probe:{key}", key=key, value=value, claim_type=None)
+    except PersonaError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any canonicalizer refusal is a script defect
+        raise PersonaError(
+            f"{where}.value {value!r} cannot be canonicalized into a claim id "
+            f"({type(exc).__name__}: {exc}); the script is not emittable"
+        ) from exc
+
+
+def _reject_duplicate_keys(script: tuple[Mapping[str, Any], ...], *, persona: str) -> None:
+    """Refuse a script that names the same claim key twice.
+
+    Two entries sharing a key produce two `Claim`s with the SAME `contracts.claim_id` and the
+    same `provenance.ref` at different `source_span`s — one ledger identity for two statements,
+    which is precisely the collision `claim_id` exists to prevent (D25). The frozen criterion
+    cannot catch this: it compares SETS of keys, so a duplicate whose value also matches is
+    invisible to it.
+    """
+    seen: dict[str, int] = {}
+    for index, entry in enumerate(script):
+        key = str(entry["key"])
+        if key in seen:
+            raise PersonaError(
+                f"manifest.personas.{persona}.scripted_claims[{index}] repeats the key {key!r} "
+                f"already scripted at [{seen[key]}]. Two claims under one key collapse onto a "
+                "single claim_id and a single provenance.ref, so the ledger cannot tell them "
+                "apart (D25)."
+            )
+        seen[key] = index
 
 
 def _intent_id(intent: Any) -> str | None:
@@ -300,7 +425,7 @@ def _pitch_ref(persona: str, store_id: str | None, intent_id: str | None) -> str
 
 
 def _render(
-    script: tuple[dict[str, Any], ...], pitch_ref: str
+    script: tuple[Mapping[str, Any], ...], pitch_ref: str
 ) -> tuple[str, tuple[ClaimSourceSpan, ...]]:
     """Render the script as prose, and the span of each claim's value inside it.
 
@@ -333,7 +458,7 @@ def _render_value(value: Any) -> str:
 
 
 def _build_claim(
-    entry: dict[str, Any], *, pitch_ref: str, span: ClaimSourceSpan, observed_at: str
+    entry: Mapping[str, Any], *, pitch_ref: str, span: ClaimSourceSpan, observed_at: str
 ) -> Claim:
     key = str(entry["key"])
     value = entry["value"]
