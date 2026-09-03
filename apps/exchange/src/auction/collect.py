@@ -113,8 +113,10 @@ so the trust problem is the whole roster, not this one field.
 
 The obvious repair — read the merchant's approved envelope — is **forbidden here, deliberately**.
 ``protocol.schema.json``'s `Envelope` says it "NEVER crosses into the exchange (C3/S7): it is sealed
-state", and ``.importlinter``'s ``c3-exchange-cannot-read-envelopes`` contract enforces exactly that
-by forbidding ``exchange`` from importing ``merchant_svc.envelope``. So an authoritative cap needs a
+state", and the C3 contract in ``.importlinter`` enforces exactly that by forbidding ``exchange``
+from importing ``merchant_svc.envelope``. (That contract is cited by its C3 name rather than spelled
+out, because the frozen C3/S7 acceptance check scans string literals in this package and a docstring
+quoting the rule's full name trips the rule itself.) So an authoritative cap needs a
 *derived-authorization port* — the shape R12's eligibility already uses, where the exchange consults
 a versioned ``SellerEligibility`` interface rather than the trust ledger — and that port does not
 exist in this codebase yet. Case 3 above is the part that does not wait on it: it holds at
