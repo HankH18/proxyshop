@@ -1009,3 +1009,18 @@ describe("T-195 — offer.commitments may not be spelled null", () => {
     }
   });
 });
+
+describe("claims lists — the shapes the Python peer now refuses too", () => {
+  // `Array.isArray` has always been this door's rule; the Python peer accepted any iterable, so
+  // a generator of claims was walked once, drained, and admitted with its claims unread. These
+  // pin the shared verdict rather than a TypeScript-only one.
+  it.each(BOTH_PATHS)("refuses a non-array claims list on %s", (path) => {
+    for (const shape of [{0: makeClaim()}, "free_returns", 42, new Set([makeClaim()])]) {
+      expect(check(makeBid({claims: shape}), path).ok, JSON.stringify(shape)).toBe(false);
+      expect(check(makeBid({offer: makeOffer({commitments: shape})}), path).ok).toBe(false);
+    }
+
+    // Control: a real array is still walked and admitted.
+    expect(check(makeBid({claims: [makeClaim()]}), path).ok).toBe(true);
+  });
+});

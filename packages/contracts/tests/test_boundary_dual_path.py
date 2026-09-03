@@ -1276,3 +1276,65 @@ def test_the_schema_is_the_thing_the_generated_model_was_made_to_match() -> None
     assert commitments.get("default") == []
 
     assert Offer.model_validate(make_offer(commitments=[])).commitments == []
+
+
+# ---------------------------------------------------------------------------------------------
+# Found by this lane's own adversarial pass, after the price wall went in.
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_a_one_shot_iterator_of_claims_is_not_a_list_of_claims(path: str) -> None:
+    """A generator in `claims` was walked ONCE and then gone.
+
+    `model_validate` drains it first, so by the time the provenance walk reached it there was
+    nothing left to judge — every claim in the bid went unexamined and the bid was admitted. The
+    price wall made it worse by adding a SECOND reader of the same field: whichever walk ran
+    second saw an empty list. The TypeScript peer asks `Array.isArray` and calls anything else
+    `schema_invalid`, so this was also a live ok-divergence. Both doors now say the same thing.
+    """
+    smuggled = make_bid()
+    smuggled["claims"] = iter([make_claim("spf", 30, dict(ASSERTED_PROVENANCE))])
+    result = check(smuggled, path)
+    assert result.ok is False, "a generator of claims was admitted with its claims unread"
+    assert any(reason.startswith("schema_invalid") for reason in result.reasons)
+
+    for shape in ({"0": make_claim()}, {make_claim()["key"]}, iter([])):
+        hidden = make_bid()
+        hidden["claims"] = shape
+        assert check(hidden, path).ok is False, shape
+
+    # ...and the same at the offer's own claim-bearing site.
+    for shape in (iter([make_claim()]), {"0": make_claim()}, frozenset({"free_returns"})):
+        assert check(make_bid(offer=make_offer(commitments=shape)), path).ok is False, shape
+
+    # Control: a real list, and a tuple of the same claims, are still walked and admitted.
+    for shape in ([make_claim()], (make_claim(),)):
+        assert check(make_bid(claims=shape), path).ok is True
+
+
+@pytest.mark.parametrize("path", BOTH_PATHS)
+def test_the_boundary_refuses_rather_than_raising_on_an_object_that_fights_back(path: str) -> None:
+    """ "Reject" and "500" must not be the same observable — including when the READ itself is
+    hostile. An object whose `__getattr__` raises, or whose `__iter__` does, escaped as a
+    RuntimeError out of the public boundary."""
+
+    class Exploding:
+        def __getattr__(self, name: str) -> Any:
+            raise RuntimeError("boom")
+
+    class UnwalkableClaims(list):
+        def __iter__(self) -> Any:
+            raise RuntimeError("boom-iter")
+
+    hostile: list[Any] = [
+        Exploding(),
+        make_bid(offer=Exploding()),
+        {**make_bid(), "claims": UnwalkableClaims()},
+        make_bid(offer=make_offer(commitments=UnwalkableClaims())),
+        iter([1, 2, 3]),
+    ]
+    for payload in hostile:
+        result = check(payload, path)
+        assert result.ok is False
+        assert result.reasons, "a refusal must still say why"

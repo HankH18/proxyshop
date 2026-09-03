@@ -46,7 +46,7 @@ its verdict is the R8/R18/S5 table and nothing more. Use `validate_external_subm
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -142,19 +142,34 @@ REASON_PRICE_UNRECONCILABLE = "price_unreconcilable"
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
-    """Read `key` off a mapping or an object, without caring which it is."""
-    if isinstance(obj, Mapping):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+    """Read `key` off a mapping or an object, without caring which it is — and never raise.
+
+    The read itself is arbitrary caller code: `Mapping.get` on a subclass, a property, a
+    `__getattr__` trap. An object whose attribute access raises turned "this bid is refused"
+    into a 500 at the public boundary, which is the observable this module exists to keep
+    distinct — the same reason `_eligibility_reasons` catches the unhashable-`store_id`
+    `TypeError` rather than letting the lookup escape. A field that cannot be read is a field
+    the bid did not state, and the walls above fail closed on exactly that.
+    """
+    try:
+        if isinstance(obj, Mapping):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+    except Exception:  # noqa: BLE001 - a read that raises is a field the bid did not state
+        return default
 
 
 def _as_plain(bid: Any) -> Mapping[str, Any]:
     for attr in ("model_dump", "dict"):
-        fn = getattr(bid, attr, None)
-        if callable(fn):
+        try:
+            fn = getattr(bid, attr, None)
+            if not callable(fn):
+                continue
             dumped = fn()
-            if isinstance(dumped, Mapping):
-                return dumped
+        except Exception:  # noqa: BLE001 - an object that cannot dump itself is not a Bid
+            continue
+        if isinstance(dumped, Mapping):
+            return dumped
     if isinstance(bid, Mapping):
         return bid
     return {}
@@ -302,10 +317,24 @@ def _claim_provenance_reasons(
 
     if claims is None:
         return reasons, unverified
-    if isinstance(claims, (str, bytes)) or not isinstance(claims, Iterable):
+    # A SEQUENCE, not any iterable. Two reasons, and both are holes this closed:
+    #
+    # * a one-shot iterator is CONSUMED by the walk, so the second reader of `bid.claims`
+    #   (the price walk, `_carried_list_price`) saw an empty list and its wall silently did
+    #   not run. `model_validate` drains it first, so even this walk saw nothing: a bid whose
+    #   `claims` was a generator was admitted with every claim in it unexamined.
+    # * `Array.isArray` is what the TypeScript peer asks, so a mapping, a set or a generator
+    #   is `schema_invalid` there. Accepting them here made the two doors answer differently
+    #   about the same payload, which is the one thing a dual-language boundary may not do.
+    if isinstance(claims, (str, bytes)) or not isinstance(claims, Sequence):
         return [REASON_SCHEMA_INVALID], unverified
 
-    for index, claim in enumerate(claims):
+    try:
+        walk = list(enumerate(claims))
+    except Exception:  # noqa: BLE001 - a list that cannot be read is not a list of claims
+        return [REASON_SCHEMA_INVALID], unverified
+
+    for index, claim in walk:
         label = str(index) if site is None else f"{site}[{index}]"
         claim_reasons, needs_verification = _source_verdict(
             claim, path, label, addressable=site is None
@@ -412,9 +441,13 @@ def _carried_list_price(bid: Any, offer: Any) -> tuple[float | None, list[str]]:
     unreadable = False
 
     for claims in (_get(bid, "claims"), _get(offer, "commitments")):
-        if claims is None or isinstance(claims, (str, bytes)) or not isinstance(claims, Iterable):
+        if claims is None or isinstance(claims, (str, bytes)) or not isinstance(claims, Sequence):
             continue
-        for claim in claims:
+        try:
+            walk = list(claims)
+        except Exception:  # noqa: BLE001 - handled as `schema_invalid` by the provenance walk
+            continue
+        for claim in walk:
             key = _get(claim, "key")
             if not isinstance(key, str) or key.strip() != LIST_PRICE_CLAIM_KEY:
                 continue
