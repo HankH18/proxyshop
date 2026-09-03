@@ -148,7 +148,15 @@ class NetworkPrior:
 class _ClusterTally:
     """Scratch accumulator. Local to one build call — never module state, never in a prior."""
 
-    __slots__ = ("cluster_id", "observations", "wins", "stores", "value_props", "pitch", "commitments")
+    __slots__ = (
+        "cluster_id",
+        "observations",
+        "wins",
+        "stores",
+        "value_props",
+        "pitch",
+        "commitments",
+    )
 
     def __init__(self, cluster_id: str) -> None:
         self.cluster_id = cluster_id

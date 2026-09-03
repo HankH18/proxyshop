@@ -95,9 +95,7 @@ def _prior_record(index: int) -> dict[str, Any]:
 def _strip_discounts(node: Any) -> Any:
     """Recursively drop every key whose name mentions a discount."""
     if isinstance(node, Mapping):
-        return {
-            k: _strip_discounts(v) for k, v in node.items() if "discount" not in str(k).lower()
-        }
+        return {k: _strip_discounts(v) for k, v in node.items() if "discount" not in str(k).lower()}
     if isinstance(node, list):
         return [_strip_discounts(v) for v in node]
     return node

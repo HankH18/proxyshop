@@ -39,20 +39,17 @@ def as_percent(depth: float) -> float:
     return float(depth) * PERCENT_PER_UNIT
 
 
-def as_fraction(value: object) -> float | None:
-    """Read a depth as a fraction, or ``None`` when the value is not a usable number.
+def _number(value: object) -> float | None:
+    """A finite, non-negative float, or ``None``.
 
-    A value above :data:`FRACTION_CEILING` is read as a percent and divided down. This is not
-    guesswork dressed up as tolerance: no legitimate discount fraction exceeds 1.0 (that is a
-    100% discount), the two spellings live side by side in the very records this loop reads
-    (`discount_depth: 0.2` next to `discount_pct: 20.0`), and the alternative — snapping 20.0 to
-    the nearest rung, 0.2 — happens to give the right answer here and the wrong one for any
-    grid that does not stop at 20%.
+    NaN and infinity are refused rather than passed on: `bucket_index` scores rungs by
+    ``abs(bucket - depth)``, and against NaN every comparison is False, so it picks the first
+    rung and calls it evidence. A silently-wrong tally is worse than a dropped row.
 
-    NaN and infinity are refused rather than snapped: `min(..., key=abs(bucket - nan))` picks an
-    arbitrary rung and calls it evidence.
+    `bool` is refused explicitly because `True` is a perfectly good `float(1.0)` in Python, and a
+    `won` flag read into a depth field would tally a 100% discount.
     """
-    if isinstance(value, bool) or value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
         number = float(value)  # type: ignore[arg-type]
@@ -60,7 +57,36 @@ def as_fraction(value: object) -> float | None:
         return None
     if number != number or number in (float("inf"), float("-inf")):
         return None
-    if number < 0.0:
+    return number if number >= 0.0 else None
+
+
+def percent_as_fraction(value: object) -> float | None:
+    """Read an explicitly-percent depth (`discount_pct: 20.0`) as a fraction.
+
+    Always divided by :data:`PERCENT_PER_UNIT`. The field says what unit it is in, so there is
+    nothing to infer — and inferring anyway is how `discount_pct: 0.5` ("half a percent off")
+    becomes a 50% discount in the tally.
+    """
+    number = _number(value)
+    if number is None:
+        return None
+    fraction = number / PERCENT_PER_UNIT
+    return fraction if fraction <= FRACTION_CEILING else None
+
+
+def as_fraction(value: object) -> float | None:
+    """Read a fractional depth (`discount_depth: 0.2`), or ``None`` when it is not usable.
+
+    A value above :data:`FRACTION_CEILING` is read as a percent written into a fraction's field
+    and divided down. That rescue is confined to THIS reader, where the unit is implied by the
+    field name and can therefore be wrong; :func:`percent_as_fraction` never guesses, because
+    there the unit is stated. The rescue is not tolerance dressed up as a feature: no legitimate
+    fraction exceeds 1.0 (that is 100% off), the two spellings sit side by side in the very rows
+    this loop reads, and the alternative — snapping 20.0 to the nearest rung, 0.2 — happens to
+    give the right answer on a grid that stops at 20% and the wrong one on any grid that does not.
+    """
+    number = _number(value)
+    if number is None:
         return None
     if number > FRACTION_CEILING:
         number = number / PERCENT_PER_UNIT

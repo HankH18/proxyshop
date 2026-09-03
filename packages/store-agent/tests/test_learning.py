@@ -79,7 +79,9 @@ def _mutable_paths(obj: Any, path: str = "state", _depth: int = 0) -> list[str]:
             return [f"{path} (unfrozen dataclass {type(obj).__name__})"]
         found = []
         for field in dataclasses.fields(obj):
-            found.extend(_mutable_paths(getattr(obj, field.name), f"{path}.{field.name}", _depth + 1))
+            found.extend(
+                _mutable_paths(getattr(obj, field.name), f"{path}.{field.name}", _depth + 1)
+            )
         return found
     if isinstance(obj, (list, dict, set, bytearray)):
         return [f"{path} ({type(obj).__name__})"]
@@ -278,7 +280,7 @@ def test_two_stores_from_one_prior_do_not_leak_into_each_other(
 def test_a_store_bound_state_ignores_another_stores_outcomes(
     learning_prior_records, learning_outcomes, learning_store_id, learning_other_store_id
 ):
-    """"Learns from its OWN outcomes only", enforced rather than assumed of the caller."""
+    """ "Learns from its OWN outcomes only", enforced rather than assumed of the caller."""
     from store_agent.learning import build_network_prior, initial_state, update
 
     prior = build_network_prior(learning_prior_records)
@@ -332,7 +334,9 @@ def test_sample_depth_is_a_pure_function_of_state_cluster_and_seed(
     assert len(drawn) > 1, "a seeded sampler that ignores the seed is not sampling"
 
 
-def test_depth_shifts_toward_the_stores_own_winners(learning_prior_records, learning_outcomes, learning_cluster):
+def test_depth_shifts_toward_the_stores_own_winners(
+    learning_prior_records, learning_outcomes, learning_cluster
+):
     """R17/S4: converting deep raises sampled depth; converting shallow lowers it."""
     from store_agent.learning import build_network_prior, initial_state, sample_depth, update
 
@@ -351,8 +355,12 @@ def test_depth_shifts_toward_the_stores_own_winners(learning_prior_records, lear
 
     # The shift must be decisive, not a coin-flip's worth of noise. 400 draws over buckets
     # spanning 0.0-0.2 have a standard error near 0.0035, so a real shift clears 0.02 easily.
-    assert deep - base > 0.02, f"the shift toward deep winners is inside sampling noise: {deep - base}"
-    assert base - shallow > 0.02, f"the shift toward shallow winners is inside sampling noise: {base - shallow}"
+    assert deep - base > 0.02, (
+        f"the shift toward deep winners is inside sampling noise: {deep - base}"
+    )
+    assert base - shallow > 0.02, (
+        f"the shift toward shallow winners is inside sampling noise: {base - shallow}"
+    )
 
 
 def test_an_unseen_cluster_falls_back_to_the_neutral_grid(
@@ -414,10 +422,14 @@ def test_learned_policy_renders_in_the_shape_choose_policy_action_reads(
     assert isinstance(action.get("commitment_keys"), list)
 
     # Deterministic, and JSON-safe: it rides into a provenance-tagged claim value.
-    assert json.dumps(policy, sort_keys=True) == json.dumps(to_learned_policy(state), sort_keys=True)
+    assert json.dumps(policy, sort_keys=True) == json.dumps(
+        to_learned_policy(state), sort_keys=True
+    )
 
 
-def test_context_priors_render_json_safe_and_discount_blind(learning_prior_records, learning_cluster):
+def test_context_priors_render_json_safe_and_discount_blind(
+    learning_prior_records, learning_cluster
+):
     """`ToolHooks.get_network_prior` puts `network_priors[cluster]` straight into a claim value."""
     from store_agent.learning import build_network_prior, to_context_priors
 
@@ -429,3 +441,81 @@ def test_context_priors_render_json_safe_and_discount_blind(learning_prior_recor
     assert "discount" not in blob.replace("depth_buckets", ""), (
         f"a rendered network prior mentions a discount: {blob}"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# 6. the unit boundary on the way IN (added after the loop shipped; see the commit body)
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_percent_depth_field_is_never_guessed_at(learning_prior_records, learning_cluster):
+    """`discount_pct: 0.5` is half a percent off, not half the price off.
+
+    The two spellings sit side by side in the rows this loop reads (`discount_depth: 0.2` next
+    to `discount_pct: 20.0`), so it is tempting to run both through one "is this a fraction or a
+    percent?" helper. Do that and any `discount_pct` below 1.0 — a 0.5% clearance nudge — is
+    tallied as a 50% discount, which snaps to the deepest rung on the grid and teaches the store
+    that giving away half its margin converts.
+    """
+    from store_agent.learning import (
+        DEPTH_FRACTION_FIELDS,
+        DEPTH_PERCENT_FIELDS,
+        build_network_prior,
+        initial_state,
+        percent_as_fraction,
+        update,
+    )
+
+    assert set(DEPTH_FRACTION_FIELDS).isdisjoint(DEPTH_PERCENT_FIELDS)
+    assert percent_as_fraction(0.5) == 0.005
+    assert percent_as_fraction(20.0) == 0.2
+    assert percent_as_fraction(101.0) is None, "no discount exceeds 100% off"
+
+    state = initial_state(build_network_prior(learning_prior_records))
+
+    def rung(row):
+        evolved = update(state, [row])
+        learned = evolved.cluster(learning_cluster)
+        assert learned is not None
+        return [t.depth for t in learned.depths if t.observations][0]
+
+    row = {"cluster_id": learning_cluster, "store_id": "store-alpha", "won": True}
+    assert rung(dict(row, discount_pct=0.5)) == 0.0, (
+        "0.5% off was tallied as a fraction — the deepest rung on the grid"
+    )
+    assert rung(dict(row, discount_pct=20.0)) == 0.2
+    assert rung(dict(row, discount_depth=0.2)) == 0.2
+
+    # A depth written into the fraction field in percent is still rescued, because there the
+    # field name only implies the unit and 20.0 cannot be a fraction.
+    assert rung(dict(row, discount_depth=20.0)) == 0.2
+
+
+def test_a_row_stating_no_usable_depth_is_dropped_not_tallied_at_zero(
+    learning_prior_records, learning_cluster
+):
+    """ "We do not know the depth" and "it converted at no discount" are opposite evidence.
+
+    Folding an unreadable depth into rung 0.0 does not lose information, it invents it: enough
+    malformed rows and the loop concludes that giving no discount wins.
+    """
+    from store_agent.learning import build_network_prior, initial_state, update
+
+    state = initial_state(build_network_prior(learning_prior_records))
+    base = _canon(state)
+
+    junk = [
+        {"cluster_id": learning_cluster, "won": True, "discount_depth": None},
+        {"cluster_id": learning_cluster, "won": True, "discount_depth": "deep"},
+        {"cluster_id": learning_cluster, "won": True, "discount_depth": float("nan")},
+        {"cluster_id": learning_cluster, "won": True, "discount_depth": float("inf")},
+        {"cluster_id": learning_cluster, "won": True, "discount_depth": -0.2},
+        {"cluster_id": learning_cluster, "won": True, "discount_depth": True},
+        {"cluster_id": learning_cluster, "won": True},  # no depth field at all
+        {"won": True, "discount_depth": 0.2},  # no cluster
+    ]
+    assert _canon(update(state, junk)) == base, "an unreadable depth was tallied instead of dropped"
+
+    # ...but a genuine zero-depth outcome IS evidence and must be tallied.
+    real_zero = [{"cluster_id": learning_cluster, "won": True, "discount_depth": 0.0}]
+    assert _canon(update(state, real_zero)) != base

@@ -37,7 +37,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .grid import DEFAULT_DEPTH_BUCKETS, as_fraction, as_percent, bucket_index
+from .grid import (
+    DEFAULT_DEPTH_BUCKETS,
+    as_fraction,
+    as_percent,
+    bucket_index,
+    percent_as_fraction,
+)
 from .prior import NetworkPrior, Tally, best_label, cluster_prior, field
 
 #: Beta(1, 1) — a flat posterior on every rung before the store has seen anything. Uniform
@@ -46,10 +52,21 @@ from .prior import NetworkPrior, Tally, best_label, cluster_prior, field
 PRIOR_WINS = 1.0
 PRIOR_LOSSES = 1.0
 
-#: The fields an outcome row may be read from. Unlike the prior's allowlist this one DOES
-#: include discount depth: a store learning its own elasticity from its own outcomes is the
-#: whole point. The wall is that these rows never cross a store boundary.
-OUTCOME_DEPTH_FIELDS: tuple[str, ...] = ("discount_depth", "discount_pct")
+#: Outcome-row fields carrying a depth as a FRACTION (`0.2`), tried in order.
+DEPTH_FRACTION_FIELDS: tuple[str, ...] = ("discount_depth",)
+
+#: Outcome-row fields carrying a depth as a PERCENT (`20.0`), tried after the fraction fields.
+#:
+#: Split from the fraction fields on purpose. Reading both through one "guess the unit" helper
+#: turns `discount_pct: 0.5` — half a percent off — into a 50% discount in the tally, because
+#: 0.5 is a perfectly plausible fraction. The field name states the unit; there is nothing to
+#: infer, so nothing infers.
+DEPTH_PERCENT_FIELDS: tuple[str, ...] = ("discount_pct",)
+
+#: Every field an outcome row's depth may be read from. Unlike the prior's allowlist this one
+#: DOES include discount evidence: a store learning its own elasticity from its own outcomes is
+#: the whole point of the loop. The wall is that these rows never cross a store boundary.
+OUTCOME_DEPTH_FIELDS: tuple[str, ...] = DEPTH_FRACTION_FIELDS + DEPTH_PERCENT_FIELDS
 
 #: Prefix of the policy version a rendered `learned_policy` reports.
 POLICY_VERSION_PREFIX = "learned"
@@ -140,9 +157,19 @@ def _is_own(state: StoreLearningState, record: Any) -> bool:
 
 
 def _row_depth(record: Any) -> float | None:
-    """The row's discount depth as a fraction, or ``None`` when it states none usably."""
-    for name in OUTCOME_DEPTH_FIELDS:
+    """The row's discount depth as a fraction, or ``None`` when it states none usably.
+
+    Each field is read in its own declared unit. A row that states no usable depth is dropped
+    rather than tallied at rung zero: "we do not know what depth this was" and "this converted
+    at no discount" are opposite pieces of evidence, and conflating them teaches the loop that
+    zero wins.
+    """
+    for name in DEPTH_FRACTION_FIELDS:
         depth = as_fraction(field(record, name))
+        if depth is not None:
+            return depth
+    for name in DEPTH_PERCENT_FIELDS:
+        depth = percent_as_fraction(field(record, name))
         if depth is not None:
             return depth
     return None
@@ -179,7 +206,7 @@ class _ClusterScratch:
         self.won_count = 0
 
     @classmethod
-    def of(cls, learned: ClusterLearning | None, cluster_id: str, rungs: int) -> "_ClusterScratch":
+    def of(cls, learned: ClusterLearning | None, cluster_id: str, rungs: int) -> _ClusterScratch:
         scratch = cls(cluster_id, rungs)
         if learned is None:
             return scratch
@@ -379,6 +406,8 @@ def to_learned_policy(state: StoreLearningState) -> dict[str, Any]:
 
 
 __all__ = [
+    "DEPTH_FRACTION_FIELDS",
+    "DEPTH_PERCENT_FIELDS",
     "OUTCOME_DEPTH_FIELDS",
     "POLICY_VERSION_PREFIX",
     "PRIOR_LOSSES",

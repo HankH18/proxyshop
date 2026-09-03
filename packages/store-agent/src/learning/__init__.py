@@ -37,6 +37,7 @@ from .grid import (
     as_fraction,
     as_percent,
     bucket_index,
+    percent_as_fraction,
 )
 from .prior import (
     DISCOUNT_MARKER,
@@ -52,6 +53,8 @@ from .prior import (
     to_context_priors,
 )
 from .state import (
+    DEPTH_FRACTION_FIELDS,
+    DEPTH_PERCENT_FIELDS,
     OUTCOME_DEPTH_FIELDS,
     POLICY_VERSION_PREFIX,
     PRIOR_LOSSES,
@@ -69,6 +72,8 @@ from .state import (
 
 __all__ = [
     "DEFAULT_DEPTH_BUCKETS",
+    "DEPTH_FRACTION_FIELDS",
+    "DEPTH_PERCENT_FIELDS",
     "DISCOUNT_MARKER",
     "FRACTION_CEILING",
     "OUTCOME_DEPTH_FIELDS",
@@ -92,6 +97,7 @@ __all__ = [
     "cluster_prior",
     "depth_weights",
     "initial_state",
+    "percent_as_fraction",
     "prior_view",
     "reject_discount_fields",
     "sample_depth",
