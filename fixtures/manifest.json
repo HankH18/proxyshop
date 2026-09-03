@@ -210,38 +210,39 @@
       }
     ]
   },
+  "expected_trust_trajectory_replay_rule": "ESC-006. The scores below are what THIS DOCUMENT'S OWN observation_weights produce, recomputed with the shipped scoring engine rather than authored, and they assume the replay schedule stated here — the schedule is part of the contract. All SEVEN dishonest_store.behaviours are replayed ONCE PER EPISODE, one episode per day, with decay measured from each observation's own date against the published half_life_days. A simulator that replays a different subset, or spaces episodes differently, will not reproduce these numbers and must not be graded against them. The superseded values (0.42 / 0.33 / 0.26 / 0.19 / 0.13) were unreachable under any reading of the published weights: every non-zero episode fell outside its own stated band, which made this document self-contradictory and would have failed T-084 and mis-graded T-081 through no fault of either.",
   "expected_trust_trajectory": [
     {
       "episode": 0,
       "score": 0.5,
-      "tolerance": 0.08,
+      "tolerance": 0.03,
       "note": "the neutral Beta(2,2) prior, above the blacklist threshold: a store that starts below it proves nothing"
     },
     {
       "episode": 2,
-      "score": 0.42,
-      "tolerance": 0.08
+      "score": 0.235,
+      "tolerance": 0.03
     },
     {
       "episode": 4,
-      "score": 0.33,
-      "tolerance": 0.07
+      "score": 0.158,
+      "tolerance": 0.03
     },
     {
       "episode": 6,
-      "score": 0.26,
-      "tolerance": 0.06
+      "score": 0.12,
+      "tolerance": 0.03
     },
     {
       "episode": 9,
-      "score": 0.19,
-      "tolerance": 0.05
+      "score": 0.09,
+      "tolerance": 0.03
     },
     {
       "episode": 12,
-      "score": 0.13,
-      "tolerance": 0.05,
-      "note": "S2: below the 0.35 blacklist threshold even at the top of the tolerance band, inside the 12-episode budget"
+      "score": 0.073,
+      "tolerance": 0.03,
+      "note": "S2: below the 0.35 blacklist threshold even at the top of the tolerance band, inside the 12-episode budget. NOTE the crossing is far earlier than the superseded values implied: replaying all seven behaviours every episode puts this store under 0.35 at EPISODE 1 (0.317), not at 4-6. That is what the published weights say. If a slower, more illustrative decline is wanted for a demo, the lever is the replay SCHEDULE in expected_trust_trajectory_replay_rule — fewer behaviours per episode — not these numbers."
     }
   ],
   "personas": {
@@ -357,14 +358,11 @@
     "note": "This reference sits INSIDE the body the approval digest covers, so approving the manifest transitively approves the exact bytes of the golden set. Change either and the chain breaks loudly."
   },
   "approval": {
-    "status": "pending_human_approval",
-    "approver": null,
-    "approved_at": null,
-    "artifact": null,
-    "content_hash": "130608ab82568409e6e0e2a2086bf6eccb3d535338f5a32fe9dccb72a9205ce6",
-    "request": "fixtures/approval/REQUEST-manifest-approval.md",
-    "how_to_approve": "A HUMAN runs:  PROXYSHOP_WORKER=<n> ./.venv/bin/python -m fixtures.approval --approver \"<your full name>\"",
-    "note": "T-080 is a human gate (EXECUTION.md rule 6). No agent may fill approver/approved_at/artifact. `content_hash` is a computed digest of this document's body (this block excluded) and is NOT itself an approval; it is recorded so downstream readers can detect drift, and so the human approves a document whose digest is already published rather than one an agent hashes afterwards.",
-    "approver_null_because": "nobody has approved this yet"
+    "status": "approved",
+    "approver": "Hank Holcomb",
+    "approved_at": "2026-09-03T07:14:09Z",
+    "artifact": "fixtures/approval/manifest-approval.md",
+    "content_hash": "0ce80606248b6afe996a5309630359b4bc5fce65fb74d66d3fbc1aae73bffa27",
+    "request": "fixtures/approval/REQUEST-manifest-approval.md"
   }
 }

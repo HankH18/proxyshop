@@ -99,7 +99,7 @@ These are the exact bytes. The approval command recomputes all three and refuses
 still match, so what you read here is what gets approved — nothing more:
 
 ```
-fixtures/manifest.json           130608ab82568409e6e0e2a2086bf6eccb3d535338f5a32fe9dccb72a9205ce6
+fixtures/manifest.json           0ce80606248b6afe996a5309630359b4bc5fce65fb74d66d3fbc1aae73bffa27
 fixtures/golden/golden_set.json  0f8c092f0c9ce3935da2e6e6673ee0de50d7c6f9520f79665139b1dc89777012
 fixtures/catalog/coffee.json     4a94895f4209b30d2a96296072e44222245ee44c0fc7e556c700233258cb20d7
 ```
