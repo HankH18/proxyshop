@@ -19,7 +19,6 @@ from apps.buyer.svc.src.feedback import (
     FeedbackPrompt,
     UnusableOrder,
     feedback_prompt,
-    is_routed,
     routing,
 )
 
@@ -127,7 +126,7 @@ def test_the_prompt_offers_no_free_text_field_anywhere() -> None:
 )
 def test_no_prompt_is_offered_for_an_order_that_is_not_network_routed(order, why) -> None:
     assert feedback_prompt(order) is None, why
-    assert not is_routed(order), why
+    assert not routing(order).routed, why
     assert routing(order).reason, "a refusal must say why, in words a screen can show"
 
 
@@ -150,7 +149,7 @@ def test_an_order_cancelled_before_it_arrived_is_offered_no_prompt(status) -> No
     order = dict(ROUTED, status=status)
     assert feedback_prompt(order) is None
     # ...but it is still network-routed, so feedback already given about it stands.
-    assert is_routed(order) is True
+    assert routing(order).routed is True
     assert routing(order).eligible is False
 
 

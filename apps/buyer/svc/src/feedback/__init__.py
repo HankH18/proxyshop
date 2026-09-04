@@ -53,7 +53,6 @@ what goes wrong otherwise (this tree is reachable both as ``buyer_svc.feedback``
 
 from __future__ import annotations
 
-from ._reading import first, flag, read, text
 from ._spellings import bind_package
 from .errors import (
     ContradictoryFeedback,
@@ -86,7 +85,6 @@ from .routing import (
     STATUS_FIELDS,
     UNDELIVERED_STATUSES,
     Routing,
-    is_routed,
     routing,
 )
 from .submission import (
@@ -135,16 +133,11 @@ __all__ = [
     "event_view",
     "feedback_payload",
     "feedback_prompt",
-    "first",
-    "flag",
-    "is_routed",
     "prompt_for",
-    "read",
     "reset_submitted",
     "routing",
     "submit_feedback",
     "submitted",
-    "text",
 ]
 
 # LAST, and it is not decoration: this tree is importable as `buyer_svc.feedback` and as

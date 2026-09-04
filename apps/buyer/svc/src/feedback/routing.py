@@ -62,7 +62,6 @@ __all__ = [
     "STATUS_FIELDS",
     "UNDELIVERED_STATUSES",
     "Routing",
-    "is_routed",
     "routing",
 ]
 
@@ -214,8 +213,3 @@ def routing(order: Any) -> Routing:
         eligible=True,
         reason="",
     )
-
-
-def is_routed(order: Any) -> bool:
-    """Whether R14 lets this order's feedback be recorded at all. See :func:`routing`."""
-    return routing(order).routed
