@@ -822,6 +822,38 @@ def test_t140_the_production_login_path_serves_a_profile_that_reflects_the_buyer
             f"{len(fabricated)} served profiles are not a coarsening of any record in the "
             "account directory; the route is manufacturing buckets downstream of the seam"
         )
+
+        # -- (5) the DEPLOYMENT BUILDER must decide something about the directory -------
+        # ANDed with the clauses above, never in place of them, and last because the
+        # behavioural teeth are the better diagnostic. This exists to close one loophole the
+        # behavioural clauses alone leave open: giving InMemoryAccountDirectory a CLASS-level
+        # store would make every instance share state and satisfy (1) through (4) while
+        # build_auth_service still decided nothing, which is the finding verbatim — the word
+        # "accounts" does not occur anywhere in auth/routes.py today, so this module cannot
+        # wire an account source at all. Parsed, so a docstring or an __all__ string cannot
+        # satisfy it; a symbol SET rather than one name, so the gate does not dictate whether
+        # the repair is a process-wide default, a DSN-backed directory, or an importer.
+        wiring = {"accounts", "AccountDirectory", "InMemoryAccountDirectory", "account_directory"}
+        routes_tree = ast.parse(pathlib.Path(routes_mod.__file__ or "").read_text(encoding="utf-8"))
+        wired: set[str] = set()
+        for node in ast.walk(routes_tree):
+            if isinstance(node, ast.Name) and node.id in wiring:
+                wired.add(node.id)
+            elif isinstance(node, ast.Attribute) and node.attr in wiring:
+                wired.add(node.attr)
+            elif isinstance(node, ast.alias) and (node.asname or node.name) in wiring:
+                wired.add(node.asname or node.name)
+            elif isinstance(node, ast.keyword) and node.arg in wiring:
+                wired.add(node.arg)
+            elif isinstance(node, ast.FunctionDef) and node.name in wiring:
+                wired.add(node.name)
+        assert wired, (
+            f"none of {sorted(wiring)} appears as a real reference anywhere in "
+            f"{pathlib.Path(routes_mod.__file__ or '').name} — the ONLY production constructor "
+            "of the login service. It decides the vault (_vault_from_env) and the worker count "
+            "and nothing else, so no deployment can configure where buyer records come from, "
+            "whatever a shared in-memory directory might make the served profiles look like"
+        )
     finally:
         routes_mod.set_auth_service(None)
 
