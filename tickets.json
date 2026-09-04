@@ -5554,6 +5554,36 @@
       "defect": "T-264'S PROPOSED GATE IS UNSOUND AND WOULD CERTIFY THE LEAK. Run verbatim against HEAD it reports '3 passed in 0.30s' while the defect reproduces three ways. The cause is that it never varies `code_creator` \u2014 it grades the specific PATCH that landed (the registered_domains callability check) rather than the PROPERTY that no injected collaborator's repr reaches a denial reason. The hardening suggested in its own gate_design does not close this either. This is the run's recurring shape stated exactly: a gate answering a narrower question than its caller believes. The replacement must be a property over ALL injected collaborators \u2014 registered_domains, code_creator, and any sibling \u2014 asserting that no denial_reason, persisted policy_event or 409 body contains a repr-shaped substring, and it must be ARMED (assert a non-zero count of injected collaborators exercised) so it cannot pass by iterating nothing.",
       "finding_id": "abea98300d816c904533418ce7dad2c7995e1c3775ef62a7cc9dd43bbb5833fb",
       "reproduction": "Run the gate named in T-264's already_gated_by field at HEAD: 3 passed. Then reproduce the providers.py:110 leak. Measured by the run-2 refuter."
+    },
+    {
+      "id": "T-328",
+      "title": "T-198 IS THE FIRST CONFIRMED UNDER-SELECTION WITH A LIVE FAILURE, and it is an OPEN ticket. Its verify selects `test_t198_a_...`. The same file holds `test_t198_b_a_vanity_email_domain_in_a_category_slug_is_still_a_leak`, claimed by T-198 THREE ways \u2014 by name, by section comment, and by decorator \u2014 never selected by its gate, and FAILING: 'a vanity email domain was published to the store-facing profile: [reyes-family-gear]'. Reproduced directly. So T-198's gate can be turned green by fixing half its defect while a second identity leak of the same class stays live and unwatched. This is the exact shape T-204 was suspected of (a gate answering a narrower question than its caller believes) \u2014 T-204 turned out not to be an instance, and this is. The remedy is to widen T-198's verify to select both nodes; the general remedy is a red-check advisory comparing nodes-that-claim-a-ticket against nodes-the-verify-selects.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/tests/test_repro_open_tickets.py",
+      "defect": "T-198 IS THE FIRST CONFIRMED UNDER-SELECTION WITH A LIVE FAILURE, and it is an OPEN ticket. Its verify selects `test_t198_a_...`. The same file holds `test_t198_b_a_vanity_email_domain_in_a_category_slug_is_still_a_leak`, claimed by T-198 THREE ways \u2014 by name, by section comment, and by decorator \u2014 never selected by its gate, and FAILING: 'a vanity email domain was published to the store-facing profile: [reyes-family-gear]'. Reproduced directly. So T-198's gate can be turned green by fixing half its defect while a second identity leak of the same class stays live and unwatched. This is the exact shape T-204 was suspected of (a gate answering a narrower question than its caller believes) \u2014 T-204 turned out not to be an instance, and this is. The remedy is to widen T-198's verify to select both nodes; the general remedy is a red-check advisory comparing nodes-that-claim-a-ticket against nodes-the-verify-selects.",
+      "finding_id": "43e047301d044cd78e2865ef0b554c63fa383616753782fe73a76129567b72df",
+      "reproduction": "export PROXYSHOP_WORKER=<n> && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t198_b \u2014 observe the failure; then note T-198's recorded verify selects only test_t198_a."
+    },
+    {
+      "id": "T-329",
+      "title": "ONLY 16 OF 141 TICKET GATES REACH THE FROZEN ACCEPTANCE SUITE, AND 44 OF 141 GATED TICKETS HAVE NO TRACEABLE GRADER ANYWHERE. All 120 @pytest.mark.ticket(...) nodes live under .swarm-loop/acceptance/, which `norecursedirs` hides from every ordinary pytest run \u2014 `make verify` collects 2822 of 2943 nodes and ZERO acceptance nodes. The exclusion itself is CORRECT and deliberate: the frozen suite is the scorer and is driven by its own runner, not by the repo suite, and mixing them would let the graded tree grade itself. The defect is the consequence nobody stated: the markers that `graded_ticket_fraction` counts live in a tier that ticket gates almost never execute, so 'this ticket has a frozen grader' and 'this ticket's gate runs that grader' are nearly disjoint facts. Nothing is broken today \u2014 all 74 tier-A unselected nodes pass \u2014 but the two tiers can drift arbitrarily far apart without any signal, and a run can look healthy on the metric while the gates enforce something else entirely.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "pyproject.toml"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "pyproject.toml",
+      "defect": "ONLY 16 OF 141 TICKET GATES REACH THE FROZEN ACCEPTANCE SUITE, AND 44 OF 141 GATED TICKETS HAVE NO TRACEABLE GRADER ANYWHERE. All 120 @pytest.mark.ticket(...) nodes live under .swarm-loop/acceptance/, which `norecursedirs` hides from every ordinary pytest run \u2014 `make verify` collects 2822 of 2943 nodes and ZERO acceptance nodes. The exclusion itself is CORRECT and deliberate: the frozen suite is the scorer and is driven by its own runner, not by the repo suite, and mixing them would let the graded tree grade itself. The defect is the consequence nobody stated: the markers that `graded_ticket_fraction` counts live in a tier that ticket gates almost never execute, so 'this ticket has a frozen grader' and 'this ticket's gate runs that grader' are nearly disjoint facts. Nothing is broken today \u2014 all 74 tier-A unselected nodes pass \u2014 but the two tiers can drift arbitrarily far apart without any signal, and a run can look healthy on the metric while the gates enforce something else entirely.",
+      "finding_id": "25c8da02248e7f05010a8dc3c3ea8d0ee5ad5774487aa521ffa0915b26063bfd",
+      "reproduction": "pytest --collect-only -q | wc -l vs the same over .swarm-loop/acceptance/; then count how many ticket verify commands name a path under .swarm-loop/acceptance/ (16 of 141)."
     }
   ]
 }
