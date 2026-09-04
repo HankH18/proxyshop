@@ -87,10 +87,9 @@ def test_the_events_fixture_connects_as_the_role_the_ledger_writer_actually_ship
     as a literal, so this grades "the fixtures use the shipped principal", not "the
     fixtures use a string spelled this way today".
     """
-    from proxyshop_support.postgres import ROLES
-
     from apps.trust.src.events.pg import DEFAULT_DSN_ENV
     from apps.trust.tests import _fixtures_events
+    from proxyshop_support.postgres import ROLES
 
     env_to_role = {spec[0]: role for role, spec in ROLES.items()}
     shipped_role = next(
@@ -243,15 +242,39 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
 
     Built against a container-shaped tree rather than against a running daemon: the
     Dockerfile's own ``COPY`` lines are parsed, those paths are materialised into a temp
-    tree, the two ``.pkgroot`` symlinks the Dockerfile's ``RUN`` creates are recreated, and
-    a subprocess with the image's ``PYTHONPATH`` (and nothing else) asks
-    ``trust.verification`` for ``verify``.
+    tree, the ``.pkgroot`` symlinks the Dockerfile's ``RUN`` creates are recreated *from
+    that RUN's own* ``ln -s`` *pairs*, and a subprocess with the image's ``PYTHONPATH``
+    (and nothing else) asks ``trust.verification`` for ``verify``.
 
     ``import trust.verification`` alone is NOT the reproduction any more — the module went
     lazy (PEP 562) precisely so the absent package would not kill the service at import
     time. The failure moved to the first call, which is worse to find and no less fatal:
     a trust service that cannot verify a claim treats every product-fact claim as
     unverifiable, silently.
+
+    Two things make this an honest measurement of the temp tree rather than of the repo,
+    and both were established by measurement after this gate was found XPASSing while the
+    defect it describes was still live:
+
+    ``-S`` **on the probe.** ``.venv/lib/python3.12/site-packages/_proxyshop.pth`` lists the
+    checkout root and its ``.pkgroot``. ``site`` processes ``.pth`` files at interpreter
+    startup, so those two directories land on ``sys.path`` *regardless of* ``PYTHONPATH``
+    and regardless of ``cwd`` — the probe resolved ``claim_verification`` out of the LIVE
+    CHECKOUT and printed ``RESOLVED`` while the image would have raised. ``-S`` disables
+    ``site`` and therefore ``.pth`` handling; the verifier is stdlib-only (``hashlib``,
+    ``json``, ``math``, ``re``, ``datetime``, ``types``, ``typing``, ``collections``), so
+    losing ``site-packages`` costs the probe nothing it needs. ``-E`` is NOT usable here —
+    it discards ``PYTHONPATH`` too, and the probe then fails on ``No module named 'trust'``,
+    which is the wrong red. ``-I`` is NOT usable either: it implies ``-E -s``, and ``-s``
+    suppresses only the *user* site directory, leaving the venv's ``.pth`` to fire — measured
+    RESOLVING against the unfixed Dockerfile, i.e. maximally wrong.
+
+    **Symlinks parsed, not hardcoded.** The two ``.pkgroot`` links used to be a literal
+    tuple of ``contracts`` and ``trust``. ``packages/verification/__init__.py`` forwards to
+    ``claim_verification``, which the repo provides as ``.pkgroot/claim_verification ->
+    ../packages/verification/src``, so closing T-193 takes a ``COPY`` *and* a matching
+    ``ln -s``. Against a hardcoded pair the fixed Dockerfile still measured FAILS — the gate
+    could not see its own fix. Reading the pairs off the ``RUN`` makes the witness fire.
     """
     dockerfile = (REPO_ROOT / "apps" / "trust" / "Dockerfile").read_text(encoding="utf-8")
     copies = re.findall(r"^COPY\s+(\S+)\s+(\S+)\s*$", dockerfile, flags=re.MULTILINE)
@@ -264,21 +287,37 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
         dst = app / destination.removeprefix("/app/").rstrip("/")
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True, symlinks=False, ignore_dangling_symlinks=True)
+            shutil.copytree(
+                src, dst, dirs_exist_ok=True, symlinks=False, ignore_dangling_symlinks=True
+            )
         elif src.is_file():
             shutil.copy2(src, dst)
 
-    pkgroot = app / ".pkgroot"
-    pkgroot.mkdir(exist_ok=True)
-    for link, target in (("contracts", "../packages/contracts/src"), ("trust", "../apps/trust/src")):
-        spot = pkgroot / link
-        if not spot.exists():
+    # Every `ln -s <target> <link>` the image's RUN layer creates under /app, read off the
+    # Dockerfile rather than transcribed, so a link ADDED by a fix is reproduced here too.
+    links = [
+        (target, link)
+        for target, link in re.findall(r"\bln\s+-s\s+(\S+)\s+(\S+)", dockerfile)
+        if link.startswith("/app/")
+    ]
+    assert links, (
+        "no `ln -s ... /app/...` pairs parsed out of apps/trust/Dockerfile, so this gate "
+        "would build a tree with none of the .pkgroot symlinks that make the flat layout "
+        "importable (R1b/D42) and would go red whatever the COPY set contains"
+    )
+    for target, link in links:
+        spot = app / link.removeprefix("/app/")
+        spot.parent.mkdir(parents=True, exist_ok=True)
+        if not spot.is_symlink() and not spot.exists():
             spot.symlink_to(target)
 
     probe = textwrap.dedent(
         """
-        import trust.verification as v
-        v.verify
+        import json, sys
+        print("SYSPATH " + json.dumps(sys.path))
+        import trust.verification as shim
+        print("SHIM " + shim.__file__)
+        shim.verify
         print("RESOLVED")
         """
     )
@@ -288,12 +327,52 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     result = subprocess.run(
-        [sys.executable, "-c", probe],
+        # -S: no `site`, therefore no `.pth`, therefore no live checkout on sys.path.
+        [sys.executable, "-S", "-c", probe],
         cwd=app,
         env=env,
         capture_output=True,
         text=True,
         timeout=120,
+    )
+
+    def _tagged(tag: str) -> str | None:
+        prefix = f"{tag} "
+        return next(
+            (line[len(prefix) :] for line in result.stdout.splitlines() if line.startswith(prefix)),
+            None,
+        )
+
+    def _inside_checkout(entry: str) -> bool:
+        if not entry:
+            return False
+        resolved = pathlib.Path(entry).resolve()
+        return resolved == REPO_ROOT or REPO_ROOT in resolved.parents
+
+    reported_path = _tagged("SYSPATH")
+    assert reported_path is not None, (
+        "the container-shaped probe never reached its first statement, so this gate graded "
+        f"nothing at all:\n{result.stderr.strip()[-1200:]}"
+    )
+
+    leaked = [entry for entry in json.loads(reported_path) if _inside_checkout(entry)]
+    assert leaked == [], (
+        f"the probe subprocess can see the live checkout on sys.path ({leaked}), so it can "
+        f"import the claim verifier from the repo instead of from the container-shaped tree "
+        f"and this gate proves nothing about the image. .venv's site-packages/_proxyshop.pth "
+        f"puts {REPO_ROOT} and {REPO_ROOT / '.pkgroot'} on sys.path at interpreter startup "
+        f"regardless of PYTHONPATH; `-S` is what keeps them off."
+    )
+
+    shim_file = _tagged("SHIM")
+    assert shim_file is not None, (
+        "the container-shaped tree cannot import `trust.verification` at all, so this gate "
+        "is going red BEFORE the verifier lookup it exists to grade — fix the tree, not the "
+        f"COPY set:\n{result.stderr.strip()[-1200:]}"
+    )
+    assert app.resolve() in pathlib.Path(shim_file).resolve().parents, (
+        f"the probe imported trust.verification from {shim_file}, which is outside the "
+        f"container-shaped tree at {app.resolve()} — it is grading the live checkout"
     )
 
     assert result.returncode == 0 and "RESOLVED" in result.stdout, (
@@ -328,13 +407,13 @@ def test_the_mismatch_return_gloss_agrees_with_the_approved_manifest() -> None:
     from apps.trust.src.scoring import engine
 
     manifest = json.loads((REPO_ROOT / "fixtures" / "manifest.json").read_text(encoding="utf-8"))
-    behaviours = (manifest.get("dishonest_store") or {}).get("behaviours") or (
-        manifest.get("dishonest_store") or {}
-    ).get("behaviors") or []
+    behaviours = (
+        (manifest.get("dishonest_store") or {}).get("behaviours")
+        or (manifest.get("dishonest_store") or {}).get("behaviors")
+        or []
+    )
     approved = [
-        row
-        for row in behaviours
-        if isinstance(row, dict) and row.get("type") == "mismatch_return"
+        row for row in behaviours if isinstance(row, dict) and row.get("type") == "mismatch_return"
     ]
     assert approved, (
         "the approved manifest no longer scripts a mismatch_return behaviour, so this gate "
@@ -346,9 +425,7 @@ def test_the_mismatch_return_gloss_agrees_with_the_approved_manifest() -> None:
     )
 
     gloss = "\n".join(
-        line
-        for line in (engine.__doc__ or "").splitlines()
-        if "mismatch_return" in line
+        line for line in (engine.__doc__ or "").splitlines() if "mismatch_return" in line
     )
     assert gloss, "scoring/engine.py no longer glosses mismatch_return at all"
 
