@@ -743,11 +743,21 @@ def _t279_bases() -> list[dict[str, Any]]:
         nonce = _t279_token(rng, index, 3)
         # Near-term for even indexes, far for odd — by index, so "half the draws look like a
         # real bid" is true by construction and not a coin flip the assertion has to tolerate.
+        #
+        # BUCKETED BY INDEX, and that is a bug fix rather than a flourish. Drawn flat, the
+        # `issued_at` offset had 241 possible values and twelve draws collide about one run in
+        # four — measured, and it made the distinctness assertion below fail ~1 run in 8. A
+        # gate that is flaky about its own arming is worse than no arming at all, because the
+        # red it produces is noise and gets ignored. Each index draws from its OWN disjoint
+        # window, so distinctness is structural and the value is still drawn.
+        bucket = index // 2
         if index % 2 == 0:
-            expires_at = now + timedelta(minutes=rng.randrange(1, 1440))
+            expires_at = now + timedelta(minutes=30 + bucket * 230 + rng.randrange(0, 200))
         else:
-            expires_at = now + timedelta(minutes=rng.randrange(1440, 1440 * 365 * 5))
-        issued_at = now + timedelta(seconds=rng.randrange(-120, 121))
+            expires_at = now + timedelta(
+                minutes=1500 + bucket * 400_000 + rng.randrange(0, 300_000)
+            )
+        issued_at = now + timedelta(seconds=-115 + index * 20 + rng.randrange(-4, 5))
         deadline = now + timedelta(seconds=rng.randrange(60, 3600))
         unit_price = rng.randrange(500, 50000) / 100.0
         payload = {
