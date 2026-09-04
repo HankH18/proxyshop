@@ -1,0 +1,183 @@
+{
+  "contract_version": "1.0.0",
+  "server": "shopify-catalog-mcp",
+  "tool": "catalog.list_products",
+  "shop_domain": "harbour-house.example.com",
+  "notes": [
+    "RECORDED CONTRACT for the catalog MCP server (T-023, SPEC A1/C6).",
+    "Replayed by ingest.adapters.catalog_mcp.RecordedMCPSession, which refuses any call",
+    "it has no recording for - so `make verify` can never start making a live call, and a",
+    "contract test cannot pass by asking for something nobody recorded.",
+    "Recorded with limit=2 so pagination is exercised in four products rather",
+    "than in four hundred; construct the adapter with page_size=2 to replay it.",
+    "Two pages, four products, seven variants. Identifiers are GIDs because that is",
+    "what the MCP surface serves; ingest.adapters.mapping.native_key reduces them to",
+    "the same key products.json states as a bare integer, so both adapters land on",
+    "one Product node per product."
+  ],
+  "interactions": [
+    {
+      "tool": "catalog.list_products",
+      "arguments": {
+        "shop_domain": "harbour-house.example.com",
+        "limit": 2
+      },
+      "response": {
+        "isError": false,
+        "structuredContent": {
+          "products": [
+            {
+              "id": "gid://shopify/Product/7100100",
+              "handle": "altura-washed-single-origin",
+              "title": "Altura Washed Single Origin",
+              "vendor": "Harbour House Coffee",
+              "product_type": "Whole Bean Coffee",
+              "status": "ACTIVE",
+              "online_store_url": "https://harbour-house.example.com/products/altura-washed-single-origin",
+              "variants": [
+                {
+                  "id": "gid://shopify/ProductVariant/41001",
+                  "sku": "ALT-250",
+                  "title": "250 g",
+                  "price": {
+                    "amount": "18.50",
+                    "currency_code": "USD"
+                  },
+                  "available": true
+                },
+                {
+                  "id": "gid://shopify/ProductVariant/41002",
+                  "sku": "ALT-1KG",
+                  "title": "1 kg",
+                  "price": {
+                    "amount": "62.90",
+                    "currency_code": "USD"
+                  },
+                  "available": true
+                }
+              ]
+            },
+            {
+              "id": "gid://shopify/Product/7100101",
+              "handle": "harbour-house-espresso-blend",
+              "title": "Harbour House Espresso Blend",
+              "vendor": "Harbour House Coffee",
+              "product_type": "Whole Bean Coffee",
+              "status": "ACTIVE",
+              "online_store_url": "https://harbour-house.example.com/products/harbour-house-espresso-blend",
+              "variants": [
+                {
+                  "id": "gid://shopify/ProductVariant/41010",
+                  "sku": "HHE-250",
+                  "title": "250 g",
+                  "price": {
+                    "amount": "16.00",
+                    "currency_code": "USD"
+                  },
+                  "available": true
+                },
+                {
+                  "id": "gid://shopify/ProductVariant/41011",
+                  "sku": "HHE-1KG",
+                  "title": "1 kg",
+                  "price": {
+                    "amount": "54.40",
+                    "currency_code": "USD"
+                  },
+                  "available": false
+                }
+              ]
+            }
+          ],
+          "page_info": {
+            "has_next_page": true,
+            "end_cursor": "eyJsYXN0X2lkIjoiNzEwMDEwMSJ9"
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"products\": [{\"id\": \"gid://shopify/Product/7100100\", \"handle\": \"altura-washed-single-origin\", \"title\": \"Altura Washed Single Origin\", \"vendor\": \"Harbour House Coffee\", \"product_type\": \"Whole Bean Coffee\", \"status\": \"ACTIVE\", \"online_store_url\": \"https://harbour-house.example.com/products/altura-washed-single-origin\", \"variants\": [{\"id\": \"gid://shopify/ProductVariant/41001\", \"sku\": \"ALT-250\", \"title\": \"250 g\", \"price\": {\"amount\": \"18.50\", \"currency_code\": \"USD\"}, \"available\": true}, {\"id\": \"gid://shopify/ProductVariant/41002\", \"sku\": \"ALT-1KG\", \"title\": \"1 kg\", \"price\": {\"amount\": \"62.90\", \"currency_code\": \"USD\"}, \"available\": true}]}, {\"id\": \"gid://shopify/Product/7100101\", \"handle\": \"harbour-house-espresso-blend\", \"title\": \"Harbour House Espresso Blend\", \"vendor\": \"Harbour House Coffee\", \"product_type\": \"Whole Bean Coffee\", \"status\": \"ACTIVE\", \"online_store_url\": \"https://harbour-house.example.com/products/harbour-house-espresso-blend\", \"variants\": [{\"id\": \"gid://shopify/ProductVariant/41010\", \"sku\": \"HHE-250\", \"title\": \"250 g\", \"price\": {\"amount\": \"16.00\", \"currency_code\": \"USD\"}, \"available\": true}, {\"id\": \"gid://shopify/ProductVariant/41011\", \"sku\": \"HHE-1KG\", \"title\": \"1 kg\", \"price\": {\"amount\": \"54.40\", \"currency_code\": \"USD\"}, \"available\": false}]}], \"page_info\": {\"has_next_page\": true, \"end_cursor\": \"eyJsYXN0X2lkIjoiNzEwMDEwMSJ9\"}}"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "catalog.list_products",
+      "arguments": {
+        "shop_domain": "harbour-house.example.com",
+        "limit": 2,
+        "cursor": "eyJsYXN0X2lkIjoiNzEwMDEwMSJ9"
+      },
+      "response": {
+        "isError": false,
+        "structuredContent": {
+          "products": [
+            {
+              "id": "gid://shopify/Product/7100102",
+              "handle": "cold-brew-coarse-grind",
+              "title": "Cold Brew Coarse Grind",
+              "vendor": "Harbour House Coffee",
+              "product_type": "Ground Coffee",
+              "status": "ACTIVE",
+              "online_store_url": "https://harbour-house.example.com/products/cold-brew-coarse-grind",
+              "variants": [
+                {
+                  "id": "gid://shopify/ProductVariant/41020",
+                  "sku": "CBC-500",
+                  "title": "500 g",
+                  "price": {
+                    "amount": "21.00",
+                    "currency_code": "USD"
+                  },
+                  "available": true
+                }
+              ]
+            },
+            {
+              "id": "gid://shopify/Product/7100103",
+              "handle": "decaf-swiss-water-reserve",
+              "title": "Decaf Swiss Water Reserve",
+              "vendor": "Harbour House Coffee",
+              "product_type": "Whole Bean Coffee",
+              "status": "ACTIVE",
+              "online_store_url": "https://harbour-house.example.com/products/decaf-swiss-water-reserve",
+              "variants": [
+                {
+                  "id": "gid://shopify/ProductVariant/41030",
+                  "sku": "DSW-250",
+                  "title": "250 g",
+                  "price": {
+                    "amount": "19.75",
+                    "currency_code": "USD"
+                  },
+                  "available": true
+                },
+                {
+                  "id": "gid://shopify/ProductVariant/41031",
+                  "sku": "DSW-1KG",
+                  "title": "1 kg",
+                  "price": {
+                    "amount": "67.15",
+                    "currency_code": "USD"
+                  },
+                  "available": true
+                }
+              ]
+            }
+          ],
+          "page_info": {
+            "has_next_page": false,
+            "end_cursor": null
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"products\": [{\"id\": \"gid://shopify/Product/7100102\", \"handle\": \"cold-brew-coarse-grind\", \"title\": \"Cold Brew Coarse Grind\", \"vendor\": \"Harbour House Coffee\", \"product_type\": \"Ground Coffee\", \"status\": \"ACTIVE\", \"online_store_url\": \"https://harbour-house.example.com/products/cold-brew-coarse-grind\", \"variants\": [{\"id\": \"gid://shopify/ProductVariant/41020\", \"sku\": \"CBC-500\", \"title\": \"500 g\", \"price\": {\"amount\": \"21.00\", \"currency_code\": \"USD\"}, \"available\": true}]}, {\"id\": \"gid://shopify/Product/7100103\", \"handle\": \"decaf-swiss-water-reserve\", \"title\": \"Decaf Swiss Water Reserve\", \"vendor\": \"Harbour House Coffee\", \"product_type\": \"Whole Bean Coffee\", \"status\": \"ACTIVE\", \"online_store_url\": \"https://harbour-house.example.com/products/decaf-swiss-water-reserve\", \"variants\": [{\"id\": \"gid://shopify/ProductVariant/41030\", \"sku\": \"DSW-250\", \"title\": \"250 g\", \"price\": {\"amount\": \"19.75\", \"currency_code\": \"USD\"}, \"available\": true}, {\"id\": \"gid://shopify/ProductVariant/41031\", \"sku\": \"DSW-1KG\", \"title\": \"1 kg\", \"price\": {\"amount\": \"67.15\", \"currency_code\": \"USD\"}, \"available\": true}]}], \"page_info\": {\"has_next_page\": false, \"end_cursor\": null}}"
+          }
+        ]
+      }
+    }
+  ]
+}

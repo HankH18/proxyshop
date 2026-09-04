@@ -33,7 +33,7 @@ re-exported here and are the stable surface other tickets should import.
 
 from __future__ import annotations
 
-from . import signed_fetch
+from . import catalog_mcp, signed_fetch
 from .base import (
     CatalogAdapter,
     CatalogRequest,
@@ -45,7 +45,26 @@ from .base import (
     apply_upserts,
 )
 from .budgets import BudgetExceeded, BudgetUsage, CrawlBudget, CrawlLedger
+from .catalog_mcp import (
+    CatalogMCPAdapter,
+    MCPError,
+    MCPSession,
+    MCPToolError,
+    RecordedMCPSession,
+    UnrecordedMCPCall,
+)
 from .hashing import canonical_json_hash, content_hash, has_changed, snapshot_ref
+from .mapping import (
+    build_upserts,
+    coerce_availability,
+    coerce_price,
+    composite_hash,
+    native_key,
+    native_product_key,
+    product_id_for,
+    stable_id,
+    variant_id_for,
+)
 from .netguard import (
     BLOCKED_IPV4_NETWORKS,
     BLOCKED_IPV6_NETWORKS,
@@ -78,32 +97,43 @@ from .transport import HTTPResult, RequestSigner, SafeHTTPClient, TransportError
 __all__ = [
     "BLOCKED_IPV4_NETWORKS",
     "BLOCKED_IPV6_NETWORKS",
-    "DENIED_HOSTS",
-    "DENIED_HOST_SUFFIXES",
-    "PRODUCT_TOKEN",
-    "USER_AGENT",
     "BudgetExceeded",
     "BudgetUsage",
     "CatalogAdapter",
+    "CatalogMCPAdapter",
     "CatalogRequest",
     "CatalogSnapshot",
     "CrawlBudget",
     "CrawlLedger",
+    "DENIED_HOSTS",
+    "DENIED_HOST_SUFFIXES",
     "FetchPolicy",
     "FetchRefused",
     "FetchVerdict",
     "FetchedResource",
     "HTTPResult",
+    "MCPError",
+    "MCPSession",
+    "MCPToolError",
+    "PRODUCT_TOKEN",
     "ProductRecord",
+    "RecordedMCPSession",
     "RequestSigner",
     "SafeHTTPClient",
     "SignedFetchAdapter",
     "TransportError",
+    "USER_AGENT",
+    "UnrecordedMCPCall",
     "UpsertOp",
     "VariantRecord",
     "address_refusal",
     "apply_upserts",
+    "build_upserts",
     "canonical_json_hash",
+    "catalog_mcp",
+    "coerce_availability",
+    "coerce_price",
+    "composite_hash",
     "content_hash",
     "crawl_delay",
     "decode_numeric_ipv4",
@@ -113,11 +143,16 @@ __all__ = [
     "is_fetch_allowed",
     "is_redirect_chain_allowed",
     "may_fetch",
+    "native_key",
+    "native_product_key",
     "normalise_host",
+    "product_id_for",
     "resolve_host",
     "robots_url",
     "robots_verdict_for_status",
     "signed_fetch",
     "snapshot_ref",
+    "stable_id",
     "user_agent_token",
+    "variant_id_for",
 ]
