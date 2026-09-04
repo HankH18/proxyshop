@@ -1618,15 +1618,6 @@ def test_t313_every_component_the_stack_includes_is_actually_deployable() -> Non
 _UNBUILT_MARKERS = ("NOT VERIFIED", "never been BUILT", "expect to debug the build")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-314: services/shopify-stub/compose.yaml carries its own warning that the image "
-        "has never been built on this host, while docs/demo/starting-slice.md:64 sends an "
-        "operator into it as step 1 of the demo; remove this marker once the image has been "
-        "built and the warning removed"
-    ),
-)
 def test_t314_the_shopify_stub_image_is_not_declared_unbuilt_by_its_own_compose_fragment() -> None:
     """The demo's step 1 sends an operator into an image the repo says was never built.
 
