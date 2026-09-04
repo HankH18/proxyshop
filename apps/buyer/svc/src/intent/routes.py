@@ -33,7 +33,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from .clarifier import clarify
 from .confirmation import confirm
@@ -46,6 +46,11 @@ from .errors import (
 )
 
 _log = logging.getLogger(__name__)
+
+#: Starlette 0.5x renamed ``HTTP_422_UNPROCESSABLE_ENTITY`` to ``..._CONTENT`` and emits a
+#: DeprecationWarning on the old name. Resolved once, here, so this module names neither
+#: spelling twice and works on both.
+_HTTP_422 = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
 
 __all__ = [
     "AUCTION_CLIENT_ATTR",
@@ -123,7 +128,14 @@ class ConfirmBody(BaseModel):
     """The intent the buyer just confirmed, and their confirmation."""
 
     intent: dict[str, Any]
-    confirmed: bool = False
+    #: ``StrictBool``, not ``bool``, and this was MEASURED rather than reasoned about.
+    #: Pydantic's default (lax) mode coerces the JSON strings ``"yes"``, ``"true"``,
+    #: ``"on"`` and ``"1"`` into ``True``, so a plain ``bool`` field turned
+    #: ``{"confirmed": "yes"}`` into a live auction: HTTP 201, one call to the exchange,
+    #: for a body that never carried a boolean at all. ``StrictBool`` admits exactly
+    #: ``true`` and ``false`` and answers 422 to everything else, which is what makes the
+    #: wire layer a real guard rather than a second spelling of the same guess.
+    confirmed: StrictBool = False
     profile: dict[str, Any] | None = None
     roster: list[dict[str, Any]] | None = None
     bid_timeout_seconds: float | None = None
@@ -146,9 +158,7 @@ async def clarify_route(body: ClarifyBody) -> ClarifyResponse:
     except IntentError as exc:
         # EmptyDialogue included: a dialogue with nothing in it is an unprocessable body,
         # not a server fault.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
     return ClarifyResponse(
         questions=list(outcome.questions),
         intent=outcome.intent.to_dict(),
@@ -176,9 +186,7 @@ async def confirm_route(body: ConfirmBody, request: Request) -> ConfirmResponse:
     except IntentAlreadyConfirmed as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UnstructuredIntent as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
     except AuctionClientUnusable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
