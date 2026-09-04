@@ -187,12 +187,16 @@ them is code-reading rather than observed execution** — which is why two of th
 their own note. A precision the mechanism deserves: the conftest probes TCP reachability of the compose datastore
 ports, not the daemon; the daemon being down is upstream of the thing actually measured.
 
-**The six WEAK verdicts on `npx vitest` gates say nothing about their tickets.** red-check builds a throwaway
-worktree with no `node_modules`, and `npx` has no self-provisioning equivalent to `uv run`, so the gate cannot
-run at all and stamps WEAK on the harness rather than on the work. Measured directly in the provisioned main
-checkout: `npx vitest run packages/contracts` → **7 files, 683 tests passed, exit 0, 1.45s**, while the same gate
-reads WEAK in the sweep. Two independent watchdog sessions reproduced this separately. **A WEAK stamp on a
-vitest gate is not evidence about the ticket and must never be read as one.**
+**Six of the thirteen WEAK verdicts say nothing about their tickets.** They are the `npx vitest` gates — T-050,
+T-051, T-054, T-070, T-103, T-113. red-check builds a throwaway worktree with no `node_modules`, and `npx` has no
+self-provisioning equivalent to `uv run`, so the gate cannot run at all and stamps WEAK **on the harness rather
+than on the work.** Measured directly in the provisioned main checkout, on T-103's and T-113's literal gate
+string: `npx vitest run packages/contracts` → **7 files, 683 tests passed, exit 0, 1.45s** — while that same
+command reads WEAK in the sweep. Two independent watchdog sessions reproduced this separately. **A WEAK stamp on
+a vitest gate is not evidence about the ticket and must never be read as one.**
+
+Six of the remaining seven are the older, honest kind: T-024, T-082, T-083, T-084, T-086 and T-087 name a test
+file that does not exist yet, which is what an unbuilt ticket's gate is supposed to look like.
 
 ## Ledger regeneration — and a `status` field that disagrees in both directions
 
@@ -401,3 +405,32 @@ advanced to `c9e5d5f` (fifteen commits) by the time the report was finished, and
 rather than absorbed silently · measured at `9ef97f8`, the range's **base** — nothing above it is in any number
 on the board · frozen bytes re-verified at `a02067d`, 17/17 clean against `manifest.json` ·
 written against swarm-loop skill `6778268`.</sub>
+
+---
+
+## Push gate: DECLINED for cycle 16 — one condition unmet
+
+`push-gate --cycle 16` scored five mechanical conditions. Four PASS: `verify` intact, no stale metric in
+`analysis/cycle-16.json`, tracked files 663 → 713 with no sharp drop, and `.swarm-loop/` clean at HEAD.
+
+**The unmet condition is `rung2-returned`.** One verifier dispatch is still open — `verifier-c16`, the adversarial
+verification of the batch `9ef97f8..main`. Its brief covers the thing this epoch most needs a second pair of eyes
+on: resolution provenance, i.e. whether the greens on the T-223/T-224 fix executed the merged source rather than
+the primary checkout's `.venv` through the `_proxyshop.pth` leak. That is not a hypothetical here — this same epoch
+repaired a reproduction test that had been passing for exactly that reason. A verdict still outstanding is an unmet
+condition and not a pass, so **nothing is pushed for cycle 16 and the push carries to the next epoch's gate.**
+
+Worth recording that the gate could only see this because the verifier was entered in the dispatch ledger with
+`--kind verifier`. It was dispatched some time before it was recorded; had it never been recorded, this rung would
+have passed vacuously and 38 commits would have gone offsite unverified. The gate is only as good as the ledger
+it reads.
+
+The two OPERATOR conditions the command refuses to score, answered here rather than left implicit:
+
+- **Integrations landed green on `main`** — YES, measured in the primary checkout at merge time, not re-read from
+  a log: `apps/exchange` 695 passed / 16 skipped / 7 xfailed after the exchange reproductions merged on top of the
+  T-223 threshold; `apps/trust` 400 passed / 127 skipped / 7 xfailed; the trust reproduction file 1 passed /
+  7 xfailed on the normal run and `1 failed, 7 deselected` under `--runxfail` for T-193; `ruff check` and
+  `ruff format --check` clean across 459 files.
+- **No rung-2 finding invalidates a merged branch** — CANNOT BE ANSWERED YET, because the verifier has not
+  reported. That is the same open condition, and it is the honest reason the push is declined rather than deferred.
