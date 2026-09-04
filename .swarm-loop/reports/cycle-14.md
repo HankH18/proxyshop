@@ -229,3 +229,24 @@ unrepaired. **ESC-011 is open and awaiting a decision.**
 
 <sub>Cycle 14 · epoch `7279452..b255f31` (54 commits) · measured at `b255f31` ·
 written against swarm-loop skill `3527702`.</sub>
+
+---
+
+## Push gate, scored (appended after the gate ran)
+
+`swarmloop.py push-gate --cycle 14` was run at `76d61ae`, after this report and after the
+ledger commit — which is the only point in the epoch at which its last condition can be true.
+
+**All five mechanical rungs PASS**: `verify` intact; no stale metric in `analysis/cycle-14.json`;
+tracked files 580 → 613, no sharp drop; no open dispatch of kind `verifier` (the five open
+`ticket` dispatches are epoch-15 lanes, and rolling dispatch is not a push blocker); `.swarm-loop/`
+clean at HEAD.
+
+**DECLINED on an operator condition: "this epoch's integrations landed green on `main`."**
+That condition is false and is not a judgement call — `build_succeeds` measured **0** this cycle
+because `make verify` exits 2 on the eight mypy errors listed above. A `main` whose own build gate
+is red is not a green `main`, so the 41 unpushed commits stay local.
+
+This is a deliberate hold, not drift, and it is the second epoch running that it has been correctly
+held. It carries to cycle 15's gate, where the condition clears the moment T-228 lands and
+`build_succeeds` measures 1. Nothing else about the gate is outstanding.
