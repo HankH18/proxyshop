@@ -93,7 +93,9 @@ WORKER_DATABASE_RE = re.compile(rf"^{re.escape(DATABASE_PREFIX)}(?P<index>[0-9]+
 
 #: ``ledger_second_database``'s shape (``_fixtures_ledger_schema.py``): a worker index, the
 #: literal marker, and ``uuid4().hex[:8]``.
-MIGRATIONCHECK_RE = re.compile(rf"^{re.escape(DATABASE_PREFIX)}[0-9]+_migrationcheck_[0-9a-f]{{8}}$")
+MIGRATIONCHECK_RE = re.compile(
+    rf"^{re.escape(DATABASE_PREFIX)}[0-9]+_migrationcheck_[0-9a-f]{{8}}$"
+)
 
 #: The reserved scratch band, ``[SCRATCH_WORKER_BASE, SCRATCH_WORKER_BASE + SCRATCH_BAND_SIZE)``.
 #: Kept in step with ``apps/trust/tests/test_ledger_schema_state_hygiene.SCRATCH_WORKER_BASE``
@@ -455,9 +457,7 @@ def _human(size_bytes: int) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="db_reclaim.py",
-        description=(
-            "Report abandoned proxyshop_w* databases. Dry run unless --apply is given."
-        ),
+        description=("Report abandoned proxyshop_w* databases. Dry run unless --apply is given."),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Safety: --dry-run is the default; --apply additionally requires a readable "

@@ -95,7 +95,7 @@ def test_the_shared_graph_fixtures_do_not_wipe_the_graph_a_second_time() -> None
     and quotes the statement, and a check that flagged that would be a check nobody could
     keep green while documenting the decision.
     """
-    source =Path(__file__).with_name("_fixtures_graph.py").read_text(encoding="utf-8")
+    source = Path(__file__).with_name("_fixtures_graph.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     offenders = [
         argument.value
