@@ -546,13 +546,18 @@ def _drawn_text(rng: Any) -> str:
 
 
 def _drawn_timestamp(rng: Any, *, future: bool) -> str:
-    """A timestamp at a drawn time of day. `future` means strictly after `NOW`.
+    """A timestamp. `future` means strictly after `NOW`.
 
-    The NON-future window deliberately reaches past `NOW`'s year and OVERLAPS the future one.
-    A past window that stops short of the current year is a key on its own, and a measured one:
-    "this bid carries no provenance observed in 2026 or later" separated every drawn bid from
-    every realistic one — the strongest surviving attack on an earlier cut of this generator,
-    and it keys on a semantic property rather than on any spelling.
+    Two measured keys live here and they point in OPPOSITE directions, so both windows have to
+    be wide rather than merely different from the last one:
+
+    * the non-future window reaches past `NOW`'s year and OVERLAPS the future one. A past window
+      stopping short of the current year gave "this bid carries no provenance observed in 2026 or
+      later", which separated 100% of the generated population from 100% of real traffic.
+    * the time of day is midnight a fifth of the time. Drawing it uniformly closed "every expiry
+      is at midnight" and opened "NO timestamp in this bid is at midnight" — the repo's own
+      `NOT_EXPIRED` and `HOOK_PROVENANCE` are both midnight, and a uniform draw hits it once in
+      86,400. Same for the top of the hour and the top of the minute.
     """
     if future:
         year = rng.randrange(2026, 3000)
@@ -560,10 +565,22 @@ def _drawn_timestamp(rng: Any, *, future: bool) -> str:
     else:
         year = rng.randrange(2000, 2028)
         month = rng.randrange(1, 13)
-    return (
-        f"{year:04d}-{month:02d}-{rng.randrange(1, 29):02d}"
-        f"T{rng.randrange(24):02d}:{rng.randrange(60):02d}:{rng.randrange(60):02d}Z"
-    )
+    roll = rng.random()
+    if roll < 0.2:
+        hh, mm, ss = 0, 0, 0
+    elif roll < 0.3:
+        hh, mm, ss = rng.randrange(24), 0, 0
+    elif roll < 0.4:
+        hh, mm, ss = rng.randrange(24), rng.randrange(60), 0
+    else:
+        hh, mm, ss = rng.randrange(24), rng.randrange(60), rng.randrange(60)
+    # The real length of the real month. Stopping at 28 was a key of its own — every bid stamped
+    # on the 29th, 30th or 31st was outside the drawn population — and a wrong length is worse
+    # than a narrow one: 2026-02-29 is unparseable, which fails the expiry arming rather than the
+    # property.
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[month - 1]
+    return f"{year:04d}-{month:02d}-{rng.randrange(1, days + 1):02d}T{hh:02d}:{mm:02d}:{ss:02d}Z"
 
 
 def _drawn_provenance(rng: Any) -> dict[str, Any]:
@@ -651,6 +668,14 @@ def _drawn_priced_bid(
 
     from packages.contracts.tests._fixtures_protocol import make_offer
 
+    # A COHERENT FIXTURE-SHAPED BID, one draw in six. Drawing each id independently closed the
+    # per-field prefix keys but left their CONJUNCTION unreachable: each id is repo-shaped ~5-12%
+    # of the time, so "all four ids look like our fixtures" holds for ~1e-4 of draws and never
+    # once in 120 — measured ALIVE at 20/20 as a fail-open key. Closing a per-field key by
+    # widening a field does not close the whole-payload key over those fields; the population has
+    # to actually contain the fixture-shaped bid.
+    fixture_shaped = rng.random() < 0.17
+
     # Sometimes ONE provenance block is reused across every claim, the way a bid minted by a
     # single hook call is. Always drawing independent blocks is a key on its own.
     shared = _drawn_provenance(rng) if rng.random() < 0.4 else None
@@ -670,45 +695,96 @@ def _drawn_priced_bid(
             # All three spellings `_declared_depth` accepts, so a fix cannot key on one.
             "type": ("percentage", "percent", "pct")[rng.randrange(3)],
             "value": depth,
-            "provenance": _drawn_provenance(rng) if shared is None else dict(shared),
+            # A real hook-minted grant carries `HOOK_PROVENANCE` verbatim. Never emitting it made
+            # "the discount's provenance is that exact block" a live key at 20/20.
+            "provenance": (
+                dict(HOOK_PROVENANCE)
+                if fixture_shaped
+                else (_drawn_provenance(rng) if shared is None else dict(shared))
+            ),
         }
 
     # Any quantity is at least one, so a total can only ever be LARGER than one discounted unit.
-    total_price = unit_price if rng.random() < 0.4 else round(unit_price * rng.uniform(1.0, 5.0), 2)
+    # A third of draws are an exact INTEGER multiple, because that is what a real quantity is and
+    # a continuous multiplier never lands on one: `total_price == 2 * unit_price` was measured
+    # ALIVE at 40/40 as a fail-open key, and it holds for every quantity-2 bid in production.
+    roll = rng.random()
+    if roll < 0.3:
+        total_price = unit_price
+    elif roll < 0.6:
+        total_price = round(unit_price * rng.randrange(1, 9), 2)
+    else:
+        total_price = round(unit_price * rng.uniform(1.0, 5.0), 2)
 
-    store_id = _drawn_id(rng, "store", "store-one", "shop", "s")
+    store_id = (
+        ("store-1", "store-one", "store-external-1")[rng.randrange(3)]
+        if fixture_shaped
+        else _drawn_id(rng, "store", "store-one", "shop", "s")
+    )
+    variant_ref = (
+        "44352913"
+        if fixture_shaped
+        else (None if rng.random() < 0.2 else _drawn_id(rng, "var", "variant", "v"))
+    )
+    # A real cart permalink is VARIANT-SCOPED (D25), so its cart id IS the offer's variant_ref.
+    # Drawing the two independently meant no drawn bid ever had them agree, and "the url's cart
+    # id equals variant_ref" — true of every real bid — ran ALIVE at 20/20 as a fail-open key.
+    cart_id = variant_ref if variant_ref is not None else str(rng.randrange(10**9))
     offer = make_offer(
-        product_ref=_drawn_id(rng, "prod", "product", "sku", "p"),
-        variant_ref=None if rng.random() < 0.2 else _drawn_id(rng, "var", "variant", "v"),
+        product_ref=(
+            ("prod-1", "prod-cap", "gate-prod-1")[rng.randrange(3)]
+            if fixture_shaped
+            else _drawn_id(rng, "prod", "product", "sku", "p")
+        ),
+        variant_ref=variant_ref,
         unit_price=unit_price,
         total_price=total_price,
-        currency=_CURRENCIES[rng.randrange(len(_CURRENCIES))],
+        currency="USD" if fixture_shaped else _CURRENCIES[rng.randrange(len(_CURRENCIES))],
         discount=discount,
         commitments=[_drawn_claim(rng, provenance=shared) for _ in range(rng.randrange(0, 6))],
         expires_at=_drawn_timestamp(rng, future=True),
+        # The host is drawn INDEPENDENTLY of `store_id` most of the time. Tying every url's host
+        # to the drawn store id was itself a key, and one this generator INTRODUCED while closing
+        # a different one: this repo's own fixture pairs `store_id="store-1"` with the host
+        # `store-one.example.com`, so no realistic bid matched the shapes drawn here and
+        # "checkout_url is one of my three shapes" ran ALIVE at 60/60.
         checkout_url=(
             None
             if rng.random() < 0.2
             else (
-                f"https://{store_id}.example.com/cart/{rng.randrange(10**9)}:1",
+                f"https://{store_id}.example.com/cart/{cart_id}:1",
+                f"https://store-one.example.com/cart/{cart_id}:1",
                 f"https://example.test/{_drawn_id(rng, 'checkout', 'c')}",
-                f"https://{_drawn_id(rng, 'shop', 'store-one')}.myshopify.com/cart/{rng.randrange(10**9)}",
-            )[rng.randrange(3)]
+                f"https://{_drawn_id(rng, 'shop', 'store-one')}.myshopify.com/{rng.randrange(10**9)}",
+                f"https://{_drawn_id(rng, 'www', 'shop', 'cdn')}.example.org/p/{rng.randrange(10**6)}",
+            )[rng.randrange(5)]
         ),
     )
     return make_bid(
         claims=claims,
         store_id=store_id,
-        auction_id=_drawn_id(rng, "auc", "auction", "a"),
+        auction_id=(
+            ("auc-1", "auc-0100", "auc-gate-1")[rng.randrange(3)]
+            if fixture_shaped
+            else _drawn_id(rng, "auc", "auction", "a")
+        ),
         offer=offer,
         message=(None, _drawn_text(rng), "m" * rng.randrange(1, 120))[rng.randrange(3)],
         agent_version=(
-            f"store-agent/{rng.randrange(9)}.{rng.randrange(9)}.{rng.randrange(9)}",
-            f"{rng.randrange(9)}.{rng.randrange(99)}.{rng.randrange(99)}",
-            _drawn_id(rng, "agent", "store-agent"),
-        )[rng.randrange(3)],
-        signature=_drawn_id(rng, "sig", "sig-deadbeef", "signature"),
-        schema_version=("1", "1.0.0", "1.1.0", "2.0.0")[rng.randrange(4)],
+            "store-agent/1.0.0"
+            if fixture_shaped
+            else (
+                f"store-agent/{rng.randrange(9)}.{rng.randrange(9)}.{rng.randrange(9)}",
+                f"{rng.randrange(9)}.{rng.randrange(99)}.{rng.randrange(99)}",
+                _drawn_id(rng, "agent", "store-agent"),
+            )[rng.randrange(3)]
+        ),
+        signature=(
+            "sig-deadbeef" if fixture_shaped else _drawn_id(rng, "sig", "sig-deadbeef", "signature")
+        ),
+        schema_version=(
+            "1.0.0" if fixture_shaped else ("1", "1.0.0", "1.1.0", "2.0.0")[rng.randrange(4)]
+        ),
     )
 
 
@@ -740,6 +816,39 @@ def _eligible_snapshot(bid: Any, rng: Any = None) -> dict[str, Any]:
                 "blacklisted": rng.random() < 0.5,
             }
     return table
+
+
+def _documented_specimen(
+    total_price: float = 15.0,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """THE bid both tickets describe, in this repo's own fixture spelling.
+
+    Returns `(bid, trust_snapshot, roster)`. It charges 15.00 for a product the exchange prices
+    at 100.00 while declaring 20% — 85% off behind a 20% authorization — and carries no
+    `list_price` claim of its own. `total_price` is a parameter because pinning it equal to the
+    unit price made `total_price != unit_price` a one-field escape from this whole case.
+
+    It is asserted alongside the drawn population because it can never BE drawn: every drawn bid
+    is priced honestly for its declared depth so that its `supplied.ok is True` arming can pass,
+    and this one is by construction priced dishonestly. That gap was measured to be a live
+    gaming key — `NOT(unit_price == 15.0 and discount.value == 20.0)` took both gates green on
+    20 consecutive fresh seeds while keeping the EXACT documented specimen admitted, unmodified.
+    Any specific point in a two-decimal continuous draw has measure zero, so the answer is not a
+    wider draw; it is to assert the point itself, with the arming inverted to suit a bid that is
+    supposed to be refused.
+    """
+    from packages.contracts.tests._fixtures_protocol import make_offer
+
+    bid = make_bid(
+        offer=make_offer(
+            unit_price=15.0,
+            total_price=total_price,
+            discount={"type": "percentage", "value": 20.0, "provenance": dict(HOOK_PROVENANCE)},
+        )
+    )
+    snapshot = {"store-1": {"store_id": "store-1", "score": 0.6, "blacklisted": False}}
+    roster = {"prod-1": {"list_price": 100.0, "max_discount_pct": 20.0}}
+    return bid, snapshot, roster
 
 
 def _judge(bid: Any, path: str, **kwargs: Any) -> Any:
@@ -807,12 +916,17 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
     drawn rather than written — see the module comment above for the measured gaming keys a
     table of named shapes leaves open.
 
-    Each draw arms itself twice before the comparison. With a roster that really prices the
-    product the same bid must be ADMITTED, so the refusals below are the roster argument
-    answering rather than the bid being unbuildable or blacklisted or expired; and the explicit
-    empty roster must REFUSE, so the equality cannot be satisfied by collapsing both sides to
-    `ok=True` — an "empty roster means no roster" repair points the fail-open the other way and
-    is refused here by the `omitted.ok is False` assertion.
+    Each draw arms itself before the comparison. With a roster that really prices the product the
+    same bid must be ADMITTED, so the refusals below are the roster argument answering rather
+    than the bid being unbuildable or blacklisted or expired; and the explicit empty roster must
+    REFUSE, so the equality cannot be satisfied by collapsing both sides to `ok=True` — an
+    "empty roster means no roster" repair points the fail-open the other way and is refused here
+    by the `omitted.ok is False` assertion.
+
+    Every draw is then run a SECOND time as an UNDER-PRICED variant of the same bid, armed the
+    other way up (with the roster the wall must refuse it). Without that, the whole drawn
+    population is honestly priced — the admission arming forces it — and the gate's only
+    coverage of the case the ticket is actually about is the one hard-coded specimen below.
     """
     import random
 
@@ -837,6 +951,17 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
             if rng.random() < 0.7
             else min(row_cap, (0.0, 10.0, 20.0)[rng.randrange(3)])
         )
+        # THE SPECIMEN'S PRICE LINE, DRAWN rather than pinned. One draw in five uses the
+        # ticket's own numbers — a 100.00 list at a declared 20% — so `unit_price == 15.00` at
+        # `depth == 20%` is INSIDE the population rather than three hard-coded points beside it.
+        # Measured: with only those points, `total_price != 45.00` — the identical bid at
+        # quantity three — took both gates green on 20 consecutive fresh seeds with the money
+        # path open. Three points are not a population, and a fourth point would not have been
+        # one either; the line itself has to be drawable.
+        on_specimen_line = rng.random() < 0.2
+        if on_specimen_line:
+            list_price, row_cap, depth = 100.0, 20.0, 20.0
+
         # The HONEST price for that depth. The margin is drawn: at zero the tolerance still
         # clears the wall, so the price can land exactly on the arithmetic rather than a cent above.
         margin = (0.0, 0.0, 0.01, round(rng.uniform(0.0, 40.0), 2))[rng.randrange(4)]
@@ -885,7 +1010,86 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
             f"{list(empty.reasons)}. Omission is the case that happens by accident, and it is "
             f"the more permissive of the two. path={path} bid={bid!r} result={omitted!r}"
         )
+
+        # AN UNDER-PRICED VARIANT OF THE SAME BID. Every draw above is priced HONESTLY for its
+        # declared depth — forced by the `supplied.ok is True` arming, which is what makes the
+        # comparison mean anything — so the drawn population contained no under-priced bid at
+        # all, and this gate's entire coverage of the case the ticket is ABOUT rested on one
+        # hard-coded specimen. Measured: a fail-open that spares that single point takes both
+        # gates green at 40/40 with the money path open. A point is not a population, and the
+        # answer is a drawn population of them, armed the other way up: with the roster the wall
+        # must REFUSE this bid, which is what proves it reached the wall at all.
+        cheat = (
+            15.0
+            if on_specimen_line
+            else round(max(list_price * 0.01, list_price * (100.0 - depth) / 100.0 * 0.4), 2)
+        )
+        underpriced = dict(bid)
+        underpriced["offer"] = dict(bid["offer"])
+        underpriced["offer"]["unit_price"] = cheat
+        # A REAL QUANTITY, not always one. Every dishonestly-priced bid this gate judged used to
+        # set `total_price == unit_price`, and so did the hard-coded specimen — so the entire
+        # class "any trait the drawn population never emits AND total_price != unit_price" walked
+        # straight through, measured ALIVE at 20/20 on three independent traits. The escape was
+        # one field wide.
+        quantity_roll = rng.random()
+        if quantity_roll < 0.3:
+            underpriced["offer"]["total_price"] = cheat
+        elif quantity_roll < 0.65:
+            underpriced["offer"]["total_price"] = round(cheat * rng.randrange(2, 9), 2)
+        else:
+            # CONTINUOUS as well as integral, so no finite set of totals can be spared.
+            underpriced["offer"]["total_price"] = round(cheat * rng.uniform(1.0, 9.0), 2)
+
+        cheat_rostered = _judge(underpriced, path, snapshot=snap, list_prices=roster)
+        assert cheat_rostered.ok is False and "price_under_declared_depth:offer.unit_price" in list(
+            cheat_rostered.reasons
+        ), (
+            f"seed {seed} draw {draw}: arming the under-priced variant — charging {cheat} for a "
+            f"product the roster prices at {list_price} while declaring {depth}% must be refused "
+            f"by the price wall: path={path} result={cheat_rostered!r}"
+        )
+
+        cheat_empty = _judge(underpriced, path, snapshot=snap, list_prices={})
+        assert cheat_empty.ok is False, (
+            f"seed {seed} draw {draw}: control — an empty roster must refuse the under-priced "
+            f"variant: path={path} result={cheat_empty!r}"
+        )
+
+        cheat_omitted = _judge(underpriced, path, snapshot=snap)
+        assert _verdict(cheat_omitted) == _verdict(cheat_empty), (
+            f"seed {seed} draw {draw}: for an UNDER-PRICED bid, omitting list_prices gave "
+            f"{_verdict(cheat_omitted)} where an explicit empty roster gave "
+            f"{_verdict(cheat_empty)}. This is the shape the ticket is about — a bid charging "
+            f"{cheat} for a {list_price} product — and forgetting the roster is what admits it. "
+            f"path={path} bid={underpriced!r}"
+        )
         return repr(bid)
+
+    # THE DOCUMENTED SPECIMEN — the one bid the ticket names, which the drawn population cannot
+    # contain. Armed inversely: a roster that prices the product must REFUSE it (proving it
+    # reaches the price wall), and the empty roster must refuse it too.
+    for spec_total in (15.0, 30.0, 105.0):
+        spec, spec_snap, spec_roster = _documented_specimen(spec_total)
+        spec_rostered = _judge(spec, HOSTED_PATH, snapshot=spec_snap, list_prices=spec_roster)
+        assert spec_rostered.ok is False and "price_under_declared_depth:offer.unit_price" in list(
+            spec_rostered.reasons
+        ), (
+            f"arming the documented specimen at total={spec_total}: 15.00 for a product the "
+            f"roster prices at 100.00 under a 20% authorization must be refused by the price "
+            f"wall, or this case proves nothing: {spec_rostered!r}"
+        )
+        spec_empty = _judge(spec, HOSTED_PATH, snapshot=spec_snap, list_prices={})
+        assert spec_empty.ok is False, (
+            f"control at total={spec_total}: an empty roster must refuse: {spec_empty!r}"
+        )
+        spec_omitted = _judge(spec, HOSTED_PATH, snapshot=spec_snap)
+        assert _verdict(spec_omitted) == _verdict(spec_empty), (
+            f"THE DOCUMENTED SPECIMEN at total={spec_total}: omitting list_prices gave "
+            f"{_verdict(spec_omitted)} where an explicit empty roster gave "
+            f"{_verdict(spec_empty)}. This is the exact bid the ticket describes — 85% off "
+            f"behind a 20% authorization — and forgetting the roster admitted it"
+        )
 
     exercised = 0
     distinct: set[str] = set()
@@ -1071,6 +1275,39 @@ def test_t307_a_supplied_discount_ceiling_is_not_inert_when_the_roster_is_absent
         )
         return repr(bid)
 
+    # THE DOCUMENTED SPECIMEN under a ceiling of zero — "I authorize no discount at all", and
+    # the roster forgotten. Armed inversely, as in T-306.
+    for spec_total in (15.0, 30.0, 105.0):
+        spec, spec_snap, _ = _documented_specimen(spec_total)
+        spec_bounded = _judge(
+            spec,
+            HOSTED_PATH,
+            snapshot=spec_snap,
+            list_prices={"prod-1": 100.0},
+            max_discount_pct=0.0,
+        )
+        assert spec_bounded.ok is False and any(
+            reason.startswith("discount_over_authorized_depth:") for reason in spec_bounded.reasons
+        ), (
+            f"arming the documented specimen at total={spec_total}: a 20% depth under a 0% "
+            f"caller ceiling must be refused for exceeding the authorized depth once a roster "
+            f"is present: {spec_bounded!r}"
+        )
+        spec_empty = _judge(
+            spec, HOSTED_PATH, snapshot=spec_snap, list_prices={}, max_discount_pct=0.0
+        )
+        assert spec_empty.ok is False, (
+            f"control at total={spec_total}: empty roster plus a 0% ceiling must refuse: "
+            f"{spec_empty!r}"
+        )
+        spec_omitted = _judge(spec, HOSTED_PATH, snapshot=spec_snap, max_discount_pct=0.0)
+        assert _verdict(spec_omitted) == _verdict(spec_empty), (
+            f"THE DOCUMENTED SPECIMEN at total={spec_total}: a 0% ceiling with the roster "
+            f"OMITTED gave {_verdict(spec_omitted)} where the same ceiling with an explicit "
+            f"empty roster gave {_verdict(spec_empty)}. The caller authorized nothing and was "
+            f"ignored"
+        )
+
     exercised = 0
     distinct: set[str] = set()
     for seed in _property_seeds(20260905):
@@ -1124,16 +1361,29 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
     """
     import random
 
+    assert _DRAWS_PER_SEED >= 60, (
+        f"_DRAWS_PER_SEED is {_DRAWS_PER_SEED}. Nothing outside this file pins it, and shrinking "
+        f"it silently narrows both properties — measured, setting it to 1 left the ordinary run "
+        f"green while each gate measured two draws instead of 120"
+    )
+
     rng = random.Random(20260906)
     seen = 0
 
-    # Both paths x both claim configurations x three numeric points. The numeric axis matters:
-    # a generator sabotaged to raise unless `depth == 20.0 and list_price == 100.0` left an
-    # ordinary run reporting `1 passed, 8 xfailed` against the single-point version of this
-    # canary, with both gates scoring total errors as reproductions.
+    # Both paths x both claim configurations x five numeric points spanning what the gates
+    # ACTUALLY draw (depth to 95, list price to 5000). The numeric axis matters and its RANGE
+    # matters: against a version of this canary that stopped at 62.5, a generator sabotaged to
+    # raise for `depth > 62.5` left an ordinary run reporting `1 passed, 8 xfailed` while T-307
+    # scored a total runtime error as a reproduction.
     for path in (HOSTED_PATH, EXTERNAL_PATH):
         for carries in (True, False):
-            for list_price, depth in ((100.0, 20.0), (49.0, 0.0), (3499.99, 62.5)):
+            for list_price, depth in (
+                (100.0, 20.0),
+                (49.0, 0.0),
+                (3499.99, 62.5),
+                (5000.0, 95.0),
+                (100.0, 85.0),
+            ):
                 unit_price = round(list_price * (100.0 - depth) / 100.0, 2)
                 bid = _drawn_priced_bid(
                     rng,
@@ -1144,7 +1394,7 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
                 )
                 product_ref = bid["offer"]["product_ref"]
                 snap = _eligible_snapshot(bid, rng)
-                where = f"path={path} carries_list_price={carries} {depth}% off {list_price}"
+                where = f"path={path} carries={carries} {depth}% off {list_price}"
 
                 admitted = _judge(
                     bid,
@@ -1166,7 +1416,168 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
                 )
                 seen += 1
 
-    assert seen == 12, f"the canary walked {seen} of 12 configurations"
+    assert seen == 20, f"the canary walked {seen} of 20 configurations"
+
+    # GENERATOR SPREAD — the assertion that actually guards the gaming analysis.
+    #
+    # Everything the two gates claim about being un-gameable rests on the generator EMITTING the
+    # shapes it advertises. A generator quietly NARROWED — never emitting a dashed id, never
+    # stamping a provenance in the current year, never landing on midnight — stays green
+    # everywhere, canary and positive control included, while silently resurrecting fail-open
+    # keys that were measured dead. Two such narrowings were demonstrated and both were invisible
+    # to every other check in this file. So the spread is measured rather than assumed, on a
+    # pinned seed so it cannot flake. Each threshold sits far below its expectation.
+    stats = {
+        k: 0
+        for k in (
+            "dashed",
+            "current_year",
+            "midnight",
+            "reused",
+            "foreign_host",
+            "integer_total",
+            "late_day",
+            "fixture_shaped",
+            "other_host",
+            "usd",
+            "schema_1_0_0",
+            "agent_fixture",
+            "message_none",
+            "variant_cart_url",
+            "hook_provenance",
+            "no_claims",
+            "no_commitments",
+            "no_variant",
+            "no_url",
+            "pct_spelling",
+        )
+    }
+    currencies: set[Any] = set()
+    for sample in range(250):
+        # BOTH claim configurations. Sampling only `carries_list_price=True` always inserts a
+        # `list_price` claim, so `claims` was never empty and the floor below could not see it.
+        b = _drawn_priced_bid(
+            rng,
+            depth=20.0,
+            list_price=100.0,
+            unit_price=80.0,
+            carries_list_price=sample % 2 == 0,
+        )
+        offer = b["offer"]
+        currencies.add(offer["currency"])
+        if "-" in str(offer["product_ref"]) and str(offer["product_ref"])[-1].isdigit():
+            stats["dashed"] += 1
+        stamps = [c["provenance"]["observed_at"] for c in b["claims"]]
+        stamps += [c["provenance"]["observed_at"] for c in offer["commitments"]]
+        if offer.get("discount"):
+            stamps.append(offer["discount"]["provenance"]["observed_at"])
+        if any(t[:4] >= "2026" for t in stamps):
+            stats["current_year"] += 1
+        # DRAWN stamps only. `HOOK_PROVENANCE["observed_at"]` is itself midnight, so once the
+        # fixture-shaped draw started carrying that block verbatim this floor was counting a
+        # CONSTANT: measured 50/250 midnights, all of them the fixture's, and zero from a drawn
+        # stamp — so forcing every drawn timestamp off midnight left the floor satisfied and the
+        # narrowing invisible. A floor that can be satisfied by something the generator does not
+        # draw is not a floor.
+        drawn_stamps = [t for t in stamps if t != HOOK_PROVENANCE["observed_at"]]
+        if any(t.endswith("T00:00:00Z") for t in drawn_stamps + [offer["expires_at"]]):
+            stats["midnight"] += 1
+        blocks = [repr(c["provenance"]) for c in b["claims"]]
+        if len(blocks) > 1 and len(set(blocks)) < len(blocks):
+            stats["reused"] += 1
+        url = offer.get("checkout_url")
+        if url and str(b["store_id"]) not in url:
+            stats["foreign_host"] += 1
+        if url and ("example.test" in url or "myshopify" in url or "example.org" in url):
+            # The url pool is more than "my own host" plus one alternative — cutting it back to
+            # two shapes resurrected the checkout_url key while `foreign_host` stayed satisfied.
+            stats["other_host"] += 1
+        unit, total = offer["unit_price"], offer["total_price"]
+        if unit and total >= unit * 2 and abs(total / unit - round(total / unit)) < 1e-9:
+            # A real quantity is an integer. A continuous multiplier never lands on one.
+            stats["integer_total"] += 1
+        if int(str(offer["expires_at"])[8:10]) >= 29:
+            stats["late_day"] += 1
+        # The COHERENT fixture-shaped bid, checked across ALL SIX fields. A floor over two of
+        # them stays satisfied while `store_id`/`auction_id`/`product_ref` are redrawn off the
+        # fixture values, and the six-field conjunction key comes straight back to life — that
+        # exact narrowing was measured invisible to a two-field floor.
+        if (
+            str(b["signature"]) == "sig-deadbeef"
+            and str(offer["variant_ref"]) == "44352913"
+            and str(b["store_id"]) in {"store-1", "store-one", "store-external-1"}
+            and str(b["auction_id"]) in {"auc-1", "auc-0100", "auc-gate-1"}
+            and str(offer["product_ref"]) in {"prod-1", "prod-cap", "gate-prod-1"}
+            and str(b["agent_version"]) == "store-agent/1.0.0"
+        ):
+            stats["fixture_shaped"] += 1
+        # Individually unremarkable values that a real bid always carries. Each was measured as a
+        # live key at 20/20 once the generator stopped emitting it, and no other floor saw it.
+        if offer["currency"] == "USD":
+            stats["usd"] += 1
+        if b["schema_version"] == "1.0.0":
+            stats["schema_1_0_0"] += 1
+        if b["agent_version"] == "store-agent/1.0.0":
+            stats["agent_fixture"] += 1
+        if b["message"] is None:
+            stats["message_none"] += 1
+        if url and offer["variant_ref"] and f"/cart/{offer['variant_ref']}:" in url:
+            # A cart permalink is variant-scoped, so a real url's cart id IS the variant_ref.
+            stats["variant_cart_url"] += 1
+        if offer.get("discount") and offer["discount"]["provenance"] == dict(HOOK_PROVENANCE):
+            stats["hook_provenance"] += 1
+        # Axes nothing was watching. Each is a shape a real bid has and a narrowed generator
+        # could silently stop producing, which is exactly how the midnight floor was defanged.
+        if not b["claims"]:
+            stats["no_claims"] += 1
+        if not offer["commitments"]:
+            stats["no_commitments"] += 1
+        if offer["variant_ref"] is None:
+            stats["no_variant"] += 1
+        if offer.get("checkout_url") is None:
+            stats["no_url"] += 1
+        if offer.get("discount") and offer["discount"]["type"] in ("percent", "pct"):
+            stats["pct_spelling"] += 1
+
+    floors = {
+        "dashed": 10,
+        "current_year": 10,
+        "midnight": 20,
+        "reused": 10,
+        "foreign_host": 20,
+        "integer_total": 10,
+        "late_day": 5,
+        "fixture_shaped": 10,
+        "other_host": 10,
+        "usd": 10,
+        "schema_1_0_0": 10,
+        "agent_fixture": 10,
+        "message_none": 20,
+        "variant_cart_url": 10,
+        "hook_provenance": 10,
+        "no_claims": 5,
+        "no_commitments": 20,
+        "no_variant": 10,
+        "no_url": 20,
+        "pct_spelling": 40,
+    }
+    thin = {k: v for k, v in stats.items() if v < floors[k]}
+    assert not thin, (
+        f"the bid generator has been NARROWED: {thin} out of 250 draws, against floors {floors}. "
+        f"Each of these shapes closes a fail-open key that was measured ALIVE without it — a "
+        f"dashed id (B02/B03/B07), a provenance observed in the current year (B20), a midnight "
+        f"timestamp, a provenance block reused within one bid (B21/B22), a checkout host "
+        f"unrelated to the store id and a url pool wider than two shapes (B04), an integer "
+        f"quantity in total_price, a day-of-month past the 28th, and the COHERENT "
+        f"fixture-shaped bid (B05/B05b, whose conjunction no per-field floor can see). A "
+        f"generator that stops emitting one of them leaves "
+        f"every test in this file green while the gate it protects becomes satisfiable without "
+        f"the fix. Full spread: {stats}"
+    )
+    assert len(currencies) >= 6, (
+        f"the generator emitted only {len(currencies)} distinct currencies across 250 draws: "
+        f"{sorted(currencies, key=str)}"
+    )
 
     # THE JS-TRUTHINESS TRAP, pinned rather than left to a comment. `_eligible_snapshot` spells
     # `blacklisted` several FALSY ways, and `[]` must never join them: `_js_truthy` reads
