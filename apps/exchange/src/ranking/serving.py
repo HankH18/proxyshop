@@ -73,8 +73,15 @@ DEFAULT_SHORTLIST_CAPACITY = 512
 #: became a 500 on every ``POST /auctions`` in a container that still booted and still answered
 #: its ``/openapi.json`` healthcheck: measured, ``RANK_W_M=0.9`` with the other four unset gave
 #: a healthy-looking exchange whose only auction-opening route was totally dead. Resolved here,
-#: the same typo fails ``create_app()``, so the container never reports healthy and the
-#: operator is told which variable is wrong.
+#: the same typo fails ``create_app()``, so the container never reports healthy.
+#:
+#: What the operator is told depends on WHICH mistake was made, and this is stated exactly
+#: because the first draft of this comment claimed the variable is always named and that was
+#: measured false. A non-numeric value (``RANK_W_M=abc``) names ``RANK_W_M`` — the published
+#: loader raises with the variable in the message. A set that parses but does not SUM to 1.0
+#: does not: the message is ``w_m=0.9+w_e=0.2+w_t=0.2+w_v=0.15+w_d=0.1 = 1.55``, which names
+#: the fields rather than the environment variables. Legible either way, and loud either way;
+#: only in the second case does the operator have to map ``w_m`` back to ``RANK_W_M``.
 ENV_RANKING_WEIGHTS: RankingWeights = RankingWeights.from_env()
 
 

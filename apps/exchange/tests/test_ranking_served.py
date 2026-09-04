@@ -14,12 +14,15 @@ app**:
 1. **Reachability and the published path** (§1). Through ``create_app()``: the app mounts
    ``exchange.ranking.routes`` and answers ``GET /auctions/{auction_id}/shortlist``, which
    ``packages/contracts/openapi/exchange.openapi.json`` has declared all along.
-2. **The filters actually decide a served auction** (§2-3). Through a ``TestClient`` on the
-   real app — the same object ``uvicorn exchange.main:app`` builds. A candidate that fails an
-   R19 hard constraint, R12's blacklist read or C10's checkout-domain check is reported
-   excluded and is in no shortlist slot, over the HTTP door rather than over ``rank()``. These
-   are the tests that go red if the ranking is removed from the route; measured, deleting it
-   fails 12 of them.
+2. **The filters actually decide a served auction** (§2, and the HTTP half of §3). Through a
+   ``TestClient`` on the real app — the same object ``uvicorn exchange.main:app`` builds. A
+   candidate that fails an R19 hard constraint, R12's blacklist read or C10's checkout-domain
+   check is reported excluded and is in no shortlist slot, over the HTTP door rather than over
+   ``rank()``. These are the tests that go red if the ranking is removed from the route;
+   measured by simulating that removal, **14** of them fail. (§3 is mixed and an earlier
+   version of this list said otherwise: ``…store_forgets_on_the_ttl…``,
+   ``…store_hands_out_copies…`` and ``…weight_set_fails_at_app_build…`` drive the library and
+   ``create_app()`` directly, never HTTP.)
 3. **A bidder cannot move its own SCORE** (§4). Driven at the library level on purpose, and it
    would not detect the ranking being unwired — that is §2's job. The property is about the
    projection, and a route driving it would test the projection through two layers that can
@@ -47,6 +50,7 @@ from exchange.auction.collect import BidEntry
 from exchange.auction.routes import (
     MAX_EXCLUSION_REASONS_PER_BID,
     MAX_HARD_CONSTRAINTS,
+    MAX_IDENTIFIER_LENGTH,
     MAX_ROSTER_ENTRIES,
     configure_auctions,
 )
@@ -617,6 +621,81 @@ def test_the_two_ceilings_on_an_unauthenticated_body_are_refused_at_the_door(
         return
     assert response.status_code == 422, f"[{label}] over the ceiling was accepted"
     assert expected_detail in response.text, f"[{label}] {response.text[:300]}"
+
+
+@pytest.mark.parametrize(
+    ("label", "field_bytes", "store_id_pad", "expected"),
+    [
+        ("short names", 8, 0, 201),
+        ("constraint text at the budget", 200, 0, 201),
+        ("constraint text over the budget", 1024, 0, 422),
+        ("store id at the ceiling", 8, MAX_IDENTIFIER_LENGTH, 201),
+        ("store id over the ceiling", 8, MAX_IDENTIFIER_LENGTH + 1, 422),
+    ],
+)
+def test_the_length_of_what_the_caller_writes_is_bounded_too(
+    label, field_bytes, store_id_pad, expected
+):
+    """Counting the constraints was only half the bound, and the other half was measured.
+
+    Every exclusion reason quotes the caller's own ``field`` and ``store_id`` back, so the
+    cost is candidates x constraints x *the length of what the caller wrote*. With only the
+    count caps in place, a request that satisfied every one of them still OOM'd the container:
+    500 stores x 64 constraints with a 4 KB ``field`` is a 293 KiB body and measured 201 with a
+    12.4 MiB response at 434 MiB peak RSS, against ``mem_limit: 256m``; at 200 KB it was 573 MiB
+    and 3.3 GiB. Found by an adversarial re-run OF THE COUNT FIX, which is the only reason it
+    is a test rather than an incident.
+
+    After: every one of those returns 422, and the worst request that still gets a 201 — 500
+    stores, 64 constraints, `field` and `store_id` both at their ceilings, a 174 KiB body —
+    answers in 0.06 s with a 1.8 MiB response at 94.5 MiB peak.
+    """
+    stores = tuple(f"store-{i:03d}".ljust(store_id_pad, "x") for i in range(12))
+    intent = _intent(
+        [
+            {"field": f"attr_{i}".ljust(field_bytes, "z"), "op": "gte", "value": i}
+            for i in range(MAX_HARD_CONSTRAINTS)
+        ]
+    )
+    app = _wired_app(bidders=Bidders({}), stores=stores)
+
+    response = TestClient(app).post(
+        "/auctions",
+        json={
+            "intent": intent,
+            "roster": [_rostered(store, 100.0) for store in stores],
+            "bid_timeout_seconds": 0.1,
+        },
+    )
+    assert response.status_code == expected, f"[{label}] {response.text[:300]}"
+    # Whatever the verdict, the answer must not be enormous. A 422 that echoes the whole
+    # request back is a smaller amplifier than a 201 that multiplies it, but it is still one.
+    assert len(response.content) < 8 * 1024 * 1024, (
+        f"[{label}] the response was {len(response.content) / 1024 / 1024:.1f} MiB"
+    )
+
+
+def test_the_404_says_the_shortlist_may_have_been_evicted():
+    """The four causes, asserted on the body rather than trusted to the docstring.
+
+    An operator told "the TTL took it away" about a 30-second-old auction is sent to the wrong
+    knob, and the store's capacity is the cheapest of the four to reach: it holds
+    ``DEFAULT_SHORTLIST_CAPACITY`` auctions, so a burst evicts entries nowhere near their TTL.
+    Driven through the real route with a store small enough to fill.
+    """
+    app = _wired_app(bidders=Bidders({}), stores=(STORE_A,))
+    configure_ranking(app, shortlists=ShortlistStore(capacity=2))
+    client = TestClient(app)
+
+    first = _post(app, [_rostered(STORE_A, 100.0)])["auction_id"]
+    for _ in range(2):
+        _post(app, [_rostered(STORE_A, 100.0)])
+
+    gone = client.get(f"/auctions/{first}/shortlist")
+    assert gone.status_code == 404, gone.text
+    detail = gone.json()["detail"]
+    for cause in ("not closed", "never existed", "TTL", "evicted"):
+        assert cause in detail, f"the 404 does not name {cause!r}: {detail!r}"
 
 
 def test_a_malformed_weight_set_fails_at_app_build_rather_than_per_request():

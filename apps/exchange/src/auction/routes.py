@@ -45,9 +45,10 @@ un-wired service is **safe rather than convenient**:
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
-from collections.abc import Mapping, Sequence, Sized
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -70,7 +71,9 @@ __all__ = [
     "DEFAULT_BID_TIMEOUT_SECONDS",
     "MAX_BID_TIMEOUT_SECONDS",
     "MAX_EXCLUSION_REASONS_PER_BID",
+    "MAX_HARD_CONSTRAINT_BYTES",
     "MAX_HARD_CONSTRAINTS",
+    "MAX_IDENTIFIER_LENGTH",
     "MAX_ROSTER_ENTRIES",
     "NullSolicitor",
     "bid_window_seconds",
@@ -119,6 +122,33 @@ class NullSolicitor:
     __call__ = solicit
 
 
+#: The most bytes one intent's ``hard_constraints`` may occupy, and the most characters an
+#: identifier on a roster row may run to.
+#:
+#: **Counting the constraints was not enough, and this is the second half of the same bound.**
+#: Every exclusion reason INTERPOLATES the caller's own strings — the constraint's ``field``
+#: and the row's ``store_id`` — so the cost is candidates x constraints x *the length of what
+#: the caller wrote*. Capping only the first two factors moved the hole rather than closing it.
+#: Measured against a request that satisfies every count cap (500 rostered stores, 64
+#: constraints), varying only the length of ``field``::
+#:
+#:       1 KB field ( 32 KiB request) -> 201,   3.8 MiB body,   154 MiB peak RSS
+#:       4 KB field (293 KiB request) -> 201,  12.4 MiB body,   434 MiB peak RSS
+#:      20 KB field (1.3 MiB request) -> 201,  58.2 MiB body, 1,746 MiB peak RSS
+#:     200 KB field (12 MiB request)  -> 201, 573.0 MiB body, 3,344 MiB peak RSS
+#:
+#: — the same one-request OOM against ``mem_limit: 256m``, reached through length instead of
+#: through count. Found by an adversarial re-run of the count fix, which is the only reason it
+#: is closed here rather than in production.
+#:
+#: The budget is on the constraints TOGETHER rather than on each one, because 64 constraints of
+#: 4 KB each is the same amount of echoed text as one of 256 KB and there is no reason to allow
+#: either. 16 KiB is ~256 bytes per constraint at the count cap, which is a generous
+#: ``{"field": ..., "op": "gte", "value": ...}``. An identifier is a name, not a document.
+MAX_HARD_CONSTRAINT_BYTES = 16 * 1024
+MAX_IDENTIFIER_LENGTH = 128
+
+
 class RosterEntry(BaseModel):
     """One rostered store, **as the unauthenticated request body states it**.
 
@@ -163,9 +193,12 @@ class RosterEntry(BaseModel):
     request body's word, and closing that needs the derived-authorization port named above.
     """
 
-    store_id: str
+    #: Bounded in LENGTH as well as required, because every exclusion reason the ranking emits
+    #: interpolates it once per unsatisfied constraint — see :data:`MAX_IDENTIFIER_LENGTH`. A
+    #: store id is a name; a 20 KB one is a lever on the response size, not an identifier.
+    store_id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     tier: int = 1
-    product_ref: str | None = None
+    product_ref: str | None = Field(default=None, max_length=MAX_IDENTIFIER_LENGTH)
     #: **Required, and strictly above zero.** It used to default to ``0.0``, which minted a free
     #: item with no bid involved at all: a roster row naming no price produced a 0.00 *fallback*
     #: offer for a silent store, and that offer wins every ranking there is. Measured before that
@@ -432,12 +465,13 @@ def _refuse_an_oversized_intent(intent: Any) -> None:
     made the bound depend on an argument about the transport rather than on the value: a JSON
     body cannot carry a ``set`` or a generator, so over HTTP the two are equivalent — and a
     guard whose correctness rests on "the only caller is JSON" stops being correct the first
-    time it has a second caller. ``Sized`` costs one word and needs no such argument.
+    time it has a second caller. ``Collection`` — sized AND iterable, which a list, a tuple, a set and a dict all
+    are and a generator is not — costs one word and needs no such argument.
     """
     if not isinstance(intent, Mapping):
         return
     constraints = intent.get("hard_constraints")
-    if isinstance(constraints, (str, bytes)) or not isinstance(constraints, Sized):
+    if isinstance(constraints, (str, bytes)) or not isinstance(constraints, Collection):
         return
     if len(constraints) > MAX_HARD_CONSTRAINTS:
         raise HTTPException(
@@ -447,6 +481,28 @@ def _refuse_an_oversized_intent(intent: Any) -> None:
                 f"evaluates at most {MAX_HARD_CONSTRAINTS} per auction. Every constraint is "
                 f"decided against every rostered candidate, so the request is refused rather "
                 f"than answered against a subset of what was asked"
+            ),
+        )
+
+    # The second factor, and it has to be measured rather than assumed from the count: an
+    # exclusion reason quotes the constraint back, so 64 constraints of 4 KB cost as much as
+    # 1,024 short ones. `default=str` so a value this exchange cannot serialise is still
+    # WEIGHED rather than raising out of a size check — an unserialisable constraint is
+    # `read_criteria`'s problem to name, not this function's to crash on.
+    try:
+        weight = len(json.dumps(list(constraints), default=str))
+    except (TypeError, ValueError, RecursionError):
+        # Unmeasurable is not small. A constraint list that cannot be sized is one this
+        # function cannot promise anything about, so it is refused rather than admitted.
+        weight = MAX_HARD_CONSTRAINT_BYTES + 1
+    if weight > MAX_HARD_CONSTRAINT_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"intent.hard_constraints occupies {weight} bytes; this exchange accepts at "
+                f"most {MAX_HARD_CONSTRAINT_BYTES}. Every constraint is quoted back once per "
+                f"candidate it excludes, so the size of the answer is the size of the "
+                f"question multiplied by the roster"
             ),
         )
 

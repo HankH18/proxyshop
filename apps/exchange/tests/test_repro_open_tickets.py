@@ -1102,8 +1102,10 @@ def test_t310_the_served_exchange_app_reaches_the_published_ranking() -> None:
     published ``GET /auctions/{auction_id}/shortlist``. ``POST /auctions`` ranks at close.
 
     Neo4j is NOT in that path, and it was worth measuring rather than assuming. The wiring
-    grows the served import closure by seventeen modules — all of ``exchange.retrieval`` and
-    seven ``ingest.*`` — because ``filters.py:39`` imports ``retrieval.criteria`` and importing
+    grows the served import closure by seventeen modules — the six of ``exchange.retrieval``
+    and eleven ``ingest.*`` (counted, because a first draft of this line said "seven" and
+    contradicted the "eleven ``ingest.*`` modules" the paragraph above it already stated) —
+    because ``filters.py:39`` imports ``retrieval.criteria`` and importing
     a submodule executes ``retrieval/__init__.py``, which imports ``sources`` and ``service``
     too. (An earlier version of this paragraph said ``criteria`` was reached "only, never
     sources/service", which is false and is the kind of false that stops the next reader
