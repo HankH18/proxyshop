@@ -27,10 +27,17 @@ services:
       # what an unset variable looked like the first time this was run.
       #
       # PROXYSHOP_LEDGER_DSN is set FIRST because it is what the writer actually reads
-      # first: trust/events/pg.py consults ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_APP")
-      # and never looks at PROXYSHOP_PG_DSN_TRUST_RW. Without this line a deployed ledger
-      # silently writes as the `app` role instead of the `trust_rw` role D5 gives it —
-      # observed here, not theorised.
+      # first: trust/events/pg.py's DEFAULT_DSN_ENV is
+      # ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_TRUST_RW", "PROXYSHOP_PG_DSN_APP").
+      #
+      # This comment used to say that walk was ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_APP")
+      # and "never looks at PROXYSHOP_PG_DSN_TRUST_RW". That was true when it was written and
+      # stopped being true when T-151 put the writer's own role variable second; the DSNs below
+      # were already correct, so nothing was mis-deployed, but the stated reason for the first
+      # line was wrong. Both of the first two entries now resolve `trust_rw`, and the `app` DSN
+      # is a last-resort fallback rather than the second choice. Without either of the first two
+      # lines a deployed ledger silently writes as the `app` role instead of the `trust_rw` role
+      # D5 gives it — observed here, not theorised.
       PROXYSHOP_LEDGER_DSN: "postgresql://trust_rw:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_PG_DSN_TRUST_RW: "postgresql://trust_rw:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_PG_DSN_APP: "postgresql://app:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"

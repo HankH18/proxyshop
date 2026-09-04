@@ -492,9 +492,12 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
     assert result.returncode == 0 and "RESOLVED" in result.stdout, (
         "the trust image's COPY set cannot resolve `trust.verification.verify`:\n"
         f"{result.stderr.strip()[-1200:]}\n"
-        "apps/trust/Dockerfile copies packages/contracts, proxyshop_support and "
-        "apps/trust/src, and NOT packages/verification — so T-065's engine, whose golden "
-        "set passes 36/36 in the repo, is absent from the artifact that deploys."
+        "T-065's engine, whose golden set passes 36/36 in the repo, is absent from the "
+        "artifact that deploys. Closing this takes BOTH halves, because the flat layout "
+        "needs both (R1b/D42): `COPY packages/verification/{__init__.py,src/}` AND "
+        "`ln -s ../packages/verification/src /app/.pkgroot/claim_verification` in the RUN "
+        "layer. A COPY without the link leaves the package unimportable, and the link "
+        "without the COPY dangles."
     )
 
 
