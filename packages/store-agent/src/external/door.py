@@ -37,6 +37,7 @@ a set of claims someone still has to check.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -78,6 +79,18 @@ REASON_AFTER_AUCTION_DEADLINE = "after_auction_deadline"
 REASON_STORE_BLACKLISTED = "store_blacklisted"
 REASON_REPLAYED_NONCE = "replayed_nonce"
 REASON_QUEUE_UNAVAILABLE = "verification_queue_unavailable"
+#: The caller gave no replay memory. Fail closed rather than mint a per-call one (T-232): a
+#: store that dies with the call remembers nothing, so the door would have no replay defence
+#: and the receipt of a replay would be byte-identical to a real admission.
+REASON_REPLAY_MEMORY_UNAVAILABLE = "replay_memory_unavailable"
+#: `freshness_window_seconds` is not a finite, non-negative number, so it is not a window
+#: (T-231/T-230). NaN passes `float()` and loses every comparison, `inf` and `10**400` say
+#: "never stale", and a negative window says "always stale" — none of them is a policy this
+#: door may silently substitute a default for.
+REASON_FRESHNESS_WINDOW_INVALID = "freshness_window_invalid"
+#: The door itself failed. `receive_bid` is documented **Never raises** and is the anonymous
+#: external entry point, so an unhandled error must become a refusal rather than a 500 (T-230).
+REASON_DOOR_FAILED_CLOSED = "door_failed_closed"
 
 
 @dataclass(frozen=True)
@@ -102,9 +115,23 @@ class ExternalBidReceipt:
 
 
 def _refuse(*reasons: str, payload: Any = None) -> ExternalBidReceipt:
-    """A rejection receipt. Never carries `accepted=True` by any path."""
-    signer_id = payload.get("signer_id") if isinstance(payload, Mapping) else None
-    nonce = payload.get("nonce") if isinstance(payload, Mapping) else None
+    """A rejection receipt. Never carries `accepted=True` by any path, and **never raises**.
+
+    `payload` is read only to fill `signer_id`/`nonce` into the receipt for the rejection log,
+    and that read is guarded (T-230). This is the REFUSAL path: it exists for hostile input, so
+    it is the one place that must be safe on a mapping whose `.get` raises. Every refusal after
+    the door has snapshotted the submission passes the snapshot — a plain dict this module
+    built — so in practice nothing hostile reaches here at all; the guard is what makes that
+    true by construction rather than by the current arrangement of the call sites.
+    """
+    try:
+        signer_id = payload.get("signer_id") if isinstance(payload, Mapping) else None
+    except Exception:  # noqa: BLE001 - diagnosis is worth nothing next to a total refusal path
+        signer_id = None
+    try:
+        nonce = payload.get("nonce") if isinstance(payload, Mapping) else None
+    except Exception:  # noqa: BLE001
+        nonce = None
     return ExternalBidReceipt(
         accepted=False,
         verified=False,
@@ -130,7 +157,13 @@ def _blacklisted(payload: Mapping[str, Any], blacklist: Iterable[Any] | None) ->
     else:
         try:
             blocked = list(blacklist)
-        except TypeError:  # a non-iterable blacklist is not a licence to admit everyone
+        except Exception:  # noqa: BLE001 - a blacklist we cannot read is not a licence to admit
+            # Every failure to read the operator's block list means the same thing, so they are
+            # all answered the same way. It used to catch `TypeError` only, which covered the
+            # non-iterable case and let an `__iter__` that raised anything else — a feed
+            # answering with half-decoded JSON raises `ValueError`, a broken DB cursor raises
+            # its own driver error — propagate straight out of the eligibility check and out of
+            # `receive_bid`, which is documented never to raise (T-230).
             return True
     # Fail closed on a blacklist we cannot read (R12). An entry that is not a store/signer id —
     # a dict where a string belongs, half-decoded JSON, a `None` from a nullable column — means
@@ -140,11 +173,14 @@ def _blacklisted(payload: Mapping[str, Any], blacklist: Iterable[Any] | None) ->
     # reason: `unhashable in {...}` raises, and a blacklist that crashes blocks nobody.
     if any(not isinstance(entry, str) for entry in blocked):
         return True
-    return any(
-        payload.get(field_name) == entry
-        for field_name in ("store_id", "signer_id")
-        for entry in blocked
-    )
+    try:
+        return any(
+            payload.get(field_name) == entry
+            for field_name in ("store_id", "signer_id")
+            for entry in blocked
+        )
+    except Exception:  # noqa: BLE001 - an id whose __eq__ raises is an id we cannot clear
+        return True
 
 
 def _synthetic_trust_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -192,6 +228,35 @@ def _snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     turns it into a refusal, which is what a submission we cannot even copy deserves.
     """
     return {key: payload.get(key) for key in list(payload)}
+
+
+def _freshness_window(value: Any) -> float | None:
+    """`freshness_window_seconds` as a finite, non-negative float — or `None`, meaning refuse.
+
+    `float()` was the whole validation, and it is not enough (T-231, T-230):
+
+    * `float('nan')` passes it, and EVERY comparison against NaN is `False`, so both `age >
+      window` and `-age > window` fail and the two-sided freshness gate silently stops
+      refusing anything. Measured: a six-year-stale bid, correctly refused at the default
+      window, was ACCEPTED with `nan`.
+    * `float('inf')` says the same thing honestly, and a negative window says the opposite —
+      neither is a window.
+    * `float(10**400)` does not return at all, it raises `OverflowError`, and the old handler
+      caught `(TypeError, ValueError)` only, so it propagated out of a function documented
+      **Never raises**.
+
+    A bad window is REFUSED rather than quietly replaced with `DEFAULT_FRESHNESS_WINDOW_SECONDS`.
+    Substituting a policy the caller did not ask for is how an operator ends up believing a
+    window is in force that is not, and this is the single knob that decides how long a captured
+    submission stays replayable — the one place a silent default is least affordable.
+    """
+    try:
+        window = float(value)
+    except Exception:  # noqa: BLE001 - OverflowError, TypeError, ValueError, a hostile __float__
+        return None
+    if not math.isfinite(window) or window < 0.0:
+        return None
+    return window
 
 
 def _work_item(
@@ -252,7 +317,54 @@ def receive_bid(
     list_prices: Mapping[Any, Any] | None = None,
     max_discount_pct: float | None = None,
 ) -> ExternalBidReceipt:
-    """Admit or refuse one externally submitted, signed bid. **Never raises.**
+    """Admit or refuse one externally submitted, signed bid. **Never raises** — see below.
+
+    This is a thin total wrapper around `_receive_bid`, and the split is the point. "Never
+    raises" is a security property here, not a courtesy: this function is what an anonymous
+    `POST /v1/auctions/{auction_id}/bids` reaches, so an exception is a 500 handed to an
+    unauthenticated submitter — a stack trace, a burnt worker, and an oracle — where a refusal
+    belongs. Every hazard the gates know about is handled by name inside `_receive_bid`; three
+    of them were measured escaping it (an overflowing `freshness_window_seconds`, a blacklist
+    whose `__iter__` raised, and a payload whose `.get` raised THROUGH THE REFUSAL PATH), and
+    naming three is not the same as being total. This wrapper is what makes the docstring true
+    by construction rather than by enumeration, and it fails CLOSED: an error the door did not
+    anticipate is a refusal, never an admission (T-230).
+    """
+    try:
+        return _receive_bid(
+            payload,
+            signature,
+            keyring,
+            queue=queue,
+            nonce_store=nonce_store,
+            now=now,
+            auction_deadline=auction_deadline,
+            blacklist=blacklist,
+            freshness_window_seconds=freshness_window_seconds,
+            trust_snapshot=trust_snapshot,
+            list_prices=list_prices,
+            max_discount_pct=max_discount_pct,
+        )
+    except Exception:  # noqa: BLE001 - a door that raises is a door that 500s; fail closed
+        return _refuse(REASON_DOOR_FAILED_CLOSED)
+
+
+def _receive_bid(
+    payload: Any,
+    signature: Any,
+    keyring: Any,
+    *,
+    queue: Any = None,
+    nonce_store: NonceStore | None = None,
+    now: Any = None,
+    auction_deadline: Any = None,
+    blacklist: Iterable[Any] | None = None,
+    freshness_window_seconds: float = DEFAULT_FRESHNESS_WINDOW_SECONDS,
+    trust_snapshot: Mapping[str, Any] | None = None,
+    list_prices: Mapping[Any, Any] | None = None,
+    max_discount_pct: float | None = None,
+) -> ExternalBidReceipt:
+    """The six gates. Called only by `receive_bid`, which is the total wrapper.
 
     Args:
         payload: the submission — `Bid` fields plus the five-field D52 signing envelope.
@@ -261,14 +373,24 @@ def receive_bid(
             legitimately use the same `key_id` string, so a flat `{signer_id: secret}` cannot
             express key selection and is not honoured as a shortcut.
         queue: the verification queue. Called once, with the work item, on acceptance only.
-        nonce_store: the replay memory. A fresh `NonceStore()` is used when none is injected,
-            which remembers nothing across calls — inject a shared one to actually catch replay.
+        nonce_store: the replay memory, and it is **required in practice**. A submission judged
+            without one is REFUSED `replay_memory_unavailable` (T-232). It used to default to a
+            fresh `NonceStore()` per call, which remembers nothing between submissions: the
+            identical signed bid was admitted three times running, and the receipt of a replay
+            was byte-identical to the receipt of a real admission, so the missing defence was
+            invisible from outside. Replay protection must not be something a caller switches
+            off by forgetting an argument. It stays keyword-with-a-default rather than
+            positional-required so the five-name public surface is unchanged and the failure is
+            a refusal at runtime with a reason on it, not a `TypeError` from the entry point.
         now: the instant to judge freshness, the deadline and offer expiry against. Pass it to
             keep the door deterministic; it defaults to the current UTC time.
         auction_deadline: the instant the auction closes. A submission arriving after it is
             refused, and an accepted nonce is remembered until it has passed.
         blacklist: store ids and/or signer ids to refuse outright.
-        freshness_window_seconds: how far either side of `now` an `issued_at` may sit.
+        freshness_window_seconds: how far either side of `now` an `issued_at` may sit. Must be a
+            finite, non-negative number; anything else — `nan`, `inf`, `10**400`, a negative,
+            `None`, a string — refuses the submission rather than being silently replaced with
+            the default (T-231). See `_freshness_window`.
         trust_snapshot: the real eligibility snapshot, when the caller holds one. Preferred over
             `blacklist`; see `_synthetic_trust_snapshot` for what is assumed when it is absent.
         list_prices: the caller's own catalog, forwarded to the price wall. This is the door it
@@ -354,10 +476,9 @@ def receive_bid(
         # The field is present and non-blank (gate 2) but is not an instant. It is inside the
         # signed bytes, so this is a well-formed signature over a meaningless claim about time.
         return _refuse(REASON_ISSUED_AT_UNPARSEABLE, payload=submitted)
-    try:
-        window = float(freshness_window_seconds)
-    except (TypeError, ValueError):
-        window = DEFAULT_FRESHNESS_WINDOW_SECONDS
+    window = _freshness_window(freshness_window_seconds)
+    if window is None:
+        return _refuse(REASON_FRESHNESS_WINDOW_INVALID, payload=submitted)
     age_seconds = (evaluated_at - issued_at).total_seconds()
     if age_seconds > window:
         return _refuse(REASON_STALE_SUBMISSION, payload=submitted)
@@ -370,7 +491,8 @@ def receive_bid(
     if deadline is not None and evaluated_at > deadline:
         return _refuse(REASON_AFTER_AUCTION_DEADLINE, payload=submitted)
 
-    # 5. Eligibility and the shared Tier-2 boundary.
+    # 5. Eligibility and the shared Tier-2 boundary — judged on the snapshot, so the document
+    #    the boundary approves is the document the queue receives.
     if _blacklisted(submitted, blacklist):
         return _refuse(REASON_STORE_BLACKLISTED, payload=submitted)
     submission = dict(submitted)
@@ -397,8 +519,16 @@ def receive_bid(
 
     # 6. Replay. Checked last so a submission refused above never spends the nonce it names —
     #    otherwise anyone could burn an honest signer's nonce with a deliberately broken copy.
-    store = nonce_store if nonce_store is not None else NonceStore()
-    if not store.consume(signer_id, nonce, auction_deadline):
+    #
+    #    No injected store, no admission (T-232). This used to mint a fresh `NonceStore()`, one
+    #    per call, which is a replay memory that remembers nothing: the identical signed bid was
+    #    admitted three times running and the three receipts were indistinguishable from real
+    #    admissions. Documenting it was not enough, because this is the one gate whose absence
+    #    cannot be noticed by watching the door work — every other missing gate eventually shows
+    #    up as something wrong getting in, and this one shows up as nothing at all.
+    if nonce_store is None:
+        return _refuse(REASON_REPLAY_MEMORY_UNAVAILABLE, payload=submitted)
+    if not nonce_store.consume(signer_id, nonce, auction_deadline):
         return _refuse(REASON_REPLAYED_NONCE, payload=submitted)
 
     item = _work_item(
@@ -442,10 +572,16 @@ def _resolve_enqueue(queue: Any) -> Any:
     """
     if queue is None:
         return None
-    if callable(queue):
-        return queue
-    for method_name in ("enqueue", "put", "submit", "send", "append", "write", "record", "log"):
-        method = getattr(queue, method_name, None)
-        if callable(method):
-            return method
+    try:
+        if callable(queue):
+            return queue
+        for method_name in ("enqueue", "put", "submit", "send", "append", "write", "record", "log"):
+            method = getattr(queue, method_name, None)
+            if callable(method):
+                return method
+    except Exception:  # noqa: BLE001 - a transport whose attribute access raises is no transport
+        # `getattr` on a caller-supplied object runs the caller's `__getattr__`/descriptors, and
+        # `callable()` runs its metaclass. Neither is ours to trust, and "there is no usable
+        # transport" is the honest answer to an object that cannot be asked (T-230).
+        return None
     return None

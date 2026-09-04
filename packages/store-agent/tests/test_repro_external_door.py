@@ -272,14 +272,10 @@ def test_every_identity_field_on_the_work_item_is_the_one_that_was_signed() -> N
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-230: receive_bid is documented 'Never raises' at door.py:224 and an overflowing "
-        "freshness window, an unreadable blacklist and a payload whose .get raises all propagate "
-        "out of it; remove this marker with the fix"
-    ),
-)
+# xfail marker removed with the T-230 fix: the overflowing window is refused by
+# `_freshness_window`, `_blacklisted` fails closed on any unreadable blacklist, `_refuse` no
+# longer re-reads the payload it is refusing, and `receive_bid` is now a total wrapper around
+# `_receive_bid`, so this test XPASSes and `strict=True` would fail the run if the marker stayed.
 def test_the_door_never_raises_on_the_three_inputs_that_make_it_raise() -> None:
     """This is the signed external-bid entry point; an exception here is a 500, not a refusal.
 
@@ -369,14 +365,9 @@ def test_the_door_never_raises_on_the_three_inputs_that_make_it_raise() -> None:
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-231: freshness_window_seconds of NaN or inf silently disables BOTH freshness gates, "
-        "because float() accepts them and every NaN comparison is False; remove this marker with "
-        "the fix"
-    ),
-)
+# xfail marker removed with the T-231 fix: a `freshness_window_seconds` that is not a finite,
+# non-negative number now refuses the submission instead of passing `float()` intact, so this
+# test XPASSes and `strict=True` would fail the run if the marker stayed.
 def test_a_non_finite_freshness_window_does_not_disable_the_freshness_gates() -> None:
     """A six-year-stale bid must stay refused whatever the window says.
 
@@ -431,14 +422,9 @@ def test_a_non_finite_freshness_window_does_not_disable_the_freshness_gates() ->
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-232: door.py:348 mints a fresh NonceStore() per call when none is injected, so a "
-        "caller that omits nonce_store gets no replay defence and no signal that it has none; "
-        "remove this marker with the fix"
-    ),
-)
+# xfail marker removed with the T-232 fix: an absent `nonce_store` is now refused
+# `replay_memory_unavailable` instead of being given a throwaway store that remembers nothing,
+# so this test XPASSes and `strict=True` would fail the run if the marker stayed.
 def test_a_door_with_no_injected_nonce_store_does_not_admit_the_same_bid_twice() -> None:
     """Replay defence must not be something a caller can switch off by forgetting an argument.
 
