@@ -188,27 +188,30 @@ def _blacklisted(payload: Mapping[str, Any], blacklist: Iterable[Any] | None) ->
         return True
 
 
-def _synthetic_trust_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """The `trust_snapshot` mapping `validate_external_submission` needs, from a `blacklist` list.
-
-    The frozen public surface hands this door a `blacklist: list[str]`, while the shared
-    boundary takes a snapshot MAPPING and treats a store with *no row* as an unavailable
-    eligibility read — which it denies (R12, fail closed). Passing `{}` would therefore reject
-    every submission, so the adapter mints the one row the boundary is about to look up.
-
-    That row is deliberately thin: it asserts only "this store is not blacklisted", which is
-    exactly what a caller passing a bare `blacklist` has told us, and nothing about the store's
-    score. **A caller holding a real snapshot should pass `trust_snapshot=` instead** — this
-    function is only reached when nobody did, and it is not a source of trust, it is the
-    absence of one written down honestly. The blacklist itself is enforced before this is
-    called, so a blocked store never reaches a row that says it is fine.
-    """
-    store_id = payload.get("store_id")
-    if not isinstance(store_id, str) or not store_id:
-        # No store id to key a row on. Returning an empty snapshot lets the boundary refuse it
-        # as an unavailable read rather than having this adapter invent a verdict.
-        return {}
-    return {store_id: {"store_id": store_id, "score": None, "blacklisted": False}}
+# T-233. There used to be a `_synthetic_trust_snapshot(payload)` here, reached whenever the
+# caller passed no `trust_snapshot=`. It minted the one row the shared boundary was about to
+# look up — `{store_id: {"store_id": …, "score": None, "blacklisted": False}}` — keyed on the
+# store id out of the SUBMITTER'S OWN payload, so the eligibility gate was satisfied by data
+# the submitter supplied and passed trivially. Measured on the tree before this change, same
+# signed bid, same door:
+#
+#     receive_bid(payload, …)                        -> accepted=True,  reasons=()
+#     receive_bid(payload, …, trust_snapshot={})     -> accepted=False,
+#                                                       reasons=('trust_snapshot_unavailable:…',)
+#
+# The explicit "I have no eligibility data" failed closed and saying nothing at all failed
+# OPEN, which is backwards: omission is the case that happens by accident. Its docstring
+# argued the row was honest because the caller "told us" the store was not blacklisted by
+# passing a bare `blacklist`, but the row was minted on the default path too, where the caller
+# told us nothing — and R12 denies an unavailable eligibility read. The function is gone rather
+# than fixed: an absent snapshot IS an empty snapshot, and there is nothing left to synthesize.
+#
+# This is the T-232 shape exactly, one argument over: an injected dependency whose absence used
+# to be silently filled in with a permissive stand-in. It is resolved the same way, and for the
+# same stated reason — a refusal at runtime carrying a reason, not a `TypeError` from the entry
+# point — because `receive_bid` is documented **Never raises** and is what an anonymous POST
+# reaches. Making `trust_snapshot` a required argument would move the failure outside the total
+# wrapper and hand an unauthenticated submitter a 500 instead of a refusal.
 
 
 #: How deep `_snapshot` will copy before refusing. A bid is `offer` → `commitments` → a claim →
@@ -449,8 +452,14 @@ def _receive_bid(
             finite, non-negative number; anything else — `nan`, `inf`, `10**400`, a negative,
             `None`, a string — refuses the submission rather than being silently replaced with
             the default (T-231). See `_freshness_window`.
-        trust_snapshot: the real eligibility snapshot, when the caller holds one. Preferred over
-            `blacklist`; see `_synthetic_trust_snapshot` for what is assumed when it is absent.
+        trust_snapshot: the eligibility snapshot, `{store_id: {…, "blacklisted": bool}}`, and it
+            is **required in practice** exactly as `nonce_store` is. A submission judged without
+            one is REFUSED `trust_snapshot_unavailable:<store_id>` by the shared boundary,
+            because a store with no row is an unavailable eligibility read and R12 denies those.
+            Absent is treated as `{}` — identical to an explicit empty snapshot — so that saying
+            nothing is never more permissive than saying "I hold no eligibility data" (T-233).
+            `blacklist` is a separate, narrower input and does NOT substitute for this one: it
+            refuses named ids, it does not establish that any store is eligible.
         list_prices: the caller's own catalog, forwarded to the price wall. This is the door it
             matters most on — a Tier-2 store never meets the emitting-side wall and gets to
             choose what its bid says about its own catalog.
@@ -571,9 +580,10 @@ def _receive_bid(
     submission["signature"] = signature
     verdict = validate_external_submission(
         submission,
-        trust_snapshot=(
-            trust_snapshot if trust_snapshot is not None else _synthetic_trust_snapshot(submitted)
-        ),
+        # An absent snapshot is an EMPTY snapshot, not a permissive one (T-233). The boundary
+        # reads a store with no row as an unavailable eligibility read and denies it (R12), and
+        # that is the right answer for a caller who supplied no eligibility read at all.
+        trust_snapshot=trust_snapshot if trust_snapshot is not None else {},
         now=evaluated_at,
         list_prices=list_prices,
         max_discount_pct=max_discount_pct,

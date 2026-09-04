@@ -104,6 +104,31 @@ class _Queue:
         return len(self.items)
 
 
+def _trust_snapshot_for(payload) -> dict:
+    """The eligibility read this caller holds for the store the payload names.
+
+    Re-baselined with the T-233 fix. These calls used to pass no `trust_snapshot=` at all and
+    relied on the door minting one for them out of the submitter's own `store_id` — which is
+    what T-233 was: the door manufacturing an eligibility verdict nobody gave it, so that
+    forgetting the argument was more permissive than passing `{}`. The row has not disappeared,
+    it has moved to the only place that can honestly assert it: the caller. A test that means
+    to exercise the signature, the nonce, the deadline or the queue must supply the eligibility
+    input a real caller supplies, or it is measuring the defaulting path instead.
+
+    Keyed on `store_id` because that is the key the shared boundary looks up
+    (`_eligibility_reasons(_get(bid, "store_id"), trust_snapshot)`), and `signer_id` is checked
+    against the snapshot nowhere — the signer/store distinction is the `blacklist`'s job. Reads
+    defensively because some callers below hand the door hostile objects on purpose.
+    """
+    try:
+        store_id = payload.get("store_id")
+    except Exception:  # noqa: BLE001 - a payload whose .get raises is one we hold no row for
+        store_id = None
+    if not isinstance(store_id, str) or not store_id:
+        return {}
+    return {store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}}
+
+
 def _receive(payload, signature, **kwargs):
     from store_agent.external import NonceStore, receive_bid
 
@@ -111,6 +136,7 @@ def _receive(payload, signature, **kwargs):
     kwargs.setdefault("nonce_store", NonceStore())
     kwargs.setdefault("now", NOW)
     kwargs.setdefault("auction_deadline", DEADLINE)
+    kwargs.setdefault("trust_snapshot", _trust_snapshot_for(payload))
     keyring = kwargs.pop("keyring", None)
     ring = _keyring() if keyring is None else keyring
     try:
@@ -404,6 +430,7 @@ def test_an_unusable_verification_queue_refuses_before_spending_the_nonce() -> N
         nonce_store=store,
         now=NOW,
         auction_deadline=DEADLINE,
+        trust_snapshot=_trust_snapshot_for(payload),
     )
     assert result is None or result.accepted is not True, (
         "a submission that could not be enqueued must not report itself accepted"
@@ -436,6 +463,7 @@ def test_a_queue_that_raises_is_never_reported_as_a_successful_admission() -> No
         nonce_store=NonceStore(),
         now=NOW,
         auction_deadline=DEADLINE,
+        trust_snapshot=_trust_snapshot_for(payload),
     )
     assert queue.attempts == 1, "the door must have genuinely attempted the write exactly once"
     assert result is None or result.accepted is not True, (
@@ -484,6 +512,7 @@ def test_the_door_refuses_hostile_input_rather_than_raising(case, args) -> None:
             nonce_store=NonceStore(),
             now=NOW,
             auction_deadline=DEADLINE,
+            trust_snapshot=_trust_snapshot_for(payload),
         )
     except Exception as exc:  # noqa: BLE001
         raise AssertionError(
