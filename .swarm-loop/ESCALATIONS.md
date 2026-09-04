@@ -15,10 +15,39 @@ every `escalate`; editing this file by hand changes nothing.</sub>
 
 ## OPEN (1)
 
-### ESC-019 · frozen-test · `.swarm-loop/acceptance/test_e8_proofs.py — the runbook gate still checks SHAPE, and step (3) of your own ESC-018 ruling has now arrived`
+### ESC-020 · frozen-test · `.swarm-loop/acceptance emits self-declared verified claims — and that is now what lets a bidder fake a hard constraint on a SERVED path`
 
-- **filed**: 2026-09-04T16:42:50 · cycle 18 · HEAD `fdb14c52ef`
-- **what is wrong**: YOUR RULING ON ESC-018 SAID A FRESH ESCALATION MUST BE FILED AT STEP 3. This is it, and the conditions you set have been met.
+- **filed**: 2026-09-04T17:07:25 · cycle 18 · HEAD `653b313374`
+- **what is wrong**: WIRING THE RANKER MADE A PRE-EXISTING TRUST BYPASS REACHABLE BY AN HTTP REQUEST, AND THE HONEST FIX TAKES FROZEN TESTS RED. This is the ESC-017 shape again: satisfying the product requirement breaks a frozen test, satisfying the frozen test keeps the fail-open.
+
+THE DEFECT, confirmed at source on the merged tree. apps/exchange/src/ranking/filters.py:237 gates hard-constraint satisfaction on: if str(_enum_value(read(claim, 'status', ''))) != VERIFIED. That status field is supplied by the bidding store in its OWN claim; the published Claim contract does not declare it (additionalProperties: false); and nothing on the auction path validates claims against that contract. Measured by the lane: two otherwise identical stores, one adding the string, and the liar takes the ENTIRE shortlist while the honest store is excluded. It also sets verified_hard_fit_count, which is the FIRST published tie-break, so the lie wins ties as well as filters.
+
+WHY IT IS NEWLY URGENT. rank() was on no served path until this cycle — T-310's whole finding was that the ranker was orphaned while the demo claimed it ran. Wiring it onto POST /auctions is correct and closes T-310, and it also means an unauthenticated request now reaches this branch. The defect did not change; its REACHABILITY did, and my merge is what changed it.
+
+WHY I AM NOT JUST FIXING IT. The obvious repair — ignore store-supplied status, treat every self-asserted claim as unverified — makes every hard-constrained auction return an EMPTY shortlist, because nothing in this system currently produces a verified claim on the auction path. And the fixtures that go red are not only the lane's: apps/exchange/tests/_fixtures_ranking.py and test_ranking.py emit self-declared verified claims, AND SO DOES THE FROZEN ACCEPTANCE SUITE. The honest fix takes frozen tests red, which I may not do.
+
+I HAVE NOT WORKED AROUND IT AND HAVE NOT SOFTENED THE TICKET. It is minted at HIGH with its reproduction; the merge landed with make verify green, the frozen suite at 120/120, the artifact gate at 10 and collect-only 5611 with zero errors; and this is filed the same cycle rather than carried.
+
+NOT BLOCKING, deliberately. Nothing is deployed, no other work depends on this ruling, and there is plenty of honest work that does not touch it. I would rather keep building than halt a swarm over a decision you can take when you reach it.
+- **proposed change**: Rule one of three. (1) MY RECOMMENDATION — amend the frozen acceptance FIXTURES so claims carry verification provenance the store cannot write, then fix filters.py to ignore store-supplied status. It is the only option that actually closes the bypass, and it touches the suite's fixtures rather than its assertions. (2) Wire a real claim-verification producer on the auction path first and let the bypass close as a consequence — better engineering, substantially more work, and the bypass stays live meanwhile. (3) Rule that self-asserted claims are in scope for this build's demo and not a defect; I will record that on the ticket and stop treating it as one. That is coherent for something undeployed, and I want it written down rather than assumed.
+- **to grant it** — edit .swarm-loop/acceptance emits self-declared verified claims — and that is now what lets a bidder fake a hard constraint on a SERVED path, then re-lock the harness around the new bytes:
+
+  ```
+  swarmloop.py freeze --amend "<why you approved this harness change>"
+  swarmloop.py escalate --resolve ESC-020 --note "<what you decided>"
+  ```
+- **to decline it**:
+
+  ```
+  swarmloop.py escalate --resolve ESC-020 --note "declined — <why>"
+  ```
+
+## RESOLVED (19)
+
+### ESC-019 · frozen-test · `.swarm-loop/acceptance/test_e8_proofs.py — the runbook gate still checks SHAPE, and step (3) of your own ESC-018 ruling has now arrived` — resolved 2026-09-04T16:46:20
+
+- filed 2026-09-04T16:42:50 (cycle 18)
+- **what was wrong**: YOUR RULING ON ESC-018 SAID A FRESH ESCALATION MUST BE FILED AT STEP 3. This is it, and the conditions you set have been met.
 
 You ruled: (1) land the executability check in the NON-FROZEN tier — done, it is on main; (2) make the runbook's claims TRUE — done, this cycle; (3) only then revisit amending the frozen gate, 'since a shape check will certify the next broken runbook too, but doing it after the runbook is executable costs nothing where doing it first deliberately reds a confirmed-green board.'
 
@@ -29,20 +58,8 @@ SO THE COST YOU WERE AVOIDING IS NOW ZERO. Amending the frozen E8 runbook test t
 WHAT IS STILL WRONG WITHOUT THE AMENDMENT, which is why the question did not go away when the runbook was fixed: the frozen test checks that the runbook's make targets are DEFINED. It never checks that their recipes resolve. So it certified a runbook whose two headline commands both failed, for an unknown number of cycles, at 8/8 — and it will certify the next one identically. The non-frozen gate now covers this, but the non-frozen tier is worker-editable by design: check-branch vetoes a lane touching .swarm-loop/acceptance and vetoes nothing about docs/tests/.
 
 THE COUNTER-ARGUMENT, stated because it is real. A gate that is green when it lands can only ever go red later, and this one grades a document a lane may legitimately edit. The frozen suite currently has zero tests that execute a shell recipe, so this would be the first, and freeze-time hermeticity rules apply to it (it must pin its own configuration and not read anything outside the frozen manifest). If you would rather the executability check stay in the non-frozen tier permanently and accept that a worker could weaken it, that is a coherent answer and I will record it and stop asking.
-- **proposed change**: Amend .swarm-loop/acceptance/test_e8_proofs.py's runbook test so it grades EXECUTABILITY rather than shape: for every make target the runbook names, assert the target is defined AND every script/file its recipe invokes exists (and parses, for shell); for every pytest/python path named, assert the path exists and pytest can COLLECT it. Derive the command list from the runbook text rather than hardcoding it — a gate over a frozen list of command names stops working the moment the runbook changes, which is the failure the current test already has. It goes green on today's tree, so no metric moves. If you prefer, the narrower version is to assert only the two headline commands resolve, which is smaller but re-acquires the same staleness problem the first time the runbook is edited.
-- **to grant it** — edit .swarm-loop/acceptance/test_e8_proofs.py — the runbook gate still checks SHAPE, and step (3) of your own ESC-018 ruling has now arrived, then re-lock the harness around the new bytes:
-
-  ```
-  swarmloop.py freeze --amend "<why you approved this harness change>"
-  swarmloop.py escalate --resolve ESC-019 --note "<what you decided>"
-  ```
-- **to decline it**:
-
-  ```
-  swarmloop.py escalate --resolve ESC-019 --note "declined — <why>"
-  ```
-
-## RESOLVED (18)
+- **proposed**: Amend .swarm-loop/acceptance/test_e8_proofs.py's runbook test so it grades EXECUTABILITY rather than shape: for every make target the runbook names, assert the target is defined AND every script/file its recipe invokes exists (and parses, for shell); for every pytest/python path named, assert the path exists and pytest can COLLECT it. Derive the command list from the runbook text rather than hardcoding it — a gate over a frozen list of command names stops working the moment the runbook changes, which is the failure the current test already has. It goes green on today's tree, so no metric moves. If you prefer, the narrower version is to assert only the two headline commands resolve, which is smaller but re-acquires the same staleness problem the first time the runbook is edited.
+- **decision**: GRANTED by Hank, 2026-09-04, in session: 'Cool, yeah, then do it.' — said directly in reply to the message that ended with ESC-019 and its resolve command, so I am reading it as authorising the ESC-019 amendment specifically. RECORDING MY READING EXPLICITLY BECAUSE A PEER MESSAGE ABOUT A DIFFERENT AMENDMENT ARRIVED IN THE SAME WINDOW: this note authorises amending .swarm-loop/acceptance/test_e8_proofs.py's runbook test to grade EXECUTABILITY rather than shape. It does NOT authorise anything else, and in particular it is NOT the authority under which the separate 130-ticket verify-field amendment proceeds — that one runs on the pre-existing standing grant for the tickets.json verify-field class (ESC-013, 'GRANTED by Hank 2026-09-03'), which Hank declined to intervene against when a peer session raised it but did not re-confirm. If my reading of 'do it' is wrong, this is the record that shows exactly what I took it to mean. CONDITIONS THAT MADE THE COST ZERO, all measured before asking: the runbook's claims are now true (17 commands, 17 PASS, 0 FAIL, xfail marker removed), e2e/test_s1_flow.py passes 27 tests, make e2e-live resolves with no reachable exit 0, and make verify is OK:all — so the amended frozen test goes green on today's tree, e8_proofs_passing stays 8 and acceptance stays 120/120. No board is taken red, which is exactly the sequencing Hank ruled on in ESC-018.
 
 ### ESC-018 · frozen-test · `acceptance/test_e8_proofs.py:677 certifies a demo runbook whose two headline commands both fail` — resolved 2026-09-04T12:48:17
 
