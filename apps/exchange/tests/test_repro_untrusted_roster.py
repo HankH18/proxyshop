@@ -5,10 +5,16 @@ measured and because a wall proved only at the library boundary is a wall whose 
 untested. ``apps/exchange/src/auction/routes.py``'s own ``RosterEntry`` docstring already writes
 both of these down as an unclosed follow-up; these are the gates that follow up.
 
-Each test is marked ``xfail(strict=True)`` and asserts the behaviour that SHOULD hold. A normal
-run reports ``xfailed`` and stays green; the ticket's gate runs the same test with
-``--runxfail`` and gets a real failure. When the defect is repaired the test XPASSes, which
-``strict=True`` turns into a failure — so the marker cannot outlive the bug.
+Each of the first five tests arrived marked ``xfail(strict=True)`` and asserting the behaviour
+that SHOULD hold: a normal run reported ``xfailed`` and stayed green, and the ticket's gate ran
+the same test with ``--runxfail`` and got a real failure. **The markers are gone because the
+defects are.** ``strict=True`` turns an XPASS into a failure, so a marker left on a repaired
+defect fails the suite — the mechanism cleans itself up, and its absence here is the record that
+both bugs were actually closed rather than deferred.
+
+The tests appended below the two ticket sections pin the SHAPE rather than the two sites: a floor
+that is a threshold holds at every spelling of "almost nothing", and a guard with no roster term
+in it cannot be switched off by anything a caller writes in a request body.
 """
 
 from __future__ import annotations
@@ -44,8 +50,9 @@ UNCAPPED_ROW: dict[str, Any] = {
     "list_price": 100.0,
 }
 
-#: A row that prices the product at nothing. ``list_price`` is ``Field(ge=0.0)``, so this body
-#: is accepted by the request model today.
+#: A row that prices the product at nothing. ``list_price`` WAS ``Field(ge=0.0)``, so this body
+#: was accepted by the request model and the auction ran on it; it is ``Field(gt=0.0)`` now and
+#: this body is a 422.
 ZERO_PRICED_ROW: dict[str, Any] = {
     "store_id": "store-1",
     "tier": 1,
@@ -122,14 +129,6 @@ def _post(row: dict, priced: dict | None, *, timeout: float = 1.0):
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-223: contracts/boundary.py's zero-price floor tests `priced == 0.0`, not a "
-        "proportional floor, so under max_discount_pct: 100 an offer at unit_price 0.001 buys a "
-        "100.00 product through the real POST /auctions door; remove this marker with the fix"
-    ),
-)
 @pytest.mark.parametrize("depth", [None, 100.0])
 def test_t223_one_tenth_of_a_cent_does_not_buy_a_hundred_dollar_product(depth: Any) -> None:
     """A price of nothing-but-not-exactly-zero is still the absence of a price.
@@ -157,14 +156,6 @@ def test_t223_one_tenth_of_a_cent_does_not_buy_a_hundred_dollar_product(depth: A
     assert entry["unit_price"] == 100.0, entry
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-223: on a roster row stating no max_discount_pct, collect.py's _is_judged returns "
-        "False for an undeclared price, so the price walk never runs and unit_price 1e-09 is "
-        "HTTP 201 as a rankable bid; remove this marker with the fix"
-    ),
-)
 def test_t223_an_undeclared_billionth_of_a_cent_is_not_a_rankable_bid() -> None:
     """The second, separate failure: the wall is not merely too loose, it is SKIPPED.
 
@@ -203,15 +194,6 @@ def test_t223_an_undeclared_billionth_of_a_cent_is_not_a_rankable_bid() -> None:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-224: list_price: 0.0 is an accepted roster value (Field(ge=0.0)); on such a row "
-        "_is_judged returns False, so an unparseable store price reaches float() unguarded and "
-        "raises ValueError out of the auction as an unauthenticated HTTP 500; remove this "
-        "marker with the fix"
-    ),
-)
 def test_t224_an_unreadable_store_price_never_becomes_a_server_error() -> None:
     """One keystroke in an unauthenticated request body takes the auction down.
 
@@ -235,15 +217,6 @@ def test_t224_an_unreadable_store_price_never_becomes_a_server_error() -> None:
     assert posted.status_code < 500, (posted.status_code, posted.text[:400])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-224: a roster row of list_price: 0.0 mints a 0.00 rankable fallback offer for a "
-        "silent store (HTTP 201, entries=[{fallback: true, unit_price: 0.0}]) — the same free "
-        "item the required-list_price 422 closed, reached by writing the zero instead of "
-        "omitting the field; remove this marker with the fix"
-    ),
-)
 def test_t224_a_roster_row_that_prices_nothing_cannot_mint_a_free_offer() -> None:
     """The free item that needs no bid at all, reached by writing ``0.0`` instead of omitting it.
 
@@ -266,3 +239,197 @@ def test_t224_a_roster_row_that_prices_nothing_cannot_mint_a_free_offer() -> Non
         assert not free, f"a rankable offer of nothing was minted from the roster alone: {free}"
     else:
         assert posted.status_code == 422, (posted.status_code, posted.text[:400])
+
+
+# =====================================================================================
+# The CLASS, not the two instances — appended with the fix.
+#
+# T-223 was one exact-equality floor and T-224 was one guard whose on/off switch was a
+# caller-supplied number. Both are shapes rather than sites, so the tests below pin the shape:
+# a floor that is a THRESHOLD holds at every spelling of "almost nothing", and a guard with no
+# roster term in it cannot be switched off by anything written in a request body.
+# =====================================================================================
+
+NOW = 1_700_000_000.0
+
+
+def _collect(roster: list[dict], responses: list[dict]):
+    from exchange.auction import collect_bids  # noqa: PLC0415
+
+    return list(collect_bids(roster, responses, NOW))
+
+
+def _reply(priced: Any, store_id: str = "store-1") -> dict:
+    return {
+        "store_id": store_id,
+        "received_at": NOW - 1.0,
+        "bid": {
+            "auction_id": "auc-1",
+            "store_id": store_id,
+            "offer": priced,
+            "claims": [],
+        },
+    }
+
+
+def test_the_module_under_test_is_this_worktree() -> None:
+    """A green run that imported the PRIMARY checkout's `collect.py` is evidence about that tree.
+
+    The venv's ``_proxyshop.pth`` hardcodes the primary checkout onto ``sys.path``, so this is
+    not hypothetical: a suite can pass here while grading a file nobody in this branch edited.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from exchange.auction import collect  # noqa: PLC0415
+
+    here = Path(__file__).resolve().parents[3]
+    resolved = Path(collect.__file__).resolve()
+    assert here in resolved.parents, f"graded {resolved}, not {here}"
+
+
+@pytest.mark.parametrize("unit", [1e-09, 1e-06, 0.0001, 0.001, 0.009])
+@pytest.mark.parametrize("row", [CAP_100_ROW, UNCAPPED_ROW], ids=["cap_100", "no_cap"])
+def test_t223_the_floor_is_a_threshold_so_no_spelling_of_almost_nothing_clears_it(
+    row: dict, unit: float
+) -> None:
+    """The generalisation of the defect: `priced == 0.0` was defeated by ADDING A DIGIT.
+
+    An equality has exactly one value that satisfies it, so the whole floor was one keystroke
+    wide. Every price here is positive, so the boundary's ``:not_positive`` and ``:negative``
+    refusals say nothing about any of them, and on the ``cap_100`` row every depth relation in
+    the walk is satisfied too — ``100.00 * (100 - 100) / 100`` is 0.00 and any price at all is
+    above it. Only a threshold refuses these, and it must refuse them on the row that authorizes
+    everything and on the row that authorizes nothing alike.
+    """
+    entry = _collect([row], [_reply(_offer(unit, unit))])[0]
+
+    assert entry.fallback is True, (row.get("max_discount_pct"), unit, entry.price_reasons)
+    assert entry.fallback_reason == "bid_price_unreconcilable"
+    assert entry.unit_price == 100.0, "the refused store is still represented, at its list price"
+
+
+def test_t223_the_floor_names_its_own_refusal_and_does_not_double_report_a_bad_number() -> None:
+    """`fallback_reason` is a fixed vocabulary; `price_reasons` is what the store's operator is
+    owed. A price under the floor is a POLICY refusal with a name of its own, and a price that is
+    zero, negative or unreadable keeps the boundary's own name for that instead of collecting
+    both — one bad number reported twice is the mislabelling `FALLBACK_REASONS` was split to end.
+    """
+    from exchange.auction.collect import PRICE_BELOW_FLOOR_REASON  # noqa: PLC0415
+
+    under = _collect([CAP_100_ROW], [_reply(_offer(0.001, 0.001))])[0]
+    assert (
+        f"price_unreconcilable:offer.unit_price:{PRICE_BELOW_FLOOR_REASON}" in under.price_reasons
+    )
+    assert (
+        f"price_unreconcilable:offer.total_price:{PRICE_BELOW_FLOOR_REASON}" in under.price_reasons
+    )
+
+    for priced, already_named in ((0.0, "not_positive"), (-5.0, "negative")):
+        other = _collect([CAP_100_ROW], [_reply(_offer(priced, priced))])[0]
+        assert other.fallback is True, priced
+        assert f"price_unreconcilable:offer.unit_price:{already_named}" in other.price_reasons
+        assert not [r for r in other.price_reasons if r.endswith(PRICE_BELOW_FLOOR_REASON)], (
+            priced,
+            other.price_reasons,
+        )
+
+
+@pytest.mark.parametrize("unit", [1.0, 80.0, 99.0, 100.0])
+def test_t223_the_floor_leaves_every_undercut_r10_requires_admitted(unit: float) -> None:
+    """The paired control, and the constraint that sets the floor's ceiling.
+
+    A wall that refused every cheap bid would satisfy every rejection above and destroy the
+    auction. ``test_auction_price_wall.py`` ::
+    ``test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized`` pins 99.00, 80.00
+    and 1.00 on this uncapped 100.00 row as admitted — a 99% undercut is still an undercut — so
+    the floor has to leave a whole dollar alone, and it does, by an order of magnitude.
+    """
+    entry = _collect([UNCAPPED_ROW], [_reply(_offer(unit, unit))])[0]
+    assert entry.fallback is False, (unit, entry.price_reasons)
+    assert entry.unit_price == unit
+
+
+def test_t223_the_floor_bites_in_proportion_on_a_product_the_cent_floor_cannot_reach() -> None:
+    """An absolute floor alone is not enough: 0.02 is a payable amount and it is not a price for a
+    product listed at 1,000,000.00. The proportional half is what reaches that, and the paired
+    control is that the same row still admits a real bid."""
+    expensive = dict(UNCAPPED_ROW, list_price=1_000_000.0)
+
+    refused = _collect([expensive], [_reply(_offer(0.02, 0.02))])[0]
+    assert refused.fallback is True, refused.price_reasons
+    assert refused.unit_price == 1_000_000.0
+
+    kept = _collect([expensive], [_reply(_offer(900_000.0, 900_000.0))])[0]
+    assert kept.fallback is False, kept.price_reasons
+
+
+def test_t223_a_catalog_that_genuinely_prices_below_a_cent_is_not_walled_off() -> None:
+    """The floor must not be closed rather than fail-closed. A row listing at 0.005 is a catalog
+    describing a sub-cent product, not a caller minting a giveaway, so the absolute cent floor is
+    dropped there and the proportional one — which is 0.000005 — is what applies."""
+    micro = dict(UNCAPPED_ROW, list_price=0.005)
+
+    kept = _collect([micro], [_reply(_offer(0.004, 0.004))])[0]
+    assert kept.fallback is False, kept.price_reasons
+    assert kept.unit_price == 0.004
+
+
+@pytest.mark.parametrize("junk", ["cheap", None, float("nan"), float("inf"), [], {"a": 1}])
+def test_t224_an_unreadable_price_is_judged_on_every_row_whatever_it_prices(junk: Any) -> None:
+    """The guard has no roster term in it, and that is the repair.
+
+    `_priced_at_nothing` turned an unreadable price into a fallback only ``if listed > 0``, so the
+    protection was switched on and off by a number the caller writes. Below, the SAME junk price
+    is refused on a row listing at 100.00, on a row listing at zero, and on a row that states no
+    list price at all — three rosters, one verdict, and no ``ValueError`` out of any of them.
+    """
+    for row in (
+        UNCAPPED_ROW,
+        dict(UNCAPPED_ROW, list_price=0.0),
+        {"store_id": "store-1", "tier": 1, "product_ref": "prod-1"},
+    ):
+        entry = _collect([row], [_reply(_offer(junk, junk))])[0]
+        assert entry.fallback is True, (row.get("list_price"), junk, entry.price_reasons)
+        assert entry.fallback_reason == "bid_price_unreconcilable"
+        # It never raises, and the store is never dropped: R10 is not negotiable.
+        assert entry.store_id == "store-1"
+        assert isinstance(entry.unit_price, float)
+
+
+def test_t224_an_unreadable_roster_value_cannot_raise_out_of_the_collector_either() -> None:
+    """The same shape one row over, on the FALLBACK path rather than the bid path.
+
+    `_list_price_bid` read ``float(entry.get("list_price", 0.0))`` and `collect_bids` read
+    ``int(rostered.get("tier", 1))``, so a silent store on a row carrying ``list_price: "cheap"``
+    — or any store on a row carrying ``tier: "one"`` — raised out of the middle of the auction the
+    same way an unreadable BID price did. Both are unreadable claims now, and an unreadable claim
+    establishes nothing: no list price, and no bidding agent.
+    """
+    unpriced = _collect([dict(UNCAPPED_ROW, list_price="cheap")], [])[0]
+    assert unpriced.fallback is True
+    assert unpriced.fallback_reason == "no_response"
+    assert unpriced.unit_price == 0.0
+
+    for junk in ("one", float("nan"), float("inf"), None, [1]):
+        untiered = _collect([dict(UNCAPPED_ROW, tier=junk)], [_reply(_offer(80.0, 80.0))])[0]
+        assert untiered.tier == 0, junk
+        assert untiered.fallback is True, junk
+        assert untiered.fallback_reason == "tier_0_no_agent", junk
+
+
+def test_t224_the_door_refuses_a_zero_list_price_the_same_way_it_refuses_a_missing_one() -> None:
+    """ "Prices it at nothing" is not a different statement from "does not price it", and the 422
+    on the missing field was reached around by writing the zero. Both are 422 now, and the paired
+    control is that a priced row still opens an auction."""
+    for row in (
+        {"store_id": "store-1", "tier": 1, "product_ref": "prod-1"},
+        ZERO_PRICED_ROW,
+        dict(ZERO_PRICED_ROW, list_price=-5.0),
+    ):
+        posted = _post(row, None)
+        assert posted.status_code == 422, (row.get("list_price"), posted.text[:200])
+        assert posted.json()["detail"][0]["loc"][-1] == "list_price"
+
+    priced = _post(UNCAPPED_ROW, None)
+    assert priced.status_code == 201, priced.text
+    assert priced.json()["entries"][0]["unit_price"] == 100.0
