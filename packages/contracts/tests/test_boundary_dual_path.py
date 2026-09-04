@@ -1169,6 +1169,65 @@ def test_the_corpus_still_covers_every_case_the_hand_copied_table_pinned() -> No
     } <= set(PRICE_PARITY_BY_NAME)
 
 
+def test_the_corpus_pins_the_price_floor_in_both_directions() -> None:
+    """T-278 — the gate for T-250's fix, and the reason it is IN the shared corpus.
+
+    T-250 replaced an exact `priced == 0` equality with a THRESHOLD, because an equality has
+    exactly one satisfying value: 0.001 for a product the roster prices at 100.00 was refused by
+    nothing. That fix landed on both doors, but only the Python one was reachable from a test —
+    verified through the exchange in `apps/exchange/tests/test_repro_untrusted_roster.py`, which
+    the TypeScript door does not run. Measured against the pre-T-278 corpus by re-introducing the
+    defect verbatim in `boundary.ts` (`priced === 0`, threshold branch deleted): 683/683 vitest
+    tests GREEN.
+
+    Note what was NOT true of it: deleting the whole floor block was already caught, by the four
+    zero-price rows the block's OTHER branch (`not_positive`) answers. It was the THRESHOLD half
+    — everything strictly between zero and the floor — that no case in either language reached.
+    """
+    from contracts import boundary  # noqa: PLC0415
+
+    suffix = f":{boundary.ROSTER_PRICE_BELOW_FLOOR}"
+    floor_rows = [c for c in PRICE_PARITY_CASES if any(r.endswith(suffix) for r in c["reasons"])]
+    assert len(floor_rows) >= 5, "the corpus carries no below_price_floor case"
+
+    # Both halves of `max(listed * fraction, one minor unit)` are exercised, on a listing where
+    # each one dominates: 0.005 clears 0.1% of a 0.50 product and is still half a cent, and 0.05
+    # is a payable amount that is not a price for a 100.00 one. Either half alone admits what the
+    # other refuses, so a corpus reaching only one of them gates only half the arithmetic.
+    listings = {c["list_prices"]["prod-1"]["list_price"] for c in floor_rows}
+    assert 100.0 in listings, "no floor case where the proportional half dominates"
+    assert 0.5 in listings, "no floor case where the absolute half dominates"
+
+    # ...and the boundary value itself is ADMITTED, on both halves. `<`, never `<=`: a wall that
+    # refuses the lowest number the contract still calls a price is closed, not fail-closed, and
+    # that is the direction this class of bug lives in once the equality is gone.
+    for name in (
+        "a_price_exactly_at_the_proportional_floor_is_admitted",
+        "a_price_exactly_at_the_absolute_floor_is_admitted",
+    ):
+        at_the_floor = PRICE_PARITY_BY_NAME[name]
+        assert at_the_floor["ok"] is True, name
+        assert at_the_floor["reasons"] == [], name
+
+    assert boundary.PRICE_FLOOR_FRACTION == 0.001
+    assert boundary.MINIMUM_PAYABLE_AMOUNT == 0.01
+    assert boundary.price_floor(100.0) == 0.1
+    assert boundary.price_floor(0.5) == boundary.MINIMUM_PAYABLE_AMOUNT
+    # The floor is dropped, not clamped, below one minor unit — a roster genuinely pricing
+    # something at 0.005 is not describing a giveaway, and a floor above its own list price would
+    # refuse every bid on it.
+    assert boundary.price_floor(0.005) < boundary.MINIMUM_PAYABLE_AMOUNT
+
+    # THE CEILING on `PRICE_FLOOR_FRACTION`, in machine-checkable form.
+    # `apps/exchange/tests/test_auction_price_wall.py::
+    # test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized` pins 1.00 on an
+    # UNCAPPED 100.00 row as ADMITTED, so a floor at or above 1.00 there breaks a frozen
+    # assertion. That ceiling binds the FLOOR only, and only on that row: the sibling test
+    # refuses 1.00 on a CAPPED row — by the depth relation, not by the floor — and the two
+    # `an_undeclared_dollar_on_a(n)_..._hundred` rows in the corpus hold that distinction apart.
+    assert boundary.price_floor(100.0) < 1.0
+
+
 def test_the_price_walk_survives_attribute_access_and_hostile_offers() -> None:
     """It must work on an extracted `Bid` as well as on a wire dict, and it must never raise."""
     from packages.contracts import Bid
