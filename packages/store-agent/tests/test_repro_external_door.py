@@ -12,6 +12,7 @@ re-reads it instead of snapshotting it once at entry.
 
 from __future__ import annotations
 
+import random
 import threading
 from collections.abc import Mapping
 from typing import Any
@@ -33,6 +34,46 @@ LONG_STALE = "2020-01-01T00:00:00Z"
 
 HONEST_PRICE = 89.0
 ATTACKER_PRICE = 1.0
+
+
+def _trust_snapshot_for(payload: Any) -> dict[str, Any]:
+    """The eligibility read the CALLER holds, which every gate below has to be given.
+
+    Added with the T-233 fix, and it is load-bearing rather than cosmetic. The door used to
+    mint this row itself out of the submitter's own `store_id` whenever the argument was
+    omitted, which is the defect: an eligibility verdict manufactured from the thing being
+    judged. Now an absent snapshot is an empty snapshot and the shared boundary refuses the
+    submission `trust_snapshot_unavailable` (R12).
+
+    Every probe in this file that has to reach a LATER gate must therefore supply it, and three
+    of them are silently hollowed out without it. Measured against the fixed door, admissions
+    with the argument vs without:
+
+        T-229 body-liar sweep            6 of 8    ->   0 of 8
+        T-281 nested-offer-liar sweep   70 of 79   ->   0 of 79
+        T-241 identity-liar sweep       48 of 66   ->   0 of 66
+
+    Each is shaped `if not receipt.accepted: continue`, so at zero admissions the loop asserts
+    nothing at all and the test still reports green. A gate probe that cannot reach its gate is
+    not a passing test, it is an absent one — which is why all three now carry an explicit
+    arming assertion rather than trusting this argument to stay correct.
+
+    Two probes that supply it are NOT in that list, and the distinction is measured, not
+    assumed. T-231's window probe refuses `freshness_window_invalid` / `issued_at_stale` either
+    way, because freshness is gate 4a and the boundary is gate 5; it was never hollowed. T-232's
+    replay counter passes no `nonce_store` at all, so it admits 0 of 3 with the argument and 0
+    of 3 without — its `admitted <= 1` is trivially true in both cases, which is a pre-existing
+    weakness of that probe and not something this change caused or fixed. Both supply the
+    argument anyway so neither depends on gate ORDERING staying what it is today.
+
+    Keyed on the honest payload's `store_id` — the id the caller believes it is dealing with —
+    because that is the key the shared boundary looks up, and because several payloads below
+    are deliberate liars whose own answers must not be allowed to steer the fixture.
+    """
+    store_id = payload.get("store_id") if isinstance(payload, Mapping) else None
+    if not isinstance(store_id, str) or not store_id:
+        return {}
+    return {store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}}
 
 
 def _keyring() -> dict[str, dict[str, str]]:
@@ -182,6 +223,7 @@ def test_the_body_that_was_validated_is_the_body_that_is_enqueued() -> None:
     payload = _payload()
     signature = sign_bid(payload, KEY)
 
+    admitted = 0
     for swap_after in range(1, 9):
         queue = _Queue()
         receipt = receive_bid(
@@ -192,9 +234,11 @@ def test_the_body_that_was_validated_is_the_body_that_is_enqueued() -> None:
             nonce_store=NonceStore(),
             now=NOW,
             auction_deadline=DEADLINE,
+            trust_snapshot=_trust_snapshot_for(payload),
         )
         if not receipt.accepted:
             continue
+        admitted += 1
         assert queue.count == 1, f"swap_after={swap_after}: one admission is one enqueue"
         enqueued = queue.items[0]["submission"]["offer"]["unit_price"]
         assert enqueued == HONEST_PRICE, (
@@ -203,6 +247,16 @@ def test_the_body_that_was_validated_is_the_body_that_is_enqueued() -> None:
             f"is a claim about the document that was checked, and the next stage receives a "
             f"different document"
         )
+
+    # ARMING. `if not receipt.accepted: continue` makes this whole sweep silently optional: if
+    # every payload is refused, the loop asserts NOTHING and the test still reports green. That
+    # is one edit away at all times — measured, dropping the `trust_snapshot=` above takes this
+    # from 6 admissions of 8 to 0 of 8 with nothing turning red. The sweep has to prove it ran.
+    assert admitted, (
+        "not one of the 8 body-liar payloads was admitted, so every assertion in this sweep was "
+        "skipped and it proved nothing. The probe has stopped reaching the gate it is about — "
+        "check what is refusing before this test's subject (payload aliasing) is ever reached"
+    )
 
 
 class _NestedOfferLiar(Mapping):
@@ -279,6 +333,7 @@ def test_the_snapshot_is_deep_so_a_nested_value_cannot_be_swapped_or_mutated() -
         nonce_store=NonceStore(),
         now=NOW,
         auction_deadline=DEADLINE,
+        trust_snapshot=_trust_snapshot_for(payload),
     )
     assert receipt.accepted is True, f"control: this bid must be admitted: {receipt!r}"
     assert queue.count == 1
@@ -295,6 +350,7 @@ def test_the_snapshot_is_deep_so_a_nested_value_cannot_be_swapped_or_mutated() -
     )
 
     # 2. the T-229 threat model, nested
+    nested_admitted = 0
     for lie_after in range(1, 80):
         fresh = _payload()
         fresh_signature = sign_bid(fresh, KEY)
@@ -308,9 +364,11 @@ def test_the_snapshot_is_deep_so_a_nested_value_cannot_be_swapped_or_mutated() -
             nonce_store=NonceStore(),
             now=NOW,
             auction_deadline=DEADLINE,
+            trust_snapshot=_trust_snapshot_for(fresh),
         )
         if not nested.accepted:
             continue
+        nested_admitted += 1
         assert nested_queue.count == 1
         enqueued = nested_queue.items[0]["submission"]["offer"]
         assert isinstance(enqueued, dict), (
@@ -322,6 +380,14 @@ def test_the_snapshot_is_deep_so_a_nested_value_cannot_be_swapped_or_mutated() -
             f"{HONEST_PRICE} and enqueued one priced at {enqueued['unit_price']}. This is T-229 "
             f"one level down, where the price actually lives"
         )
+
+    # ARMING — see the identical note in `test_the_body_that_was_validated_is_the_body_that_is
+    # _enqueued`. Measured: dropping the `trust_snapshot=` above takes this sweep from 70
+    # admissions of 79 to 0 of 79, and the test still reports green.
+    assert nested_admitted, (
+        "not one of the 79 nested-offer-liar payloads was admitted, so every assertion in this "
+        "sweep was skipped and it proved nothing about what reaches the queue"
+    )
 
 
 # =============================================================================================
@@ -358,6 +424,7 @@ def test_every_identity_field_on_the_work_item_is_the_one_that_was_signed() -> N
     payload = _payload()
     signature = sign_bid(payload, KEY)
 
+    admitted_by_field: dict[str, int] = {}
     for field in _IDENTITY_FIELDS:
         lie = f"attacker-{field}"
         for swap_after in range(1, 12):
@@ -371,9 +438,11 @@ def test_every_identity_field_on_the_work_item_is_the_one_that_was_signed() -> N
                 nonce_store=store,
                 now=NOW,
                 auction_deadline=DEADLINE,
+                trust_snapshot=_trust_snapshot_for(payload),
             )
             if not receipt.accepted:
                 continue
+            admitted_by_field[field] = admitted_by_field.get(field, 0) + 1
             assert queue.count == 1
             item = queue.items[0]
             assert item[field] == payload[field], (
@@ -384,6 +453,18 @@ def test_every_identity_field_on_the_work_item_is_the_one_that_was_signed() -> N
                 f"idempotency key is {item['nonce']!r} — the two disagree about which submission "
                 f"this is, and payload_hash covers only the body so nothing downstream can tell"
             )
+
+    # ARMING, per field rather than in total. `if not receipt.accepted: continue` makes each
+    # field's slice silently optional, and a global count would let five fields carry a sixth
+    # that never gets admitted once. Measured: dropping the `trust_snapshot=` above takes this
+    # sweep from 48 admissions of 66 to 0 of 66 with nothing turning red.
+    unexercised = [f for f in _IDENTITY_FIELDS if not admitted_by_field.get(f)]
+    assert not unexercised, (
+        f"no payload lying about {unexercised} was ever admitted, so this sweep asserted nothing "
+        f"about {'those fields' if len(unexercised) > 1 else 'that field'}. Admissions per field: "
+        f"{ {f: admitted_by_field.get(f, 0) for f in _IDENTITY_FIELDS} }. A gate refusing before "
+        f"the work item is built means this test is no longer measuring the work item"
+    )
 
 
 # =============================================================================================
@@ -421,6 +502,14 @@ def test_the_door_never_raises_on_the_three_inputs_that_make_it_raise() -> None:
     signature = sign_bid(payload, KEY)
 
     def _call(**kwargs: Any) -> Any:
+        # `setdefault`, not a keyword before `**kwargs`: a case that wants to pass its own
+        # `trust_snapshot=` must be able to, rather than dying on a duplicate-keyword TypeError.
+        # Measured: the eligibility gate sits AFTER the blacklist and window gates, so supplying
+        # a row changes none of these three refusal reasons today — they stay
+        # `freshness_window_invalid`, `store_blacklisted` and `signing_envelope_uncanonicalizable`
+        # either way. It is here so that stays true by construction rather than by gate
+        # ordering: each case has to be refused on ITS OWN hazard.
+        kwargs.setdefault("trust_snapshot", _trust_snapshot_for(payload))
         return receive_bid(
             kwargs.pop("payload", payload),
             signature,
@@ -510,6 +599,11 @@ def test_a_non_finite_freshness_window_does_not_disable_the_freshness_gates() ->
     signature = sign_bid(stale, KEY)
 
     def _receive(**kwargs: Any) -> Any:
+        # Measured: the window-validation gate refuses `freshness_window_invalid` BEFORE the
+        # eligibility gate is reached, so this probe reports the same reasons with or without a
+        # row. The row is supplied anyway so the probe never depends on that gate ordering, and
+        # `setdefault` keeps a caller free to override it.
+        kwargs.setdefault("trust_snapshot", _trust_snapshot_for(stale))
         return receive_bid(
             stale,
             signature,
@@ -576,6 +670,7 @@ def test_a_door_with_no_injected_nonce_store_does_not_admit_the_same_bid_twice()
             queue=queue,
             now=NOW,
             auction_deadline=DEADLINE,
+            trust_snapshot=_trust_snapshot_for(payload),
         )
         admitted += 1 if receipt.accepted else 0
         enqueued += queue.count
@@ -593,36 +688,105 @@ def test_a_door_with_no_injected_nonce_store_does_not_admit_the_same_bid_twice()
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-233: with neither trust_snapshot= nor blacklist=, _synthetic_trust_snapshot mints a "
-        "row asserting the store is not blacklisted, so omission fails OPEN while an explicit "
-        "empty snapshot fails closed; remove this marker with the fix"
+# xfail marker removed with the T-233 fix: an absent `trust_snapshot` is now the empty snapshot
+# rather than a row minted from the submitter's own `store_id`, so omission and `{}` reach the
+# same refusal and this test XPASSes — which `strict=True` would turn into a failure.
+#
+# justify-test-edit. The marker is the only existing test machinery this ticket touched, and
+# removing it is the marker's designed lifecycle rather than a weakening — this file's own
+# header says so: "once the defect is closed the test XPASSes, which a strict xfail turns into
+# a failure, and whoever fixed it has to delete the marker." Would this test still be wrong if
+# I reverted my change? No — it would be RIGHT, and it would FAIL, which is exactly what a
+# reproduction gate is for; its two original assertions are unchanged in meaning and still
+# fail against the pre-fix door. Nothing was weakened to get green: no assertion was modified
+# or deleted anywhere in this change, and the two assertions added below (an arming control,
+# and the `blacklist=`-only half of the same defect) both make this gate strictly harder.
+
+
+def _claim(key: str, value: str, source: str = "seller_asserted") -> dict[str, Any]:
+    """One claim. `source` matters: R8 admits `seller_asserted` in `bid.claims` and flags it for
+    verification, but refuses it at `offer.commitments`, which only a tool hook can mint
+    (`get_owner_commitments` → `owner_statement`)."""
+    return {
+        "key": key,
+        "value": value,
+        "provenance": {
+            "source": source,
+            "ref": f"pitch:gate-1#{key}",
+            "observed_at": ISSUED_AT,
+            "authority_rank": 1,
+        },
+    }
+
+
+#: Payload shapes this property is asserted over. The property is universal — it is about an
+#: ARGUMENT, not about any bid — so probing it with one payload is a hole rather than a shortcut,
+#: and a measured one. Patching `_synthetic_trust_snapshot` to return `{}` only for a claimless
+#: bid turns a single-payload probe green while leaving the fail-open intact for every bid a real
+#: store actually submits; run against that patch, the parametrized probe below still reports the
+#: defect. The shapes vary what such a key-off could plausibly key ON — how many `claims` the bid
+#: carries (none, one, three), whether the offer carries `commitments`, and whether `store_id` is
+#: the signer itself or a separate shopfront — while every one of them stays a VALID bid, which
+#: the arming assertion below enforces so a shape can never go quiet by becoming unbuildable.
+_T233_SHAPES: dict[str, Any] = {
+    "an empty claims list": lambda: _payload(),
+    "one seller-asserted claim": lambda: _payload(claims=[_claim("material", "merino wool")]),
+    "three claims": lambda: _payload(
+        claims=[
+            _claim("material", "merino wool"),
+            _claim("origin", "New Zealand"),
+            _claim("care", "machine washable"),
+        ],
     ),
-)
-def test_omitting_the_eligibility_inputs_is_not_more_permissive_than_passing_empty_ones() -> None:
+    "a committed offer": lambda: _payload(
+        claims=[_claim("material", "merino wool")],
+        offer={
+            "product_ref": "gate-prod-1",
+            "unit_price": HONEST_PRICE,
+            "total_price": HONEST_PRICE,
+            "discount": None,
+            "commitments": [_claim("returns", "60 days, free", source="owner_statement")],
+            "expires_at": FAR_FUTURE,
+        },
+    ),
+    "a shopfront store id that is not the signer": lambda: _payload(
+        store_id="store-shopfront-7",
+        claims=[_claim("material", "merino wool")],
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_T233_SHAPES), ids=lambda s: s.replace(" ", "-"))
+def test_omitting_the_eligibility_inputs_is_not_more_permissive_than_passing_empty_ones(
+    shape: str,
+) -> None:
     """Omission is the case that happens by accident, so it must not be the permissive one.
 
-    Measured on this tree, same signed payload, same door:
+    Measured on this tree BEFORE the fix, same signed payload, same door:
 
     * `receive_bid(payload, ...)` with neither `trust_snapshot=` nor `blacklist=` →
       ``accepted=True, reasons=()``
     * `receive_bid(payload, ..., trust_snapshot={})` →
       ``accepted=False, reasons=('trust_snapshot_unavailable:store-external-1',)``
 
-    The explicit empty value fails closed and the omitted one fails open, which is backwards. The
-    door reaches `_synthetic_trust_snapshot`, which mints the single row the shared boundary is
-    about to look up and fills it with ``blacklisted: False`` — a verdict the caller never gave.
-    The docstring is honest about this ("it is not a source of trust, it is the absence of one
-    written down honestly"), and an absent eligibility read is exactly what R12 says to deny on.
+    The explicit empty value failed closed and the omitted one failed OPEN, which is backwards.
+    The door reached `_synthetic_trust_snapshot`, which minted the single row the shared boundary
+    was about to look up and filled it with ``blacklisted: False`` — a verdict the caller never
+    gave, keyed on an id out of the submission being judged. That function's own docstring was
+    honest about it ("it is not a source of trust, it is the absence of one written down
+    honestly"), and an absent eligibility read is exactly what R12 says to deny on.
 
     The property: a caller who said nothing about eligibility must not get a more permissive
-    answer than a caller who said "I have no eligibility data".
+    answer than a caller who said "I have no eligibility data". It is a property of the
+    ARGUMENT and therefore holds for every bid, which is why it is parametrized — see
+    `_T233_SHAPES` for the single-payload hole that closes.
+
+    Each case arms itself first: with a real snapshot the same bid must be ADMITTED, so a
+    refusal below is the eligibility gate answering and not the bid being unbuildable.
     """
     from store_agent.external import NonceStore, receive_bid, sign_bid
 
-    payload = _payload()
+    payload = _T233_SHAPES[shape]()
     signature = sign_bid(payload, KEY)
 
     def _receive(**kwargs: Any) -> Any:
@@ -637,19 +801,148 @@ def test_omitting_the_eligibility_inputs_is_not_more_permissive_than_passing_emp
             **kwargs,
         )
 
+    supplied = _receive(trust_snapshot=_trust_snapshot_for(payload))
+    assert supplied.accepted is True, (
+        f"arming {shape!r}: with a real eligibility row this bid must be admitted, or the "
+        f"refusals below prove nothing about the eligibility argument: {supplied!r}"
+    )
+
     empty = _receive(trust_snapshot={})
     assert empty.accepted is False, (
-        f"control: an explicitly empty trust snapshot is an unavailable eligibility read and "
-        f"must be refused (R12): {empty!r}"
+        f"{shape}: control — an explicitly empty trust snapshot is an unavailable eligibility "
+        f"read and must be refused (R12): {empty!r}"
     )
 
     omitted = _receive()
     assert omitted.accepted is False, (
-        f"a submission judged with NO eligibility input at all was admitted, while the same "
-        f"submission judged with an explicitly empty snapshot was refused "
-        f"{empty.reasons!r}. Omission is the case that happens by accident, and it is the more "
-        f"permissive of the two: {omitted!r}"
+        f"{shape}: a submission judged with NO eligibility input at all was admitted, while the "
+        f"same submission judged with an explicitly empty snapshot was refused {empty.reasons!r}."
+        f" Omission is the case that happens by accident, and it is the more permissive of the "
+        f"two: {omitted!r}"
     )
+
+    # The other half of the same defect: `blacklist=` was the input the minted row claimed to be
+    # adapting, so a caller who passes only a blacklist must not be let through either. A
+    # blacklist refuses named ids; it never establishes that a store is eligible.
+    blacklist_only = _receive(blacklist=[])
+    assert blacklist_only.accepted is False, (
+        f"{shape}: passing only blacklist=[] admitted a submission that an empty trust snapshot "
+        f"refuses. A blacklist is a narrower input than an eligibility snapshot and does not "
+        f"stand in for one: {blacklist_only!r}"
+    )
+
+
+def _randomized_bid(rng: random.Random) -> dict[str, Any]:
+    """A valid, signable bid whose every caller-visible field is drawn rather than fixed.
+
+    `signer_id`/`key_id` are held to the keyring because a bid nobody can authenticate never
+    reaches the eligibility gate at all; everything else varies.
+    """
+    unit_price = round(rng.uniform(1.0, 5000.0), 2)
+    expires_at = (
+        f"{rng.randrange(2027, 3000)}-{rng.randrange(1, 13):02d}-{rng.randrange(1, 29):02d}"
+        "T00:00:00Z"
+    )
+    claims = [
+        _claim(f"attr-{rng.randrange(10**6)}", f"value-{rng.randrange(10**6)}")
+        for _ in range(rng.randrange(0, 4))
+    ]
+    commitments = [
+        _claim(f"commit-{rng.randrange(10**6)}", "60 days, free", source="owner_statement")
+        for _ in range(rng.randrange(0, 2))
+    ]
+    return {
+        "auction_id": f"auc-{rng.randrange(10**9)}",
+        "store_id": f"store-{rng.randrange(10**9)}",
+        "offer": {
+            "product_ref": f"prod-{rng.randrange(10**9)}",
+            "unit_price": unit_price,
+            "total_price": unit_price,
+            "discount": None,
+            "commitments": commitments,
+            "expires_at": expires_at,
+        },
+        "claims": claims,
+        "message": "x" * rng.randrange(1, 200),
+        "agent_version": f"ext-{rng.randrange(9)}.{rng.randrange(9)}.{rng.randrange(9)}",
+        "schema_version": "1",
+        "signer_id": SIGNER,
+        "key_id": KEY_ID,
+        "issued_at": ISSUED_AT,
+        "nonce": f"nonce-{rng.randrange(10**12)}",
+    }
+
+
+def test_the_absent_eligibility_argument_is_indistinguishable_from_the_empty_one_for_any_bid():
+    """T-233 stated as the property it actually is, over bids nobody chose.
+
+    `_T233_SHAPES` above hardens the probe against a fix that keys its fail-open on `claims`,
+    which is the one an author reaches for first. It does NOT harden it against keying on
+    anything else, and that hole is measured rather than theoretical: an adversarial review of
+    this very change wrote four patches that keep the fail-open alive for realistic bids and
+    still take the five shapes to `5 passed` — keyed on `offer.expires_at >= "2100"` (every
+    shape uses `FAR_FUTURE`), on a `store_id` allowlist, on `auction_id == "auc-gate-1"`, and on
+    `nonce == "nonce-gate-0001"`. Every shape is built from one `_payload()` fixture, so every
+    field they share is a viable key, and no enumeration of shapes can close that — adding a
+    sixth shape just moves the key.
+
+    The durable form is not more payloads, it is the property itself: `trust_snapshot=None` must
+    be INDISTINGUISHABLE from `trust_snapshot={}` — same verdict, same reasons — for a bid the
+    test author did not choose. A fail-open that keys on any payload field is then caught by the
+    draws that miss its key, and one that keys on nothing is caught by all of them.
+
+    Reasons are compared, not just `accepted`. Two refusals for different reasons are two
+    different behaviours, and "absent" collapsing to some OTHER refusal would be a new defect
+    wearing this one's passing grade.
+    """
+    from store_agent.external import NonceStore, receive_bid, sign_bid
+
+    rng = random.Random(20260904)  # fixed seed: randomized coverage, deterministic reruns
+    armed = 0
+
+    for i in range(60):
+        payload = _randomized_bid(rng)
+        signature = sign_bid(payload, KEY)
+
+        def _receive(**kwargs: Any) -> Any:
+            return receive_bid(
+                payload,
+                signature,
+                _keyring(),
+                queue=_Queue(),
+                nonce_store=NonceStore(),
+                now=NOW,
+                auction_deadline=DEADLINE,
+                **kwargs,
+            )
+
+        supplied = _receive(trust_snapshot=_trust_snapshot_for(payload))
+        assert supplied.accepted is True, (
+            f"draw {i}: with a real eligibility row this randomized bid must be admitted, or the "
+            f"comparison below is between two refusals that have nothing to do with eligibility. "
+            f"payload={payload!r} receipt={supplied!r}"
+        )
+        armed += 1
+
+        omitted = _receive()
+        empty = _receive(trust_snapshot={})
+        assert (omitted.accepted, tuple(omitted.reasons or ())) == (
+            empty.accepted,
+            tuple(empty.reasons or ()),
+        ), (
+            f"draw {i}: omitting trust_snapshot gave "
+            f"{(omitted.accepted, tuple(omitted.reasons or ()))} where passing an explicit empty "
+            f"snapshot gave {(empty.accepted, tuple(empty.reasons or ()))}. The absent argument "
+            f"must be the empty one for EVERY bid, not for the ones this file happens to name — "
+            f"a default that reads any part of the submission to decide how permissive to be is "
+            f"the T-233 defect with a different key. payload={payload!r}"
+        )
+        assert omitted.accepted is False, (
+            f"draw {i}: a submission judged with no eligibility input at all was admitted. "
+            f"payload={payload!r} receipt={omitted!r}"
+        )
+
+    assert armed == 60, f"only {armed} of 60 draws were armed; the generator has drifted"
 
 
 # =============================================================================================

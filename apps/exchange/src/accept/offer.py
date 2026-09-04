@@ -78,6 +78,13 @@ from ..checkout import (
     code_fingerprint,
     resolve_provider,
 )
+from .reasons import (
+    DENIAL_ALREADY_ACCEPTED,
+    DENIAL_CHECKOUT_REFUSED,
+    DENIAL_UNKNOWN_BID,
+    DENIAL_UNRECORDABLE_ACCEPTANCE,
+    denial_reason,
+)
 
 __all__ = [
     "ACCEPT_REFUSED",
@@ -439,8 +446,11 @@ def accept(
             auction,
             ref,
             mode,
-            f"unknown_bid: auction {str(_read(auction, 'auction_id') or '')!r} carries no bid "
-            f"{ref!r}; there is nothing to accept",
+            denial_reason(
+                DENIAL_UNKNOWN_BID,
+                f"auction {str(_read(auction, 'auction_id') or '')!r} carries no bid {ref!r}; "
+                f"there is nothing to accept",
+            ),
             reoffer_bid_ref=next_slot(auction, ref),
         )
 
@@ -452,8 +462,11 @@ def accept(
             auction,
             ref,
             mode,
-            f"already_accepted: this auction was already accepted on bid {str(already)!r}; a "
-            f"second accept issues no second discount code (R3/A5)",
+            denial_reason(
+                DENIAL_ALREADY_ACCEPTED,
+                f"this auction was already accepted on bid {str(already)!r}; a second accept "
+                f"issues no second discount code (R3/A5)",
+            ),
             store_id=store_id,
         )
 
@@ -462,9 +475,12 @@ def accept(
             auction,
             ref,
             mode,
-            f"unrecordable_acceptance: {type(auction).__name__} cannot record "
-            f"{_ACCEPTED_FIELD!r}, so a second accept could not be refused; refusing the "
-            f"first rather than issuing a code that cannot be made single-use",
+            denial_reason(
+                DENIAL_UNRECORDABLE_ACCEPTANCE,
+                f"{type(auction).__name__} cannot record {_ACCEPTED_FIELD!r}, so a second "
+                f"accept could not be refused; refusing the first rather than issuing a code "
+                f"that cannot be made single-use",
+            ),
             store_id=store_id,
         )
 
@@ -522,7 +538,7 @@ def accept(
             # lands in a `policy_event` payload the published API types as a bare string;
             # the code itself goes to the `code_created` event `_refused` emits alongside,
             # which is the only place it is written down.
-            f"checkout_refused: {type(exc).__name__}: {exc}",
+            denial_reason(DENIAL_CHECKOUT_REFUSED, f"{type(exc).__name__}: {exc}"),
             store_id=store_id,
             reoffer_bid_ref=next_slot(auction, ref),
             orphan=orphan,

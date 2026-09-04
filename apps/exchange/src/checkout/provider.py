@@ -1082,9 +1082,17 @@ def registered_domain_for(request: CheckoutRequest) -> str:
     lookup = getattr(source, "domain_for", None)
     if not callable(lookup):
         if not callable(source):
+            # The TYPE, never `{source!r}` (T-264). This message is formatted straight into
+            # `AcceptResult.denial_reason`, which is persisted into a `policy_event` and
+            # returned to an unauthenticated caller — and the value that reaches here is
+            # routinely an object with the default `__repr__`, so the repr rendered a literal
+            # `<object object at 0x104e0a170>` into that payload. That is a process
+            # memory-layout leak, and it also made one refusal render differently on every
+            # run, so nothing downstream could group two of them. The type name is the part
+            # an operator can act on.
             raise TypeError(
-                f"registered_domains {source!r} exposes neither domain_for(store_id) "
-                f"nor __call__(store_id)"
+                f"registered_domains of type {type(source).__name__!r} exposes neither "
+                f"domain_for(store_id) nor __call__(store_id)"
             )
         lookup = source
 
