@@ -50,22 +50,34 @@ def graph_source() -> Any:
 def graph_schema_session(neo4j_session: Any) -> Iterator[Any]:
     """A Neo4j session on an **empty** graph with the full T-012 schema applied.
 
-    The graph is emptied per test rather than per session. ``reset_graph`` runs once, in the
-    session-scoped ``neo4j_driver`` fixture, which is not enough when several tests in one
-    file each seed products: the second test would retrieve the first test's rows and its
-    "top-1" assertion would be measuring the wrong graph. Constraints and indexes survive
-    ``DETACH DELETE`` and are re-applied here anyway, so a test that deliberately drops
-    schema cannot leak into its neighbours.
+    The graph is emptied per test, and **this fixture is not what empties it** (P5b). It
+    used to run its own ``MATCH (n) DETACH DELETE n`` here, written when ``neo4j_driver``
+    was session-scoped and reset once per session — which genuinely was not enough, because
+    the second test in a file would have retrieved the first one's rows. T-214 made
+    ``_neo4j_guard`` function-scoped and moved the reset with it, so by the time this
+    fixture is built the root conftest has already taken the D37 flock *and* called
+    ``reset_graph`` for this test. A second wipe inside the same lock is strictly more work
+    for an identical post-state.
+
+    Measured before removing it, on ``pytest services/ingest/tests -m graph`` (110 graph
+    tests, worker 13, 2026-09-04): the second wipe ran 109 times and deleted
+    **0 nodes and 0 relationships every single time**, while the root reset in the same
+    runs deleted 1 420 nodes in total. It was reclaiming nothing.
+    ``test_graph_reset_contract.py`` is the standing proof, and pins it against being
+    reintroduced.
+
+    Constraints and indexes survive ``DETACH DELETE``, and are re-applied here anyway, so a
+    test that deliberately drops schema cannot leak into its neighbours.
 
     Args:
-        neo4j_session: the root conftest's session, already inside the D37 flock.
+        neo4j_session: the root conftest's session, already inside the D37 flock and
+            already reset for this test.
 
     Yields:
         The same session, with an empty, fully-constrained graph.
     """
     from ingest.graph import apply_schema
 
-    neo4j_session.run("MATCH (n) DETACH DELETE n").consume()
     apply_schema(neo4j_session)
     yield neo4j_session
 
