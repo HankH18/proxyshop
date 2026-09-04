@@ -1,0 +1,123 @@
+{
+  "_comment": [
+    "The S1 starting-path run fixture (T-082). This file is the run's ground truth: the",
+    "roster it solicits and the counts the flow is graded against. Trust SCORES are not here",
+    "on purpose: the snapshot the ranker filters on is built by trust.snapshot.build_snapshot",
+    "from the seeded blacklist, so the blacklist flag is the trust engine's answer and not a",
+    "row this fixture wrote.",
+    "",
+    "The catalogue each hosted store's agent reads lives here too, and",
+    "`bid_placed == n_stores_solicited` is checked against",
+    "`expected.solicited` here, so a silent drop in solicitation cannot pass by agreeing with",
+    "itself.",
+    "",
+    "Roles are the four the starting path has to distinguish: two hosted stores whose agents",
+    "really answer, one store that never answers (so the exchange represents it at list price",
+    "- R10's fallback), and one blacklisted store that must never be solicited, ranked, shown",
+    "or accepted anywhere in the run (S8 release blocker)."
+  ],
+  "auction_id": "auction-s1-starting-slice",
+  "verifier_version": "s1-verifier-1.0.0",
+  "checkout_mode": "redirect",
+  "buyer_turns": [
+    "I want an espresso machine for the office, nothing temperamental",
+    "Budget is up to about five hundred dollars",
+    "It has to run on our normal wall sockets"
+  ],
+  "intent": {
+    "intent_id": "intent-s1-espresso",
+    "cluster_id": "cluster-espresso",
+    "query": "a heat-exchange espresso machine for an office under $500",
+    "category": "coffee",
+    "hard_constraints": [],
+    "preferences": [{"field": "price", "direction": "minimize", "weight": 1.0}],
+    "ship_to": "US-CA",
+    "currency": "USD",
+    "budget_band": "300-500",
+    "created_at": "2026-01-01T00:00:00Z",
+    "schema_version": "1"
+  },
+  "profile": {
+    "pseudonym": "pseu-s1-0001",
+    "buckets": {
+      "budget_band": "300-500",
+      "category_affinity": ["coffee"],
+      "frequency_tier": "occasional",
+      "region": "US-W",
+      "first_time": true
+    }
+  },
+  "stores": [
+    {
+      "store_id": "store-northroast",
+      "role": "hosted",
+      "tier": 1,
+      "eligibility": "eligible",
+      "product_ref": "prod-northroast-hx",
+      "list_price": 389.0,
+      "catalog": {
+        "product_ref": "prod-northroast-hx",
+        "list_price": 389.0,
+        "boiler_type": "heat exchange",
+        "pump_pressure_bar": 9,
+        "warranty_months": 24
+      },
+      "live_state": {"in_stock": true, "units_left": 7},
+      "commitments": [
+        {"key": "free_returns", "value": "30 return window", "claim_type": "return_policy"}
+      ]
+    },
+    {
+      "store_id": "store-brightbean",
+      "role": "hosted",
+      "tier": 1,
+      "eligibility": "eligible",
+      "product_ref": "prod-brightbean-hx",
+      "list_price": 449.0,
+      "catalog": {
+        "product_ref": "prod-brightbean-hx",
+        "list_price": 449.0,
+        "boiler_type": "heat exchange",
+        "pump_pressure_bar": 9,
+        "warranty_months": 12
+      },
+      "live_state": {"in_stock": true, "units_left": 3},
+      "commitments": [
+        {"key": "free_returns", "value": "14 return window", "claim_type": "return_policy"}
+      ]
+    },
+    {
+      "store_id": "store-slowreply",
+      "role": "silent",
+      "tier": 1,
+      "eligibility": "eligible",
+      "product_ref": "prod-slowreply-hx",
+      "list_price": 519.0,
+      "catalog": {},
+      "live_state": {},
+      "commitments": []
+    },
+    {
+      "store_id": "store-blocked",
+      "role": "blacklisted",
+      "tier": 1,
+      "eligibility": "blacklisted",
+      "product_ref": "prod-blocked-hx",
+      "list_price": 299.0,
+      "catalog": {},
+      "live_state": {},
+      "commitments": []
+    }
+  ],
+  "expected": {
+    "solicited": ["store-northroast", "store-brightbean", "store-slowreply"],
+    "entries": ["store-northroast", "store-brightbean", "store-slowreply"],
+    "denied": ["store-blocked"],
+    "fallback_stores": ["store-slowreply"],
+    "hosted_stores": ["store-northroast", "store-brightbean"],
+    "shortlist_slots": 3,
+    "winning_store": "store-northroast",
+    "asserted_claims": 6,
+    "telemetry_claim_keys": ["policy_action"]
+  }
+}
