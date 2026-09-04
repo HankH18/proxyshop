@@ -18,6 +18,19 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+#: The directories this lane's ticket scope (`services/sim/**`, T-081) names, which
+#: `pytest services/sim` must be able to collect from.
+#:
+#: This list was the empty literal `[]`, written inline in the loop below. A `for` over an
+#: empty literal never enters its body, so the assertion never executed and the test reported
+#: green unconditionally — it would have passed just as happily against a `services/sim` that
+#: did not exist, which is the one thing it was written to catch. Recorded in
+#: `.swarm-loop/findings.jsonl` as MEDIUM, in three copies; the other two
+#: (`packages/verification/tests/` and `apps/seller-reference/tests/`) are outside this
+#: lane's ownership and are reported, not touched. The loop and its assertion are unchanged:
+#: only the iterable was empty, and now it is not.
+SCOPE_DIRECTORIES = ("services/sim/src", "services/sim/tests")
+
 
 def test_import_namespace_resolves() -> None:
     """``sim`` imports, and resolves to this member's FLAT ``src/`` directory."""
@@ -29,7 +42,7 @@ def test_import_namespace_resolves() -> None:
 
 def test_scope_directories_exist() -> None:
     """Every directory a ticket scope names is present, so `pytest <path>` cannot exit 4."""
-    for relative in []:
+    for relative in SCOPE_DIRECTORIES:
         assert (REPO_ROOT / relative).is_dir(), relative
 
 
