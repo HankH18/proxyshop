@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Sized
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -423,14 +423,21 @@ def _refuse_an_oversized_intent(intent: Any) -> None:
     constraint would need the model to know the intent's shape, which is precisely what it
     declines to know.
 
-    A non-list ``hard_constraints`` is NOT refused here: ``read_criteria`` already answers that
-    with an undecidable-intent exclusion for every candidate, which is fail-closed and names
-    the reason. This function is about size only.
+    A non-list ``hard_constraints`` is not refused for its SHAPE here: ``read_criteria``
+    already answers that with an undecidable-intent exclusion for every candidate, which is
+    fail-closed and names the reason. This function is about size only.
+
+    But it measures the size of anything that HAS one, not only of a ``Sequence``. The first
+    version tested ``isinstance(constraints, Sequence)`` and returned early otherwise, which
+    made the bound depend on an argument about the transport rather than on the value: a JSON
+    body cannot carry a ``set`` or a generator, so over HTTP the two are equivalent — and a
+    guard whose correctness rests on "the only caller is JSON" stops being correct the first
+    time it has a second caller. ``Sized`` costs one word and needs no such argument.
     """
     if not isinstance(intent, Mapping):
         return
     constraints = intent.get("hard_constraints")
-    if not isinstance(constraints, Sequence) or isinstance(constraints, (str, bytes)):
+    if isinstance(constraints, (str, bytes)) or not isinstance(constraints, Sized):
         return
     if len(constraints) > MAX_HARD_CONSTRAINTS:
         raise HTTPException(
