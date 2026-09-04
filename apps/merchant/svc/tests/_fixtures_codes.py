@@ -94,9 +94,7 @@ class RecordingAdmin:
     def mutations(self) -> list[Any]:
         """The variables of every ``discountCodeBasicCreate`` call, in order."""
         return [
-            variables
-            for document, variables in self.calls
-            if "discountCodeBasicCreate" in document
+            variables for document, variables in self.calls if "discountCodeBasicCreate" in document
         ]
 
     def basic_inputs(self) -> list[dict[str, Any]]:
