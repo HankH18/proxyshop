@@ -85,7 +85,9 @@ def test_a_provenance_nested_in_a_claim_value_is_not_invisible_to_the_hosted_doo
         "provenance": dict(HOOK_PROVENANCE),
     }
 
-    control = _check(make_bid(claims=[make_claim("x", "y", dict(ASSERTED_PROVENANCE))]), HOSTED_PATH)
+    control = _check(
+        make_bid(claims=[make_claim("x", "y", dict(ASSERTED_PROVENANCE))]), HOSTED_PATH
+    )
     assert control.ok is False, (
         "positive control: the same seller_asserted block at the top level must still be "
         f"refused on the hosted path, got {control.reasons}"
@@ -285,7 +287,9 @@ def test_the_python_door_enforces_the_date_time_format_the_typescript_door_enfor
     )
 
     malformed = dict(HOOK_PROVENANCE, observed_at="not-a-date")
-    result = _check(make_bid(claims=[make_claim("free_returns", "30 days", malformed)]), HOSTED_PATH)
+    result = _check(
+        make_bid(claims=[make_claim("free_returns", "30 days", malformed)]), HOSTED_PATH
+    )
 
     assert result.ok is False, (
         "the Python door admitted a provenance timestamp the published schema declares "

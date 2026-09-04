@@ -176,7 +176,9 @@ def _modules_imported_by_the_app() -> dict[str, str]:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-def _adapter_constructions(path: Path, *, ignoring: frozenset[str] = _TYPE_CHECK_HELPERS) -> list[str]:
+def _adapter_constructions(
+    path: Path, *, ignoring: frozenset[str] = _TYPE_CHECK_HELPERS
+) -> list[str]:
     """Names of catalog adapters CONSTRUCTED in ``path``, ignoring the type-check helpers."""
     with warnings.catch_warnings():
         # Compiling someone else's source re-emits its SyntaxWarnings against this test.
@@ -253,9 +255,9 @@ def test_the_running_ingest_app_can_reach_a_catalog_adapter_that_is_actually_bui
     # Positive control for the scanner itself: with nothing ignored it DOES find the
     # construction inside `_satisfies_catalog_adapter`, so an empty result below means "no
     # adapter is built outside the type check" rather than "the scanner finds nothing".
-    assert _adapter_constructions(
-        INGEST_SRC / "adapters/catalog_mcp.py", ignoring=frozenset()
-    ) == ["CatalogMCPAdapter"], "the AST scan cannot see a construction it is pointed straight at"
+    assert _adapter_constructions(INGEST_SRC / "adapters/catalog_mcp.py", ignoring=frozenset()) == [
+        "CatalogMCPAdapter"
+    ], "the AST scan cannot see a construction it is pointed straight at"
 
     built = {path: _adapter_constructions(path) for path in reachable}
     wired = {str(path.relative_to(REPO_ROOT)): names for path, names in built.items() if names}

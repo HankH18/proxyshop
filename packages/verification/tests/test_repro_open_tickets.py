@@ -38,7 +38,9 @@ _NAMESPACE = "claim_verification"
 
 
 def _copy_sources(dockerfile: Path) -> list[str]:
-    return [m.group("src") for line in dockerfile.read_text().splitlines() if (m := _COPY.match(line))]
+    return [
+        m.group("src") for line in dockerfile.read_text().splitlines() if (m := _COPY.match(line))
+    ]
 
 
 # =============================================================================================
