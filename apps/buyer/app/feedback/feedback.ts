@@ -99,6 +99,48 @@ export class OrderNotRoutedError extends Error {
   }
 }
 
+/**
+ * Thrown when the order was routed for a different buyer.
+ *
+ * Separate from {@link OrderNotRoutedError} because the service answers both with 403 and the
+ * two are not the same news. Collapsing them told a buyer looking at somebody else's order
+ * "the network did not route this order", which is false about that order and unhelpful about
+ * their own.
+ */
+export class FeedbackNotYoursError extends Error {
+  constructor(readonly detail: string) {
+    super(
+      `R14: this order was routed for a different buyer, so this session may not leave ` +
+        `feedback about it. Nothing was recorded.`,
+    )
+    this.name = 'FeedbackNotYoursError'
+  }
+}
+
+/**
+ * Thrown when the service could not reach the ledger, or reached it and did not hear back.
+ *
+ * `eventId` is present when the write's outcome is UNKNOWN, and it is not decoration: the
+ * service refuses a blind retry, because a sink that raised may still have written the row. A
+ * retry must carry this id so the ledger writes the same row rather than a second trust
+ * observation. A caller that does not have one should show the buyer that their answer may
+ * already be recorded, not a Try Again button.
+ */
+export class LedgerUnavailableError extends Error {
+  constructor(
+    readonly eventId: string,
+    readonly detail: string,
+  ) {
+    super(
+      eventId === ''
+        ? `The feedback ledger is unavailable, so nothing was recorded. ${detail}`
+        : `The feedback ledger did not confirm the write, so whether it landed is unknown. ` +
+          `Any retry must reuse event ${eventId}; a fresh submission is refused.`,
+    )
+    this.name = 'LedgerUnavailableError'
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -183,6 +225,19 @@ export async function fetchFeedbackPrompt(
   const payload: unknown = await response.json()
   if (!isRecord(payload)) throw new Error('the feedback prompt response was not an object')
   const prompt = readPrompt(payload.prompt)
+  if (payload.offered === true && prompt === null) {
+    // The service offered a prompt this build could not read — a shape change, or a prompt with
+    // fewer than two options. Reporting it as `offered: false` with the service's own empty
+    // `reason` made the view fall back to "the network did not route this order", which is a
+    // false statement about a routed order. Say what actually happened instead.
+    return {
+      offered: false,
+      reason:
+        'There is a feedback question for this order, but this app could not read the form it ' +
+        'came in. Nothing is wrong with your order.',
+      prompt: null,
+    }
+  }
   return {
     offered: payload.offered === true && prompt !== null,
     reason: text(payload.reason),
@@ -216,11 +271,22 @@ export async function submitFeedback(
       response: { question_id: prompt.question_id, choice },
     }),
   })
-  if (response.status === 403) {
-    const detail: unknown = await response.json().catch(() => null)
-    const reason =
-      isRecord(detail) && isRecord(detail.detail) ? text(detail.detail.reason) : 'It was not.'
-    throw new OrderNotRoutedError(reason)
+  if (response.status === 403 || response.status === 503) {
+    const body: unknown = await response.json().catch(() => null)
+    const detail: unknown = isRecord(body) ? body.detail : null
+    if (response.status === 503) {
+      throw new LedgerUnavailableError(
+        isRecord(detail) ? text(detail.event_id) : '',
+        isRecord(detail) ? text(detail.message) : text(detail),
+      )
+    }
+    // Two different 403s. The routing refusal answers with an object carrying `reason`; the
+    // ownership refusal answers with a plain string, and reading that as "not routed" told the
+    // buyer something false about the order.
+    if (isRecord(detail) && isNonEmptyString(detail.reason)) {
+      throw new OrderNotRoutedError(detail.reason)
+    }
+    throw new FeedbackNotYoursError(typeof detail === 'string' ? detail : '')
   }
   if (!response.ok) throw new Error(`feedback submission failed: HTTP ${response.status}`)
 

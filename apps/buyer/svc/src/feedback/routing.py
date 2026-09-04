@@ -18,6 +18,14 @@ Three readings that are wrong, and are the shape of this file
   carrying no boolean into a live auction on T-071's confirm route). Both readings hand a prompt
   to an un-routed order. :func:`buyer_svc.feedback._reading.flag` answers ``True``/``False`` only
   for an unambiguous boolean and ``None`` — "this record does not say" — otherwise.
+* **"nothing said it was not routed, so it was".** This is the one that bit. An earlier version
+  of this file refused only on an explicit ``routed: false`` and otherwise fell back to "does the
+  record name an auction?" — so an order record with **no ``routed`` field at all**, or one whose
+  flag was unreadable, came back ROUTED, and ``auction_id`` is entirely caller-supplied. That is a
+  fail-OPEN default on the single field R14's clause is about. The gate now requires an
+  affirmative, unambiguous ``true``: absence is not evidence of routing, and the published order
+  shape (``{order_ref, store_id, auction_id, routed}``) carries the flag, so requiring it costs a
+  well-formed record nothing.
 * **"the flag said true, so it was routed".** An order claiming to be routed while naming no
   ``auction_id`` cannot be attributed to an auction. Its feedback event would carry
   ``auction_id=None``, which is a ``feedback`` row nobody can trace back to the offer it is
@@ -106,16 +114,6 @@ class Routing:
     #: Why not, in words a screen can show. ``""`` exactly when ``eligible`` is true.
     reason: str
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "order_ref": self.order_ref,
-            "store_id": self.store_id,
-            "auction_id": self.auction_id,
-            "routed": self.routed,
-            "eligible": self.eligible,
-            "reason": self.reason,
-        }
-
 
 def routing(order: Any) -> Routing:
     """Read one order record and decide whether R14 lets it be asked, and answered.
@@ -136,10 +134,13 @@ def routing(order: Any) -> Routing:
             call rather than a decision about an order.
     """
     if order is None or isinstance(order, (str, bytes, int, float, bool)):
+        # The value is NOT interpolated. A caller who passes a string passes whatever string
+        # they had, and this message travels into a log line and an HTTP response body; a buyer
+        # who typed their name into the wrong box must not have it echoed back through both.
         raise UnusableOrder(
-            f"feedback takes the order record, not {type(order).__name__} ({order!r}). Pass the "
-            f"order as the exchange sent it — it is what names the order, the store and the "
-            f"auction the offer came from."
+            f"feedback takes the order record, not {type(order).__name__}. Pass the order as the "
+            f"exchange sent it — it is what names the order, the store and the auction the offer "
+            f"came from."
         )
 
     order_ref = first(order, ORDER_REF_FIELDS)
@@ -148,26 +149,37 @@ def routing(order: Any) -> Routing:
     pseudonym = first(order, ("buyer_pseudonym", "pseudonym"))
     status = first(order, STATUS_FIELDS).lower()
 
+    # EVERY routing field is read, not just the first one present, and an explicit `false`
+    # anywhere wins over a `true` anywhere else. Stopping at the first PRESENT field was a
+    # measured hole: `{"routed": "nope", "network_routed": False}` stopped on the unreadable
+    # `routed`, never consulted `network_routed`, and came back routed. A record that
+    # contradicts itself is not a record this gate should resolve in the permissive direction.
     said: bool | None = None
     for field_name in ROUTED_FIELDS:
         raw = read(order, field_name)
         if raw is None:
             continue
-        said = flag(raw)
-        if said is None and raw != "":
-            # The record HAS a routing flag and it is not a boolean in any spelling. Falling
-            # back to the auction check is the safe reading, but it is also a silent one, and
-            # a field that stopped being a boolean upstream would otherwise never be noticed.
+        reading = flag(raw)
+        if reading is False:
+            said = False
+            break
+        if reading is True:
+            said = True
+            continue
+        if not isinstance(raw, str) or raw.strip():
+            # The record HAS a routing flag and it is not a boolean in any spelling. Under the
+            # fail-closed reading below this is already refused; the line exists because a field
+            # that stopped being a boolean upstream would otherwise be invisible, and the refusal
+            # would look like a correctly un-routed order. The TYPE is logged, never the value.
             _log.warning(
-                "order %s carries %s=%r, which is not a boolean in any spelling; falling back "
-                "to whether the order names an auction",
-                first(order, ORDER_REF_FIELDS) or "<unnamed>",
+                "order %s carries %s of type %s, which is not a boolean in any spelling; R14's "
+                "gate refuses it rather than guessing",
+                order_ref or "<unnamed>",
                 field_name,
                 type(raw).__name__,
             )
-        break
 
-    if said is False:
+    if said is not True:
         return Routing(
             order_ref=order_ref,
             store_id=store_id,
@@ -176,9 +188,16 @@ def routing(order: Any) -> Routing:
             routed=False,
             eligible=False,
             reason=(
-                "the network did not route this order, so R14 offers no feedback prompt for it. "
-                "Feedback is taken only from buyers the network actually routed — otherwise a "
-                "store can move its own trust score with reviews of orders it was never given."
+                "this order is not marked as network-routed, so R14 offers no feedback prompt "
+                "for it. Feedback is taken only from buyers the network actually routed — "
+                "otherwise a store can move its own trust score with reviews of orders it was "
+                "never given — and a record that does not say it was routed is not evidence "
+                "that it was."
+                if said is None
+                else "the network did not route this order, so R14 offers no feedback prompt "
+                "for it. Feedback is taken only from buyers the network actually routed — "
+                "otherwise a store can move its own trust score with reviews of orders it was "
+                "never given."
             ),
         )
 
@@ -191,15 +210,10 @@ def routing(order: Any) -> Routing:
             routed=False,
             eligible=False,
             reason=(
-                "this order names no auction, so it cannot be attributed to an offer the network "
-                "made. Its feedback would be a trust observation about nothing in particular, so "
-                "it is treated as un-routed."
-                + (
-                    " The record does claim routed=true; that disagreement is a data bug "
-                    "upstream, not a reason to record the feedback."
-                    if said is True
-                    else ""
-                )
+                "this order is marked network-routed but names no auction, so it cannot be "
+                "attributed to an offer the network made. Its feedback would be a trust "
+                "observation about nothing in particular. That disagreement is a data bug "
+                "upstream, not a reason to record the feedback."
             ),
         )
 

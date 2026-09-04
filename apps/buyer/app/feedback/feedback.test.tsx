@@ -15,6 +15,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { FeedbackPromptView } from './FeedbackPromptView'
 import {
+  FeedbackNotYoursError,
+  LedgerUnavailableError,
   OrderNotRoutedError,
   PROMPT_PATH,
   SUBMIT_PATH,
@@ -144,6 +146,51 @@ describe('the wire', () => {
       submitFeedback(ORDER, PROMPT, 'it was fine, I am Dana Reyes', fetcher),
     ).rejects.toBeInstanceOf(UnknownChoiceError)
     expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('tells a buyer nothing false when the service offers a prompt this build cannot read', async () => {
+    // MEASURED: `offered: true` with an unreadable prompt reported `offered: false, reason: ''`,
+    // and the view then told the buyer "the network did not route this order" — false about a
+    // routed order, and it sends them looking for a problem with their order.
+    const fetcher = vi.fn<Fetcher>(async () =>
+      jsonResponse({ offered: true, reason: '', prompt: { ...PROMPT, options: [] } }),
+    )
+
+    const outcome = await fetchFeedbackPrompt(ORDER, fetcher)
+
+    expect(outcome.offered).toBe(false)
+    expect(outcome.prompt).toBeNull()
+    expect(outcome.reason).not.toContain('route')
+    expect(outcome.reason).toContain('could not read')
+  })
+
+  it('separates the two 403s: not routed, and not yours', async () => {
+    // MEASURED: both collapsed into OrderNotRoutedError, so a buyer looking at someone else's
+    // order was told "the network did not route this order" — false about that order.
+    const notYours = vi.fn<Fetcher>(async () =>
+      jsonResponse({ detail: 'order was routed for a different buyer' }, 403),
+    )
+    await expect(
+      submitFeedback(ORDER, PROMPT, 'yes_as_described', notYours),
+    ).rejects.toBeInstanceOf(FeedbackNotYoursError)
+  })
+
+  it('reports an unconfirmed ledger write as such, carrying the id a retry must reuse', async () => {
+    const fetcher = vi.fn<Fetcher>(async () =>
+      jsonResponse(
+        { detail: { message: 'unknown', event_id: 'fb-abc123', retry_with_event_id: true } },
+        503,
+      ),
+    )
+
+    const failure = await submitFeedback(ORDER, PROMPT, 'yes_as_described', fetcher).catch(
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(LedgerUnavailableError)
+    expect((failure as LedgerUnavailableError).eventId).toBe('fb-abc123')
+    // Not "try again": a blind retry is what the service refuses.
+    expect((failure as LedgerUnavailableError).message).toContain('fb-abc123')
   })
 
   it('turns the service 403 into a routing refusal rather than a generic failure', async () => {

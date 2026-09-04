@@ -22,6 +22,8 @@ from apps.buyer.svc.src.feedback import (
     FeedbackLedger,
     FeedbackNotYours,
     LedgerSinkUnusable,
+    LedgerWriteUncertain,
+    MalformedFeedbackEvent,
     MissingFeedbackChoice,
     OrderNotRouted,
     UnknownFeedbackChoice,
@@ -61,12 +63,40 @@ class Sink:
 
 
 class ExplodingSink:
+    """Raises BEFORE recording: the friendly half, where nothing landed."""
+
     def __init__(self) -> None:
         self.calls = 0
 
     def append(self, event):
         self.calls += 1
         raise ConnectionError("the ledger is down")
+
+
+class FlakySink:
+    """Records and THEN raises: an at-least-once client whose acknowledgement was lost.
+
+    This is the shape that produced two `feedback` rows for one order. `ExplodingSink` above
+    cannot reproduce it — it raises before appending, so it only ever exercises the half where
+    the claim really is unspent.
+    """
+
+    def __init__(self, failures: int = 99) -> None:
+        self.events: list[LedgerEvent] = []
+        self.failures = failures
+
+    def append(self, event) -> None:
+        self.events.append(event)
+        if self.failures > 0:
+            self.failures -= 1
+            raise TimeoutError("the write went out and the acknowledgement did not come back")
+
+
+class LeakySink:
+    """A sink whose exception message carries a credential, as real ones do."""
+
+    def append(self, event):
+        raise ConnectionError("could not connect: dsn=postgres://svc:hunter2@ledger.internal/db")
 
 
 @pytest.fixture()
@@ -299,17 +329,78 @@ def test_a_second_submission_for_one_order_is_refused(ledger) -> None:
     assert caught.value.event_id == first.event_id
 
 
-def test_a_failed_submission_can_honestly_be_retried(ledger) -> None:
-    """A claim that was never spent must be given back, or one outage is permanent."""
-    broken = ExplodingSink()
-    with pytest.raises(ConnectionError):
-        submit_feedback(ORDER, ANSWER, broken, ledger=ledger)
-    assert broken.calls == 1
+def test_a_sink_that_wrote_and_then_raised_cannot_be_blindly_retried(ledger) -> None:
+    """THE regression test. Measured: this produced two `feedback` rows for one order.
+
+    An at-least-once ledger client whose write commits and whose acknowledgement is then lost
+    raises with the row already on the ledger. The old code released the claim on any sink
+    exception ("nothing landed, so the claim was not spent"), so the next honest retry minted a
+    second event id and wrote a second row — the doubled `feedback_match` observation this whole
+    package exists to prevent, produced by the recovery path.
+    """
+    landed = FlakySink()
+
+    with pytest.raises(LedgerWriteUncertain) as caught:
+        submit_feedback(ORDER, ANSWER, landed, ledger=ledger)
+    first_id = caught.value.event_id
+    assert first_id and landed.events[0].event_id == first_id, "the write did land"
+    assert ledger.event_for("ord-unit-101") == first_id, "the claim must still stand"
+    assert ledger.landed("ord-unit-101") is False, "...and must not claim it landed"
+
+    # A blind retry — a fresh event id — is refused. This is the line that was red before.
+    with pytest.raises(FeedbackAlreadySubmitted):
+        submit_feedback(ORDER, ANSWER, landed, ledger=ledger)
+    assert len({event.event_id for event in landed.events}) == 1, (
+        f"two distinct feedback events for one order: {[event.event_id for event in landed.events]}"
+    )
+
+
+def test_a_deliberate_retry_reuses_the_event_id_so_the_ledger_writes_one_row(ledger) -> None:
+    """ "Retryable" and "safe to retry" differ, and only the caller holding the id can tell."""
+    flaky = FlakySink(failures=1)  # the first ack is lost; the second attempt is acknowledged
+    with pytest.raises(LedgerWriteUncertain) as caught:
+        submit_feedback(ORDER, ANSWER, flaky, ledger=ledger)
+    event_id = caught.value.event_id
+
+    again = submit_feedback(ORDER, ANSWER, flaky, ledger=ledger, event_id=event_id)
+    assert again.event_id == event_id, "the retry must write the SAME row, not a second one"
+    assert len({event.event_id for event in flaky.events}) == 1
+    assert ledger.landed("ord-unit-101") is True
+
+    # And once it has definitely landed, even the same id is refused.
+    with pytest.raises(FeedbackAlreadySubmitted):
+        submit_feedback(ORDER, ANSWER, flaky, ledger=ledger, event_id=event_id)
+
+
+def test_the_sinks_own_exception_message_never_travels(ledger) -> None:
+    """A ledger client's error text routinely names a host or a DSN; this one is rendered
+    into an HTTP response body by the route above."""
+    with pytest.raises(LedgerWriteUncertain) as caught:
+        submit_feedback(ORDER, ANSWER, LeakySink(), ledger=ledger)
+    assert "postgres://" not in str(caught.value)
+    assert "hunter2" not in str(caught.value)
+    assert isinstance(caught.value.__cause__, ConnectionError), "still chained for the logs"
+
+
+def test_a_sink_that_could_never_have_written_gives_the_claim_back(ledger) -> None:
+    """The one path where "nothing landed" is knowable: there was nothing to write with."""
+    with pytest.raises(LedgerSinkUnusable):
+        submit_feedback(ORDER, ANSWER, object(), ledger=ledger)
     assert ledger.event_for("ord-unit-101") is None
 
     good = Sink()
     assert submit_feedback(ORDER, ANSWER, good, ledger=ledger)
     assert len(good.events) == 1
+
+
+def test_a_refusal_for_an_in_flight_claim_names_the_event_it_is_waiting_on(ledger) -> None:
+    """Measured before the fix: the 409 carried `event_id: ""` for feedback nobody could find."""
+    flaky = FlakySink()
+    with pytest.raises(LedgerWriteUncertain):
+        submit_feedback(ORDER, ANSWER, flaky, ledger=ledger)
+    with pytest.raises(FeedbackAlreadySubmitted) as caught:
+        submit_feedback(ORDER, ANSWER, Sink(), ledger=ledger)
+    assert caught.value.event_id == flaky.events[0].event_id
 
 
 def test_a_refused_answer_does_not_burn_the_orders_one_submission(ledger) -> None:
@@ -364,6 +455,74 @@ def test_a_sink_that_cannot_record_is_a_refusal_not_a_shrug(sink, ledger) -> Non
 
 
 # --- the error hierarchy --------------------------------------------------------------------
+
+
+def test_a_body_that_is_not_the_published_shape_is_refused_at_the_producing_boundary(
+    ledger, monkeypatch
+) -> None:
+    """The validator call is real code, not ceremony — this is the test that says so.
+
+    MEASURED before this test existed: replacing `validate_ledger_payload` with a stub that
+    returns `[]` left the WHOLE buyer suite green (501 passed, identical to baseline), so the
+    check at the producing boundary — the one T-235 records as missing on the exchange's
+    `code_created` path — was itself ungraded.
+    """
+    from apps.buyer.svc.src.feedback import submission as module
+
+    monkeypatch.setattr(
+        module, "validate_ledger_payload", lambda kind, payload: ["missing published key 'x'"]
+    )
+    sink = Sink()
+    with pytest.raises(MalformedFeedbackEvent) as caught:
+        submit_feedback(ORDER, ANSWER, sink, ledger=ledger)
+    assert sink.events == [], "a malformed body must be refused BEFORE it reaches the ledger"
+    assert caught.value.problems == ("missing published key 'x'",)
+    assert ledger.event_for("ord-unit-101") is None, "and must not burn the order's submission"
+
+
+def test_a_broken_call_still_raises_the_builtin_it_is(ledger) -> None:
+    """The other half of the error convention, and the half a FeedbackError check cannot see.
+
+    `pytest.raises(FeedbackError)` succeeding already proves the refusal is not a TypeError,
+    so asserting that afterwards proves nothing. What is worth asserting is the converse: a
+    genuinely broken call must NOT be dressed up as a domain refusal.
+    """
+    with pytest.raises(TypeError):
+        submit_feedback(ORDER, ANSWER)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        submit_feedback(ORDER, ANSWER, Sink(), nonsense=1)  # type: ignore[call-arg]
+
+
+def test_no_caller_supplied_prose_reaches_a_refusal_message(ledger) -> None:
+    """Every refusal here is rendered into an HTTP body and a log line by the route above."""
+    prose = "the seller lied to me, I'm Dana Reyes, dana.reyes@example.com, 555-0134"
+
+    with pytest.raises(FeedbackError) as bad_response:
+        submit_feedback(ORDER, prose, Sink(), ledger=ledger)
+    with pytest.raises(FeedbackError) as bad_order:
+        submit_feedback(prose, ANSWER, Sink(), ledger=ledger)
+    with pytest.raises(FeedbackError) as bad_choice:
+        submit_feedback(ORDER, {"choice": prose}, Sink(), ledger=ledger)
+    with pytest.raises(FeedbackError) as bad_question:
+        submit_feedback(
+            ORDER, {"question_id": prose, "choice": "wrong_item"}, Sink(), ledger=ledger
+        )
+
+    for caught in (bad_response, bad_order, bad_choice, bad_question):
+        message = str(caught.value)
+        for secret in ("Dana", "Reyes", "example.com", "555-0134", "lied"):
+            assert secret not in message, f"{secret!r} leaked into {message!r}"
+
+
+def test_a_name_shaped_choice_is_not_quoted_back_but_a_typod_option_id_is(ledger) -> None:
+    """`_ECHOABLE` is the option-id shape, not "short enough": `Dana_Reyes_1985` was echoed."""
+    with pytest.raises(UnknownFeedbackChoice) as named:
+        submit_feedback(ORDER, {"choice": "Dana_Reyes_1985"}, Sink(), ledger=ledger)
+    assert "Dana" not in str(named.value)
+
+    with pytest.raises(UnknownFeedbackChoice) as typo:
+        submit_feedback(ORDER, {"choice": "yes_as_describd"}, Sink(), ledger=ledger)
+    assert "yes_as_describd" in str(typo.value), "a typo'd id is exactly what is worth echoing"
 
 
 @pytest.mark.parametrize(

@@ -27,6 +27,7 @@ spelling of one, and ``None`` — "this record does not say" — for everything 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from numbers import Number
 from typing import Any
 
 __all__ = ["FALSE_WORDS", "TRUE_WORDS", "first", "flag", "read", "text"]
@@ -94,9 +95,11 @@ def flag(value: Any) -> bool | None:
 
     Never ``bool(value)``. The string ``"false"`` is truthy in Python and pydantic's lax mode
     turns ``"yes"`` into ``True``; both readings would hand a feedback prompt to an order the
-    network did not route, which is the one thing R14 forbids. An integer ``0``/``1`` is
-    accepted (a SQL driver's boolean), and any other number, list or object is ``None`` rather
-    than a guess.
+    network did not route, which is the one thing R14 forbids. A ``0``/``1`` of any numeric
+    type is accepted (a SQL driver's boolean, a JSON ``0.0``, a ``numpy.bool_`` out of a
+    dataframe, a ``Decimal``), and any other number, list or object is ``None`` rather than a
+    guess. ``None`` is not a permissive answer here: :func:`buyer_svc.feedback.routing.routing`
+    requires an affirmative ``True`` and refuses everything else.
     """
     if isinstance(value, bool):
         return value
@@ -110,11 +113,32 @@ def flag(value: Any) -> bool | None:
             return False
         return None
     if isinstance(value, (int, float)) and value in (0, 1):
-        # ``float`` as well as ``int``, and this was a MEASURED hole rather than a
-        # completeness exercise: a numeric column, a JSON encoder that writes ``0.0``, or a
-        # pandas/numpy round-trip all deliver ``routed`` as a float, and reading ``0.0`` as
-        # "this record does not say" made it fall through to the auction check and come back
+        # ``float`` as well as ``int``, and this was a MEASURED hole rather than a completeness
+        # exercise: a numeric column or a JSON encoder that writes ``0.0`` delivers ``routed``
+        # as a float, and reading ``0.0`` as "this record does not say" sent it on to be read as
         # ROUTED. ``0.0 == 0`` is true, so the membership test covers both once the isinstance
-        # does. A ``Decimal`` still reads as "does not say"; nothing in this repo produces one.
+        # does.
         return bool(value)
+    item = getattr(value, "item", None)
+    if callable(item):
+        # A numpy scalar: ``numpy.False_`` and ``numpy.int64(0)`` are neither ``bool`` nor
+        # ``int``/``float`` subclasses, so every check above misses them, and numpy is a
+        # dependency of this repo. ``.item()`` is the documented way to get the Python value out
+        # of one, and it is duck-typed here rather than imported so this module stays free of
+        # numpy. One level only — ``.item()`` returns a builtin.
+        try:
+            unwrapped = item()
+        except Exception:  # noqa: BLE001 - an object with an unusable `.item` is simply unread
+            return None
+        if isinstance(unwrapped, (bool, int, float, str)):
+            return flag(unwrapped)
+        return None
+    if isinstance(value, Number) and not isinstance(value, complex):
+        # ``Decimal("0")`` and ``Fraction(1)`` reach here: numbers that are not ``int``/``float``
+        # subclasses. Compared rather than cast, so a value that is neither 0 nor 1 stays unread.
+        try:
+            if value == 0 or value == 1:
+                return bool(value)
+        except Exception:  # noqa: BLE001 - a number whose __eq__ raises is not an answer
+            return None
     return None

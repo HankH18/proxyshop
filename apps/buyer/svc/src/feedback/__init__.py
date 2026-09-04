@@ -14,11 +14,14 @@ weighting and the cross-check belong to ``trust.feedback.engine`` (T-063). What 
 first clause and the last word of the middle one — *who is asked*, and *what shape the answer
 takes on the way to the ledger* — and both are promises about **authority**:
 
-* **Only network-routed buyers.** :mod:`buyer_svc.feedback.routing` decides, and its refusals are
-  deliberately conservative: an order whose ``routed`` flag is not an unambiguous boolean, or
-  which names no auction, is treated as un-routed. Without that gate a store can move its own
-  ``feedback_match`` dimension for the price of a few fake reviews, and the dimension stops
-  meaning anything.
+* **Only network-routed buyers.** :mod:`buyer_svc.feedback.routing` decides, and it **fails
+  closed**: an order is routed only when it carries an affirmative, unambiguous ``routed`` and
+  names an auction. No flag at all, an unreadable one, or an explicit ``false`` anywhere in the
+  record all mean un-routed. An earlier version of this package refused only an explicit
+  ``false`` and otherwise fell back to "does it name an auction?" — a fail-open default on the
+  one field R14's clause is about, on a value the caller supplies. Without this gate a store can
+  move its own ``feedback_match`` dimension for the price of a few fake reviews, and the
+  dimension stops meaning anything.
 * **One structured prompt.** :mod:`buyer_svc.feedback.prompt` publishes exactly one question over
   a closed set of five options, with no free-text field anywhere on it — and
   :mod:`buyer_svc.feedback.submission` re-checks that at the write boundary, because the prompt
@@ -60,6 +63,7 @@ from .errors import (
     FeedbackError,
     FeedbackNotYours,
     LedgerSinkUnusable,
+    LedgerWriteUncertain,
     MalformedFeedbackEvent,
     MissingFeedbackChoice,
     OrderNotRouted,
@@ -123,6 +127,7 @@ __all__ = [
     "FeedbackNotYours",
     "FeedbackPrompt",
     "LedgerSinkUnusable",
+    "LedgerWriteUncertain",
     "MalformedFeedbackEvent",
     "MissingFeedbackChoice",
     "OrderNotRouted",

@@ -26,7 +26,11 @@ coerces the JSON strings ``"yes"``, ``"true"``, ``"on"`` and ``"1"`` into ``True
 this tree at 2.13, where it turned a body carrying no boolean at all into an HTTP 201 and a live
 auction on T-071's confirm route. Here the same coercion would offer a feedback prompt for an
 order the network never routed, which is the one thing R14 forbids, so the order body is a typed
-model rather than an open ``dict`` and its one boolean admits exactly ``true`` and ``false``.
+model rather than an open ``dict``. **All three** routing spellings the library reads
+(``routed``, ``network_routed``, ``routed_by_network``) are declared as ``StrictBool``: the body
+allows extras, so declaring only one of them left the other two arriving untyped and being read
+leniently — measured, ``{"network_routed": "yes"}`` was a 200 with a prompt while
+``{"routed": "yes"}`` was a 422.
 
 **The response body is a closed model with no free-text field.** FastAPI serializes through
 ``response_model``, so even a handler that returned the whole order record by mistake is filtered
@@ -67,6 +71,7 @@ from .errors import (
     FeedbackError,
     FeedbackNotYours,
     LedgerSinkUnusable,
+    LedgerWriteUncertain,
     MalformedFeedbackEvent,
     MissingFeedbackChoice,
     OrderNotRouted,
@@ -87,6 +92,9 @@ _HTTP_422 = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
 
 __all__ = [
     "LEDGER_SINK_ATTR",
+    "MAX_REFERENCE",
+    "MAX_STATUS",
+    "REFERENCE_PATTERN",
     "FeedbackEventView",
     "OrderBody",
     "PromptBody",
@@ -101,6 +109,25 @@ router = APIRouter(prefix="/buyer/feedback", tags=["buyer-feedback"])
 #: Where the ledger sink lives on the app. Set it in your composition root.
 LEDGER_SINK_ATTR = "ledger_sink"
 
+#: Longest identifier this route will copy onto a ledger event. See :class:`OrderBody`.
+MAX_REFERENCE = 200
+
+#: Longest order status. A lifecycle word, not a sentence.
+MAX_STATUS = 64
+
+#: The shape an identifier this route copies onto a ledger event may take.
+#:
+#: Length alone was not enough, and this is the finding that says so: `order_ref` is written
+#: verbatim onto an append-only `LedgerEvent` and into this service's logs, so
+#: `{"order_ref": "Dana Reyes dana.reyes@example.com 555-0134 the seller lied to me"}` was a
+#: free-text field with a buyer's name and email in it, reaching the ledger under a kind whose
+#: whole point is that it carries no prose. Nothing downstream can take it back out again.
+#:
+#: The class is what a real reference is made of: a Shopify order name (`#1001`), a GID
+#: (`gid://shopify/Order/4435291300000`), a UUID, one of this repo's `ord-e7-101` refs. No
+#: spaces, no `@`, so neither a sentence nor an email address can be one.
+REFERENCE_PATTERN = rf"^[A-Za-z0-9_.:#/-]{{1,{MAX_REFERENCE}}}$"
+
 
 class OrderBody(BaseModel):
     """One order, as much of it as this service needs to answer R14's question.
@@ -112,15 +139,32 @@ class OrderBody(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    order_ref: str = Field(min_length=1)
-    store_id: str = ""
-    auction_id: str = ""
+    #: Bounded AND shaped, and both are about the LEDGER rather than about memory. `order_ref` is
+    #: copied verbatim onto an append-only `LedgerEvent` and into this service's log lines, and
+    #: nothing downstream can take it back out — measured, a 100 000-character `order_ref` and an
+    #: `order_ref` reading "Dana Reyes dana.reyes@example.com 555-0134 the seller lied to me"
+    #: were both accepted, echoed by `/prompt`, and written to the ledger by `/feedback`. See
+    #: :data:`REFERENCE_PATTERN`.
+    order_ref: str = Field(min_length=1, max_length=MAX_REFERENCE, pattern=REFERENCE_PATTERN)
+    store_id: str = Field(default="", max_length=MAX_REFERENCE, pattern=rf"{REFERENCE_PATTERN}|^$")
+    auction_id: str = Field(
+        default="", max_length=MAX_REFERENCE, pattern=rf"{REFERENCE_PATTERN}|^$"
+    )
     #: ``StrictBool``, never ``bool`` — see this module's docstring. ``None`` means "the record
-    #: does not say", which is a third answer and not the same as ``false``: it falls back to
-    #: whether the order names an auction.
+    #: does not say", which R14's gate refuses rather than resolves.
     routed: StrictBool | None = None
-    status: str = ""
-    buyer_pseudonym: str = ""
+    #: The other two spellings :data:`buyer_svc.feedback.ROUTED_FIELDS` reads. They are DECLARED
+    #: here, and that is the point rather than completeness: `model_config` allows extras, so an
+    #: undeclared `network_routed` used to arrive untyped and be read by the library's lax
+    #: `flag()` — measured, `{"network_routed": "yes"}` was HTTP 200 `offered: true` while
+    #: `{"routed": "yes"}` was a 422. A strict boolean on one spelling of a field is not a strict
+    #: boundary; it is a strict boundary with a door beside it.
+    network_routed: StrictBool | None = None
+    routed_by_network: StrictBool | None = None
+    status: str = Field(default="", max_length=MAX_STATUS)
+    buyer_pseudonym: str = Field(
+        default="", max_length=MAX_REFERENCE, pattern=rf"{REFERENCE_PATTERN}|^$"
+    )
 
 
 class PromptBody(BaseModel):
@@ -276,6 +320,15 @@ async def submit_route(
     except LedgerSinkUnusable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except LedgerWriteUncertain as exc:
+        # 503 and NOT 500, and it carries the event id. The sink raised, so this service is the
+        # one that is unavailable — but the write may have landed, and a client that retries
+        # blindly would ask for a second trust observation. The id is what makes the retry safe;
+        # the sink's own message (which routinely names a host or a DSN) is logged, not sent.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"message": str(exc), "event_id": exc.event_id, "retry_with_event_id": True},
         ) from exc
     except MalformedFeedbackEvent as exc:
         # 500 and not 422: the body this service built is wrong, which is nobody's fault but

@@ -213,3 +213,149 @@ def test_no_session_header_is_accepted_as_it_is_on_the_accept_route(client, sink
     """Nothing in this repo logs a buyer in before a shortlist; see this ticket's NEEDS."""
     assert client.post(SUBMIT, json={"order": ORDER, "response": ANSWER}).status_code == 201
     assert len(sink.events) == 1
+
+
+@pytest.mark.parametrize("field", ["order_ref", "store_id", "auction_id", "buyer_pseudonym"])
+def test_an_unbounded_reference_is_refused_at_the_wire(client, sink, field) -> None:
+    """MEASURED before the bound: a 100 000-character order_ref was accepted and echoed.
+
+    It would have been copied verbatim onto an append-only ledger event, where nothing
+    downstream can shorten it again.
+    """
+    order = dict(ORDER, **{field: "x" * 100_000})
+    assert client.post(PROMPT, json={"order": order}).status_code == 422
+    assert client.post(SUBMIT, json={"order": order, "response": ANSWER}).status_code == 422
+    assert sink.events == []
+
+
+def test_a_reference_of_a_realistic_length_is_still_accepted(client) -> None:
+    """A Shopify order GID is about forty characters; the bound must not be in its way."""
+    long_but_real = "gid://shopify/Order/4435291300000"
+    response = client.post(PROMPT, json={"order": dict(ORDER, order_ref=long_but_real)})
+    assert response.status_code == 200
+    assert response.json()["prompt"]["order_ref"] == long_but_real
+
+
+def test_no_body_this_route_accepts_produces_a_5xx(client) -> None:
+    """Every refusal must name a caller-facing status. A 500 blames us for their request."""
+    bodies = [
+        {},
+        {"order": None},
+        {"order": []},
+        {"order": "x"},
+        {"order": {"order_ref": ""}},
+        {"order": dict(ORDER, status=["cancelled"])},
+        {"order": dict(ORDER, auction_id=None)},
+        {"order": ORDER, "response": None},
+        {"order": ORDER, "response": []},
+        {"order": ORDER, "response": {"choice": None}},
+        {"order": ORDER, "response": {"choice": {"nested": 1}}},
+    ]
+    for body in bodies:
+        for path in (PROMPT, SUBMIT):
+            assert client.post(path, json=body).status_code < 500, (path, body)
+
+
+class FlakySink:
+    """Records and THEN raises: an at-least-once client whose acknowledgement was lost."""
+
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def append(self, event) -> None:
+        self.events.append(event)
+        raise TimeoutError("could not connect: dsn=postgres://svc:hunter2@ledger.internal/db")
+
+
+def test_an_order_that_does_not_say_it_was_routed_is_offered_no_prompt(client, sink) -> None:
+    """MEASURED before the gate failed closed: this was 200 offered=true, then a 201.
+
+    `routed` is not required by the wire model, and `auction_id` is entirely caller-supplied,
+    so an order body that simply omitted the flag walked through R14's gate over HTTP.
+    """
+    unstated = {"order_ref": "ord-http-9", "store_id": "st-1", "auction_id": "auc-http-9"}
+
+    prompt = client.post(PROMPT, json={"order": unstated})
+    assert prompt.status_code == 200
+    assert prompt.json()["offered"] is False
+    assert "not marked as network-routed" in prompt.json()["reason"]
+
+    submit = client.post(SUBMIT, json={"order": unstated, "response": ANSWER})
+    assert submit.status_code == 403, submit.text
+    assert sink.events == []
+
+
+@pytest.mark.parametrize("field", ["routed", "network_routed", "routed_by_network"])
+@pytest.mark.parametrize("lax", ["yes", "true", "on", "1"])
+def test_every_routing_spelling_is_strict_not_just_the_declared_one(
+    client, sink, field, lax
+) -> None:
+    """MEASURED: `{"network_routed": "yes"}` was 200 offered=true while `{"routed": "yes"}` was 422.
+
+    `model_config` allows extras, so declaring `StrictBool` on one spelling left the other two
+    arriving untyped and being read by the library's lenient `flag()`. A strict boundary with a
+    door beside it is not a strict boundary.
+    """
+    order = {"order_ref": "ord-http-8", "auction_id": "auc-http-8", field: lax}
+    assert client.post(PROMPT, json={"order": order}).status_code == 422
+    assert client.post(SUBMIT, json={"order": order, "response": ANSWER}).status_code == 422
+    assert sink.events == []
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "Dana Reyes dana.reyes@example.com 555-0134 the seller lied to me",
+        "dana.reyes@example.com",
+        "44 Alder Way, Portland OR 97205",
+    ],
+)
+def test_prose_cannot_reach_the_ledger_through_an_order_reference(client, sink, ref) -> None:
+    """MEASURED: `order_ref` had a length bound and no shape, so it was a free-text field.
+
+    It is copied verbatim onto an append-only `LedgerEvent` and into this service's logs, under
+    a kind whose whole point is that it carries no prose, and nothing downstream can remove it.
+    """
+    order = dict(ORDER, order_ref=ref)
+    assert client.post(SUBMIT, json={"order": order, "response": ANSWER}).status_code == 422
+    assert client.post(PROMPT, json={"order": order}).status_code == 422
+    assert sink.events == []
+
+
+@pytest.mark.parametrize(
+    "ref", ["ord-e7-101", "#1001", "gid://shopify/Order/4435291300000", "8f14e45f_ea67"]
+)
+def test_a_real_order_reference_is_still_accepted(client, ref) -> None:
+    """The shape must not be in the way of what a reference actually looks like."""
+    response = client.post(PROMPT, json={"order": dict(ORDER, order_ref=ref)})
+    assert response.status_code == 200, response.text
+    assert response.json()["prompt"]["order_ref"] == ref
+
+
+def test_a_ledger_that_raises_is_a_503_with_a_retry_id_and_never_a_500(sinkless_client) -> None:
+    """MEASURED: any sink exception was an unhandled 500 with the sink's own message in it."""
+    flaky = FlakySink()
+    sinkless_client.app.state.ledger_sink = flaky
+
+    response = sinkless_client.post(SUBMIT, json={"order": ORDER, "response": ANSWER})
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert detail["retry_with_event_id"] is True
+    assert detail["event_id"] == flaky.events[0].event_id
+    assert "postgres://" not in response.text and "hunter2" not in response.text
+
+
+def test_a_blind_retry_after_an_uncertain_write_is_a_409_not_a_second_event(
+    sinkless_client,
+) -> None:
+    """The write may have landed. A second submission would be a second trust observation."""
+    flaky = FlakySink()
+    sinkless_client.app.state.ledger_sink = flaky
+
+    first = sinkless_client.post(SUBMIT, json={"order": ORDER, "response": ANSWER})
+    assert first.status_code == 503
+
+    second = sinkless_client.post(SUBMIT, json={"order": ORDER, "response": ANSWER})
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["event_id"] == flaky.events[0].event_id
+    assert len({event.event_id for event in flaky.events}) == 1

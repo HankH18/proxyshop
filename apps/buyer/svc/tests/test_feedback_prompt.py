@@ -136,12 +136,58 @@ def test_the_string_false_is_not_read_as_true() -> None:
     assert feedback_prompt({"order_ref": "o", "auction_id": "a", "routed": "false"}) is None
 
 
-def test_an_unrecognisable_routed_value_falls_back_to_the_auction_and_never_to_true() -> None:
-    """ "maybe" is not an answer, so the auction decides — and no auction means no prompt."""
-    assert feedback_prompt({"order_ref": "o", "routed": "maybe"}) is None
-    assert feedback_prompt({"order_ref": "o", "auction_id": "a", "routed": "maybe"}) is not None
-    assert feedback_prompt({"order_ref": "o", "auction_id": "a", "routed": []}) is not None
-    assert feedback_prompt({"order_ref": "o", "routed": [1]}) is None
+def test_the_gate_fails_closed_when_nothing_says_the_order_was_routed() -> None:
+    """The measured hole this replaces: absence of a `routed` flag read as ROUTED.
+
+    The earlier rule refused only an explicit `routed: false` and otherwise fell back to "does
+    the record name an auction?". `auction_id` is entirely caller-supplied, so an order record
+    with no routing flag at all — or one whose flag was unreadable — was offered a prompt and
+    could land a `feedback` ledger event. R14's clause is a negative guarantee; absence of
+    evidence is not evidence, and this asserts the conservative reading in every spelling of
+    "the record does not say".
+    """
+    for unstated in (
+        {},
+        {"routed": None},
+        {"routed": ""},
+        {"routed": "maybe"},
+        {"routed": []},
+        {"routed": 2},
+        {"routed": "False."},
+    ):
+        order = {"order_ref": "o", "store_id": "s", "auction_id": "a", **unstated}
+        assert feedback_prompt(order) is None, f"{unstated!r} was read as routed"
+        assert routing(order).routed is False, f"{unstated!r} was read as routed"
+        assert "not marked as network-routed" in routing(order).reason
+
+    # ...and an affirmative flag with an auction still works, so the gate is not simply closed.
+    assert feedback_prompt({"order_ref": "o", "auction_id": "a", "routed": True}) is not None
+
+
+def test_an_explicit_false_anywhere_beats_an_unreadable_flag_before_it() -> None:
+    """Measured: stopping at the first PRESENT field never consulted the one that said no."""
+    order = {"order_ref": "o", "auction_id": "a", "routed": "nope", "network_routed": False}
+    assert feedback_prompt(order) is None
+    assert routing(order).routed is False
+
+    contradiction = {"order_ref": "o", "auction_id": "a", "routed": True, "network_routed": False}
+    assert feedback_prompt(contradiction) is None, (
+        "a record that contradicts itself must not be resolved in the permissive direction"
+    )
+
+
+def test_a_numpy_or_decimal_boolean_is_read_rather_than_ignored() -> None:
+    """`numpy.bool_` is not a `bool` and `numpy.int64` is not an `int`; numpy is a dependency."""
+    from decimal import Decimal
+
+    import numpy
+
+    for truthy in (numpy.True_, numpy.int64(1), Decimal(1)):
+        order = {"order_ref": "o", "auction_id": "a", "routed": truthy}
+        assert routing(order).routed is True, f"{truthy!r} was not read as routed"
+    for falsy in (numpy.False_, numpy.int64(0), Decimal(0)):
+        order = {"order_ref": "o", "auction_id": "a", "routed": falsy}
+        assert routing(order).routed is False, f"{falsy!r} was not read as un-routed"
 
 
 @pytest.mark.parametrize("status", ["cancelled", "canceled", "CANCELLED", "voided", "void"])
@@ -238,3 +284,39 @@ def test_an_absent_flag_is_not_reported_as_malformed(absent, caplog) -> None:
     with caplog.at_level("WARNING"):
         routing({"order_ref": "o", "auction_id": "a", "routed": absent})
     assert caplog.records == []
+
+
+def test_an_order_whose_own_comparison_raises_cannot_raise_out_of_the_gate() -> None:
+    """`_reading` promises nothing escapes; the routing scan must not break that promise.
+
+    A `raw != ""` check added to the flag scan called the caller's `__ne__` and propagated
+    whatever it raised straight out of `feedback_prompt`, turning a domain question into a
+    `ZeroDivisionError`. The scan now decides by TYPE.
+    """
+
+    class Explosive:
+        def __eq__(self, other):
+            raise ZeroDivisionError("comparison")
+
+        __ne__ = __eq__
+        __hash__ = None  # type: ignore[assignment]
+
+    order = {"order_ref": "o", "store_id": "s", "auction_id": "a", "routed": Explosive()}
+    assert feedback_prompt(order) is None
+    assert routing(order).routed is False
+
+
+def test_a_hostile_record_that_raises_on_every_read_is_simply_un_routed() -> None:
+    """Every field read goes through `_reading.read`, which cannot raise."""
+
+    class Hostile:
+        def __getattr__(self, name):
+            raise ZeroDivisionError(name)
+
+    class HostileMapping(dict):
+        def get(self, key, default=None):
+            raise RuntimeError(key)
+
+    for record in (Hostile(), HostileMapping({"order_ref": "o", "auction_id": "a"})):
+        assert feedback_prompt(record) is None
+        assert routing(record).routed is False

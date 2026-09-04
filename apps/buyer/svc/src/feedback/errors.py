@@ -20,7 +20,9 @@ The refusals split into three groups, and the split is the ticket:
   the only place "structured" can be enforced is where an arbitrary string would otherwise
   become a ledger row;
 * **the write gate** — :class:`FeedbackAlreadySubmitted`, :class:`LedgerSinkUnusable`,
-  :class:`MalformedFeedbackEvent`.
+  :class:`LedgerWriteUncertain` and :class:`MalformedFeedbackEvent`. The distinction between the
+  last two and :class:`LedgerSinkUnusable` is *what is known*: nothing was attempted, the
+  attempt's outcome is unknown, or this service built a body it will not send.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ __all__ = [
     "FeedbackError",
     "FeedbackNotYours",
     "LedgerSinkUnusable",
+    "LedgerWriteUncertain",
     "MalformedFeedbackEvent",
     "MissingFeedbackChoice",
     "OrderNotRouted",
@@ -86,8 +89,11 @@ class UnknownFeedbackChoice(FeedbackError):
     ledger that accepted it would carry a free-text feedback body under a kind whose published
     shape says otherwise, and R14's "one structured prompt" would be true only of the UI.
 
-    :attr:`choice` is the offending value, truncated — an enormous body must not become an
-    enormous exception message, a log line and an HTTP response body.
+    :attr:`choice` is the offending value in the form it is safe to repeat: a value shaped like
+    an option id is quoted (a typo is the case worth showing), and anything else is reported by
+    length alone. That is an R5 rule, not a length rule — a ``choice`` carrying prose is a client
+    that invented a text box, and prose a buyer typed is where their own name and email address
+    turn up, on the way into an exception message, a log line and an HTTP response body.
     """
 
     def __init__(self, message: str, choice: str = "", options: tuple[str, ...] = ()) -> None:
@@ -131,6 +137,25 @@ class LedgerSinkUnusable(FeedbackError):
     submit that silently recorded nothing is indistinguishable to the buyer from one that
     worked, and the store would never be graded on the feedback they gave.
     """
+
+
+class LedgerWriteUncertain(FeedbackError):
+    """The ledger sink raised, so whether the event landed is unknown.
+
+    Not "it failed". An at-least-once ledger client whose write commits and whose acknowledgement
+    is then lost raises with the row already written, and nothing this service can see tells the
+    two apart. So the order's claim is deliberately NOT released, a blind retry is refused, and
+    :attr:`event_id` is the id to pass back to :func:`~buyer_svc.feedback.submission.
+    submit_feedback` to re-attempt the SAME row — which a de-duplicating ledger collapses to one.
+
+    The sink's own exception is chained (``__cause__``) and logged, but its message is never
+    folded into this one: a ledger client's error text routinely carries a DSN or a host, and
+    this message is rendered into an HTTP response body.
+    """
+
+    def __init__(self, message: str, event_id: str = "") -> None:
+        super().__init__(message)
+        self.event_id = event_id
 
 
 class MalformedFeedbackEvent(FeedbackError):
