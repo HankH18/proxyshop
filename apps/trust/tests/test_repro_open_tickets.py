@@ -769,15 +769,6 @@ _KIND_EMISSION = re.compile(
 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-237: nothing in product code turns a sub-threshold trust score into a blacklisted "
-        "ledger event — the two frozen kinds are reserved everywhere and emitted nowhere, so "
-        "'the exchange stops asking the dishonest store' is a seam nobody implemented; "
-        "remove this marker with the fix"
-    ),
-)
 def test_a_sub_threshold_trust_score_produces_a_blacklisted_ledger_event() -> None:
     """S2's second half: the engine catches the store, and then something acts on it.
 
@@ -835,4 +826,182 @@ def test_a_sub_threshold_trust_score_produces_a_blacklisted_ledger_event() -> No
         f"so the delisting is never recorded and nothing downstream can read it. 'The trust "
         f"engine catches the dishonest store' is true; 'and therefore the exchange stops "
         f"asking it' is a seam nobody implemented (S2)."
+    )
+
+
+#: A store whose evidence is uniformly contradicted across every reachable dimension. Enough
+#: episodes that the Beta prior cannot hold the score up.
+def _dishonest_observations(store_id: str) -> list[dict[str, Any]]:
+    return [
+        {"store_id": store_id, "dim": dim, "type": "contradicted", "observed_at": AS_OF}
+        for dim in (
+            "price_honored",
+            "discount_honored",
+            "shipped_on_time",
+            "not_returned",
+            "catalog_claim_accuracy",
+        )
+        for _ in range(30)
+    ]
+
+
+def _store(store_id: str, identity: str, observations: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"store_id": store_id, "business_identity": identity, "observations": observations}
+
+
+def test_the_delisting_seam_records_a_decision_the_ledger_can_actually_hold() -> None:
+    """The gate above proves the kind is EMITTED somewhere. This proves the event is real.
+
+    A grep for the literal is satisfied by a constant nobody builds an event from, so the
+    seam is graded here against the three things that decide whether the decision survives:
+    the ledger's own published payload shape for the kind (``contracts.ledger``), the
+    writer's envelope validation (``trust.events.normalise_event``), and an actual append
+    into a store that hash-chains it.
+    """
+    from contracts.ledger import LEDGER_PAYLOAD_SHAPES, validate_ledger_payload
+    from trust.events import InMemoryEventStore, append, normalise_event
+    from trust.scoring import Blacklist
+    from trust.snapshot import build_snapshot
+
+    snapshot = build_snapshot(
+        [_store("s-bad", "bad-co", _dishonest_observations("s-bad"))],
+        blacklist=Blacklist(),
+        as_of=AS_OF,
+    )
+    delistings = snapshot["delistings"]
+    assert [event["kind"] for event in delistings] == ["blacklisted"], (
+        f"a store scoring {snapshot['stores']['s-bad']['score']} against an empty registry "
+        f"must imply exactly one delisting; got {delistings}"
+    )
+
+    event = delistings[0]
+    assert set(LEDGER_PAYLOAD_SHAPES["blacklisted"]) <= set(event["payload"]), (
+        f"the blacklisted payload is missing published keys: "
+        f"{sorted(set(LEDGER_PAYLOAD_SHAPES['blacklisted']) - set(event['payload']))}"
+    )
+    assert validate_ledger_payload("blacklisted", event["payload"]) == []
+    assert normalise_event(event)["kind"] == "blacklisted"
+
+    store = InMemoryEventStore()
+    outcome = append(store, event)
+    assert outcome.inserted and outcome.seq == 1
+    assert store.read()[0]["payload"]["reason_code"] == "trust_score_below_threshold"
+
+
+def test_a_delisting_decision_is_idempotent_and_replayable() -> None:
+    """Same snapshot, same events — including the id the ledger deduplicates on (D16)."""
+    from trust.events import InMemoryEventStore, append
+    from trust.scoring import Blacklist
+    from trust.snapshot import build_snapshot
+
+    stores = [_store("s-bad", "bad-co", _dishonest_observations("s-bad"))]
+    first = build_snapshot(stores, blacklist=Blacklist(), as_of=AS_OF)["delistings"]
+    second = build_snapshot(stores, blacklist=Blacklist(), as_of=AS_OF)["delistings"]
+    assert first == second, "the delisting decision is not deterministic, so a replay diverges"
+
+    store = InMemoryEventStore()
+    append(store, first[0])
+    again = append(store, second[0])
+    assert not again.inserted and store.length == 1, (
+        "re-running the same snapshot appended a second copy of the same decision; the "
+        "event_id is not derived from the decision"
+    )
+
+
+def test_a_store_the_registry_already_blocks_is_not_delisted_twice() -> None:
+    """The registry's answer is the state; the threshold only proposes changes to it."""
+    from trust.scoring import Blacklist
+    from trust.snapshot import build_snapshot
+
+    blacklist = Blacklist()
+    blacklist.add(business_identity="bad-co", reason_code="trust_score_below_threshold")
+    snapshot = build_snapshot(
+        [_store("s-bad", "bad-co", _dishonest_observations("s-bad"))],
+        blacklist=blacklist,
+        as_of=AS_OF,
+    )
+    assert snapshot["stores"]["s-bad"]["blacklisted"] is True
+    assert snapshot["delistings"] == [], (
+        "a store already listed produced a second `blacklisted` event, so every snapshot "
+        "would re-delist it"
+    )
+
+
+def test_an_honest_store_is_never_delisted() -> None:
+    """The seam has to be silent about the stores it has no case against."""
+    from trust.scoring import BLACKLIST_THRESHOLD, Blacklist
+    from trust.snapshot import build_snapshot
+
+    honest = [
+        {"store_id": "s-ok", "dim": dim, "type": "verified", "observed_at": AS_OF}
+        for dim in ("price_honored", "discount_honored", "shipped_on_time")
+        for _ in range(30)
+    ]
+    snapshot = build_snapshot([_store("s-ok", "ok-co", honest)], blacklist=Blacklist(), as_of=AS_OF)
+    assert snapshot["stores"]["s-ok"]["score"] >= BLACKLIST_THRESHOLD
+    assert snapshot["delistings"] == []
+
+
+def test_a_lapsed_listing_is_recorded_as_expired_and_the_evidence_re_lists_the_store() -> None:
+    """Both halves, because recording only one leaves a hole exactly where an appeal looks."""
+    from trust.scoring import Blacklist
+    from trust.snapshot import build_snapshot
+
+    blacklist = Blacklist()
+    blacklist.add(
+        business_identity="bad-co",
+        reason_code="manual_review",
+        expires_at="2025-01-01T00:00:00Z",
+    )
+    snapshot = build_snapshot(
+        [_store("s-bad", "bad-co", _dishonest_observations("s-bad"))],
+        blacklist=blacklist,
+        as_of=AS_OF,
+    )
+    kinds = [event["kind"] for event in snapshot["delistings"]]
+    assert kinds == ["blacklist_expired", "blacklisted"], (
+        f"a listing that lapsed while the score is still sub-threshold must record BOTH the "
+        f"expiry and the fresh delisting; got {kinds}"
+    )
+
+
+def test_a_registry_that_cannot_answer_never_releases_a_store() -> None:
+    """Fail closed, in the same direction as ``is_blacklisted`` on the same inputs."""
+    from trust.snapshot import build_snapshot
+    from trust.snapshot.delisting import delisting_events
+
+    class _Unavailable:
+        def lookup(self, business_identity: str) -> Any:
+            raise RuntimeError("blacklist source is down")
+
+    snapshot = build_snapshot(
+        [_store("s-bad", "bad-co", _dishonest_observations("s-bad"))],
+        blacklist=_Unavailable(),
+        as_of=AS_OF,
+    )
+    assert snapshot["stores"]["s-bad"]["blacklisted"] is True, (
+        "is_blacklisted stopped failing closed"
+    )
+    assert snapshot["delistings"] == [], (
+        "a registry that cannot answer produced a `blacklist_expired` event, which would "
+        "release a listed store because its source was down"
+    )
+    assert delisting_events([], blacklist=_Unavailable(), as_of=AS_OF) == []
+
+
+def test_the_published_threshold_is_read_by_product_code_and_not_only_by_tests() -> None:
+    """T-237's other half: the constant had zero product readers outside its own definition.
+
+    Derived from the source rather than asserted as a path list, so moving the reader keeps
+    this green and DELETING every reader turns it red.
+    """
+    readers = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in _product_python_files()
+        if "BLACKLIST_THRESHOLD" in path.read_text(encoding="utf-8", errors="ignore")
+        and path.name not in {"engine.py", "__init__.py"}
+    )
+    assert readers, (
+        "BLACKLIST_THRESHOLD is exported and compared only in tests again — the published "
+        "threshold decides nothing until product code reads it (S2)"
     )

@@ -60,6 +60,7 @@ from ..scoring import (
     is_blacklisted,
     score,
 )
+from .delisting import delisting_events
 
 __all__ = [
     "EPISODE_FLOOR_DIMENSIONS",
@@ -214,13 +215,22 @@ def build_snapshot(stores: Iterable[Any], *, blacklist: Any, as_of: Any) -> dict
             entry from a fresh one.
 
     Returns:
-        ``{version, score_version, as_of, stores}`` where ``stores`` is keyed by ``store_id``
-        and each entry carries ``store_id``, ``score``, ``confidence``, all six ``dims`` with
-        ``alpha``/``beta``/``decayed_at``/``coverage``, ``blacklisted`` and ``low_data``.
+        ``{version, score_version, dimensions, as_of, stores, delistings}`` where ``stores``
+        is keyed by ``store_id`` and each entry carries ``store_id``, ``score``,
+        ``confidence``, all six ``dims`` with ``alpha``/``beta``/``decayed_at``/``coverage``,
+        ``blacklisted`` and ``low_data``.
 
         All six dimensions always appear, including ``catalog_claim_accuracy``: a five-dim
         snapshot is the exact regression D53 exists to prevent, and a consumer that has to
         ask whether the sixth is present will get it wrong.
+
+        ``delistings`` is S2's second half (T-237): the ``blacklisted`` and
+        ``blacklist_expired`` ledger events this snapshot's scores and the registry imply at
+        ``as_of``, ready for ``trust.events.append``. It is a RECOMMENDATION, not the
+        registry's answer — ``entry["blacklisted"]`` still reports only what the registry
+        already says, so a caller that ignores ``delistings`` sees exactly what it saw
+        before. Nothing here mutates the registry or writes anything; see
+        :mod:`.delisting` for why the decision is pure.
     """
     entries: dict[str, dict[str, Any]] = {}
     for store in stores:
@@ -235,4 +245,5 @@ def build_snapshot(stores: Iterable[Any], *, blacklist: Any, as_of: Any) -> dict
         "dimensions": list(TRUST_DIMENSIONS),
         "as_of": as_of,
         "stores": entries,
+        "delistings": delisting_events(entries.values(), blacklist=blacklist, as_of=as_of),
     }
