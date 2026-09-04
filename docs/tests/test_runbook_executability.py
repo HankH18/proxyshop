@@ -277,7 +277,8 @@ class Dropped:
 #: it is written — inside a fence language this parser does not read, or unprompted inside a
 #: transcript — and is promoted back out of the dropped bucket rather than believed to be output.
 _CLASSIFIABLE_HEADS = {
-    "make", "pytest", "python", "python3", "docker", "bash", "sh", "zsh", "cp", "uv", "node",
+    "make", "pytest", "python", "python3", "docker", "docker-compose",
+    "bash", "sh", "zsh", "cp", "uv", "node",
 }  # fmt: skip
 
 
@@ -1016,12 +1017,11 @@ def check_make_target(target: str, seen: set[str] | None = None) -> tuple[bool, 
             continue
         if "$" in head:
             continue  # an undefined program variable is reported by _undefined_program_vars
-        if head == "docker" and rest[:1] == ["compose"]:
+        if (head == "docker" and rest[:1] == ["compose"]) or head == "docker-compose":
             if services is None:
                 services = _compose_services()[0]
-            named = _positional_args(
-                rest[1:], {"--profile", "-f", "--file", "-p", "--project-name"}
-            )
+            after = rest[1:] if head == "docker" else rest
+            named = _positional_args(after, {"--profile", "-f", "--file", "-p", "--project-name"})
             unknown = [t for t in named if t not in services and t not in _COMPOSE_WORDS]
             if services and unknown:
                 problems.append(
@@ -1479,6 +1479,12 @@ def classify_and_check(cmd: Command) -> Result:
     if base == "docker" and len(toks) > 1 and toks[1] == "compose" and "$" not in head:
         return _check_docker_compose(cmd, toks)
 
+    # `docker-compose up -d shopify-stub` is the SAME command as `docker compose up -d
+    # shopify-stub`, and grading only the spaced spelling made a hyphen a bypass. Normalised to
+    # the two-token form so one checker serves both.
+    if base == "docker-compose" and "$" not in head:
+        return _check_docker_compose(cmd, ["docker", "compose", *toks[1:]])
+
     if (head.startswith("./") or head.startswith("../")) and "$" not in head:
         rel = head[2:] if head.startswith("./") else head
         if rel.endswith(".sh"):
@@ -1629,7 +1635,13 @@ def _raw_make_mentions(line: str, targets: set[str]) -> list[str]:
 #: and pointing the same step at `no-such-service` under that fence produced rc=0 and no FAIL,
 #: where the identical edit under ` ```bash ` reports
 #: `[FAIL] … the merged compose config defines no service named no-such-service`.
-_RAW_COMPOSE = re.compile(r"(?<![\w-])docker\s+compose(?![\w-])", re.IGNORECASE)
+#: Both spellings, because they are one command. Measured: the hyphenated legacy spelling in a
+#: fence the parser does not read produced `swept 16 ... 1 DROPPED` — accounted for, but the
+#: sweep count still fell by one with nothing failing, which is the shape of the defect.
+#: The trailing `(?![\w.-])` keeps a prose mention of the FILE `docker-compose.yml` out of
+#: the scan — that names a config, not a step, and flagging it would be a false positive on
+#: the document this net exists to protect.
+_RAW_COMPOSE = re.compile(r"(?<![\w-])docker[-\s]+compose(?![\w.-])", re.IGNORECASE)
 
 
 def _named_by_line(
@@ -1676,7 +1688,8 @@ def _named_by_line(
                 if "=" not in target:
                     for ln in lines:
                         makes.setdefault(ln, set()).add(target)
-        if Path(toks[0]).name.lower() == "docker" and toks[1:2] == ["compose"]:
+        head_name = Path(toks[0]).name.lower()
+        if (head_name == "docker" and toks[1:2] == ["compose"]) or head_name == "docker-compose":
             compose |= set(lines)
         for tok in toks[1:]:
             if _repo_shaped(tok):
@@ -1865,9 +1878,10 @@ def _fixture_runbook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str)
     return doc
 
 
+@pytest.mark.parametrize("spelling", ["docker compose", "docker-compose"])
 @pytest.mark.parametrize("lang", ["console", "shell-session", "text", "plaintext", "output"])
 def test_a_step_does_not_vanish_when_its_fence_is_relabelled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lang: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lang: str, spelling: str
 ) -> None:
     """FAIL-OPEN 1. Re-fencing a step used to delete it from the sweep, silently.
 
@@ -1883,13 +1897,17 @@ def test_a_step_does_not_vanish_when_its_fence_is_relabelled(
     because its head is a program this gate classifies; and, separately,
     `test_the_compose_cross_check_fires_when_a_compose_step_is_ungraded` pins the raw-text
     backstop that catches it even if the promotion list is ever wrong.
+
+    Both spellings, because a hyphen was a bypass of its own: measured, `docker-compose …` inside
+    a ```text fence produced `swept 16 … 1 DROPPED` — accounted for, but the sweep count still
+    fell by one with no test failing, which is the shape of the defect wearing a different name.
     """
     doc = _fixture_runbook(
         tmp_path,
         monkeypatch,
         "# Fixture\n\nBring the stub up:\n\n"
         f"```{lang}\n"
-        "docker compose --profile e2e up -d no-such-service\n"
+        f"{spelling} --profile e2e up -d no-such-service\n"
         "```\n",
     )
     commands, results, per_doc, dropped = audit()
