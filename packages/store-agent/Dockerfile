@@ -1,9 +1,17 @@
-# The proxyshop-exchange container.
+# The proxyshop-store-agent container. (T-313)
 #
-# The exchange API — the auction and ranking service. C1 makes it one of four
-# SEPARATE deployables, and C3/S7 are the reason it is separate: this image contains no
-# buyer_svc and no envelope-reading code, so the process cannot read a sealed envelope
-# even if someone later writes an import that says it should.
+# The store agent — the bidding runtime, the provenance hooks, the learning grid and the
+# external door an unharnessed seller speaks through. `store_agent.main:app` is the frozen
+# entrypoint.
+#
+# STATED PLAINLY, because a reader deserves it before they deploy this: the app serves NO
+# business routes. `main.py:29-30` mounts routers by globbing `*/routes.py` and there is no
+# `routes.py` anywhere under packages/store-agent/src, so `app.state.mounted_routers` is []
+# and the container answers only FastAPI's own /openapi.json, /docs and /redoc. That is not
+# a packaging defect and this Dockerfile does not paper over it: the store agent's surface
+# is a LIBRARY consumed in-process (services/sim drives it; apps/exchange solicits through
+# it), and the HTTP entrypoint is the frozen T-000 scaffold waiting for a router. The image
+# is real, it starts, and its healthcheck is honest about probing only that.
 #
 # Build context is the REPO ROOT (see the sibling compose.yaml), not this directory: the
 # flat src layout (D42) means a service image has to reach across member directories.
@@ -25,6 +33,11 @@ FROM python:3.12-slim
 # at schema-build time — an extras dependency an import scan cannot see, and the reason
 # buyer-svc crash-looped on its first deploy. numpy, scipy, lxml, anthropic
 # and mcp are in no deployable's closure and are deliberately absent.
+#
+# Kept VERBATIM here for the layer-cache reason above: an identical instruction is the SAME
+# layer on disk as the other images', so the wheels this package does not import cost no
+# extra download and no extra disk. store_agent's own measured need is fastapi + pydantic
+# (the latter via contracts); jsonschema is reached lazily by contracts.registry.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -57,58 +70,32 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 # alone lands a dangling link in the image and `contracts.protocol` dies on
 # `No module named 'contracts.generated'` at import time — observed, not theorised.
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
-COPY proxyshop_support/             /app/proxyshop_support/
-COPY apps/exchange/src/          /app/apps/exchange/src/
-# T-299. `ingest.graph` and `ingest.embeddings` are a SHARED LIBRARY that happens to live at
-# a service's path, and candidate retrieval is the exchange's own responsibility (DESIGN.md:34),
-# not a call across a service boundary: DESIGN.md:23-24's architecture graph has ING->NEO and
-# EXC->NEO as two independent edges with no exchange<->ingest edge, DESIGN.md:38 gives ingest
-# writes only, ingest.openapi.json is a single write route, and `.importlinter` — the file whose
-# entire job is forbidding layering violations — forbids exchange->envelopes and says nothing
-# about exchange->ingest. So the repair is to ship the library, not to delete the imports.
-#
-# WITHOUT these lines eleven of this image's own shipped modules raise
-# `ModuleNotFoundError: No module named 'ingest'` — `exchange.ranking` and all four of its
-# modules, and every module of `exchange.retrieval` — while `exchange.main` imports perfectly.
-# It imports perfectly because `main.py:27-30` mounts routers by globbing `*/routes.py`, and
-# neither `retrieval/` nor `ranking/` has one, so a smoke test, a /healthz and any entrypoint
-# probe pass this image forever. Among the dead modules is `retrieval/fit.py`, which holds the
-# repo's ONLY emitter of the `bid_placed` ledger event (FIT_LEDGER_KIND at :61, emitted at
-# :311-316) — a kind whose count is load-bearing in two frozen metrics.
-#
-# Only `graph/` and `embeddings/` are shipped, because that is the measured closure of what
-# exchange actually imports (`retrieval/criteria.py:45-46`, `service.py:33-34`,
-# `sources.py:29-31` name `ingest.graph`, `ingest.graph.model`, `ingest.graph.query` and
-# `ingest.embeddings` and nothing else). `adapters/`, `er/`, `extraction/`, `scheduler/` and
-# `main.py` — the crawler and the ingest service itself — stay out.
-#
-# ZERO new pip requirements, measured rather than assumed, and that is why this is a COPY and
-# not a dependency change: every module in the shipped subset is stdlib-only at module scope.
-# The two heavy imports in it are both deferred — `graph/reembed.py:386` imports the neo4j
-# driver INSIDE `graph_driver()`, and `embeddings/local_bge.py:93` imports
-# sentence_transformers (hence torch) INSIDE `_load()`. The prologue's "numpy, scipy, lxml,
-# anthropic and mcp are in no deployable's closure and are deliberately absent" stays true.
-# `src/__init__.py` is empty and is copied anyway: without it `ingest` is not a package.
-COPY services/ingest/src/__init__.py /app/services/ingest/src/
-COPY services/ingest/src/graph/      /app/services/ingest/src/graph/
-COPY services/ingest/src/embeddings/ /app/services/ingest/src/embeddings/
+COPY packages/store-agent/src/   /app/packages/store-agent/src/
 
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
 # The repo tracks these as git symlinks; the image RECREATES them instead of copying them
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
+#
+# The `store_agent` link is load-bearing beyond the usual reason. `runtime/__init__.py:75`,
+# `hooks/__init__.py:114` and `modes/__init__.py:76` each call
+# `importlib.import_module("store_agent.<sub>")` at import time and compare the result's
+# __file__ with their own, to bind one canonical spelling. Reached under any other name that
+# lookup fails (caught) or resolves to a SECOND module object with its own copy of the
+# module state. This link is what makes `store_agent.*` the only spelling in the image.
+# `proxyshop_support/` is deliberately NOT copied: nothing under packages/store-agent/src
+# imports it at any scope.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
- && ln -s ../apps/exchange/src /app/.pkgroot/exchange \
- && ln -s ../services/ingest/src /app/.pkgroot/ingest
+ && ln -s ../packages/store-agent/src /app/.pkgroot/store_agent
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
 # the process to be able to.
 RUN useradd --create-home --uid 10001 proxyshop
 USER proxyshop
 
-EXPOSE 8083
+EXPOSE 8086
 
 # One worker on purpose. The frozen entrypoint builds the app at import time and a feature
-# router may hold in-process state (the auction registry, the install nonce table); a
-# second worker would answer half the requests from a different copy of it.
-CMD ["uvicorn", "exchange.main:app", "--host", "0.0.0.0", "--port", "8083", "--workers", "1"]
+# router may hold in-process state; a second worker would answer half the requests from a
+# different copy of it.
+CMD ["uvicorn", "store_agent.main:app", "--host", "0.0.0.0", "--port", "8086", "--workers", "1"]

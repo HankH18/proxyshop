@@ -59,13 +59,59 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
 COPY proxyshop_support/             /app/proxyshop_support/
 COPY apps/merchant/svc/src/      /app/apps/merchant/svc/src/
+# T-298. `apps/merchant/svc/src/codes/offer.py:36` is
+# `from exchange.checkout.discounts import UnusableDiscount, shopify_discount_percentage`
+# at COLUMN 0, in a module `merchant_svc.codes.routes` imports and `merchant_svc.main`
+# mounts. Without the lines below `uvicorn merchant_svc.main:app` raises
+# ModuleNotFoundError before uvicorn has an app: the container cannot start. Not degraded,
+# not slow — dead on first boot, and seven of the image's own modules unimportable.
+#
+# This is a DELIBERATELY NARROW copy, and the wholesale one is a trap that was measured.
+# `apps/exchange/Dockerfile:61` copies `apps/exchange/src/` entire; applied verbatim here it
+# also ships `exchange.retrieval` and `exchange.ranking`, whose module-scope
+# `from ingest.graph import ...` would turn this image's T-298 into T-299 — 11 more
+# unimportable modules — and the repair for THAT would be shipping the ingest graph library
+# into the merchant container too. Shipping a package to silence a checker about code the
+# process never runs is the opposite of what the artifact gates exist for.
+#
+# What is shipped is the MEASURED runtime closure of `exchange.checkout.discounts` and
+# nothing else: `checkout/` in full (its `__init__.py` is a re-export barrel, so importing
+# one of its modules executes all nine siblings) plus the four `auction/` modules
+# `checkout/provider.py:40`'s `from ..auction.ledger import build_published_event` reaches
+# through `auction/__init__.py`. 16 modules of 42.
+#
+# `auction/routes.py` is EXCLUDED on purpose, and it is the reason `auction/` is named file
+# by file instead of as a directory: it is the auction's HTTP surface, served by
+# `exchange.main`, which this image never runs, and its module-scope `..eligibility` /
+# `..orchestration` imports (routes.py:39-40) would drag in three more subpackages — nine
+# more modules, 16 -> 25 measured — for a router nothing here mounts. The merchant needs
+# the auction's ledger event builder, not the auction service.
+#
+# No new pip requirement: the only third-party name the shipped subset reaches is pydantic,
+# via `contracts.boundary`, and contracts is already here.
+#
+# This subset is not a private convention that can rot silently. Every module an image ships
+# is imported inside a container-shaped tree by
+# proxyshop_support/tests/test_artifact_copyset.py::test_t301_every_shipped_module_imports_inside_the_container_shaped_tree,
+# so the day a `checkout/` or `auction/` module grows a module-scope import into a
+# subpackage this COPY set does not cover, that gate goes red here — instead of the merchant
+# container crash-looping in a deploy.
+COPY apps/exchange/src/__init__.py /app/apps/exchange/src/
+COPY apps/exchange/src/checkout/   /app/apps/exchange/src/checkout/
+COPY apps/exchange/src/auction/__init__.py \
+     apps/exchange/src/auction/collect.py \
+     apps/exchange/src/auction/fanout.py \
+     apps/exchange/src/auction/ledger.py \
+     apps/exchange/src/auction/state.py \
+     /app/apps/exchange/src/auction/
 
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
 # The repo tracks these as git symlinks; the image RECREATES them instead of copying them
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
- && ln -s ../apps/merchant/svc/src /app/.pkgroot/merchant_svc
+ && ln -s ../apps/merchant/svc/src /app/.pkgroot/merchant_svc \
+ && ln -s ../apps/exchange/src /app/.pkgroot/exchange
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
 # the process to be able to.

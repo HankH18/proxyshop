@@ -1,11 +1,36 @@
 # Compose fragment included by the root docker-compose.yml. Created by T-000 as a valid
 # empty stub so the root file's `include:` list is static from day one and no worker ever
-# edits it (B6(ii)). Owner: T-081.
+# edits it (B6(ii)). Owner: T-081. Filled by T-313.
 #
-# The simulation runner service.
+# The simulation runner. NOT a server — a run-to-completion batch job, and the settings
+# below are shaped by that rather than copied from the service fragments:
 #
-# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
-# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
-# only env-overridable ports (D40), and keep the service name unique across all nine
-# fragments.
-services: {}
+#   * no `ports:`      — it opens no socket at all.
+#   * no `healthcheck:`— there is no endpoint to probe, and a container that exits 0 on
+#                        success would be marked unhealthy by any probe that outlived it.
+#   * `restart: "no"`  — THE load-bearing one. `services/sim/src/__main__.py:10-19` makes the
+#                        exit status the result: 0 = the dishonest store was caught inside
+#                        the episode budget, 1 = it never was (an S2 failure), 2 = the run
+#                        could not start because the manifest digest chain did not verify.
+#                        `unless-stopped` would relaunch the run forever and destroy that
+#                        signal — an S2 failure would read as a crash loop.
+#
+# Start it explicitly: `docker compose run --rm sim`, optionally with `--seed N`
+# `--episodes N` appended (the CMD's own flags). `docker compose up` will run it once and
+# leave it exited, which is correct for a job and looks alarming if you expect a service.
+#
+# It takes no services and touches no database: the run is a pure function of the
+# human-approved manifest and one seed, so it is the same run whether the rest of the stack
+# is up or down. That is why there is no `depends_on:` either.
+services:
+  sim:
+    build:
+      # Relative to THIS file's directory, so the context is the repo root.
+      context: ../..
+      dockerfile: services/sim/Dockerfile
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+    restart: "no"
+    # D10: memory is the binding constraint. The whole market is a few thousand dataclasses
+    # held in dicts; the measured run is far under this and it is a job, not a resident.
+    mem_limit: 256m

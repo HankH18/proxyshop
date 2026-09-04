@@ -1,11 +1,41 @@
 # Compose fragment included by the root docker-compose.yml. Created by T-000 as a valid
 # empty stub so the root file's `include:` list is static from day one and no worker ever
-# edits it (B6(ii)). Owner: the store-agent lane.
+# edits it (B6(ii)). Owner: the store-agent lane. Filled by T-313.
 #
 # The store-agent runner.
 #
-# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
-# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
-# only env-overridable ports (D40), and keep the service name unique across all nine
-# fragments.
-services: {}
+# ⚠️ READ THIS BEFORE DEPLOYING IT. The container starts and stays healthy, and it serves NO
+# business routes. `packages/store-agent/src/main.py` is the frozen T-000 entrypoint and
+# mounts routers by globbing `*/routes.py`; there is no `routes.py` anywhere under that
+# tree, so `app.state.mounted_routers` is `[]` and the only endpoints are FastAPI's own
+# /openapi.json, /docs and /redoc. The store agent's real surface — the bidding runtime, the
+# provenance hooks, the learning grid, the external door — is a LIBRARY used in-process by
+# services/sim and by the exchange's solicitation path. This fragment exists because the
+# component is in the root stack's `include:` list and had no artifact at all (T-313); it
+# does not claim an HTTP service that has not been written. The healthcheck below is
+# deliberately honest about probing only that the app imports and uvicorn answers.
+services:
+  store-agent:
+    build:
+      # Relative to THIS file's directory, so the context is the repo root.
+      context: ../..
+      dockerfile: packages/store-agent/Dockerfile
+    # D40: env-overridable. 8086 continues the 808x block after ingest's 8085.
+    ports:
+      - "${STORE_AGENT_PORT:-8086}:8086"
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+    # No depends_on: the shipped closure opens no socket and touches no datastore. Adding a
+    # postgres/redis dependency here would be decoration, and would make this container wait
+    # on services it never speaks to.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8086/openapi.json').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    mem_limit: 256m       # D10
+    stop_grace_period: 10s
+    restart: unless-stopped

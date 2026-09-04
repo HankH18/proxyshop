@@ -55,7 +55,15 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import pytest
+# `pytest` is deliberately NOT imported at module scope. `COPY proxyshop_support/` puts this
+# file into SIX images — buyer, exchange, merchant, trust, ingest and sim — and none of them
+# installs pytest, so a column-0 `import pytest` here made every one of those artifacts ship
+# a module that cannot be imported — measured by
+# `proxyshop_support/tests/test_artifact_copyset.py::test_t301_every_shipped_module_imports_inside_the_container_shaped_tree`,
+# which walls the probe off from the dev venv precisely so this is visible. Nothing here
+# needs pytest until :func:`_poisoned_fixture` actually builds a fixture, which only happens
+# under a pytest session, so the import moves there. Behaviour under pytest is unchanged;
+# the difference is that importing this module no longer requires pytest to be installed.
 
 #: Files matching this glob, next to the importing conftest, are scanned.
 FIXTURE_GLOB = "_fixtures_*.py"
@@ -116,6 +124,8 @@ def duplicate_message(name: str, paths: list[str]) -> str:
 
 def _poisoned_fixture(name: str, paths: list[str]) -> Any:
     """A real pytest fixture that raises, naming both definitions, only when requested."""
+    import pytest  # local: see the note where the module-scope import used to be
+
     message = duplicate_message(name, paths)
 
     @pytest.fixture(name=name)
