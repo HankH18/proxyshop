@@ -106,36 +106,50 @@ class RosterEntry(BaseModel):
     frozen C3/S7 acceptance check scans string literals here, so quoting the rule's full name in a
     docstring trips the rule itself.)
 
-    What is closed here is the part that does not wait on that port: **omitting** ``list_price``
-    is now a 422 rather than a silent 0.00 default, and a bid cannot be priced at nothing on a row
-    that prices the product above zero.
+    What is closed here is the part that does not wait on that port: **pricing the product at
+    nothing** — by omitting ``list_price`` or by writing a zero into it — is a 422, and a bid
+    cannot be priced at nothing, or at a positive number that is not a price, on any row.
 
-    It is NOT true that "a free item cannot be minted through this model whatever the caller
-    writes in it" — this docstring said that, and it was measured false twice over:
+    This docstring used to claim "a free item cannot be minted through this model whatever the
+    caller writes in it", and that was measured false twice over. Both holes are now closed, and
+    both are written down here because an overclaiming comment is how the next reader stops
+    looking:
 
-    * ``list_price: 0.0`` is an accepted value (``Field(ge=0.0)``). On such a row a silent store
-      still mints a 0.00 rankable fallback — ``HTTP 201, entries=[{fallback: true,
-      unit_price: 0.0, fallback_reason: 'no_response'}]`` — which is the same free item the 422
-      above closed, reached by writing the zero instead of omitting the field. Negative and
-      ``nan`` unit prices are admitted on that row too.
-    * the zero-price floor is an equality (``priced == 0.0``), so under ``max_discount_pct: 100``
-      an offer at ``unit_price: 0.001`` is admitted through the real door.
+    * ``list_price: 0.0`` was an accepted value (``Field(ge=0.0)``). On such a row a silent store
+      minted a 0.00 rankable fallback — ``HTTP 201, entries=[{fallback: true, unit_price: 0.0,
+      fallback_reason: 'no_response'}]`` — which is the same free item the missing-field 422
+      closed, reached by writing the zero instead of omitting it; and the same row switched off
+      the guard that turns an unreadable store price into a fallback, so ``unit_price: "cheap"``
+      raised ``ValueError`` out of the middle of the auction as an unauthenticated **HTTP 500**.
+      T-224. The field is ``Field(gt=0.0)`` now, and the 500 is closed a second time in
+      :func:`~apps.exchange.src.auction.collect._price_is_unreadable`, which asks nothing of the
+      roster: a repair that lives only in a request model is a repair a second caller of
+      ``collect_bids`` does not get.
+    * the zero-price floor was an equality (``priced == 0.0``), so under ``max_discount_pct: 100``
+      an offer at ``unit_price: 0.001`` — or, on a row stating no cap at all, ``1e-09`` — was
+      admitted through the real door as a rankable bid for a 100.00 product. T-223. It is a
+      threshold now, absolute and proportional, in
+      :func:`~apps.exchange.src.auction.collect._below_the_price_floor`.
 
-    Both live on the untrusted-roster surface this class already documents as the follow-up
-    ticket's scope, and both are fail-closed or pre-existing rather than new. They are written
-    down because an overclaiming comment is how the next reader stops looking.
+    What is still open is what it always was: everything BETWEEN the floor and the cap is the
+    request body's word, and closing that needs the derived-authorization port named above.
     """
 
     store_id: str
     tier: int = 1
     product_ref: str | None = None
-    #: **Required, and at least zero.** It used to default to ``0.0``, which minted a free item
-    #: with no bid involved at all: a roster row naming no price produced a 0.00 *fallback* offer
-    #: for a silent store, and that offer wins every ranking there is. Measured before this
+    #: **Required, and strictly above zero.** It used to default to ``0.0``, which minted a free
+    #: item with no bid involved at all: a roster row naming no price produced a 0.00 *fallback*
+    #: offer for a silent store, and that offer wins every ranking there is. Measured before that
     #: change — ``POST /auctions`` with ``{"store_id": "s1", "tier": 1, "product_ref": "prod-1"}``
-    #: and no solicitor — ``HTTP 201, entries=[{fallback: true, unit_price: 0.0}]``. A caller that
-    #: cannot price a product cannot auction it; 422 says so, and a default said nothing.
-    list_price: float = Field(ge=0.0)
+    #: and no solicitor — ``HTTP 201, entries=[{fallback: true, unit_price: 0.0}]``.
+    #:
+    #: Making it required left the same free item one keystroke away, because ``ge=0.0`` accepted
+    #: the zero it had just stopped defaulting to, with the identical measured result. ``gt``, not
+    #: ``ge``: a caller that cannot price a product cannot auction it, and "prices it at nothing"
+    #: is not a different statement from "does not price it". That zero was also the switch that
+    #: turned the price wall off entirely on the row carrying it — see the class docstring.
+    list_price: float = Field(gt=0.0)
     #: The deepest percentage discount the caller states is authorized on this product — the
     #: policy `Envelope`'s own spelling. Optional, and its absence is not permissive: a bid
     #: DECLARING a discount on a row that authorizes none is refused and falls back to the list
