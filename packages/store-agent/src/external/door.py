@@ -170,8 +170,32 @@ def _synthetic_trust_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {store_id: {"store_id": store_id, "score": None, "blacklisted": False}}
 
 
+def _snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """One read of the caller's mapping, into a plain `dict`. Everything after reads this.
+
+    `receive_bid` accepts ANY `Mapping` — that is its signature and its published contract — and
+    it used to read the caller's object over and over: `missing_signing_fields` read it,
+    `canonical_signing_bytes` read it, the door's own envelope guard read it, `verify_signature`
+    re-canonicalized and read it again, the shared boundary was handed `dict(payload)`, and
+    `_work_item` built a SECOND `dict(payload)` for the queue. Nothing bound those reads
+    together, so a mapping that answered differently between two of them made the value that was
+    VERIFIED and the value that was ENQUEUED two different things (T-229, T-241): a correctly
+    signed bid for 89.00 was enqueued as 1.00 with `accepted=True, reasons=()`, and every one of
+    the work item's six identity fields could be swapped for an attacker's — `payload_hash`
+    covers only the bid BODY, so for `issued_at`, `nonce`, `signer_id` and `key_id` the enqueued
+    item stayed internally consistent and nothing downstream could tell.
+
+    Read through `.get`, which is the accessor the door and the canonicalizer both use, so the
+    snapshot REPLACES a read the door was going to do rather than adding a third one.
+
+    Raising is the correct answer to a mapping that cannot be read: the caller of this function
+    turns it into a refusal, which is what a submission we cannot even copy deserves.
+    """
+    return {key: payload.get(key) for key in list(payload)}
+
+
 def _work_item(
-    payload: Mapping[str, Any],
+    submission: dict[str, Any],
     signature: str,
     *,
     digest: str,
@@ -187,22 +211,29 @@ def _work_item(
     The `nonce` rides at the top level as the idempotency key: the queue is at-least-once, and
     extraction plus verification must be able to recognise a redelivery of work it has already
     done without re-parsing the submission to find the key.
+
+    **`submission` is the door's own snapshot, not the caller's mapping** (T-229, T-241). The
+    six identity fields and the queued body are therefore two views of ONE dict — the same dict
+    the signature was verified over, the same dict the shared boundary judged — rather than a
+    later, separately-unvalidated read of an object that is free to answer differently. The
+    parameter is typed `dict` rather than `Mapping` to say so in the signature: hand this the
+    caller's object again and the defect comes straight back.
     """
-    submission = dict(payload)
-    submission["signature"] = signature
+    body = dict(submission)
+    body["signature"] = signature
     return {
         "kind": "external_bid_verification",
-        "auction_id": payload.get("auction_id"),
-        "store_id": payload.get("store_id"),
-        "signer_id": payload.get("signer_id"),
-        "key_id": payload.get("key_id"),
-        "issued_at": payload.get("issued_at"),
-        "nonce": payload.get("nonce"),
+        "auction_id": submission.get("auction_id"),
+        "store_id": submission.get("store_id"),
+        "signer_id": submission.get("signer_id"),
+        "key_id": submission.get("key_id"),
+        "issued_at": submission.get("issued_at"),
+        "nonce": submission.get("nonce"),
         "payload_hash": digest,
         "verified": False,
         "verification_status": UNVERIFIED_STATUS,
         "unverified_claim_indexes": list(unverified_claim_indexes),
-        "submission": submission,
+        "submission": body,
     }
 
 
@@ -258,82 +289,103 @@ def receive_bid(
 
     # 2. The envelope must be complete enough to canonicalize. `canonical_signing_bytes` owns
     #    that rule for both sides; asking it is how the door and the signer stay one protocol.
+    #    This one asks the CALLER'S object, because that is the object whose bytes the submitter
+    #    claims to have signed, and a submission that cannot be canonicalized at all is refused
+    #    before anything is copied.
     try:
         canonical_signing_bytes(payload)
-        digest = payload_hash(payload)
     except Exception:  # noqa: BLE001 - CanonicalisationError, or anything unsignable at all
         return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=payload)
 
-    # 2b. The three envelope ids this function goes on to ACT on — the pair that selects the
-    #     signing key, and the pair that spends the nonce — read ONCE here and proven to be
-    #     strings before either use.
+    # 2b. THE SNAPSHOT. `payload` — the caller's mapping — is read here for the last time.
+    #     Everything below this line reads `submitted`, a plain dict this module owns.
     #
-    #     For an ordinary mapping this cannot fail, and gate 2 is why: `canonical_signing_bytes`
-    #     refuses unless `missing_signing_fields` found every one of D52's five envelope fields
-    #     present, `isinstance(..., str)` and non-blank, and that refusal is the
-    #     REASON_ENVELOPE_UNCANONICALIZABLE returned immediately above. This check is not
-    #     written for an ordinary mapping. `receive_bid` accepts ANY `Mapping`, and gate 2 read
-    #     these fields through `canonical_signing_bytes` — so without this, the values that
-    #     reach `keyring_secret` and `NonceStore.consume` are a SECOND, separately-unvalidated
-    #     read of a caller-supplied object, and a `get` that does not answer the same way twice
-    #     makes the two reads disagree. That matters most at the nonce: `NonceStore._key`
-    #     stringifies both halves so a pair that read as `None` on the second read keys the
-    #     replay memory at `("None", "None")` — one slot shared by every submission that plays
-    #     the same trick, so the first burns it and the rest are refused as replays, and if the
-    #     ordering ever changed it would be one slot admitting all of them. Fail closed, once,
-    #     on the same reason gate 2 would have given, rather than trusting a re-read.
-    signer_id = payload.get("signer_id")
-    key_id = payload.get("key_id")
-    nonce = payload.get("nonce")
+    #     T-228 read the three envelope ids the door itself acts on once, here, and proved them
+    #     strings. That closed the two SECURITY decisions and left the rest: `verify_signature`
+    #     re-canonicalized the caller's object, the shared boundary was handed `dict(payload)`,
+    #     and `_work_item` built a SECOND `dict(payload)` afterwards, so the body that was
+    #     VALIDATED and the body that was ENQUEUED were two different reads of an object free to
+    #     answer differently between them — measured at 89.00 in, 1.00 out, `accepted=True`,
+    #     `reasons=()` (T-229) — and all six of the work item's identity fields could be swapped
+    #     the same way (T-241). Hardening three fields could not fix that; only reading once can.
+    #
+    #     Refusing a mapping we cannot copy is the fail-closed direction, and the refusal is
+    #     safe on exactly the input it exists for because `_refuse` no longer re-reads what it
+    #     is refusing (T-230).
+    try:
+        submitted = _snapshot(payload)
+    except Exception:  # noqa: BLE001 - a mapping that cannot be read is a malformed submission
+        return _refuse(REASON_MALFORMED_SUBMISSION)
+
+    #     Re-anchor the protocol on the snapshot. The bytes that were canonicalized at gate 2
+    #     belong to the caller's object; these belong to the document that is actually going to
+    #     be judged and queued, and `digest` is the hash the work item carries. If the mapping
+    #     answered differently between the two, the snapshot's bytes no longer match the
+    #     signature and gate 3 refuses it — the submission is authenticated over precisely the
+    #     bytes that reach the queue, which is the property T-229 asks for stated in full.
+    try:
+        canonical_signing_bytes(submitted)
+        digest = payload_hash(submitted)
+    except Exception:  # noqa: BLE001
+        return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=submitted)
+
+    #     The three ids this function goes on to ACT on — the pair that selects the signing key,
+    #     and the pair that spends the nonce — proven to be strings before either use. It
+    #     matters most at the nonce: `NonceStore._key` stringifies both halves, so a `None` here
+    #     would key the replay memory at `("None", "None")`, one slot shared by every submission
+    #     that plays the same trick.
+    signer_id = submitted.get("signer_id")
+    key_id = submitted.get("key_id")
+    nonce = submitted.get("nonce")
     if not isinstance(signer_id, str) or not isinstance(key_id, str) or not isinstance(nonce, str):
-        return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=payload)
+        return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=submitted)
 
     # 3. Key SELECTION, never key trial.
     secret = keyring_secret(keyring, signer_id, key_id)
     if secret is None:
-        return _refuse(REASON_UNKNOWN_SIGNING_KEY, payload=payload)
-    if not verify_signature(payload, signature, secret):
-        return _refuse(REASON_SIGNATURE_INVALID, payload=payload)
+        return _refuse(REASON_UNKNOWN_SIGNING_KEY, payload=submitted)
+    if not verify_signature(submitted, signature, secret):
+        return _refuse(REASON_SIGNATURE_INVALID, payload=submitted)
 
     # 4a. Freshness, two-sided.
     evaluated_at = parse_timestamp(now) or datetime.now(UTC)
-    issued_at = parse_timestamp(payload.get("issued_at"))
+    issued_at = parse_timestamp(submitted.get("issued_at"))
     if issued_at is None:
         # The field is present and non-blank (gate 2) but is not an instant. It is inside the
         # signed bytes, so this is a well-formed signature over a meaningless claim about time.
-        return _refuse(REASON_ISSUED_AT_UNPARSEABLE, payload=payload)
+        return _refuse(REASON_ISSUED_AT_UNPARSEABLE, payload=submitted)
     try:
         window = float(freshness_window_seconds)
     except (TypeError, ValueError):
         window = DEFAULT_FRESHNESS_WINDOW_SECONDS
     age_seconds = (evaluated_at - issued_at).total_seconds()
     if age_seconds > window:
-        return _refuse(REASON_STALE_SUBMISSION, payload=payload)
+        return _refuse(REASON_STALE_SUBMISSION, payload=submitted)
     if -age_seconds > window:
-        return _refuse(REASON_FUTURE_DATED_SUBMISSION, payload=payload)
+        return _refuse(REASON_FUTURE_DATED_SUBMISSION, payload=submitted)
 
     # 4b. The auction deadline — a different question from freshness. The late submission is
     #     seconds old and still too late; only this check can see that.
     deadline = parse_timestamp(auction_deadline)
     if deadline is not None and evaluated_at > deadline:
-        return _refuse(REASON_AFTER_AUCTION_DEADLINE, payload=payload)
+        return _refuse(REASON_AFTER_AUCTION_DEADLINE, payload=submitted)
 
     # 5. Eligibility and the shared Tier-2 boundary.
-    if _blacklisted(payload, blacklist):
-        return _refuse(REASON_STORE_BLACKLISTED, payload=payload)
-    submission = dict(payload)
+    if _blacklisted(submitted, blacklist):
+        return _refuse(REASON_STORE_BLACKLISTED, payload=submitted)
+    submission = dict(submitted)
     submission["signature"] = signature
     verdict = validate_external_submission(
         submission,
         trust_snapshot=(
-            trust_snapshot if trust_snapshot is not None else _synthetic_trust_snapshot(payload)
+            trust_snapshot if trust_snapshot is not None else _synthetic_trust_snapshot(submitted)
         ),
         now=evaluated_at,
         list_prices=list_prices,
         max_discount_pct=max_discount_pct,
     )
     if not verdict.ok:
-        return _refuse(*verdict.reasons, payload=payload)
+        return _refuse(*verdict.reasons, payload=submitted)
 
     # The transport is resolved BEFORE the nonce is spent. A queue we cannot write to means this
     # submission is not going to be admitted, and discovering that after consuming the nonce
@@ -341,16 +393,16 @@ def receive_bid(
     # then be unable to retry the identical submission at all.
     enqueue = _resolve_enqueue(queue)
     if enqueue is None:
-        return _refuse(REASON_QUEUE_UNAVAILABLE, payload=payload)
+        return _refuse(REASON_QUEUE_UNAVAILABLE, payload=submitted)
 
     # 6. Replay. Checked last so a submission refused above never spends the nonce it names —
     #    otherwise anyone could burn an honest signer's nonce with a deliberately broken copy.
     store = nonce_store if nonce_store is not None else NonceStore()
     if not store.consume(signer_id, nonce, auction_deadline):
-        return _refuse(REASON_REPLAYED_NONCE, payload=payload)
+        return _refuse(REASON_REPLAYED_NONCE, payload=submitted)
 
     item = _work_item(
-        payload,
+        submitted,
         signature,
         digest=digest,
         unverified_claim_indexes=verdict.unverified_claim_indexes or [],
@@ -362,7 +414,7 @@ def receive_bid(
         # re-opening its nonce because the transport threw would hand a replay window to
         # whoever was watching. The submitter retries with a new nonce, exactly as they would
         # on any 5xx.
-        return _refuse(REASON_QUEUE_UNAVAILABLE, payload=payload)
+        return _refuse(REASON_QUEUE_UNAVAILABLE, payload=submitted)
 
     return ExternalBidReceipt(
         accepted=True,

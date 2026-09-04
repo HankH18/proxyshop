@@ -155,14 +155,9 @@ class _BodyLiar(Mapping):
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-229: receive_bid never snapshots the caller-supplied Mapping, so the body the shared "
-        "boundary validated and the body _work_item enqueues are two separate reads and can "
-        "differ; remove this marker with the fix"
-    ),
-)
+# xfail marker removed with the T-229 fix: `receive_bid` now snapshots the caller's mapping
+# once (`_snapshot`, door.py) and every gate, the signature check and the work item read that
+# snapshot, so this test XPASSes and `strict=True` would fail the run if the marker stayed.
 def test_the_body_that_was_validated_is_the_body_that_is_enqueued() -> None:
     """A correctly signed bid for 89.00 must never be enqueued as 1.00.
 
@@ -217,14 +212,9 @@ def test_the_body_that_was_validated_is_the_body_that_is_enqueued() -> None:
 _IDENTITY_FIELDS = ("auction_id", "store_id", "signer_id", "key_id", "issued_at", "nonce")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-241: _work_item re-reads all six envelope identity fields after the door has decided, "
-        "so the enqueued work item can name an auction, store, signer, key, instant or nonce "
-        "that was never signed; remove this marker with the fix"
-    ),
-)
+# xfail marker removed with the T-241 fix: `_work_item` now takes the door's own snapshot
+# (typed `dict`, not `Mapping`) and its six identity fields and its queued body are two views of
+# that one dict, so this test XPASSes and `strict=True` would fail the run if the marker stayed.
 def test_every_identity_field_on_the_work_item_is_the_one_that_was_signed() -> None:
     """The work item's six identity fields must be the values the signature covered.
 
