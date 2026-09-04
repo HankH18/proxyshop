@@ -76,6 +76,11 @@ REASON_ISSUED_AT_UNPARSEABLE = "issued_at_unparseable"
 REASON_STALE_SUBMISSION = "issued_at_stale"
 REASON_FUTURE_DATED_SUBMISSION = "issued_at_future_dated"
 REASON_AFTER_AUCTION_DEADLINE = "after_auction_deadline"
+#: An `auction_deadline` was supplied and is not an instant. Refused rather than treated as no
+#: deadline at all — the same fail-open shape as T-231's freshness window, found by fuzzing this
+#: door rather than by a ticket. `auction_deadline=None` still means "this auction has no
+#: deadline"; only a value that was GIVEN and cannot be read is refused.
+REASON_AUCTION_DEADLINE_UNPARSEABLE = "auction_deadline_unparseable"
 REASON_STORE_BLACKLISTED = "store_blacklisted"
 REASON_REPLAYED_NONCE = "replayed_nonce"
 REASON_QUEUE_UNAVAILABLE = "verification_queue_unavailable"
@@ -488,6 +493,20 @@ def _receive_bid(
     # 4b. The auction deadline — a different question from freshness. The late submission is
     #     seconds old and still too late; only this check can see that.
     deadline = parse_timestamp(auction_deadline)
+    if auction_deadline is not None and deadline is None:
+        # A deadline that was GIVEN and cannot be read is not "no deadline". `parse_timestamp`
+        # answers `None` for both, so this gate used to skip silently on a typo, a wrong-shaped
+        # column or a hostile object, and an auction that had closed went on accepting
+        # submissions. That is T-231's shape exactly — an unreadable policy input becoming the
+        # permissive one — and the asymmetry with the rest of the door was already visible:
+        # `issued_at` is refused `issued_at_unparseable` for the same fault immediately above,
+        # and `NonceStore.consume` retains a nonce FOREVER on an unreadable retention because
+        # "forgetting early is the failure mode that reopens replay". One value, two gates
+        # reading it as maximally conservative and one reading it as maximally permissive.
+        #
+        # Found by fuzzing this door, not by a ticket; no test in the repo passes an unparseable
+        # deadline, so nothing depended on the old behaviour.
+        return _refuse(REASON_AUCTION_DEADLINE_UNPARSEABLE, payload=submitted)
     if deadline is not None and evaluated_at > deadline:
         return _refuse(REASON_AFTER_AUCTION_DEADLINE, payload=submitted)
 
