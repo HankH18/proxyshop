@@ -33,7 +33,7 @@ import pytest
 import apps.exchange.src.accept as repo_root_spelling
 from apps.exchange.src.accept._spellings import SPELLINGS, bind_spellings
 
-SUBMODULES = ("_spellings", "gate", "offer")
+SUBMODULES = ("_spellings", "gate", "offer", "routes")
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
@@ -43,6 +43,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 IMPORT_ORDERINGS = (
     "import exchange.accept; import apps.exchange.src.accept as p",
     "import apps.exchange.src.accept; import exchange.accept as p",
+    "import exchange.accept.routes; import apps.exchange.src.accept.routes as p",
+    "import apps.exchange.src.accept.routes; import exchange.accept.routes as p",
     "import exchange.main; import apps.exchange.src.accept as p",
     "from apps.exchange.src.orchestration import accept_offer; import exchange.accept as p",
 )

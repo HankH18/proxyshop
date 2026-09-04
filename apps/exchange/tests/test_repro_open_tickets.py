@@ -77,15 +77,6 @@ def _calls_named(tree: ast.AST, name: str) -> list[int]:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-169: nothing in production source calls use_registered_domains, so the deployed "
-        "exchange resolves no platform registry and registered_domain_for falls back to "
-        "bid['store_domain'] — a bidder-controlled field supplying both halves of its own "
-        "host check; remove this marker with the fix"
-    ),
-)
 def test_t169_a_production_call_site_wires_the_platform_seller_registry() -> None:
     """The trusted half of the domain check has no deployment that supplies it.
 
@@ -196,15 +187,6 @@ def test_t169_a_registry_wired_through_either_spelling_binds_the_other() -> None
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-170: main.py mounts routers by globbing <feature>/routes.py and the accept package "
-        "ships none, so the served exchange exposes only ['/auctions', "
-        "'/auctions/{auction_id}'] while the published contract declares "
-        "'/auctions/{auction_id}/accept'; remove this marker with the fix"
-    ),
-)
 def test_t170_the_served_exchange_app_exposes_the_published_accept_path() -> None:
     """The published contract declares an accept endpoint; the app that boots does not serve it.
 
