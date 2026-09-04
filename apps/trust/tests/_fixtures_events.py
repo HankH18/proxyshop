@@ -35,11 +35,23 @@ EVENTS_FIXTURE_PATH = (
     pathlib.Path(__file__).resolve().parent / "data" / "ledger_fixture_stream.json"
 )
 
-#: The role the writer connects as. ``app`` is the append-only principal 0004 grants
-#: SELECT + INSERT on ``ledger`` and UPDATE on ``ledger.chain_head`` -- deliberately not
-#: ``trust_rw`` (which can also DELETE), so the tests exercise the privileges the writer
-#: actually ships with rather than a superset that would hide a missing grant.
-EVENTS_ROLE = "app"
+#: The role the writer connects as, and it must be the role the writer SHIPS as (T-154).
+#:
+#: This used to read ``app``, on the reasoning that ``app`` is the narrower append-only
+#: principal and grading against a superset would hide a missing grant. That reasoning
+#: described a deployment this repo no longer has: ``trust.events.pg.DEFAULT_DSN_ENV``
+#: consults ``PROXYSHOP_PG_DSN_TRUST_RW`` -- ``trust_rw``'s own variable -- ahead of the
+#: generic ``PROXYSHOP_PG_DSN_APP``, and ``compose.yaml`` and ``.env.example`` set it, so
+#: the shipped writer resolves ``trust_rw``.
+#:
+#: The two grant sets are not nested, so ``app`` was never a subset that could stand in for
+#: it: 0004 gives ``app`` SELECT + INSERT on ``ledger`` plus full DML on ``app`` and
+#: ``sealed``, and gives ``trust_rw`` full DML on ``ledger``, read-only on ``app``,
+#: INSERT/UPDATE/DELETE on ``app.seller_blacklist``, and nothing at all in ``sealed``.
+#: Connecting as ``app`` therefore graded a principal the deployment never uses, in both
+#: directions -- it could touch tables the writer cannot, and it lacked the DELETE the
+#: writer has.
+EVENTS_ROLE = "trust_rw"
 
 
 @pytest.fixture(scope="session")
@@ -63,7 +75,7 @@ def events_memory() -> InMemoryEventStore:
 
 @pytest.fixture
 def events_dsn(worker_database: str, worker_index: int) -> str:
-    """The writer's DSN: role ``app`` against **this worker's** database (D38)."""
+    """The writer's DSN: role :data:`EVENTS_ROLE` against **this worker's** database (D38)."""
     return role_dsn(EVENTS_ROLE, worker_index, database=worker_database)
 
 

@@ -1,6 +1,12 @@
 """One module object per submodule, whichever dotted spelling reached it first.
 
-``.pkgroot/trust`` is a tracked symlink to ``apps/trust/src``, so every file in this feature
+Lives at ``apps/trust/src/_shared/_binding.py`` and is imported by the four feature packages
+that need it as ``from .._shared._binding import bind_submodules`` (T-167). It used to exist
+as four byte-identical copies, one per package, with nothing enforcing that they agreed —
+so an edit to one and not the others would have silently reintroduced the very
+module-identity bug below. One home, one body, one place to fix.
+
+``.pkgroot/trust`` is a tracked symlink to ``apps/trust/src``, so every file in a feature
 package is reachable under TWO dotted names:
 
 * ``trust.<feature>.<module>`` — how member packages and ``trust.main``'s router discovery
@@ -14,7 +20,7 @@ scorer under the FIRST spelling while the acceptance suite imports it under the 
 ``except UnmappedClaimType`` written against one would silently stop catching what the other
 raises — the exact failure T-119/T-126 measured and fixed for ``trust.ledger`` and
 ``trust.events``, and the reason ``trust.scoring``, ``trust.reconcile``, ``trust.feedback``
-and ``trust.snapshot`` each carry this file rather than rediscovering it.
+and ``trust.snapshot`` all reach for this module rather than rediscovering it.
 
 This module is that fix, reduced to the shape a stdlib-only feature package needs. Two
 differences from ``apps/trust/src/ledger/__init__.py``, both deliberate:
@@ -23,13 +29,15 @@ differences from ``apps/trust/src/ledger/__init__.py``, both deliberate:
    because ``.store``/``.migrations`` drag in psycopg. Nothing in these packages imports
    anything outside the standard library, so the submodules are simply imported and
    published. Importing one still costs nothing but the stdlib.
-2. **Parameterised, not per-package.** The package passes its own ``__name__``,
-   ``__path__`` and spellings in, so the four feature packages that need this carry one copy
-   of the same logic rather than four divergent hand-edits of the same 150 lines.
+2. **Parameterised, not per-package.** The caller passes its own ``__name__``, ``__path__``
+   and spellings in, which is what lets the four feature packages share ONE body of this
+   logic instead of four divergent hand-edits of the same 150 lines.
 
 The *elected primary* half of T-126 cannot live here — it has to run before the first
-relative import, which is what would load this file — so each package inlines those five
-lines at the top of its own ``__init__.py`` and calls :func:`bind_submodules` at the bottom.
+relative import, and ``from .._shared._binding import ...`` IS a relative import — so each
+package inlines those five lines at the top of its own ``__init__.py``, ABOVE that import,
+and calls :func:`bind_submodules` at the bottom. Hoisting this file did not move the block
+and must not.
 
 What is NOT done, deliberately (same ruling as the ledger): the two PACKAGE objects stay
 distinct. Making them one means replacing ``sys.modules[__name__]`` mid-execution, and the

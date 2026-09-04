@@ -3,15 +3,18 @@
 Owned by T-064 (scope ``apps/trust/src/snapshot/**``). Importable as
 ``apps.trust.src.snapshot`` (repo-root path, how the frozen acceptance suite reaches it) and
 as ``trust.snapshot`` (via ``.pkgroot/trust``); the block at the bottom makes both spellings
-resolve to the same objects — see :mod:`._binding`.
+resolve to the same objects — see :mod:`trust._shared._binding`.
 
-============================  ==========================================================
-:func:`build_snapshot`        stores -> ``{version, score_version, as_of, stores}``.
-:func:`store_entry`           one store's entry, if you already have the store.
-:func:`clean_episodes`        the ``low_data`` count, and how it is derived.
+================================  ======================================================
+:func:`build_snapshot`            stores -> ``{version, score_version, dimensions, as_of,
+                                  stores, delistings}``.
+:func:`store_entry`               one store's entry, if you already have the store.
+:func:`clean_episodes`            the ``low_data`` count, and how it is derived.
+:mod:`.delisting`                 S2's second half: the ``blacklisted`` /
+                                  ``blacklist_expired`` ledger events a snapshot implies.
 :data:`EPISODE_FLOOR_DIMENSIONS`  the dimensions that count is derived over, and why.
-:data:`SNAPSHOT_VERSION`      what the exchange client caches on and refreshes against.
-============================  ==========================================================
+:data:`SNAPSHOT_VERSION`          what the exchange client caches on and refreshes against.
+================================  ======================================================
 
 Every entry carries all SIX dimensions with ``alpha``/``beta``/``decayed_at``/``coverage``,
 plus ``blacklisted`` (resolved through the identity-bound, fail-closed blacklist) and
@@ -38,7 +41,7 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 
 # E402 below is the point of the block above: the sequencing has to run BEFORE the first
 # relative import, because it is the eager imports that build the second copy.
-from ._binding import bind_submodules as _bind_submodules  # noqa: E402
+from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .builder import (  # noqa: E402
     EPISODE_FLOOR_DIMENSIONS,
     SNAPSHOT_VERSION,

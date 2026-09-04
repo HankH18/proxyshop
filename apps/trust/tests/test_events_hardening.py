@@ -726,9 +726,12 @@ def test_the_writer_appends_to_the_real_ledger_as_trust_rw(
     ``AFTER INSERT`` trigger that maintains ``ledger.chain_head`` -- still works under it.
     This appends through the store's public entry point and reads the chain back.
 
-    Every other database-backed test in this package connects as ``app``
-    (``_fixtures_events.EVENTS_ROLE``), so without this one nothing would exercise the
-    role the deployment actually ships.
+    This test predates T-154, when every other database-backed test in this package
+    connected as ``app`` and this was the only one exercising the shipped role.
+    ``_fixtures_events.EVENTS_ROLE`` is now ``trust_rw`` too, so the rest of the package
+    grades the same principal; what remains distinctive here is that this test resolves the
+    role from the ENVIRONMENT through ``PostgresEventStore()``'s own ``DEFAULT_DSN_ENV``
+    walk rather than being handed a DSN by a fixture.
     """
     from proxyshop_support.postgres import ROLES, role_dsn
 

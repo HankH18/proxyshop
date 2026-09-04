@@ -3,7 +3,7 @@
 Owned by T-061 (scope ``apps/trust/src/reconcile/**``). Importable as
 ``apps.trust.src.reconcile`` (repo-root path, how the frozen acceptance suite reaches it) and
 as ``trust.reconcile`` (via ``.pkgroot/trust``, how member packages reach it); the block at
-the bottom makes both spellings resolve to the same objects — see :mod:`._binding`.
+the bottom makes both spellings resolve to the same objects — see :mod:`trust._shared._binding`.
 
 ===========================  ===========================================================
 :func:`reconcile`            a checkout event stream -> one ``reconciled`` event/order.
@@ -46,7 +46,7 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 
 # E402 below is the point of the block above: the sequencing has to run BEFORE the first
 # relative import, because it is the eager imports that build the second copy.
-from ._binding import bind_submodules as _bind_submodules  # noqa: E402
+from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .engine import (  # noqa: E402
     ACCEPTED_KIND,
     DISCOUNT_TOLERANCE,

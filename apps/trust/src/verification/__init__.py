@@ -14,11 +14,23 @@ does a verification outcome mean here", so that answer is written down once.
 observation ``trust.scoring.score`` consumes, routing it through the human-approved
 ``claim_type -> dimension`` table and raising loudly on a claim type nobody approved.
 
-Imports are LAZY (PEP 562) and that is load-bearing, not tidiness. ``apps/trust/Dockerfile``
-copies ``packages/contracts``, ``proxyshop_support`` and ``apps/trust/src`` — and NOT
-``packages/verification``. An eager ``import claim_verification`` here would make the whole
-trust service unimportable in its own container, and it would fail at startup rather than at
-the first call, so every test in this repo would pass while the deploy died.
+Imports are LAZY (PEP 562), and the reason has CHANGED — read this before deleting it.
+
+It used to be that ``apps/trust/Dockerfile`` did not copy ``packages/verification`` at all, so
+an eager ``import claim_verification`` here would have made the whole trust service
+unimportable in its own container. T-193 fixed the image: the Dockerfile now copies
+``packages/verification/{__init__.py,src/}`` and links ``.pkgroot/claim_verification``, and
+the trust image resolves ``verify`` — pinned by
+``apps/trust/tests/test_repro_open_tickets.py::test_the_trust_image_copy_set_can_resolve_the_claim_verifier``
+against a container-shaped tree.
+
+What laziness still buys, and why it stays: this seam is imported by every consumer of
+``trust.verification``, including ones with no verifier on their path at all (a member that
+holds only ``.pkgroot`` for its own package, a probe, a partial deploy). Eager here would
+turn "cannot verify" into "cannot import trust", which is a far worse failure and one that
+lands at startup rather than at the call that actually needed the verifier. The cost is that a
+missing verifier is invisible until first use, which is precisely how T-193 stayed open — so
+the image's COPY set has a gate of its own rather than relying on this module to notice.
 """
 
 from __future__ import annotations
@@ -51,9 +63,11 @@ def __getattr__(name: str) -> Any:
         return getattr(module, _LAZY[name])
     raise ModuleNotFoundError(
         "the claim verifier (packages/verification, T-065) is not importable from this "
-        "deployment. apps/trust/Dockerfile does not copy packages/, so a trust image that "
-        "needs to verify claims in-process has to add it — this module deliberately does not "
-        "carry a second comparator."
+        "deployment, under either spelling (claim_verification, packages.verification). "
+        "apps/trust/Dockerfile DOES ship it — COPY packages/verification/{__init__.py,src/} "
+        "plus `ln -s ../packages/verification/src /app/.pkgroot/claim_verification` — so this "
+        "is some other path: check that .pkgroot is on sys.path here. This module "
+        "deliberately does not carry a second comparator."
     )
 
 
