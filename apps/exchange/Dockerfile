@@ -59,13 +59,47 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
 COPY proxyshop_support/             /app/proxyshop_support/
 COPY apps/exchange/src/          /app/apps/exchange/src/
+# T-299. `ingest.graph` and `ingest.embeddings` are a SHARED LIBRARY that happens to live at
+# a service's path, and candidate retrieval is the exchange's own responsibility (DESIGN.md:33),
+# not a call across a service boundary: DESIGN.md:23-24's architecture graph has ING->NEO and
+# EXC->NEO as two independent edges with no exchange<->ingest edge, DESIGN.md:38 gives ingest
+# writes only, ingest.openapi.json is a single write route, and `.importlinter` — the file whose
+# entire job is forbidding layering violations — forbids exchange->envelopes and says nothing
+# about exchange->ingest. So the repair is to ship the library, not to delete the imports.
+#
+# WITHOUT these lines eleven of this image's own shipped modules raise
+# `ModuleNotFoundError: No module named 'ingest'` — `exchange.ranking` and all four of its
+# modules, and every module of `exchange.retrieval` — while `exchange.main` imports perfectly.
+# It imports perfectly because `main.py:27-30` mounts routers by globbing `*/routes.py`, and
+# neither `retrieval/` nor `ranking/` has one, so a smoke test, a /healthz and any entrypoint
+# probe pass this image forever. Among the dead modules is `retrieval/fit.py`, which holds the
+# repo's ONLY emitter of the `bid_placed` ledger event (FIT_LEDGER_KIND at :61, emitted at
+# :311-316) — a kind whose count is load-bearing in two frozen metrics.
+#
+# Only `graph/` and `embeddings/` are shipped, because that is the measured closure of what
+# exchange actually imports (`retrieval/criteria.py:45-46`, `service.py:33-34`,
+# `sources.py:29-31` name `ingest.graph`, `ingest.graph.model`, `ingest.graph.query` and
+# `ingest.embeddings` and nothing else). `adapters/`, `er/`, `extraction/`, `scheduler/` and
+# `main.py` — the crawler and the ingest service itself — stay out.
+#
+# ZERO new pip requirements, measured rather than assumed, and that is why this is a COPY and
+# not a dependency change: every module in the shipped subset is stdlib-only at module scope.
+# The two heavy imports in it are both deferred — `graph/reembed.py:386` imports the neo4j
+# driver INSIDE `graph_driver()`, and `embeddings/local_bge.py:93` imports
+# sentence_transformers (hence torch) INSIDE `_load()`. The prologue's "numpy, scipy, lxml,
+# anthropic and mcp are in no deployable's closure and are deliberately absent" stays true.
+# `src/__init__.py` is empty and is copied anyway: without it `ingest` is not a package.
+COPY services/ingest/src/__init__.py /app/services/ingest/src/
+COPY services/ingest/src/graph/      /app/services/ingest/src/graph/
+COPY services/ingest/src/embeddings/ /app/services/ingest/src/embeddings/
 
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
 # The repo tracks these as git symlinks; the image RECREATES them instead of copying them
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
- && ln -s ../apps/exchange/src /app/.pkgroot/exchange
+ && ln -s ../apps/exchange/src /app/.pkgroot/exchange \
+ && ln -s ../services/ingest/src /app/.pkgroot/ingest
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
 # the process to be able to.

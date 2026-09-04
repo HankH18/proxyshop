@@ -1244,14 +1244,6 @@ def test_the_repo_has_images_and_first_party_packages_to_grade() -> None:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-301: three of the five images import a first-party package their Dockerfile does "
-        "not ship — merchant/exchange (T-298/T-299, module scope, fatal) and buyer (T-300, "
-        "lazy and swallowed); remove this marker when every COPY set covers its own imports"
-    ),
-)
 def test_t301_every_image_copy_set_covers_every_first_party_import_it_ships() -> None:
     """Check (a) over every image at once: the COPY set must satisfy the shipped tree.
 
@@ -1272,16 +1264,6 @@ def test_t301_every_image_copy_set_covers_every_first_party_import_it_ships() ->
     assert failures == [], "\n\n".join(failures)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-301: the merchant and exchange images cannot import 7 and 11 of their own shipped "
-        "modules (T-298/T-299), and ALL FOUR service images ship "
-        "proxyshop_support/fixture_loader.py, which does `import pytest` at column 0 while "
-        "no image's pip layer installs pytest; remove this marker when every shipped module "
-        "imports from the artifact that ships it"
-    ),
-)
 def test_t301_every_shipped_module_imports_inside_the_container_shaped_tree() -> None:
     """Check (b) over every image at once: what ships must import from what ships.
 
@@ -1304,15 +1286,6 @@ def test_t301_every_shipped_module_imports_inside_the_container_shaped_tree() ->
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-298: apps/merchant/Dockerfile does not COPY the exchange package while "
-        "apps/merchant/svc/src/codes/offer.py:36 imports exchange.checkout.discounts at "
-        "module scope, so uvicorn merchant_svc.main:app raises ModuleNotFoundError and the "
-        "container cannot start; remove this marker with the fix"
-    ),
-)
 def test_t298_the_merchant_image_can_import_its_own_entrypoint() -> None:
     """The merchant image's ``CMD`` module must import from the merchant image.
 
@@ -1356,15 +1329,6 @@ def test_t298_the_merchant_image_can_import_its_own_entrypoint() -> None:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-299: apps/exchange/Dockerfile does not COPY the ingest package, so 11 of the "
-        "image's shipped modules — exchange.ranking and all of exchange.retrieval — raise "
-        "ModuleNotFoundError while exchange.main imports fine and every entry-point check "
-        "passes; remove this marker when the shipped tree's imports resolve"
-    ),
-)
 def test_t299_every_module_the_exchange_image_ships_can_be_imported_from_it() -> None:
     """The exchange image ships modules it cannot import, and its entrypoint hides it.
 
@@ -1396,15 +1360,6 @@ def test_t299_every_module_the_exchange_image_ships_can_be_imported_from_it() ->
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-300: packages/llm is absent from the buyer image's COPY set while "
-        "apps/buyer/svc/src/intent/routes.py:99 imports it inside a function under "
-        "try/except ImportError, so the clarification loop runs without a model forever and "
-        "logs a warning instead of failing; remove this marker with the fix"
-    ),
-)
 def test_t300_the_buyer_image_ships_the_llm_package_its_intent_router_imports() -> None:
     """The case that proves the static check is not redundant with the runtime one.
 

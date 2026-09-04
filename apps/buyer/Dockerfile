@@ -63,13 +63,37 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
 COPY proxyshop_support/             /app/proxyshop_support/
 COPY apps/buyer/svc/src/         /app/apps/buyer/svc/src/
+# T-300. `apps/buyer/svc/src/intent/routes.py:99` is `from llm import build_llm`, INDENTED
+# inside `buyer_llm()` and wrapped in `except ImportError` that logs a warning and returns
+# None. Without the two lines below that except branch is what the DEPLOYED buyer runs, on
+# every /buyer/intent/clarify request, for the life of the image: no container crashes, no
+# healthcheck fails, every shipped module still imports, and the clarification loop silently
+# falls back to its own hard-coded wording and its own extraction. The only evidence is one
+# WARNING line, in a service that installs no logging handler at all (T-308). The `# pragma:
+# no cover - only with a broken sys.path` on that except branch was describing this image.
+#
+# This costs NOTHING in the pip layer, which is why it is a COPY and not a dependency
+# change. Measured, not assumed: the module-scope closure of the whole `packages/llm` tree
+# is stdlib only — `import anthropic` lives at `packages/llm/src/client.py:168`, INSIDE
+# `AnthropicLLM._ensure_client()`, and `config.py:65` makes the offline double the default
+# provider, so `build_llm("buyer")` returns a `DeterministicLLM` with no SDK, no key and no
+# socket. The prologue's "anthropic and mcp are deliberately absent" stays true.
+#
+# `fixtures/` comes along for the same reason `packages/contracts/schemas/` does above:
+# `packages/llm/src/recordings.py:45` resolves its recordings as
+# `Path(__file__).resolve().parents[1] / "fixtures" / "recorded"`, so the repo shape has to
+# be reproduced or that lookup lands on a directory the image does not have. Nothing on the
+# buyer's own path reads it today — which is exactly what made T-304 latent for so long.
+COPY packages/llm/src/              /app/packages/llm/src/
+COPY packages/llm/fixtures/         /app/packages/llm/fixtures/
 
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
 # The repo tracks these as git symlinks; the image RECREATES them instead of copying them
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
- && ln -s ../apps/buyer/svc/src /app/.pkgroot/buyer_svc
+ && ln -s ../apps/buyer/svc/src /app/.pkgroot/buyer_svc \
+ && ln -s ../packages/llm/src /app/.pkgroot/llm
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
 # the process to be able to.
