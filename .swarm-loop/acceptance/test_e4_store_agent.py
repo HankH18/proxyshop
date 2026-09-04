@@ -1126,6 +1126,39 @@ def _external_payload(
     }
 
 
+def _trust_snapshot_for(payload) -> dict:
+    """The eligibility snapshot a real caller holds, keyed on THIS payload's own store.
+
+    HARNESS AMENDMENT 2 (user-approved). The door's `trust_snapshot` is the caller's
+    eligibility read, and the shared boundary looks the submission's `store_id` up in it.
+    Every call below used to omit the argument entirely, which quietly made each positive
+    control an assertion about the door's behaviour when NOBODY supplied an eligibility read
+    — the one input a caller is most likely to forget. That is the wrong thing for a control
+    to pin, and it is T-233: omission was strictly more permissive than an explicit empty
+    snapshot, so the suite mandated the fail-open it was supposed to be indifferent to.
+
+    Supplying the snapshot the caller actually holds moves these controls onto the path a
+    real caller takes and off the defaulting path, WITHOUT touching a single assertion: the
+    same bids must still be admitted for the same reasons, and every refusal below is still
+    driven by the signature, the envelope, the nonce, the deadline or the blacklist — never
+    by a missing trust row. The store id is read off each payload rather than hardcoded,
+    because two of these bids are submitted by `store-external-2` and a row filed under the
+    wrong key is invisible to the boundary.
+    """
+    try:
+        store_id = payload.get("store_id")
+    except Exception:  # noqa: BLE001 - `_present` grades NON-MAPPING and hostile payloads too,
+        # and this helper runs BEFORE its try/except. A bare `payload.get` here would turn the
+        # door's `malformed_submission` refusal into an AttributeError inside the harness, so
+        # the suite could no longer measure the door on the input class it exists to grade.
+        store_id = None
+    if not isinstance(store_id, str) or not store_id:
+        # No store id to key a row on, so the caller genuinely holds no row for this bid. An
+        # empty snapshot says exactly that and lets the boundary refuse the unavailable read.
+        return {}
+    return {store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}}
+
+
 def _present(receive_bid, payload, signature, *, nonce_store, keyring=None, now=NOW,
              auction_deadline=AUCTION_DEADLINE, **extra):
     """Offer one bid at the door. Returns (accepted, plain_result, queue)."""
@@ -1135,6 +1168,7 @@ def _present(receive_bid, payload, signature, *, nonce_store, keyring=None, now=
         nonce_store=nonce_store,
         now=now,
         auction_deadline=auction_deadline,
+        trust_snapshot=_trust_snapshot_for(payload),
     )
     kwargs.update(extra)
     ring = _keyring() if keyring is None else keyring
@@ -1174,6 +1208,7 @@ def test_signed_external_bid_is_accepted_and_enqueued_for_verification():
         nonce_store=NonceStore(),
         now=NOW,
         auction_deadline=AUCTION_DEADLINE,
+        trust_snapshot=_trust_snapshot_for(payload),
     )
     plain = _plain(result)
 
