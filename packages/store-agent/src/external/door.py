@@ -264,11 +264,32 @@ def receive_bid(
     except Exception:  # noqa: BLE001 - CanonicalisationError, or anything unsignable at all
         return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=payload)
 
+    # 2b. The three envelope ids this function goes on to ACT on — the pair that selects the
+    #     signing key, and the pair that spends the nonce — read ONCE here and proven to be
+    #     strings before either use.
+    #
+    #     For an ordinary mapping this cannot fail, and gate 2 is why: `canonical_signing_bytes`
+    #     refuses unless `missing_signing_fields` found every one of D52's five envelope fields
+    #     present, `isinstance(..., str)` and non-blank, and that refusal is the
+    #     REASON_ENVELOPE_UNCANONICALIZABLE returned immediately above. This check is not
+    #     written for an ordinary mapping. `receive_bid` accepts ANY `Mapping`, and gate 2 read
+    #     these fields through `canonical_signing_bytes` — so without this, the values that
+    #     reach `keyring_secret` and `NonceStore.consume` are a SECOND, separately-unvalidated
+    #     read of a caller-supplied object, and a `get` that does not answer the same way twice
+    #     makes the two reads disagree. That matters most at the nonce: `NonceStore._key`
+    #     stringifies both halves so a pair that read as `None` on the second read keys the
+    #     replay memory at `("None", "None")` — one slot shared by every submission that plays
+    #     the same trick, so the first burns it and the rest are refused as replays, and if the
+    #     ordering ever changed it would be one slot admitting all of them. Fail closed, once,
+    #     on the same reason gate 2 would have given, rather than trusting a re-read.
     signer_id = payload.get("signer_id")
+    key_id = payload.get("key_id")
     nonce = payload.get("nonce")
+    if not isinstance(signer_id, str) or not isinstance(key_id, str) or not isinstance(nonce, str):
+        return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=payload)
 
     # 3. Key SELECTION, never key trial.
-    secret = keyring_secret(keyring, signer_id, payload.get("key_id"))
+    secret = keyring_secret(keyring, signer_id, key_id)
     if secret is None:
         return _refuse(REASON_UNKNOWN_SIGNING_KEY, payload=payload)
     if not verify_signature(payload, signature, secret):

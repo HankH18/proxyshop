@@ -210,11 +210,16 @@ class _ClusterScratch:
         scratch = cls(cluster_id, rungs)
         if learned is None:
             return scratch
-        for index, tally in enumerate(learned.depths[:rungs]):
-            scratch.wins[index] = tally.wins
-            scratch.losses[index] = tally.losses
-        for tally in learned.commitments:
-            scratch.commitments[tally.label] = [tally.wins, tally.observations]
+        for index, rung in enumerate(learned.depths[:rungs]):
+            scratch.wins[index] = rung.wins
+            scratch.losses[index] = rung.losses
+        # A DIFFERENT name, deliberately: `learned.depths` yields `DepthTally` (keyed by a
+        # numeric `depth`) and `learned.commitments` yields `Tally` (keyed by a string `label`).
+        # Reusing one loop variable for both bound the name to the first record type and made
+        # the second loop's `.label` unreadable to the type checker — the two are not
+        # interchangeable and the code should not spell them as though they were.
+        for commitment in learned.commitments:
+            scratch.commitments[commitment.label] = [commitment.wins, commitment.observations]
         scratch.observations = learned.observations
         scratch.won_count = learned.wins
         return scratch

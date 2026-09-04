@@ -519,3 +519,49 @@ def test_a_row_stating_no_usable_depth_is_dropped_not_tallied_at_zero(
     # ...but a genuine zero-depth outcome IS evidence and must be tallied.
     real_zero = [{"cluster_id": learning_cluster, "won": True, "discount_depth": 0.0}]
     assert _canon(update(state, real_zero)) != base
+
+
+def test_a_second_update_carries_the_existing_commitment_tallies_forward(
+    learning_prior_records, learning_outcomes, learning_cluster
+):
+    """Folding twice must ACCUMULATE commitment evidence, never restart it.
+
+    A single `update` cannot show this. The scratch accumulator it builds starts empty, so the
+    branch that re-reads the commitment tallies already on the state — the `Tally` rows, keyed
+    by a string `label`, as opposed to the `DepthTally` rows keyed by a numeric `depth` — is
+    only reached on the SECOND fold. Nothing exercised it, and the two record types are easy to
+    confuse precisely because both carry `wins`: a carry-forward that read the wrong one would
+    lose every commitment the store had already learned and no existing test would notice.
+
+    Two folds of the same outcomes must therefore give exactly twice the evidence, label for
+    label, and must lose no label at all.
+    """
+    from store_agent.learning import build_network_prior, initial_state, update
+
+    prior = build_network_prior(learning_prior_records)
+    once = update(initial_state(prior), learning_outcomes(0.20, 0.00))
+    twice = update(once, learning_outcomes(0.20, 0.00))
+
+    first_cluster = once.cluster(learning_cluster)
+    second_cluster = twice.cluster(learning_cluster)
+    assert first_cluster is not None and second_cluster is not None, (
+        "the fixture's outcomes all name one cluster; it must be present after each fold"
+    )
+
+    first = {tally.label: tally for tally in first_cluster.commitments}
+    second = {tally.label: tally for tally in second_cluster.commitments}
+
+    assert first, "the fixture's outcomes each carry a commitment, so the first fold must tally one"
+    assert set(second) == set(first), (
+        f"a second fold dropped or invented a commitment label: {sorted(first)} -> {sorted(second)}"
+    )
+    for label, tally in first.items():
+        assert second[label].observations == 2 * tally.observations, (
+            f"{label}: the second fold restarted the tally instead of carrying it forward "
+            f"({tally.observations} -> {second[label].observations}, expected "
+            f"{2 * tally.observations})"
+        )
+        assert second[label].wins == 2 * tally.wins, (
+            f"{label}: wins were not carried forward ({tally.wins} -> {second[label].wins}, "
+            f"expected {2 * tally.wins})"
+        )

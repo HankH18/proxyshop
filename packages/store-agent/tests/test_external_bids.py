@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Mapping
 
 import pytest
 
@@ -509,3 +510,134 @@ def test_a_blacklist_the_door_cannot_read_blocks_everything_rather_than_nobody()
             f"{case}: an unreadable blacklist must deny, never admit"
         )
         assert queue.count == 0, f"{case}: nothing may be enqueued"
+
+
+class _EnvelopeLiar(Mapping):
+    """A `Mapping` that tells the truth about `field_name` except on read number `lie_on`.
+
+    `receive_bid` accepts ANY `Mapping` — that is its signature and its docstring — and it does
+    not snapshot the one it is given. It reads the signing envelope out of that mapping several
+    separate times: `contracts.signing.missing_signing_fields` reads it to decide the envelope
+    is complete, `canonical_signing_bytes` reads it to build the bytes the signature covers, the
+    door reads it to decide which key to select and which nonce to spend, `verify_signature`
+    re-canonicalizes and reads it again, and `_work_item` reads it once more on the way to the
+    queue. Every one of those is a separate `payload.get` call.
+
+    A plain `dict` answers all of them identically and so can never show the difference between
+    "the value that was verified" and "the value that was acted on". This can. Lying on exactly
+    ONE read is the sharp instrument: lying on all of them from some point onward is caught by
+    `verify_signature`, which re-canonicalizes and no longer matches, so it proves much less
+    than it looks like it does.
+    """
+
+    def __init__(self, base, field_name, lie_on, lie=None):
+        self._base = dict(base)
+        self._field = field_name
+        self._lie_on = lie_on
+        self._lie = lie
+        self.reads = 0
+
+    def __getitem__(self, key):
+        return self._base[key]
+
+    def __iter__(self):
+        return iter(self._base)
+
+    def __len__(self):
+        return len(self._base)
+
+    def get(self, key, default=None):
+        if key == self._field:
+            self.reads += 1
+            if self.reads == self._lie_on:
+                return self._lie
+        return self._base.get(key, default)
+
+
+def test_one_signed_submission_cannot_be_admitted_twice_by_lying_on_one_envelope_read() -> None:
+    """Whatever mapping it arrives in, one set of signed bytes gets in at most ONCE.
+
+    This is the replay guarantee stated without reference to any gate, and it is the one that
+    broke. The door used to bind its `nonce` from a re-read of the payload rather than from the
+    reading it had just canonicalized and was about to verify. A mapping that answers truthfully
+    everywhere except on that single read therefore produced a submission that was correctly
+    signed, correctly canonicalized, correctly verified — and then spent the WRONG slot in the
+    replay memory, because `NonceStore._key` stringifies both halves, so a `None` spends
+    `("store-external-1", "None")` and leaves the real nonce untouched. Measured against the
+    pre-fix door: the lying mapping was admitted AND the identical signed bytes, resubmitted
+    afterwards as an ordinary `dict`, were admitted a second time. Two admissions, one nonce.
+
+    The sweep runs over every read position rather than the one that happened to be the door's,
+    so the test keeps grading the property if the number or order of the reads ever changes.
+    A position at which the mapping never lies is honest by construction: it is admitted once
+    and its replay is refused, which is the same assertion.
+    """
+    from store_agent.external import NonceStore, sign_bid
+
+    payload = _payload()
+    signature = sign_bid(payload, KEY)
+
+    for lie_on in range(1, 9):
+        store = NonceStore()
+        queue = _Queue()
+        liar = _EnvelopeLiar(payload, "nonce", lie_on=lie_on)
+
+        first, _q, error = _receive(liar, signature, queue=queue, nonce_store=store)
+        assert error is None, f"lie_on={lie_on}: the door must refuse, never raise: {error!r}"
+
+        second, _q2, error2 = _receive(payload, signature, queue=queue, nonce_store=store)
+        assert error2 is None, f"lie_on={lie_on}: the honest resubmission must not raise"
+
+        admitted = [r.accepted for r in (first, second)].count(True)
+        assert admitted <= 1, (
+            f"lie_on={lie_on}: the same signed bytes were admitted {admitted} times. A payload "
+            f"that lies on one envelope read must not be able to spend a different slot in the "
+            f"replay memory than the one it signed"
+        )
+        assert queue.count == admitted, (
+            f"lie_on={lie_on}: {queue.count} enqueue(s) for {admitted} admission(s) — the queue "
+            f"and the verdict must agree"
+        )
+        assert not store.seen(SIGNER, "None"), (
+            f"lie_on={lie_on}: the replay memory was keyed off a stringified None. That slot is "
+            f"not the nonce that was signed, and it is the same slot for every payload that "
+            f"plays this trick"
+        )
+
+
+def test_a_payload_that_lies_about_its_nonce_is_refused_before_the_replay_memory() -> None:
+    """The direct reading of the same guard: the lie is caught, and it costs the honest nonce nothing.
+
+    Read order for `nonce` is measured rather than assumed — #1 `missing_signing_fields`,
+    #2 `canonical_signing_bytes`, #3 the door's own envelope guard — so read #3 is the one the
+    door acts on. Refusing there is the fail-closed direction: the submission never reaches the
+    queue, and the nonce it named is left unspent, so the honest submitter can still use it.
+    """
+    from store_agent.external import NonceStore, sign_bid
+
+    store = NonceStore()
+    payload = _payload()
+    signature = sign_bid(payload, KEY)
+
+    result, queue, error = _receive(
+        _EnvelopeLiar(payload, "nonce", lie_on=3), signature, nonce_store=store
+    )
+
+    assert error is None, f"the door must refuse hostile input rather than raise: {error!r}"
+    assert result.accepted is False, (
+        f"a payload that lies about the nonce the door acts on must not be admitted: {result!r}"
+    )
+    assert queue.count == 0, f"nothing may be enqueued, saw {queue.count} call(s)"
+    assert not store.seen(SIGNER, payload["nonce"]), (
+        "a refused submission must not spend the nonce it named"
+    )
+    assert not store.seen(SIGNER, "None"), (
+        "the replay memory must never be keyed off a stringified None"
+    )
+
+    honest, honest_queue, _err = _receive(payload, signature, nonce_store=store)
+    assert honest.accepted is True, (
+        "refusing the liar must cost the honest submitter nothing: the nonce it named was never "
+        "spent, so the genuine submission of the same bytes must still be admitted"
+    )
+    assert honest_queue.count == 1
