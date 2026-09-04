@@ -653,3 +653,669 @@ def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> N
         + "\n  ".join(escapes[:20])
         + (f"\n  ... and {len(escapes) - 20} more" if len(escapes) > 20 else "")
     )
+
+
+# =============================================================================================
+# T-279 — the total catch-all is the ONLY thing holding "never raises" up
+#
+# Function-local imports again: this file is append-only by lane contract and `E402` forbids a
+# second module-level import block.
+# =============================================================================================
+
+#: Sixteen words with sixteen distinct first letters. The head word of every drawn id is chosen
+#: by INDEX rather than by draw, so no two bases can share a literal prefix — the exact hole
+#: that let a `store_id`-prefix sabotage go undetected in this package's sibling gate. The rest
+#: of each id is drawn, so the ids are varied as well as distinct.
+T279_WORDS = (
+    "alpaca",
+    "birch",
+    "cinder",
+    "dune",
+    "ember",
+    "fern",
+    "glacier",
+    "harbor",
+    "indigo",
+    "juniper",
+    "kelp",
+    "lumen",
+    "meadow",
+    "nimbus",
+    "opal",
+    "quartz",
+)
+T279_SEPARATORS = ("-", "_", ".", "")
+T279_PINNED_SEED = 20260904
+T279_BASE_COUNT = 12
+T279_FRESHNESS_WINDOW_SECONDS = 300.0
+#: 30 hazards x 2 distinct base bids each.
+T279_CASE_COUNT = 60
+
+#: The reason the outer wrapper returns when something escaped `_receive_bid`. It is a REAL
+#: refusal — the door failing closed is correct — but it is also the door saying "I do not know
+#: what went wrong", and it must not be the answer to an input the door has a name for.
+T279_FAILED_CLOSED = "door_failed_closed"
+
+
+def _t279_token(rng: Any, index: int, offset: int) -> str:
+    head = T279_WORDS[(index + offset) % len(T279_WORDS)]
+    sep = rng.choice(T279_SEPARATORS)
+    tail = rng.choice(T279_WORDS)
+    return f"{head}{sep}{tail}{sep}{rng.randrange(1000, 9999)}"
+
+
+def _t279_sink(item: Any) -> None:  # a queue that takes everything and says nothing
+    return None
+
+
+def _t279_bases() -> list[dict[str, Any]]:
+    """Twelve fully valid, correctly signed submissions this door ACCEPTS.
+
+    Every hostile case below is one of these with exactly ONE caller-supplied argument
+    corrupted, which is the only way the sweep can attribute a refusal to the corruption. That
+    makes the acceptance of these twelve the load-bearing precondition of the whole gate, and
+    the arming test asserts it rather than assuming it.
+
+    This is the lesson of ``test_repro_external_door.py`` restated: its generator drew
+    ``expires_at`` in 2027-2999 against ``now=2026``, so no draw ever resembled a realistic bid,
+    two live sabotages went undetected and a 4,959-test differential came back an EMPTY DIFF.
+    So the shapes here are drawn, not constant, and drawn NEAR the instant they are judged
+    against: half the bases expire within a day of ``now``, by index rather than by luck.
+
+    Half the bases are drawn from a pinned seed (reproducible) and half from ``SystemRandom``
+    (different every run, so the sweep cannot be fitted to a constant table).
+    """
+    import random
+    from datetime import UTC, datetime, timedelta
+
+    from store_agent.external import sign_bid
+
+    pinned = random.Random(T279_PINNED_SEED)
+    system = random.SystemRandom()
+    now = datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC)
+    bases: list[dict[str, Any]] = []
+    for index in range(T279_BASE_COUNT):
+        rng: Any = pinned if index % 2 == 0 else system
+        store_id = _t279_token(rng, index, 0)
+        signer_id = _t279_token(rng, index, 5)
+        key_id = _t279_token(rng, index, 9)
+        secret = _t279_token(rng, index, 13)
+        nonce = _t279_token(rng, index, 3)
+        # Near-term for even indexes, far for odd — by index, so "half the draws look like a
+        # real bid" is true by construction and not a coin flip the assertion has to tolerate.
+        if index % 2 == 0:
+            expires_at = now + timedelta(minutes=rng.randrange(1, 1440))
+        else:
+            expires_at = now + timedelta(minutes=rng.randrange(1440, 1440 * 365 * 5))
+        issued_at = now + timedelta(seconds=rng.randrange(-120, 121))
+        deadline = now + timedelta(seconds=rng.randrange(60, 3600))
+        unit_price = rng.randrange(500, 50000) / 100.0
+        payload = {
+            "auction_id": _t279_token(rng, index, 7),
+            "store_id": store_id,
+            "offer": {
+                "product_ref": _t279_token(rng, index, 11),
+                "unit_price": unit_price,
+                "total_price": round(unit_price * rng.randrange(1, 4), 2),
+                "discount": None,
+                "commitments": [],
+                "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            },
+            "claims": [],
+            "message": f"{rng.choice(T279_WORDS)} {rng.choice(T279_WORDS)}",
+            "agent_version": f"ext-{rng.randrange(1, 9)}.{rng.randrange(0, 9)}.0",
+            "schema_version": "1",
+            "signer_id": signer_id,
+            "key_id": key_id,
+            "issued_at": issued_at.isoformat().replace("+00:00", "Z"),
+            "nonce": nonce,
+        }
+        bases.append(
+            {
+                "index": index,
+                "stream": "pinned" if index % 2 == 0 else "drawn",
+                "payload": payload,
+                "signature": sign_bid(payload, secret),
+                "keyring": {signer_id: {key_id: secret}},
+                "store_id": store_id,
+                "signer_id": signer_id,
+                "key_id": key_id,
+                "nonce": nonce,
+                "now": now.isoformat().replace("+00:00", "Z"),
+                "auction_deadline": deadline.isoformat().replace("+00:00", "Z"),
+                "expires_at": payload["offer"]["expires_at"],
+                "issued_at": payload["issued_at"],
+                "trust_snapshot": {
+                    store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}
+                },
+            }
+        )
+    return bases
+
+
+def _t279_invoke(entry: Any, base: dict[str, Any], overrides: dict[str, Any]) -> Any:
+    """Call ``entry`` (``receive_bid`` or ``_receive_bid``) on ``base`` with one field changed.
+
+    A fresh ``NonceStore`` per call, deliberately: an accepted submission consumes its nonce,
+    and a shared store would make the second call on the same base a ``replayed_nonce`` refusal
+    — a green-looking refusal that says nothing about the hazard under test.
+    """
+    from store_agent.external import NonceStore
+
+    kwargs: dict[str, Any] = {
+        "queue": _t279_sink,
+        "nonce_store": NonceStore(),
+        "now": base["now"],
+        "auction_deadline": base["auction_deadline"],
+        "blacklist": None,
+        "freshness_window_seconds": T279_FRESHNESS_WINDOW_SECONDS,
+        "trust_snapshot": base["trust_snapshot"],
+        "list_prices": None,
+        "max_discount_pct": None,
+    }
+    positional = ("payload", "signature", "keyring")
+    kwargs.update({name: value for name, value in overrides.items() if name not in positional})
+    return entry(
+        overrides.get("payload", base["payload"]),
+        overrides.get("signature", base["signature"]),
+        overrides.get("keyring", base["keyring"]),
+        **kwargs,
+    )
+
+
+def _t279_heads(reasons: Any) -> set[str]:
+    """The reason TOKENS, with their ``:<detail>`` suffixes trimmed.
+
+    ``trust_snapshot_unavailable`` alone is emitted in three different spellings — bare, with a
+    plain ``:<store_id>``, and with a ``:{store_id!r}`` — and the door's own
+    ``store_blacklisted`` carries no suffix where the boundary's does. Grading the whole string
+    would make this gate fail on a spelling; grading the token is what makes it about the
+    door's ANSWER.
+    """
+    return {str(reason).split(":", 1)[0] for reason in reasons}
+
+
+def _t279_hazards() -> list[dict[str, Any]]:
+    """Every hazard, with the READABLE input the door already has a name for beside it.
+
+    The expected reason is never written down here. It is MEASURED at run time, from the benign
+    equivalent, on the same base bid — "a store whose eligibility row cannot be read must be
+    refused the way a store with no row is", "a keyring that cannot be searched must be refused
+    the way an empty one is". That is what makes the assertion impossible to satisfy with an
+    invented token: nine families expect eight DISTINCT reason tokens, and one generic catch-all
+    can only ever return one of them. A catch-all that dispatched on the hazard to pick the
+    right token would BE the by-name handling this ticket asks for.
+
+    Six of the nine families are green at HEAD. They are not filler — they are the canary. If
+    the harness below stopped being able to see a refusal at all, they would go red with it,
+    so a red result on the other three is a measurement rather than a broken assertion.
+    """
+    from collections.abc import Mapping
+
+    class _HostileMapping(Mapping):  # type: ignore[type-arg]
+        """A real ``Mapping`` whose reads raise. The type gate passes; the read is the hazard."""
+
+        def __init__(self, error: BaseException) -> None:
+            self._error = error
+
+        def get(self, key: Any, default: Any = None) -> Any:
+            raise self._error
+
+        def __getitem__(self, key: Any) -> Any:
+            raise self._error
+
+        def __iter__(self) -> Any:
+            return iter(())
+
+        def __len__(self) -> int:
+            return 0
+
+    class _ExplodingPayload(Mapping):  # type: ignore[type-arg]
+        """A submission that answers ``after`` reads honestly and then starts raising."""
+
+        def __init__(self, body: dict[str, Any], after: int, error: BaseException) -> None:
+            self._body = body
+            self._after = after
+            self._error = error
+            self.reads = 0
+
+        def _tick(self) -> None:
+            self.reads += 1
+            if self.reads > self._after:
+                raise self._error
+
+        def get(self, key: Any, default: Any = None) -> Any:
+            self._tick()
+            return self._body.get(key, default)
+
+        def __getitem__(self, key: Any) -> Any:
+            self._tick()
+            return self._body[key]
+
+        def __iter__(self) -> Any:
+            return iter(self._body)
+
+        def __len__(self) -> int:
+            return len(self._body)
+
+    class _UnreadableBlacklist:
+        def __iter__(self) -> Any:
+            raise ValueError("the block list feed answered with half-decoded JSON")
+
+    class _ExplodingId(str):
+        """A str SUBCLASS, so ``isinstance(entry, str)`` passes and the comparison is reached.
+
+        A plain object would be refused by ``_blacklisted``'s own "not a string" guard before
+        any ``__eq__`` ran, and the hazard would never be exercised.
+        """
+
+        def __eq__(self, other: Any) -> bool:
+            raise RuntimeError("this blocked id cannot be compared")
+
+        def __hash__(self) -> int:
+            return 0
+
+    class _UnaskableQueue:
+        def __getattr__(self, name: str) -> Any:
+            raise RuntimeError("this transport cannot be asked what it can do")
+
+    class _RaisingQueue:
+        def __call__(self, item: Any) -> None:
+            raise RuntimeError("this transport took nothing")
+
+    class _UnreadableDeadline:
+        def __str__(self) -> str:
+            raise RuntimeError("this deadline cannot be rendered")
+
+        def __repr__(self) -> str:
+            return "<unreadable deadline>"
+
+    def snapshot_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"trust_snapshot": {}}
+
+    def keyring_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"keyring": {}}
+
+    def keyring_inner_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"keyring": {base["signer_id"]: {}}}
+
+    def blacklist_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"blacklist": [base["store_id"]]}
+
+    def window_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"freshness_window_seconds": -1.0}
+
+    def deadline_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"auction_deadline": "not-an-instant"}
+
+    def payload_benign(base: dict[str, Any]) -> dict[str, Any]:
+        body = dict(base["payload"])
+        body.pop("signer_id")
+        return {"payload": body}
+
+    def queue_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"queue": None}
+
+    def prices_benign(base: dict[str, Any]) -> dict[str, Any]:
+        return {"list_prices": {}}
+
+    hazards: list[dict[str, Any]] = []
+
+    for error in (
+        ValueError("eligibility feed is half-decoded"),
+        RuntimeError("eligibility store is not connected"),
+        KeyError("eligibility partition"),
+        OverflowError("eligibility index overflowed"),
+        ArithmeticError("eligibility score is not a number"),
+        ZeroDivisionError("eligibility ratio divided by zero"),
+        LookupError("eligibility shard is missing"),
+    ):
+        hazards.append(
+            {
+                "family": "trust_snapshot",
+                "label": f"trust_snapshot.get raises {type(error).__name__}",
+                "make": lambda base, error=error: {"trust_snapshot": _HostileMapping(error)},
+                "benign": snapshot_benign,
+            }
+        )
+
+    for error in (
+        RuntimeError("the key store is not connected"),
+        ValueError("the key store answered with half-decoded JSON"),
+        OverflowError("the key index overflowed"),
+    ):
+        hazards.append(
+            {
+                "family": "keyring",
+                "label": f"keyring.get raises {type(error).__name__}",
+                "make": lambda base, error=error: {"keyring": _HostileMapping(error)},
+                "benign": keyring_benign,
+            }
+        )
+        hazards.append(
+            {
+                "family": "keyring_inner",
+                "label": f"keyring[signer].get raises {type(error).__name__}",
+                "make": lambda base, error=error: {
+                    "keyring": {base["signer_id"]: _HostileMapping(error)}
+                },
+                "benign": keyring_inner_benign,
+            }
+        )
+
+    hazards.append(
+        {
+            "family": "blacklist",
+            "label": "blacklist.__iter__ raises ValueError",
+            "make": lambda base: {"blacklist": _UnreadableBlacklist()},
+            "benign": blacklist_benign,
+        }
+    )
+    hazards.append(
+        {
+            "family": "blacklist",
+            "label": "a blocked id whose __eq__ raises RuntimeError",
+            "make": lambda base: {"blacklist": [_ExplodingId(base["store_id"])]},
+            "benign": blacklist_benign,
+        }
+    )
+
+    for window, label in (
+        (10**400, "freshness_window_seconds=10**400 (float() raises OverflowError)"),
+        (float("nan"), "freshness_window_seconds=nan (loses every comparison)"),
+        (float("inf"), "freshness_window_seconds=inf (says never stale)"),
+        (None, "freshness_window_seconds=None"),
+    ):
+        hazards.append(
+            {
+                "family": "freshness_window",
+                "label": label,
+                "make": lambda base, window=window: {"freshness_window_seconds": window},
+                "benign": window_benign,
+            }
+        )
+
+    hazards.append(
+        {
+            "family": "auction_deadline",
+            "label": "an auction_deadline whose __str__ raises",
+            "make": lambda base: {"auction_deadline": _UnreadableDeadline()},
+            "benign": deadline_benign,
+        }
+    )
+    hazards.append(
+        {
+            "family": "auction_deadline",
+            "label": "an auction_deadline that is a list",
+            "make": lambda base: {"auction_deadline": ["2026-01-01T00:05:00Z"]},
+            "benign": deadline_benign,
+        }
+    )
+
+    for after in (0, 1, 3, 6, 10):
+        hazards.append(
+            {
+                "family": "payload",
+                "label": f"payload.get raises after {after} read(s)",
+                "make": lambda base, after=after: {
+                    "payload": _ExplodingPayload(
+                        base["payload"], after, RuntimeError("the submission stopped answering")
+                    )
+                },
+                "benign": payload_benign,
+            }
+        )
+
+    hazards.append(
+        {
+            "family": "queue",
+            "label": "a queue whose attribute access raises",
+            "make": lambda base: {"queue": _UnaskableQueue()},
+            "benign": queue_benign,
+        }
+    )
+    hazards.append(
+        {
+            "family": "queue",
+            "label": "a queue whose __call__ raises",
+            "make": lambda base: {"queue": _RaisingQueue()},
+            "benign": queue_benign,
+        }
+    )
+
+    for error in (
+        RuntimeError("the catalog is not connected"),
+        ValueError("the catalog answered with half-decoded JSON"),
+    ):
+        hazards.append(
+            {
+                "family": "list_prices",
+                "label": f"list_prices.get raises {type(error).__name__}",
+                "make": lambda base, error=error: {"list_prices": _HostileMapping(error)},
+                "benign": prices_benign,
+            }
+        )
+
+    return hazards
+
+
+def _t279_cases() -> list[dict[str, Any]]:
+    """Every hazard against two DIFFERENT drawn bids, so no case rests on one lucky shape."""
+    bases = _t279_bases()
+    hazards = _t279_hazards()
+    cases: list[dict[str, Any]] = []
+    for position, hazard in enumerate(hazards):
+        for repeat in range(2):
+            base = bases[(2 * position + repeat) % len(bases)]
+            cases.append({"hazard": hazard, "base": base})
+    return cases
+
+
+def test_t279_the_hostile_input_sweep_is_armed() -> None:
+    """Sixty real cases, twelve bids the door really accepts, nine benign answers to compare
+    against, and the wrapper split still in place. NOT xfail.
+
+    Each block below closes one way the gate could report green while the erosion lived:
+
+    1. **The sweep goes quiet.** Counted and de-duplicated before anything is concluded.
+    2. **The base bids stop being accepted.** This is the failure this package has already
+       shipped: a generator whose draws did not resemble a bid, so nothing it did could be
+       detected. If a base were refused, every hostile variant of it would refuse too — for the
+       base's reason, not the hazard's — and the comparison below would be measuring nothing.
+    3. **The draws collapse onto a constant table.** Distinct ids, distinct instants, no shared
+       literal prefix, and half the offers expiring within a day of the instant they are judged
+       against.
+    4. **The benign answers are empty.** The gate asserts "answer the unreadable input the way
+       you answer the readable one". If a benign equivalent were ACCEPTED, or refused with no
+       reasons, that comparison would be satisfiable by anything.
+    5. **The wrapper split is gone.** The gate's below-the-wrapper probe is a direct call to
+       ``_receive_bid``; if that name stopped being a separate function the probe would be
+       grading the wrapper again.
+    """
+    from store_agent.external import receive_bid
+    from store_agent.external.door import _receive_bid
+
+    assert _receive_bid is not receive_bid, (
+        "receive_bid and _receive_bid are the same object; the total wrapper and the gates it "
+        "wraps can no longer be told apart, so nothing below can see under the catch-all"
+    )
+
+    cases = _t279_cases()
+    assert len(cases) == T279_CASE_COUNT, (
+        f"the sweep generated {len(cases)} cases, not {T279_CASE_COUNT} — it has shrunk"
+    )
+    keys = {(case["hazard"]["label"], case["base"]["index"]) for case in cases}
+    assert len(keys) == T279_CASE_COUNT, (
+        f"only {len(keys)} of {len(cases)} cases are DISTINCT (hazard, bid) pairs"
+    )
+    families: dict[str, int] = {}
+    for case in cases:
+        families[case["hazard"]["family"]] = families.get(case["hazard"]["family"], 0) + 1
+    assert families == {
+        "trust_snapshot": 14,
+        "keyring": 6,
+        "keyring_inner": 6,
+        "blacklist": 4,
+        "freshness_window": 8,
+        "auction_deadline": 4,
+        "payload": 10,
+        "queue": 4,
+        "list_prices": 4,
+    }, f"the hazard families no longer have the counts this gate was measured against: {families}"
+
+    # 2. The bases are real bids this door admits.
+    bases = _t279_bases()
+    assert len(bases) == T279_BASE_COUNT
+    for base in bases:
+        receipt = _t279_invoke(receive_bid, base, {})
+        assert receipt.accepted is True, (
+            f"base bid {base['index']} ({base['stream']} stream) was REFUSED "
+            f"{receipt.reasons}; every hostile variant of it would then be refused for the "
+            "base's reason and the sweep would be blind — this is exactly how this package's "
+            "sibling generator drew 4,959 cases that detected nothing"
+        )
+        assert receipt.reasons == (), f"base bid {base['index']} carried reasons {receipt.reasons}"
+
+    # 3. The draws are varied, not a constant table wearing different numbers.
+    for field in ("store_id", "signer_id", "key_id", "nonce", "issued_at", "expires_at"):
+        drawn = [base[field] for base in bases]
+        assert len(set(drawn)) == T279_BASE_COUNT, (
+            f"only {len(set(drawn))} of {T279_BASE_COUNT} drawn {field} values are distinct"
+        )
+    for field in ("store_id", "signer_id", "key_id", "nonce"):
+        drawn = [base[field] for base in bases]
+        shared = 0
+        while all(len(value) > shared and value[shared] == drawn[0][shared] for value in drawn):
+            shared += 1
+        assert shared <= 1, (
+            f"all {T279_BASE_COUNT} drawn {field} values share the literal prefix "
+            f"{drawn[0][:shared]!r}; a sabotage keyed on that prefix would go undetected, which "
+            "is what happened to this package's sibling gate"
+        )
+    near_term = sum(1 for base in bases if base["expires_at"] < "2026-01-02")
+    assert near_term >= T279_BASE_COUNT // 2, (
+        f"only {near_term} of {T279_BASE_COUNT} offers expire within a day of the instant they "
+        "are judged against; the sibling generator drew 2027-2999 against now=2026 and no draw "
+        "ever resembled a realistic bid"
+    )
+
+    # 4. Every family has a readable equivalent the door already refuses BY NAME.
+    seen_tokens: dict[str, set[str]] = {}
+    for hazard in _t279_hazards():
+        base = bases[0]
+        benign = _t279_invoke(receive_bid, base, hazard["benign"](base))
+        assert benign.accepted is not True, (
+            f"{hazard['family']}: the readable equivalent was ADMITTED "
+            f"({hazard['benign'](base)}); there is nothing for the hostile case to be compared "
+            "against"
+        )
+        assert benign.reasons, f"{hazard['family']}: the readable equivalent carried no reasons"
+        heads = _t279_heads(benign.reasons)
+        assert T279_FAILED_CLOSED not in heads, (
+            f"{hazard['family']}: even the READABLE input now answers {T279_FAILED_CLOSED}; the "
+            "gate can no longer distinguish a named refusal from an internal fault"
+        )
+        seen_tokens[hazard["family"]] = heads
+    distinct = {frozenset(heads) for heads in seen_tokens.values()}
+    assert len(distinct) >= 8, (
+        f"the nine hazard families expect only {len(distinct)} distinct reason token sets "
+        f"({seen_tokens}); the gate's whole defence against an invented catch-all token is that "
+        "one token cannot answer for all of them"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-279: the total `except Exception` at door.py:404 is the only thing holding "
+        "`receive_bid` never-raises up for two whole hazard families. A trust_snapshot whose "
+        "`.get` raises anything but TypeError escapes contracts/boundary.py:958-964, and a "
+        "keyring whose `.get` does the same escapes contracts/signing.py:399-406; both come "
+        "back `door_failed_closed` where the readable equivalent is answered "
+        "`trust_snapshot_unavailable:<store_id>` and `unknown_signing_key`. Every by-name gate "
+        "inside _receive_bid could regress and the suite would stay green; remove this marker "
+        "with the fix"
+    ),
+)
+def test_t279_every_hostile_input_is_refused_by_name_not_by_the_catch_all() -> None:
+    """The door must answer an input it cannot READ the way it answers one it can.
+
+    The wrapper at ``door.py:386-407`` is right and this gate does not ask for its removal: an
+    anonymous ``POST`` must never be handed a 500, and an error nobody anticipated must be a
+    refusal. What it asks is that the wrapper be the belt and not the braces. Today it is the
+    only thing holding the property up for two families, which is the erosion the ticket names:
+    the grading test at ``test_repro_external_door.py:494`` asserts only ``accepted is not
+    True``, so reverting any by-name guard inside ``_receive_bid`` leaves it green — measured,
+    by reverting ``_blacklisted`` and ``_freshness_window`` to their pre-fix forms.
+
+    Two assertions per case, and neither can be satisfied by moving the catch-all:
+
+    * **The refusal carries the hazard's OWN reason token**, measured from the readable
+      equivalent on the same bid rather than written down here. Nine families, eight distinct
+      tokens — ``trust_snapshot_unavailable``, ``unknown_signing_key``, ``store_blacklisted``,
+      ``freshness_window_invalid``, ``auction_deadline_unparseable``,
+      ``signing_envelope_uncanonicalizable``, ``verification_queue_unavailable``,
+      ``price_unreconcilable``. A generic handler one frame down returns ONE token and fails
+      eight of the nine; a handler that returned the right token for each hazard would be the
+      by-name handling this ticket asks for. This is deliberately a POSITIVE check: "not
+      ``door_failed_closed``" would be satisfied by any freshly invented string, which is how
+      the first draft of this gate could have certified a rename of the catch-all.
+    * **``_receive_bid`` itself does not raise**, and answers the same token. That is the
+      structural half: the wrapper adds nothing, because there is nothing left for it to catch.
+
+    Six of the nine families pass today. They are the canary, not padding — they prove the
+    comparison can see a refusal, so the three that fail are a measurement.
+
+    MEASURED at HEAD: 60/60 hostile calls refused by the outer door (the existing assertion is
+    satisfied throughout), while ``_receive_bid`` RAISES for every trust_snapshot and keyring
+    case and the receipt says ``door_failed_closed``.
+    """
+    from store_agent.external import receive_bid
+    from store_agent.external.door import _receive_bid
+
+    cases = _t279_cases()
+    assert len(cases) == T279_CASE_COUNT, (
+        f"the sweep generated {len(cases)} cases, not {T279_CASE_COUNT}; see the arming test"
+    )
+
+    escapes: list[str] = []
+    for case in cases:
+        hazard, base = case["hazard"], case["base"]
+        label = f"bid {base['index']} + {hazard['label']}"
+        overrides = hazard["make"](base)
+        expected = _t279_heads(_t279_invoke(receive_bid, base, hazard["benign"](base)).reasons)
+
+        try:
+            receipt = _t279_invoke(receive_bid, base, overrides)
+        except Exception as exc:
+            escapes.append(f"{label}: receive_bid RAISED {type(exc).__name__}: {exc}")
+            continue
+        if receipt.accepted is True:
+            escapes.append(f"{label}: ADMITTED")
+            continue
+        actual = _t279_heads(receipt.reasons)
+        if actual != expected:
+            escapes.append(
+                f"{label}: refused {sorted(actual)}, but the readable equivalent is refused "
+                f"{sorted(expected)}"
+            )
+
+        try:
+            below = _t279_invoke(_receive_bid, base, overrides)
+        except Exception as exc:
+            escapes.append(
+                f"{label}: _receive_bid RAISED {type(exc).__name__}: {exc} — only the outer "
+                "catch-all is holding the never-raises property up here"
+            )
+            continue
+        under = _t279_heads(below.reasons)
+        if under != expected:
+            escapes.append(
+                f"{label}: below the wrapper the refusal is {sorted(under)}, not {sorted(expected)}"
+            )
+
+    assert not escapes, (
+        f"{len(escapes)} hazard(s) are answered by the total wrapper rather than by name:\n  "
+        + "\n  ".join(escapes[:24])
+        + (f"\n  ... and {len(escapes) - 24} more" if len(escapes) > 24 else "")
+    )
