@@ -736,7 +736,22 @@ def test_a_tampered_unsigned_or_reserialised_paid_webhook_is_refused(s1_run) -> 
     assert tampered_body != body
 
     unsigned = {key: value for key, value in headers.items() if key != HEADER_HMAC.lower()}
+    assert HEADER_HMAC.lower() not in unsigned
+
     wrong_key = {**headers, HEADER_HMAC.lower(): sign(body, "not-the-merchants-secret")}
+    # This case builds its hostile input with `sign` — the very module under test — so it has
+    # to prove the input really is hostile. Measured with `sign` sabotaged to ignore its
+    # secret argument: the "forged" header comes out byte-identical to the real one, the
+    # merchant correctly accepts it, and the loop below fails with "the merchant ACCEPTED a
+    # delivery it cannot have authenticated" — which is a TRUE red for a FALSE reason. The
+    # merchant did nothing wrong; the test's own forgery was not a forgery. This assertion
+    # does not add a catch, it makes the diagnosis honest, which is the same reason every
+    # other hostile input above is proved distinct from the accepted one.
+    assert wrong_key[HEADER_HMAC.lower()] != headers[HEADER_HMAC.lower()], (
+        "signing with another secret produced the SAME header as the real delivery; this "
+        "case cannot test the signature and `sign` is ignoring its key"
+    )
+
     not_ascii = {**headers, HEADER_HMAC.lower(): "sig-éè"}
 
     hostile: dict[str, tuple[bytes, dict[str, str], str]] = {
