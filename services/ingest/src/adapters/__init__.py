@@ -7,19 +7,22 @@ and the fetcher, plus the guards every adapter that touches a network must run t
 
 Layout::
 
-    base.py        CatalogAdapter + the records that cross the seam (+ apply_upserts)
-    netguard.py    the SSRF guard: resolve, decide, pin; redirect chains
-    robots.py      crawler identity (USER_AGENT) and robots.txt obedience
-    budgets.py     pages / depth / time / bytes ceilings a hostile store cannot evade
-    transport.py   the guarded HTTP client everything on the wire goes through
-    hashing.py     content hashes and snapshot refs for change detection
-    signed_fetch.py the adapter itself
+    base.py         CatalogAdapter + the records that cross the seam (+ apply_upserts)
+    mapping.py      the ONE snapshot -> graph-upsert mapping both adapters call, plus the
+                    identity and value coercion that make them agree on the same nodes
+    netguard.py     the SSRF guard: resolve, decide, pin; redirect chains
+    robots.py       crawler identity (USER_AGENT) and robots.txt obedience
+    budgets.py      pages / depth / time / bytes ceilings a hostile store cannot evade
+    transport.py    the guarded HTTP client everything on the wire goes through
+    hashing.py      content hashes and snapshot refs for change detection
+    signed_fetch.py the page fetcher (T-020)
+    catalog_mcp.py  the catalog MCP adapter, replayed from fixtures/mcp/ (T-023)
 
-Typical use::
+Typical use — the point of C6 is that the two are interchangeable at this seam::
 
-    from ingest.adapters import CatalogRequest, SignedFetchAdapter, apply_upserts
+    from ingest.adapters import CatalogMCPAdapter, CatalogRequest, SignedFetchAdapter, apply_upserts
 
-    adapter = SignedFetchAdapter()
+    adapter = SignedFetchAdapter()          # or CatalogMCPAdapter(session=...) for a public store
     snapshot = adapter.fetch_catalog(
         CatalogRequest(store_id="store-1", base_url="https://dev.example.com",
                        storefront_password="hunter2", known_hashes=previous)
