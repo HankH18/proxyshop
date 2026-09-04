@@ -5374,6 +5374,111 @@
       "defect": "DESIGN.md:145 states docs/demo/ should hold TWO runbooks and that 'the S6 lint reads their union', but the directory contains only .gitkeep and starting-slice.md. The second, docs/demo/shopify-onboarding-extension.md, is T-087's declared scope -- and T-087 is the ticket whose gate names a file (docs/tests/test_runbook.py) that its own scope forbids it to create, already filed as T-262. So the missing runbook and the unbuildable ticket are the same knot.",
       "finding_id": "be494787560a0b854e7b7c49397aa4ee461bec215d3ea09b63326cdab148e698",
       "reproduction": "ls docs/demo/ -> .gitkeep, starting-slice.md. Read DESIGN.md:145."
+    },
+    {
+      "id": "T-316",
+      "title": "T-310's fix is BLOCKED ON T-299 and wiring it today turns a booting service into a crash-looping one. ranking/filters.py:39 imports exchange.retrieval, which imports ingest.graph and ingest.embeddings at MODULE SCOPE, pulling in 11 ingest.* modules. apps/exchange/Dockerfile ships no ingest. Reproduced against a tree holding only what that Dockerfile COPYs: create_app() SUCCEEDS, then `import exchange.ranking` raises ModuleNotFoundError: 'ingest'. Because CMD is `uvicorn exchange.main:app`, the import happens at startup, so adding the one-line ranking import to a served path converts a service that starts into one that crash-loops. Adding an ingest symlink alone is NOT the fix: the coupling is transitive through retrieval. This is a SCHEDULING dependency the graph does not record \u2014 T-310 must not be dispatched before T-299 is resolved, and T-299 itself carries an open architectural question (whether ingest is meant to be in the exchange image at all).",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/auction/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/auction/routes.py",
+      "defect": "T-310's fix is BLOCKED ON T-299 and wiring it today turns a booting service into a crash-looping one. ranking/filters.py:39 imports exchange.retrieval, which imports ingest.graph and ingest.embeddings at MODULE SCOPE, pulling in 11 ingest.* modules. apps/exchange/Dockerfile ships no ingest. Reproduced against a tree holding only what that Dockerfile COPYs: create_app() SUCCEEDS, then `import exchange.ranking` raises ModuleNotFoundError: 'ingest'. Because CMD is `uvicorn exchange.main:app`, the import happens at startup, so adding the one-line ranking import to a served path converts a service that starts into one that crash-loops. Adding an ingest symlink alone is NOT the fix: the coupling is transitive through retrieval. This is a SCHEDULING dependency the graph does not record \u2014 T-310 must not be dispatched before T-299 is resolved, and T-299 itself carries an open architectural question (whether ingest is meant to be in the exchange image at all).",
+      "finding_id": "eb11eefd66d221d570ae4a6cd549f87e7fea27c1279b12c699437d4e22cc2f5d",
+      "reproduction": "Materialise only the paths apps/exchange/Dockerfile COPYs into a temp tree; run python -c 'import exchange.main' (succeeds) then python -c 'import exchange.ranking' (ModuleNotFoundError: No module named ingest). Measured by lane-C19-served."
+    },
+    {
+      "id": "T-317",
+      "title": "THE MERCHANT SERVES THREE ROUTES THAT APPEAR IN NO PUBLISHED CONTRACT: GET /install, GET /install/callback, GET /install/shops. Measured by constructing the app and diffing app.openapi()['paths'] against packages/contracts/openapi/. This is the served-but-UNPUBLISHED direction, and merchant was previously believed to be the one service whose surface agreed with its contract \u2014 T-312 records merchant as fully served and says nothing about it publishing less than it serves. Undeclared served routes are a security and review surface: nothing in the contract review process ever looks at them.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/merchant/svc/src/onboarding/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/merchant/svc/src/onboarding/routes.py",
+      "defect": "THE MERCHANT SERVES THREE ROUTES THAT APPEAR IN NO PUBLISHED CONTRACT: GET /install, GET /install/callback, GET /install/shops. Measured by constructing the app and diffing app.openapi()['paths'] against packages/contracts/openapi/. This is the served-but-UNPUBLISHED direction, and merchant was previously believed to be the one service whose surface agreed with its contract \u2014 T-312 records merchant as fully served and says nothing about it publishing less than it serves. Undeclared served routes are a security and review surface: nothing in the contract review process ever looks at them.",
+      "finding_id": "e6a8d23742c23b36944dd410bf43930325378d50464310a9074da912f9525046",
+      "reproduction": "export PROXYSHOP_WORKER=<n> && python -c \"from merchant_svc.main import create_app; print(sorted(create_app().openapi()['paths']))\" and diff against packages/contracts/openapi/merchant.openapi.json. Measured by lane-C19-served: served 9, published 6, 3 unpublished."
+    },
+    {
+      "id": "T-318",
+      "title": "T-312 UNDERCOUNTS ITS OWN FINDING BY A FACTOR OF MORE THAN THREE. T-312 records the contract/served divergence as affecting three services in one direction. Measured across all five: 8 published-but-unserved AND 15 served-but-unpublished, spread over four services. Per service (served/published/unserved/unpublished): store-agent 0/1/1/0, exchange 3/5/3/1, trust 6/4/3/5, ingest 6/1/1/6, merchant 9/6/0/3. All 8 unserved routes measured 404. T-312's gate as landed grades both directions correctly, so the gate is right and the TICKET TEXT is what is stale \u2014 anyone scoping the fix from the ticket will size it at roughly a third of the real work.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/openapi/trust.openapi.json"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/contracts/openapi/trust.openapi.json",
+      "defect": "T-312 UNDERCOUNTS ITS OWN FINDING BY A FACTOR OF MORE THAN THREE. T-312 records the contract/served divergence as affecting three services in one direction. Measured across all five: 8 published-but-unserved AND 15 served-but-unpublished, spread over four services. Per service (served/published/unserved/unpublished): store-agent 0/1/1/0, exchange 3/5/3/1, trust 6/4/3/5, ingest 6/1/1/6, merchant 9/6/0/3. All 8 unserved routes measured 404. T-312's gate as landed grades both directions correctly, so the gate is right and the TICKET TEXT is what is stale \u2014 anyone scoping the fix from the ticket will size it at roughly a third of the real work.",
+      "finding_id": "efbcbf1c4efd79b596c79d638dbc510b56560d9870c39bd522a9e17f77ed24c9",
+      "reproduction": "For each service construct the app, read app.openapi()['paths'], load its packages/contracts/openapi/*.json, and compare both directions after normalising path parameters. Measured by lane-C19-served under worker 3; identical under worker 0."
+    },
+    {
+      "id": "T-319",
+      "title": "T-288'S STRENGTHENED AST GATE IS STILL EVADABLE BY TWO SHAPES THAT PRESERVE THE DEAD 503 ARM. _names_holding_a_status_code propagates taint only through Assign/AnnAssign/AugAssign/NamedExpr, so (1) `for code in (response.status_code,):` evades it because an ast.For target is not an assignment node, and (2) a helper parameter `def _arm(c): if c == 503` evades it because there is no interprocedural propagation. Under xfail(strict=True) either evasion makes the test XPASS, which RETIRES T-166 while its defect is live \u2014 the gate failing open in the most expensive direction. There is also a related over-taint bug: ast.walk on `self.code = response.status_code` taints the bare name `self`. Deliberately not fixed by the lane that found it: strengthening an interprocedural taint analysis risks false positives across the whole suite and is its own ticket.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/tests/test_repro_open_tickets.py",
+      "defect": "T-288'S STRENGTHENED AST GATE IS STILL EVADABLE BY TWO SHAPES THAT PRESERVE THE DEAD 503 ARM. _names_holding_a_status_code propagates taint only through Assign/AnnAssign/AugAssign/NamedExpr, so (1) `for code in (response.status_code,):` evades it because an ast.For target is not an assignment node, and (2) a helper parameter `def _arm(c): if c == 503` evades it because there is no interprocedural propagation. Under xfail(strict=True) either evasion makes the test XPASS, which RETIRES T-166 while its defect is live \u2014 the gate failing open in the most expensive direction. There is also a related over-taint bug: ast.walk on `self.code = response.status_code` taints the bare name `self`. Deliberately not fixed by the lane that found it: strengthening an interprocedural taint analysis risks false positives across the whole suite and is its own ticket.",
+      "finding_id": "b97652e19e8e0e7c26e3e7bed34a198a8fc072397f863661cab2c78eeb2d1f0b",
+      "reproduction": "Rewrite the guarded condition as a single-element for-loop, or hoist it into a one-line helper taking the status code as a parameter; run the T-166 gate and observe XPASS. Measured by lane-C18-trust-reverify."
+    },
+    {
+      "id": "T-320",
+      "title": "_lapsed_reasons at delisting.py:112 iterates the registry, so a LOOKUP-ONLY registry implementation emits zero blacklist_expired events and no listing is ever re-opened. A sub-agent filed this as a fail-open; the lane checked and DOWNGRADED it, and the downgrade is recorded here rather than the original claim: the docstring documents the choice and its reason (avoiding a second read per store against app.seller_blacklist), and the direction is fail-CLOSED \u2014 the store simply stays delisted. It is a real coverage gap in the expiry path, not a security hole, and it should be fixed by iterating the blacklist rather than the registry.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/src/snapshot/delisting.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/src/snapshot/delisting.py",
+      "defect": "_lapsed_reasons at delisting.py:112 iterates the registry, so a LOOKUP-ONLY registry implementation emits zero blacklist_expired events and no listing is ever re-opened. A sub-agent filed this as a fail-open; the lane checked and DOWNGRADED it, and the downgrade is recorded here rather than the original claim: the docstring documents the choice and its reason (avoiding a second read per store against app.seller_blacklist), and the direction is fail-CLOSED \u2014 the store simply stays delisted. It is a real coverage gap in the expiry path, not a security hole, and it should be fixed by iterating the blacklist rather than the registry.",
+      "finding_id": "41a2cfaf617e43ea9b2463a97933d758b0d91c0224a2d7af1751345ca3bcef1e",
+      "reproduction": "Supply a SellerEligibility implementation exposing only a lookup (no iteration) and run the expiry path; observe zero blacklist_expired events. Measured by lane-C18-trust-reverify."
+    },
+    {
+      "id": "T-321",
+      "title": "SIX CONTRACT/SERVED SWEEP HELPERS NOW EXIST IN THREE COPIES, one per package, with nothing enforcing that they agree. They were unified once already after diverging \u2014 a regex path-normaliser in the store-agent copy disagreed with the other two on malformed input, which is exactly the failure mode that makes two of the three gates measure something slightly different from the third. There is no shared location for them because the three files live in three packages with no common test-support package. This is the T-167 shape (four byte-identical shims) reappearing in the test tier, and T-167's own gate does not cover test files.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/store-agent/tests/test_repro_open_tickets.py",
+      "defect": "SIX CONTRACT/SERVED SWEEP HELPERS NOW EXIST IN THREE COPIES, one per package, with nothing enforcing that they agree. They were unified once already after diverging \u2014 a regex path-normaliser in the store-agent copy disagreed with the other two on malformed input, which is exactly the failure mode that makes two of the three gates measure something slightly different from the third. There is no shared location for them because the three files live in three packages with no common test-support package. This is the T-167 shape (four byte-identical shims) reappearing in the test tier, and T-167's own gate does not cover test files.",
+      "finding_id": "a34e9015581689dda6c2100bb5df032d0fa38c34831091b5fda4cef0458dd55b",
+      "reproduction": "diff the six helper functions across apps/exchange/tests/test_repro_open_tickets.py, packages/store-agent/tests/test_repro_open_tickets.py and services/ingest/tests/test_repro_open_tickets.py. Self-reported by lane-C19-served."
+    },
+    {
+      "id": "T-322",
+      "title": "A LATENT GATE FLAKE THAT INTERMITTENTLY REDS SEVEN TICKETS' GATES, AND IT IS NOT THE DATABASE. packages/contracts/tests/signing.test.ts:1079 \u2014 the test literally named 'T-115 - one blank rule...' \u2014 is a full-Unicode-codepoint sweep measured at 5580 ms against vitest's DEFAULT testTimeout of 5000 ms. It is ~10% over budget, so it passes on an idle box and fails on a loaded one; it failed twice consecutively for one agent and passed three times for another, and a run with --testTimeout=30000 showed no assertion ever fails. Because `npx vitest run packages/contracts` is the gate for T-010, T-103, T-108, T-113, T-115, T-125 and T-128, a loaded box reds seven tickets at once for a reason unrelated to any of them. Worker isolation does NOT help \u2014 this is CPU time, not database contention \u2014 so it will survive the per-worker fix. A gate that fails for a reason outside the thing it grades is the failure mode that teaches everyone to re-run gates until they are green.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/tests/signing.test.ts"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/contracts/tests/signing.test.ts",
+      "defect": "A LATENT GATE FLAKE THAT INTERMITTENTLY REDS SEVEN TICKETS' GATES, AND IT IS NOT THE DATABASE. packages/contracts/tests/signing.test.ts:1079 \u2014 the test literally named 'T-115 - one blank rule...' \u2014 is a full-Unicode-codepoint sweep measured at 5580 ms against vitest's DEFAULT testTimeout of 5000 ms. It is ~10% over budget, so it passes on an idle box and fails on a loaded one; it failed twice consecutively for one agent and passed three times for another, and a run with --testTimeout=30000 showed no assertion ever fails. Because `npx vitest run packages/contracts` is the gate for T-010, T-103, T-108, T-113, T-115, T-125 and T-128, a loaded box reds seven tickets at once for a reason unrelated to any of them. Worker isolation does NOT help \u2014 this is CPU time, not database contention \u2014 so it will survive the per-worker fix. A gate that fails for a reason outside the thing it grades is the failure mode that teaches everyone to re-run gates until they are green.",
+      "finding_id": "eaf7ccd6df5e8d52343a0ac0ee1b3721842a14d1be3a2fec1dfa072bc9bacbee",
+      "reproduction": "export PROXYSHOP_WORKER=<n> && npx vitest run packages/contracts under CPU load; observe signing.test.ts:1079 exceed 5000 ms. Then re-run with --testTimeout=30000 and observe 694/694 pass with no assertion failure. Measured by the red-check classification sweep."
     }
   ]
 }
