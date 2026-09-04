@@ -37,7 +37,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
-from ..auction.ledger import build_event
+from ..auction.ledger import build_published_event
 from .codes import (
     assert_offer_is_mintable,
     build_cart_permalink,
@@ -826,19 +826,27 @@ class CheckoutProvider:
 
         try:
             checkout_token = secrets.token_hex(16)
+            # Resolved ONCE, above, and handed to both the result and the events. It used to
+            # be computed only for the result, which is half of why the `code_created` event
+            # could not carry its published `expires_at`: there was no single value to put
+            # in it, and a second `code_expiry(...)` call here would be a second answer to
+            # the question "when does this discount die" for one discount (T-235).
+            expires_at = (
+                minted.expires_at
+                if minted.expires_at is not None
+                else code_expiry(request.now, request.offer)
+            )
             return CheckoutResult(
                 code=minted.code,
                 permalink_url=minted.permalink_url,
-                events=self._events(request, minted, checkout_token, verified=verified),
+                events=self._events(
+                    request, minted, checkout_token, verified=verified, expires_at=expires_at
+                ),
                 mode=request.mode,
                 provider=self.name,
                 checkout_token=checkout_token,
                 domain_verified=verified,
-                expires_at=(
-                    minted.expires_at
-                    if minted.expires_at is not None
-                    else code_expiry(request.now, request.offer)
-                ),
+                expires_at=expires_at,
             )
         except Exception as exc:
             # Building the result cannot normally fail — step 3 already proved the offer's
@@ -961,11 +969,26 @@ class CheckoutProvider:
         checkout_token: str,
         *,
         verified: bool = False,
+        expires_at: float | None = None,
     ) -> list[Mapping[str, Any]]:
+        """The C11 trio, each body checked against the shape ``contracts`` publishes for it.
+
+        ``expires_at`` is the checkout's single resolved expiry, passed in rather than
+        recomputed, so the ``code_created`` record and :attr:`CheckoutResult.expires_at`
+        cannot disagree about when the discount dies.
+
+        Built through :func:`build_published_event` rather than :func:`build_event`: this is
+        the producing boundary ``contracts/src/ledger.py`` names, and the defect it closes is
+        that ONE kind had TWO bodies — the orphan path (``accept()._orphan_record``) wrote
+        the published ``code_created`` body while this success path wrote
+        ``{checkout_token, discount_code}``, carrying none of ``code``, ``permalink_url`` or
+        ``expires_at``. So anything that needed to revoke or expire a *live* discount found
+        the fields present only on the refused one (T-235).
+        """
         offer = dict(request.offer)
         common = {"auction_id": request.auction_id, "store_id": request.store_id}
         return [
-            build_event(
+            build_published_event(
                 "accepted",
                 payload={
                     "checkout_token": checkout_token,
@@ -979,12 +1002,25 @@ class CheckoutProvider:
                 },
                 **common,
             ),
-            build_event(
+            build_published_event(
                 "code_created",
-                payload={"checkout_token": checkout_token, "discount_code": minted.code},
+                payload={
+                    # The published `code_created` body (D24) — the same three keys the
+                    # orphan record has always carried, so one kind is one shape whether the
+                    # checkout completed or was refused after the mint.
+                    "code": minted.code,
+                    "permalink_url": minted.permalink_url,
+                    "expires_at": expires_at,
+                    # Kept beside them, not instead of them: `checkout_token` is the D24 join
+                    # to `accepted`/`checkout_redirect`, and `discount_code` is the spelling
+                    # `services/sim/src/runner.py` already reads (it accepts either), so
+                    # adding the published keys breaks no existing reader.
+                    "checkout_token": checkout_token,
+                    "discount_code": minted.code,
+                },
                 **common,
             ),
-            build_event(
+            build_published_event(
                 "checkout_redirect",
                 payload={
                     "checkout_token": checkout_token,

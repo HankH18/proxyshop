@@ -490,16 +490,6 @@ def test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code(
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-235: the successful checkout emits code_created with "
-        "{'checkout_token','discount_code'} while contracts publishes "
-        "('code','permalink_url','expires_at'), so validate_ledger_payload reports all three "
-        "published keys missing and nothing downstream can revoke or expire the discount; "
-        "remove this marker with the fix"
-    ),
-)
 def test_t235_a_successful_checkout_emits_the_published_code_created_body() -> None:
     """One ledger kind must have one body, and the contract says which.
 

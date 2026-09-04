@@ -69,7 +69,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..auction.ledger import build_event
+from ..auction.ledger import build_published_event
 from ..checkout import (
     CheckoutRequest,
     CheckoutResult,
@@ -291,7 +291,7 @@ def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any]:
     ``checkout_redirect`` accompanies it — the buyer was handed nothing, and the C11 trio
     describes a checkout that completed.
     """
-    return build_event(
+    return build_published_event(
         "code_created",
         auction_id=str(_read(auction, "auction_id") or orphan.auction_id or ""),
         store_id=orphan.store_id or None,
@@ -356,7 +356,7 @@ def _refusal_event(
         payload["orphaned_code"] = pointer
 
     events.append(
-        build_event(
+        build_published_event(
             "policy_event",
             auction_id=str(_read(auction, "auction_id") or ""),
             store_id=store_id,
