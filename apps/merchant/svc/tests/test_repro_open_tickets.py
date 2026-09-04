@@ -1,0 +1,372 @@
+"""Reproduction gates for the open ``apps/merchant`` tickets.
+
+Every test here asserts the behaviour that SHOULD hold and therefore fails against the tree
+as it stands. Each carries ``@pytest.mark.xfail(strict=True)`` while the defect is live, so:
+
+* an ordinary run reports ``xfailed`` and the repo-wide build gate stays GREEN;
+* the ticket's own gate runs
+  ``export PROXYSHOP_WORKER=0 && uv run python -m pytest
+  apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k <name>``
+  and gets a real, selected ``1 failed``;
+* the marker cannot outlive the bug — once the defect is closed the test XPASSes, which
+  ``strict=True`` turns into a failure, forcing whoever fixed it to delete the marker.
+
+**Nothing here is allowed to skip.** A skip is not a gate, and the compose datastore stack is
+routinely down in this repo, so every assertion below is made against a pure function, a
+module's public surface, source text, or a subprocess — never against a live datastore.
+
+**Nothing here mutates process-global state.** ``merchant_svc.envelope.store.ENVELOPES`` is a
+module-level singleton that the merchant suite only partially isolates, so recording into it
+from a test would create exactly the order-dependence T-247 is about. Every probe below
+either builds its own ``EnvelopeVersions`` or asserts identity without writing.
+"""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import textwrap
+from typing import Any
+
+import pytest
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+ENVELOPE_PKG = REPO_ROOT / "apps" / "merchant" / "svc" / "src" / "envelope"
+
+#: The two module spellings the repo can reach the merchant envelope store through. Both are
+#: importable today (``.pkgroot/merchant_svc`` is a symlink to ``apps/merchant/svc/src``, and
+#: the repo root is on ``pythonpath``), and they resolve to the same file on disk.
+SHORT_SPELLING = "merchant_svc.envelope.store"
+LONG_SPELLING = "apps.merchant.svc.src.envelope.store"
+
+
+#: A DESIGN-shaped envelope. ``record()`` validates against ``contracts.Envelope`` and needs
+#: every one of these eight fields, so a shorter dict is refused for the wrong reason.
+def _envelope(store_id: str, **overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "store_id": store_id,
+        "version": 1,
+        "floors": [],
+        "max_discount_pct": 0.0,
+        "budget_cap": 0.0,
+        "pursue_clusters": [],
+        "standing_commitments": [],
+        "activation": "shadow",
+    }
+    body.update(overrides)
+    return body
+
+
+def _product_python_files() -> list[pathlib.Path]:
+    """Every shipped ``.py`` file — apps, packages, services, e2e — excluding tests."""
+    roots = ("apps", "packages", "services", "e2e", "proxyshop_support")
+    found: list[pathlib.Path] = []
+    for root in roots:
+        base = REPO_ROOT / root
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.py"):
+            parts = set(path.parts)
+            if "tests" in parts or ".venv" in parts or "node_modules" in parts:
+                continue
+            if path.name == "conftest.py":
+                continue
+            found.append(path)
+    return sorted(found)
+
+
+# ======================================================================================
+# T-243 — the merchant envelope store exists twice, under two spellings
+# ======================================================================================
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-243: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are "
+        "DISTINCT module objects over the same file, with distinct ENVELOPES singletons, "
+        "distinct EnvelopeVersions classes and distinct EnvelopeError subclasses that do not "
+        "catch each other — the frozen E5 acceptance suite imports the LONG spelling while "
+        "production onboarding/routes.py imports the SHORT one, and unlike codes/ the "
+        "envelope package never calls bind_package(); remove this marker with the fix"
+    ),
+)
+def test_t243_the_merchant_envelope_store_has_exactly_one_module_identity() -> None:
+    """One file must be one module, whichever spelling reaches it.
+
+    ``apps/merchant/svc/src/codes/`` already solves this with ``_spellings.py`` and a
+    ``bind_package(__name__)`` call, and ``merchant_svc.codes is apps.merchant.svc.src.codes``
+    is True as a result. The envelope package has no such binding.
+    """
+    short = importlib.import_module(SHORT_SPELLING)
+    long_ = importlib.import_module(LONG_SPELLING)
+
+    # Control, and the .pth guard: both spellings must be the SAME file, and that file must
+    # be the one in the tree under test rather than another checkout sharing this venv.
+    short_file = pathlib.Path(short.__file__ or "").resolve()
+    long_file = pathlib.Path(long_.__file__ or "").resolve()
+    assert short_file == long_file, (
+        f"the two spellings are different files: {short_file} vs {long_file}"
+    )
+    assert short_file.is_relative_to(REPO_ROOT), (
+        f"{SHORT_SPELLING} resolved to {short_file}, which is outside the tree under test "
+        f"({REPO_ROOT}) — a .pth leak, not a measurement"
+    )
+
+    split: list[str] = []
+    if short is not long_:
+        split.append(f"module object ({SHORT_SPELLING} is not {LONG_SPELLING})")
+    for name in (
+        "ENVELOPES",
+        "EnvelopeVersions",
+        "UnknownStore",
+        "VersionWentBackwards",
+        "StoreMismatch",
+        "Envelope",
+        "EnvelopeError",
+    ):
+        if getattr(short, name) is not getattr(long_, name):
+            split.append(name)
+
+    assert not split, (
+        f"one file, {short_file}, is loaded as two independent modules; these names are two "
+        f"distinct objects: {split}. A store written through one spelling is invisible "
+        "through the other, and an `except` on one spelling's error class does not catch the "
+        "other's."
+    )
+
+
+# ======================================================================================
+# T-248 — record() accepts a caller-asserted 'active' with no approval artifact
+# ======================================================================================
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-248: EnvelopeVersions.record (envelope/store.py:46) validates the contract shape "
+        "and the monotonic-version rule and never looks at `activation`, so a caller-asserted "
+        "activation='active' is filed with approval=None and Envelope.is_live returns True — "
+        "one import away from defeating the approve-then-edit guarantee that put()/activate() "
+        "establish on the HTTP surface; remove this marker with the fix"
+    ),
+)
+def test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact() -> None:
+    """Nothing may be live on the caller's say-so. Live means an approval artifact exists.
+
+    Two repairs are acceptable and both make this pass: refuse the record outright (any
+    ``EnvelopeError``), or file it forced to ``shadow`` the way ``put()`` already does.
+    """
+    from merchant_svc.envelope.model import EnvelopeError  # noqa: PLC0415
+    from merchant_svc.envelope.store import EnvelopeVersions  # noqa: PLC0415
+
+    versions = EnvelopeVersions()
+    claimed = _envelope("s-t248", version=7, max_discount_pct=99.0, activation="active")
+
+    try:
+        recorded = versions.record(claimed)
+    except EnvelopeError:
+        return  # refused — an acceptable repair
+
+    assert recorded.approval is None, "fixture error: no approval artifact was supplied"
+    assert not recorded.is_live, (
+        "an envelope asserted its own activation and was filed live with no approval "
+        f"artifact: version={recorded.version} activation={recorded.activation!r} "
+        f"max_discount_pct={recorded.max_discount_pct} approval={recorded.approval!r}; "
+        f"EnvelopeVersions.is_live({recorded.store_id!r}) is "
+        f"{versions.is_live(recorded.store_id)}"
+    )
+
+
+# ======================================================================================
+# T-246 — nothing in production reads the activation decision
+# ======================================================================================
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-246: `is_live` appears only at its two definition sites "
+        "(envelope/model.py:254, envelope/store.py:89) and in merchant tests — no production "
+        "module anywhere in apps/, packages/, services/ or e2e/ reads it, so nothing "
+        "demonstrates that a shadow or killed store actually stops bidding; the store-agent's "
+        "activation gate (store-agent/src/modes/runner.py:105 _envelope_states) reads a "
+        "context mapping that no production code ever builds from an envelope; remove this "
+        "marker with the fix"
+    ),
+)
+def test_t246_some_production_code_reads_the_envelope_activation_decision() -> None:
+    """A decision the product computes and nobody asks for is not wired up.
+
+    The definition sites themselves do not count: the point of the ticket is that the
+    consequence is never consumed.
+    """
+    import re  # noqa: PLC0415
+
+    token = re.compile(r"\bis_live\b")
+    definition_sites = {ENVELOPE_PKG / "model.py", ENVELOPE_PKG / "store.py"}
+
+    consumers: list[str] = []
+    for path in _product_python_files():
+        if path in definition_sites:
+            continue
+        if token.search(path.read_text(encoding="utf-8")):
+            consumers.append(str(path.relative_to(REPO_ROOT)))
+
+    # Control: the accessor really does exist, so a green here would mean a consumer and not
+    # a renamed symbol.
+    from merchant_svc.envelope.store import EnvelopeVersions  # noqa: PLC0415
+
+    assert callable(EnvelopeVersions.is_live), "fixture error: EnvelopeVersions.is_live is gone"
+
+    assert consumers, (
+        "no production file outside apps/merchant/svc/src/envelope/ reads `is_live`, so the "
+        "kill switch and the shadow default are computed and never consulted — the merchant "
+        "side of the envelope has no executed path that demonstrates a killed store stops "
+        "bidding"
+    )
+
+
+# ======================================================================================
+# T-239 — the envelope version history is process-local and dies with the process
+# ======================================================================================
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-239: ENVELOPES = EnvelopeVersions() at envelope/store.py:149 keeps the whole "
+        "append-only history, the version-never-backwards rule and activate-the-head in "
+        "memory; the class takes no backing store, exposes no load/persist member, imports no "
+        "database driver, and db/migrations/0003_sealed_vault_app_tables.sql:41's "
+        "sealed.envelopes table — where DESIGN puts the real history — has no production "
+        "reader or writer anywhere in the repo; remove this marker with the fix"
+    ),
+)
+def test_t239_the_envelope_version_store_has_a_durability_seam() -> None:
+    """The three invariants have to be able to cross the persistence boundary.
+
+    This is a structural gate by necessity: there is no load seam to point a round-trip test
+    at, and a datastore-backed test would SKIP when compose is down, which is not a gate.
+    It is written against the module-level singleton's own type rather than against
+    ``EnvelopeVersions`` by name, so replacing the singleton with a persistent implementation
+    satisfies it just as well as giving ``EnvelopeVersions`` a repository argument.
+    """
+    from merchant_svc.envelope import store as store_mod  # noqa: PLC0415
+
+    resolved = pathlib.Path(store_mod.__file__ or "").resolve()
+    assert resolved.is_relative_to(REPO_ROOT), (
+        f"{SHORT_SPELLING} resolved to {resolved}, outside the tree under test ({REPO_ROOT})"
+    )
+
+    live_store = store_mod.ENVELOPES
+    cls = type(live_store)
+
+    # Observable consequence today: a second store shares nothing with the first.
+    first = store_mod.EnvelopeVersions()
+    first.record(_envelope("s-t239-durable"))
+    second = store_mod.EnvelopeVersions()
+
+    takes_backing = len(inspect.signature(cls.__init__).parameters) > 1
+    persistence_members = sorted(
+        name
+        for name in dir(cls)
+        if any(
+            keyword in name
+            for keyword in ("load", "persist", "save", "flush", "reload", "restore", "commit")
+        )
+    )
+
+    assert takes_backing or persistence_members, (
+        f"{cls.__module__}.{cls.__qualname__} — the type of the module-level ENVELOPES "
+        f"singleton — takes no backing store ({inspect.signature(cls.__init__)}) and exposes "
+        "no load/persist member, so the version history exists only for the lifetime of one "
+        f"process: a fresh instance sees {second.stores()!r} after another recorded "
+        f"{first.stores()!r}"
+    )
+
+
+# ======================================================================================
+# T-247 — the merchant install suite leaves the process-global webhook sink set to None
+# ======================================================================================
+#: Run inside a fresh interpreter: capture the boot sink, run the one merchant install test
+#: that installs its own sink, then report what the module global was left as.
+_SINK_RESIDUE_PROBE = """
+import json, pathlib, sys
+import pytest
+from merchant_svc.install import webhooks
+
+boot = webhooks.webhook_sink()
+code = pytest.main([
+    "apps/merchant/svc/tests/test_install.py",
+    "-q", "-p", "no:cacheprovider",
+    "-k", "test_a_sink_that_refuses_a_delivery_gets_the_retry_not_a_duplicate",
+])
+after = webhooks.webhook_sink()
+print("PROBE" + json.dumps({
+    "module_file": str(pathlib.Path(webhooks.__file__).resolve()),
+    "pytest_rc": int(code),
+    "boot_is_default": boot is webhooks.default_sink,
+    "after_is_default": after is webhooks.default_sink,
+    "after_is_none": after is None,
+    "after_repr": repr(after),
+}))
+"""
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-247: install/webhooks.py:418 boots the process-global _sink to default_sink, but "
+        "apps/merchant/svc/tests/test_install.py:859 'restores' it with "
+        "set_webhook_sink(None) in its finally — to None, not to the value it found — so "
+        "every later test in the same process runs against a service that answers an "
+        "authenticated delivery '200 recorded' and hands it to nobody, which is exactly the "
+        "state webhooks.py:412-417 says it closed; remove this marker with the fix"
+    ),
+)
+def test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it() -> None:
+    """A suite may install its own sink; it may not leave the process worse than it found it.
+
+    Measured in a subprocess for the same reason
+    ``test_merchant_hardening.py:466`` uses one — the state under test is a module global,
+    and observing it has to happen in an interpreter this test did not already dirty. The
+    subprocess also makes the gate order-independent: it creates the bad state itself rather
+    than depending on which tests ran before it.
+    """
+    env = dict(os.environ, PROXYSHOP_WORKER=os.environ.get("PROXYSHOP_WORKER", "0"))
+    completed = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_SINK_RESIDUE_PROBE)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    marker = [line for line in completed.stdout.splitlines() if line.startswith("PROBE")]
+    assert marker, (
+        "the residue probe produced no verdict line.\n"
+        f"stdout:\n{completed.stdout[-4000:]}\nstderr:\n{completed.stderr[-4000:]}"
+    )
+    payload = json.loads(marker[-1][len("PROBE") :])
+
+    # The .pth guard: a venv shared with another checkout can put a different tree's module
+    # on sys.path, and a reproduction that measured the wrong tree is not a reproduction.
+    module_file = pathlib.Path(payload["module_file"])
+    assert module_file.is_relative_to(REPO_ROOT), (
+        f"the probe imported {module_file}, which is outside the tree under test "
+        f"({REPO_ROOT}) — a .pth leak, not a measurement"
+    )
+
+    # Controls: the suite really ran, and the boot default really is the default sink.
+    assert payload["pytest_rc"] == 0, (
+        f"the install test did not pass in the probe (rc={payload['pytest_rc']}); the residue "
+        f"reading is not meaningful.\nstdout:\n{completed.stdout[-4000:]}"
+    )
+    assert payload["boot_is_default"] is True, (
+        "fixture error: the module did not boot with default_sink installed"
+    )
+
+    assert payload["after_is_default"] is True, (
+        "running one merchant install test left the process-global webhook sink as "
+        f"{payload['after_repr']} (is None: {payload['after_is_none']}) instead of the boot "
+        "default, so every authenticated delivery a later test in that process makes is "
+        "verified, put in the display ring, and handed to nobody"
+    )
