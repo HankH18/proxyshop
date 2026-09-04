@@ -229,7 +229,10 @@ here only so a reader knows where the boundary is and where to go next.
   ```
 
   A live development-store run is **demo procedure only**. It is never a ticket's
-  verification gate (C9), and no ticket may depend on it.
+  verification gate (C9), and no ticket may depend on it. The target is defined in the repo
+  root Makefile and shells out to `docs/demo/e2e_live.sh`, which lands with the extension
+  runbook — until then the target exits rather than running anything, which is the correct
+  behaviour for a procedure that is off this page's path.
 
 - **The merchant onboarding interview.** T-053 turns a plain-language interview into a
   drafted envelope, a written merchant approval and a versioned record, and its gate is a
