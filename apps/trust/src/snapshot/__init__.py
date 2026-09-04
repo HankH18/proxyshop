@@ -3,7 +3,7 @@
 Owned by T-064 (scope ``apps/trust/src/snapshot/**``). Importable as
 ``apps.trust.src.snapshot`` (repo-root path, how the frozen acceptance suite reaches it) and
 as ``trust.snapshot`` (via ``.pkgroot/trust``); the block at the bottom makes both spellings
-resolve to the same objects — see :mod:`._binding`.
+resolve to the same objects — see :mod:`trust._shared._binding`.
 
 ============================  ==========================================================
 :func:`build_snapshot`        stores -> ``{version, score_version, as_of, stores}``.

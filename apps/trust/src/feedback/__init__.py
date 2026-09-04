@@ -3,7 +3,7 @@
 Owned by T-063 (scope ``apps/trust/src/feedback/**``). Importable as
 ``apps.trust.src.feedback`` (repo-root path, how the frozen acceptance suite reaches it) and
 as ``trust.feedback`` (via ``.pkgroot/trust``); the block at the bottom makes both spellings
-resolve to the same objects — see :mod:`._binding`.
+resolve to the same objects — see :mod:`trust._shared._binding`.
 
 ==============================  ========================================================
 :func:`push_trust_event`        one delta -> one send, to the affected store only.
@@ -38,7 +38,7 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 
 # E402 below is the point of the block above: the sequencing has to run BEFORE the first
 # relative import, because it is the eager imports that build the second copy.
-from ._binding import bind_submodules as _bind_submodules  # noqa: E402
+from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .engine import (  # noqa: E402
     BASE_FEEDBACK_WEIGHT,
     FEEDBACK_DIMENSION,

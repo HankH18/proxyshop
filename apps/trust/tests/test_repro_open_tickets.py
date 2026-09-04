@@ -144,14 +144,6 @@ def test_the_replay_snapshot_test_does_not_branch_on_a_status_it_can_never_reach
 # ======================================================================================
 # T-167 — four byte-identical copies of the module-binding shim
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-167: apps/trust/src/{scoring,reconcile,feedback,snapshot}/_binding.py are four "
-        "byte-identical copies of the elected-primary shim with nothing enforcing that they "
-        "stay identical; remove this marker with the fix"
-    ),
-)
 def test_the_elected_primary_binding_shim_has_exactly_one_home() -> None:
     """The dual-spelling module-identity fix must exist once, not four times.
 

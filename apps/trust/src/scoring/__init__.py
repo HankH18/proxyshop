@@ -4,7 +4,7 @@ Owned by T-062 (scope ``apps/trust/src/scoring/**``). Importable both as
 ``apps.trust.src.scoring`` (repo-root path, how the frozen acceptance suite reaches it) and
 as ``trust.scoring`` (via the tracked ``.pkgroot/trust`` symlink, how member packages and
 ``apps/trust/src/ledger/replay.py`` reach it). Both spellings resolve to this file, and the
-block at the bottom makes them resolve to the same *objects* — see :mod:`._binding`.
+block at the bottom makes them resolve to the same *objects* — see :mod:`trust._shared._binding`.
 
 =====================================  ================================================
 :func:`score`                          observations -> one served TrustSnapshot.
@@ -71,7 +71,7 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 # E402 below is the point of the block above, not an oversight: the sequencing has to run
 # BEFORE the first relative import, because it is the eager imports that build the second
 # copy of every submodule.
-from ._binding import bind_submodules as _bind_submodules  # noqa: E402
+from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .blacklist import (  # noqa: E402
     BLACKLIST_STATUSES,
     BLOCKING_BLACKLIST_STATUSES,
