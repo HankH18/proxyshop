@@ -77,15 +77,6 @@ def _calls_named(tree: ast.AST, name: str) -> list[int]:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-169: nothing in production source calls use_registered_domains, so the deployed "
-        "exchange resolves no platform registry and registered_domain_for falls back to "
-        "bid['store_domain'] — a bidder-controlled field supplying both halves of its own "
-        "host check; remove this marker with the fix"
-    ),
-)
 def test_t169_a_production_call_site_wires_the_platform_seller_registry() -> None:
     """The trusted half of the domain check has no deployment that supplies it.
 
@@ -129,15 +120,6 @@ def test_t169_a_production_call_site_wires_the_platform_seller_registry() -> Non
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-169: `apps.exchange.src.accept` and `exchange.accept` are the same file (equal "
-        "inode) but two distinct module objects with two copies of every module global, so a "
-        "registry wired through the spelling the package's own docstring documents is "
-        "invisible to the spelling the served app imports; remove this marker with the fix"
-    ),
-)
 def test_t169_a_registry_wired_through_either_spelling_binds_the_other() -> None:
     """Wiring a process-wide default only works if there is one process-wide module.
 
@@ -205,15 +187,6 @@ def test_t169_a_registry_wired_through_either_spelling_binds_the_other() -> None
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-170: main.py mounts routers by globbing <feature>/routes.py and the accept package "
-        "ships none, so the served exchange exposes only ['/auctions', "
-        "'/auctions/{auction_id}'] while the published contract declares "
-        "'/auctions/{auction_id}/accept'; remove this marker with the fix"
-    ),
-)
 def test_t170_the_served_exchange_app_exposes_the_published_accept_path() -> None:
     """The published contract declares an accept endpoint; the app that boots does not serve it.
 
@@ -336,15 +309,6 @@ def _declared_denial_vocabulary() -> tuple[str, set[str]] | None:
     return None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-204: denial_reason is persisted into a policy_event payload and published as a bare "
-        "string, but its vocabulary is whatever `type(exc).__name__` happens to be — six "
-        "distinct leading tokens today, one of which renders a memory address; no enum and no "
-        "exported constant declares the set; remove this marker with the fix"
-    ),
-)
 def test_t204_a_denial_reason_is_drawn_from_a_declared_vocabulary() -> None:
     """A client-visible, persisted field whose values are exception class names is a contract
     by accident.
