@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Mapping
 
 import pytest
 
@@ -509,3 +510,106 @@ def test_a_blacklist_the_door_cannot_read_blocks_everything_rather_than_nobody()
             f"{case}: an unreadable blacklist must deny, never admit"
         )
         assert queue.count == 0, f"{case}: nothing may be enqueued"
+
+
+class _ShiftingPayload(Mapping):
+    """A `Mapping` that answers `field_name` truthfully `truthful` times, then lies.
+
+    `receive_bid` accepts ANY `Mapping`, and it reads the signing envelope out of that mapping
+    more than once: `canonical_signing_bytes` reads it to build the signing input, and the door
+    reads it again to select the key and to spend the nonce. Every one of those reads is a
+    separate call to `payload.get`, so a mapping whose `get` does not answer the same way twice
+    makes them disagree — and a plain `dict` can never show that, which is why this exists.
+    """
+
+    def __init__(self, base, field_name, truthful, lie=None):
+        self._base = dict(base)
+        self._field = field_name
+        self._truthful_left = truthful
+        self._lie = lie
+        self.reads = 0
+
+    def __getitem__(self, key):
+        return self._base[key]
+
+    def __iter__(self):
+        return iter(self._base)
+
+    def __len__(self):
+        return len(self._base)
+
+    def get(self, key, default=None):
+        if key == self._field:
+            self.reads += 1
+            if self._truthful_left <= 0:
+                return self._lie
+            self._truthful_left -= 1
+        return self._base.get(key, default)
+
+
+def test_a_payload_that_changes_its_own_nonce_between_reads_is_refused_and_burns_nothing() -> None:
+    """The door must act on ONE reading of the envelope, not on whatever the payload says next.
+
+    The read order for `nonce` is measured, not assumed: read #1 is
+    `contracts.signing.missing_signing_fields`, read #2 is `canonical_signing_bytes` building
+    the signed bytes, and read #3 is the door's own envelope guard. Two truthful reads therefore
+    let gate 2 succeed over the REAL nonce — the submission is properly signed and properly
+    canonicalized — and then hand the door a `None` where the nonce should be.
+
+    What the guard is protecting is the replay memory. `NonceStore._key` stringifies both halves
+    deliberately, so a `None` arriving at `consume` does not crash: it spends the slot
+    `("store-external-1", "None")`. That slot is not this submission's nonce, and it is the same
+    slot for every payload that plays the same trick, so the replay memory would be recording
+    something other than what it admitted. Refusing costs an attacker nothing they were entitled
+    to — the honest nonce is untouched and can still be submitted.
+    """
+    from store_agent.external import NonceStore, sign_bid
+
+    store = NonceStore()
+    payload = _payload()
+    signature = sign_bid(payload, KEY)
+    shifting = _ShiftingPayload(payload, "nonce", truthful=2)
+
+    result, queue, error = _receive(shifting, signature, nonce_store=store)
+
+    assert error is None, f"the door must refuse hostile input rather than raise: {error!r}"
+    assert result.accepted is False, (
+        f"a payload that changes its nonce between reads must not be admitted: {result!r}"
+    )
+    assert queue.count == 0, f"nothing may be enqueued, saw {queue.count} call(s)"
+    assert not store.seen(SIGNER, payload["nonce"]), (
+        "a refused submission must not spend the nonce it named — otherwise a hostile copy "
+        "burns the honest submitter's one-shot key"
+    )
+    assert not store.seen(SIGNER, "None"), (
+        "the replay memory must never be keyed off a stringified None: that is one slot shared "
+        "by every submission that lies about its nonce, and it is not the nonce that was signed"
+    )
+
+
+def test_the_envelope_ids_the_door_acts_on_are_the_ones_it_canonicalized() -> None:
+    """The same guard, read from the other side: every LATER disagreement is also fail-closed.
+
+    `truthful=2` is caught by the door's envelope guard; `truthful=3` and `truthful=4` get past
+    it and are caught by `verify_signature`, which re-canonicalizes and no longer matches. The
+    point of the sweep is that there is no window in between — no number of truthful reads
+    admits a submission whose nonce changed before the door finished with it.
+    """
+    from store_agent.external import NonceStore, sign_bid
+
+    payload = _payload()
+    signature = sign_bid(payload, KEY)
+
+    for truthful in (0, 1, 2, 3, 4):
+        store = NonceStore()
+        shifting = _ShiftingPayload(payload, "nonce", truthful=truthful)
+        result, queue, error = _receive(shifting, signature, nonce_store=store)
+        assert error is None, f"truthful={truthful}: must refuse rather than raise: {error!r}"
+        assert result.accepted is False, (
+            f"truthful={truthful}: a nonce that changes before the door is done with it must "
+            f"never be admitted: {result!r}"
+        )
+        assert queue.count == 0, f"truthful={truthful}: nothing may be enqueued"
+        assert not store.seen(SIGNER, "None"), (
+            f"truthful={truthful}: the replay memory must not record a stringified None"
+        )
