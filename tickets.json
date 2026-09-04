@@ -2882,7 +2882,7 @@
     {
       "id": "T-158",
       "title": "The one-accept-per-auction guard is only as durable as the record handed in. accept() stamps the auction OBJECT it receives. A route that loads an AuctionRecord from RedisAuctionStore, accepts, and does not save it back leaves an unstamped record for the next request; and two concurrent requests reading it can both pass the guard, because the check-then-act window spans the whole provider call including merchant I/O. The durable guard belongs on AuctionStateMachine's already-serialised ACCEPTED transition.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code",
       "scope": [
         "apps/exchange/src/accept/offer.py (module docstring) + AuctionStateMachine"
       ],
@@ -3069,7 +3069,7 @@
     {
       "id": "T-169",
       "title": "T-033's registered-domain guard is DECORATIVE in the deployed configuration. `_platform_domains` is module state initialised to None and NOTHING in the repository calls `use_registered_domains`, so under `uvicorn exchange.main:app` the resolution yields None, CheckoutRequest(registered_domains=None) is built, and registered_domain_for falls back to `bid['store_domain']` \u2014 a field the bidder controls. The frozen S8-3 blocker test_offdomain_checkout_url_is_refused therefore PASSES on that decorative comparison, which means spec_criteria_passing counts a decorative pass toward its target. Worse, the package's own wiring docstring tells an integrator to wire `apps.exchange.src.accept`, while the served app reads `exchange.accept` \u2014 measured as the SAME FILE (equal inode) but DIFFERENT module objects, so wiring one spelling leaves the other completely unwired and an accept through the unwired spelling mints a real single-use discount code for a host the platform never registered. apps/trust/src/ledger/__init__.py and packages/store-agent/src/hooks/__init__.py both already implement _install_canonical_alias() for exactly this hazard; the accept package skipped that convention.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t169_a_production_call_site_wires_the_platform_seller_registry",
       "scope": [
         "apps/exchange/src/accept/offer.py:94,:328 + apps/exchange/src/accept/__init__.py"
       ],
@@ -3086,7 +3086,7 @@
     {
       "id": "T-170",
       "title": "T-033's objective opens 'Accept endpoint resolves a CheckoutProvider by CHECKOUT_MODE...', but the accept package ships NO routes.py. main.py discovers routers by globbing <feature>/routes.py, so the booted app mounts only exchange.auction.routes and the exchange OpenAPI exposes exactly ['/auctions','/auctions/{auction_id}']. There is no HTTP path by which a buyer's accept can reach accept() or accept_offer(). The accept half is complete, tested and lint-enforced, but has no production consumer and no wiring \u2014 so no deployed path is protected by any of it.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t170_the_served_exchange_app_exposes_the_published_accept_path",
       "scope": [
         "apps/exchange/src/accept/ (no routes.py) vs apps/exchange/src/main.py"
       ],
@@ -3664,7 +3664,7 @@
     {
       "id": "T-204",
       "title": "REFUSAL REASONS ARE UNENUMERATED AND NOTHING ASSERTS ON THEM. accept() formats type(exc).__name__ into denial_reason, which is PERSISTED into a policy_event payload, and the published OpenAPI types it as a bare string. Three reason values changed in this branch alone (OrphanedOffDomainCheckout, UnusableDiscount, and a double-named 'OrphanedCheckoutCode: <Original>: ...'). Nothing in the repo asserts on any of them, so nothing broke \u2014 and nothing would catch a regression either. A persisted, client-visible field whose vocabulary is an exception class name is a contract by accident.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t204_a_denial_reason_is_drawn_from_a_declared_vocabulary",
       "scope": [
         "packages/contracts/openapi/exchange.openapi.json:169 (denial_reason) + apps/exchange/src/accept/offer.py"
       ],
@@ -4163,7 +4163,7 @@
     {
       "id": "T-235",
       "title": "ONE LEDGER KIND, TWO BODIES: the successful checkout path emits a code_created event carrying NONE of its three published payload keys. packages/contracts/src/ledger.py:63 publishes LEDGER_PAYLOAD_SHAPES['code_created'] = ('code','permalink_url','expires_at'). The success path at provider.py:983 writes {'checkout_token':..., 'discount_code':...}. The ORPHAN path at apps/exchange/src/accept/offer.py:294-303 writes the published body and its own comment says so (# The published code_created body (D24)). Suspected cause: nothing on the accept path calls validate_ledger_payload \u2014 the only product caller in the repo is apps/exchange/src/retrieval/fit.py:227, while contracts/src/ledger.py:15 says the check is meant to run 'at the PRODUCING boundary'. CONSEQUENCE: any consumer reading payload['code'] or payload['expires_at'] off a successful code_created gets nothing, including anything that needs to revoke or expire a live discount \u2014 which is exactly what T-202's orphan machinery was built to enable.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t235_a_successful_checkout_emits_the_published_code_created_body",
       "scope": [
         "apps/exchange/src/checkout/provider.py"
       ],
@@ -4388,7 +4388,7 @@
     {
       "id": "T-250",
       "title": "The exact-equality price floor T-223 was filed against is STILL LIVE in the shared contracts boundary. The T-223 lane closed the attack at the exchange door (apps/exchange/src/auction/collect.py) because that was its granted ownership, but the ticket's own scope field names boundary.py:819 as the site. Any other consumer of the shared boundary -- including the TypeScript peer door, which mirrors this arithmetic -- still accepts a thousandth of a cent as a valid price. Port _below_the_price_floor's threshold into the boundary and delete the duplicate.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t250_the_shared_boundary_refuses_a_thousandth_of_a_cent_for_a_hundred_dollar_product",
       "scope": [
         "packages/contracts/src/boundary.py"
       ],
@@ -4594,6 +4594,96 @@
       "defect": "A ticket whose DELIVERABLE IS ITS OWN GATE TARGET can never be red-checked at its merge base, so the retro red-check that guards every merge stamps it WEAK and arms a veto against a lane that did nothing wrong. T-082's gate is 'pytest e2e/test_s1_flow.py -q' and e2e/test_s1_flow.py is exactly what T-082 must create; at the merge parent the file is absent, pytest exits 4 with no tests SELECTED, and that is indistinguishable by exit code from a genuine red or from the conftest D38 abort. The same shape affects T-024, T-083, T-084, T-086 and T-087, all of which name a test file that does not exist. This is the shape the graph's 'bootstrap: true' exemption exists for, but that field is contractually allowed on one ticket only. Either these tickets need a reproduction landed on main ahead of them the way the xfail-strict repro lanes do, or the gate needs to name an existing frozen test that the deliverable turns green.",
       "finding_id": "5558e10437f6237a656986aefd440dceb843185d2b130731c79cf145ceae9b52",
       "reproduction": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_s1_flow.py -q at main exits 4 with 'no tests ran'. swarmloop.py red-check --ticket T-082 --base main stamps WEAK with selection null; check-branch --ticket T-082 then reads that stamp as a merge veto."
+    },
+    {
+      "id": "T-264",
+      "title": "A MEMORY ADDRESS IS RENDERED INTO A PERSISTED, CLIENT-VISIBLE EVENT PAYLOAD. A TypeError raised from an unusable registered_domains argument is formatted into denial_reason, producing a literal '<object object at 0x...>' string that is both stored in the policy_event and returned to the caller. That leaks process memory layout to an unauthenticated client and makes the denial reason unparseable by anything downstream. Within T-204's ambit (denial reasons drawn from a declared vocabulary) but is a distinct and more serious defect than the vocabulary gap itself.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/checkout/provider.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/checkout/provider.py:1049",
+      "defect": "A MEMORY ADDRESS IS RENDERED INTO A PERSISTED, CLIENT-VISIBLE EVENT PAYLOAD. A TypeError raised from an unusable registered_domains argument is formatted into denial_reason, producing a literal '<object object at 0x...>' string that is both stored in the policy_event and returned to the caller. That leaks process memory layout to an unauthenticated client and makes the denial reason unparseable by anything downstream. Within T-204's ambit (denial reasons drawn from a declared vocabulary) but is a distinct and more serious defect than the vocabulary gap itself.",
+      "finding_id": "c9ed6aaa82f3cdca3aa811b31f85464fcafd548c41697dadeeb222e4400f2fef",
+      "reproduction": "Call the checkout provider with a registered_domains value that raises TypeError on use and read the resulting denial_reason; the sentinel object's repr appears verbatim. Found by the cycle-16 exchange reproduction lane while gating T-204."
+    },
+    {
+      "id": "T-265",
+      "title": "A TEST WHITELISTS THE DEFECT IT IS SUPPOSED TO GUARD, BY NAME, AND STAYS GREEN BOTH BEFORE AND AFTER THE REPAIR. The assertion is 'deviating <= {\"code_created\"}', which explicitly permits code_created to deviate from the published contract -- exactly the T-235 defect. It therefore cannot fail whether T-235 is fixed or not, and must never be cited as a guard for that defect. This is the carve-out-with-no-exercising-case shape: an allowlist entry that makes the rule unable to see the one case it was written for.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/sim/tests/test_simulation.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "services/sim/tests/test_simulation.py:353",
+      "defect": "A TEST WHITELISTS THE DEFECT IT IS SUPPOSED TO GUARD, BY NAME, AND STAYS GREEN BOTH BEFORE AND AFTER THE REPAIR. The assertion is 'deviating <= {\"code_created\"}', which explicitly permits code_created to deviate from the published contract -- exactly the T-235 defect. It therefore cannot fail whether T-235 is fixed or not, and must never be cited as a guard for that defect. This is the carve-out-with-no-exercising-case shape: an allowlist entry that makes the rule unable to see the one case it was written for.",
+      "finding_id": "a36fcc65a9c1492b131bc2be1ca298727184ac140ddd956a2e250c71458e1174",
+      "reproduction": "Read services/sim/tests/test_simulation.py:353. The test passes on main with T-235 live, and would pass identically with T-235 fixed. Measured by the cycle-16 exchange reproduction lane."
+    },
+    {
+      "id": "T-266",
+      "title": "THE SERVED EXCHANGE IS MISSING FOUR PUBLISHED PATHS, NOT ONE. create_app().openapi() answers only ['/auctions', '/auctions/{auction_id}'] while packages/contracts declares five. Three absences belong to scheduled tickets (T-032 shortlist, T-044 external bids); the fourth, /auctions/{auction_id}/accept, is the one the earlier T-176 adjudication records as owned by nobody, and is now gated as T-170. Recording the full count because the ticket graph currently describes this as a single missing path.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/main.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/main.py",
+      "defect": "THE SERVED EXCHANGE IS MISSING FOUR PUBLISHED PATHS, NOT ONE. create_app().openapi() answers only ['/auctions', '/auctions/{auction_id}'] while packages/contracts declares five. Three absences belong to scheduled tickets (T-032 shortlist, T-044 external bids); the fourth, /auctions/{auction_id}/accept, is the one the earlier T-176 adjudication records as owned by nobody, and is now gated as T-170. Recording the full count because the ticket graph currently describes this as a single missing path.",
+      "finding_id": "5529dd269200a29edd8e0e64e2fa0cde82a5c6695c1b5f0ba494d71839f29d13",
+      "reproduction": "PROXYSHOP_WORKER=0 uv run python -c \"from exchange.main import create_app; print(sorted(create_app().openapi()['paths']))\" prints the two served paths; compare against packages/contracts/openapi/exchange.openapi.json."
+    },
+    {
+      "id": "T-267",
+      "title": "The published OpenAPI example for denial_reason is 'blacklist', a value the code has never produced -- the gate emits 'blacklisted: fixture:blacklisted'. Worse, NOTHING IN THE REPO READS THIS FILE: no test, no codegen, no script. So the published contract can drift arbitrarily from the implementation with nothing detecting it, which is the same class as an allowlist no tracked file exercises.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/openapi/exchange.openapi.json"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/contracts/openapi/exchange.openapi.json:172",
+      "defect": "The published OpenAPI example for denial_reason is 'blacklist', a value the code has never produced -- the gate emits 'blacklisted: fixture:blacklisted'. Worse, NOTHING IN THE REPO READS THIS FILE: no test, no codegen, no script. So the published contract can drift arbitrarily from the implementation with nothing detecting it, which is the same class as an allowlist no tracked file exercises.",
+      "finding_id": "9598a3a88527b46c103df23dee8c775e829575c387309abf73c41cdc6e283037",
+      "reproduction": "git grep -l 'exchange.openapi.json' returns no test, script or codegen consumer. The example at line 172 says 'blacklist'; the running code emits 'blacklisted: fixture:blacklisted'."
+    },
+    {
+      "id": "T-268",
+      "title": "Dead line: 'return parsed.timestamp()' is unreachable, sitting after a try block that either returns or raises on every path.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/checkout/codes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "LOW",
+      "location": "apps/exchange/src/checkout/codes.py:190",
+      "defect": "Dead line: 'return parsed.timestamp()' is unreachable, sitting after a try block that either returns or raises on every path.",
+      "finding_id": "874622d6ed6a21d1cdd70e7f2c2df41f8d2d4884768d6883cda9cb2c10392907",
+      "reproduction": "Read apps/exchange/src/checkout/codes.py:180-190; no control-flow path reaches line 190."
+    },
+    {
+      "id": "T-269",
+      "title": "expiry_epoch accepts three shapes that contracts.parse_timestamp refuses, so the two parsers disagree: True -> 1.0, '2026' -> 2026.0, '20260903.0' -> 20260903.0, all landing in 1970. Every one fails CLOSED (the code reads as already expired), so severity is low, but a shared timestamp contract that two call sites disagree about is a latent divergence.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/checkout/codes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "LOW",
+      "location": "apps/exchange/src/checkout/codes.py:143",
+      "defect": "expiry_epoch accepts three shapes that contracts.parse_timestamp refuses, so the two parsers disagree: True -> 1.0, '2026' -> 2026.0, '20260903.0' -> 20260903.0, all landing in 1970. Every one fails CLOSED (the code reads as already expired), so severity is low, but a shared timestamp contract that two call sites disagree about is a latent divergence.",
+      "finding_id": "ec37ca807fc570ab24998ae404fd7dced608d7ee1cfa8aee62ac8ca514f4fdd6",
+      "reproduction": "PROXYSHOP_WORKER=0 uv run python -c \"from exchange.checkout.codes import expiry_epoch; print(expiry_epoch(True), expiry_epoch('2026'), expiry_epoch('20260903.0'))\" against contracts.parse_timestamp on the same three inputs, which raises for all three."
     }
   ]
 }
