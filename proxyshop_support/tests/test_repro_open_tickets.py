@@ -24,10 +24,14 @@ from __future__ import annotations
 import ast
 import json
 import os
+import random
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -400,8 +404,359 @@ def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
         f"{len(violations)} CLOSED ticket(s) carry a gate that cannot fail in their own "
         "name, so nothing about closing them distinguished the defect from its repair:\n"
         + "\n".join(lines)
-        + "\n\nRepair: repoint each verify at one of the tests listed beside it (a "
+        + "\n\nRepair: repoint each verify at one of the tests listed beside it — a "
         "verify-field amendment, the precedent being freeze-log amendment 10, which "
-        "repointed ten other tickets the same way), or — for the graph's single root — "
-        "declare `bootstrap: true` on it."
+        "repointed ten other tickets the same way."
     )
+
+
+# =====================================================================================
+# T-210 — a Neo4j lock timeout is a non-zero `make verify`, indistinguishable to a
+#          machine from a product failure, so build_succeeds records 0 for a machine
+#          condition
+# =====================================================================================
+
+#: Worker ids this gate's child processes are allowed to claim. 0 is the scorer's and 15 is
+#: the ticket-gate index; a child badged with either would collide with a real measurement,
+#: since the worker id picks the Postgres database name and the Redis logical DB.
+_CHILD_WORKERS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+
+#: What the child pytest module looks like. ``neo4j_flock`` is imported from the repo, not
+#: reimplemented: the lock primitive under test has to be the real one.
+_CHILD_MODULE = """
+import pytest
+from proxyshop_support.neo4j_lock import neo4j_flock
+
+@pytest.fixture
+def graph_guard():
+    with neo4j_flock(timeout={timeout!r}, poll={poll!r}, report=lambda message: None):
+        yield True
+
+{bodies}
+"""
+
+_HOLDER = """
+import sys, time
+from proxyshop_support.neo4j_lock import neo4j_flock
+lock, sentinel, hold = sys.argv[1], sys.argv[2], float(sys.argv[3])
+with neo4j_flock(timeout=30.0, poll=0.05, path=lock, report=lambda message: None):
+    with open(sentinel, "w", encoding="utf-8") as handle:
+        handle.write("held")
+    time.sleep(hold)
+"""
+
+
+def _child_source(shape: dict[str, Any]) -> str:
+    """One pytest module in the drawn shape: ``n_pass`` plain tests, one lock-taking test
+    at ``guard_at``, and — when ``failing_at`` is not None — one test that asserts False."""
+    bodies = []
+    for index in range(shape["n_tests"]):
+        name = f"test_{shape['names'][index]}"
+        if index == shape["guard_at"]:
+            bodies.append(f"def {name}(graph_guard):\n    assert graph_guard\n")
+        elif index == shape["failing_at"]:
+            bodies.append(f"def {name}():\n    assert False, {shape['message']!r}\n")
+        else:
+            bodies.append(f"def {name}():\n    assert True\n")
+    return _CHILD_MODULE.format(
+        timeout=shape["timeout"], poll=shape["poll"], bodies="\n".join(bodies)
+    )
+
+
+def _run_child(path: Path, lock: Path, worker: int) -> int:
+    """Exit status of one child pytest run, which is all the metric harness ever sees.
+
+    ``cwd`` is the repo root and the module lives under it, so pytest loads the REAL root
+    ``conftest.py`` and the real ``pyproject.toml`` ini. That is deliberate and it is what
+    makes this gate satisfiable: the only unfrozen places a fix can live are
+    ``conftest.py`` and ``proxyshop_support/neo4j_lock.py``, and a child that loaded a
+    hand-built conftest instead would grade a fixture of this test's own making — the
+    "graded a fixture rather than the system" failure this repo has already shipped once.
+    """
+    env = dict(os.environ)
+    env["PROXYSHOP_WORKER"] = str(worker)
+    env["PROXYSHOP_NEO4J_LOCK"] = str(lock)
+    env["PROXYSHOP_NEO4J_LOCK_LOG"] = "0"
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(path.relative_to(REPO_ROOT)),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "--tb=no",
+            "-ra",
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return completed.returncode
+
+
+def _draw_shapes(count: int) -> list[dict[str, Any]]:
+    """``count`` case shapes: pinned adversarial ones first, then SystemRandom draws.
+
+    SystemRandom and not a seeded ``Random``: a pinned seed makes this a parametrized probe
+    in a costume — the same handful of cases every run, which is exactly the thing that
+    cannot notice a repair keyed on one of them. What varies is the SHAPE (how many tests,
+    which one takes the lock, which one fails, their names and therefore their collection
+    order, the worker id, the lock filename, the timeout and the poll interval), not just a
+    value inside a fixed shape.
+    """
+    entropy = random.SystemRandom()
+    shapes: list[dict[str, Any]] = []
+    # Pinned: the guard first and the failure last, the guard last and the failure first,
+    # and a single-test module. These are the orderings a fix keyed on item order would
+    # get wrong, and leaving them to chance means sometimes not drawing them.
+    pinned = [(3, 0, 2), (3, 2, 0), (2, 1, 0), (1, 0, None)]
+    for index in range(count):
+        if index < len(pinned):
+            n_tests, guard_at, failing_at = pinned[index]
+        else:
+            # From 2, never 1, and that bound is a defect a control caught rather than a
+            # taste: a one-test module has no slot left for the failing test, so it
+            # contributes no product-failure leg, and drawing `randint(1, 5)` made the
+            # count of usable cases binomial around 16 against a threshold of 15. One
+            # control run duly failed on "only 14 cases carry a product defect" — the gate
+            # going red for a reason that was not the defect, which is the exact failure
+            # mode this lane's tickets are about. Now exactly one case (pinned) lacks a
+            # defect leg and the count is 19 every time.
+            n_tests = entropy.randint(2, 5)
+            guard_at = entropy.randrange(n_tests)
+            others = [i for i in range(n_tests) if i != guard_at]
+            failing_at = entropy.choice(others)
+        shapes.append(
+            {
+                "n_tests": n_tests,
+                "guard_at": guard_at,
+                "failing_at": failing_at,
+                "names": [
+                    f"{entropy.choice('abcdefghijklmnopqrstuvwxyz')}{entropy.randrange(10**6):06d}"
+                    for _ in range(n_tests)
+                ],
+                "message": f"simulated product defect {entropy.randrange(10**9)}",
+                "timeout": round(entropy.uniform(0.25, 0.6), 3),
+                "poll": round(entropy.uniform(0.02, 0.09), 3),
+                "worker": entropy.choice(_CHILD_WORKERS),
+                "lock_name": f"t210-{os.getpid()}-{index}-{entropy.randrange(10**9)}.lock",
+            }
+        )
+    return shapes
+
+
+def _measure(shape: dict[str, Any], workdir: Path, scratch: Path) -> dict[str, int | bool]:
+    """Run the three legs of one case and report only what a machine could read."""
+    lock = scratch / shape["lock_name"]
+    module = workdir / f"test_lane_{shape['names'][0]}.py"
+
+    module.write_text(_child_source({**shape, "failing_at": None}), encoding="utf-8")
+    green_rc = _run_child(module, lock, shape["worker"])
+
+    held = False
+    sentinel = scratch / (shape["lock_name"] + ".held")
+    holder_script = scratch / "hold_the_lock.py"
+    holder_script.write_text(_HOLDER, encoding="utf-8")
+    holder = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, str(holder_script), str(lock), str(sentinel), "20"],
+        cwd=str(REPO_ROOT),
+        env={**os.environ, "PROXYSHOP_WORKER": str(shape["worker"]), "PROXYSHOP_NEO4J_LOCK_LOG": "0"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if sentinel.exists():
+                held = True
+                break
+            time.sleep(0.02)
+        contention_rc = _run_child(module, lock, shape["worker"]) if held else -1
+    finally:
+        holder.terminate()
+        holder.wait(timeout=30)
+
+    if shape["failing_at"] is not None:
+        module.write_text(_child_source(shape), encoding="utf-8")
+        product_rc = _run_child(module, lock, shape["worker"])
+    else:
+        product_rc = -1
+    return {"green": green_rc, "contention": contention_rc, "product": product_rc, "held": held}
+
+
+def test_t210_the_lock_attribution_sweep_is_armed() -> None:
+    """Not xfail, and the separation matters: under ``xfail(strict=True)`` ANY exception in
+    the graded body reads as ``xfailed``, i.e. green, so a probe that had stopped working
+    would be indistinguishable from the defect it is supposed to detect.
+
+    Two of these are the vacuity traps this specific gate has. The first: the real
+    ``_neo4j_guard`` calls ``_require_services("neo4j-bolt")`` BEFORE taking the lock, so
+    with the stack down a contention case SKIPS and exits 0 — byte-identical to green, and
+    the whole sweep passes while measuring nothing. This gate therefore uses
+    ``neo4j_flock`` directly rather than the guard fixture, and asserts below that a
+    contended acquisition really does raise; what it gives up is coverage of the
+    reachability probe, which is not what T-210 is about. The second: the holder must
+    actually hold. If the holder process fails to take the flock, the "contention" leg is
+    just another green run, so every case asserts its own sentinel.
+    """
+    shapes = _draw_shapes(20)
+    assert len(shapes) >= 20, f"only {len(shapes)} cases drawn"
+    assert len({tuple(s["names"]) for s in shapes}) >= 15, "the draw is not varying the shapes"
+    assert len({s["n_tests"] for s in shapes}) >= 3, "every case has the same test count"
+    assert len({s["guard_at"] for s in shapes}) >= 2, "the lock-taking test is always in one slot"
+    assert len({s["timeout"] for s in shapes}) >= 15, "the timeouts are not being drawn"
+
+    # The primitive really is the repo's, and a contended acquisition really does raise.
+    from proxyshop_support import neo4j_lock
+
+    assert neo4j_lock.DEFAULT_TIMEOUT > 0
+    with tempfile.TemporaryDirectory() as raw:
+        scratch = Path(raw)
+        lock = scratch / "armed.lock"
+        holder_script = scratch / "hold_the_lock.py"
+        holder_script.write_text(_HOLDER, encoding="utf-8")
+        sentinel = scratch / "armed.held"
+        holder = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            [sys.executable, str(holder_script), str(lock), str(sentinel), "20"],
+            cwd=str(REPO_ROOT),
+            env={**os.environ, "PROXYSHOP_WORKER": "6", "PROXYSHOP_NEO4J_LOCK_LOG": "0"},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline and not sentinel.exists():
+                time.sleep(0.02)
+            assert sentinel.exists(), "the holder subprocess never took the scratch flock"
+            with pytest.raises(neo4j_lock.Neo4jLockTimeout):
+                with neo4j_lock.neo4j_flock(timeout=0.3, poll=0.05, path=lock, report=lambda _m: None):
+                    pass
+        finally:
+            holder.terminate()
+            holder.wait(timeout=30)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-210: a run that fails only because another worker held the Neo4j lock exits 1, "
+        "exactly like a run that failed on a real product defect, so the frozen "
+        "build_succeeds probe — a zero/non-zero test on `make verify` — records 0 for a "
+        "machine condition and nothing downstream can tell the two apart. Remove this "
+        "marker with the fix"
+    ),
+)
+def test_t210_lock_contention_and_a_product_defect_do_not_share_an_exit_status() -> None:
+    """Three outcomes, three exit statuses. That is the whole property.
+
+    The metric this defect corrupts is a zero/non-zero test on a child process, so the
+    exit status is the ONLY channel that counts, and the property is stated on it alone.
+    That choice is the measured correction to the obvious design. Asserting instead that
+    the three states are "distinguishable by exit status and output stream" is GREEN ON DAY
+    ONE and would XPASS: a lock timeout is raised in fixture SETUP, so pytest already
+    prints ``ERROR <nodeid>`` and ``N passed, 1 error`` for contention against ``FAILED``
+    and ``1 failed, N passed`` for a defect. Measured, both harnesses agreeing: contention
+    (rc=1, ERROR), defect (rc=1, FAILED), green (rc=0). Those markers are pytest's, not the
+    repo's, so a gate keyed on them measures pytest and calls it a fix.
+
+    Neither existing token can carry the property either, and both were measured rather
+    than assumed. ``Neo4jLockTimeout`` reaches stdout only inside a default traceback: it
+    is absent under ``--tb=no`` and the short-summary line truncates it to
+    ``proxyshop_support.neo4j_lock.Neo4jLockTime...`` at 80 columns, which is what
+    ``verify.sh``'s ``tee`` gets. And ``[neo4j-lock]`` — the one string the repo emits
+    deliberately — is printed by any contended WAIT, including one that succeeds, so a run
+    whose only failure is a genuine product bug carries it too.
+
+    So: exit status alone, one fixed rule across every case, never the drawn test name or
+    message text. That last clause is the T-233 lesson — keying on per-case text closes one
+    cheat and leaves the class alive — and it is why the assertions below are made over the
+    SET of statuses collected across all 20 cases rather than case by case.
+
+    Every defensible repair passes and only the wrong outcome fails. The property does not
+    name a mechanism: a distinct status for a machine condition, or making contention wait
+    until it wins so it never fails at all, both satisfy it. What it refuses is the two
+    failures being the same number, and — through the second assertion — the banned repair
+    of skipping instead of failing, which the ticket rules out because a skip is invisible
+    in the metrics. Measured as satisfiable, so this is not an unsatisfiable gate: an
+    evidence-gated ``pytest_sessionfinish`` in the unfrozen root ``conftest.py`` that
+    re-stamps ``session.exitstatus`` only when the sole failure is a ``Neo4jLockTimeout``
+    yields 0 / 1 / 77, and 77 survives ``scripts/verify.sh``'s ``run_pytest`` unchanged
+    (``rc=$PIPESTATUS[0]`` recovered from behind the ``tee``, then ``return "$rc"``) even
+    though that file is hash-frozen.
+    Whoever writes it must avoid 5 (verify.sh remaps it to 1, laundering the machine
+    condition back into a product failure) and 2 (verify.sh's own fatals), must not fire
+    when a real defect is also present, and must not fire unconditionally or the
+    empty-suite gate dies with it.
+
+    HONEST LIMIT, recorded here so the fix cannot overclaim: ``build_succeeds`` is
+    ``if make verify; then echo 1; else echo 0; fi``. It reads zero-vs-non-zero and never
+    the value, so a distinct status does NOT stop the false zeros — six of them are already
+    in history.csv. What it buys is machine triage: an orchestrator reading the child can
+    tell a machine condition from a defect without a human. The cure for the zeros is
+    scheduler-level, which the ticket says itself and which no lane can reach.
+    """
+    workdir = REPO_ROOT / f".t210-{os.getpid()}"
+    workdir.mkdir(exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory() as raw:
+            scratch = Path(raw)
+            shapes = _draw_shapes(20)
+            assert len(shapes) >= 20, "the sweep would iterate fewer than 20 cases"
+            results = [(shape, _measure(shape, workdir, scratch)) for shape in shapes]
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    # Arming, inside the body as well as beside it: under `--runxfail -k t210` the gate
+    # command selects both tests, and a dead probe must be a failure in either.
+    assert all(outcome["held"] for _shape, outcome in results), (
+        "a holder subprocess never took the scratch flock, so its 'contention' leg was "
+        "just another uncontended run: "
+        + str([s["lock_name"] for s, o in results if not o["held"]])
+    )
+    assert all(outcome["green"] == 0 for _shape, outcome in results), (
+        "an uncontended run of the generated module did not exit 0, so the harness itself "
+        "is broken and every comparison below is meaningless: "
+        + str([(s["names"][0], o["green"]) for s, o in results])
+    )
+    with_defect = [(s, o) for s, o in results if s["failing_at"] is not None]
+    # 19 of 20 by construction: only the pinned single-test case has no slot for a failing
+    # test. A threshold below that would let a broken draw shrink the comparison silently.
+    assert len(with_defect) >= 18, f"only {len(with_defect)} cases carry a product defect"
+    assert all(o["product"] != 0 for _s, o in with_defect), (
+        "a run containing a failing test exited 0: " + str([o["product"] for _s, o in with_defect])
+    )
+
+    green_statuses = {o["green"] for _s, o in results}
+    contention_statuses = {o["contention"] for _s, o in results}
+    product_statuses = {o["product"] for _s, o in with_defect}
+
+    assert len(contention_statuses) == 1, (
+        "lock contention does not produce ONE exit status across the drawn shapes "
+        f"({sorted(contention_statuses)}), so whatever separates it is keyed on the shape "
+        "of the run rather than on the condition"
+    )
+    assert not (contention_statuses & product_statuses), (
+        "a run that failed ONLY because another worker held the Neo4j lock exits "
+        f"{sorted(contention_statuses)}, and a run that failed on a real product defect "
+        f"exits {sorted(product_statuses)} — the same status. Nothing reading the child "
+        "process can tell a machine condition from a defect, so `make verify` is non-zero "
+        "either way and the frozen build_succeeds probe records 0 for a busy lock.\n"
+        "Repair (measured as satisfiable, and both frozen files stay untouched): give the "
+        "machine condition its own exit status from inside the pytest process — an "
+        "evidence-gated `pytest_sessionfinish` in conftest.py that re-stamps "
+        "`session.exitstatus` only when the run's sole failure is a Neo4jLockTimeout — or "
+        "make a contended acquisition wait until it wins so it never fails at all. Do NOT "
+        "use 5 or 2, do not fire when a real failure is also present, and do not skip "
+        "instead of failing: a skip is invisible in the metrics."
+    )
+    assert not (contention_statuses & green_statuses), (
+        "lock contention now exits with the same status as a clean green run "
+        f"({sorted(contention_statuses)}), which is the one repair this ticket rules out: "
+        "a machine condition that reports success is invisible in the metrics rather than "
+        "merely misattributed"
+    )
+
