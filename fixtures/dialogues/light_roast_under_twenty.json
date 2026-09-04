@@ -1,0 +1,35 @@
+{
+  "_note": "Nothing is missing, so NOTHING is asked - the zero-question end of R1's range. The llm_script is the reply recorded for this exact utterance in packages/llm/fixtures/recorded/buyer_intent.json (T-014), verbatim: it proposes `price_usd lt 20`, an op R19 cannot express, and the golden shows it DROPPED rather than coerced to `lte` - the buyer's own `under $20` is what survives. Its `days_since_roast` weight of 1.0 is likewise ignored in favour of the 0.7 the buyer's own words carry, because the model is additive and never overwrites the buyer.",
+  "_questions_expected": 0,
+  "turns": [
+    "I want a light roast under $20, and I'd rather it be recently roasted."
+  ],
+  "llm_script": [
+    "{\"constraints\": [{\"field\": \"roast_level\", \"op\": \"eq\", \"value\": \"light\"}, {\"field\": \"price_usd\", \"op\": \"lt\", \"value\": 20}], \"preferences\": [{\"field\": \"days_since_roast\", \"direction\": \"min\", \"weight\": 1.0}], \"clarifying_question\": null}"
+  ],
+  "expected_intent": {
+    "query": "I want a light roast under $20, and I'd rather it be recently roasted.",
+    "category": "coffee",
+    "budget_band": "0-50",
+    "currency": "USD",
+    "hard_constraints": [
+      {
+        "field": "price_usd",
+        "op": "lte",
+        "value": 20.0
+      },
+      {
+        "field": "roast_level",
+        "op": "eq",
+        "value": "light"
+      }
+    ],
+    "preferences": [
+      {
+        "field": "days_since_roast",
+        "direction": "minimize",
+        "weight": 0.7
+      }
+    ]
+  }
+}
