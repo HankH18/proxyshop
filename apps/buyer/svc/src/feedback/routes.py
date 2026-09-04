@@ -1,0 +1,296 @@
+"""HTTP surface for R14's post-purchase feedback (T-073).
+
+Discovered and mounted by the frozen :func:`buyer_svc.main.create_app`.
+
+Two routes, and the split between them is "may I ask?" on one side and "this is the answer" on
+the other::
+
+    POST /buyer/feedback/prompt   {"order": {...}}                 -> 200 {offered, prompt|null}
+    POST /buyer/feedback          {"order": {...}, "response": {}} -> 201 {event_id, ...}
+
+``/prompt`` answers **200 with ``offered: false``** for an order the network did not route,
+rather than 404. "Is there a feedback prompt for this order?" is a question with two correct
+answers, and an order list rendering fifty rows should not have to treat half of them as errors.
+The ``reason`` field carries the refusal in words a screen can show, so the buyer is told *why*
+there is nothing to fill in — which for an un-routed order is the honest and slightly
+reassuring answer that we did not send them there.
+
+``/prompt`` cannot write. It reaches no ledger sink at all: :func:`buyer_svc.feedback.
+feedback_prompt` takes none, so asking whether a prompt exists cannot become recording feedback
+no matter what a future edit does to this file.
+
+Three things about the boundary
+-------------------------------
+**``routed`` is a ``StrictBool``.** Not a style preference. Pydantic's default (lax) mode
+coerces the JSON strings ``"yes"``, ``"true"``, ``"on"`` and ``"1"`` into ``True`` — measured on
+this tree at 2.13, where it turned a body carrying no boolean at all into an HTTP 201 and a live
+auction on T-071's confirm route. Here the same coercion would offer a feedback prompt for an
+order the network never routed, which is the one thing R14 forbids, so the order body is a typed
+model rather than an open ``dict`` and its one boolean admits exactly ``true`` and ``false``.
+
+**The response body is a closed model with no free-text field.** FastAPI serializes through
+``response_model``, so even a handler that returned the whole order record by mistake is filtered
+down to the declared fields. That is the same reason T-070's auth routes declare theirs
+explicitly: the R5 boundary is enforced by the wire contract as well as by the code behind it.
+
+**Ownership is checked only when the session can be resolved.** ``X-Buyer-Session`` is optional
+here, exactly as it is on T-072's accept routes, because nothing in this repository logs a buyer
+in before they reach a shortlist. When it IS supplied it is resolved to a pseudonym and passed
+to :func:`~buyer_svc.feedback.submission.submit_feedback`, which refuses feedback about an order
+routed for somebody else. The gap — that an unauthenticated caller who can name an order ref is
+not stopped here — is real, is the reason ``FeedbackNotYours`` exists, and is reported in this
+ticket's NEEDS rather than papered over with a check that cannot run.
+
+Wiring
+------
+The ledger sink is read from ``app.state.ledger_sink`` and is **not** constructed here, for the
+same reason T-072's ``/buyer/shortlist/accept`` does not construct its exchange client: a buyer
+service that mints its own ledger client cannot be pointed at a stub, and a deployment that
+forgot to wire one should hear about it as a 503 rather than discover it when the first buyer
+answers a prompt. **Nothing in this repository sets that attribute yet** — the buyer→ledger seam
+has no composition root, exactly as the buyer→exchange seam has none. Reported in NEEDS.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from typing import Any
+
+from fastapi import APIRouter, Header, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
+
+from ._spellings import bind_spellings
+from .errors import (
+    ContradictoryFeedback,
+    FeedbackAlreadySubmitted,
+    FeedbackError,
+    FeedbackNotYours,
+    LedgerSinkUnusable,
+    MalformedFeedbackEvent,
+    MissingFeedbackChoice,
+    OrderNotRouted,
+    UnknownFeedbackChoice,
+    UnknownFeedbackQuestion,
+    UnusableOrder,
+)
+from .prompt import feedback_prompt
+from .routing import routing
+from .submission import event_view, submit_feedback
+
+_log = logging.getLogger(__name__)
+
+#: Starlette 0.5x renamed ``HTTP_422_UNPROCESSABLE_ENTITY`` to ``..._CONTENT`` and emits a
+#: DeprecationWarning on the old name. Resolved once, here, so this module names neither
+#: spelling twice and works on both.
+_HTTP_422 = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
+
+__all__ = [
+    "LEDGER_SINK_ATTR",
+    "FeedbackEventView",
+    "OrderBody",
+    "PromptBody",
+    "PromptResponse",
+    "PromptView",
+    "SubmitBody",
+    "router",
+]
+
+router = APIRouter(prefix="/buyer/feedback", tags=["buyer-feedback"])
+
+#: Where the ledger sink lives on the app. Set it in your composition root.
+LEDGER_SINK_ATTR = "ledger_sink"
+
+
+class OrderBody(BaseModel):
+    """One order, as much of it as this service needs to answer R14's question.
+
+    ``extra="allow"`` because a real order record carries plenty more and truncating it here
+    would make the route's answer differ from the library's for the same order. Only the fields
+    below are ever read.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    order_ref: str = Field(min_length=1)
+    store_id: str = ""
+    auction_id: str = ""
+    #: ``StrictBool``, never ``bool`` — see this module's docstring. ``None`` means "the record
+    #: does not say", which is a third answer and not the same as ``false``: it falls back to
+    #: whether the order names an auction.
+    routed: StrictBool | None = None
+    status: str = ""
+    buyer_pseudonym: str = ""
+
+
+class PromptBody(BaseModel):
+    """The order a prompt is being asked about."""
+
+    order: OrderBody
+
+
+class SubmitBody(BaseModel):
+    """The order, and the answered prompt."""
+
+    order: OrderBody
+    #: The answer. An open mapping because the choice vocabulary is published by the library
+    #: (``buyer_svc.feedback.CHOICE_IDS``) and re-stating it as an enum here would be a second
+    #: copy of the option table — the drift D30 exists to prevent.
+    response: dict[str, Any]
+
+
+class OptionView(BaseModel):
+    """One option on the prompt. Three fields, none of which admits typing."""
+
+    id: str
+    label: str
+    matched_pitch: bool
+
+
+class PromptView(BaseModel):
+    """The one prompt. A single object, never a list — R14 offers one question, not a survey."""
+
+    order_ref: str
+    store_id: str
+    auction_id: str
+    question_id: str
+    question: str
+    input_type: str
+    options: list[OptionView]
+
+
+class PromptResponse(BaseModel):
+    """Whether there is a prompt for this order, and if not, why not."""
+
+    offered: bool
+    reason: str = ""
+    prompt: PromptView | None = None
+
+
+class FeedbackEventView(BaseModel):
+    """The ledger event the submission became, as the client is allowed to see it."""
+
+    event_id: str
+    kind: str
+    ts: str
+    order_ref: str
+    store_id: str
+    auction_id: str
+    matched_pitch: bool
+    reason: str
+
+
+def _pseudonym_for(session_id: str | None) -> str:
+    """The pseudonym behind an ``X-Buyer-Session`` header, or ``""`` when there is no header.
+
+    A header that is present and not a live session is a 401: a caller that sent a credential
+    is telling us who they are, and quietly ignoring a bad one would mean the ownership check is
+    skipped in exactly the case an attacker controls.
+    """
+    if not session_id:
+        return ""
+    try:
+        from ..auth.routes import get_auth_service
+        from ..auth.sessions import SessionError
+    except Exception as exc:  # pragma: no cover - the login package is part of this service
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="buyer sessions are unavailable, so this session could not be checked",
+        ) from exc
+    try:
+        return str(get_auth_service().session(session_id).pseudonym)
+    except SessionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="no live buyer session"
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # A login service that cannot be built (T-070 refuses a multi-worker deployment) is a
+        # 503 rather than a 500: the request was fine and this deployment is not.
+        _log.warning("could not resolve a buyer session for a feedback request: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="buyer sessions are unavailable, so this session could not be checked",
+        ) from exc
+
+
+@router.post("/prompt", response_model=PromptResponse)
+async def prompt_route(body: PromptBody) -> PromptResponse:
+    """The one structured prompt for an order, or a reason there is none (R14).
+
+    Writes nothing and can reach no ledger sink.
+    """
+    order = body.order.model_dump()
+    try:
+        prompt = feedback_prompt(order)
+    except UnusableOrder as exc:
+        raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
+    if prompt is None:
+        return PromptResponse(offered=False, reason=routing(order).reason, prompt=None)
+    return PromptResponse(offered=True, reason="", prompt=PromptView(**prompt.to_dict()))
+
+
+@router.post("", status_code=status.HTTP_201_CREATED, response_model=FeedbackEventView)
+async def submit_route(
+    body: SubmitBody,
+    request: Request,
+    x_buyer_session: str | None = Header(default=None, alias="X-Buyer-Session"),
+) -> FeedbackEventView:
+    """Record one answered prompt as a ``feedback`` ledger event (R14)."""
+    sink = getattr(request.app.state, LEDGER_SINK_ATTR, None)
+    pseudonym = _pseudonym_for(x_buyer_session)
+    try:
+        event = submit_feedback(
+            body.order.model_dump(), body.response, sink, buyer_pseudonym=pseudonym
+        )
+    except UnusableOrder as exc:
+        raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
+    except OrderNotRouted as exc:
+        # 403, not 404 and not 422. The order exists and the request is well formed; what is
+        # refused is the buyer's standing to leave feedback about it, which is R14's gate.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"message": str(exc), "reason": exc.reason},
+        ) from exc
+    except FeedbackNotYours as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except FeedbackAlreadySubmitted as exc:
+        # 409 with the event id already recorded: the buyer's feedback exists, and an error with
+        # no reference to it would be the unhelpful half of right.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": str(exc), "event_id": exc.event_id},
+        ) from exc
+    except UnknownFeedbackChoice as exc:
+        raise HTTPException(
+            status_code=_HTTP_422,
+            detail={"message": str(exc), "options": list(exc.options)},
+        ) from exc
+    except (
+        MissingFeedbackChoice,
+        UnknownFeedbackQuestion,
+        ContradictoryFeedback,
+    ) as exc:
+        raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
+    except LedgerSinkUnusable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+    except MalformedFeedbackEvent as exc:
+        # 500 and not 422: the body this service built is wrong, which is nobody's fault but
+        # ours, and blaming the caller for it would send them away to fix a request that is fine.
+        _log.error("refused to emit a malformed feedback event: %s", "; ".join(exc.problems))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="this feedback could not be recorded in the published shape",
+        ) from exc
+    except FeedbackError as exc:  # pragma: no cover - a refusal added later, not yet mapped
+        raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
+    return FeedbackEventView(**event_view(event))
+
+
+# This module is not imported by the package `__init__` (it would drag FastAPI into every
+# consumer of `feedback_prompt`), so it binds its own alternate spelling here. See
+# `_spellings.py` for what goes wrong without it.
+bind_spellings(sys.modules[__name__])

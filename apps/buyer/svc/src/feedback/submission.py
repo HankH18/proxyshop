@@ -46,6 +46,7 @@ keyword *values* alike, so a call passing both would emit one event and record t
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import uuid
 from collections.abc import Mapping
@@ -123,10 +124,17 @@ RESPONSE_CHOICE_FIELDS: tuple[str, ...] = (
 #: refuse a well-formed answer.
 RESPONSE_QUESTION_FIELDS: tuple[str, ...] = ("question_id", "prompt_id")
 
-#: How much of a rejected choice is echoed back in the refusal. A client can post a megabyte in
-#: ``choice``; the refusal for it travels into an exception message, a log line and an HTTP
-#: response body, and none of those should be a megabyte long.
-MAX_ECHOED_CHOICE = 80
+#: Longest rejected value echoed back verbatim in a refusal.
+MAX_ECHOED_CHOICE = 64
+
+#: What a rejected value has to look like before it is quoted back. A typo'd option id
+#: (``"yes_as_describd"``) is the case worth echoing, and this admits it. Everything else is
+#: reported by length only, and that is an R5 rule rather than a length rule: the prompt offers
+#: no free-text field, so a ``choice`` carrying a sentence is a client that invented one, and the
+#: sentence a buyer typed is exactly where their own name and email address turn up. A refusal is
+#: not a safe place to put it — it travels into an exception message, a log line and an HTTP
+#: response body, none of which this package controls the destination of.
+_ECHOABLE = re.compile(rf"^[A-Za-z0-9_.\-]{{1,{MAX_ECHOED_CHOICE}}}$")
 
 
 class FeedbackLedger:
@@ -182,7 +190,10 @@ def reset_submitted() -> None:
 
 
 def _echo(value: str) -> str:
-    return value if len(value) <= MAX_ECHOED_CHOICE else value[:MAX_ECHOED_CHOICE] + "…"
+    """A rejected value in a form that is safe to put in a message. See :data:`_ECHOABLE`."""
+    if _ECHOABLE.match(value):
+        return repr(value)
+    return f"<{len(value)} characters, which is not an option id>"
 
 
 def _chosen(response: Any) -> FeedbackChoice:
@@ -203,7 +214,7 @@ def _chosen(response: Any) -> FeedbackChoice:
     asked = first(response, RESPONSE_QUESTION_FIELDS)
     if asked and asked != PROMPT_QUESTION_ID:
         raise UnknownFeedbackQuestion(
-            f"this response answers question {_echo(asked)!r}, but the only question R14 asks is "
+            f"this response answers question {_echo(asked)}, but the only question R14 asks is "
             f"{PROMPT_QUESTION_ID!r} — did it match the pitch. Nothing was recorded."
         )
 
@@ -218,7 +229,7 @@ def _chosen(response: Any) -> FeedbackChoice:
     choice = CHOICES_BY_ID.get(picked)
     if choice is None:
         raise UnknownFeedbackChoice(
-            f"{_echo(picked)!r} is not one of this prompt's options. R14's prompt is structured: "
+            f"{_echo(picked)} is not one of this prompt's options. R14's prompt is structured: "
             f"the answer must be one of {list(CHOICE_IDS)}, and free text is not an option the "
             f"buyer was offered — recording it would put a body on the ledger that "
             f"'feedback' has no published shape for.",
