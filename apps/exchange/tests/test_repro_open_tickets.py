@@ -129,15 +129,6 @@ def test_t169_a_production_call_site_wires_the_platform_seller_registry() -> Non
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-169: `apps.exchange.src.accept` and `exchange.accept` are the same file (equal "
-        "inode) but two distinct module objects with two copies of every module global, so a "
-        "registry wired through the spelling the package's own docstring documents is "
-        "invisible to the spelling the served app imports; remove this marker with the fix"
-    ),
-)
 def test_t169_a_registry_wired_through_either_spelling_binds_the_other() -> None:
     """Wiring a process-wide default only works if there is one process-wide module.
 
