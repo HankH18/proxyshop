@@ -62,15 +62,6 @@ def _product_python_files() -> list[pathlib.Path]:
 # ======================================================================================
 # T-154 — the DB-backed trust suite connects as a principal the deployment does not use
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-154: _fixtures_events.EVENTS_ROLE is 'app', but the shipped ledger writer "
-        "connects as 'trust_rw' (pg.DEFAULT_DSN_ENV consults PROXYSHOP_PG_DSN_TRUST_RW "
-        "ahead of the generic app DSN), so every DB-backed test in apps/trust grades a "
-        "different grant set from the one that ships; remove this marker with the fix"
-    ),
-)
 def test_the_events_fixture_connects_as_the_role_the_ledger_writer_actually_ships_as() -> None:
     """The DB-backed trust fixtures must use the deployment's own principal.
 
