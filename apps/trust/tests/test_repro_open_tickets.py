@@ -102,6 +102,76 @@ def test_the_events_fixture_connects_as_the_role_the_ledger_writer_actually_ship
 # ======================================================================================
 # T-166 — a conditional test that silently stopped covering the case it was written for
 # ======================================================================================
+#: The attribute an HTTP response carries its status on, in every client this repo uses.
+_STATUS_ATTRIBUTE = "status_code"
+
+#: How many preceding word tokens a negator may sit in and still govern a "match" claim.
+_NEGATION_WINDOW = 4
+
+
+def _reads_a_status_code(node: ast.AST, tainted: frozenset[str]) -> bool:
+    """True when this expression reads a response status **however it is spelled**.
+
+    Three spellings, because the substring check this replaced saw only the first:
+
+    * the attribute itself — ``response.status_code``;
+    * the attribute name as a string — ``getattr(response, "status_code")``;
+    * a local that was ASSIGNED from one — ``code`` after ``code = response.status_code``.
+    """
+    for child in ast.walk(node):
+        if isinstance(child, ast.Attribute) and child.attr == _STATUS_ATTRIBUTE:
+            return True
+        if isinstance(child, ast.Constant) and child.value == _STATUS_ATTRIBUTE:
+            return True
+        if isinstance(child, ast.Name) and child.id in tainted:
+            return True
+    return False
+
+
+def _names_holding_a_status_code(tree: ast.AST) -> frozenset[str]:
+    """Every local name that ends up holding a status code, to a fixed point.
+
+    Iterated rather than single-pass so a chain — ``code = response.status_code`` then
+    ``alias = code`` — is followed all the way, in either source order.
+    """
+    tainted: set[str] = set()
+    while True:
+        grew = False
+        for node in ast.walk(tree):
+            targets: list[ast.expr]
+            if isinstance(node, ast.Assign):
+                targets, value = list(node.targets), node.value
+            elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
+                targets, value = [node.target], node.value  # type: ignore[list-item]
+            else:
+                continue
+            if value is None or not _reads_a_status_code(value, frozenset(tainted)):
+                continue
+            for target in targets:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name) and name.id not in tainted:
+                        tainted.add(name.id)
+                        grew = True
+        if not grew:
+            return frozenset(tainted)
+
+
+def _branches_on_a_status_code(tree: ast.AST) -> list[str]:
+    """The source of every branch condition in ``tree`` that is decided by a status code.
+
+    ``if``/``elif``, conditional expressions, ``while`` and ``match`` subjects all count: a
+    dead arm is dead whichever of them guards it.
+    """
+    tainted = _names_holding_a_status_code(tree)
+    conditions: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If | ast.IfExp | ast.While):
+            conditions.append(node.test)
+        elif isinstance(node, ast.Match):
+            conditions.append(node.subject)
+    return [ast.unparse(test) for test in conditions if _reads_a_status_code(test, tainted)]
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -122,6 +192,21 @@ def test_the_replay_snapshot_test_does_not_branch_on_a_status_it_can_never_reach
 
     Parsed with ``ast`` rather than matched as text, so reformatting the source cannot make
     the branch invisible to this gate.
+
+    STRENGTHENED (T-288). The original walk below collected ``ast.If`` nodes whose test
+    expression SOURCE contained the substring ``"status_code"``, which graded the spelling
+    rather than the value. Measured evasion, which used to pass and is re-run against this
+    gate in ``test_the_status_code_branch_gate_is_not_evadable_by_hoisting_the_attribute``::
+
+        code = response.status_code      # the attribute leaves the `if`
+        if code == 503:                  # ... and the dead branch survives untouched
+            ...
+
+    That yielded ``branches == []`` and went GREEN — and, under ``xfail(strict=True)``, an
+    XPASS forces the marker's removal, so the escape hatch would have retired T-166 with the
+    dead branch still there. The original assertion is UNCHANGED and still runs first; the
+    second one below tracks the value through assignment to a fixed point, and also counts
+    conditional expressions, ``while`` and ``match``, which the first never looked at.
     """
     from apps.trust.tests import test_events
 
@@ -138,6 +223,60 @@ def test_the_replay_snapshot_test_does_not_branch_on_a_status_it_can_never_reach
         f"({branches}). With T-062 landed the 503 arm is unreachable, so its assertions "
         f"about `scorer_unavailable` never run — the test passes by taking the other arm. "
         f"Assert the 200 outcome unconditionally instead."
+    )
+
+    tracked = _branches_on_a_status_code(tree)
+    assert tracked == [], (
+        f"{subject.__name__} still branches on a value that came from the status code it is "
+        f"testing ({tracked}). The condition need not MENTION `status_code` for the branch "
+        f"to be dead — hoisting the attribute into a local moves the spelling, not the "
+        f"unreachable arm. Assert the 200 outcome unconditionally instead."
+    )
+
+
+def test_the_status_code_branch_gate_is_not_evadable_by_hoisting_the_attribute() -> None:
+    """The gate above, attacked. A tightened gate nobody attacked is not tightened.
+
+    Each case below is a real evasion of the substring walk this gate used to be: the dead
+    503 branch survives verbatim and only the SPELLING of its condition moves. Every one was
+    measured GREEN against ``"status_code" in ast.unparse(node.test)`` and must now be red.
+    The last case is the shape a genuine fix has, and must stay green — a gate that flags
+    the fix is no better than one that misses the defect.
+    """
+    evasions = {
+        "the defect as written today": "if response.status_code == 503:\n    pass\n",
+        "hoisted into a local": "code = response.status_code\nif code == 503:\n    pass\n",
+        "hoisted twice": (
+            "code = response.status_code\nalias = code\nif alias == 503:\n    pass\n"
+        ),
+        "read through getattr": (
+            'code = getattr(response, "status_code")\nif code == 503:\n    pass\n'
+        ),
+        "hoisted and moved into a conditional expression": (
+            "code = response.status_code\nbody = a if code == 503 else b\n"
+        ),
+        "hoisted and moved into a match": (
+            "code = response.status_code\nmatch code:\n    case 503:\n        pass\n"
+        ),
+        "tuple-unpacked": (
+            "code, text = response.status_code, response.text\nif code == 503:\n    pass\n"
+        ),
+    }
+    missed = [
+        label
+        for label, source in evasions.items()
+        if not _branches_on_a_status_code(ast.parse(textwrap.dedent(source)))
+    ]
+    assert missed == [], (
+        f"these rewrites keep the unreachable 503 branch and slip past the gate: {missed}. "
+        f"The gate is grading how the condition is SPELLED again, which is the hole T-288 "
+        f"measured."
+    )
+
+    fixed = "assert response.status_code == 200, response.text\n"
+    assert _branches_on_a_status_code(ast.parse(fixed)) == [], (
+        "the gate flags an unconditional assertion on the status code, which is exactly what "
+        "T-166 asks the target test to become — it must not be red against its own fix"
     )
 
 
@@ -362,6 +501,62 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
 # ======================================================================================
 # T-207 — the weight table's gloss contradicts the approved manifest
 # ======================================================================================
+#: A claim about whether a delivery matched its pitch. ``mismatch``/``mismatched`` carry the
+#: negation in the word itself; everything else needs a negator in front of it. Word
+#: boundaries keep IDENTIFIERS out: ``mismatch_return`` and ``feedback_match`` are names of
+#: things, not sentences about them, and ``_`` is a word character so neither matches.
+_MATCH_CLAIM = re.compile(r"\b(?P<denied>mis)?match(?:e[ds]|es|ing)?\b", re.IGNORECASE)
+
+#: Words that flip a nearby ``match`` claim. Contractions are listed whole because the
+#: tokeniser keeps apostrophes.
+_NEGATORS = frozenset(
+    {
+        "not",
+        "never",
+        "no",
+        "nor",
+        "without",
+        "fail",
+        "fails",
+        "failed",
+        "failing",
+        "cannot",
+        "isn't",
+        "wasn't",
+        "aren't",
+        "weren't",
+        "doesn't",
+        "didn't",
+        "don't",
+        "can't",
+    }
+)
+
+
+def _match_claim_polarity(text: str) -> set[str]:
+    """What ``text`` claims about the delivery matching: ``{"asserted"}``, ``{"denied"}``, both, or neither.
+
+    "the buyer said it matched"                       -> {"asserted"}
+    "the buyer confirmed the match and returned it"   -> {"asserted"}
+    "what arrived does not match what was pitched"    -> {"denied"}
+    "the buyer reports a mismatch"                    -> {"denied"}
+    "the delivery differed from the pitch"            -> set()   (says nothing about matching)
+
+    Nothing here decides which polarity is CORRECT — the approved manifest does that, and
+    the gate below reads it from the manifest rather than typing it as a literal.
+    """
+    polarity: set[str] = set()
+    for claim in _MATCH_CLAIM.finditer(text):
+        if claim.group("denied"):
+            polarity.add("denied")
+            continue
+        preceding = re.findall(r"[A-Za-z']+", text[: claim.start()])[-_NEGATION_WINDOW:]
+        polarity.add(
+            "denied" if any(word.lower() in _NEGATORS for word in preceding) else "asserted"
+        )
+    return polarity
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -378,6 +573,21 @@ def test_the_mismatch_return_gloss_agrees_with_the_approved_manifest() -> None:
     ``pitch_delivery_mismatch``: "The buyer reports that what arrived does not match what
     was pitched, and returns it." The engine's weight table says the opposite — that the
     buyer *said it matched* — which inverts what the 1.5 weight is being applied to.
+
+    STRENGTHENED (T-287). This test loaded the manifest's authoritative description and then
+    never compared the two: its load-bearing assertion was ``assert "said it matched" not in
+    gloss``, which forbids ONE EXACT PHRASE rather than checking agreement. Measured: the
+    live gloss is red (correct), but ``"the buyer confirmed the match and returned it"`` —
+    the same inverted meaning, reworded — went GREEN. Under ``xfail(strict=True)`` that green
+    XPASSes and FORCES the marker's removal, so a reword would have retired T-207 with the
+    contradiction fully intact. The original assertion is UNCHANGED and still runs first; the
+    comparison added after it derives its expectation from the manifest text already loaded
+    above, so only a gloss that actually agrees with the authority passes.
+
+    Note the direction of the derivation, since deriving an expectation from the thing under
+    test is its own defect (T-289): the MANIFEST is the authority (SPEC A3) and the GLOSS is
+    what is defended. Reading the expectation off the manifest is the point — reword the
+    manifest and the expectation must move with it.
     """
     from apps.trust.src.scoring import engine
 
@@ -409,6 +619,72 @@ def test_the_mismatch_return_gloss_agrees_with_the_approved_manifest() -> None:
         f"said the delivery MATCHED. The approved manifest says the opposite: "
         f"{description!r}. One of the two decides a 1.5-weight negative observation, and "
         f"the manifest is the authority (SPEC A3)."
+    )
+
+    approved_polarity = _match_claim_polarity(description)
+    assert approved_polarity, (
+        f"the manifest's mismatch_return description no longer says anything about whether "
+        f"the delivery matched, so this gate has no authority left to compare against: "
+        f"{description!r}"
+    )
+    gloss_polarity = _match_claim_polarity(gloss)
+    assert gloss_polarity <= approved_polarity, (
+        f"scoring/engine.py's gloss on mismatch_return CONTRADICTS the approved manifest. "
+        f"The gloss {gloss.strip()!r} claims the delivery match was {sorted(gloss_polarity)}; "
+        f"the manifest {description!r} says it was {sorted(approved_polarity)}. This is a "
+        f"comparison against the authority, not a ban on one phrasing: rewording the "
+        f"inversion ('the buyer confirmed the match and returned it') does not clear it, and "
+        f"only a gloss that agrees with the manifest does. The manifest is the authority "
+        f"(SPEC A3) and it decides what the 1.5 weight is applied to."
+    )
+
+
+def test_the_mismatch_return_gloss_gate_is_not_evadable_by_rewording_the_inversion() -> None:
+    """The gate above, attacked, against the REAL manifest description.
+
+    The candidate glosses below all keep the inverted meaning and only change the words. Each
+    was measured GREEN against ``assert "said it matched" not in gloss`` — and an XPASS under
+    ``strict=True`` would have forced T-207's marker off with the contradiction intact. They
+    must now be red. The agreeing glosses at the bottom must stay green: a gate that flags a
+    correct rewrite is no more useful than one that misses the defect.
+    """
+    manifest = json.loads((REPO_ROOT / "fixtures" / "manifest.json").read_text(encoding="utf-8"))
+    behaviours = (manifest.get("dishonest_store") or {}).get("behaviours") or []
+    description = next(
+        str(row.get("description", ""))
+        for row in behaviours
+        if isinstance(row, dict) and row.get("type") == "mismatch_return"
+    )
+    approved = _match_claim_polarity(description)
+    assert approved == {"denied"}, (
+        f"the approved manifest no longer denies the match, so every expectation below is "
+        f"pointed at the wrong authority: {description!r} -> {sorted(approved)}"
+    )
+
+    inverted = (
+        "``mismatch_return``  1.5  the buyer said it matched and then returned it",
+        "``mismatch_return``  1.5  the buyer confirmed the match and returned it",
+        "``mismatch_return``  1.5  the delivery matched the pitch and came back anyway",
+        "``mismatch_return``  1.5  a matching delivery the buyer returned regardless",
+        "``mismatch_return``  1.5  the buyer reported a mismatch, then said it matched",
+    )
+    slipped = [text for text in inverted if _match_claim_polarity(text) <= approved]
+    assert slipped == [], (
+        f"these glosses still say the buyer got what was pitched and clear the gate anyway: "
+        f"{slipped}. The gate is forbidding a phrase again instead of comparing meanings, "
+        f"which is the hole T-287 measured."
+    )
+
+    agreeing = (
+        "``mismatch_return``  1.5  the buyer reports that what arrived does not match the pitch",
+        "``mismatch_return``  1.5  the buyer reports a mismatch and returns the item",
+        "``mismatch_return``  1.5  what arrived did not match what was pitched, and went back",
+        "``mismatch_return``  1.5  the buyer reports the delivery differed from the pitch",
+    )
+    refused = [text for text in agreeing if not _match_claim_polarity(text) <= approved]
+    assert refused == [], (
+        f"these glosses agree with the approved manifest and the gate rejects them anyway: "
+        f"{refused}. A gate that is red against its own fix cannot be closed."
     )
 
 
