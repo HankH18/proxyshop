@@ -951,6 +951,17 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
             if rng.random() < 0.7
             else min(row_cap, (0.0, 10.0, 20.0)[rng.randrange(3)])
         )
+        # THE SPECIMEN'S PRICE LINE, DRAWN rather than pinned. One draw in five uses the
+        # ticket's own numbers — a 100.00 list at a declared 20% — so `unit_price == 15.00` at
+        # `depth == 20%` is INSIDE the population rather than three hard-coded points beside it.
+        # Measured: with only those points, `total_price != 45.00` — the identical bid at
+        # quantity three — took both gates green on 20 consecutive fresh seeds with the money
+        # path open. Three points are not a population, and a fourth point would not have been
+        # one either; the line itself has to be drawable.
+        on_specimen_line = rng.random() < 0.2
+        if on_specimen_line:
+            list_price, row_cap, depth = 100.0, 20.0, 20.0
+
         # The HONEST price for that depth. The margin is drawn: at zero the tolerance still
         # clears the wall, so the price can land exactly on the arithmetic rather than a cent above.
         margin = (0.0, 0.0, 0.01, round(rng.uniform(0.0, 40.0), 2))[rng.randrange(4)]
@@ -1008,7 +1019,11 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
         # gates green at 40/40 with the money path open. A point is not a population, and the
         # answer is a drawn population of them, armed the other way up: with the roster the wall
         # must REFUSE this bid, which is what proves it reached the wall at all.
-        cheat = round(max(list_price * 0.01, list_price * (100.0 - depth) / 100.0 * 0.4), 2)
+        cheat = (
+            15.0
+            if on_specimen_line
+            else round(max(list_price * 0.01, list_price * (100.0 - depth) / 100.0 * 0.4), 2)
+        )
         underpriced = dict(bid)
         underpriced["offer"] = dict(bid["offer"])
         underpriced["offer"]["unit_price"] = cheat
@@ -1017,9 +1032,14 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
         # class "any trait the drawn population never emits AND total_price != unit_price" walked
         # straight through, measured ALIVE at 20/20 on three independent traits. The escape was
         # one field wide.
-        underpriced["offer"]["total_price"] = (
-            cheat if rng.random() < 0.4 else round(cheat * rng.randrange(2, 9), 2)
-        )
+        quantity_roll = rng.random()
+        if quantity_roll < 0.3:
+            underpriced["offer"]["total_price"] = cheat
+        elif quantity_roll < 0.65:
+            underpriced["offer"]["total_price"] = round(cheat * rng.randrange(2, 9), 2)
+        else:
+            # CONTINUOUS as well as integral, so no finite set of totals can be spared.
+            underpriced["offer"]["total_price"] = round(cheat * rng.uniform(1.0, 9.0), 2)
 
         cheat_rostered = _judge(underpriced, path, snapshot=snap, list_prices=roster)
         assert cheat_rostered.ok is False and "price_under_declared_depth:offer.unit_price" in list(
@@ -1425,12 +1445,23 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
             "message_none",
             "variant_cart_url",
             "hook_provenance",
+            "no_claims",
+            "no_commitments",
+            "no_variant",
+            "no_url",
+            "pct_spelling",
         )
     }
     currencies: set[Any] = set()
-    for _ in range(250):
+    for sample in range(250):
+        # BOTH claim configurations. Sampling only `carries_list_price=True` always inserts a
+        # `list_price` claim, so `claims` was never empty and the floor below could not see it.
         b = _drawn_priced_bid(
-            rng, depth=20.0, list_price=100.0, unit_price=80.0, carries_list_price=True
+            rng,
+            depth=20.0,
+            list_price=100.0,
+            unit_price=80.0,
+            carries_list_price=sample % 2 == 0,
         )
         offer = b["offer"]
         currencies.add(offer["currency"])
@@ -1442,7 +1473,14 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
             stamps.append(offer["discount"]["provenance"]["observed_at"])
         if any(t[:4] >= "2026" for t in stamps):
             stats["current_year"] += 1
-        if any(t.endswith("T00:00:00Z") for t in stamps + [offer["expires_at"]]):
+        # DRAWN stamps only. `HOOK_PROVENANCE["observed_at"]` is itself midnight, so once the
+        # fixture-shaped draw started carrying that block verbatim this floor was counting a
+        # CONSTANT: measured 50/250 midnights, all of them the fixture's, and zero from a drawn
+        # stamp — so forcing every drawn timestamp off midnight left the floor satisfied and the
+        # narrowing invisible. A floor that can be satisfied by something the generator does not
+        # draw is not a floor.
+        drawn_stamps = [t for t in stamps if t != HOOK_PROVENANCE["observed_at"]]
+        if any(t.endswith("T00:00:00Z") for t in drawn_stamps + [offer["expires_at"]]):
             stats["midnight"] += 1
         blocks = [repr(c["provenance"]) for c in b["claims"]]
         if len(blocks) > 1 and len(set(blocks)) < len(blocks):
@@ -1488,6 +1526,18 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
             stats["variant_cart_url"] += 1
         if offer.get("discount") and offer["discount"]["provenance"] == dict(HOOK_PROVENANCE):
             stats["hook_provenance"] += 1
+        # Axes nothing was watching. Each is a shape a real bid has and a narrowed generator
+        # could silently stop producing, which is exactly how the midnight floor was defanged.
+        if not b["claims"]:
+            stats["no_claims"] += 1
+        if not offer["commitments"]:
+            stats["no_commitments"] += 1
+        if offer["variant_ref"] is None:
+            stats["no_variant"] += 1
+        if offer.get("checkout_url") is None:
+            stats["no_url"] += 1
+        if offer.get("discount") and offer["discount"]["type"] in ("percent", "pct"):
+            stats["pct_spelling"] += 1
 
     floors = {
         "dashed": 10,
@@ -1505,6 +1555,11 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
         "message_none": 20,
         "variant_cart_url": 10,
         "hook_provenance": 10,
+        "no_claims": 5,
+        "no_commitments": 20,
+        "no_variant": 10,
+        "no_url": 20,
+        "pct_spelling": 40,
     }
     thin = {k: v for k, v in stats.items() if v < floors[k]}
     assert not thin, (
