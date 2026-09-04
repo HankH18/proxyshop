@@ -964,6 +964,13 @@ def test_a_lapsed_listing_is_recorded_as_expired_and_the_evidence_re_lists_the_s
         f"expiry and the fresh delisting; got {kinds}"
     )
 
+    expired, delisted = snapshot["delistings"]
+    assert expired["payload"]["reason_code"] == "manual_review", (
+        "the expiry event must carry the reason the listing was OPENED with; stamping the "
+        "trust-score reason on a listing a human opened files a false record of why it ended"
+    )
+    assert delisted["payload"]["reason_code"] == "trust_score_below_threshold"
+
 
 def test_a_registry_that_cannot_answer_never_releases_a_store() -> None:
     """Fail closed, in the same direction as ``is_blacklisted`` on the same inputs."""

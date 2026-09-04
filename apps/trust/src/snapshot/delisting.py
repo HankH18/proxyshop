@@ -33,9 +33,9 @@ the threshold correctly produces BOTH: the old listing ended, and the current ev
 re-lists the store. Recording only one of the two would leave a gap in the audit trail
 exactly where an appeal would look.
 
-Fail-closed, in the same direction as :func:`trust.scoring.is_blacklisted`: a registry whose
-``lookup`` is missing or raises yields no ``blacklist_expired`` event, so a store stays
-listed rather than being quietly released by a broken lookup.
+Fail-closed, in the same direction as :func:`trust.scoring.is_blacklisted`: a registry this
+module cannot read yields no ``blacklist_expired`` event, so a store stays listed rather than
+being quietly released because its source was down.
 """
 
 from __future__ import annotations
@@ -87,8 +87,14 @@ def below_blacklist_threshold(value: Any) -> bool:
     return float(value) < BLACKLIST_THRESHOLD
 
 
-def _lapsed_identities(blacklist: Any, as_of: Any) -> frozenset[str]:
-    """Business identities whose listing is still blocking but has lapsed at ``as_of``.
+def _lapsed_reasons(blacklist: Any, as_of: Any) -> dict[str, str]:
+    """Business identity -> reason code, for every listing still blocking but lapsed at ``as_of``.
+
+    The reason travels with the identity because the expiry event has to carry the reason the
+    listing was CREATED with -- ``blacklist_expired``'s published payload is
+    ``("store_id", "reason_code")``, and stamping this module's own
+    ``trust_score_below_threshold`` on a listing a human opened for ``manual_review`` would
+    file a false record of why it ended.
 
     Read by ITERATING the registry once, deliberately, rather than by calling
     ``lookup(identity)`` per store. ``build_snapshot`` has already asked ``lookup`` exactly
@@ -105,9 +111,9 @@ def _lapsed_identities(blacklist: Any, as_of: Any) -> frozenset[str]:
     try:
         records = list(blacklist)
     except Exception:  # noqa: BLE001 - a registry that cannot answer must not release a store
-        return frozenset()
+        return {}
 
-    lapsed: set[str] = set()
+    lapsed: dict[str, str] = {}
     for record in records:
         identity = getattr(record, "business_identity", None)
         expired_at = getattr(record, "expired_at", None)
@@ -117,10 +123,10 @@ def _lapsed_identities(blacklist: Any, as_of: Any) -> frozenset[str]:
             continue
         try:
             if expired_at(as_of):
-                lapsed.add(str(identity))
+                lapsed[str(identity)] = str(getattr(record, "reason_code", "") or "unrecorded")
         except Exception:  # noqa: BLE001 - same reason
             continue
-    return frozenset(lapsed)
+    return lapsed
 
 
 def _event(kind: str, *, store_id: str, as_of: Any, payload: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +170,7 @@ def delisting_events(
     cannot be keyed by is already denied by ``is_blacklisted``'s fail-closed path.
     """
     entries = list(entries)
-    lapsed = _lapsed_identities(blacklist, as_of) if entries else frozenset()
+    lapsed = _lapsed_reasons(blacklist, as_of) if entries else {}
     events: list[dict[str, Any]] = []
     for entry in entries:
         store_id = entry.get("store_id")
@@ -182,7 +188,8 @@ def delisting_events(
                     as_of=as_of,
                     payload={
                         "store_id": store_id,
-                        "reason_code": TRUST_SCORE_REASON_CODE,
+                        # The reason the listing was OPENED with, not this module's.
+                        "reason_code": lapsed[identity],
                         "business_identity": identity,
                     },
                 )
