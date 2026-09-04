@@ -23,7 +23,19 @@ RUN pip install --no-cache-dir \
 # what the `.pkgroot/shopify_stub -> src` symlink provides in the repo. In the image the
 # same effect is had by copying src/ to a directory literally named shopify_stub.
 COPY services/shopify-stub/src/ /app/shopify_stub/
-COPY services/shopify-stub/fixtures/ /app/services/shopify-stub/fixtures/
+# T-304. The fixtures land at /app/fixtures/, NOT at /app/services/shopify-stub/fixtures/,
+# because the line above FLATTENS src/ and `recordings.py:46` locates the recordings
+# relative to its own file:
+#     RECORDINGS_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "recorded"
+# In the checkout that module is services/shopify-stub/src/recordings.py, so parent.parent
+# is services/shopify-stub/ and the lookup is right. In the image it is
+# /app/shopify_stub/recordings.py, so parent.parent is bare /app and the lookup is
+# /app/fixtures/recorded. Reproducing the repo path here — which is what this line used to
+# do — put the bytes somewhere the shipped module can never look: the checkout resolved it
+# and the artifact did not, with no error, just an empty recordings set for the first
+# consumer to import it. The COPY destination follows the flatten instead of fighting it, so
+# the module's own path arithmetic is true on both sides.
+COPY services/shopify-stub/fixtures/ /app/fixtures/
 
 EXPOSE 8787
 

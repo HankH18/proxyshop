@@ -1472,15 +1472,6 @@ _RECORDINGS_PROBE = (
 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-304: services/shopify-stub/src/recordings.py:46 resolves RECORDINGS_DIR as "
-        "parent.parent/'fixtures'/'recorded', which is /app/fixtures/recorded in the "
-        "flattened container while services/shopify-stub/Dockerfile:26 lands the fixtures at "
-        "/app/services/shopify-stub/fixtures; remove this marker with the fix"
-    ),
-)
 def test_t304_the_shopify_stub_image_resolves_its_recordings_directory() -> None:
     """A COPY-set gate would NOT catch this, which is why it is gated separately.
 
