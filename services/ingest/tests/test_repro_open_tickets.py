@@ -34,6 +34,8 @@ from ingest.adapters import (
     native_product_key,
 )
 
+from proxyshop_support.asgi_server import serve
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INGEST_SRC = REPO_ROOT / "services/ingest/src"
 
@@ -51,6 +53,91 @@ _TYPE_CHECK_HELPERS = frozenset({"_satisfies_catalog_adapter"})
 
 def _client() -> SafeHTTPClient:
     return SafeHTTPClient(policy=LOOPBACK)
+
+
+class _TwoFacedStore:
+    """A storefront whose two surfaces price the same variant differently.
+
+    Raw ASGI, like ``_fixtures_storefront.StorefrontStub`` next door and for the same reason:
+    every property here is a wire-level one. It exists separately because that stub *derives*
+    each product page's JSON-LD from the entry it serves in ``products.json``, so it can never
+    make the two disagree — which is the whole of what T-249 is about.
+    """
+
+    HANDLE = "trail-runner-42"
+    SKU = "TR-42-9"
+
+    def __init__(self, *, entry_price: str, page_price: str) -> None:
+        self.entry_price = entry_price
+        self.page_price = page_price
+
+    def _entry(self) -> dict[str, Any]:
+        return {
+            "id": 8123456,
+            "title": "Trail Runner 42",
+            "handle": self.HANDLE,
+            "vendor": "Cascade",
+            "variants": [
+                {
+                    "id": 44352913,
+                    "title": "US 9",
+                    "sku": self.SKU,
+                    "price": self.entry_price,
+                    "available": True,
+                }
+            ],
+        }
+
+    def _page(self) -> bytes:
+        ld = {
+            "@context": "https://schema.org/",
+            "@type": "Product",
+            "name": "Trail Runner 42",
+            "brand": {"@type": "Brand", "name": "Cascade"},
+            "offers": [
+                {
+                    "@type": "Offer",
+                    "sku": self.SKU,
+                    "price": self.page_price,
+                    "priceCurrency": "USD",
+                    "availability": "https://schema.org/InStock",
+                }
+            ],
+        }
+        return (
+            '<!doctype html><html><head><script type="application/ld+json">'
+            f"{json.dumps(ld)}</script></head><body></body></html>"
+        ).encode()
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+
+        while True:
+            message = await receive()
+            if not message.get("more_body"):
+                break
+
+        path = scope["path"]
+        if path == "/robots.txt":
+            body, media = b"User-agent: *\nAllow: /\n", b"text/plain"
+        elif path == "/products.json":
+            body, media = json.dumps({"products": [self._entry()]}).encode(), b"application/json"
+        elif path == f"/products/{self.HANDLE}":
+            body, media = self._page(), b"text/html"
+        else:
+            body, media = b"not found", b"text/plain"
+
+        await send(
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-type", media)]}
+        )
+        await send({"type": "http.response.body", "body": body})
 
 
 def _modules_imported_by_the_app() -> dict[str, str]:
@@ -325,39 +412,27 @@ def test_a_refused_entry_price_does_not_promote_the_other_surfaces_price() -> No
     choose which of its two surfaces prices the product by making the first one unusable.
     Measured: ``price=12.0``, and an ``Offer`` op is emitted for it.
 
-    ``_to_record`` is the merge itself and is called directly because this needs the two
-    surfaces to DISAGREE, which the shared storefront stub cannot express — it derives the
-    page's JSON-LD from the same entry it serves in ``products.json``, so both always carry
-    the same number.
+    The store is served for real rather than calling the merge directly: this needs the two
+    surfaces to DISAGREE, which the shared ``StorefrontStub`` cannot express — it generates the
+    product page's JSON-LD from the same entry it serves in ``products.json``, so both always
+    carry the same number. :class:`_TwoFacedStore` serves the two numbers the ticket names and
+    is crawled through the ordinary public entry point.
 
     Either repair passes: refuse the product, or leave the price unset. What may not happen is
     a refused price silently becoming a different number.
     """
-    entry = {
-        "id": 8123456,
-        "handle": "trail-runner-42",
-        "title": "Trail Runner 42",
-        "vendor": "Cascade",
-        "variants": [{"id": 44352913, "sku": "TR-42-9", "price": "-5.00", "available": True}],
-    }
-    jsonld = {
-        "@type": "Product",
-        "name": "Trail Runner 42",
-        "offers": [
-            {
-                "@type": "Offer",
-                "sku": "TR-42-9",
-                "price": "12.00",
-                "priceCurrency": "USD",
-                "availability": "https://schema.org/InStock",
-            }
-        ],
-    }
+    with serve(_TwoFacedStore(entry_price="-5.00", page_price="12.00")) as base_url:
+        snapshot = SignedFetchAdapter().fetch_catalog(
+            CatalogRequest(
+                store_id="store-1",
+                base_url=base_url,
+                policy=LOOPBACK,
+                fetch_product_pages=True,
+            )
+        )
 
-    record = SignedFetchAdapter()._to_record(
-        "store-1", entry, jsonld, "https://store-one.example.com/x", "digest", changed=True
-    )
-    price = record.variants[0].price
+    assert snapshot.products, f"the crawl read nothing: {list(snapshot.warnings)}"
+    price = snapshot.products[0].variants[0].price
 
     assert price != 12.0, (
         "a hostile entry price of '-5.00' was read as 'no price stated' and the JSON-LD's "
