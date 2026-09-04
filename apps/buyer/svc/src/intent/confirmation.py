@@ -120,7 +120,7 @@ def confirmations() -> ConfirmationLedger:
 
 def reset_confirmations() -> None:
     """Forget every confirmation. For tests and for a fresh process only."""
-    _LEDGER.reset()
+    confirmations().reset()
 
 
 def confirm(
@@ -174,7 +174,10 @@ def confirm(
     resolved = coerce_intent(intent)
     _require_structure(resolved)
 
-    book = ledger if ledger is not None else _LEDGER
+    # Through the accessor, not the module global: one place decides what "the default
+    # ledger" is, so a deployment that swaps it in has one thing to swap rather than
+    # every reader of `_LEDGER` to find.
+    book = ledger if ledger is not None else confirmations()
     book.claim(resolved.intent_id)
 
     try:
