@@ -1972,3 +1972,426 @@ def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one()
         f"the served exchange solicited no store at all from a {len(store_ids)}-store roster, "
         f"so S2's chain has no end-to-end path even for the honest stores"
     )
+
+
+# ======================================================================================
+# T-256 — T-065's persistence half: five tables, no writer, and no caller either
+# ======================================================================================
+#: The five ledger tables T-065's objective says a verification result lands in. Names only —
+#: every column, constraint and vocabulary below is parsed out of the migration itself, so
+#: this gate cannot drift away from the schema it is grading.
+_T256_TABLES = (
+    "ledger.claims",
+    "ledger.claim_verifications",
+    "ledger.verification_evidence_refs",
+    "ledger.trust_observations",
+    "ledger.trust_scores",
+)
+
+#: The migration that owns those tables. Postgres-only by construction (``jsonb``,
+#: ``timestamptz``, ``gen_random_uuid()``, ``plpgsql``), which is exactly why this gate reads
+#: the DDL and drives a recording double instead of opening a database: this file's own
+#: contract is that nothing in it may skip, and a datastore-backed test skips whenever the
+#: compose stack is down — and a skip is not an xfail, so ``strict=True`` would never fire.
+_T256_MIGRATION = "db/migrations/0002_ledger_tables.sql"
+
+#: A trust-side callable that persists a verification outcome, found by capability rather than
+#: by a pinned name so the fix is free to choose its own spelling.
+_T256_SEAM_ACTION = re.compile(r"persist|record|write|save|insert|append", re.IGNORECASE)
+_T256_SEAM_SUBJECT = re.compile(r"verif|claim|observation|trust_score", re.IGNORECASE)
+
+#: Where a caller has to live for the seam to be reachable in something that ships. e2e
+#: support and tests do not count: ``observation_from_claim`` was added to answer this very
+#: class of finding and its only caller in the tree is ``e2e/support/s1/flow.py``, so a
+#: function whose sole caller is a harness is the precedent this excludes, not a hypothetical.
+_T256_SHIPPED_CALLER = re.compile(r"^(apps/[^/]+(/svc)?|services/[^/]+)/src/")
+
+
+def _t256_migration_sql() -> str:
+    path = REPO_ROOT / _T256_MIGRATION
+    assert path.is_file(), f"{_T256_MIGRATION} is missing; the five tables' DDL is ground truth here"
+    return path.read_text(encoding="utf-8")
+
+
+def _t256_table_ddl(sql: str, table: str) -> str:
+    """The body of one ``create table`` statement, parenthesis-balanced.
+
+    Balanced rather than a lazy regex to the next ``);`` because these tables carry
+    ``check (...)`` constraints with nested parentheses, and a lazy match silently truncates
+    the column list — which would make every "is this column required" answer below quietly
+    wrong in the permissive direction.
+    """
+    match = re.search(rf"create\s+table[^(]*?\b{re.escape(table)}\b\s*\(", sql, re.IGNORECASE)
+    assert match is not None, f"{_T256_MIGRATION} no longer declares {table}"
+    depth, start = 0, match.end() - 1
+    for index in range(start, len(sql)):
+        if sql[index] == "(":
+            depth += 1
+        elif sql[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return sql[start + 1 : index]
+    raise AssertionError(f"unbalanced parentheses in the {table} definition")
+
+
+def _t256_check_values(body: str, column: str) -> list[str]:
+    """The literal vocabulary a ``check (<column> in (...))`` constraint pins, in order."""
+    match = re.search(rf"{re.escape(column)}\s+in\s*\(([^)]*)\)", body, re.IGNORECASE | re.DOTALL)
+    return re.findall(r"'([^']+)'", match.group(1)) if match else []
+
+
+def _t256_required_columns(body: str) -> list[str]:
+    """Columns the database refuses an insert without: NOT NULL and carrying no DEFAULT.
+
+    These are exactly what a mock cursor accepts and Postgres rejects on the first row, which
+    is how a persistence "fix" can pass every generated case against SQL that has never run.
+    """
+    required: list[str] = []
+    reserved = {"constraint", "check", "unique", "primary", "foreign", "create", "table"}
+    for line in body.splitlines():
+        stripped = line.strip().rstrip(",")
+        column = re.match(r"^([a-z_][a-z0-9_]*)\s+\S", stripped, re.IGNORECASE)
+        if column is None or column.group(1).lower() in reserved:
+            continue
+        if re.search(r"\bnot\s+null\b", stripped, re.IGNORECASE) and not re.search(
+            r"\bdefault\b", stripped, re.IGNORECASE
+        ):
+            required.append(column.group(1))
+    return required
+
+
+def _t256_cases() -> list[dict[str, Any]]:
+    """The FULL claim_type x status cross product, each with randomized surroundings.
+
+    Full rather than sampled because both vocabularies are small and frozen in the migration's
+    own CHECK constraints: a stub that hard-codes one dimension or one status passes 1 case of
+    56 rather than getting lucky. The surroundings are drawn — never pinned — so every
+    assertion below is a function of the generated input rather than of a constant.
+    """
+    import random
+
+    from claim_verification import VERIFICATION_STATUSES
+    from trust.scoring import CLAIM_TYPE_DIMENSIONS
+
+    rng = random.Random(0x256 ^ random.SystemRandom().getrandbits(48))
+    cases: list[dict[str, Any]] = []
+    for claim_type in sorted(CLAIM_TYPE_DIMENSIONS):
+        for status in VERIFICATION_STATUSES:
+            cases.append(
+                {
+                    "store_id": f"store-{rng.randrange(10**9)}",
+                    "claim_ref": f"claim-{claim_type}-{rng.randrange(10**9)}",
+                    "claim_type": claim_type,
+                    "key": f"{claim_type}.value",
+                    "status": status,
+                    "confidence": round(rng.uniform(0.0, 1.0), 6),
+                    "catalog_snapshot_id": f"snapshot-{rng.randrange(10**9)}",
+                    "verifier_version": f"verifier-{rng.randrange(100)}.0.0",
+                    "evidence_refs": [
+                        f"evidence-{rng.randrange(10**9)}" for _ in range(rng.randint(1, 3))
+                    ],
+                    "observed_at": AS_OF,
+                }
+            )
+    return cases
+
+
+class _T256RecordingCursor:
+    """A DB-API cursor that remembers every statement instead of executing one."""
+
+    def __init__(self, log: list[tuple[str, Any]]) -> None:
+        self._log = log
+        self.description = None
+        self.rowcount = -1
+
+    def execute(self, sql: Any, params: Any = None) -> "_T256RecordingCursor":
+        self._log.append((str(sql), params))
+        return self
+
+    def executemany(self, sql: Any, seq: Any = None) -> "_T256RecordingCursor":
+        for params in seq or ():
+            self._log.append((str(sql), params))
+        return self
+
+    def fetchone(self) -> Any:
+        return None
+
+    def fetchall(self) -> list[Any]:
+        return []
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "_T256RecordingCursor":
+        return self
+
+    def __exit__(self, *_: Any) -> bool:
+        return False
+
+
+class _T256RecordingConnection:
+    """The smallest thing a psycopg-shaped writer can be handed without a database."""
+
+    def __init__(self) -> None:
+        self.log: list[tuple[str, Any]] = []
+
+    def cursor(self, *_: Any, **__: Any) -> _T256RecordingCursor:
+        return _T256RecordingCursor(self.log)
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def execute(self, sql: Any, params: Any = None) -> _T256RecordingCursor:
+        return _T256RecordingCursor(self.log).execute(sql, params)
+
+    def __enter__(self) -> "_T256RecordingConnection":
+        return self
+
+    def __exit__(self, *_: Any) -> bool:
+        return False
+
+
+def _t256_find_seams() -> list[tuple[str, str, Any]]:
+    """Every trust-side callable that looks like it persists a verification outcome.
+
+    Found by capability across the trust package's public surface — ``(module, name, obj)`` —
+    so the fix picks its own spelling and its own home, and this gate grades whether the
+    behaviour exists rather than whether one particular identifier does.
+    """
+    import importlib
+
+    found: list[tuple[str, str, Any]] = []
+    for module_name in (
+        "trust.verification",
+        "trust.ledger",
+        "trust.events",
+        "trust.scoring",
+        "trust.snapshot",
+        "trust.reconcile",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:  # a package that will not import cannot be the seam
+            continue
+        for name in getattr(module, "__all__", ()) or dir(module):
+            if name.startswith("_"):
+                continue
+            if not (_T256_SEAM_ACTION.search(name) and _T256_SEAM_SUBJECT.search(name)):
+                continue
+            attribute = getattr(module, name, None)
+            if callable(attribute) and not isinstance(attribute, type):
+                found.append((module_name, name, attribute))
+    return found
+
+
+def test_t256_the_verification_persistence_sweep_is_armed() -> None:
+    """The five tables, the two vocabularies and the cross product all still exist.
+
+    Not xfail. The repro below iterates the full ``claim_type x status`` cross product, and
+    the cheapest way to silence it is for one of those vocabularies to shrink — a sweep that
+    quietly drops to one case still reports the same "passed". This is also where the DDL
+    reader is proved to have read something: a regex that silently matched nothing would make
+    every "is this column required" answer below vacuously true, which is this repo's own
+    defanged-by-its-own-fixture failure.
+    """
+    from claim_verification import VERIFICATION_STATUSES
+    from contracts.ledger import LEDGER_EVENT_KINDS, LEDGER_PAYLOAD_SHAPES
+    from trust.scoring import CLAIM_TYPE_DIMENSIONS
+
+    sql = _t256_migration_sql()
+    bodies = {table: _t256_table_ddl(sql, table) for table in _T256_TABLES}
+
+    claim_types = _t256_check_values(bodies["ledger.claims"], "claim_type")
+    assert len(claim_types) >= 10, (
+        f"parsed only {len(claim_types)} claim types out of {_T256_MIGRATION}'s "
+        f"claims_claim_type_check (14 when this was written): {claim_types}. The cross product "
+        f"below is built from this list, so a reader that stopped matching would shrink the "
+        f"sweep to nothing and still report a pass"
+    )
+    assert set(claim_types) == set(CLAIM_TYPE_DIMENSIONS), (
+        f"the migration's claim-type vocabulary and trust.scoring.CLAIM_TYPE_DIMENSIONS have "
+        f"drifted: only in the migration "
+        f"{sorted(set(claim_types) - set(CLAIM_TYPE_DIMENSIONS))}, only in the mapping "
+        f"{sorted(set(CLAIM_TYPE_DIMENSIONS) - set(claim_types))}"
+    )
+
+    statuses = _t256_check_values(bodies["ledger.claim_verifications"], "status")
+    assert set(statuses) == set(VERIFICATION_STATUSES), (
+        f"the migration pins {sorted(statuses)} as verification statuses and the verifier "
+        f"publishes {sorted(VERIFICATION_STATUSES)}"
+    )
+
+    for table, body in bodies.items():
+        assert _t256_required_columns(body), (
+            f"{table} parsed to zero NOT-NULL-without-DEFAULT columns, so the SQL conformance "
+            f"assertion in the repro would accept an INSERT naming nothing at all"
+        )
+
+    assert "claim_verified" in LEDGER_EVENT_KINDS, (
+        "claim_verified is no longer a frozen ledger kind, so T-065's 'emit claim_verified' "
+        "half has nothing left to be measured against"
+    )
+    assert LEDGER_PAYLOAD_SHAPES["claim_verified"], (
+        "contracts pins no payload shape for claim_verified any more"
+    )
+
+    cases = _t256_cases()
+    assert len(cases) == len(claim_types) * len(statuses), (
+        f"the generator produced {len(cases)} cases, not the full "
+        f"{len(claim_types)}x{len(statuses)} cross product"
+    )
+    assert {case["claim_type"] for case in cases} == set(claim_types), (
+        "the generated cases no longer exercise every claim type"
+    )
+    assert {case["status"] for case in cases} == set(statuses), (
+        "the generated cases no longer exercise every verification status"
+    )
+    assert len({case["store_id"] for case in cases}) == len(cases), (
+        "generated store ids collide, so the sweep is narrower than it counts"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-256: T-065's persistence half is unimplemented — ledger.claims, "
+        "claim_verifications, verification_evidence_refs, trust_observations and trust_scores "
+        "all exist in db/migrations/0002 and the only INSERT in the product tree targets "
+        "ledger.commerce_events, so no trust-side seam persists a verification outcome and "
+        "nothing calls one; remove this marker with the fix"
+    ),
+)
+def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_for() -> None:
+    """A verification that writes nothing is graded, correctly, as writing nothing.
+
+    T-065's acceptance item 2 — "re-running the same (claim, snapshot, verifier version)
+    writes nothing" — is satisfied trivially by a pure function, which is how the persistence
+    half stayed unimplemented behind a green ticket. The schema disagrees about what the item
+    meant: the migration reserves ``claim_verifications_idempotency_key UNIQUE (claim_id,
+    catalog_snapshot_id, verifier_version)`` with a comment naming that very acceptance item,
+    so it was always about ROWS.
+
+    Four demands, in an order where each blocks the cheapest way past the one before it:
+
+    1. **a seam exists** — some trust-side callable persists a verification outcome;
+    2. **something that ships calls it** — an uncalled function that formats INSERT strings
+       leaves the ticket's own claim ("nothing writes any of them") true after the fix, and the
+       precedent for exactly that sits in the scoped file: ``observation_from_claim``'s only
+       caller anywhere in the tree is ``e2e/support/s1/flow.py``;
+    3. **its SQL is executable** — every column the migration marks NOT NULL with no DEFAULT
+       must be named. A recording cursor accepts an INSERT that omits all of them, so without
+       this the whole cross product passes against SQL Postgres would reject on row one;
+    4. **a replay writes no second ROW** — asserted as "no second INSERT, or an INSERT that
+       carries ``on conflict``", so the constraint-based design the migration was written for
+       is accepted rather than the fixer being pushed toward a racy select-then-skip.
+    """
+    seams = _t256_find_seams()
+    assert seams, (
+        "no trust-side callable persists a verification outcome. Searched the public surface "
+        "of trust.verification / trust.ledger / trust.events / trust.scoring / trust.snapshot "
+        "/ trust.reconcile for a name that is both an action "
+        "(persist|record|write|save|insert|append) and a subject "
+        "(verif|claim|observation|trust_score), and found none — which agrees with the tree: "
+        "the only INSERT into ledger.* anywhere in product code targets "
+        f"ledger.commerce_events. The five tables {list(_T256_TABLES)} have no writer at all, "
+        "so T-065's acceptance item 2 grades pure-function idempotency and nothing else"
+    )
+
+    product_sources = {
+        str(path.relative_to(REPO_ROOT)): path.read_text(encoding="utf-8")
+        for path in _product_python_files()
+    }
+    assert product_sources, "the product file sweep found nothing to search for callers"
+    uncalled: list[str] = []
+    for module_name, name, _ in seams:
+        home = module_name.replace(".", "/")
+        callers = [
+            path
+            for path, source in product_sources.items()
+            if home not in path
+            and _T256_SHIPPED_CALLER.match(path)
+            and re.search(rf"\b{re.escape(name)}\s*\(", source)
+        ]
+        if not callers:
+            uncalled.append(f"{module_name}.{name}")
+    assert len(uncalled) < len(seams), (
+        f"every persistence seam found is uncalled by anything that ships: {uncalled}. A "
+        f"function nobody invokes writes nothing, so the ticket's claim survives its own fix. "
+        f"A caller has to live under apps/<app>/src/** or services/<service>/src/** — not in "
+        f"tests, and not in e2e support"
+    )
+
+    sql = _t256_migration_sql()
+    required = {
+        table: _t256_required_columns(_t256_table_ddl(sql, table)) for table in _T256_TABLES
+    }
+    cases = _t256_cases()
+    module_name, name, seam = next(
+        (entry for entry in seams if f"{entry[0]}.{entry[1]}" not in uncalled), seams[0]
+    )
+    parameters = set(inspect.signature(seam).parameters)
+
+    connection = _T256RecordingConnection()
+    for case in cases:
+        arguments = dict(case, connection=connection)
+        seam(**{key: value for key, value in arguments.items() if key in parameters})
+
+    written = {
+        table: [
+            statement
+            for statement, _ in connection.log
+            if re.search(rf"insert\s+into\s+{re.escape(table)}\b", statement, re.IGNORECASE)
+        ]
+        for table in _T256_TABLES
+    }
+    missing = sorted(table for table, statements in written.items() if not statements)
+    assert missing == [], (
+        f"{module_name}.{name} wrote nothing to {missing} across all {len(cases)} generated "
+        f"claim_type x status cases"
+    )
+
+    incomplete: set[str] = set()
+    for table, statements in written.items():
+        for statement in statements:
+            columns = re.search(
+                rf"insert\s+into\s+{re.escape(table)}\s*\(([^)]*)\)", statement, re.IGNORECASE
+            )
+            named = (
+                {token.strip().strip('"') for token in columns.group(1).split(",")}
+                if columns
+                else set()
+            )
+            absent = sorted(set(required[table]) - named)
+            if absent:
+                incomplete.add(f"{table} INSERT omits {absent}")
+    assert not incomplete, (
+        f"{len(incomplete)} generated INSERT shapes omit a column the migration marks NOT NULL "
+        f"with no DEFAULT, so Postgres would reject them on the first row while a recording "
+        f"cursor takes all {len(cases)}:\n  " + "\n  ".join(sorted(incomplete)[:8])
+    )
+
+    replay = _T256RecordingConnection()
+    payload = {
+        key: value
+        for key, value in dict(cases[0], connection=replay).items()
+        if key in parameters
+    }
+    seam(**payload)
+    seam(**payload)
+    replayed = [
+        statement
+        for statement, _ in replay.log
+        if re.search(r"insert\s+into\s+ledger\.claim_verifications\b", statement, re.IGNORECASE)
+    ]
+    assert len(replayed) <= 1 or all(
+        re.search(r"on\s+conflict", statement, re.IGNORECASE) for statement in replayed
+    ), (
+        f"replaying the identical (claim_ref, catalog_snapshot_id, verifier_version) emitted "
+        f"{len(replayed)} claim_verifications INSERTs and none defers to the "
+        f"claim_verifications_idempotency_key UNIQUE constraint with ON CONFLICT. T-065's "
+        f"acceptance 2 is about rows, not statements: a second ROW is the failure, and letting "
+        f"the constraint refuse it is the design the migration was written for"
+    )
