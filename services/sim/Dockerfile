@@ -81,17 +81,30 @@ COPY apps/trust/src/             /app/apps/trust/src/
 # library as well — for code the simulation never executes. `ranking/` reaches the same
 # imports through `filters.py:39`. `policy/`, `reports/` and `main.py` are simply unused.
 #
-# `auction/routes.py` IS included here (unlike in apps/merchant/Dockerfile, which excludes
-# it) because its module-scope `..eligibility` / `..orchestration` imports at :39-40 both
-# resolve in this image — the simulation needs those two subpackages anyway — so the whole
-# directory is self-consistent and naming it as a directory is the simpler, less brittle
-# instruction. The narrowing cannot rot silently either way:
-# proxyshop_support/tests/test_artifact_copyset.py imports every module this image ships
-# inside a container-shaped tree, so a new module-scope edge out of these five subpackages
-# turns that gate red here.
+# `auction/routes.py` is now EXCLUDED, exactly as apps/merchant/Dockerfile:101-106 excludes
+# it, and `auction/` is therefore named file by file rather than as a directory. It USED to be
+# included, on the argument that its module-scope `..eligibility` / `..orchestration` imports
+# both resolve here anyway; T-310 ended that. Wiring the published ranking onto the served
+# auction added `from ..ranking.serving import ...` at module scope, and `ranking/` reaches
+# `retrieval/criteria.py` and through it `ingest.graph` — so keeping the directory would
+# oblige this image to carry `ranking/`, `retrieval/` AND the ingest graph library, for an
+# HTTP router `exchange.main` serves and this image never mounts. The simulation imports
+# `exchange.auction` (the package) at `runner.py:513`, never `exchange.auction.routes`;
+# measured, `git grep -n 'auction.routes\|configure_auctions' services/sim/src` is empty.
+#
+# This is the narrowing working rather than rotting, and the gate is what said so: the module
+# that grew the new edge turned
+# proxyshop_support/tests/test_artifact_copyset.py::test_t301_every_shipped_module_imports_inside_the_container_shaped_tree
+# red HERE — `1 of 96 shipped modules cannot be imported ... No module named
+# 'exchange.ranking'` — instead of this container failing in a deploy.
 COPY apps/exchange/src/__init__.py    /app/apps/exchange/src/
 COPY apps/exchange/src/accept/        /app/apps/exchange/src/accept/
-COPY apps/exchange/src/auction/       /app/apps/exchange/src/auction/
+COPY apps/exchange/src/auction/__init__.py \
+     apps/exchange/src/auction/collect.py \
+     apps/exchange/src/auction/fanout.py \
+     apps/exchange/src/auction/ledger.py \
+     apps/exchange/src/auction/state.py \
+     /app/apps/exchange/src/auction/
 COPY apps/exchange/src/checkout/      /app/apps/exchange/src/checkout/
 COPY apps/exchange/src/eligibility/   /app/apps/exchange/src/eligibility/
 COPY apps/exchange/src/orchestration/ /app/apps/exchange/src/orchestration/

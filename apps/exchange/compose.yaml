@@ -41,7 +41,27 @@ services:
       REDIS_URL: "redis://redis:6379"
       LLM_PROVIDER: "${LLM_PROVIDER:-double}"
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-hash}"
-      RANKING_WEIGHTS: "${RANKING_WEIGHTS:-w_m=0.35,w_e=0.20,w_t=0.20,w_v=0.15,w_d=0.10}"
+      # T-310. This block used to be a single `RANKING_WEIGHTS=w_m=0.35,w_e=0.20,...` and
+      # NOTHING read it — measured: `git grep RANKING_WEIGHTS` outside .swarm-loop returns
+      # this line and `.env.example:43` and no reader at all. The published loader is
+      # `contracts.ranking.RankingWeights.from_env`, and `WEIGHT_ENV_VARS` (ranking.py:58-64)
+      # names five SEPARATE variables — RANK_W_M/E/T/V/D — plus RANK_WEIGHTS_VERSION. So the
+      # deployed exchange was silently un-tunable: a weight set written into the old variable
+      # changed nothing, and the shortlist was always the published default. That mattered
+      # nowhere until the ranker reached a served path; it does now.
+      #
+      # Defaults are deliberately EMPTY rather than the published numbers, for the same reason
+      # PROXYSHOP_ROLE_PASSWORD above is: `from_env` falls back to the published set when a
+      # variable is unset, so a copy of those numbers here would be a second source of truth
+      # that stops agreeing with `packages/contracts` the day the published set moves. Setting
+      # a malformed one, or a set that does not sum to 1.0, raises from the published loader
+      # rather than defaulting silently.
+      RANK_W_M: "${RANK_W_M:-}"
+      RANK_W_E: "${RANK_W_E:-}"
+      RANK_W_T: "${RANK_W_T:-}"
+      RANK_W_V: "${RANK_W_V:-}"
+      RANK_W_D: "${RANK_W_D:-}"
+      RANK_WEIGHTS_VERSION: "${RANK_WEIGHTS_VERSION:-}"
       CHECKOUT_MODE: "${CHECKOUT_MODE:-redirect}"
     depends_on:
       postgres:
