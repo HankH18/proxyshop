@@ -1,0 +1,34 @@
+{
+  "contract_version": "1.0.0",
+  "server": "shopify-catalog-mcp",
+  "tool": "catalog.list_products",
+  "shop_domain": "harbour-house.example.com",
+  "notes": [
+    "RECORDED CONTRACT for the catalog MCP server (T-023, SPEC A1/C6).",
+    "Replayed by ingest.adapters.catalog_mcp.RecordedMCPSession, which refuses any call",
+    "it has no recording for - so `make verify` can never start making a live call, and a",
+    "contract test cannot pass by asking for something nobody recorded.",
+    "Recorded with limit=2 so pagination is exercised in four products rather",
+    "than in four hundred; construct the adapter with page_size=2 to replay it.",
+    "A server on the older MCP shape: no `structuredContent`, only a text content",
+    "block carrying the JSON. The adapter has to read this one too."
+  ],
+  "interactions": [
+    {
+      "tool": "catalog.list_products",
+      "arguments": {
+        "shop_domain": "harbour-house.example.com",
+        "limit": 2
+      },
+      "response": {
+        "isError": false,
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"products\": [{\"id\": \"gid://shopify/Product/7100200\", \"handle\": \"harbour-house-filter-papers\", \"title\": \"Harbour House Filter Papers\", \"vendor\": \"Harbour House Coffee\", \"product_type\": \"Brewing Equipment\", \"status\": \"ACTIVE\", \"online_store_url\": \"https://harbour-house.example.com/products/harbour-house-filter-papers\", \"variants\": [{\"id\": \"gid://shopify/ProductVariant/41200\", \"sku\": \"HHF-100\", \"title\": \"100 pack\", \"price\": {\"amount\": \"7.25\", \"currency_code\": \"USD\"}, \"available\": true}]}], \"page_info\": {\"has_next_page\": false}}"
+          }
+        ]
+      }
+    }
+  ]
+}

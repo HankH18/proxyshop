@@ -1,0 +1,35 @@
+{
+  "contract_version": "1.0.0",
+  "server": "shopify-catalog-mcp",
+  "tool": "catalog.list_products",
+  "shop_domain": "harbour-house.example.com",
+  "notes": [
+    "RECORDED CONTRACT for the catalog MCP server (T-023, SPEC A1/C6).",
+    "Replayed by ingest.adapters.catalog_mcp.RecordedMCPSession, which refuses any call",
+    "it has no recording for - so `make verify` can never start making a live call, and a",
+    "contract test cannot pass by asking for something nobody recorded.",
+    "Recorded with limit=2 so pagination is exercised in four products rather",
+    "than in four hundred; construct the adapter with page_size=2 to replay it.",
+    "A tool-level failure. An MCP error result carries its explanation in the SAME",
+    "`content` field a successful one carries data in, so this recording is what",
+    "proves the decoder checks `isError` before it reaches for the payload."
+  ],
+  "interactions": [
+    {
+      "tool": "catalog.list_products",
+      "arguments": {
+        "shop_domain": "harbour-house.example.com",
+        "limit": 2
+      },
+      "response": {
+        "isError": true,
+        "content": [
+          {
+            "type": "text",
+            "text": "catalog temporarily unavailable: upstream returned 503"
+          }
+        ]
+      }
+    }
+  ]
+}
