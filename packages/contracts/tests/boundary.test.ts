@@ -12,11 +12,13 @@ import {
   HOSTED_PATH,
   LIST_PRICE_CLAIM_KEY,
   MAX_DISCOUNT_ROSTER_KEY,
+  MINIMUM_PAYABLE_AMOUNT,
   NON_HOOK_PROVENANCE_SOURCES,
   OFFER_COMMITMENTS_SITE,
   OFFER_DISCOUNT_SITE,
   OFFER_TOTAL_PRICE_SITE,
   OFFER_UNIT_PRICE_SITE,
+  PRICE_FLOOR_FRACTION,
   PRICE_RECONCILIATION_TOLERANCE,
   REASON_CLAIM_PROVENANCE_EMPTY_SOURCE,
   REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE,
@@ -34,7 +36,9 @@ import {
   REASON_TRUST_SNAPSHOT_UNAVAILABLE,
   REASON_UNKNOWN_PATH,
   REASON_UNVERIFIABLE_CLAIM_SITE,
+  ROSTER_PRICE_BELOW_FLOOR,
   parseTimestamp,
+  priceFloor,
   priceReasons,
   validateBid,
   validateExternalSubmission,
@@ -991,6 +995,66 @@ describe("T-177 price parity — the SHARED corpus `test_boundary_dual_path.py` 
     ]) {
       expect(byName.has(name), name).toBe(true);
     }
+  });
+
+  it("pins the price floor in both directions — T-278's gate for the T-250 fix", () => {
+    // T-250 replaced an exact `priced === 0` equality with a THRESHOLD, because an equality has
+    // exactly one satisfying value: 0.001 for a product the roster prices at 100.00 was refused
+    // by nothing at all. The Python half of that fix was verified through the exchange; the
+    // TypeScript half shipped with no case in this corpus. Measured against the pre-T-278 corpus
+    // by re-introducing the defect verbatim (`priced === 0`, threshold branch deleted):
+    // 683/683 vitest tests GREEN. These rows are what makes that red.
+    //
+    // Note what was NOT true: deleting the whole floor block was already caught, by the four
+    // zero-price rows the block's OTHER branch (`not_positive`) answers. It was the THRESHOLD
+    // half — everything between zero and the floor — that no case reached.
+    const floorRows = cases.filter((c) =>
+      c.reasons.some((r) => r.endsWith(`:${ROSTER_PRICE_BELOW_FLOOR}`)),
+    );
+    expect(floorRows.length, "the corpus carries no below_price_floor case").toBeGreaterThanOrEqual(
+      5,
+    );
+
+    // Both halves of `max(listed * fraction, one minor unit)` are exercised, on a listing where
+    // each one dominates: 0.005 clears 0.1% of a 0.50 product and is still half a cent, and 0.05
+    // is a payable amount that is not a price for a 100.00 one. Either half alone admits what the
+    // other refuses, so a corpus reaching only one of them gates only half the arithmetic.
+    const listedIn = (c: ParityCase) =>
+      (c.list_prices as Record<string, {list_price: number}> | null)?.["prod-1"]?.list_price;
+    const listings = new Set(floorRows.map(listedIn));
+    expect(listings.has(100.0), "no floor case where the proportional half dominates").toBe(true);
+    expect(listings.has(0.5), "no floor case where the absolute half dominates").toBe(true);
+
+    // ...and the boundary value itself is ADMITTED, on both halves. `<`, never `<=`: a wall that
+    // refuses the lowest number the contract still calls a price is closed, not fail-closed, and
+    // that is the direction this class of bug lives in once the equality is gone.
+    for (const name of [
+      "a_price_exactly_at_the_proportional_floor_is_admitted",
+      "a_price_exactly_at_the_absolute_floor_is_admitted",
+    ]) {
+      const at = byName.get(name);
+      expect(at, name).toBeDefined();
+      expect(at!.ok, name).toBe(true);
+      expect(at!.reasons, name).toEqual([]);
+    }
+
+    expect(PRICE_FLOOR_FRACTION).toBe(0.001);
+    expect(MINIMUM_PAYABLE_AMOUNT).toBe(0.01);
+    expect(priceFloor(100.0)).toBe(0.1);
+    expect(priceFloor(0.5)).toBe(MINIMUM_PAYABLE_AMOUNT);
+    // The floor is dropped, not clamped, below one minor unit — a roster genuinely pricing
+    // something at 0.005 is not describing a giveaway, and a floor above its own list price
+    // would refuse every bid on it.
+    expect(priceFloor(0.005)).toBeLessThan(MINIMUM_PAYABLE_AMOUNT);
+
+    // THE CEILING on `PRICE_FLOOR_FRACTION`, in machine-checkable form.
+    // `apps/exchange/tests/test_auction_price_wall.py::
+    // test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized` pins 1.00 on an
+    // UNCAPPED 100.00 row as ADMITTED, so a floor at or above 1.00 there breaks a frozen
+    // assertion. That ceiling binds the FLOOR only, and only on that row: the sibling test
+    // refuses 1.00 on a CAPPED row — by the depth relation, not by the floor — and the two
+    // `an_undeclared_dollar_on_a(n)_..._hundred` rows above hold that distinction apart.
+    expect(priceFloor(100.0)).toBeLessThan(1.0);
   });
 
   it("exposes the price walk on its own, for a caller holding no trust snapshot", () => {

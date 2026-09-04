@@ -20,7 +20,18 @@
     "part of the vocabulary the two implementations are not expected to spell identically.",
     "",
     "`path` and `now` apply to every case; the trust snapshot is each suite's `make_snapshot_table()`",
-    "/ `makeSnapshotTable()`, which is why every bid names `store-1`."
+    "/ `makeSnapshotTable()`, which is why every bid names `store-1`.",
+    "",
+    "THE FLOOR (T-278). The `below_price_floor` rows at the end of this table are the gate for the",
+    "T-250 fix. That fix replaced an exact `price == 0` equality with a threshold \u2014 the floor is",
+    "`max(list_price * 0.001, 0.01)` \u2014 because an equality against zero has exactly one satisfying",
+    "value, so 0.001 for a product the roster prices at 100.00 was refused by nothing. The Python",
+    "half of the fix was verified through the exchange; the TypeScript half shipped with no case in",
+    "this table at all, and deleting `boundary.ts`'s floor block outright left all 806 vitest tests",
+    "green. These rows are what makes that a red suite instead. Both boundary directions are pinned",
+    "\u2014 a price exactly AT the floor is ADMITTED \u2014 because a wall that is closed rather than",
+    "fail-closed is its own defect, and the two halves of the `max` are pinned separately, on a",
+    "100.00 listing and on a 0.50 one, since either half alone admits what the other refuses."
   ],
   "path": "hosted",
   "now": "2026-06-01T00:00:00Z",
@@ -1317,6 +1328,412 @@
       "max_discount_pct": null,
       "ok": true,
       "reasons": []
+    },
+    {
+      "name": "a_thousandth_of_a_dollar_is_below_the_proportional_floor",
+      "why": "T-250's exact defect, and the one the TypeScript door had NO gate for: 0.001 for a product the roster prices at 100.00. Every other relation in the walk is satisfied \u2014 the row authorizes 100%, so `listed * (100 - 100) / 100` is 0.00 and the price clears it \u2014 and the floor is the only thing left that objects. Written `=== 0` it objected to exactly one value and this one walked through.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.001,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 0.001,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:below_price_floor",
+        "price_unreconcilable:offer.total_price:below_price_floor"
+      ]
+    },
+    {
+      "name": "a_nanodollar_is_below_the_floor_by_nine_orders_of_magnitude",
+      "why": "the same walk-through one keystroke further from zero. 1e-09 is nine orders of magnitude under the smallest coin there is, and an equality against zero admits it just as readily as 0.001 \u2014 which is why the floor is a threshold and not a value.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 1e-09,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 1e-09,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:below_price_floor",
+        "price_unreconcilable:offer.total_price:below_price_floor"
+      ]
+    },
+    {
+      "name": "a_half_cent_is_below_the_absolute_floor_on_a_cheap_product",
+      "why": "the ABSOLUTE half of the floor, which the proportional half alone would miss: 0.1% of a 0.50 product is 0.0005, and 0.005 clears that comfortably while still being half a cent \u2014 an amount no settlement rail moves. `max(proportional, 0.01)` is what makes the wall bite on a cheap listing.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.005,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 0.005,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 0.5,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:below_price_floor",
+        "price_unreconcilable:offer.total_price:below_price_floor"
+      ]
+    },
+    {
+      "name": "a_price_exactly_at_the_proportional_floor_is_admitted",
+      "why": "the boundary value, and the direction the wall is likelier to fail: `<` not `<=`. 0.10 is exactly `100.00 * 0.001` in both languages' float arithmetic, so a door that refused it would be refusing the lowest price the contract still calls a price \u2014 closed rather than fail-closed.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.1,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 0.1,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": true,
+      "reasons": []
+    },
+    {
+      "name": "a_price_exactly_at_the_absolute_floor_is_admitted",
+      "why": "the same boundary on the other half of the `max`. One minor currency unit on a 0.50 listing is admitted; the half cent above is not. Both sides of `0.01` are pinned so the absolute half cannot be widened or dropped without a red row.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.01,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 0.01,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 0.5,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": true,
+      "reasons": []
+    },
+    {
+      "name": "a_price_a_cent_above_the_proportional_floor_is_admitted",
+      "why": "the positive control one step outside the wall. A floor that swallowed 0.11 on a 100.00 listing would be a different, wider rule than the one the constants state.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.11,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 0.11,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": true,
+      "reasons": []
+    },
+    {
+      "name": "a_total_below_the_floor_behind_a_list_price_unit",
+      "why": "the floor runs on both money fields independently. A 100.00 unit with a 0.001 total is the same undercut wearing the other field, and only the total collects a reason \u2014 one bad number reported once, at the site that carries it.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 100.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 0.001,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.total_price:below_price_floor"
+      ]
+    },
+    {
+      "name": "a_silent_thousandth_on_a_row_that_authorizes_nothing",
+      "why": "the floor and the depth relation are different objections and a bid can collect both: 0.001 with no discount declared, on a row that states a list price and authorizes no depth at all, is below the floor AND below the full list price.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 0.001,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 0.001,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:below_price_floor",
+        "price_unreconcilable:offer.total_price:below_price_floor",
+        "price_under_declared_depth:offer.unit_price"
+      ]
+    },
+    {
+      "name": "an_undeclared_dollar_on_an_uncapped_hundred_clears_the_floor",
+      "why": "the CEILING on `PRICE_FLOOR_FRACTION`, restated at the boundary. The exchange's frozen `test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized` pins 1.00 on a 100.00 row listing no cap as ADMITTED, so any floor at or above 1.00 there breaks a standing assertion. 0.1% leaves an order of magnitude of margin, and this row is the assertion that the margin is still there: 1.00 never collects a floor reason.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 1.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 1.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 100.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": true,
+      "reasons": []
+    },
+    {
+      "name": "an_undeclared_dollar_on_a_capped_hundred_is_refused_by_depth_not_by_the_floor",
+      "why": "the other row fixture, and the distinction a previous pass of this work got wrong. The exchange's sibling test refuses 1.00 on a CAPPED 100.00 row \u2014 but by the depth relation, not by the floor. 1.00 is above `price_floor(100.0)` on both rows; what differs is what the row authorizes. If a floor reason ever appears here, the wall has grown past the ceiling the frozen R10 case pins.",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 1.0,
+          "currency": "USD",
+          "commitments": [],
+          "total_price": 1.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0",
+        "claims": []
+      },
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 20.0
+        }
+      },
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_under_declared_depth:offer.unit_price"
+      ]
     }
   ]
 }
