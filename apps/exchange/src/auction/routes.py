@@ -62,6 +62,7 @@ from ..ranking.serving import (
     trust_snapshot_of,
     weights_of,
 )
+from ..retrieval.criteria import MAX_CANDIDATE_LIMIT
 from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
 
@@ -193,10 +194,39 @@ class RosterEntry(BaseModel):
     max_discount_pct: float | None = Field(default=None, ge=0.0, le=100.0)
 
 
+#: The most hard constraints one intent may carry into a served auction.
+#:
+#: The published ``Intent`` schema puts no ``maxItems`` on ``hard_constraints``, so this number
+#: is a judgement and is written down as one. It exists for the same reason
+#: :data:`MAX_BID_TIMEOUT_SECONDS` does — the value arrives on an unauthenticated body and
+#: decides how much work a worker does — and it became load-bearing when the ranker reached the
+#: served path: the eligibility gate evaluates every constraint against every candidate and
+#: emits one reason string per failure, so the cost of a request is O(roster x constraints)
+#: rather than O(roster). Uncapped and measured, an 93 KiB request built 641,600 reason strings
+#: and drove peak RSS to 831 MB against ``compose.yaml``'s ``mem_limit: 256m``.
+#:
+#: 64 is chosen as "more must-haves than any buyer states, far fewer than any attack needs".
+#: Refused rather than truncated: silently ranking against fewer constraints than the buyer
+#: sent would answer a different question from the one asked, and answering it with a 201 is
+#: worse than refusing.
+MAX_HARD_CONSTRAINTS = 64
+
+#: The most rostered stores one auction may carry. Not a new opinion —
+#: :data:`~exchange.retrieval.criteria.MAX_CANDIDATE_LIMIT` is the published ceiling on how
+#: many candidates the exchange will consider for one intent, and a roster is that same set
+#: arriving by a different door. Imported rather than restated so the two cannot drift.
+#:
+#: This one is not a T-310 regression: the roster has always been unbounded here, and each
+#: entry already costs an eligibility read and a fan-out slot. It is capped in the same change
+#: because the ranking multiplies it, and because a ceiling that exists in the retrieval path
+#: and not on the request that feeds the auction is a ceiling with a door beside it.
+MAX_ROSTER_ENTRIES = MAX_CANDIDATE_LIMIT
+
+
 class CreateAuctionRequest(BaseModel):
     intent: dict[str, Any]
     profile: dict[str, Any] | None = None
-    roster: list[RosterEntry] = Field(default_factory=list)
+    roster: list[RosterEntry] = Field(default_factory=list, max_length=MAX_ROSTER_ENTRIES)
     #: R10's hard timeout for this auction, in seconds.
     bid_timeout_seconds: float = DEFAULT_BID_TIMEOUT_SECONDS
 
@@ -328,6 +358,41 @@ def _ranked_out(ranked: Sequence[Mapping[str, Any]]) -> list[RankedBidOut]:
     ]
 
 
+#: How many exclusion reasons one candidate may report before the rest are summarised.
+#:
+#: This is a **memory bound on an unauthenticated response**, not a display preference, and
+#: the number it replaces was measured rather than feared. ``exclusion_reasons`` carries ONE
+#: string per unsatisfied hard constraint (``ranking/filters.py``), and both dimensions arrive
+#: on the request body: ``roster`` has no length limit and ``intent`` is a free ``dict``, so an
+#: uncapped report is O(roster x hard_constraints). Measured on this tree before the cap, with
+#: a single request and no credential::
+#:
+#:     300 stores x 300 constraints ( 36 KiB request) -> 201,   20.4 MB response
+#:     800 stores x 800 constraints ( 93 KiB request) -> 201,  142 MB body, peak RSS 831 MB
+#:    1000 stores x 1000 constraints (120 KiB request) -> 201,  226 MB response
+#:
+#: against ``compose.yaml``'s ``mem_limit: 256m`` and a single uvicorn worker — a one-request
+#: OOM kill. Capping the per-candidate list returns the response to O(roster), which is the
+#: order ``entries`` already had and therefore the exposure the roster already carried.
+#:
+#: The overflow is SUMMARISED rather than silently dropped: a truncated list that did not say
+#: it was truncated would be a store told it failed eight constraints when it failed ninety.
+MAX_EXCLUSION_REASONS_PER_BID = 8
+
+
+def _exclusion_reasons_out(row: Mapping[str, Any]) -> list[str]:
+    reasons = [str(reason) for reason in row.get("exclusion_reasons") or ()]
+    if len(reasons) <= MAX_EXCLUSION_REASONS_PER_BID:
+        return reasons
+    hidden = len(reasons) - MAX_EXCLUSION_REASONS_PER_BID
+    return [
+        *reasons[:MAX_EXCLUSION_REASONS_PER_BID],
+        f"... and {hidden} further exclusion reason(s) not reported: this candidate failed "
+        f"{len(reasons)} checks and the response reports the first "
+        f"{MAX_EXCLUSION_REASONS_PER_BID}",
+    ]
+
+
 def _excluded_out(rows: Sequence[Mapping[str, Any]]) -> list[ExcludedBidOut]:
     """The ineligible rows, in the order they were offered — never the eligible ones.
 
@@ -339,11 +404,41 @@ def _excluded_out(rows: Sequence[Mapping[str, Any]]) -> list[ExcludedBidOut]:
         ExcludedBidOut(
             bid_ref=str(row["bid_id"]),
             store_id=str(row["store_id"]),
-            exclusion_reasons=[str(reason) for reason in row.get("exclusion_reasons") or ()],
+            exclusion_reasons=_exclusion_reasons_out(row),
         )
         for row in rows
         if not row.get("eligible")
     ]
+
+
+def _refuse_an_oversized_intent(intent: Any) -> None:
+    """422 an intent carrying more hard constraints than :data:`MAX_HARD_CONSTRAINTS`.
+
+    Checked HERE rather than on ``CreateAuctionRequest``, because ``intent`` is a free
+    ``dict[str, Any]`` on that model — the route accepts whatever shape a buyer service sends
+    and lets ``exchange.ranking.filters.read_criteria`` decide what it means. A pydantic
+    constraint would need the model to know the intent's shape, which is precisely what it
+    declines to know.
+
+    A non-list ``hard_constraints`` is NOT refused here: ``read_criteria`` already answers that
+    with an undecidable-intent exclusion for every candidate, which is fail-closed and names
+    the reason. This function is about size only.
+    """
+    if not isinstance(intent, Mapping):
+        return
+    constraints = intent.get("hard_constraints")
+    if not isinstance(constraints, Sequence) or isinstance(constraints, (str, bytes)):
+        return
+    if len(constraints) > MAX_HARD_CONSTRAINTS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"intent.hard_constraints carries {len(constraints)} entries; this exchange "
+                f"evaluates at most {MAX_HARD_CONSTRAINTS} per auction. Every constraint is "
+                f"decided against every rostered candidate, so the request is refused rather "
+                f"than answered against a subset of what was asked"
+            ),
+        )
 
 
 @router.post("/auctions", response_model=CreateAuctionResponse, status_code=201)
@@ -351,6 +446,7 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     """Open an auction, gate the roster, fan out with a hard timeout, close, and answer."""
     machine = _machine(request)
     intent = body.intent
+    _refuse_an_oversized_intent(intent)
     auction_id = f"auction-{uuid.uuid4()}"
     roster = [entry.model_dump() for entry in body.roster]
 
