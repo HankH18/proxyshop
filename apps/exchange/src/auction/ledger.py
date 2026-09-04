@@ -30,19 +30,39 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from contracts.ledger import LEDGER_EVENT_KINDS
+from contracts.ledger import LEDGER_EVENT_KINDS, LEDGER_PAYLOAD_SHAPES, validate_ledger_payload
 
 __all__ = [
     "InMemoryLedgerSink",
     "LedgerRecorder",
     "LedgerSink",
+    "MalformedLedgerPayload",
     "UnknownLedgerEventKind",
     "build_event",
+    "build_published_event",
+    "published_body",
 ]
 
 
 class UnknownLedgerEventKind(ValueError):
     """A kind outside the frozen `LedgerEventKind` vocabulary (D24) was produced."""
+
+
+class MalformedLedgerPayload(ValueError):
+    """A payload that does not carry its kind's published body.
+
+    Raised at construction, which is the only place it can still be fixed. It is a
+    *programming* error — the producer decides what goes in the body — so it is not
+    swallowed the way a sink being down is. Deliberately the same class name and the same
+    contract as ``apps/merchant/svc/src/codes/ledger.py``: that service already validates at
+    the producing boundary, and a second convention for the same rule is a second thing to
+    keep in step.
+    """
+
+
+def published_body(kind: str) -> tuple[str, ...]:
+    """The keys ``kind``'s published body carries, straight from ``contracts``."""
+    return tuple(LEDGER_PAYLOAD_SHAPES.get(str(kind), ()))
 
 
 class LedgerSink(Protocol):
@@ -93,6 +113,43 @@ def build_event(
         "order_ref": order_ref,
         "payload": dict(payload or {}),
     }
+
+
+def build_published_event(kind: str, **fields: Any) -> dict[str, Any]:
+    """:func:`build_event`, and the body must be the one ``contracts`` publishes for ``kind``.
+
+    ``build_event`` checks only that the *kind* is in the frozen vocabulary — which is how
+    one kind came to be emitted with two entirely different bodies (T-235): the successful
+    checkout wrote ``{checkout_token, discount_code}`` under ``code_created`` while
+    ``contracts.ledger.LEDGER_PAYLOAD_SHAPES`` publishes ``(code, permalink_url,
+    expires_at)``, so a consumer reading ``payload['code']`` off a success got nothing and
+    nothing anywhere raised. ``contracts/src/ledger.py`` says the check belongs "at the
+    PRODUCING boundary"; this is the exchange's half of that, and
+    ``apps/merchant/svc/src/codes/ledger.py`` is the in-repo convention it copies.
+
+    Extra keys are welcome and are what make an event actionable rather than merely
+    well-formed (the orphan record's ``revocation_required`` is one); a *missing* published
+    key is refused.
+
+    This is a **separate entry point** rather than a check folded into :func:`build_event`
+    on purpose. Three of the state machine's own transitions do not carry their published
+    bodies either (``auction_opened`` omits ``roster_size``, ``auction_closed`` omits
+    ``shortlist_size``, ``accepted`` omits ``checkout_token`` and ``offer``), and turning
+    those into exceptions would fail live auctions for an audit-record defect that is
+    nobody's ticket here. They are reported, not silently swept in.
+
+    Raises:
+        UnknownLedgerEventKind: the kind is not in the frozen vocabulary.
+        MalformedLedgerPayload: the body is missing a key its kind publishes.
+    """
+    event = build_event(kind, **fields)
+    problems = validate_ledger_payload(kind, event["payload"])
+    if problems:
+        raise MalformedLedgerPayload(
+            f"refusing to emit a {kind!r} event whose body is not the published one "
+            f"{published_body(kind)}: {'; '.join(problems)}"
+        )
+    return event
 
 
 class LedgerRecorder:
