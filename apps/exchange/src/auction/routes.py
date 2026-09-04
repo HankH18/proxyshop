@@ -11,6 +11,16 @@ The sequence is the point, and it is the same sequence the unit tests drive:
 
     create -> OPEN --(auction_opened)-->  solicit_bids   -> close --(auction_closed)-->
               R12 gate on every rostered store    parallel fan-out, hard timeout
+           -> rank --(R19 filters, published formula, D29 shortlist)--> answer
+
+The ranking step is the last one and it is not optional (T-310). Until it was wired, a served
+auction answered with the offers in whatever order the fan-out returned them: R19's hard
+constraints, R12's blacklist read and C10's checkout-domain check ran in ``exchange.ranking``
+on no request at all, so a candidate ``rank()`` would have excluded reached the buyer anyway.
+``entries`` still reports every rostered store — that is the auction's own record of who
+offered what — while ``ranked``, ``excluded`` and ``shortlist`` are what the ranking decided,
+and ``shortlist`` is the buyer-facing object the published contract serves at
+``GET /auctions/{auction_id}/shortlist``.
 
 Wiring is injected, never imported into place, and the defaults are chosen so that an
 un-wired service is **safe rather than convenient**:
@@ -22,8 +32,15 @@ un-wired service is **safe rather than convenient**:
   applied to the *deployment*, not just to the read.
 * ``app.state.bid_solicitor`` defaults to a solicitor that answers nothing, so every
   eligible store is represented at its list price (R10) rather than the request failing.
+* ``app.state.trust_snapshot`` defaults to EMPTY, and an empty snapshot denies every store
+  rather than admitting every store: a store with no row cannot be shown to be off the
+  blacklist (R12). ``app.state.ranking_registered_domains`` behaves the same way — an exchange
+  that has not been given the platform's seller registry can vouch for no checkout host, so
+  every candidate is off-domain (C10/D22). Both are the *deployment* reading of a fail-closed
+  rule, exactly as the eligibility default above is.
 
-:func:`configure_auctions` is how a deployment (or a test) replaces either.
+:func:`configure_auctions` is how a deployment (or a test) replaces either of the first two;
+:func:`~exchange.ranking.serving.configure_ranking` is how it replaces the ranking's.
 """
 
 from __future__ import annotations
@@ -38,6 +55,13 @@ from pydantic import BaseModel, Field
 
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
+from ..ranking.serving import (
+    rank_auction,
+    registered_domains_of,
+    shortlist_store,
+    trust_snapshot_of,
+    weights_of,
+)
 from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
 
@@ -192,12 +216,46 @@ class DenialOut(BaseModel):
     reason: str
 
 
+class RankedBidOut(BaseModel):
+    """One candidate the published ranking scored, best first in the response."""
+
+    bid_ref: str
+    store_id: str
+    rank_score: float
+    #: The weighted terms, which sum to ``rank_score``. Returned so a reader can see WHICH
+    #: feature produced a placement without re-running the ranker — the auditability
+    #: :mod:`~exchange.ranking.scoring` builds them for is worth nothing if the served answer
+    #: throws them away.
+    components: dict[str, float] = Field(default_factory=dict)
+
+
+class ExcludedBidOut(BaseModel):
+    """One candidate the filters refused, and every reason they refused it.
+
+    Every reason, not the first: a candidate that is both blacklisted and off-domain has two
+    things wrong with it, and reporting one of them makes the second invisible to whoever
+    fixes the first.
+    """
+
+    bid_ref: str
+    store_id: str
+    exclusion_reasons: list[str] = Field(default_factory=list)
+
+
 class CreateAuctionResponse(BaseModel):
     auction_id: str
     state: str
     solicited: list[str]
     entries: list[AuctionEntryOut]
     denied: list[DenialOut]
+    #: The eligible candidates in published rank order (D13). Empty on an exchange with no
+    #: trust snapshot and no registered domains, because both of those fail closed.
+    ranked: list[RankedBidOut] = Field(default_factory=list)
+    #: The candidates the eligibility filters excluded, each naming its reasons.
+    excluded: list[ExcludedBidOut] = Field(default_factory=list)
+    #: The buyer-facing shortlist (R2/A6/D29/D30) — the same object
+    #: ``GET /auctions/{auction_id}/shortlist`` serves, and the pinned ``Shortlist`` shape.
+    shortlist: dict[str, Any] = Field(default_factory=dict)
 
 
 def configure_auctions(
@@ -258,6 +316,36 @@ def _entries_out(entries: Sequence[Any]) -> list[AuctionEntryOut]:
     return out
 
 
+def _ranked_out(ranked: Sequence[Mapping[str, Any]]) -> list[RankedBidOut]:
+    return [
+        RankedBidOut(
+            bid_ref=str(row["bid_id"]),
+            store_id=str(row["store_id"]),
+            rank_score=float(row["rank_score"]),
+            components={str(k): float(v) for k, v in (row.get("components") or {}).items()},
+        )
+        for row in ranked
+    ]
+
+
+def _excluded_out(rows: Sequence[Mapping[str, Any]]) -> list[ExcludedBidOut]:
+    """The ineligible rows, in the order they were offered — never the eligible ones.
+
+    Read off ``candidates`` (every row) rather than off a second ranker call: ``rank()``
+    returns the ranked rows and the full set, and asking it twice would be asking a question
+    that already has an answer.
+    """
+    return [
+        ExcludedBidOut(
+            bid_ref=str(row["bid_id"]),
+            store_id=str(row["store_id"]),
+            exclusion_reasons=[str(reason) for reason in row.get("exclusion_reasons") or ()],
+        )
+        for row in rows
+        if not row.get("eligible")
+    ]
+
+
 @router.post("/auctions", response_model=CreateAuctionResponse, status_code=201)
 async def create_auction(body: CreateAuctionRequest, request: Request) -> CreateAuctionResponse:
     """Open an auction, gate the roster, fan out with a hard timeout, close, and answer."""
@@ -299,7 +387,25 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         started_at=started_at,
     )
 
-    record = machine.close(auction_id, now=time.time())
+    # ONE clock reading, used for the close transition and for the ranking's `now`. Two
+    # readings would let an offer expire between the auction closing and the ranking that
+    # decides whether it was live at the close, which is not a question two instants can
+    # answer consistently.
+    closed_at = time.time()
+    record = machine.close(auction_id, now=closed_at)
+
+    ranking = rank_auction(
+        result.entries,
+        auction_id=auction_id,
+        intent=intent,
+        now=closed_at,
+        trust_snapshot=trust_snapshot_of(request.app),
+        registered_domains=registered_domains_of(request.app),
+        weights=weights_of(request.app),
+    )
+    shortlist = ranking["shortlist"]
+    shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)
+
     return CreateAuctionResponse(
         auction_id=auction_id,
         state=record.state,
@@ -308,6 +414,9 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         denied=[
             DenialOut(store_id=d.store_id, status=d.status, reason=d.reason) for d in result.denied
         ],
+        ranked=_ranked_out(ranking["ranked"]),
+        excluded=_excluded_out(ranking["candidates"]),
+        shortlist=shortlist,
     )
 
 
