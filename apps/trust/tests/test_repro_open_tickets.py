@@ -1152,7 +1152,7 @@ def test_the_delisting_seam_itself_compares_a_score_to_the_published_threshold()
 #: with ``-p`` rather than imported, because it must observe the REAL suite's collection —
 #: the same ``pytest_collection_modifyitems`` seam ``conftest.py`` classifies items in — and
 #: ``trylast`` so it sees the item list AFTER ``-m docker`` has deselected everything else.
-_T172_COLLECTOR = '''\
+_T172_COLLECTOR = """\
 import json, os, pathlib
 import pytest
 from proxyshop_support import service_markers
@@ -1185,7 +1185,7 @@ def pytest_sessionfinish(session, exitstatus):
     pathlib.Path(os.environ["T172_CORPUS_OUT"]).write_text(
         json.dumps(_RECORDS), encoding="utf-8"
     )
-'''
+"""
 
 #: Substrings that betray, in a test module's own source, that it talks to a given compose
 #: service. Deliberately generous — the point is that a module mentioning NONE of a service's
@@ -1544,7 +1544,9 @@ def _t259_cases() -> list[dict[str, Any]]:
     return cases
 
 
-def _t259_values_by_key(node: Any, found: dict[str, list[Any]] | None = None) -> dict[str, list[Any]]:
+def _t259_values_by_key(
+    node: Any, found: dict[str, list[Any]] | None = None
+) -> dict[str, list[Any]]:
     """Every ``key -> values`` pair anywhere in a nested mapping, at any depth.
 
     The gate reads the carriers back through this rather than at a pinned address, so
@@ -1586,9 +1588,9 @@ def test_t259_the_trust_event_generator_is_armed() -> None:
         f"{sorted(dim.value for dim in TrustDimension)} — a property that never varies the "
         f"dimension cannot catch a fix that hard-codes one"
     )
-    assert {case["event"]["kind"] for case in cases} == {
-        kind.value for kind in LedgerEventKind
-    }, "the generated ledger kinds no longer cover the whole frozen vocabulary"
+    assert {case["event"]["kind"] for case in cases} == {kind.value for kind in LedgerEventKind}, (
+        "the generated ledger kinds no longer cover the whole frozen vocabulary"
+    )
 
     planted = {case["planted_identity_keys"] for case in cases}
     assert len(planted) >= 3 and 0 in planted and max(planted) >= 2, (
@@ -1651,9 +1653,7 @@ def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -
         try:
             validated = runner.ingest_trust_event(emitted)
         except Exception as refusal:
-            rejected.append(
-                (case["dim"], type(refusal).__name__, str(refusal).splitlines()[0])
-            )
+            rejected.append((case["dim"], type(refusal).__name__, str(refusal).splitlines()[0]))
         else:
             accepted.append((case, validated, runner.trust_posture))
 
@@ -1728,8 +1728,9 @@ def _t303_simulation_run() -> Any:
     that in its own header and the repo's ``pytest-socket`` guard is armed while this runs.
     Measured at ~0.02s warm, so this is a behavioural gate and not a slow one.
     """
-    from fixtures.manifest import load_manifest
     from sim.runner import run_simulation
+
+    from fixtures.manifest import load_manifest
 
     manifest = load_manifest()
     return run_simulation(manifest, int(manifest["seed"]))
@@ -1744,8 +1745,7 @@ def _t303_auction_body(store_ids: Any) -> dict[str, Any]:
     return {
         "intent": {"intent_id": "intent-t303", "cluster_id": "cluster-t303"},
         "roster": [
-            {"store_id": str(store_id), "tier": 1, "list_price": 19.99}
-            for store_id in store_ids
+            {"store_id": str(store_id), "tier": 1, "list_price": 19.99} for store_id in store_ids
         ],
     }
 
@@ -1762,7 +1762,9 @@ def test_t303_the_delisting_and_eligibility_sweeps_are_armed() -> None:
     from trust.scoring import BLACKLIST_THRESHOLD
 
     run = _t303_simulation_run()
-    assert run.chain_ok, "the simulation's own event chain does not verify; nothing below is trustworthy"
+    assert run.chain_ok, (
+        "the simulation's own event chain does not verify; nothing below is trustworthy"
+    )
     assert len(run.events) >= 20, (
         f"the simulation sealed only {len(run.events)} events (36 when this was written). The "
         f"first half below looks for a delisting INSIDE this stream; a stream this short "
@@ -1775,9 +1777,7 @@ def test_t303_the_delisting_and_eligibility_sweeps_are_armed() -> None:
         f"({BLACKLIST_THRESHOLD}) or the delisting seam stopped emitting — both make the gate "
         f"below pass while saying nothing"
     )
-    scores = {
-        store_id: entry["score"] for store_id, entry in run.snapshot["stores"].items()
-    }
+    scores = {store_id: entry["score"] for store_id, entry in run.snapshot["stores"].items()}
     assert any(score < BLACKLIST_THRESHOLD for score in scores.values()), (
         f"no store in the run scores below the published threshold {BLACKLIST_THRESHOLD}; "
         f"scores were {scores}. S2 has nothing to catch"
@@ -1939,9 +1939,10 @@ def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one()
     fail-closed. Splitting them matters — the one-line way to satisfy this test alone is a
     source whose default is ELIGIBLE, and that companion is what makes that route red.
     """
-    from fastapi.testclient import TestClient
-    from fixtures.manifest import load_manifest
     from exchange.main import create_app
+    from fastapi.testclient import TestClient
+
+    from fixtures.manifest import load_manifest
 
     store_ids = [str(store["store_id"]) for store in load_manifest()["stores"]]
     assert len(store_ids) >= 3, f"the manifest roster is too small to discriminate: {store_ids}"
@@ -1949,14 +1950,14 @@ def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one()
     app = create_app()
     with TestClient(app) as client:
         response = client.post("/auctions", json=_t303_auction_body(store_ids))
-    assert response.status_code == 201, f"POST /auctions -> {response.status_code}: {response.text[:400]}"
+    assert response.status_code == 201, (
+        f"POST /auctions -> {response.status_code}: {response.text[:400]}"
+    )
     body = response.json()
 
     denials = {entry["store_id"]: entry["reason"] for entry in body["denied"]}
     unasked = sorted(
-        store_id
-        for store_id, reason in denials.items()
-        if "static-eligibility" in str(reason)
+        store_id for store_id, reason in denials.items() if "static-eligibility" in str(reason)
     )
     assert unasked == [], (
         f"the served exchange denied {len(unasked)} of {len(store_ids)} rostered stores with a "
@@ -2009,7 +2010,9 @@ _T256_SHIPPED_CALLER = re.compile(r"^(apps/[^/]+(/svc)?|services/[^/]+)/src/")
 
 def _t256_migration_sql() -> str:
     path = REPO_ROOT / _T256_MIGRATION
-    assert path.is_file(), f"{_T256_MIGRATION} is missing; the five tables' DDL is ground truth here"
+    assert path.is_file(), (
+        f"{_T256_MIGRATION} is missing; the five tables' DDL is ground truth here"
+    )
     return path.read_text(encoding="utf-8")
 
 
@@ -2104,11 +2107,11 @@ class _T256RecordingCursor:
         self.description = None
         self.rowcount = -1
 
-    def execute(self, sql: Any, params: Any = None) -> "_T256RecordingCursor":
+    def execute(self, sql: Any, params: Any = None) -> _T256RecordingCursor:
         self._log.append((str(sql), params))
         return self
 
-    def executemany(self, sql: Any, seq: Any = None) -> "_T256RecordingCursor":
+    def executemany(self, sql: Any, seq: Any = None) -> _T256RecordingCursor:
         for params in seq or ():
             self._log.append((str(sql), params))
         return self
@@ -2122,7 +2125,7 @@ class _T256RecordingCursor:
     def close(self) -> None:
         return None
 
-    def __enter__(self) -> "_T256RecordingCursor":
+    def __enter__(self) -> _T256RecordingCursor:
         return self
 
     def __exit__(self, *_: Any) -> bool:
@@ -2147,7 +2150,7 @@ class _T256RecordingConnection:
     def execute(self, sql: Any, params: Any = None) -> _T256RecordingCursor:
         return _T256RecordingCursor(self.log).execute(sql, params)
 
-    def __enter__(self) -> "_T256RecordingConnection":
+    def __enter__(self) -> _T256RecordingConnection:
         return self
 
     def __exit__(self, *_: Any) -> bool:
@@ -2375,9 +2378,7 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
 
     replay = _T256RecordingConnection()
     payload = {
-        key: value
-        for key, value in dict(cases[0], connection=replay).items()
-        if key in parameters
+        key: value for key, value in dict(cases[0], connection=replay).items() if key in parameters
     }
     seam(**payload)
     seam(**payload)
@@ -2447,7 +2448,16 @@ def _t257_collect(args: list[str]) -> tuple[int, list[str]]:
     """The node ids a recorded verify's argv actually collects, from a real pytest run."""
     try:
         completed = subprocess.run(
-            [sys.executable, "-m", "pytest", *args, "--collect-only", "-q", "-p", "no:cacheprovider"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                *args,
+                "--collect-only",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+            ],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
@@ -2540,7 +2550,9 @@ def test_t257_the_grader_discovery_is_armed_and_ignores_prose() -> None:
     )
     assert ticket_pattern.search('"""T_112: underscore spelling."""'), "T_112 no longer matches"
 
-    comment_only = "# T-112 lives elsewhere\n'''T-011: something else.'''\ndef test_x():\n    pass\n"
+    comment_only = (
+        "# T-112 lives elsewhere\n'''T-011: something else.'''\ndef test_x():\n    pass\n"
+    )
     assert not _t257_declares(comment_only, "T-112"), (
         "a `# T-112` comment counts as a declaration, so one pasted line would green the repro"
     )
