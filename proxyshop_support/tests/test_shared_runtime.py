@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -45,8 +46,19 @@ from proxyshop_support.postgres import (
     maintenance_dsn,
     role_dsn,
 )
-from proxyshop_support.redis_client import WorkerRedis, namespaced, worker_redis
-from proxyshop_support.worker import key_prefix, redis_db_index
+from proxyshop_support.redis_client import (
+    RedisDbCeilingUnknown,
+    WorkerRedis,
+    namespaced,
+    worker_redis,
+)
+from proxyshop_support.worker import (
+    DB_COUNT_ENV_VAR,
+    REDIS_DB_COUNT,
+    key_prefix,
+    redis_db_count,
+    redis_db_index,
+)
 
 # --------------------------------------------------------------------------------------
 # embeddings (D6/D18)
@@ -287,6 +299,281 @@ def test_worker_redis_rewrites_keys_in_the_command_it_sends(monkeypatch) -> None
 def test_worker_redis_refuses_the_banned_global_reset() -> None:
     with pytest.raises(RuntimeError, match="banned repo-wide"):
         _offline_client(1).execute_command("FLUSH" + "ALL")
+
+
+# --------------------------------------------------------------------------------------
+# The logical-DB ceiling: assumed offline, DISCOVERED from the server at connection time
+# --------------------------------------------------------------------------------------
+#
+# The number of logical databases lives in exactly one authoritative place — the running
+# Redis process — and everything else is a copy that can drift from it. `--databases` in
+# docker-compose.yml is read only at container startup, so an edited compose file and a
+# live server disagree until someone restarts it; a Python constant agrees with neither.
+# So: `worker.py` keeps an ASSUMED ceiling and never opens a connection (offline callers
+# and these very tests depend on that), and `redis_client.worker_redis` asks the server.
+#
+# These tests simulate the server's answer rather than requiring one, because this whole
+# file is deliberately Docker-free (see the module docstring) — `make check` deselects
+# `docker`, and a property that only holds when a stack is up would silently stop being
+# checked there. `_server_db_count` builds a real client and calls the real `config_get`,
+# so everything but the TCP round trip is the production path. The round trip itself was
+# verified by hand against the live server; that is the one claim these cannot make.
+
+
+def _answer_db_count(count: int):
+    """A ``config_get`` that answers like a server with ``count`` logical databases."""
+
+    def config_get(self, pattern: str = "*", **kwargs) -> dict[str, str]:
+        assert pattern == "databases", f"asked for {pattern!r}, not the database count"
+        return {"databases": str(count)}
+
+    return config_get
+
+
+def _config_get_denied(self, *args, **kwargs) -> dict[str, str]:
+    """A server that will not answer: renamed command, ACL, old version, or a double."""
+    raise RuntimeError("ERR unknown command 'CONFIG'")
+
+
+def test_the_module_default_ceiling_is_not_a_copy_of_the_compose_flag() -> None:
+    """``docker-compose.yml`` now says ``--databases 64``; this constant still says 16.
+
+    That is the point, not an oversight. Raising the constant in lockstep with the compose
+    file would make it claim 64 on every server that has not been restarted since — which
+    is every server, until someone recreates the container. 16 is Redis's own default and
+    therefore the only safe assumption about a server nobody has asked. The real number is
+    read from the server at connection time, where it cannot be wrong.
+    """
+    assert REDIS_DB_COUNT == 16
+    assert redis_db_count() == REDIS_DB_COUNT
+
+
+def test_worker_identity_never_opens_a_socket(monkeypatch) -> None:
+    """The main trap in making the ceiling discoverable.
+
+    Worker identity is imported by processes that never speak to Redis, and the offline
+    tests above build clients against a dead address on purpose. If resolving the ceiling
+    required a live server, every one of them would break. So nothing in ``worker.py`` may
+    connect — proved here by making any connection attempt an immediate failure.
+    """
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("worker identity opened a socket")
+
+    monkeypatch.setattr("socket.socket.connect", forbidden)
+    monkeypatch.setattr("socket.socket.connect_ex", forbidden)
+    assert key_prefix(3) == "w3:"
+    assert redis_db_index(3) == 3
+    assert redis_db_count() == REDIS_DB_COUNT
+    with pytest.raises(ValueError, match="cannot be isolated in Redis"):
+        redis_db_index(99)
+
+
+def test_importing_worker_identity_does_not_even_pull_in_redis() -> None:
+    """A fresh interpreter: ``proxyshop_support.worker`` must not import ``redis`` at all.
+
+    Stronger than the socket test and immune to how a connection might be opened — a module
+    that has not imported the client library cannot have connected with it. Run in a child
+    because ``redis`` is long since imported in this session's ``sys.modules``.
+    """
+    script = textwrap.dedent(
+        """
+        import sys
+        import proxyshop_support.worker as w
+        assert w.redis_db_index(3) == 3
+        print("redis" in sys.modules)
+        """
+    )
+    # No `env=`, for the reason given on the hash_embed subprocess test above.
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+    assert result.stdout.strip() == "False"
+
+
+def test_a_supplied_ceiling_is_honoured_rather_than_quietly_ignored() -> None:
+    """``db_count`` must reach the comparison AND the message it produces.
+
+    A parameter that is accepted and then discarded is worse than one that does not exist:
+    the caller has evidence it was considered. Index 20 is legal on a 64-database server
+    and illegal on a 16-database one, and this asks for both answers.
+    """
+    assert redis_db_index(20, db_count=64) == 20
+    assert redis_db_index(63, db_count=64) == 63
+    with pytest.raises(ValueError) as exc:
+        redis_db_index(64, db_count=64)
+    msg = str(exc.value)
+    assert "64 logical DBs" in msg, "the message must report the ceiling actually applied"
+    assert "PROXYSHOP_WORKER=0..63" in msg
+
+
+@pytest.mark.parametrize(
+    ("ceiling_setup", "expected_source"),
+    [
+        (None, "assumed default; no server was asked"),
+        ("env", f"from ${DB_COUNT_ENV_VAR}; no server was asked"),
+        ("caller", "reported by the server at redis://example:6379"),
+    ],
+)
+def test_the_refusal_says_where_its_ceiling_came_from(
+    ceiling_setup: str | None, expected_source: str, monkeypatch
+) -> None:
+    """An assumed 16 and a measured 16 justify the same refusal but are not the same claim.
+
+    An operator told "the server has 16" when no server was asked goes and checks the wrong
+    thing — and the compose file, the constant and the running process can all disagree, so
+    "which of you said 16?" is the operator's actual next question.
+    """
+    if ceiling_setup == "env":
+        monkeypatch.setenv(DB_COUNT_ENV_VAR, "16")
+    with pytest.raises(ValueError) as exc:
+        if ceiling_setup == "caller":
+            redis_db_index(
+                16,
+                db_count=16,
+                ceiling_source="reported by the server at redis://example:6379 via CONFIG",
+            )
+        else:
+            redis_db_index(16)
+    assert expected_source in str(exc.value)
+
+
+def test_the_db_count_override_moves_the_offline_ceiling(monkeypatch) -> None:
+    """The escape hatch for a server known to be configured differently."""
+    monkeypatch.setenv(DB_COUNT_ENV_VAR, "64")
+    assert redis_db_count() == 64
+    assert redis_db_index(20) == 20, "legal on a 64-database server"
+    with pytest.raises(ValueError, match="64 logical DBs"):
+        redis_db_index(64)
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "sixteen", "0", "-1", "1.5"])
+def test_a_bad_db_count_override_never_silently_falls_back(bad: str, monkeypatch) -> None:
+    """Empty means "unset" and falls back; anything else nonsensical is an error.
+
+    Silently ignoring a malformed override would give the operator who typed it a ceiling
+    they did not ask for, which is how a worker ends up sharing a database again.
+    """
+    monkeypatch.setenv(DB_COUNT_ENV_VAR, bad)
+    if not bad.strip():
+        assert redis_db_count() == REDIS_DB_COUNT
+    else:
+        with pytest.raises(ValueError, match=DB_COUNT_ENV_VAR):
+            redis_db_count()
+
+
+def test_the_offline_client_still_works_and_reports_its_ceiling_as_unknown() -> None:
+    """The offline path: nothing listens on 127.0.0.1:1, and that must remain fine.
+
+    The client is still fully wired — right database, right prefix — but its isolation was
+    never confirmed, so ``db_ceiling`` is ``None`` and a warning says so out loud.
+    """
+    with pytest.warns(RedisDbCeilingUnknown, match="UNKNOWN"):
+        client = _offline_client(3)
+    assert client.db_ceiling is None, "None means UNCONFIRMED, never 'no limit'"
+    assert client.prefix == "w3:"
+    assert client.get_connection_kwargs()["db"] == 3
+
+
+def test_worker_redis_refuses_an_index_the_server_says_it_cannot_isolate(monkeypatch) -> None:
+    """The check that cannot drift: the ceiling comes from the server, not from a constant.
+
+    The offline ceiling is raised to 4096 first, so it CANNOT be the thing doing the
+    refusing — this pins the connection-time check specifically, which is the whole point
+    of the change. Index 20 is exactly the case that a compose file saying 64 and a server
+    still running 16 produces.
+    """
+    monkeypatch.setenv(DB_COUNT_ENV_VAR, "4096")
+    monkeypatch.setattr("redis.Redis.config_get", _answer_db_count(16))
+    assert redis_db_index(20) == 20, "the assumed ceiling permits it; the server must not"
+    with pytest.raises(ValueError) as exc:
+        worker_redis("redis://127.0.0.1:1/9", worker=20)
+    msg = str(exc.value)
+    assert "PROXYSHOP_WORKER=20" in msg, "name the worker"
+    assert "16 logical DBs" in msg, "name the server's actual ceiling"
+    assert "CONFIG GET databases" in msg, "name where that number came from"
+    assert "PROXYSHOP_WORKER=0..15" in msg, "say what to do"
+    assert "--databases" in msg and "restart" in msg, "say how to raise it"
+    assert "shares DB 4 with worker 4" in msg, "name whose run this would have corrupted"
+
+
+def test_a_raised_server_ceiling_is_usable_without_touching_any_python_constant(
+    monkeypatch,
+) -> None:
+    """The half of "discovered" that a refusal-only test cannot see.
+
+    Same index, same code path as the test above, a server that answers 64 instead of 16 —
+    and crucially NO ``$PROXYSHOP_REDIS_DB_COUNT``, so the assumed ceiling is still 16 and
+    would refuse worker 20 on its own. If the server's answer only ever narrowed what the
+    constant allowed, raising ``--databases`` to 64 and restarting would buy exactly
+    nothing, and the ceiling would not be discovered at all — merely double-checked.
+    """
+    assert redis_db_count() == 16, "the assumed ceiling alone would refuse worker 20"
+    with pytest.raises(ValueError):
+        redis_db_index(20)
+    monkeypatch.setattr("redis.Redis.config_get", _answer_db_count(64))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RedisDbCeilingUnknown)  # a confirmed pass must not warn
+        client = worker_redis("redis://127.0.0.1:1/9", worker=20)
+    assert client.db_ceiling == 64, "the ceiling recorded is the one the SERVER reported"
+    assert client.get_connection_kwargs()["db"] == 20
+    assert client.prefix == "w20:"
+
+
+def test_an_unreadable_db_count_is_unknown_and_never_a_silent_pass(monkeypatch) -> None:
+    """The failure mode that would quietly undo this whole mechanism.
+
+    Same worker, same server, same call — the ONLY difference between the two halves below
+    is whether ``CONFIG GET databases`` could be read. A server that answers refuses index
+    20 outright. A server that will not answer must not therefore approve it: the ceiling
+    is UNKNOWN, which is a third state, and it is announced rather than assumed away.
+    """
+    monkeypatch.setenv(DB_COUNT_ENV_VAR, "4096")
+    monkeypatch.setattr("redis.Redis.config_get", _answer_db_count(16))
+    with pytest.raises(ValueError, match="16 logical DBs"):
+        worker_redis("redis://127.0.0.1:1/9", worker=20)
+
+    monkeypatch.setattr("redis.Redis.config_get", _config_get_denied)
+    with pytest.warns(RedisDbCeilingUnknown) as recorded:
+        client = worker_redis("redis://127.0.0.1:1/9", worker=20)
+    assert client.db_ceiling is None, "an unread config must not resolve to a real ceiling"
+    text = str(recorded[0].message)
+    assert "UNKNOWN" in text and "NOT confirmed" in text
+    assert "PROXYSHOP_WORKER=20" in text
+    assert "CONFIG GET databases" in text, "tell the operator how to check by hand"
+
+
+def test_an_unreadable_db_count_still_gets_the_conservative_refusal(monkeypatch) -> None:
+    """UNKNOWN warns *and* falls back — it does not warn *instead of* checking.
+
+    With no override in play the assumed ceiling is 16, so worker 20 is refused even though
+    nothing could be measured. The warning and the refusal are both required: dropping the
+    refusal would make an unreachable server the easiest way past the ceiling.
+    """
+    monkeypatch.setattr("redis.Redis.config_get", _config_get_denied)
+    with pytest.warns(RedisDbCeilingUnknown, match="UNKNOWN"):
+        with pytest.raises(ValueError) as exc:
+            worker_redis("redis://127.0.0.1:1/9", worker=20)
+    assert "assumed default; no server was asked" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "reply", [{"databases": "not-a-number"}, {"databases": None}, {}, "16", None, 16]
+)
+def test_a_nonsense_db_count_reply_is_unknown_rather_than_trusted(reply, monkeypatch) -> None:
+    """A double, a proxy or an old server can answer with anything at all.
+
+    Every shape that is not a positive integer under ``databases`` has to land in UNKNOWN.
+    Coercing one of them into a number would produce a confident ceiling nobody measured.
+    """
+    monkeypatch.setattr("redis.Redis.config_get", lambda self, *a, **k: reply)
+    with pytest.warns(RedisDbCeilingUnknown):
+        client = worker_redis("redis://127.0.0.1:1/9", worker=1)
+    assert client.db_ceiling is None
 
 
 # --------------------------------------------------------------------------------------

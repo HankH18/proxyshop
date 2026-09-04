@@ -63,8 +63,16 @@ services:
   redis:
     image: redis:7-alpine
     pull_policy: missing
+    # --databases 64 (was 16, which is Redis's own default): worker N owns logical DB N
+    # (D39), so this number IS the ceiling on concurrent workers, and redis_db_index()
+    # refuses an index past it rather than silently sharing one. Logical DBs are ~free —
+    # an empty one is a couple of pointers, and maxmemory below is unchanged.
+    # The running server reads this flag ONLY at startup: until the container is recreated
+    # it still answers `CONFIG GET databases` -> 16. That gap is why the authoritative
+    # check in proxyshop_support/redis_client.py asks the live server instead of trusting
+    # this line — a compose edit and a running server can disagree for as long as they like.
     command: ["redis-server","--save","","--appendonly","no",
-              "--maxmemory","256mb","--maxmemory-policy","noeviction","--databases","16"]
+              "--maxmemory","256mb","--maxmemory-policy","noeviction","--databases","64"]
     ports: ["${REDIS_PORT:-6379}:6379"]
     healthcheck: { test: ["CMD","redis-cli","ping"], interval: 5s, timeout: 3s, retries: 10 }
     stop_grace_period: 30s

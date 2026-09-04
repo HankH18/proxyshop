@@ -6,8 +6,23 @@ import os
 
 ENV_VAR = "PROXYSHOP_WORKER"
 
-#: Redis ships with 16 logical databases by default and the compose stack pins
-#: ``--databases 16``; worker N therefore owns logical DB N.
+#: Overrides :data:`REDIS_DB_COUNT` for a server known to be configured differently.
+DB_COUNT_ENV_VAR = "PROXYSHOP_REDIS_DB_COUNT"
+
+#: The logical-DB ceiling ASSUMED when nothing better is known. Redis's own default is 16,
+#: so 16 is the safe assumption for any server nobody has asked.
+#:
+#: This is deliberately NOT kept in lockstep with ``--databases`` in docker-compose.yml.
+#: A second copy of that number would drift the moment the compose file is edited, because
+#: the running server only reads the flag at STARTUP — raising it in compose and restarting
+#: nothing leaves the server at the old value while this constant claims the new one, which
+#: is the worst of both. The number that cannot drift is the one the server itself reports,
+#: and reading it needs a connection, so the authoritative check lives at client
+#: construction in :func:`proxyshop_support.redis_client.worker_redis`, not here.
+#:
+#: Nothing in this module may open a Redis connection: worker identity is imported by
+#: processes that never speak to Redis at all, and the offline tests build a client against
+#: a dead address on purpose. A ceiling that required a live server would break both.
 REDIS_DB_COUNT = 16
 
 
@@ -54,7 +69,38 @@ def key_prefix(worker: int | None = None) -> str:
     return f"w{worker_id() if worker is None else worker}:"
 
 
-def redis_db_index(worker: int | None = None) -> int:
+def redis_db_count() -> int:
+    """Return the ASSUMED number of Redis logical DBs, without touching Redis.
+
+    Resolution order: ``$PROXYSHOP_REDIS_DB_COUNT``, then :data:`REDIS_DB_COUNT` (16).
+
+    This is the offline answer, and it is only ever a lower bound on what the server may
+    really be configured with. It opens no connection — see :data:`REDIS_DB_COUNT` for why
+    that is a hard constraint rather than a preference. The real ceiling is read from the
+    running server by :func:`proxyshop_support.redis_client.worker_redis`, which refuses an
+    index the server cannot isolate no matter what this function returned.
+
+    Raises:
+        ValueError: the override is set to something that is not an integer >= 1.
+    """
+    raw = os.environ.get(DB_COUNT_ENV_VAR)
+    if raw is None or raw.strip() == "":
+        return REDIS_DB_COUNT
+    try:
+        value = int(raw)
+    except ValueError as exc:  # noqa: TRY003 - message is the point
+        raise ValueError(f"{DB_COUNT_ENV_VAR}={raw!r} is not an integer") from exc
+    if value < 1:
+        raise ValueError(f"{DB_COUNT_ENV_VAR}={raw!r} must be >= 1")
+    return value
+
+
+def redis_db_index(
+    worker: int | None = None,
+    *,
+    db_count: int | None = None,
+    ceiling_source: str | None = None,
+) -> int:
     """Return the per-worker Redis logical DB index (D39).
 
     REFUSES an index Redis cannot isolate, instead of silently sharing one.
@@ -79,16 +125,45 @@ def redis_db_index(worker: int | None = None) -> int:
     isolated should stop, not quietly share. Postgres is unaffected — it gets a
     real database per index and has no such ceiling — so the ceiling is
     Redis-specific and lives here rather than in ``worker_id()``.
+
+    Called with no ``db_count`` this checks against the ASSUMED ceiling
+    (:func:`redis_db_count`), because this function must not open a connection. That is a
+    cheap early refusal, not the authoritative one:
+    :func:`proxyshop_support.redis_client.worker_redis` reads the number the running server
+    actually reports and calls back in here with it.
+
+    The refusal message always names the ceiling that was actually applied and where it
+    came from. An assumed 16 and a measured 16 justify the same refusal but are not the
+    same claim, and an operator who is told "the server has 16" when nobody asked a server
+    will go and check the wrong thing.
+
+    Args:
+        worker: worker index. Defaults to ``$PROXYSHOP_WORKER``.
+        db_count: ceiling to check against. Defaults to :func:`redis_db_count`. Pass the
+            server's real answer to make this the authoritative check.
+        ceiling_source: where ``db_count`` came from, in words, for the refusal message.
+            Ignored unless ``db_count`` is given; defaults to a caller-neutral phrasing
+            precisely because this function cannot know.
     """
     value = worker_id() if worker is None else worker
-    if value >= REDIS_DB_COUNT:
-        collides_with = value % REDIS_DB_COUNT
+    if db_count is not None:
+        ceiling = db_count
+        source = ceiling_source or "supplied by the caller"
+    elif (os.environ.get(DB_COUNT_ENV_VAR) or "").strip():
+        ceiling = redis_db_count()
+        source = f"from ${DB_COUNT_ENV_VAR}; no server was asked"
+    else:
+        ceiling = REDIS_DB_COUNT
+        source = "assumed default; no server was asked"
+    if value >= ceiling:
+        collides_with = value % ceiling
         raise ValueError(
-            f"{ENV_VAR}={value} cannot be isolated in Redis: this server has only "
-            f"{REDIS_DB_COUNT} logical DBs, so index {value} shares DB {collides_with} "
+            f"{ENV_VAR}={value} cannot be isolated in Redis: the ceiling in effect is "
+            f"{ceiling} logical DBs ({source}), so index {value} shares DB {collides_with} "
             f"with worker {collides_with}. The `w{value}:` prefix would keep the keys "
             f"apart, but the per-test `flushdb()` in conftest.py ignores prefixes and "
             f"would wipe that worker's state mid-run. "
-            f"Use {ENV_VAR}=0..{REDIS_DB_COUNT - 1}."
+            f"Use {ENV_VAR}=0..{ceiling - 1}, or raise `--databases` in docker-compose.yml "
+            f"and restart the redis service — the server reads that flag only at startup."
         )
     return value
