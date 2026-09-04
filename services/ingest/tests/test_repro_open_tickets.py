@@ -440,3 +440,218 @@ def test_a_refused_entry_price_does_not_promote_the_other_surfaces_price() -> No
         "a hostile entry price of '-5.00' was read as 'no price stated' and the JSON-LD's "
         f"12.00 took its place: variant price is {price!r}"
     )
+
+
+# =============================================================================================
+# T-312 (ingest half) — the published refresh door is unserved, and every door ingest DOES
+# serve is unpublished
+# =============================================================================================
+#
+# The gate is a general property rather than a probe over one route name: build the app, read
+# ``app.openapi()['paths']``, read ``packages/contracts/openapi/ingest.openapi.json``, and
+# require the two operation sets to agree **in both directions**. A frozen list of names would
+# grade only the missing half; here the divergence runs both ways and the larger half is the
+# one a name list cannot see at all.
+
+INGEST_OPENAPI = REPO_ROOT / "packages/contracts/openapi/ingest.openapi.json"
+
+#: The methods an OpenAPI path item may carry. Everything else under a path item
+#: (``parameters``, ``summary``, ``$ref``, ``servers``) is not an operation, and counting it as
+#: one would inflate the very non-zero check that arms this sweep.
+HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
+
+
+def _normalise_route(path: str) -> str:
+    """``/refresh/{store_id}`` -> ``/refresh/{}``.
+
+    The comparison is about the *wire shape* of a route, not about what the service names its
+    path parameter: an app serving ``/refresh/{sid}`` genuinely answers the contract's
+    ``/refresh/{store_id}``, and failing it for the spelling would make this gate red for a
+    reason the ticket is not about. Failure messages still print the raw spellings, so a real
+    naming divergence stays visible without being fatal.
+
+    ``str.partition`` rather than a regex so no import has to be added to this file's frozen
+    head (E402). Its behaviour on malformed input is stated exactly, because an earlier draft
+    of this docstring claimed something else and was wrong: a ``{`` with no ``}`` anywhere
+    after it is passed through unchanged, but ``/a/{b/{c}`` collapses ``b/{c`` into a single
+    ``{}`` — the first ``{`` pairs with the only ``}``. Nothing in the five contracts is shaped
+    like that today, and the injectivity check in the arming test is what keeps a future one
+    from collapsing two distinct paths onto one string unnoticed.
+    """
+    out: list[str] = []
+    rest = path
+    while "{" in rest:
+        head, _, tail = rest.partition("{")
+        _param, closed, rest = tail.partition("}")
+        if not closed:
+            return "".join(out) + head + "{" + tail
+        out.append(head + "{}")
+    return "".join(out) + rest
+
+
+def _operations(paths: dict[str, Any], *, raw: bool = False) -> set[tuple[str, str]]:
+    """``{(METHOD, path)}`` from an OpenAPI ``paths`` object, normalised unless ``raw``."""
+    return {
+        (method.upper(), path if raw else _normalise_route(path))
+        for path, item in paths.items()
+        for method in item
+        if method.lower() in HTTP_METHODS
+    }
+
+
+def _published_operations(contract: Path, *, raw: bool = False) -> set[tuple[str, str]]:
+    """What an OpenAPI document on disk declares."""
+    return _operations(json.loads(contract.read_text(encoding="utf-8")).get("paths", {}), raw=raw)
+
+
+def _served_operations(app: Any) -> set[tuple[str, str]]:
+    """What a built FastAPI application actually answers."""
+    return _operations(app.openapi().get("paths", {}))
+
+
+def _operation_divergence(served: set[tuple[str, str]], published: set[tuple[str, str]]) -> str:
+    """A message naming BOTH differences, and the counts each side actually iterated."""
+    unserved = sorted(f"{method} {path}" for method, path in published - served)
+    unpublished = sorted(f"{method} {path}" for method, path in served - published)
+    return (
+        f"served {len(served)} operation(s), contract publishes {len(published)}; "
+        f"published but NOT served: {unserved or 'none'}; "
+        f"served but NOT published: {unpublished or 'none'}"
+    )
+
+
+def _contract_probe_app(contract: Path) -> Any:
+    """A synthetic app serving exactly what ``contract`` publishes — the sweep's arming device.
+
+    Three sweeps in this repo were found going QUIET rather than red (T-229 6->0 of 8, T-281
+    70->0 of 79, T-241 48->0 of 66): a loop that iterates zero cases and passes. A
+    served-vs-published comparison carries the same hazard in a nastier form, because
+    ``set() == set()`` is a *pass*. Pointing the extractor at an app whose served set is known
+    — built from the very paths under test — is what makes an empty ``served`` mean "this
+    service serves nothing" rather than "this probe can no longer see routes".
+    """
+    from fastapi import FastAPI  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    def _probe() -> dict[str, Any]:  # pragma: no cover - mounted, never called
+        return {}
+
+    app = FastAPI(title=f"probe:{contract.name}")
+    for method, path in sorted(_published_operations(contract, raw=True)):
+        app.add_api_route(path, _probe, methods=[method])
+    return app
+
+
+def test_the_ingest_served_versus_published_sweep_is_armed() -> None:
+    """Not xfail, and not optional: the T-312 gate below is worthless without this.
+
+    Three ways the comparison could pass while measuring nothing, all closed here:
+
+    * the contract stops parsing to operations, so ``published - served`` is empty;
+    * the extractor stops seeing routes for structural reasons (a changed FastAPI, a swallowed
+      exception inside ``app.openapi()``), so ``served`` is empty for every app and an unserved
+      contract is indistinguishable from a served one;
+    * the two sides normalise paths differently — the one way a set comparison can be wrong
+      without either side being empty.
+
+    The last two are closed by comparing the contract against a synthetic app built from that
+    contract's own raw paths, and by requiring the real ingest app to serve something.
+    """
+    from ingest.main import create_app  # noqa: PLC0415
+
+    assert INGEST_OPENAPI.is_file(), f"{INGEST_OPENAPI} does not exist"
+    raw = _published_operations(INGEST_OPENAPI, raw=True)
+    published = _published_operations(INGEST_OPENAPI)
+    assert published, f"{INGEST_OPENAPI} declares no operations; the sweep would be blind"
+
+    # Normalisation must be INJECTIVE, or the comparison silently shrinks. Two distinct
+    # published paths that normalise to one string — `/refresh/{store_id}` beside
+    # `/refresh/{slug}` — collapse identically on BOTH sides, so the probe check below still
+    # passes while a service serving only one of them satisfies `served == published` with the
+    # other door 404ing. Nothing here is shaped like that today; this keeps it that way.
+    assert len(published) == len(raw), (
+        f"normalising path parameters collapsed {len(raw)} published operations onto "
+        f"{len(published)} — two distinct contract paths differ only in the NAME of a path "
+        f"parameter, so the comparison can no longer tell them apart. Raw: "
+        f"{sorted(f'{m} {p}' for m, p in raw)}"
+    )
+
+    probe = _served_operations(_contract_probe_app(INGEST_OPENAPI))
+    assert probe == published, (
+        "the extractor and the contract reader disagree on an app built from the contract "
+        f"itself — {_operation_divergence(probe, published)}"
+    )
+
+    served = _served_operations(create_app())
+    assert served, (
+        "the ingest app served no operation at all, so the extractor cannot distinguish an "
+        "unserved contract from a served one and the gate below would pass by measuring nothing"
+    )
+    # FLOORS, not equalities, and the asymmetry is the point. Either side GROWING is ordinary
+    # progress and must not turn this file red for a lane that owns neither the contract nor
+    # the gate below. Either side SHRINKING is the cheapest way to fake the fix: ``served ==
+    # published`` is satisfiable from either end, and this file's own positive control
+    # repaired the gate by editing the contract alone with no source change. So deleting the
+    # published promise, or deleting the routes, to make the two sets agree trips here. The
+    # strict xfail marker catches that fake once; this is the tripwire that survives its
+    # removal.
+    # Two separate comparisons, deliberately NOT `(a, b) >= (6, 1)`: tuple comparison is
+    # LEXICOGRAPHIC, so that spelling accepts (7, 0) — a contract emptied to zero, waved
+    # through because one more route got served. The bug the floor exists to catch would have
+    # walked straight past its own guard.
+    assert len(served) >= 6, (
+        f"ingest lost served surface since this gate was measured: {len(served)} operation(s), "
+        "floor 6. Deleting routes so the sets agree is not a fix."
+    )
+    assert len(published) >= 1, (
+        f"the ingest contract lost operations since this gate was measured: {len(published)}, "
+        "floor 1. Serving a promise is a fix; deleting the promise so the sets agree is not."
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-312 (ingest half): the published POST /refresh/{store_id} is served by nothing "
+        "(measured 404) while the six operations ingest.main.create_app() does mount — the "
+        "er and extraction routers — appear in no contract at all, so the divergence between "
+        "the served surface and the published one runs in BOTH directions; remove this marker "
+        "with the fix"
+    ),
+)
+def test_t312_ingest_serves_exactly_the_operations_its_contract_publishes() -> None:
+    """One published door with no server, and six servers with no published door.
+
+    Measured at HEAD by building the app and reading ``app.openapi()['paths']``::
+
+        served     GET  /er/config                    POST /er/match
+                   POST /er/resolve                   GET  /extraction/config
+                   POST /extraction/policy-pages      POST /extraction/stores/{store_id}
+        published  POST /refresh/{store_id}           -> 404
+
+    The two sets are disjoint. ``POST /refresh/{store_id}`` is the whole published surface of
+    this service — the door that re-crawls a store's catalog — and it is answered by nothing,
+    which is the same class of defect as the store agent serving no path at all: the pipeline
+    behind it is built and tested as a library and no request can start it.
+
+    The other direction is the larger half and is deliberately asserted here too. Six live
+    endpoints — entity resolution and extraction, including ``POST /extraction/stores/{id}``,
+    which crawls an arbitrary store — are served by a deployed service and declared by no
+    contract. Nothing tells a client they exist, and nothing tells a reviewer of the contract
+    that this service's real attack surface is six times what the document shows. Gating only
+    the missing half would let a fix mount ``/refresh`` and leave that untouched.
+
+    Either direction is repairable independently and the test names both, so whichever is
+    fixed first the message says exactly what is left.
+    """
+    from ingest.main import create_app  # noqa: PLC0415
+
+    app = create_app()
+    served = _served_operations(app)
+    published = _published_operations(INGEST_OPENAPI)
+
+    assert published, "the ingest contract declares nothing; the sweep is unarmed"
+    assert served == published, (
+        "the ingest service's served surface diverges from its published contract — "
+        f"{_operation_divergence(served, published)}; mounted routers: "
+        f"{getattr(app.state, 'mounted_routers', 'unknown')}"
+    )
