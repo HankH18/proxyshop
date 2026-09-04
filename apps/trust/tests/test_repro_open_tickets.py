@@ -220,14 +220,6 @@ def test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one(
 # ======================================================================================
 # T-193 — the deployed trust image cannot verify a claim
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-193: apps/trust/Dockerfile does not COPY packages/verification, so "
-        "trust.verification.verify raises ModuleNotFoundError inside the shipped image; "
-        "remove this marker with the fix"
-    ),
-)
 def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) -> None:
     """T-065's verifier must be present in the artifact that ships.
 

@@ -58,13 +58,25 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
 COPY proxyshop_support/             /app/proxyshop_support/
 COPY apps/trust/src/             /app/apps/trust/src/
+# T-065's claim verifier. `apps/trust/src/verification/__init__.py` forwards to
+# `claim_verification`, so WITHOUT the two lines below `trust.verification.verify` raises
+# ModuleNotFoundError inside this image — and, because that shim went lazy (PEP 562)
+# precisely so an absent package would not kill the service at import time, it raises on the
+# first CALL rather than at startup: the deployed trust service treats every product-fact
+# claim as unverifiable, silently. The repo layout is reproduced verbatim here for the same
+# reason as contracts above — `packages/verification/__init__.py` resolves `.pkgroot` as
+# `Path(__file__).resolve().parents[2] / ".pkgroot"`, which only lands on /app/.pkgroot if
+# the package sits at /app/packages/verification.
+COPY packages/verification/__init__.py /app/packages/verification/__init__.py
+COPY packages/verification/src/  /app/packages/verification/src/
 
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
 # The repo tracks these as git symlinks; the image RECREATES them instead of copying them
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
- && ln -s ../apps/trust/src /app/.pkgroot/trust
+ && ln -s ../apps/trust/src /app/.pkgroot/trust \
+ && ln -s ../packages/verification/src /app/.pkgroot/claim_verification
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
 # the process to be able to.
