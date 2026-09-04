@@ -40,23 +40,72 @@ So the lock is **re-entrant within a process and exclusive between processes**, 
 exactly what D37 asks for: one interpreter holds one real ``flock`` however many times it
 asks for it, and a *second* interpreter still waits. State is keyed by lock path and
 guarded by a ``threading.Lock`` so threads inside one process share the single flock too.
+
+What an acquisition COSTS is measured, not asserted (P5a)
+---------------------------------------------------------
+Every completed acquisition appends one JSON object to :func:`lock_log_path` — by default
+``<lock file>.log``, i.e. ``/tmp/proxyshop-neo4j.lock.log``. See :class:`Acquisition` for
+the fields. The point is a **per-acquisition cost**, not an event stream: ``waited_s`` is
+what a sibling worker lost to contention, ``held_s`` is how long this process kept every
+other one out, and ``reset_ms``/``nodes_deleted`` say how much of that hold was the
+:func:`reset_graph` wipe rather than the test.
+
+This exists because the number everyone quotes — "the flock is held 88 % of the session" —
+was measured against the **session-scoped** guard that T-214 replaced. It describes a
+system that no longer runs. Nothing should decide how many Neo4j instances to stand up
+until this log has said what the function-scoped lock actually costs; run
+``python -m proxyshop_support.neo4j_lock`` (or :func:`summarize_lock_log`) to reduce the
+log to that number.
+
+**What it does not cover**, stated plainly so nobody over-reads it:
+
+* Only *completed* acquisitions are recorded. A wait that ends in
+  :class:`Neo4jLockTimeout` writes nothing, and neither does a process killed mid-hold —
+  so the log under-counts exactly the pathological cases.
+* ``waited_s`` is measured from the first ``flock`` attempt. It cannot see time a caller
+  spent queued *before* asking (pytest collection, fixture setup ahead of
+  ``_neo4j_guard``, the ``_require_services`` probe).
+* A nested acquisition inside one process is folded into the outer record
+  (``reentries``/``max_depth``); it takes no kernel lock and costs no sibling anything.
+* It is a *local* record: each process writes its own lines, so a cluster-wide picture
+  needs the logs concatenated. Lines are single short appends to an ``O_APPEND`` file,
+  which does not interleave in practice, but the file is a diagnostic and never an input
+  to a decision the code makes at runtime.
+* Writing the record happens **after** the flock is released, so the instrumentation
+  cannot lengthen anybody's wait; the cost it reports therefore excludes itself.
 """
 
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
 #: Deliberately outside the repo: worktrees are per-ticket, but the Neo4j container is not.
 LOCK_PATH = Path(os.environ.get("PROXYSHOP_NEO4J_LOCK", "/tmp/proxyshop-neo4j.lock"))
+
+#: Overrides where :func:`lock_log_path` writes. Set it to ``""``, ``"0"``, ``"off"`` or
+#: ``"none"`` to turn the instrumentation off entirely; unset, the log sits beside the lock
+#: file, which is already machine-global and already written on every acquisition.
+LOG_ENV_VAR = "PROXYSHOP_NEO4J_LOCK_LOG"
+
+#: Values of :data:`LOG_ENV_VAR` that mean "write nothing".
+LOG_DISABLED_VALUES = frozenset({"", "0", "off", "no", "none", "false"})
+
+#: Rotate the log to ``<log>.1`` once it passes this. The default path is machine-global
+#: and appended to by every graph test on the host forever, so "it is only ~350 bytes a
+#: line" is exactly the reasoning that leaves a multi-gigabyte file in ``/tmp`` a month
+#: later. One generation is kept: this is a working measurement, not an audit trail.
+MAX_LOG_BYTES = 32 * 1024 * 1024
 
 #: How long a contended acquisition waits before raising :class:`Neo4jLockTimeout` (T-191).
 #:
@@ -82,11 +131,90 @@ class Neo4jLockTimeout(RuntimeError):
 
 
 @dataclass
+class Acquisition:
+    """The measured cost of ONE completed hold of the flock (P5a).
+
+    One of these becomes one JSON line in :func:`lock_log_path`. Every duration is in
+    seconds except :attr:`reset_ms`, which is in milliseconds because it is expected to be
+    small and a reader comparing it against :attr:`held_s` should not have to count zeroes.
+
+    Attributes:
+        pid: the holding process.
+        worker: ``$PROXYSHOP_WORKER`` as a string, or ``None`` when unset. Kept as the raw
+            string: the log records what the process was actually told, not a parse of it.
+        test: ``$PYTEST_CURRENT_TEST`` at acquisition — the nodeid whose *setup* took the
+            lock, when there is one. ``None`` outside pytest.
+        waited_s: seconds spent blocked on another **process**'s flock. ~0 uncontended.
+        held_s: seconds from acquiring the flock to releasing it. This is the number a
+            sibling worker pays for.
+        contended: whether the acquisition ever had to wait (i.e. the first non-blocking
+            ``flock`` failed). Distinguishes "0.0004 s because nobody was there" from
+            "0.0004 s because the holder let go immediately".
+        reentries: nested acquisitions folded into this record. They take no kernel lock.
+        max_depth: the deepest nesting reached during this hold (1 = never nested).
+        resets: how many :func:`reset_graph` calls ran inside this hold.
+        reset_ms: total milliseconds those resets spent in ``MATCH (n) DETACH DELETE n``.
+        nodes_deleted: nodes those resets actually removed. **Zero is the interesting
+            value**: it means the graph was already empty and the wipe bought nothing.
+        relationships_deleted: as above, for relationships.
+    """
+
+    pid: int
+    worker: str | None
+    test: str | None
+    waited_s: float
+    held_s: float = 0.0
+    contended: bool = False
+    reentries: int = 0
+    max_depth: int = 1
+    resets: int = 0
+    reset_ms: float = 0.0
+    nodes_deleted: int = 0
+    relationships_deleted: int = 0
+    #: monotonic stamp taken the instant the flock was won; not serialised.
+    acquired_at: float = field(default=0.0, repr=False)
+
+    def as_record(self, lock_path: Path) -> dict[str, Any]:
+        """This acquisition as the dict that gets serialised, newest fields last."""
+        return {
+            "ts": datetime.now(UTC).isoformat(),
+            "lock": str(lock_path),
+            "pid": self.pid,
+            "worker": self.worker,
+            "test": self.test,
+            "waited_s": round(self.waited_s, 6),
+            "held_s": round(self.held_s, 6),
+            "contended": self.contended,
+            "reentries": self.reentries,
+            "max_depth": self.max_depth,
+            "resets": self.resets,
+            "reset_ms": round(self.reset_ms, 3),
+            "nodes_deleted": self.nodes_deleted,
+            "relationships_deleted": self.relationships_deleted,
+        }
+
+
+@dataclass
+class ResetOutcome:
+    """What one :func:`reset_graph` call actually did.
+
+    Returned so a caller can assert on it. ``nodes_deleted == 0`` is the standing proof
+    that a wipe was redundant — which is how the duplicate wipe in
+    ``services/ingest/tests/_fixtures_graph.py`` was shown to be free to delete (P5b).
+    """
+
+    reset_ms: float
+    nodes_deleted: int
+    relationships_deleted: int
+
+
+@dataclass
 class _Holding:
     """One process-wide flock, and how many nested acquisitions are standing on it."""
 
     handle: IO[str]
     depth: int
+    stats: Acquisition
 
 
 #: Guards :data:`_HELD`. A thread that arrives while another thread of this process already
@@ -138,6 +266,139 @@ def lock_holder(path: Path | str | None = None) -> str:
     if not stamped:
         return "unknown (the holder has not stamped the lock file yet)"
     return stamped.splitlines()[0]
+
+
+def lock_log_path(path: Path | str | None = None) -> Path | None:
+    """Where per-acquisition records go, or ``None`` when instrumentation is off.
+
+    Resolution order: ``$PROXYSHOP_NEO4J_LOCK_LOG`` (one of
+    :data:`LOG_DISABLED_VALUES` turns it off), otherwise ``<lock file>.log``.
+
+    The default is derived from the *resolved* lock path, so on macOS — where ``/tmp`` is a
+    symlink to ``/private/tmp`` — the log for ``/tmp/proxyshop-neo4j.lock`` is
+    ``/private/tmp/proxyshop-neo4j.lock.log``. That is the same file either way; it is
+    named here so a reader looking for the log by its literal ``/tmp`` spelling is not
+    surprised by the resolved one.
+    """
+    raw = os.environ.get(LOG_ENV_VAR)
+    if raw is not None:
+        if raw.strip().lower() in LOG_DISABLED_VALUES:
+            return None
+        return Path(raw).expanduser()
+    return Path(f"{_key(path)}.log")
+
+
+def _rotate_if_oversized(log_path: Path) -> None:
+    """Move an oversized log to ``<log>.1``, keeping one generation.
+
+    ``os.replace`` is atomic, so two processes racing here produce one rename and one
+    harmless miss rather than a torn file; and because every writer opens the log fresh per
+    record, nobody is left appending to a rotated inode.
+    """
+    try:
+        if log_path.stat().st_size < MAX_LOG_BYTES:
+            return
+    except OSError:
+        return
+    os.replace(log_path, Path(f"{log_path}.1"))
+
+
+def _append_record(lock_path: Path, stats: Acquisition) -> None:
+    """Append one acquisition to the log. Never raises.
+
+    Called from :func:`_release` **after** the flock is dropped, so a slow or failing disk
+    cannot lengthen a sibling worker's wait. Instrumentation that can fail a test run is
+    worse than no instrumentation, so every error here is swallowed: the caller is a
+    ``finally``-path release and the alternative is turning a passing graph test into a
+    traceback about the logging of it.
+    """
+    try:
+        log_path = lock_log_path(lock_path)
+        if log_path is None:
+            return
+        line = json.dumps(stats.as_record(lock_path), separators=(",", ":")) + "\n"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_if_oversized(log_path)
+        # One short append per record: O_APPEND makes concurrent writers from separate
+        # processes land whole lines rather than interleaved fragments.
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+    except Exception:  # pragma: no cover - defensive; see the docstring
+        pass
+
+
+def read_lock_log(path: Path | str | None = None) -> list[dict[str, Any]]:
+    """Every well-formed record in the log, oldest first.
+
+    Args:
+        path: the **log** file. Defaults to :func:`lock_log_path`.
+
+    Returns:
+        The parsed records. A truncated or half-written final line is skipped rather than
+        raising: the log is appended to by live processes, so reading it while a run is in
+        flight is the normal case.
+    """
+    log_path = Path(path) if path is not None else lock_log_path()
+    if log_path is None or not log_path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return records
+
+
+def _percentile(values: Sequence[float], fraction: float) -> float:
+    """Nearest-rank percentile. Empty -> 0.0."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(round(fraction * (len(ordered) - 1)))))
+    return ordered[index]
+
+
+def summarize_lock_log(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Reduce acquisition records to the numbers a fan-out decision needs.
+
+    Returns:
+        ``acquisitions``, ``contended`` (count and share), wait p50/p95/max, hold
+        p50/p95/max, the total seconds the lock was held by these records, and how much of
+        that was the graph reset — plus ``resets_that_deleted_nothing``, which is the
+        measure of how often the wipe is pure overhead.
+    """
+    waits = [float(r.get("waited_s", 0.0)) for r in records]
+    holds = [float(r.get("held_s", 0.0)) for r in records]
+    resets = [r for r in records if int(r.get("resets", 0) or 0) > 0]
+    reset_seconds = sum(float(r.get("reset_ms", 0.0)) for r in records) / 1000.0
+    total_held = sum(holds)
+    contended = [r for r in records if r.get("contended")]
+    return {
+        "acquisitions": len(records),
+        "contended": len(contended),
+        "contended_share": (len(contended) / len(records)) if records else 0.0,
+        "wait_p50_s": _percentile(waits, 0.50),
+        "wait_p95_s": _percentile(waits, 0.95),
+        "wait_max_s": max(waits, default=0.0),
+        "wait_total_s": sum(waits),
+        "held_p50_s": _percentile(holds, 0.50),
+        "held_p95_s": _percentile(holds, 0.95),
+        "held_max_s": max(holds, default=0.0),
+        "held_total_s": total_held,
+        "reset_total_s": reset_seconds,
+        "reset_share_of_hold": (reset_seconds / total_held) if total_held else 0.0,
+        "resets": len(resets),
+        "resets_that_deleted_nothing": sum(
+            1 for r in resets if int(r.get("nodes_deleted", 0) or 0) == 0
+        ),
+        "nodes_deleted_total": sum(int(r.get("nodes_deleted", 0) or 0) for r in records),
+    }
 
 
 def _report_to_stderr(message: str) -> None:
@@ -239,6 +500,8 @@ def _acquire(
         holding = _HELD.get(lock_path)
         if holding is not None:
             holding.depth += 1
+            holding.stats.reentries += 1
+            holding.stats.max_depth = max(holding.stats.max_depth, holding.depth)
             return
 
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -274,6 +537,7 @@ def _acquire(
                             f"{lock_holder(lock_path)}."
                         )
                     time.sleep(poll)
+            won_at = time.monotonic()
             handle.seek(0)
             handle.truncate()
             handle.write(f"pid={os.getpid()} worker={os.environ.get('PROXYSHOP_WORKER')}\n")
@@ -281,7 +545,15 @@ def _acquire(
         except BaseException:
             handle.close()
             raise
-        _HELD[lock_path] = _Holding(handle=handle, depth=1)
+        stats = Acquisition(
+            pid=os.getpid(),
+            worker=os.environ.get("PROXYSHOP_WORKER"),
+            test=os.environ.get("PYTEST_CURRENT_TEST"),
+            waited_s=won_at - started,
+            contended=announced,
+            acquired_at=won_at,
+        )
+        _HELD[lock_path] = _Holding(handle=handle, depth=1, stats=stats)
 
 
 def _release(lock_path: Path) -> None:
@@ -293,13 +565,42 @@ def _release(lock_path: Path) -> None:
         if holding.depth > 0:
             return
         del _HELD[lock_path]
+        # Stamped before the unlock so it measures the hold, not the bookkeeping.
+        holding.stats.held_s = time.monotonic() - holding.stats.acquired_at
         try:
             fcntl.flock(holding.handle.fileno(), fcntl.LOCK_UN)
         finally:
             holding.handle.close()
+        # After the unlock: a waiting sibling is already free before this line runs.
+        _append_record(lock_path, holding.stats)
 
 
-def reset_graph(driver: Any) -> None:
+def _record_reset(path: Path | str | None, outcome: ResetOutcome) -> None:
+    """Attribute one reset to the acquisition it ran inside, if that is unambiguous.
+
+    :func:`reset_graph` is handed a driver, not a lock path, so attribution is by
+    elimination: an explicit ``path`` wins; otherwise a single held lock is the one; a
+    process holding several distinct lock files at once (only tests do that) attributes to
+    the default path if it is held, and to nothing otherwise. Guessing wrong would put a
+    reset's cost on the wrong hold, and a wrong number is worse than a missing one.
+    """
+    with _MUTEX:
+        holding: _Holding | None
+        if path is not None:
+            holding = _HELD.get(_key(path))
+        elif len(_HELD) == 1:
+            holding = next(iter(_HELD.values()))
+        else:
+            holding = _HELD.get(_key(None)) if _HELD else None
+        if holding is None:
+            return
+        holding.stats.resets += 1
+        holding.stats.reset_ms += outcome.reset_ms
+        holding.stats.nodes_deleted += outcome.nodes_deleted
+        holding.stats.relationships_deleted += outcome.relationships_deleted
+
+
+def reset_graph(driver: Any, *, path: Path | str | None = None) -> ResetOutcome:
     """Delete every node and relationship in the single Neo4j database (D37).
 
     Call this only while holding :func:`neo4j_flock` — the ``neo4j_driver`` fixture does,
@@ -309,6 +610,75 @@ def reset_graph(driver: Any) -> None:
 
     Constraints and indexes are deliberately **not** dropped: they are schema, created once
     by the graph ticket, and re-creating them on every session would be pure cost.
+
+    Args:
+        path: which held lock this reset's cost belongs to. Defaults to letting
+            :func:`_record_reset` work it out; only a process holding two different lock
+            files at once needs to say.
+
+    Returns:
+        What the wipe actually did. ``nodes_deleted == 0`` means the graph was already
+        empty and this call bought nothing — the measurement that makes a *second* wipe in
+        a fixture provably redundant rather than arguably so.
     """
+    started = time.perf_counter()
     with driver.session() as session:
-        session.run("MATCH (n) DETACH DELETE n").consume()
+        summary = session.run("MATCH (n) DETACH DELETE n").consume()
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    counters = getattr(summary, "counters", None)
+    outcome = ResetOutcome(
+        reset_ms=elapsed_ms,
+        nodes_deleted=int(getattr(counters, "nodes_deleted", 0) or 0),
+        relationships_deleted=int(getattr(counters, "relationships_deleted", 0) or 0),
+    )
+    _record_reset(path, outcome)
+    return outcome
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
+    """``python -m proxyshop_support.neo4j_lock [log path]`` — the P5a numbers.
+
+    Deliberately tiny and dependency-free: the whole point of 5a is that the cost of the
+    lock stops being a claim, and a claim that needs a bespoke one-liner to check is one
+    step from being quoted second-hand forever (which is what happened to the 88 % figure).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="proxyshop_support.neo4j_lock", description=__doc__)
+    parser.add_argument("log", nargs="?", default=None, help="log file (default: beside the lock)")
+    parser.add_argument("--json", action="store_true", help="emit the summary as JSON")
+    args = parser.parse_args(argv)
+
+    records = read_lock_log(args.log)
+    summary = summarize_lock_log(records)
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+    where = args.log or lock_log_path()
+    if not records:
+        print(f"no acquisitions recorded in {where}")
+        return 0
+    print(f"{summary['acquisitions']} acquisitions in {where}")
+    print(
+        f"  wait   p50 {summary['wait_p50_s']:.4f}s  p95 {summary['wait_p95_s']:.4f}s  "
+        f"max {summary['wait_max_s']:.4f}s  total {summary['wait_total_s']:.3f}s"
+    )
+    print(
+        f"  held   p50 {summary['held_p50_s']:.4f}s  p95 {summary['held_p95_s']:.4f}s  "
+        f"max {summary['held_max_s']:.4f}s  total {summary['held_total_s']:.3f}s"
+    )
+    print(
+        f"  reset  {summary['reset_total_s']:.3f}s of that hold "
+        f"({summary['reset_share_of_hold'] * 100:.1f}%), {summary['resets']} resets, "
+        f"{summary['resets_that_deleted_nothing']} deleted nothing, "
+        f"{summary['nodes_deleted_total']} nodes deleted in total"
+    )
+    print(
+        f"  contended {summary['contended']}/{summary['acquisitions']} "
+        f"({summary['contended_share'] * 100:.1f}%)"
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI
+    raise SystemExit(_main())
