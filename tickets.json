@@ -4939,6 +4939,96 @@
       "defect": "THE S1 E2E FLOW HAS TWO BLIND SPOTS, THOUGH IT IS OTHERWISE GENUINE. FILED AGAINST HELD WORK: e2e/test_s1_flow.py exists only on branch task/T-082 (checked out in another worktree at the time of filing) and is NOT on main -- git ls-tree main -- e2e shows no such file -- so this is a note for that lane before it merges, not a defect on main. The file's 23 tests genuinely drive the whole chain, and a controlled matched pair confirmed these two are honest coverage misses rather than sabotage that failed to land. (1) HMAC SIGNATURE VERIFICATION IS UNEXERCISED. Replacing merchant_svc.install.webhooks.verify (apps/merchant/svc/src/install/webhooks.py:147) with `lambda: True` leaves all 23 green. The test that claims this property, test_the_paid_webhook_was_authenticated_rather_than_assumed at :233, asserts only decision.status_code == 200 and decision.event is not None -- an always-true verify() produces exactly that. Its own docstring argues 'handle_delivery answers 401 on a bad signature, so an accepted decision is proof the stub signed the exact bytes', which is only proof if a BAD signature is also driven through and gets its 401; nothing in the run does. (2) mint_code CORRECTNESS IS UNEXERCISED. Replacing mint_code (apps/exchange/src/checkout/codes.py:125, 'PSX-' + 8 Crockford base32 chars) with the constant 'NOT-A-PSX-CODE' leaves all 23 green. test_the_redirect_path_minted_its_own_code_without_calling_the_merchant at :407 asserts only that the minted code is truthy, appears in the permalink, and equals the code the completion redeemed -- all three hold for any constant, since the same constant flows through every hop. Nothing in the file asserts the code's FORMAT or its uniqueness ('PSX-' appears there only inside off-domain attacker-URL fixtures at :331-335). (3) SEPARATELY: `make e2e-live` is documented in docs/demo/starting-slice.md:216-235, which claims 'until then the target exits rather than running anything, which is the correct behaviour'. It does not: Makefile:20 is `e2e-live: ; @bash docs/demo/e2e_live.sh`, docs/demo/e2e_live.sh does not exist on main OR on task/T-082 (docs/demo holds only .gitkeep and starting-slice.md), so the target dies with 'bash: docs/demo/e2e_live.sh: No such file or directory' and `make: *** [e2e-live] Error 127`. docs/tests/test_scaffold_smoke.py:22-27 only asserts the target and the path STRING are in the Makefile, so it stays green.",
       "finding_id": "66c5e6f1834ccf1c1f64f79e2946fcb91c7e6dfea2a4a78972493b5764d0c18f",
       "reproduction": "(1) git show task/T-082:e2e/test_s1_flow.py and read :233-243; monkeypatch merchant_svc.install.webhooks.verify to always return True and run `PROXYSHOP_WORKER=0 pytest e2e/test_s1_flow.py -q` in that worktree -> 23 passed. (2) Read :407-420; make exchange.checkout.codes.mint_code return the constant 'NOT-A-PSX-CODE' and re-run -> 23 passed. (3) `make e2e-live` on main -> 'bash: docs/demo/e2e_live.sh: No such file or directory' / 'make: *** [e2e-live] Error 127'; `ls docs/demo` -> .gitkeep, starting-slice.md."
+    },
+    {
+      "id": "T-287",
+      "title": "T-207'S GATE ASSERTS A SUBSTRING NEGATION, NOT THE AGREEMENT ITS NAME PROMISES, AND strict=True TURNS THAT INTO A TICKET-RETIRING TRAP. The test loads the manifest's authoritative description and asserts it still contains 'does not match' (line 423), then NEVER COMPARES THE TWO. The load-bearing assertion at line 432 is `assert \"said it matched\" not in gloss` -- forbidding one exact phrase rather than checking agreement. Measured against the live gloss: 'the buyer said it matched and then returned it' is RED (correct today); 'the buyer confirmed the match and returned it' is GREEN while STILL INVERTED; a real fix is also green. So a reword to any other phrasing of the SAME WRONG MEANING clears the gate -- and because the marker is xfail(strict=True), it then XPASSes and FORCES removal of the marker, retiring the ticket with the contradiction fully intact. The manifest text is already loaded at line 422; comparing against it is a small change. This gate is one of the seven wired by amendment 15.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/trust/tests/test_repro_open_tickets.py:432",
+      "defect": "T-207'S GATE ASSERTS A SUBSTRING NEGATION, NOT THE AGREEMENT ITS NAME PROMISES, AND strict=True TURNS THAT INTO A TICKET-RETIRING TRAP. The test loads the manifest's authoritative description and asserts it still contains 'does not match' (line 423), then NEVER COMPARES THE TWO. The load-bearing assertion at line 432 is `assert \"said it matched\" not in gloss` -- forbidding one exact phrase rather than checking agreement. Measured against the live gloss: 'the buyer said it matched and then returned it' is RED (correct today); 'the buyer confirmed the match and returned it' is GREEN while STILL INVERTED; a real fix is also green. So a reword to any other phrasing of the SAME WRONG MEANING clears the gate -- and because the marker is xfail(strict=True), it then XPASSes and FORCES removal of the marker, retiring the ticket with the contradiction fully intact. The manifest text is already loaded at line 422; comparing against it is a small change. This gate is one of the seven wired by amendment 15.",
+      "finding_id": "ae9a9064e7281132cb8f620ed2d257e6bc3a163383ee448ee5de112e3e2d2301",
+      "reproduction": "Run the T-207 gate with the gloss reworded to 'the buyer confirmed the match and returned it' -- still semantically inverted vs the approved manifest -- and the gate passes. Executed by the cycle-16 trust auditor against the live gloss from apps/trust/src/scoring/engine.py."
+    },
+    {
+      "id": "T-288",
+      "title": "T-166'S AST GATE IS EVADABLE BY A ONE-LINE HOIST THAT PRESERVES THE DEFECT. The walk at lines 140-144 collects ast.If nodes whose TEST EXPRESSION SOURCE contains the literal substring 'status_code', and asserts that collection is empty at line 145. Assigning the attribute to a local first makes the dead branch invisible to the gate while the branch itself survives. Measured: 'if response.status_code == 503:' yields branches ['response.status_code == 503'] and is RED (correct); 'code = response.status_code' followed by 'if code == 503:' yields branches [] and is GREEN with the dead 503 branch still present. Not a defect anyone stumbles into -- it is a make-it-green escape hatch, and it means a green here does not prove the dead branch is gone. One genuine strength worth preserving: the TARGET test is docker-marked and never runs without Docker, while this reproduction is pure AST over source and runs regardless, which is the right shape. This gate is one of the seven wired by amendment 15.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/tests/test_repro_open_tickets.py:140",
+      "defect": "T-166'S AST GATE IS EVADABLE BY A ONE-LINE HOIST THAT PRESERVES THE DEFECT. The walk at lines 140-144 collects ast.If nodes whose TEST EXPRESSION SOURCE contains the literal substring 'status_code', and asserts that collection is empty at line 145. Assigning the attribute to a local first makes the dead branch invisible to the gate while the branch itself survives. Measured: 'if response.status_code == 503:' yields branches ['response.status_code == 503'] and is RED (correct); 'code = response.status_code' followed by 'if code == 503:' yields branches [] and is GREEN with the dead 503 branch still present. Not a defect anyone stumbles into -- it is a make-it-green escape hatch, and it means a green here does not prove the dead branch is gone. One genuine strength worth preserving: the TARGET test is docker-marked and never runs without Docker, while this reproduction is pure AST over source and runs regardless, which is the right shape. This gate is one of the seven wired by amendment 15.",
+      "finding_id": "5fe74f5e40e610c8238ddda3509708f04d7848e9970852bc060a1feb729656f0",
+      "reproduction": "Refactor the branch under test to hoist response.status_code into a local before the if; the gate goes green while the unreachable 503 branch remains. Executed by the cycle-16 trust auditor."
+    },
+    {
+      "id": "T-289",
+      "title": "T-181'S TEST IS GREEN UNDER THE EXACT MUTATION IT EXISTS TO CATCH, because it derives its expectation from the tuple it purports to defend. Line 215 iterates `for index, earlier in enumerate(DEFAULT_DSN_ENV)` and line 216 `for later in DEFAULT_DSN_ENV[index+1:]`, then asserts at 223 that `earlier` won -- so reordering the tuple reorders the expectation with it. Sabotage executed: reordering DEFAULT_DSN_ENV from (LEDGER, TRUST_RW, APP) to (LEDGER, APP, TRUST_RW) leaves the test GREEN when it should be RED, and the sabotaged writer then resolves postgresql://app@db/x -- which is the T-151 defect re-shipped. The ticket asks for coverage of TWO sabotages: S3a (reorder the tuple) and S3b (correct tuple, walked wrong). This test covers S3b for every pair, which is real value, and ZERO of S3a. It is also not at the live layer -- it calls the private PostgresEventStore()._resolve_dsn() rather than a real connection. After this test, S3a is defended by exactly one assertion: the source-text DEFAULT_DSN_ENV.index() check at apps/trust/tests/test_events_hardening.py:610, which the ticket itself says is not doing the work. THE ORCHESTRATOR'S RECORDED REASON FOR EXCLUDING T-181 FROM AMENDMENT 15 WAS WRONG: it was excluded as 'a coverage ticket, not a defect, so it could never be a red gate'; the correct reason is 'it defends half the ticket and cannot be a red gate for EITHER half'. Do not close T-181 on the strength of this test -- the gap the ticket describes stays open.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/tests/test_repro_open_tickets.py:215",
+      "defect": "T-181'S TEST IS GREEN UNDER THE EXACT MUTATION IT EXISTS TO CATCH, because it derives its expectation from the tuple it purports to defend. Line 215 iterates `for index, earlier in enumerate(DEFAULT_DSN_ENV)` and line 216 `for later in DEFAULT_DSN_ENV[index+1:]`, then asserts at 223 that `earlier` won -- so reordering the tuple reorders the expectation with it. Sabotage executed: reordering DEFAULT_DSN_ENV from (LEDGER, TRUST_RW, APP) to (LEDGER, APP, TRUST_RW) leaves the test GREEN when it should be RED, and the sabotaged writer then resolves postgresql://app@db/x -- which is the T-151 defect re-shipped. The ticket asks for coverage of TWO sabotages: S3a (reorder the tuple) and S3b (correct tuple, walked wrong). This test covers S3b for every pair, which is real value, and ZERO of S3a. It is also not at the live layer -- it calls the private PostgresEventStore()._resolve_dsn() rather than a real connection. After this test, S3a is defended by exactly one assertion: the source-text DEFAULT_DSN_ENV.index() check at apps/trust/tests/test_events_hardening.py:610, which the ticket itself says is not doing the work. THE ORCHESTRATOR'S RECORDED REASON FOR EXCLUDING T-181 FROM AMENDMENT 15 WAS WRONG: it was excluded as 'a coverage ticket, not a defect, so it could never be a red gate'; the correct reason is 'it defends half the ticket and cannot be a red gate for EITHER half'. Do not close T-181 on the strength of this test -- the gap the ticket describes stays open.",
+      "finding_id": "a9ae030208300b5112eb96a72cf8e56dcf28e8b8949221e2a805b33e5e00abff",
+      "reproduction": "proxyshop-scratch/verify-c16/trust/sabotage_t181.py, re-runnable as-is. Baseline green; S3a reorder green (should be red); sabotaged writer resolves to the app principal."
+    },
+    {
+      "id": "T-290",
+      "title": "T-167's gate computes `bodies = {path.read_bytes() for path in copies}` at line 179 and NEVER ASSERTS ON IT -- the variable appears only in the failure message. The load-bearing assertion at line 182 is `assert len(real_files) <= 1`, i.e. 'exactly one real file', while T-167's defect text is 'nothing enforces that they stay identical'. Same class as the T-237 detector problem but milder, since the ticket's own recommended remedy (hoist to a single module) is what this gate matches. Measured: four regular files, all md5 56d63d332af0fc3eb7d5bb5baf058f6c, none a symlink.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "LOW",
+      "location": "apps/trust/tests/test_repro_open_tickets.py:179",
+      "defect": "T-167's gate computes `bodies = {path.read_bytes() for path in copies}` at line 179 and NEVER ASSERTS ON IT -- the variable appears only in the failure message. The load-bearing assertion at line 182 is `assert len(real_files) <= 1`, i.e. 'exactly one real file', while T-167's defect text is 'nothing enforces that they stay identical'. Same class as the T-237 detector problem but milder, since the ticket's own recommended remedy (hoist to a single module) is what this gate matches. Measured: four regular files, all md5 56d63d332af0fc3eb7d5bb5baf058f6c, none a symlink.",
+      "finding_id": "b88d2ea84e0a38303272f826e33b71b3c41c110dedf9390bcb872c33bc298c1d",
+      "reproduction": "Read apps/trust/tests/test_repro_open_tickets.py:179-182; `bodies` is computed and unused in any assertion."
+    },
+    {
+      "id": "T-291",
+      "title": "T-212's gate hardcodes its fixture roster: _DATASTORE_FIXTURES at lines 446-458 is a literal frozenset of nine fixture names, so a datastore fixture added later under a new name silently escapes the gate. Moot if T-274 retires this gate, which is the likely resolution since T-212 is already closed and REFUTED.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_repro_open_tickets.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "LOW",
+      "location": "apps/trust/tests/test_repro_open_tickets.py:446",
+      "defect": "T-212's gate hardcodes its fixture roster: _DATASTORE_FIXTURES at lines 446-458 is a literal frozenset of nine fixture names, so a datastore fixture added later under a new name silently escapes the gate. Moot if T-274 retires this gate, which is the likely resolution since T-212 is already closed and REFUTED.",
+      "finding_id": "ae816dd849122c44da20c68750cfdb20a87f1ced2132439d3076440dc7afd15d",
+      "reproduction": "Read the frozenset at apps/trust/tests/test_repro_open_tickets.py:446-458; nothing derives it from the conftest's actual fixture set."
+    },
+    {
+      "id": "T-292",
+      "title": "A COMMENT ASSERTS HERMETICITY THAT IS MEASURABLY FALSE, and a load-bearing line is documented as unnecessary. The comment states 'the environment is deliberately hermetic... The repo root is not handed over as well, on purpose.' Measured false: the child's sys.path contains both the repo root and .pkgroot, via the venv _proxyshop.pth which survives a scrubbed environment. The test's VERDICT is unaffected -- its own sys.path.insert(0, '.pkgroot') wins resolution and the quantity it measures (claim-id stability across PYTHONHASHSEED) is invariant -- but that insert is now load-bearing in a way the comment denies: delete it and the test still passes here while failing under -S. Related: apps/merchant/svc/tests/test_merchant_hardening.py:480 imports merchant_svc which is importable ONLY via the .pth, proven by `.venv/bin/python -S -c 'import merchant_svc.main'` raising ModuleNotFoundError -- it would ERROR rather than fail wherever the .pth does not apply.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/tests/test_claim_identity.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "LOW",
+      "location": "packages/contracts/tests/test_claim_identity.py:167",
+      "defect": "A COMMENT ASSERTS HERMETICITY THAT IS MEASURABLY FALSE, and a load-bearing line is documented as unnecessary. The comment states 'the environment is deliberately hermetic... The repo root is not handed over as well, on purpose.' Measured false: the child's sys.path contains both the repo root and .pkgroot, via the venv _proxyshop.pth which survives a scrubbed environment. The test's VERDICT is unaffected -- its own sys.path.insert(0, '.pkgroot') wins resolution and the quantity it measures (claim-id stability across PYTHONHASHSEED) is invariant -- but that insert is now load-bearing in a way the comment denies: delete it and the test still passes here while failing under -S. Related: apps/merchant/svc/tests/test_merchant_hardening.py:480 imports merchant_svc which is importable ONLY via the .pth, proven by `.venv/bin/python -S -c 'import merchant_svc.main'` raising ModuleNotFoundError -- it would ERROR rather than fail wherever the .pth does not apply.",
+      "finding_id": "9ce02e70e433ae4cd7387ee2f05e27b58ed7dcec3ebb84a5a4cdfb4bec9e86a9",
+      "reproduction": "Run that test's child argv with -c 'import sys; print(sys.path)' and observe the repo root present despite the hermetic env dict."
     }
   ]
 }
