@@ -60,7 +60,7 @@ COPY packages/contracts/generated/python/ /app/packages/contracts/generated/pyth
 COPY proxyshop_support/             /app/proxyshop_support/
 COPY apps/exchange/src/          /app/apps/exchange/src/
 # T-299. `ingest.graph` and `ingest.embeddings` are a SHARED LIBRARY that happens to live at
-# a service's path, and candidate retrieval is the exchange's own responsibility (DESIGN.md:33),
+# a service's path, and candidate retrieval is the exchange's own responsibility (DESIGN.md:34),
 # not a call across a service boundary: DESIGN.md:23-24's architecture graph has ING->NEO and
 # EXC->NEO as two independent edges with no exchange<->ingest edge, DESIGN.md:38 gives ingest
 # writes only, ingest.openapi.json is a single write route, and `.importlinter` — the file whose

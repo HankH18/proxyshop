@@ -60,7 +60,7 @@ RUN pip install --no-cache-dir \
 #                    and quietly gets worse, which is the failure mode this lane exists to
 #                    stop shipping.
 #   protego          adapters/robots.py:97,110, inside a try/except that FAILS CLOSED at
-#                    :102-103 — so an image without protego does not crawl at all, it just
+#                    :101-102 — so an image without protego does not crawl at all, it just
 #                    declines every URL and reports nothing wrong.
 #
 # NOT numpy and NOT scipy, and this corrects a claim rather than following one:

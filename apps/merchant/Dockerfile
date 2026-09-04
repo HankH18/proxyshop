@@ -83,9 +83,9 @@ COPY apps/merchant/svc/src/      /app/apps/merchant/svc/src/
 # `auction/routes.py` is EXCLUDED on purpose, and it is the reason `auction/` is named file
 # by file instead of as a directory: it is the auction's HTTP surface, served by
 # `exchange.main`, which this image never runs, and its module-scope `..eligibility` /
-# `..orchestration` imports (routes.py:39-40) would drag in three more subpackages — 23
-# modules — for a router nothing here mounts. The merchant needs the auction's ledger event
-# builder, not the auction service.
+# `..orchestration` imports (routes.py:39-40) would drag in three more subpackages — nine
+# more modules, 16 -> 25 measured — for a router nothing here mounts. The merchant needs
+# the auction's ledger event builder, not the auction service.
 #
 # No new pip requirement: the only third-party name the shipped subset reaches is pydantic,
 # via `contracts.boundary`, and contracts is already here.

@@ -56,9 +56,9 @@ from pathlib import Path
 from typing import Any
 
 # `pytest` is deliberately NOT imported at module scope. `COPY proxyshop_support/` puts this
-# file into all four service images and NONE of them installs pytest, so a column-0
-# `import pytest` here made every one of those artifacts ship a module that cannot be
-# imported — measured by
+# file into SIX images — buyer, exchange, merchant, trust, ingest and sim — and none of them
+# installs pytest, so a column-0 `import pytest` here made every one of those artifacts ship
+# a module that cannot be imported — measured by
 # `proxyshop_support/tests/test_artifact_copyset.py::test_t301_every_shipped_module_imports_inside_the_container_shaped_tree`,
 # which walls the probe off from the dev venv precisely so this is visible. Nothing here
 # needs pytest until :func:`_poisoned_fixture` actually builds a fixture, which only happens

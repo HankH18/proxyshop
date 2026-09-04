@@ -75,7 +75,7 @@ COPY apps/buyer/svc/src/         /app/apps/buyer/svc/src/
 # This costs NOTHING in the pip layer, which is why it is a COPY and not a dependency
 # change. Measured, not assumed: the module-scope closure of the whole `packages/llm` tree
 # is stdlib only — `import anthropic` lives at `packages/llm/src/client.py:168`, INSIDE
-# `AnthropicLLM._ensure_client()`, and `config.py:65` makes the offline double the default
+# `AnthropicLLM._ensure_client()`, and `config.py:82` makes the offline double the default
 # provider, so `build_llm("buyer")` returns a `DeterministicLLM` with no SDK, no key and no
 # socket. The prologue's "anthropic and mcp are deliberately absent" stays true.
 #
