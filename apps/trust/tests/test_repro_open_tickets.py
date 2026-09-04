@@ -2395,3 +2395,225 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
         f"acceptance 2 is about rows, not statements: a second ROW is the failure, and letting "
         f"the constraint refuse it is the design the migration was written for"
     )
+
+
+# ======================================================================================
+# T-257 — T-112's recorded gate collects none of its own graders
+# ======================================================================================
+#: A ticket id as it is written anywhere a human writes one: ``T-112``, ``T_112``, ``T 112``.
+#: The trailing guard stops ``T-1120`` from matching ``T-112``.
+def _t257_ticket_pattern(ticket_id: str) -> re.Pattern[str]:
+    number = ticket_id.split("-", 1)[1]
+    return re.compile(rf"(?<![A-Za-z0-9])T[-_ ]?{re.escape(number)}(?![0-9])")
+
+
+#: Words that sit between a shell verify string and its pytest arguments.
+_T257_RUNNER_WORDS = frozenset({"uv", "run", "python", "python3", "-m", "pytest", "env", "exec"})
+
+
+def _t257_testpath_roots() -> list[str]:
+    """``testpaths`` read out of ``pyproject.toml``, never transcribed.
+
+    The grader search below walks these, so a root added to the project must widen the search
+    rather than leaving a module invisible to it.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r"^testpaths\s*=\s*\[([^\]]*)\]", text, re.MULTILINE)
+    assert match is not None, "pyproject.toml declares no testpaths; the grader search has no roots"
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def _t257_pytest_args(verify: str) -> list[str]:
+    """The argv a recorded ``verify`` hands pytest, with the shell and runner prefix removed.
+
+    Parsed with ``shlex`` and replayed VERBATIM rather than approximated by a path glob, so an
+    ``-k``, an ``--ignore`` or a ``--deselect`` inside the verify cannot hide from this — the
+    collection is done by pytest's own collector, which is the thing the gate is about.
+    """
+    import shlex
+
+    tokens = shlex.split(verify)
+    index = 0
+    while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
+        index += 1
+    while index < len(tokens) and tokens[index] in _T257_RUNNER_WORDS:
+        index += 1
+    # `-q` twice collapses pytest's collect-only output to "<file>: <count>" and loses the
+    # node ids entirely, which would read as "collected nothing" instead of failing.
+    return [token for token in tokens[index:] if token not in {"-q", "--quiet"}]
+
+
+def _t257_collect(args: list[str]) -> tuple[int, list[str]]:
+    """The node ids a recorded verify's argv actually collects, from a real pytest run."""
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "pytest", *args, "--collect-only", "-q", "-p", "no:cacheprovider"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+    except subprocess.TimeoutExpired as expiry:  # pragma: no cover - a hang is a third outcome
+        raise AssertionError(
+            f"collecting {args} did not finish in 240s; a gate that hangs prints no red at all"
+        ) from expiry
+    node_ids = [line.strip() for line in completed.stdout.splitlines() if "::" in line.strip()]
+    return completed.returncode, node_ids
+
+
+def _t257_declaring_modules(ticket_id: str) -> dict[str, int]:
+    """``{path: test count}`` for every test module whose MODULE DOCSTRING names the ticket.
+
+    The module docstring is the author's statement of what the whole module grades — a
+    positional, whole-file claim. Deliberately NOT matched are:
+
+    * comments, which sit outside the AST entirely;
+    * function and class docstrings, and assertion messages, which are prose INSIDE a test.
+
+    That exclusion is the whole point. The obvious way to green a "does the gate see its
+    graders" check is to type the ticket id into a docstring of a test the recorded verify
+    already collects — a change that reads as a legitimate cross-reference and that a reviewer
+    would wave through. ``apps/trust/tests/test_schema_grants.py`` sits one word away from
+    qualifying that way: five of its collected tests already drive
+    ``PROXYSHOP_ROLE_PASSWORD`` through a fresh-volume container. Matching only the module
+    docstring means the cheapest remaining evasion is to rewrite a 56-test module's declared
+    subject line, which is a visible claim about the whole file rather than a parenthetical.
+
+    KNOWN RESIDUAL, recorded rather than papered over: that rewrite would still work. Measured
+    alternatives that do NOT discriminate, and why they were rejected — an anchor
+    co-occurrence check over each test's reachable source finds 5 graders inside
+    ``test_schema_grants.py`` (its module-level ``COMPOSE_FILE`` plus the role-password
+    environment it passes to ``_fresh_volume_postgres``), and narrowing that to anchors inside
+    an ``assert`` expression finds 0 in BOTH modules, so neither separates the two.
+    """
+    pattern = _t257_ticket_pattern(ticket_id)
+    declaring: dict[str, int] = {}
+    for root in _t257_testpath_roots():
+        base = REPO_ROOT / root
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("test_*.py")):
+            if {".venv", "node_modules", ".swarm-loop"} & set(path.parts):
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            if not pattern.search(ast.get_docstring(tree) or ""):
+                continue
+            declaring[str(path.relative_to(REPO_ROOT))] = sum(
+                1
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                and node.name.startswith("test_")
+            )
+    return declaring
+
+
+def _t257_declares(source: str, ticket_id: str) -> bool:
+    """Whether one module's source declares a ticket, by the module-docstring rule alone."""
+    return bool(_t257_ticket_pattern(ticket_id).search(ast.get_docstring(ast.parse(source)) or ""))
+
+
+def test_t257_the_grader_discovery_is_armed_and_ignores_prose() -> None:
+    """The declaration reader must find the real graders and refuse three kinds of prose.
+
+    Not xfail. Every assertion inside a strict xfail is invisible in a normal run, so a
+    discovery rule that quietly stopped finding anything — or started counting comments —
+    would leave the repro below passing for the wrong reason while looking identical.
+    """
+    declaring = _t257_declaring_modules("T-112")
+    assert declaring, (
+        "no test module's docstring declares T-112, so the repro below has no grader corpus to "
+        "ask about and would pass by having nothing to compare against"
+    )
+    assert max(declaring.values()) >= 10, (
+        f"the largest T-112 grader module holds only {max(declaring.values())} tests "
+        f"({declaring}); 14 when this was written. A corpus that small means the graders were "
+        f"deleted rather than collected, which is the other way to silence this"
+    )
+
+    ticket_pattern = _t257_ticket_pattern("T-112")
+    assert not ticket_pattern.search("T-1120 and T-11 and XT-112x"), (
+        "the ticket pattern matches a longer number or an embedded id, so unrelated tickets "
+        "would vote themselves into the corpus"
+    )
+    assert ticket_pattern.search('"""T_112: underscore spelling."""'), "T_112 no longer matches"
+
+    comment_only = "# T-112 lives elsewhere\n'''T-011: something else.'''\ndef test_x():\n    pass\n"
+    assert not _t257_declares(comment_only, "T-112"), (
+        "a `# T-112` comment counts as a declaration, so one pasted line would green the repro"
+    )
+    function_docstring_only = (
+        '"""T-011: something else."""\n\n\ndef test_x():\n    """T-112 acceptance 1."""\n    pass\n'
+    )
+    assert not _t257_declares(function_docstring_only, "T-112"), (
+        "a FUNCTION docstring counts as a module declaration — the exact one-word evasion this "
+        "rule exists to refuse, since prose inside a collected test would then buy a pass"
+    )
+    assert _t257_declares('"""T-112: the real thing."""\n', "T-112"), (
+        "a module docstring naming the ticket is no longer read as a declaration, so the "
+        "reader can never find a grader at all"
+    )
+
+    tickets = json.loads((REPO_ROOT / "tickets.json").read_text(encoding="utf-8"))["tickets"]
+    verify = next(ticket for ticket in tickets if ticket["id"] == "T-112")["verify"]
+    args = _t257_pytest_args(verify)
+    assert args, f"T-112's verify parsed to no pytest arguments at all: {verify!r}"
+    returncode, node_ids = _t257_collect(args)
+    assert returncode == 0, f"replaying T-112's verify as a collection exited {returncode}"
+    assert len(node_ids) > 0, (
+        f"replaying T-112's recorded verify collected zero node ids from {args}. The repro "
+        f"below intersects this list with the grader corpus; an empty list makes it fail for "
+        f"the wrong reason and invites the gate to be loosened rather than the ticket fixed"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-257: T-112's recorded verify is `pytest apps/trust/tests/test_schema_grants.py -q`, "
+        "which collects 56 tests from a module whose docstring declares T-011 and zero from "
+        "proxyshop_support/tests/test_role_password_end_to_end.py, whose docstring declares "
+        "T-112 and holds its 14 graders — so the gate would stay green with every T-112 "
+        "behaviour deleted; remove this marker with the fix"
+    ),
+)
+def test_t257_the_recorded_gate_for_t112_collects_at_least_one_of_its_own_graders() -> None:
+    """A ticket's recorded gate has to be able to see the tests written to grade it.
+
+    Stronger than the known T-110/T-112 non-discrimination: the gate is not merely unable to
+    tell those two tickets apart, it cannot see T-112 at all. Its 56 collected tests come from
+    a module that declares itself T-011's, and the module that declares itself T-112's — whose
+    own docstring says "The lane gate runs ``pytest proxyshop_support -q``, so these tests are
+    executed by the same gate", a belief tickets.json flatly contradicts — is never reached.
+
+    Written as the general invariant and computed dynamically, never as
+    ``assert "proxyshop_support" in verify``: a literal expected path would be the example
+    rather than the property, and would die to a rename while the defect walked free.
+    """
+    tickets = json.loads((REPO_ROOT / "tickets.json").read_text(encoding="utf-8"))["tickets"]
+    verify = next(ticket for ticket in tickets if ticket["id"] == "T-112")["verify"]
+    args = _t257_pytest_args(verify)
+
+    roots = tuple(f"{root}/" for root in _t257_testpath_roots())
+    named_paths = [token for token in args if token.startswith(roots)]
+    assert named_paths, (
+        f"T-112's verify names no path under any testpaths root ({args}), so it is either the "
+        f"whole suite wearing a ticket's name or it points outside the project. A ticket gate "
+        f"has to say which tests grade it"
+    )
+
+    returncode, node_ids = _t257_collect(args)
+    assert returncode == 0 and node_ids, "the verify did not collect; see the armed guard above"
+
+    declaring = _t257_declaring_modules("T-112")
+    collected_files = {node_id.split("::")[0] for node_id in node_ids}
+    seen = sorted(collected_files & set(declaring))
+    assert seen, (
+        f"T-112's recorded gate collects {len(node_ids)} tests from {sorted(collected_files)} "
+        f"and NONE of them come from a module that declares itself a T-112 grader. The graders "
+        f"are right there — {declaring} — and the gate never reaches them, so every one of "
+        f"T-112's four acceptance criteria could be reverted with this gate still green. "
+        f"Its verify is {verify!r}"
+    )
