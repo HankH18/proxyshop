@@ -211,6 +211,28 @@ def _synthetic_trust_snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {store_id: {"store_id": store_id, "score": None, "blacklisted": False}}
 
 
+#: How deep `_snapshot` will copy before refusing. A bid is `offer` → `commitments` → a claim →
+#: its `provenance`, four levels; anything past this is not a submission shape, and the limit is
+#: what turns a self-referential or absurdly-nested payload into a refusal rather than a
+#: `RecursionError` raised halfway through building the copy.
+_SNAPSHOT_MAX_DEPTH = 32
+
+
+def _plain(value: Any, depth: int) -> Any:
+    """One value, copied into plain containers. Raises past `_SNAPSHOT_MAX_DEPTH`."""
+    # Text first: `str` and `bytes` are Sequences, and iterating them would explode a product
+    # ref into a list of characters.
+    if isinstance(value, (str, bytes, bytearray)):
+        return value
+    if depth >= _SNAPSHOT_MAX_DEPTH:
+        raise ValueError("submission nests deeper than the door will copy")
+    if isinstance(value, Mapping):
+        return {key: _plain(value.get(key), depth + 1) for key in list(value)}
+    if isinstance(value, Sequence):
+        return [_plain(item, depth + 1) for item in value]
+    return value
+
+
 def _snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     """One read of the caller's mapping, into a plain `dict`. Everything after reads this.
 
@@ -229,10 +251,31 @@ def _snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     Read through `.get`, which is the accessor the door and the canonicalizer both use, so the
     snapshot REPLACES a read the door was going to do rather than adding a third one.
 
-    Raising is the correct answer to a mapping that cannot be read: the caller of this function
-    turns it into a refusal, which is what a submission we cannot even copy deserves.
+    **Deep, not shallow, and that distinction is the whole defect.** The first version of this
+    function was `{key: payload.get(key) for key in list(payload)}`, which is what T-229's own
+    reproduction note suggested (`payload = dict(payload)`). It copies the top level and keeps
+    every VALUE by reference, so the validated dict and the enqueued dict went on sharing the
+    caller's `offer` and `claims`. An adversarial verifier reproduced T-229's own sentence one
+    level down — `accepted=True`, `reasons=()`, the door validating `unit_price` 89.0 and the
+    queue receiving 1.0 — with a hostile `Mapping` at `payload["offer"]` instead of at the root,
+    and the committed regression test stayed green because its liar only lies at the top level.
+    The simpler variant needed no hostile machinery at all: the submitter keeps its reference to
+    the nested dict and mutates it AFTER `receive_bid` returns, and the queued item changes
+    underneath the verification worker. A nested non-`dict` `Mapping` was being enqueued by
+    identity, so the worker would run the submitter's code on dequeue.
+
+    So every nested `Mapping` becomes a `dict` and every nested non-text `Sequence` becomes a
+    `list`. `canonical_json` renders a tuple and a list identically, so flattening sequences
+    cannot move the digest. Everything else — scalars, enums, models, instants — is left alone:
+    those are not containers the caller can swap values inside, and rewriting them would change
+    what the shared boundary is handed.
+
+    `_SNAPSHOT_MAX_DEPTH` bounds it. A self-referential payload would otherwise recurse until
+    Python's own limit, and a `RecursionError` in the middle of copying is a worse answer than a
+    refusal. Raising is the correct answer to a submission that cannot be read: the caller turns
+    it into `malformed_submission`.
     """
-    return {key: payload.get(key) for key in list(payload)}
+    return _plain(payload, 0)
 
 
 def _freshness_window(value: Any) -> float | None:
@@ -288,6 +331,11 @@ def _work_item(
     later, separately-unvalidated read of an object that is free to answer differently. The
     parameter is typed `dict` rather than `Mapping` to say so in the signature: hand this the
     caller's object again and the defect comes straight back.
+
+    That claim is only true because `_snapshot` is DEEP. While it was shallow this docstring was
+    accurate about the top level and wrong about everything under it — `offer` and `claims` were
+    still the caller's own objects, shared between the document that was validated and the
+    document that was queued. See `_snapshot`.
     """
     body = dict(submission)
     body["signature"] = signature
@@ -351,7 +399,12 @@ def receive_bid(
             max_discount_pct=max_discount_pct,
         )
     except Exception:  # noqa: BLE001 - a door that raises is a door that 500s; fail closed
-        return _refuse(REASON_DOOR_FAILED_CLOSED)
+        # `payload=` so this refusal carries the same `signer_id`/`nonce` diagnosis every other
+        # refusal does. Without it a genuine internal fault produced a receipt with no identity
+        # at all, indistinguishable in a rejection log from an ordinary policy refusal — the
+        # exact invisibility the T-232 rationale argues against. `_refuse`'s reads are guarded,
+        # so handing it the caller's raw object here cannot itself raise.
+        return _refuse(REASON_DOOR_FAILED_CLOSED, payload=payload)
 
 
 def _receive_bid(

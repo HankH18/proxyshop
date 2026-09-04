@@ -205,6 +205,125 @@ def test_the_body_that_was_validated_is_the_body_that_is_enqueued() -> None:
         )
 
 
+class _NestedOfferLiar(Mapping):
+    """A hostile `Mapping` sitting at `payload["offer"]` rather than at the root.
+
+    `_BodyLiar` above lies at the TOP level, which a shallow `dict(payload)` is enough to defeat.
+    This is the same trick one level down, and it is what a shallow snapshot does NOT defeat: the
+    top-level copy keeps every value by reference, so the door validates this object and then
+    hands the identical object to the queue.
+    """
+
+    def __init__(self, base: Mapping[str, Any], lie_after: int) -> None:
+        self._base = dict(base)
+        self._lie_after = lie_after
+        self.reads = 0
+
+    def _value(self, key: str) -> Any:
+        if key in ("unit_price", "total_price") and self.reads >= self._lie_after:
+            return ATTACKER_PRICE
+        return self._base[key]
+
+    def __getitem__(self, key: str) -> Any:
+        self.reads += 1
+        return self._value(key)
+
+    def __iter__(self):
+        return iter(self._base)
+
+    def __len__(self) -> int:
+        return len(self._base)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        self.reads += 1
+        try:
+            return self._value(key)
+        except KeyError:
+            return default
+
+
+def test_the_snapshot_is_deep_so_a_nested_value_cannot_be_swapped_or_mutated() -> None:
+    """The T-229 property holds at every level, not only at the root of the submission.
+
+    T-229's fix snapshots the caller's mapping at entry. `dict(payload)` — the fix the ticket's
+    own reproduction note suggested — is SHALLOW: it copies the top level and keeps every value
+    by reference, so `offer` and `claims` stay the caller's own objects and remain shared between
+    the document the boundary validated and the document `_work_item` enqueues. The defect T-229
+    describes then survives one level down, which is where a bid's price actually lives.
+
+    Two ways in, both measured against a shallow snapshot:
+
+    1. **No hostile machinery at all.** A submitter passing an ordinary nested `dict` keeps its
+       reference and mutates `offer["unit_price"]` AFTER `receive_bid` has returned
+       `accepted=True`. The queued work item changes underneath the verification worker, which
+       has not dequeued it yet.
+    2. **T-229's own sentence, one level down.** A `Mapping` at `payload["offer"]` that answers
+       honestly while the door reads it and lies afterwards produced `accepted=True, reasons=()`
+       with the door validating 89.00 and the queue receiving 1.00 — and the sweep above stayed
+       green throughout, because its liar only lies at the top level.
+
+    A nested non-`dict` `Mapping` was also being enqueued BY IDENTITY, so the worker would run
+    the submitter's code on dequeue.
+    """
+    from store_agent.external import NonceStore, receive_bid, sign_bid
+
+    # 1. aliasing: what is queued must not be the caller's object
+    payload = _payload()
+    signature = sign_bid(payload, KEY)
+    queue = _Queue()
+    receipt = receive_bid(
+        payload,
+        signature,
+        _keyring(),
+        queue=queue,
+        nonce_store=NonceStore(),
+        now=NOW,
+        auction_deadline=DEADLINE,
+    )
+    assert receipt.accepted is True, f"control: this bid must be admitted: {receipt!r}"
+    assert queue.count == 1
+    queued_offer = queue.items[0]["submission"]["offer"]
+    assert queued_offer is not payload["offer"], (
+        "the queued work item shares the caller's nested offer object, so the submitter can "
+        "still change the price after the door has admitted it"
+    )
+    payload["offer"]["unit_price"] = ATTACKER_PRICE
+    assert queued_offer["unit_price"] == HONEST_PRICE, (
+        f"the submitter mutated its own offer dict after receive_bid returned accepted=True and "
+        f"the queued work item now reads {queued_offer['unit_price']}. The door validated "
+        f"{HONEST_PRICE}"
+    )
+
+    # 2. the T-229 threat model, nested
+    for lie_after in range(1, 80):
+        fresh = _payload()
+        fresh_signature = sign_bid(fresh, KEY)
+        fresh["offer"] = _NestedOfferLiar(fresh["offer"], lie_after)
+        nested_queue = _Queue()
+        nested = receive_bid(
+            fresh,
+            fresh_signature,
+            _keyring(),
+            queue=nested_queue,
+            nonce_store=NonceStore(),
+            now=NOW,
+            auction_deadline=DEADLINE,
+        )
+        if not nested.accepted:
+            continue
+        assert nested_queue.count == 1
+        enqueued = nested_queue.items[0]["submission"]["offer"]
+        assert isinstance(enqueued, dict), (
+            f"lie_after={lie_after}: the work item carries the submitter's own Mapping object, "
+            f"not a copy — the verification worker runs its code on dequeue"
+        )
+        assert enqueued["unit_price"] == HONEST_PRICE, (
+            f"lie_after={lie_after}: the door admitted a submission it validated at "
+            f"{HONEST_PRICE} and enqueued one priced at {enqueued['unit_price']}. This is T-229 "
+            f"one level down, where the price actually lives"
+        )
+
+
 # =============================================================================================
 # T-241 — the same defect widened: all six identity fields, re-read after the decision
 # =============================================================================================
