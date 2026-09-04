@@ -23,6 +23,7 @@ either builds its own ``EnvelopeVersions`` or asserts identity without writing.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
 import json
@@ -60,6 +61,88 @@ def _envelope(store_id: str, **overrides: Any) -> dict[str, Any]:
     }
     body.update(overrides)
     return body
+
+
+#: Words that name a persistence operation. Matched WHOLE (or as a whole underscore-separated
+#: part), never as a substring: ``"commit" in "standing_commitments"`` and ``"load" in
+#: "payload"`` are both true, and ``standing_commitments`` is a real field of ``Envelope`` in
+#: this very module — so a substring scan could be satisfied by a name with nothing to do with
+#: durability.
+PERSISTENCE_WORDS = frozenset(
+    {"load", "loads", "persist", "save", "flush", "reload", "restore", "commit", "sync", "fetch"}
+)
+
+#: Database drivers this repo could plausibly reach ``sealed.envelopes`` with.
+DB_DRIVERS = frozenset({"psycopg", "psycopg2", "sqlalchemy", "asyncpg"})
+
+
+def _names_a_persistence_operation(name: str) -> bool:
+    """True when ``name`` is (or is built out of) a whole persistence word."""
+    parts = [part for part in name.lower().strip("_").split("_") if part]
+    return any(part in PERSISTENCE_WORDS for part in parts)
+
+
+def _referenced_names(tree: ast.AST) -> set[str]:
+    """Every identifier a module really uses — never a docstring, never a comment."""
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            found.add(node.attr)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            found.add(node.name)
+        elif isinstance(node, ast.keyword) and node.arg:
+            found.add(node.arg)
+    return found
+
+
+def _imports_matching(tree: ast.AST, needle: str) -> list[str]:
+    """Imported module names containing ``needle`` — an import statement, not prose."""
+    modules: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            modules.append(node.module)
+        elif isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+    return [module for module in modules if needle in module]
+
+
+def _non_docstring_literals(tree: ast.AST) -> list[str]:
+    """Every string constant that is NOT a docstring.
+
+    ``store.py``'s own module docstring already names ``sealed.envelopes`` — it is where
+    DESIGN says the history belongs — so a plain "does the source mention the table" check is
+    green before anyone writes a line of persistence.
+    """
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            body = getattr(node, "body", None)
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                docstrings.add(id(body[0].value))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
+def _parse(path: pathlib.Path) -> ast.AST | None:
+    """Parse one product file, or ``None`` if it will not parse.
+
+    ``SyntaxWarning`` is muted here and only here: ``services/ingest/src/er/identity.py:209``
+    has ``\\s`` in a non-raw docstring, so parsing the product tree emits a warning that has
+    nothing to do with any ticket in this file and would otherwise be charged to it.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        try:
+            return ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - a product file that will not parse
+            return None
 
 
 def _product_python_files() -> list[pathlib.Path]:
@@ -119,17 +202,35 @@ def test_t243_the_merchant_envelope_store_has_exactly_one_module_identity() -> N
     split: list[str] = []
     if short is not long_:
         split.append(f"module object ({SHORT_SPELLING} is not {LONG_SPELLING})")
+
+    # ``Envelope`` and ``EnvelopeError`` are deliberately NOT listed: store.py:21 imports them
+    # absolutely from the SHORT spelling, so both copies of store share them unconditionally
+    # and testing them proves nothing. The split they belong to is the model module's, checked
+    # below. A missing name is reported rather than raising AttributeError, so a rename cannot
+    # make this gate red for the wrong reason.
+    missing = object()
     for name in (
         "ENVELOPES",
         "EnvelopeVersions",
         "UnknownStore",
         "VersionWentBackwards",
         "StoreMismatch",
-        "Envelope",
-        "EnvelopeError",
     ):
-        if getattr(short, name) is not getattr(long_, name):
+        one = getattr(short, name, missing)
+        other = getattr(long_, name, missing)
+        if one is missing or other is missing:
+            split.append(f"{name} (absent from one spelling)")
+        elif one is not other:
             split.append(name)
+
+    # The same file loaded twice is a package-level fault, and the in-tree repair
+    # (``_spellings.py`` + ``bind_package``) fixes the whole subtree at once — measured:
+    # merchant_svc.codes, .codes.create and .codes.offer are each a single object.
+    for module_name in ("merchant_svc.envelope", "merchant_svc.envelope.model"):
+        a = importlib.import_module(module_name)
+        b = importlib.import_module(module_name.replace("merchant_svc", "apps.merchant.svc.src"))
+        if a is not b:
+            split.append(f"module object ({module_name})")
 
     assert not split, (
         f"one file, {short_file}, is loaded as two independent modules; these names are two "
@@ -157,12 +258,23 @@ def test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact()
 
     Two repairs are acceptable and both make this pass: refuse the record outright (any
     ``EnvelopeError``), or file it forced to ``shadow`` the way ``put()`` already does.
+
+    The claimed envelope differs from the control in exactly one field, ``activation``. The
+    first draft also carried ``version=7`` and ``max_discount_pct=99.0``, and either of those
+    is a false-green channel: a future, unrelated rule that refused a discount ceiling or a
+    first version above 1 would raise ``EnvelopeError``, take the ``return``, and XPASS this
+    gate with T-248 untouched.
     """
     from merchant_svc.envelope.model import EnvelopeError  # noqa: PLC0415
     from merchant_svc.envelope.store import EnvelopeVersions  # noqa: PLC0415
 
+    # Control: the identical envelope in `shadow` is accepted, so a refusal below can only be
+    # about the activation claim and not about some other field of the document.
+    control = EnvelopeVersions().record(_envelope("s-t248", activation="shadow"))
+    assert not control.is_live, "fixture error: a shadow envelope reported itself live"
+
     versions = EnvelopeVersions()
-    claimed = _envelope("s-t248", version=7, max_discount_pct=99.0, activation="active")
+    claimed = _envelope("s-t248", activation="active")
 
     try:
         recorded = versions.record(claimed)
@@ -197,20 +309,36 @@ def test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact()
 def test_t246_some_production_code_reads_the_envelope_activation_decision() -> None:
     """A decision the product computes and nobody asks for is not wired up.
 
-    The definition sites themselves do not count: the point of the ticket is that the
-    consequence is never consumed.
+    Two things this gate deliberately does, both of them corrections to a first draft that a
+    ``git grep``-shaped check would have got wrong:
+
+    * It **parses**. A regex for ``is_live`` is satisfied by a ``# TODO: consult is_live``
+      comment, and the repo already sits one word-boundary from a false hit
+      (``packages/llm/src/client.py:58`` carries ``_guard_is_live_for_...`` in a comment).
+      Only a real ``Name``/``Attribute``/definition reference counts.
+    * It accepts the OTHER shape of the fix. The store-agent's activation gate
+      (``modes/runner.py:105 _envelope_states``) speaks the *activation* vocabulary, not
+      ``is_live``, so the natural repair is a merchant-side producer that feeds it — and a
+      gate that insisted on the literal ``is_live`` would stay red through exactly the right
+      fix. Any production module outside the envelope package's own CRUD surface that imports
+      a merchant envelope module counts too. Measured: zero such modules exist today.
     """
-    import re  # noqa: PLC0415
-
-    token = re.compile(r"\bis_live\b")
     definition_sites = {ENVELOPE_PKG / "model.py", ENVELOPE_PKG / "store.py"}
+    onboarding_pkg = REPO_ROOT / "apps" / "merchant" / "svc" / "src" / "onboarding"
 
-    consumers: list[str] = []
+    reads_the_accessor: list[str] = []
+    consumes_an_envelope: list[str] = []
     for path in _product_python_files():
-        if path in definition_sites:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover - a product file that will not parse
             continue
-        if token.search(path.read_text(encoding="utf-8")):
-            consumers.append(str(path.relative_to(REPO_ROOT)))
+        if path not in definition_sites and "is_live" in _referenced_names(tree):
+            reads_the_accessor.append(str(path.relative_to(REPO_ROOT)))
+        if path.is_relative_to(ENVELOPE_PKG) or path.is_relative_to(onboarding_pkg):
+            continue  # the envelope's own CRUD surface is the writer, not the consumer
+        if _imports_matching(tree, "envelope"):
+            consumes_an_envelope.append(str(path.relative_to(REPO_ROOT)))
 
     # Control: the accessor really does exist, so a green here would mean a consumer and not
     # a renamed symbol.
@@ -218,11 +346,13 @@ def test_t246_some_production_code_reads_the_envelope_activation_decision() -> N
 
     assert callable(EnvelopeVersions.is_live), "fixture error: EnvelopeVersions.is_live is gone"
 
-    assert consumers, (
-        "no production file outside apps/merchant/svc/src/envelope/ reads `is_live`, so the "
-        "kill switch and the shadow default are computed and never consulted — the merchant "
-        "side of the envelope has no executed path that demonstrates a killed store stops "
-        "bidding"
+    assert reads_the_accessor or consumes_an_envelope, (
+        "no production file reads `is_live`, and no production file outside "
+        "apps/merchant/svc/src/{envelope,onboarding}/ imports an envelope module at all, so "
+        "the kill switch and the shadow default are computed and never consulted — the "
+        "merchant side of the envelope has no executed path that demonstrates a killed store "
+        "stops bidding, and the store-agent gate at "
+        "packages/store-agent/src/modes/runner.py:105 is fed by nobody"
     )
 
 
@@ -274,21 +404,32 @@ def test_t239_the_envelope_version_store_has_a_durability_seam() -> None:
     except Exception as exc:  # noqa: BLE001 - evidence only, never the verdict
         witness = f"a second instance could not be built to compare: {exc!r}"
 
+    # Four independent signals, any one of which means somebody built the seam. They are
+    # deliberately different in KIND, because each on its own has a hole: the constructor
+    # check is satisfied by any unrelated kwarg, the member check by any method name, and a
+    # genuinely durable implementation could have neither — but it cannot reach
+    # sealed.envelopes without either naming the table in real SQL or importing a driver.
     takes_backing = len(inspect.signature(cls.__init__).parameters) > 1
-    persistence_members = sorted(
-        name
-        for name in dir(cls)
-        if any(
-            keyword in name
-            for keyword in ("load", "persist", "save", "flush", "reload", "restore", "commit")
-        )
-    )
+    persistence_members = sorted(n for n in dir(cls) if _names_a_persistence_operation(n))
 
-    assert takes_backing or persistence_members, (
+    drivers: list[str] = []
+    sealed_sql: list[str] = []
+    for path in sorted(ENVELOPE_PKG.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        drivers += [m for m in _imports_matching(tree, "") if m.split(".")[0] in DB_DRIVERS]
+        sealed_sql += [
+            f"{path.name}: {literal[:60]!r}"
+            for literal in _non_docstring_literals(tree)
+            if "sealed.envelopes" in literal
+        ]
+
+    assert takes_backing or persistence_members or drivers or sealed_sql, (
         f"{cls.__module__}.{cls.__qualname__} — the type of the module-level ENVELOPES "
-        f"singleton — takes no backing store ({inspect.signature(cls.__init__)}) and exposes "
-        "no load/persist member, so the version history exists only for the lifetime of one "
-        f"process: {witness}"
+        f"singleton — takes no backing store ({inspect.signature(cls.__init__)}), exposes no "
+        "load/persist member, and its package imports no database driver and names "
+        "sealed.envelopes nowhere but in a docstring, so the append-only history, the "
+        "version-never-backwards rule and activate-the-head exist only for the lifetime of "
+        f"one process: {witness}"
     )
 
 

@@ -21,10 +21,55 @@ inside the test body rather than at module scope.
 
 from __future__ import annotations
 
+import ast
 import inspect
+import pathlib
+import textwrap
+from types import ModuleType
 from typing import Any
 
 import pytest
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
+
+#: Names that mean "the k-anonymity floor was consulted here". Any of them appearing as a
+#: real AST reference — not a docstring, not a comment — counts.
+FLOOR_SYMBOLS = frozenset(
+    {"anonymise_cohort", "k_anonymity_floor", "buckets_at_level", "build_profiles"}
+)
+
+
+def _assert_in_tree(module: ModuleType) -> None:
+    """Refuse a reading taken from another checkout.
+
+    This venv's ``site-packages/_proxyshop.pth`` puts a checkout on ``sys.path`` for every
+    process that uses it, and it has already produced one false green in this repo: a
+    reproduction passed while its defect was fully live, because the probe imported the
+    primary checkout instead of the tree under test. Both trees contain these modules, so
+    the only way to know which one answered is to look.
+    """
+    resolved = pathlib.Path(module.__file__ or "").resolve()
+    assert resolved.is_relative_to(REPO_ROOT), (
+        f"{module.__name__} resolved to {resolved}, which is outside the tree under test "
+        f"({REPO_ROOT}) — a .pth leak, not a measurement"
+    )
+
+
+def _references(func: Any, symbols: frozenset[str]) -> bool:
+    """True when ``func``'s body really mentions one of ``symbols``.
+
+    Parsed rather than string-matched on purpose: ``"anonymise_cohort" in source`` is
+    satisfied by adding the word to a docstring, which would close the ticket without
+    changing a single execution.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in symbols:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in symbols:
+            return True
+    return False
+
 
 #: A well-formed session subject. The profile module only ever checks the ``psn-`` prefix and
 #: a non-empty body, so the exact bytes are irrelevant — they are fixed here only so that two
@@ -83,30 +128,41 @@ def test_t164_no_public_bucket_builder_publishes_identity_without_the_backstop()
     """Every public entry point that emits buckets must be behind the R5 backstop.
 
     The ticket names two acceptable repairs — run the check inside the unguarded entry
-    points, or make them private — so this gate accepts either. A name that is no longer
-    exported is not a publishing surface and is skipped; a name that is still exported must
+    points, or make them private — so this gate accepts either. A name that is gone from the
+    module is not a publishing surface and is skipped; a name that is still reachable must
     refuse ``LEAKING_ACCOUNT`` the way ``build_profile`` already does.
+
+    Reachability is ``getattr``, not ``__all__``. ``__all__`` governs ``import *`` and
+    nothing else: deleting two strings from it would leave ``from buyer_svc.profile import
+    build_buckets`` working, still unguarded, still publishing ``['reyes-gear']`` — a
+    zero-behaviour edit that would close the ticket.
     """
     from buyer_svc import profile as profile_mod  # noqa: PLC0415
     from buyer_svc.profile import IdentityLeak, build_profile  # noqa: PLC0415
+
+    _assert_in_tree(profile_mod)
 
     # Control: the guarded entry point does refuse this account, so the account is a real
     # leak and not a badly-built fixture.
     with pytest.raises(IdentityLeak):
         build_profile(LEAKING_ACCOUNT, PSN_A)
 
-    exported = set(getattr(profile_mod, "__all__", ()))
+    # k=1 is passed explicitly. With k left to default, anonymise_cohort reads
+    # PROXYSHOP_BUYER_K_ANONYMITY from the real environment, and a one-account release under
+    # any floor above 1 raises ValueError before the leak check is reached — which would make
+    # this gate red for the wrong reason in any shell that sets that documented knob.
     calls = {
         "build_buckets": lambda fn: fn(LEAKING_ACCOUNT),
-        "anonymise_cohort": lambda fn: fn([LEAKING_ACCOUNT]),
+        "anonymise_cohort": lambda fn: fn([LEAKING_ACCOUNT], k=1),
     }
 
     unguarded: list[tuple[str, Any]] = []
     for name, call in calls.items():
-        if name not in exported:
+        entry = getattr(profile_mod, name, None)
+        if entry is None:
             continue  # made private — the ticket's second accepted repair
         try:
-            emitted = call(getattr(profile_mod, name))
+            emitted = call(entry)
         except IdentityLeak:
             continue  # guarded — the ticket's first accepted repair
         unguarded.append((name, emitted))
@@ -162,7 +218,7 @@ def test_t197_a_three_letter_name_in_a_category_slug_is_still_a_leak() -> None:
         "identity_leaks == []; remove this marker with the fix"
     ),
 )
-def test_t198_a_regrouped_phone_number_in_a_category_slug_is_still_a_leak() -> None:
+def test_t198_a_a_regrouped_phone_number_in_a_category_slug_is_still_a_leak() -> None:
     """Dropping the separators from a phone number does not stop it being a phone number."""
     from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks  # noqa: PLC0415
 
@@ -193,7 +249,7 @@ def test_t198_a_regrouped_phone_number_in_a_category_slug_is_still_a_leak() -> N
         "identical words left of the @ are refused; remove this marker with the fix"
     ),
 )
-def test_t198_a_vanity_email_domain_in_a_category_slug_is_still_a_leak() -> None:
+def test_t198_b_a_vanity_email_domain_in_a_category_slug_is_still_a_leak() -> None:
     """The same two words are a leak on one side of the ``@`` and not on the other."""
     from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks  # noqa: PLC0415
 
@@ -276,13 +332,23 @@ def test_t199_a_surname_that_is_also_a_taxonomy_label_is_still_a_leak() -> None:
         "pseudonym still publishes a byte-identical tuple; remove this marker with the fix"
     ),
 )
-def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_build_profile() -> None:
-    """The floor has to be a floor, and it has to be on the path the product takes."""
-    from buyer_svc.profile import (  # noqa: PLC0415
-        build_profile,
-        equivalence_class,
-        k_anonymity_floor,
-    )
+def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_the_production_path() -> None:
+    """The floor has to be a floor, and it has to be on the path the product takes.
+
+    Both halves of the ticket, and nothing else. In particular this does NOT assert that a
+    pseudonym rotation is re-linkable: that is the *defect*, and asserting it would turn the
+    ticket's own fix into a permanent red.
+
+    The second half is checked against BOTH ends of the production path — ``build_profile``
+    and its only caller, ``MagicLinkAuth.profile_for`` — because the ticket admits two
+    repairs: teach ``build_profile`` the floor, or route production through
+    ``build_profiles``, which already applies it. Either one closes the ticket.
+    """
+    from buyer_svc import profile as profile_mod  # noqa: PLC0415
+    from buyer_svc.auth import MagicLinkAuth  # noqa: PLC0415
+    from buyer_svc.profile import build_profile, k_anonymity_floor  # noqa: PLC0415
+
+    _assert_in_tree(profile_mod)
 
     # (1) A floor of 1 is not a floor. An explicit empty environment is passed so the reading
     # cannot be changed by whatever the surrounding shell happens to export.
@@ -290,25 +356,21 @@ def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_build_profile()
     assert floor > 1, (
         f"the default k-anonymity floor is {floor}: a floor of 1 puts every buyer alone in "
         "their own equivalence class, which is exactly the re-linkability T-138 exists to "
-        "prevent"
+        "prevent, and PROXYSHOP_BUYER_K_ANONYMITY is the only thing that raises it"
     )
 
-    # (2) The single-account entry point must actually apply it. build_profiles does;
-    # build_profile is the one production calls, and it does not.
-    source = inspect.getsource(build_profile)
-    applies_floor = any(
-        symbol in source for symbol in ("anonymise_cohort", "k_anonymity_floor", "buckets_at_level")
+    # (2) The production path must actually apply it. Parsed, not string-matched: adding
+    # "anonymise_cohort" to a docstring must not close this ticket.
+    applies_floor = _references(build_profile, FLOOR_SYMBOLS) or _references(
+        MagicLinkAuth.profile_for, FLOOR_SYMBOLS
     )
     assert applies_floor, (
-        "build_profile — the only profile entry point with a production caller "
-        "(apps/buyer/svc/src/auth/magic_link.py:330) — names none of anonymise_cohort, "
-        "k_anonymity_floor or buckets_at_level, so the generalisation ladder is never "
-        "reached on the path the product takes"
+        "neither build_profile nor its only production caller "
+        "(apps/buyer/svc/src/auth/magic_link.py:330 MagicLinkAuth.profile_for) references "
+        f"any of {sorted(FLOOR_SYMBOLS)}, so the generalisation ladder commit 958fead added "
+        "is never reached on the path the product takes — only build_profiles applies it, "
+        "and nothing in production calls build_profiles"
     )
-
-    # Documenting the consequence: two rotations of one account are byte-identical today.
-    rotated = equivalence_class(build_profile(CLEAN_ACCOUNT, PSN_A).buckets)
-    assert rotated == equivalence_class(build_profile(CLEAN_ACCOUNT, PSN_B).buckets)
 
 
 # ======================================================================================
@@ -325,18 +387,26 @@ def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_build_profile()
     ),
 )
 def test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session() -> None:
-    """Format is not membership. A session subject has to have been issued by the vault."""
-    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth  # noqa: PLC0415
-    from buyer_svc.auth.sessions import (  # noqa: PLC0415
-        InMemorySessionStore,
-        NotAPseudonym,
-    )
+    """Format is not membership. A session subject has to have been issued by the vault.
 
-    service = MagicLinkAuth(sessions=InMemorySessionStore(), accounts=InMemoryAccountDirectory())
+    Deliberately *not* coupled to how the repair is shaped. The store comes from
+    ``MagicLinkAuth``'s own default factory rather than being constructed here, so threading
+    a vault reference into ``SessionStore`` — the repair the ticket names, which changes that
+    constructor's signature — does not break the probe. And the refusal is caught as
+    ``SessionError``, the base, so a fix that draws a new distinction ("prefix fine, never
+    issued") with its own subclass still satisfies this gate.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth  # noqa: PLC0415
+    from buyer_svc.auth import sessions as sessions_mod  # noqa: PLC0415
+    from buyer_svc.auth.sessions import SessionError  # noqa: PLC0415
+
+    _assert_in_tree(sessions_mod)
+
+    service = MagicLinkAuth(accounts=InMemoryAccountDirectory())
 
     # Control: a subject with no prefix is refused, so the guard is live and this test is not
     # measuring an absent code path.
-    with pytest.raises(NotAPseudonym):
+    with pytest.raises(SessionError):
         service.sessions.open("dana.reyes@example.com")
 
     forged = "psn-dana.reyes@example.com"
@@ -344,7 +414,7 @@ def test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session(
         "fixture error: the forged subject must be one no vault ever issued"
     )
 
-    with pytest.raises(NotAPseudonym):
+    with pytest.raises(SessionError):
         session = service.sessions.open(forged)
         raise AssertionError(
             "a subject the vault never issued opened a session: "
