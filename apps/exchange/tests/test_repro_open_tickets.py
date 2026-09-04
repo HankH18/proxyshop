@@ -1101,13 +1101,20 @@ def test_t310_the_served_exchange_app_reaches_the_published_ranking() -> None:
     a bidder write its own ``intent_match`` — and ``exchange.ranking.routes`` serves the
     published ``GET /auctions/{auction_id}/shortlist``. ``POST /auctions`` ranks at close.
 
-    Neo4j is NOT in that path, and it was worth measuring rather than assuming: ``filters``
-    imports ``retrieval.criteria`` only, never ``retrieval.sources``/``service``, and
-    ``criteria`` reaches ``ingest.graph.model.slug`` and ``AttributeFilter`` — pure
-    in-process string folding and a frozen dataclass. Reproduced with a meta-path finder that
-    raises on any ``neo4j`` import and ``socket`` disabled: ``rank()`` ran to completion and
-    applied its R12/R19/C10 exclusions. A Neo4j session, the driver pin and ``NEO4J_*`` env
-    are what ``exchange.retrieval`` needs (T-260), not what this gate is about.
+    Neo4j is NOT in that path, and it was worth measuring rather than assuming. The wiring
+    grows the served import closure by seventeen modules — all of ``exchange.retrieval`` and
+    seven ``ingest.*`` — because ``filters.py:39`` imports ``retrieval.criteria`` and importing
+    a submodule executes ``retrieval/__init__.py``, which imports ``sources`` and ``service``
+    too. (An earlier version of this paragraph said ``criteria`` was reached "only, never
+    sources/service", which is false and is the kind of false that stops the next reader
+    checking.) None of those seventeen touches the network at import: the neo4j driver is
+    imported INSIDE ``graph/reembed.py:386``'s ``graph_driver()`` and sentence-transformers
+    inside ``embeddings/local_bge.py:93``'s ``_load()``, so ``create_app()`` loads neither
+    ``neo4j`` nor ``numpy`` — measured on the built app. Reproduced from the other direction
+    with a meta-path finder that raises on any ``neo4j`` import and ``socket`` disabled:
+    ``rank()`` ran to completion and applied its R12/R19/C10 exclusions. A Neo4j session, the
+    driver pin and ``NEO4J_*`` env are what ``exchange.retrieval`` needs to FUNCTION (T-260),
+    not what this gate is about.
     """
     modules = _exchange_app_import_closure()
     ranking = sorted(name for name in modules if name.split(".")[:2] == ["exchange", "ranking"])

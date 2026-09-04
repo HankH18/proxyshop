@@ -10,14 +10,26 @@ are security boundaries rather than plumbing.
 **The projection NAMES its fields; it never passes the bid through.** A bid is a document the
 *store* wrote. Handing it to the scorer whole would let a bidder write ``intent_match: 1.0``
 into its own reply and win every auction it entered — R11's blindness lost not to a leak but to
-a field the store filled in. So the candidate is assembled from a fixed list of keys and
-nothing else reaches it. The published features are deliberately absent: ``intent_match`` is
-retrieval's output (T-031, and unwired — see T-260/T-323), and an absent feature takes its
-published neutral value, which is the "we do not know" the formula already has a rule for. This
-also agrees with the published shape: ``Bid`` in ``packages/contracts/schemas/protocol.schema.json``
-is ``additionalProperties: false`` and declares no feature fields at all, so a store cannot even
-state one without failing validation. Nothing here needs to *strip* them; it simply never
-copies them.
+a field the store filled in. So the candidate is assembled from a fixed list of keys. The
+published features are deliberately absent: ``intent_match`` is retrieval's output (T-031, and
+unwired — see T-260), and an absent feature takes its published neutral value, which is the "we
+do not know" the formula already has a rule for. This also agrees with the published shape:
+``Bid`` in ``packages/contracts/schemas/protocol.schema.json`` is ``additionalProperties:
+false`` and declares no feature fields at all, so a store cannot even state one without failing
+validation. Nothing here needs to *strip* them; it simply never copies them.
+
+**What that costs today, measured, because it is a real property of the served ranking and not
+a footnote.** With ``intent_match``, ``verified_claim_ratio``, ``price_value`` and
+``delivery_fit`` all absent on every served candidate, four of the formula's five terms take
+their neutral value on every request — so ``rank_score`` is a function of the trust snapshot
+alone, and candidates from stores with equal trust TIE exactly. The published tie-breaks then
+decide the order, and ``shortlist.assign_slot_names`` falls through to rank position, so D29's
+four slot names read out as 1st/2nd/3rd/4th rather than as four different reasons to pick. The
+formula is being applied correctly to inputs that do not exist yet; the producer for the one
+feature DESIGN names (``intent_match``, from retrieval+rerank) is T-260's, and until it lands
+the served ranking is an eligibility gate plus a trust ordering rather than a five-term score.
+That is worth stating plainly, because a shortlist that comes back looking sensible is exactly
+the shape in which nobody notices.
 
 **``store_domain`` comes from the platform, never from the bid.** ``checkout/sellers.py`` spells
 out why in full: on a bid the registered domain came from ``bid["store_domain"]`` — a field the
@@ -30,14 +42,42 @@ everybody. An exchange nobody has connected to the seller registry ranks nothing
 direction to fail in.
 
 ``bid_id`` is **minted here, always**, and never read off the bid. ``Bid`` declares no
-``bid_id`` and forbids extra properties, so a well-formed reply cannot carry one — which makes
-honouring one pure attack surface: ``bid_id`` is the last published tie-break (D13), so a store
-that could name its own would win every otherwise-exact tie by calling itself ``aaa``. A
-list-price fallback (R10) has the same need from the other direction: it is a real, rankable
-offer that arrived from no store at all and still has to be referable. ``{auction_id}:{store_id}``
-is deterministic, unique inside one auction (``collect_bids`` returns exactly one entry per
-rostered store), and reproducible — two runs over the same auction produce the same shortlist
-``bid_ref``.
+``bid_id`` and forbids extra properties, so a well-formed reply cannot carry one, and honouring
+one anyway would hand a store the last published tie-break (D13) as a free text field. Minting
+does NOT make that tie-break unreachable, and saying so was an overclaim in the first draft of
+this file: the mint is ``{auction_id}:{store_id}`` and ``store_id`` arrives on the same
+unauthenticated roster, so a caller that rosters itself as ``aaa-store`` still sorts ahead of
+``zzz-store`` on an exact tie — measured, in both input orders. What minting buys is that the
+id is the exchange's *format*, uniform, and not an arbitrary string chosen per reply; the
+residual lever is a name the buyer also sees. A list-price fallback (R10) needs the mint from
+the other direction: it is a real, rankable offer that arrived from no store at all and still
+has to be referable. The id is deterministic, unique inside one auction (``collect_bids``
+returns exactly one entry per rostered store), and reproducible — two runs over the same
+auction produce the same shortlist ``bid_ref``.
+
+What this module does NOT close, stated here because an overclaiming comment is how the next
+reader stops looking
+-----------------------------------------------------------------------------------------
+``offer`` and ``claims`` are copied from the store's document, because they are what the store
+is answering WITH. Two consequences, both measured through the HTTP door:
+
+* **A store satisfies any hard constraint by writing ``"status": "verified"`` onto its own
+  claim.** ``ranking/filters.py:237`` reads that field, and no ``status`` field exists on the
+  published ``Claim`` at all (``additionalProperties: false``), so nothing validates it and
+  nothing produces it but the bidder. Two identical stores, one adding the string: the liar is
+  ranked and the honest one is excluded ``hard_constraint_unsatisfied``. It also sets
+  ``verified_hard_fit_count``, the FIRST published tie-break. This is not new — ``rank()`` has
+  always read ``status`` off its candidates — but wiring the ranker onto a served path is what
+  turned it from latent into reachable, and closing it needs a claim-verification producer
+  (``packages/verification``) the auction path does not have. It is NOT closed here, because
+  ignoring the field instead would make every hard-constrained auction return an empty
+  shortlist, and that is a product decision rather than a projection detail.
+* **The ``price`` tie-break is the store's own ``total_price``.** The T-177 price wall in
+  ``auction/collect.py`` is what stands between that and a 0.01 bid; the ranker does not know
+  the wall exists.
+
+The five published FEATURES are the part this module does close: none of them is copied, so no
+key a store invents can move its own ``rank_score``.
 """
 
 from __future__ import annotations

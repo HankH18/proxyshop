@@ -4,24 +4,35 @@ Ticket verify: ``pytest apps/exchange/tests/test_ranking_served.py -q``.
 
 ``apps/exchange/tests/test_ranking.py`` grades ``rank()`` as a library and does it thoroughly.
 Nothing there could see T-310, because a unit test constructs the ranker itself: the defect was
-that no *process* did. So every assertion in this file goes through
-``exchange.main.create_app()`` and a ``TestClient`` — the same object ``uvicorn
-exchange.main:app`` builds — rather than through an import of the package under test. A green
-suite over a function nobody calls is exactly the shape T-310 was.
+that no *process* did. A green suite over a function nobody calls is exactly the shape T-310
+was.
 
-Three properties, and they are separate on purpose:
+Three properties, and they are separate on purpose — **including in how they are driven, which
+an earlier version of this docstring got wrong by claiming every test here goes through the
+app**:
 
-1. **Reachability and the published path.** The app mounts ``exchange.ranking.routes`` and
-   answers ``GET /auctions/{auction_id}/shortlist``, which
+1. **Reachability and the published path** (§1). Through ``create_app()``: the app mounts
+   ``exchange.ranking.routes`` and answers ``GET /auctions/{auction_id}/shortlist``, which
    ``packages/contracts/openapi/exchange.openapi.json`` has declared all along.
-2. **The filters actually decide a served auction.** A candidate that fails an R19 hard
-   constraint, R12's blacklist read or C10's checkout-domain check is reported excluded and is
-   in no shortlist slot — over the HTTP door, not over ``rank()``.
-3. **A bidder cannot score itself.** The candidate handed to the scorer is assembled by NAMING
-   its fields, so no key a store writes into its reply reaches the formula. This is asserted
-   twice: a parametrised probe over the specific keys worth gaming (each closes exactly one),
-   and a randomised property over arbitrary keys (which closes the class, including the key
-   nobody thought to list).
+2. **The filters actually decide a served auction** (§2-3). Through a ``TestClient`` on the
+   real app — the same object ``uvicorn exchange.main:app`` builds. A candidate that fails an
+   R19 hard constraint, R12's blacklist read or C10's checkout-domain check is reported
+   excluded and is in no shortlist slot, over the HTTP door rather than over ``rank()``. These
+   are the tests that go red if the ranking is removed from the route; measured, deleting it
+   fails 12 of them.
+3. **A bidder cannot move its own SCORE** (§4). Driven at the library level on purpose, and it
+   would not detect the ranking being unwired — that is §2's job. The property is about the
+   projection, and a route driving it would test the projection through two layers that can
+   each mask it. Asserted twice: a parametrised probe over the specific keys worth gaming (each
+   closes exactly one), and a randomised property that asserts the projection carried exactly
+   its five named fields (which closes the class, including the key nobody listed).
+
+**What §4 does not claim.** "A bidder cannot score itself" is true of the five published
+FEATURES and false of the eligibility gate: a store writes ``"status": "verified"`` onto its own
+claim and satisfies any hard constraint, because ``ranking/filters.py:237`` reads a field the
+published ``Claim`` does not have and nothing on the auction path validates. See
+``exchange.ranking.candidates``' module docstring. The builders below use that field because
+every producer in this repo does; that is the defect, not this file's convention.
 """
 
 from __future__ import annotations
@@ -33,7 +44,12 @@ from typing import Any
 import pytest
 from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RANK_FEATURES
 from exchange.auction.collect import BidEntry
-from exchange.auction.routes import configure_auctions
+from exchange.auction.routes import (
+    MAX_EXCLUSION_REASONS_PER_BID,
+    MAX_HARD_CONSTRAINTS,
+    MAX_ROSTER_ENTRIES,
+    configure_auctions,
+)
 from exchange.checkout.sellers import StaticRegisteredDomains
 from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
 from exchange.main import create_app
@@ -100,7 +116,14 @@ def _offer(price: float, store_id: str, *, expires_in: float = LIVE_FOR_AN_HOUR)
 
 
 class Bidders:
-    """The outbound bid client, answering from a table. Every reply is a protocol ``Bid``."""
+    """The outbound bid client, answering from a table.
+
+    A reply is ``Bid``-SHAPED, not a valid ``Bid``: ``_claim`` writes a ``status`` field that
+    the published ``Claim`` forbids (``additionalProperties: false``). It is written that way
+    because that is what the ranker reads and what every other producer in this repo emits —
+    and because saying "every reply is a protocol Bid" here, as the first draft did, would hide
+    the fact that the field deciding eligibility is one the contract does not have.
+    """
 
     def __init__(self, bids: dict[str, dict[str, Any]]) -> None:
         self.bids = dict(bids)
@@ -229,9 +252,11 @@ def test_a_served_auction_scores_its_bids_and_publishes_a_shortlist():
     # Every candidate's components sum to its score — the audit trail is real, not decorative.
     for row in ranked:
         assert row["rank_score"] == pytest.approx(sum(row["components"].values()))
-    # Both stores are identical on every feature the formula reads, so the scores TIE and the
-    # published price tie-break is what ordered them. That is the ranking running, not the
-    # fan-out's arrival order.
+    # These two stores hold the same trust score, so they TIE and the published price
+    # tie-break is what ordered them. Asserting the tie is NOT evidence the formula ran —
+    # `test_trust_is_the_only_dimension_that_moves_a_served_score` is — because on the served
+    # path every eligible candidate ties whenever trust is equal. That is a real property of
+    # the ranking today, not an artefact of this fixture; see the next test.
     assert ranked[0]["rank_score"] == pytest.approx(ranked[1]["rank_score"])
 
     slots = body["shortlist"]["slots"]
@@ -241,6 +266,57 @@ def test_a_served_auction_scores_its_bids_and_publishes_a_shortlist():
         mint_bid_id(body["auction_id"], STORE_B),
     ]
     assert {slot["slot"] for slot in slots} == {"fit", "value"}
+
+
+def test_trust_is_the_only_dimension_that_moves_a_served_score_today():
+    """The formula runs, and it currently has exactly one live input. Both halves asserted.
+
+    RUNS: two stores identical in every respect except their trust snapshot score come back
+    with DIFFERENT ``rank_score``s, ordered by trust, and each score is `w_t` times the trust
+    difference apart. That is the published five-term combination executing on a served
+    request, which is what T-310 is about.
+
+    ONE LIVE INPUT: the other four terms are pinned to their neutral values here, on purpose,
+    because that is the measured state of the served path — ``exchange.ranking.candidates``
+    copies no feature off the bid, and the producer for ``intent_match`` (retrieval+rerank) is
+    T-260's and unwired. So this test is also the record of what is NOT yet true: a shortlist
+    that differentiates on fit, price value or delivery does not exist yet, and the day T-260
+    lands this assertion should start failing on the neutral half and be updated with it.
+    """
+    from contracts.ranking import RANK_FEATURES  # noqa: PLC0415
+
+    bidders = Bidders({STORE_A: _bid(STORE_A, 100.0), STORE_B: _bid(STORE_B, 100.0)})
+    app = _wired_app(
+        bidders=bidders,
+        trust_snapshot={
+            STORE_A: {"blacklisted": False, "score": 0.2},
+            STORE_B: {"blacklisted": False, "score": 0.9},
+        },
+    )
+    body = _post(app, [_rostered(STORE_A, 100.0), _rostered(STORE_B, 100.0)])
+
+    ranked = body["ranked"]
+    assert [row["store_id"] for row in ranked] == [STORE_B, STORE_A], (
+        f"the higher-trust store did not lead: {ranked}"
+    )
+    assert ranked[0]["rank_score"] > ranked[1]["rank_score"], ranked
+    w_t = DEFAULT_RANKING_WEIGHTS.feature_weights["trust"]
+    assert ranked[0]["rank_score"] - ranked[1]["rank_score"] == pytest.approx(w_t * (0.9 - 0.2))
+
+    neutral = [name for name in RANK_FEATURES if name != "trust"]
+    assert neutral, "the sweep over the non-trust features is unarmed"
+    for row in ranked:
+        components = row["components"]
+        assert set(components) >= set(RANK_FEATURES), components
+        for name in neutral:
+            assert components[name] == pytest.approx(components_of_first_row(ranked, name)), (
+                f"{name} differs between two candidates, so the served path has grown a "
+                f"producer for it and this test's second half is now wrong (in a good way)"
+            )
+
+
+def components_of_first_row(ranked, name):
+    return ranked[0]["components"][name]
 
 
 def test_a_hard_constraint_the_bid_cannot_evidence_keeps_it_out_of_the_shortlist():
@@ -440,8 +516,129 @@ def test_the_shortlist_store_forgets_on_the_ttl_and_is_bounded():
     assert len(store) == 3
     assert store.get("auction-0", now=0.0) is None, "the oldest was not evicted"
     assert store.get("auction-4", now=0.0) is not None
-    assert store.get("auction-4", now=901.0) is None, "the TTL did not expire the entry"
+    assert store.get("auction-4", now=899.999) is not None, "expired one instant early"
+    assert store.get("auction-4", now=900.0) is None, (
+        "at exactly the TTL the shortlist was still served, so it outlived the auction record "
+        "it describes by one instant"
+    )
     assert len(store) == 2, "an expired entry was not dropped on read"
+
+
+def test_the_shortlist_store_hands_out_copies_rather_than_its_own_state():
+    """A store whose contents can be changed from outside it is not a store.
+
+    ``dict(shortlist)`` is shallow, so before this the same ``slots`` list was simultaneously
+    in the store and in the ``CreateAuctionResponse`` handed to pydantic.
+    """
+    store = ShortlistStore()
+    original = {"auction_id": "a1", "slots": [{"slot": "fit", "bid_ref": "b1"}]}
+    store.put("a1", original, now=0.0)
+
+    original["slots"].append({"slot": "value", "bid_ref": "b2"})
+    handed_out = store.get("a1", now=0.0)
+    assert handed_out is not None
+    handed_out["slots"].append({"slot": "reliability", "bid_ref": "b3"})
+
+    assert store.get("a1", now=0.0)["slots"] == [{"slot": "fit", "bid_ref": "b1"}], (
+        "mutating either the source object or a handed-out copy changed the stored shortlist"
+    )
+
+
+def test_a_huge_roster_and_a_huge_intent_do_not_produce_an_unbounded_response():
+    """The release-blocker this cap exists for, driven through the unauthenticated door.
+
+    ``exclusion_reasons`` carries one string per unsatisfied hard constraint, and both the
+    roster length and the constraint count arrive on the request body. Measured before the cap,
+    a 93 KiB request returned a 142 MB body and drove peak RSS to 831 MB against
+    ``compose.yaml``'s ``mem_limit: 256m`` with a single uvicorn worker — a one-request OOM
+    kill with no credential.
+
+    The numbers here are small enough to run in a normal suite and large enough that an
+    uncapped response fails the assertion by two orders of magnitude: 60 stores x 60
+    constraints is 3600 reason strings uncapped and at most 60 x 9 capped.
+    """
+    stores = tuple(f"store-{index:03d}" for index in range(60))
+    intent = _intent([{"field": f"attr_{i}", "op": "gte", "value": i} for i in range(60)])
+    app = _wired_app(bidders=Bidders({}), stores=stores)
+
+    body = _post(app, [_rostered(store, 100.0) for store in stores], intent=intent)
+
+    assert len(body["excluded"]) == len(stores), "every rostered store must still get a verdict"
+    longest = max(len(row["exclusion_reasons"]) for row in body["excluded"])
+    assert longest <= MAX_EXCLUSION_REASONS_PER_BID + 1, (
+        f"a candidate reported {longest} reasons; the cap is "
+        f"{MAX_EXCLUSION_REASONS_PER_BID} plus one summary line"
+    )
+    overflowing = [row for row in body["excluded"] if len(row["exclusion_reasons"]) > 1]
+    assert overflowing, "the probe is unarmed: no candidate produced enough reasons to cap"
+    assert "further exclusion reason(s) not reported" in overflowing[0]["exclusion_reasons"][-1], (
+        "the list was truncated without saying so, which tells a store it failed 8 checks "
+        f"when it failed more: {overflowing[0]['exclusion_reasons'][-1]!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "stores", "constraints", "expected_detail"),
+    [
+        ("roster at the ceiling", MAX_ROSTER_ENTRIES, 1, None),
+        ("roster one over", MAX_ROSTER_ENTRIES + 1, 1, "roster"),
+        ("constraints at the ceiling", 1, MAX_HARD_CONSTRAINTS, None),
+        ("constraints one over", 1, MAX_HARD_CONSTRAINTS + 1, "hard_constraints"),
+    ],
+)
+def test_the_two_ceilings_on_an_unauthenticated_body_are_refused_at_the_door(
+    label, stores, constraints, expected_detail
+):
+    """Both caps, at the boundary and one past it, so neither is off by one in either
+    direction.
+
+    The pair is what bounds the request: the ranker decides every constraint against every
+    candidate, so the cost is the PRODUCT and capping one alone leaves the other unbounded.
+    Measured against the reviewer's reproduction — 800 stores x 800 constraints, a 93 KiB
+    unauthenticated request — before: 201, a 142 MB body, peak RSS 831 MB against a 256 MiB
+    container limit. After: 422 in 0.01 s at 55 MB. The worst request this route now accepts
+    (500 x 64) answers 201 with a 0.91 MB body at 75 MB peak.
+    """
+    ids = tuple(f"store-{index:04d}" for index in range(stores))
+    intent = _intent([{"field": f"attr_{i}", "op": "gte", "value": i} for i in range(constraints)])
+    app = _wired_app(bidders=Bidders({}), stores=ids)
+
+    response = TestClient(app).post(
+        "/auctions",
+        json={
+            "intent": intent,
+            "roster": [_rostered(store, 100.0) for store in ids],
+            "bid_timeout_seconds": 0.1,
+        },
+    )
+
+    if expected_detail is None:
+        assert response.status_code == 201, f"[{label}] the ceiling itself was refused"
+        return
+    assert response.status_code == 422, f"[{label}] over the ceiling was accepted"
+    assert expected_detail in response.text, f"[{label}] {response.text[:300]}"
+
+
+def test_a_malformed_weight_set_fails_at_app_build_rather_than_per_request():
+    """A config typo must not leave a container that boots healthy and 500s every auction.
+
+    ``compose.yaml``'s healthcheck probes ``/openapi.json``, which FastAPI serves itself. With
+    the weight set resolved lazily, ``RANK_W_M=0.9`` (the other four unset) gave a container
+    that passed that probe forever while ``POST /auctions`` — the only auction-opening route —
+    answered 500 to every request. Resolved at import, the same typo fails ``create_app()``.
+    """
+    import importlib  # noqa: PLC0415
+
+    from contracts.ranking import RankingWeights  # noqa: PLC0415
+
+    with pytest.raises(Exception) as caught:
+        RankingWeights.from_env({"RANK_W_M": "0.9"})
+    assert "1.0" in str(caught.value) or "sum" in str(caught.value).lower(), caught.value
+
+    # And the resolution really is at import: the module constant exists and `weights_of`
+    # returns it for an app nobody configured, so no request-time env read remains.
+    serving = importlib.import_module("exchange.ranking.serving")
+    assert serving.weights_of(create_app()) is serving.ENV_RANKING_WEIGHTS
 
 
 # =====================================================================================
