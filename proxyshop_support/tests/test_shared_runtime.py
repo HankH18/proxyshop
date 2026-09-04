@@ -199,9 +199,40 @@ def test_worker_prefix_and_db_index_track_the_worker(worker: int) -> None:
 
     The one pre-existing assertion compared ``key("cart")`` with ``f"w{worker_index}:cart"``
     at the running worker, so ``key_prefix()`` hard-coded to ``"w1:"`` passed at worker 1.
+
+    The db-index half USED TO ASSERT ``worker % 16`` for every index here, which
+    pinned the collision as correct behaviour: it required ``redis_db_index(16)
+    == 0`` and ``(17) == 1`` — the exact sharing that lets one worker's per-test
+    FLUSHDB wipe another's state, since FLUSHDB ignores the ``w{N}:`` prefix.
+    Changed deliberately, and not to turn a red test green: the assertion was
+    wrong. ``redis_db_index`` now refuses an index it cannot isolate. The prefix
+    half is unchanged and still covers 16 and 17, because prefixes DO track any
+    index — that was never the broken part.
     """
     assert key_prefix(worker) == f"w{worker}:"
-    assert redis_db_index(worker) == worker % 16
+    if worker < 16:
+        assert redis_db_index(worker) == worker
+    else:
+        with pytest.raises(ValueError, match="cannot be isolated in Redis"):
+            redis_db_index(worker)
+
+
+@pytest.mark.parametrize("worker", [16, 17, 32, 64, 7071])
+def test_redis_db_index_refuses_an_index_it_cannot_isolate(worker: int) -> None:
+    """An index past the logical-DB ceiling must fail loudly, not share silently.
+
+    Measured on the live cluster when this was found: 37 of 53 ``proxyshop_w*``
+    databases carried an index >= 16, so this was the common case rather than a
+    corner. 16, 32 and 64 all mapped onto worker 0's DB; 17 onto worker 1's. The
+    message must name the worker actually collided with, because the operator's
+    next question is whose run they just corrupted.
+    """
+    with pytest.raises(ValueError) as exc:
+        redis_db_index(worker)
+    msg = str(exc.value)
+    assert f"shares DB {worker % 16}" in msg
+    assert f"with worker {worker % 16}" in msg
+    assert "PROXYSHOP_WORKER=0..15" in msg
 
 
 def _offline_client(worker: int) -> WorkerRedis:
