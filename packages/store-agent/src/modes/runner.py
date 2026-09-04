@@ -49,7 +49,7 @@ from typing import Any
 
 from contracts import Bid, EnvelopeActivation, TrustDimension, TrustEventPayload
 
-from ..runtime import Decline, bid, is_decline
+from ..runtime import Decline, bid
 
 #: The modes in which an answer leaves the building. Named once, so "which modes submit" is a
 #: fact with one definition rather than a condition repeated at each call site.
@@ -313,8 +313,17 @@ def rationale_for(answer: Bid | Decline, posture: TrustPosture) -> str:
     identity of the runner that produced it — so the same answer under the same posture always
     renders the same string. That is what makes "an injected trust event changed the rationale"
     a signal rather than noise: the ONLY thing that can move this text is the evidence.
+
+    The branch is spelled `isinstance(answer, Decline)` and NOT `is_decline(answer)`, which is
+    the same test and reads better. `is_decline` is a `TypeGuard`, and a `TypeGuard` narrows
+    only the branch where it is True (PEP 647); the `else` arm kept the full `Bid | Decline`
+    and `_offer_clauses` wants a `Bid`, so the dispatch was correct at runtime and unprovable
+    to the type checker. `isinstance` narrows BOTH arms natively — the `Decline` one to
+    `Decline` and, because the union is closed at two members, the other one to `Bid`. Please
+    do not "tidy" this back into the helper: the helper cannot express the negative half until
+    `TypeIs` (PEP 742, Python 3.13) is available to this project.
     """
-    clauses = _decline_clauses(answer) if is_decline(answer) else _offer_clauses(answer)
+    clauses = _decline_clauses(answer) if isinstance(answer, Decline) else _offer_clauses(answer)
     return "; ".join((*clauses, posture.describe()))
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import TypeGuard
 
 
 class DeclineReason(StrEnum):
@@ -73,11 +74,24 @@ class Decline:
         return f"decline({self.reason}) for auction {self.auction_id!r}{suffix}"
 
 
-def is_decline(answer: object) -> bool:
+def is_decline(answer: object) -> TypeGuard[Decline]:
     """Whether an answer from :func:`~store_agent.runtime.bid` is a decline.
 
     Offered so a caller never has to write ``not isinstance(answer, Bid)``, which is the same
     test spelled as a negation and quietly answers True for `None`.
+
+    The return type is a `TypeGuard` rather than a bare `bool` because the bare `bool` was a
+    LIE BY OMISSION: it said "this call answers yes or no" when the call in fact establishes
+    *what the value is*. A caller that branched on it got no narrowing, so `answer` stayed
+    `Bid | Decline` inside a block that had already proven it was a `Decline`, and the only
+    ways out were a `cast` or an `isinstance` written next to the call that was already doing
+    the isinstance. The guard states the fact the body establishes; nothing changes at runtime.
+
+    **`TypeGuard` narrows the TRUE branch only** (PEP 647). It cannot say "and if this is
+    False, within `Bid | Decline`, it is a `Bid`" — that is `TypeIs` (PEP 742), which is
+    `typing.TypeIs` from Python 3.13 and this project pins 3.12. A caller that needs BOTH
+    branches narrowed must therefore still branch on `isinstance(answer, Decline)` directly;
+    see `store_agent.modes.runner.rationale_for`.
     """
     return isinstance(answer, Decline)
 

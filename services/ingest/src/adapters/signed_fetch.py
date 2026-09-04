@@ -37,15 +37,13 @@ it is never interpolated into a query, a prompt, or a URL.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.parse import urlencode, urljoin
 
-from ..graph.model import Category, Offer, Product, Source, Store, Variant
 from .base import CatalogAdapter as _CatalogAdapter
 from .base import (
     CatalogRequest,
@@ -56,7 +54,18 @@ from .base import (
     VariantRecord,
 )
 from .budgets import BudgetExceeded, CrawlLedger
-from .hashing import canonical_json_hash, content_hash, has_changed
+from .hashing import canonical_json_hash, has_changed
+from .mapping import (
+    build_upserts,
+    coerce_availability,
+    coerce_price,
+    composite_hash,
+    native_product_key,
+    product_id_for,
+    safe_host,
+    safe_split,
+    variant_id_for,
+)
 from .netguard import FetchRefused
 from .robots import USER_AGENT, may_fetch, robots_url, robots_verdict_for_status
 from .transport import HTTPResult, RequestSigner, SafeHTTPClient, TransportError
@@ -69,43 +78,9 @@ PRODUCTS_PATH = "/products.json"
 PASSWORD_PATH = "/password"
 _PAGE_SIZE = 250
 
-#: schema.org availability URLs -> the vocabulary `ingest.graph` stores on an Offer.
-_AVAILABILITY = {
-    "instock": "in_stock",
-    "in_stock": "in_stock",
-    "onlineonly": "in_stock",
-    "limitedavailability": "limited",
-    "outofstock": "out_of_stock",
-    "soldout": "out_of_stock",
-    "discontinued": "discontinued",
-    "preorder": "preorder",
-    "presale": "preorder",
-    "backorder": "backorder",
-}
-
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _stable_id(*parts: str) -> str:
-    return hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8")).hexdigest()[:32]
-
-
-def _as_float(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(str(value).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def _availability(value: Any) -> str:
-    if isinstance(value, bool):
-        return "in_stock" if value else "out_of_stock"
-    token = str(value or "").strip().lower().rsplit("/", 1)[-1].replace(" ", "")
-    return _AVAILABILITY.get(token, "unknown")
 
 
 class SignedFetchAdapter:
@@ -150,8 +125,21 @@ class SignedFetchAdapter:
         client = self._client or SafeHTTPClient(
             policy=request.policy, user_agent=self.user_agent, signer=self.signer
         )
-        base = request.base_url.rstrip("/")
-        host = (urlsplit(base).hostname or "").lower()
+        base = str(request.base_url or "").rstrip("/")
+        if safe_split(base) is None:
+            # `urlsplit("http://[")` raises. Every URL this crawl builds is derived from the
+            # base, so one that does not parse has to end the crawl here rather than as a
+            # ValueError out of the transport's host check.
+            return CatalogSnapshot(
+                store_id=request.store_id,
+                base_url=base,
+                observed_at=observed_at,
+                adapter=ADAPTER_NAME,
+                usage=ledger.snapshot(),
+                extractor_version=EXTRACTOR_VERSION,
+                warnings=(f"base_url {request.base_url!r} does not parse; crawl abandoned",),
+            )
+        host = safe_host(base)
         allowed = tuple(dict.fromkeys((host, *request.allowed_hosts)))
 
         resources: list[FetchedResource] = []
@@ -228,100 +216,16 @@ class SignedFetchAdapter:
     def to_upserts(self, snapshot: CatalogSnapshot) -> list[UpsertOp]:
         """Map a snapshot to graph writes, in dependency order. Pure — no I/O.
 
-        Only ``snapshot.changed_products`` are visited, which is where the "unchanged
-        content produces zero re-extraction work" guarantee actually lives: for a crawl
-        whose every hash matched, this returns ``[]`` without inspecting a single product.
+        Delegates to :func:`ingest.adapters.mapping.build_upserts`, which is the *one*
+        snapshot-to-graph mapping both catalog adapters use (C6, T-023 acceptance 2): the MCP
+        adapter matching this adapter's upsert semantics is then structural rather than a
+        second implementation someone has to keep in step.
+
+        Only ``snapshot.changed_products`` are visited, which is where the "unchanged content
+        produces zero re-extraction work" guarantee actually lives: for a crawl whose every
+        hash matched, this returns ``[]`` without inspecting a single product.
         """
-        changed = snapshot.changed_products
-        if not changed:
-            return []
-
-        store_source = self._source(
-            snapshot.base_url,
-            content_hash(snapshot.base_url),
-            snapshot.observed_at,
-            confidence=1.0,
-        )
-        ops: list[UpsertOp] = [
-            UpsertOp(
-                kind="store",
-                node=Store(
-                    store_id=snapshot.store_id,
-                    domain=(urlsplit(snapshot.base_url).hostname or "").lower(),
-                ),
-                source=store_source,
-            )
-        ]
-
-        for product in changed:
-            source = self._source(
-                product.source_url or snapshot.base_url,
-                product.content_hash or content_hash(product.product_id),
-                snapshot.observed_at,
-            )
-            ops.append(
-                UpsertOp(
-                    kind="product",
-                    node=Product(
-                        product_id=product.product_id,
-                        canonical_name=product.canonical_name,
-                        brand=product.brand,
-                        status=product.status,
-                    ),
-                    source=source,
-                )
-            )
-            ops.append(
-                UpsertOp(
-                    kind="sells",
-                    node=None,
-                    source=source,
-                    context={"store_id": snapshot.store_id, "product_id": product.product_id},
-                )
-            )
-            for name in product.categories:
-                ops.append(
-                    UpsertOp(
-                        kind="category",
-                        node=Category(name=name),
-                        source=source,
-                        context={"product_id": product.product_id},
-                    )
-                )
-            for variant in product.variants:
-                ops.append(
-                    UpsertOp(
-                        kind="variant",
-                        node=Variant(
-                            variant_id=variant.variant_id,
-                            seller_sku=variant.seller_sku,
-                            name=variant.name,
-                            status=variant.status,
-                        ),
-                        source=source,
-                        context={"product_id": product.product_id},
-                    )
-                )
-                if variant.price is None:
-                    continue
-                ops.append(
-                    UpsertOp(
-                        kind="offer",
-                        node=Offer(
-                            offer_id=f"off_{_stable_id(snapshot.store_id, variant.variant_id)}",
-                            price=float(variant.price),
-                            currency=variant.currency,
-                            availability=variant.availability,
-                            observed_at=snapshot.observed_at,
-                        ),
-                        source=source,
-                        context={
-                            "store_id": snapshot.store_id,
-                            "variant_id": variant.variant_id,
-                        },
-                    )
-                )
-        return ops
+        return build_upserts(snapshot, extractor_version=EXTRACTOR_VERSION)
 
     # -- storefront password (A1) ---------------------------------------------------------
 
@@ -357,7 +261,7 @@ class SignedFetchAdapter:
                 method="POST",
                 body=payload,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                allowed_hosts=(urlsplit(base).hostname or "",),
+                allowed_hosts=(safe_host(base),),
                 ledger=ledger,
             )
         except (FetchRefused, TransportError) as exc:
@@ -438,7 +342,7 @@ class SignedFetchAdapter:
             # keyed under the `product:` namespace rather than under its page URL — that URL
             # is also a *resource* key carrying the page's own body digest, and letting the
             # two share a key makes every product look changed on every crawl for ever.
-            composite = content_hash(f"{entry_hash}|{page_hash}")
+            composite = composite_hash(entry_hash, page_hash)
             product_id = self._product_id(request.store_id, entry)
             known = request.known_hashes.get(f"product:{product_id}")
             products.append(
@@ -461,8 +365,7 @@ class SignedFetchAdapter:
         product keeps the same node across crawls (and a re-crawl of unchanged content
         cannot churn the graph through ID drift).
         """
-        native = str(entry.get("id") or entry.get("handle") or "").strip()
-        return f"prod_{_stable_id(store_id, native)}"
+        return product_id_for(store_id, entry)
 
     def _to_record(
         self,
@@ -479,7 +382,7 @@ class SignedFetchAdapter:
         ``products.json`` wins on anything it states; JSON-LD fills the gaps (brand,
         currency, availability) that the machine endpoint does not carry.
         """
-        native = str(entry.get("id") or entry.get("handle") or "").strip()
+        native = native_product_key(entry)
         product_id = self._product_id(store_id, entry)
         brand = str(entry.get("vendor") or "").strip() or self._brand(jsonld)
         title = str(entry.get("title") or jsonld.get("name") or "").strip()
@@ -499,18 +402,18 @@ class SignedFetchAdapter:
             sku = str(item.get("sku") or "").strip()
             matched = by_sku.get(sku, {})
             native_variant = str(item.get("id") or sku or item.get("title") or "").strip()
-            price = _as_float(item.get("price"))
+            price = coerce_price(item.get("price"))
             if price is None:
-                price = _as_float(matched.get("price"))
+                price = coerce_price(matched.get("price"))
             available = item.get("available")
             availability = (
-                _availability(available)
+                coerce_availability(available)
                 if available is not None
-                else _availability(matched.get("availability") or default_availability)
+                else coerce_availability(matched.get("availability") or default_availability)
             )
             variants.append(
                 VariantRecord(
-                    variant_id=f"var_{_stable_id(store_id, native, native_variant)}",
+                    variant_id=variant_id_for(store_id, native, native_variant),
                     seller_sku=sku,
                     name=str(item.get("title") or "").strip(),
                     price=price,
@@ -609,25 +512,6 @@ class SignedFetchAdapter:
         if isinstance(offers, list):
             return [o for o in offers if isinstance(o, dict)]
         return []
-
-    # -- provenance --------------------------------------------------------------------------
-
-    @staticmethod
-    def _source(url: str, digest: str, observed_at: str, *, confidence: float = 0.9) -> Source:
-        """A `Source` node for one observed URL — DESIGN: Source ≡ Provenance.
-
-        ``source_id`` is derived from the URL and the digest, so re-observing unchanged
-        content produces the *same* Source rather than a new one every crawl.
-        """
-        return Source(
-            source_id=f"src_{_stable_id(url, digest)}",
-            url=url,
-            content_hash=digest,
-            observed_at=observed_at,
-            extractor_version=EXTRACTOR_VERSION,
-            confidence=confidence,
-            source_class="scraped",
-        )
 
 
 def _satisfies_catalog_adapter() -> bool:
