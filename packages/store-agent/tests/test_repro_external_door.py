@@ -562,14 +562,9 @@ def test_omitting_the_eligibility_inputs_is_not_more_permissive_than_passing_emp
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-234: NonceStore.consume (nonces.py:55-59) tests membership, calls parse_timestamp, "
-        "and only then stores, so two callers racing on one (signer_id, nonce) can both be told "
-        "they spent it; remove this marker with the fix"
-    ),
-)
+# xfail marker removed with the T-234 fix: `NonceStore.consume` now parses the retention
+# BEFORE the critical section and does the membership test and the store under one lock, so
+# this test XPASSes and `strict=True` would fail the run if the marker stayed.
 def test_only_one_of_two_racing_callers_can_spend_the_same_nonce(monkeypatch) -> None:
     """ "Spend this nonce" must be atomic, or it is not a replay defence.
 
