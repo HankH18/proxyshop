@@ -459,6 +459,34 @@ class _QuotesAnObjectInItsReason:
         )
 
 
+class _QuotesAnObjectBehindTheDeclaredCode:
+    """The BYPASS: a reason that already begins with its declared code is returned VERBATIM.
+
+    ``gate._denial_reason`` reads::
+
+        if denial_code(reason) == code:
+            return reason
+        return denial_reason(code, reason)
+
+    so a source answering ``unavailable`` with the prose ``"unavailable: … <object at 0x…> …"``
+    takes the first branch and never reaches ``denial_reason`` at all. This case exists because
+    it is the one shape a sanitiser installed inside ``denial_reason()`` would NOT close — the
+    obvious single-point fix leaves it live, and a gate that omitted it would certify that fix
+    as complete. ``_QuotesAnObjectInItsReason`` above is the sibling that DOES route through
+    ``denial_reason``; the pair is what distinguishes "sanitiser absent" from
+    "sanitiser present and bypassed".
+    """
+
+    interface_version = SELLER_ELIGIBILITY_INTERFACE_VERSION
+
+    def check(self, store_id: str) -> Any:
+        return EligibilityDecision(
+            store_id=store_id,
+            status=DENIAL_UNAVAILABLE,
+            reason=f"{DENIAL_UNAVAILABLE}: the source {object()!r} refused",
+        )
+
+
 class _DeclaresAnObjectVersion:
     """``interface_version`` is whatever the source put there — the path ``describe`` covers."""
 
@@ -496,6 +524,12 @@ def _hostile_cases() -> tuple[tuple[str, str, Any, str | None], ...]:
         ("eligibility", "raises on use", _RaisesQuotingAnObject, None),
         ("eligibility", "answers with an object status", _AnswersWithAnObject, None),
         ("eligibility", "quotes an object in its own reason", _QuotesAnObjectInItsReason, None),
+        (
+            "eligibility",
+            "quotes an object BEHIND the declared code",
+            _QuotesAnObjectBehindTheDeclaredCode,
+            None,
+        ),
         # the offer the bidding store wrote, which reaches the same f-strings
         ("offer", "expires_at is an object", object, "expires_at"),
         ("offer", "quantity is an object", object, "quantity"),
@@ -598,8 +632,21 @@ def test_the_injected_collaborator_leak_sweep_is_armed() -> None:
     )
 
     cases = _hostile_cases()
-    assert len(cases) >= 15, f"the case table holds {len(cases)} case(s); it held 17 when written"
+    assert len(cases) >= 17, f"the case table holds {len(cases)} case(s); it held 18 when written"
     assert len(cases) == len({(c[0], c[1]) for c in cases}), "two cases share a label"
+
+    # The BYPASS PAIR, pinned by name. `gate._denial_reason` returns a reason that already
+    # carries its declared code VERBATIM, skipping `denial_reason()` — so a sanitiser installed
+    # there closes one of these two shapes and not the other. Losing either half turns this
+    # sweep back into a test of one code path.
+    shapes = {shape for _c, shape, _f, _k in cases}
+    for half in ("quotes an object in its own reason", "quotes an object BEHIND the declared code"):
+        assert half in shapes, (
+            f"the case {half!r} is gone from the sweep. It is one half of the pair that tells "
+            "'no sanitiser' apart from 'sanitiser bypassed': gate._denial_reason short-circuits "
+            "on a reason that already names its code, so a fix inside reasons.denial_reason() "
+            "closes only the other half"
+        )
 
     covered = {carrier for carrier, _shape, _factory, _key in cases}
     missing = (set(INJECTED_COLLABORATORS) | {OFFER_CARRIER}) - covered
@@ -675,11 +722,14 @@ def test_t326_an_unusable_code_creator_leaks_no_memory_address(unwired: None) ->
     reason=(
         "The property both tickets are instances of, stated once over every collaborator: "
         "registered_domains, code_creator, eligibility AND the offer the bidding store wrote. "
-        "Measured 12 leaking cases of 17 at HEAD, across four f-string sites — "
+        "Measured 13 leaking cases of 18 at HEAD, across four f-string sites — "
         "checkout/providers.py:110, checkout/provider.py:1103-1105, checkout/codes.py:187+224 "
         "and eligibility/__init__.py:175+194 — every one amplified by the pass-through at "
-        "accept/offer.py:541. A single sanitising pass inside reasons.denial_reason() closes "
-        "all four. Remove this marker with the fix"
+        "accept/offer.py:541. A sanitising pass inside reasons.denial_reason() closes twelve "
+        "of the thirteen; the thirteenth is the BYPASS — accept/gate.py::_denial_reason "
+        "returns a reason that already names its declared code VERBATIM and never calls "
+        "denial_reason() at all, so that site needs its own repair. Remove this marker with "
+        "the fix"
     ),
 )
 def test_no_injected_collaborators_repr_reaches_any_denial_sink(unwired: None) -> None:
