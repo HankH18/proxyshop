@@ -1,0 +1,27 @@
+{
+  "_note": "The buyer asks once and never comes back. The question was asked and stays on the record; the intent is still produced from what they did say, with `budget` unresolved. A loop that waited for an answer it will never get would hang here.",
+  "_questions_expected": 1,
+  "turns": [
+    "trail running shoes, size 10, waterproof"
+  ],
+  "llm_script": [],
+  "expected_intent": {
+    "query": "trail running shoes, size 10, waterproof",
+    "category": "footwear",
+    "budget_band": "unspecified",
+    "currency": "USD",
+    "hard_constraints": [
+      {
+        "field": "size",
+        "op": "eq",
+        "value": 10.0
+      },
+      {
+        "field": "waterproof",
+        "op": "eq",
+        "value": true
+      }
+    ],
+    "preferences": []
+  }
+}
