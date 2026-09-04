@@ -614,3 +614,505 @@ def test_t250_the_shared_boundary_refuses_a_thousandth_of_a_cent_for_a_hundred_d
         assert (
             price_reasons(_t250_bid(legal), list_prices=T250_ROSTER, max_discount_pct=100.0) == []
         ), f"R10's aggressive undercut at {legal:.2f} was refused; the floor is now too high"
+
+
+# =====================================================================================
+# Served-vs-published sweep — the shared machinery for T-312 (and the shape T-309 uses
+# next door in ``packages/store-agent/tests``)
+# =====================================================================================
+#
+# A hand-written probe over one or two named routes blocks exactly one way of being wrong;
+# ``test_t170_…`` above is that shape, deliberately, because it grades a single path T-176
+# left unowned. What follows is the general property instead: build the app, read
+# ``app.openapi()['paths']``, read the service's published contract, and require the two
+# operation sets to agree **in both directions**. It keeps holding as routes are added on
+# either side, and it catches the divergence that runs the other way — a route the service
+# answers that no contract declares — which a frozen list of names cannot see at all.
+
+#: ``packages/contracts/openapi`` — derived from the constant above so a moved contract
+#: directory breaks loudly here rather than silently making every sweep iterate nothing.
+CONTRACTS_OPENAPI_DIR = EXCHANGE_OPENAPI.parent
+
+TRUST_OPENAPI = CONTRACTS_OPENAPI_DIR / "trust.openapi.json"
+
+#: A third service, in the table as the sweep's LIVENESS control: it is a real app that
+#: really does serve routes, so ``served`` coming back empty for it means the extractor is
+#: broken rather than that a service is unwired.
+#:
+#: It is deliberately NOT described as a service whose surface agrees with its contract — an
+#: earlier comment here claimed that and it is false. Measured: ``merchant_svc.main`` serves
+#: NINE operations against a contract publishing SIX; ``GET /install``, ``GET
+#: /install/callback`` and ``GET /install/shops`` are served and declared nowhere. So T-312's
+#: "three services" is an undercount — a fourth service diverges, in the served-but-
+#: unpublished direction, and no ticket names it. That is reported rather than gated here:
+#: this lane owns no merchant file, and inventing a fourth half of someone else's ticket
+#: inside the exchange's repro file is how gates become unownable.
+MERCHANT_OPENAPI = CONTRACTS_OPENAPI_DIR / "merchant.openapi.json"
+
+#: The methods an OpenAPI path item may carry. Everything else under a path item
+#: (``parameters``, ``summary``, ``$ref``, ``servers``) is not an operation, and counting it
+#: as one would inflate the very non-zero check that arms this sweep.
+HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
+
+
+def _normalise_route(path: str) -> str:
+    """``/stores/{store_id}/trust`` -> ``/stores/{}/trust``.
+
+    The comparison is about the *wire shape* of a route, not about what a service names its
+    path parameter: a service answering ``/stores/{sid}/trust`` genuinely satisfies the
+    contract's ``/stores/{store_id}/trust``, and failing it for the spelling would make this
+    gate red for a reason the ticket is not about. Every failure message still prints the raw
+    spellings, so a real naming divergence stays visible without being fatal.
+
+    Written with ``str.partition`` rather than a regex so no module-level import has to be
+    added to the head of this file (E402). Its behaviour on malformed input is stated exactly,
+    because an earlier draft of this docstring claimed something else and was wrong: a ``{``
+    with no ``}`` anywhere after it is passed through unchanged, but ``/a/{b/{c}`` collapses
+    ``b/{c`` into a single ``{}`` — the first ``{`` pairs with the only ``}``. Nothing in the
+    five contracts is shaped like that today, and the injectivity check in the arming test is
+    what keeps a future one from collapsing two distinct paths onto one string unnoticed.
+    """
+    out: list[str] = []
+    rest = path
+    while "{" in rest:
+        head, _, tail = rest.partition("{")
+        _param, closed, rest = tail.partition("}")
+        if not closed:
+            return "".join(out) + head + "{" + tail
+        out.append(head + "{}")
+    return "".join(out) + rest
+
+
+def _operations(paths: dict[str, Any], *, raw: bool = False) -> set[tuple[str, str]]:
+    """``{(METHOD, path)}`` from an OpenAPI ``paths`` object, normalised unless ``raw``."""
+    return {
+        (method.upper(), path if raw else _normalise_route(path))
+        for path, item in paths.items()
+        for method in item
+        if method.lower() in HTTP_METHODS
+    }
+
+
+def _published_operations(contract: Path, *, raw: bool = False) -> set[tuple[str, str]]:
+    """What an OpenAPI document on disk declares."""
+    document = json.loads(contract.read_text(encoding="utf-8"))
+    return _operations(document.get("paths", {}), raw=raw)
+
+
+def _served_operations(app: Any) -> set[tuple[str, str]]:
+    """What a built FastAPI application actually answers."""
+    return _operations(app.openapi().get("paths", {}))
+
+
+def _operation_divergence(served: set[tuple[str, str]], published: set[tuple[str, str]]) -> str:
+    """A message naming BOTH differences, and the counts each side actually iterated."""
+    unserved = sorted(f"{method} {path}" for method, path in published - served)
+    unpublished = sorted(f"{method} {path}" for method, path in served - published)
+    return (
+        f"served {len(served)} operation(s), contract publishes {len(published)}; "
+        f"published but NOT served: {unserved or 'none'}; "
+        f"served but NOT published: {unpublished or 'none'}"
+    )
+
+
+def _contract_probe_app(contract: Path) -> Any:
+    """A synthetic app serving exactly what ``contract`` publishes — the sweep's arming device.
+
+    Three sweeps in this repo were found going QUIET rather than red (T-229 6->0 of 8, T-281
+    70->0 of 79, T-241 48->0 of 66): a loop that iterates zero cases and passes. A
+    served-vs-published comparison has the same hazard in a nastier form, because
+    ``set() == set()`` is a *pass*. Pointing the extractor at an app whose served set is known
+    — built out of the very paths under test — is what makes an empty ``served`` mean "this
+    service serves nothing" rather than "this probe can no longer see routes".
+    """
+    from fastapi import FastAPI  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    def _probe() -> dict[str, Any]:  # pragma: no cover - mounted, never called
+        return {}
+
+    app = FastAPI(title=f"probe:{contract.name}")
+    for method, path in sorted(_published_operations(contract, raw=True)):
+        app.add_api_route(path, _probe, methods=[method])
+    return app
+
+
+def _build(module_name: str) -> Any:
+    """``create_app()`` for one service, by dotted module name."""
+    import importlib  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    return importlib.import_module(module_name).create_app()
+
+
+#: Every service this file sweeps: ``name -> (app module, published contract)``. The sweep
+#: iterates THIS, and the arming test below asserts it is non-empty and that every entry
+#: yields a non-zero published operation count — so a table that quietly emptied, or a
+#: contract that quietly stopped parsing, is a failure rather than a silent green.
+SWEPT_SERVICES: dict[str, tuple[str, Path]] = {
+    "exchange": ("exchange.main", EXCHANGE_OPENAPI),
+    "trust": ("trust.main", TRUST_OPENAPI),
+    "merchant": ("merchant_svc.main", MERCHANT_OPENAPI),
+}
+
+
+def test_the_served_versus_published_sweep_is_armed() -> None:
+    """Not xfail, and not optional: the T-312 gates below are worthless without this.
+
+    Four ways the comparison could pass while measuring nothing, all closed here:
+
+    * the service table empties, so the sweep iterates zero services;
+    * a contract stops parsing to operations, so ``published - served`` is empty;
+    * the extractor stops seeing routes for structural reasons (a changed FastAPI, a swallowed
+      exception inside ``app.openapi()``), so ``served`` is empty for *every* app and an
+      unserved contract is indistinguishable from a served one;
+    * the two sides normalise paths differently, which is the one way a set comparison can be
+      wrong without either side being empty.
+
+    The last two are closed by comparing each contract against a synthetic app built from that
+    contract's own raw paths, and by requiring at least one real service to serve something.
+    """
+    assert len(SWEPT_SERVICES) >= 3, (
+        f"the sweep table holds {len(SWEPT_SERVICES)} service(s); it is supposed to cover at "
+        "least exchange, trust and merchant"
+    )
+
+    published_counts: dict[str, int] = {}
+    for name, (_module, contract) in sorted(SWEPT_SERVICES.items()):
+        assert contract.is_file(), f"{name}: {contract} does not exist"
+        raw = _published_operations(contract, raw=True)
+        published = _published_operations(contract)
+        assert published, f"{name}: {contract} declares no operations; the sweep would be blind"
+        published_counts[name] = len(published)
+
+        # Normalisation must be INJECTIVE, or the whole comparison silently shrinks. Two
+        # distinct published paths that normalise to one string — `/stores/{store_id}` beside
+        # `/stores/{slug}` — collapse identically on BOTH sides, so the probe check below
+        # still passes while a service serving only one of them satisfies `served ==
+        # published` with the other door 404ing. Nothing in the five contracts is shaped like
+        # that today; this is what keeps it that way.
+        assert len(published) == len(raw), (
+            f"{name}: normalising path parameters collapsed {len(raw)} published operations "
+            f"onto {len(published)} — two distinct contract paths differ only in the NAME of "
+            "a path parameter, so the served-vs-published comparison can no longer tell them "
+            f"apart. Raw: {sorted(f'{m} {p}' for m, p in raw)}"
+        )
+
+        probe = _served_operations(_contract_probe_app(contract))
+        assert probe == published, (
+            f"{name}: the extractor and the contract reader disagree on an app built from the "
+            f"contract itself — {_operation_divergence(probe, published)}"
+        )
+
+    # PER SERVICE, not summed. `sum(...) > 0` was the first spelling here and it is too weak:
+    # it stays green while `exchange.main` regresses to zero routes, as long as one of the
+    # other two still serves something — and then the exchange T-312 gate below keeps
+    # reporting xfail for a reason that is not the ticket.
+    served_counts = {
+        name: len(_served_operations(_build(module)))
+        for name, (module, _contract) in sorted(SWEPT_SERVICES.items())
+    }
+    blind = {name: n for name, n in served_counts.items() if n == 0}
+    assert not blind, (
+        f"these swept services served no operation at all: {blind} (all counts: "
+        f"{served_counts}) — for any service in that state the gates below cannot tell "
+        "'serves nothing' from 'cannot be measured'"
+    )
+    served_floors = {"exchange": 3, "trust": 6}
+    lost = {n: c for n, c in served_counts.items() if c < served_floors.get(n, 0)}
+    assert not lost, (
+        f"a swept service lost served routes since these gates were measured — {lost} against "
+        f"the floors {served_floors}. Deleting routes so the sets agree is not a fix."
+    )
+    # FLOORS, not equalities, and the asymmetry is the point. A contract that GROWS is
+    # ordinary progress and must not turn this file red for a lane that owns neither it nor
+    # the gates below. A contract that SHRINKS is the cheapest way to fake a T-312 fix —
+    # ``served == published`` is satisfiable from either side, as the positive control for
+    # this file's ingest sibling demonstrated by repairing the gate with a contract edit and
+    # no source change at all — so deleting a published promise to make the sets agree trips
+    # here. The strict xfail markers below catch the same fake once (XPASS is a failure until
+    # someone deletes the marker); this is the tripwire that survives the marker's removal.
+    # Only the two services this file actually gates. Merchant is in the table as a liveness
+    # control, not as a graded surface, and floor-ing its contract here would turn THIS file
+    # red for a merchant-lane change that has nothing to do with T-310 or T-312 — a gate whose
+    # failures land on a lane that cannot act on them is a gate that gets deleted.
+    floors = {"exchange": 5, "trust": 4}
+    shrunk = {name: n for name, n in published_counts.items() if n < floors.get(name, 0)}
+    assert not shrunk, (
+        "a published contract lost operations since these gates were measured — "
+        f"{shrunk} against the floors {floors}. Serving a promise is a fix; deleting the "
+        "promise so the sets agree is not. Re-read the contract and, if the removal is "
+        "deliberate, lower the floor in the same change that justifies it."
+    )
+
+
+# =====================================================================================
+# T-312 — published routes that no server answers, and served routes no contract declares
+# =====================================================================================
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-312 (exchange half): exchange.main.create_app() serves POST /auctions, "
+        "GET /auctions/{auction_id} and POST /auctions/{auction_id}/accept, while the "
+        "published contract declares GET /auctions/{auction_id}/shortlist, "
+        "POST /internal/outcomes and POST /v1/auctions/{auction_id}/bids — all three measured "
+        "404 — and declares nothing at all for the GET /auctions/{auction_id} the app does "
+        "serve; remove this marker with the fix"
+    ),
+)
+def test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes() -> None:
+    """Three published doors nobody answers, and one served door nobody published.
+
+    Measured at HEAD by building the app and reading ``app.openapi()['paths']``::
+
+        served     POST /auctions
+                   GET  /auctions/{auction_id}
+                   POST /auctions/{auction_id}/accept
+        published  POST /auctions
+                   POST /auctions/{auction_id}/accept
+                   GET  /auctions/{auction_id}/shortlist      -> 404
+                   POST /internal/outcomes                    -> 404
+                   POST /v1/auctions/{auction_id}/bids        -> 404
+
+    The three 404s are the shortlist a buyer is supposed to read, the outcome callback the
+    bandit is supposed to learn from, and the external bid submission a store is supposed to
+    use — each fully built and tested as a library and reachable by no request. The fourth
+    difference runs the other way: ``GET /auctions/{auction_id}`` is a live, unauthenticated
+    read of auction state that appears in no contract, so no client can be told it exists and
+    no reviewer of the contract can see that it does.
+
+    Both directions are asserted together on purpose. Serving the three missing paths while
+    leaving the fourth undeclared leaves the surface still diverging from its specification,
+    which is the property this gate is for — not a checklist of three names.
+    """
+    served = _served_operations(_build("exchange.main"))
+    published = _published_operations(EXCHANGE_OPENAPI)
+
+    assert published, "the exchange contract declares nothing; the sweep is unarmed"
+    assert served == published, (
+        f"the exchange's served surface diverges from its published contract — "
+        f"{_operation_divergence(served, published)}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-312 (trust half): trust.main.create_app() serves only the six raw-ledger "
+        "/events operations, while the published contract declares GET /snapshot, "
+        "GET /stores/{store_id}/trust and POST /feedback/{order_ref} — all three measured "
+        "404 — and declares none of the five read-side /events operations the app does "
+        "serve; remove this marker with the fix"
+    ),
+)
+def test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publishes() -> None:
+    """The trust service exposes its ledger and none of the reads the platform is promised.
+
+    Measured at HEAD::
+
+        served     POST /events            GET /events        GET /events/head
+                   GET  /events/replay     GET /events/verify GET /events/{event_id}
+        published  POST /events
+                   GET  /snapshot                  -> 404
+                   GET  /stores/{store_id}/trust   -> 404
+                   POST /feedback/{order_ref}      -> 404
+
+    So the only operation the two sides agree on is the append. The trust *scores* — the whole
+    point of the service, and R12's input to the exchange's eligibility gate — are readable by
+    nobody, and the buyer feedback that is supposed to move them has no door. Inversely, five
+    read paths over the raw event log are served with no contract declaring them.
+
+    This half lives in the exchange's repro file rather than under ``apps/trust/tests`` because
+    it needs no file there: it imports ``trust.main`` and reads
+    ``packages/contracts/openapi/trust.openapi.json``, both of which this test can reach from
+    here. Nothing about the property is exchange-specific; only the file ownership is.
+    """
+    served = _served_operations(_build("trust.main"))
+    published = _published_operations(TRUST_OPENAPI)
+
+    assert published, "the trust contract declares nothing; the sweep is unarmed"
+    assert served == published, (
+        f"the trust service's served surface diverges from its published contract — "
+        f"{_operation_divergence(served, published)}"
+    )
+
+
+# =====================================================================================
+# T-310 — the published ranking is on no served path
+# =====================================================================================
+
+
+def _exchange_app_import_closure() -> dict[str, str]:
+    """Every ``exchange.*`` module that BUILDING the real app pulls in, name -> file.
+
+    Measured in a SUBPROCESS on purpose, the same way ``services/ingest/tests`` measures its
+    own reachability question. In-process, ``sys.modules`` already holds whatever the rest of
+    this directory's tests imported — ``test_ranking.py`` imports ``exchange.ranking`` by
+    hand — and a reachability question answered against a polluted module table answers
+    itself in the affirmative every time.
+
+    The subprocess is given an explicit ``PYTHONPATH`` and its answers are checked against the
+    repo root by the caller, because this venv's ``site-packages/_proxyshop.pth`` puts a
+    checkout root and its ``.pkgroot`` on ``sys.path`` for every process that uses it — a
+    probe that trusts the resolution it happens to get can measure a different tree than the
+    one under test.
+    """
+    import os  # noqa: PLC0415 - kept out of this file's frozen import head
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    repo_root = Path(__file__).resolve().parents[3]
+    code = (
+        "import json, sys\n"
+        "import exchange.main\n"
+        "exchange.main.create_app()\n"
+        "print(json.dumps({name: getattr(module, '__file__', '') or ''\n"
+        "                  for name, module in sys.modules.items()\n"
+        "                  if name == 'exchange' or name.startswith('exchange.')}))\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(repo_root), str(repo_root / ".pkgroot")])
+    env["PROXYSHOP_WORKER"] = env.get("PROXYSHOP_WORKER", "0")
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, "-c", code],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, f"the exchange app would not build:\n{completed.stderr}"
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def test_the_exchange_import_closure_probe_is_armed() -> None:
+    """Not xfail, and this separation is the whole reason it exists.
+
+    These four checks used to live inside ``test_t310_…``'s body. That was unsound, and
+    measurably so: under ``xfail(strict=True)`` **any** exception in the body is reported
+    ``xfailed`` — which is green — so a probe that had stopped working was indistinguishable
+    from the defect it was supposed to detect. A faked ``subprocess.run`` returning either
+    ``{}`` (empty closure) or a non-zero exit reported ``1 xfailed`` in both cases; the
+    subprocess failing to build the app, a JSON decode error and a timeout all read the same
+    way. Worse, under the ticket's own ``--runxfail`` gate every one of those dead-probe
+    states reads as "still broken", so a lane repairing T-310 would churn against a probe
+    that could never go green.
+
+    Moving them out is what makes the failure legible: a broken probe now fails ``make
+    verify`` in its own name, while T-310 stays a clean statement about one property.
+
+    What is armed here:
+
+    * the probe subprocess builds the app at all;
+    * every module it names resolves inside THIS tree, so the venv's ``_proxyshop.pth`` — which
+      puts a checkout root on ``sys.path`` for every process using it — cannot answer the
+      question with a different checkout's code;
+    * the closure contains the modules already known to be served, so an empty ranking result
+      means "ranking is unreachable" rather than "the probe saw nothing".
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    modules = _exchange_app_import_closure()
+
+    assert modules, "building the exchange app imported no exchange module at all; probe is wrong"
+    for name, filename in sorted(modules.items()):
+        if not filename:
+            continue
+        resolved = Path(filename).resolve()
+        assert repo_root in resolved.parents, (
+            f"{name} resolved to {resolved}, which is outside the tree under test "
+            f"({repo_root}) — the probe measured the wrong checkout"
+        )
+
+    for expected in ("exchange.main", "exchange.auction.routes", "exchange.accept.routes"):
+        assert expected in modules, (
+            f"{expected} is missing from the app's own import closure {sorted(modules)} — "
+            "the reachability probe is not measuring the served app"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-310: nothing the exchange app imports reaches exchange.ranking — "
+        "auction/routes.py:39-42 imports eligibility, orchestration, fanout and state and "
+        "nothing else, and no other served module names the package — so rank(), the hard "
+        "constraint filters and the shortlist builder are on no served path while "
+        "docs/demo/starting-slice.md 3.4 claims they run in the auction. READ THE DOCSTRING "
+        "BEFORE FIXING: the one-line wiring crashes the deployed image, because "
+        "exchange.ranking transitively imports `ingest`, which apps/exchange/Dockerfile does "
+        "not ship (T-299). Remove this marker with the fix"
+    ),
+)
+def test_t310_the_served_exchange_app_reaches_the_published_ranking() -> None:
+    """The ranker is fully built, fully tested, and imported by no running process.
+
+    ``apps/exchange/src/ranking`` is T-032's deliverable: the published deterministic scoring
+    formula, the hard-constraint eligibility filters, and the shortlist construction. It has
+    its own suite (``apps/exchange/tests/test_ranking.py``) and the frozen acceptance suite
+    imports ``apps.exchange.src.ranking`` at eight sites across two files. Every one of those
+    is a *library* call. Measured at HEAD::
+
+        $ git grep -n ranking -- apps/exchange/src | grep -v '^apps/exchange/src/ranking/'
+        apps/exchange/src/accept/offer.py:226:      ... through ranking has no shortlist ...
+        apps/exchange/src/auction/routes.py:143:    ... wins every ranking there is ...
+        apps/exchange/src/eligibility/__init__.py:23: ... owns the ranking gate inside rank() ...
+        apps/exchange/src/retrieval/criteria.py:331: ... apps/exchange/src/ranking never sees ...
+        apps/exchange/src/retrieval/rerank.py:18:   ... ranking function for the published one ...
+
+    Five hits outside the package, and every one is a *docstring or comment* — not one is an
+    import or a call. (The brief that commissioned this gate said the grep "returns zero
+    hits", which is false as written; what is true, and is the defect, is that zero of the
+    hits are code.) Inside the package the only imports of a ranking module are
+    ``ranking/__init__.py:46`` and ``ranking/scoring.py:32``, both
+    ``from contracts.ranking import ...`` — the package reaching for its own contracts
+    package. The auction route's import block, lines 39-42, is::
+
+        from ..eligibility import StaticSellerEligibility
+        from ..orchestration import solicit_bids
+        from .fanout import parallel_fan_out
+        from .state import AuctionStateMachine, UnknownAuction
+
+    so a request that runs an auction end to end never scores anything: the offers come back
+    from the fan-out in whatever order they arrive. ``docs/demo/starting-slice.md`` 3.4 states
+    that "``exchange.ranking.rank`` applies the hard-constraint filters, then the published
+    weighted formula, and builds the shortlist" — a claim about a code path no served request
+    takes, and it is the weighted formula half that the demo script promises. The filters
+    inside
+    ``rank()`` are the part that matters most: R19's hard constraints never run on a served
+    auction, so a candidate ``rank()`` would have excluded is offered to the buyer anyway.
+
+    The property asserted is reachability, not a call site: some module the app imports while
+    building must pull ``exchange.ranking`` in. That is deliberately the weakest sufficient
+    condition, so any honest wiring passes — a route that calls ``rank``, a service module
+    that imports it, an orchestration step that scores the fan-out — while today's tree, in
+    which nothing on the served side names the package at all, cannot.
+
+    **Do not fix this with the one-line import until T-299 is fixed — it takes the exchange
+    DOWN.** Measured, not theorised. ``exchange.ranking.filters:39`` does
+    ``from ..retrieval.criteria import HardCriterion, MalformedIntent``, which executes
+    ``exchange.retrieval.__init__``, which imports ``sources``/``service``, which do
+    ``from ingest.graph import ...`` and ``from ingest.embeddings import ...`` at module
+    scope. So importing ``exchange.ranking`` pulls in eleven ``ingest.*`` modules. In the repo
+    that resolves, because ``.pkgroot/ingest`` is there. In the deployed image it does not:
+    ``apps/exchange/Dockerfile`` copies ``packages/contracts``, ``proxyshop_support`` and
+    ``apps/exchange/src`` and creates exactly two ``.pkgroot`` links (``contracts``,
+    ``exchange``) — no ``services/ingest`` and no ``ingest`` link. Reproduced against a tree
+    holding only what that Dockerfile copies::
+
+        import exchange.main; exchange.main.create_app()  -> APP BUILDS OK
+        import exchange.ranking                           -> ModuleNotFoundError: 'ingest'
+        import exchange.retrieval                         -> ModuleNotFoundError: 'ingest'
+
+    ``CMD uvicorn exchange.main:app`` builds the app at import time, so wiring ranking into a
+    served route module today would turn a service that boots and answers three paths into a
+    container that crash-loops on start. The gate stays as written — the defect is real and
+    the property is the right one — but the repair is "make ``ingest`` reachable from the
+    exchange image, or break ranking's dependency on it, THEN wire it", not one import line.
+    """
+    modules = _exchange_app_import_closure()
+    ranking = sorted(name for name in modules if name.split(".")[:2] == ["exchange", "ranking"])
+    assert ranking, (
+        "building the exchange app imports no exchange.ranking module, so the published "
+        "ranking — rank(), the hard-constraint filters and the shortlist builder — is on no "
+        f"served path; the app's exchange import closure is {sorted(modules)}"
+    )
