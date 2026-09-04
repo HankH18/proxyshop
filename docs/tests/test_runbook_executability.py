@@ -91,7 +91,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import pytest
+# `import pytest` used to live here for the `@pytest.mark.xfail` on the gate below. Removing
+# that marker made this the file's only remaining use of the name, and ruff's F401 fails
+# `make verify` on a dead import — so it goes with the marker. Nothing else here needs pytest:
+# every check is a plain assertion, and the one pytest subprocess this file runs is spawned
+# through `sys.executable -m pytest`.
 
 #: Repo root, reached from this file rather than from a hard-coded string so a moved test
 #: cannot silently start scanning nothing.
@@ -1486,18 +1490,18 @@ def test_the_runbook_command_sweep_is_armed() -> None:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the demo runbook's two headline commands do not resolve: "
-        "`uv run python -m pytest e2e/test_s1_flow.py -q` names a module that is not in the "
-        "repo (T-082, which would have added it, was rejected and its branch is unmerged), and "
-        "`make e2e-live` shells out to docs/demo/e2e_live.sh, which was never written, so the "
-        "target dies with `No such file or directory` (bash 127, make exit 2). The frozen E8 "
-        "acceptance checks only that the Makefile DEFINES the targets, so both read green. "
-        "Remove this marker once the runbook's commands actually run."
-    ),
-)
+# This test carried `@pytest.mark.xfail(strict=True)` when it landed, because the runbook's
+# two headline commands did not resolve: `uv run python -m pytest e2e/test_s1_flow.py -q`
+# named a file that was not in the repo (T-082, which would have added it, was rejected and
+# its branch left unmerged), and `make e2e-live` shelled out to `docs/demo/e2e_live.sh`, which
+# had never been written, so the target died with `No such file or directory` — bash 127, make
+# exit 2. The sweep read 17 commands, 13 PASS / 4 FAIL / 0 UNCLASSIFIED.
+#
+# ESC-018 step (b) closed both. `docs/demo/e2e_live.sh` now exists as the live-run preflight
+# (it always exits non-zero; the runbook says so), and `e2e/test_s1_flow.py` exists and
+# collects. The sweep now reads 17 commands, 17 PASS / 0 FAIL / 0 UNCLASSIFIED, so the marker
+# is gone: leaving it would turn this file red on XPASS, which is the same defect in the other
+# direction. Put it back only alongside a measurement showing a command that does not resolve.
 def test_c19_every_command_the_demo_runbook_names_resolves() -> None:
     """Every command in every ``docs/demo/`` runbook must resolve to something real.
 
