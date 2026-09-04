@@ -1143,3 +1143,570 @@ def test_the_delisting_seam_itself_compares_a_score_to_the_published_threshold()
         f"and neither a text grep nor a whole-tree 'somebody loads it' check can see that: "
         f"services/sim/src/runner.py loads it independently and would hold both green"
     )
+
+
+# ======================================================================================
+# T-172 — an undeclared docker test is silently widened to the whole stack
+# ======================================================================================
+#: The plugin the collection subprocess below runs under. Written to ``tmp_path`` and loaded
+#: with ``-p`` rather than imported, because it must observe the REAL suite's collection —
+#: the same ``pytest_collection_modifyitems`` seam ``conftest.py`` classifies items in — and
+#: ``trylast`` so it sees the item list AFTER ``-m docker`` has deselected everything else.
+_T172_COLLECTOR = '''\
+import json, os, pathlib
+import pytest
+from proxyshop_support import service_markers
+
+_RECORDS = []
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(items):
+    for item in items:
+        marker_args = [list(mark.args) for mark in item.iter_markers("docker")]
+        fixtures = sorted(set(item.fixturenames) & set(service_markers.FIXTURE_SERVICES))
+        try:
+            services = list(service_markers.services_for(marker_args, item.fixturenames))
+            refusal = None
+        except Exception as exc:  # a LOUD resolution is a fix, not a defect
+            services, refusal = [], f"{type(exc).__name__}: {exc}"
+        _RECORDS.append(
+            {
+                "nodeid": item.nodeid,
+                "marker_args": marker_args,
+                "mapped_fixtures": fixtures,
+                "services": services,
+                "refusal": refusal,
+            }
+        )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    pathlib.Path(os.environ["T172_CORPUS_OUT"]).write_text(
+        json.dumps(_RECORDS), encoding="utf-8"
+    )
+'''
+
+#: Substrings that betray, in a test module's own source, that it talks to a given compose
+#: service. Deliberately generous — the point is that a module mentioning NONE of a service's
+#: spellings anywhere cannot possibly need that service, which is ground truth INDEPENDENT of
+#: ``services_for`` and of ``FIXTURE_SERVICES``. Keyed by service so a new compose service
+#: makes the armed guard below fail rather than silently drop out of the sweep.
+_T172_SERVICE_EVIDENCE: dict[str, str] = {
+    "postgres": r"postgres|psycopg|\bpg_|libpq",
+    "redis": r"redis",
+    "neo4j-bolt": r"neo4j|bolt",
+}
+
+#: The smallest docker corpus this gate will reason about. Measured at 264; a collection that
+#: silently drops most of the suite must fail rather than pass over the remainder.
+_T172_MIN_DOCKER_ITEMS = 200
+
+
+#: One collection per session, shared by the armed guard and the repro. Collecting the whole
+#: suite twice is ~5s of pure duplication in ``make verify``.
+_T172_CORPUS_CACHE: list[dict[str, Any]] | None = None
+
+
+def _t172_collect_docker_corpus(tmp_path: Any) -> list[dict[str, Any]]:
+    """Every ``-m docker`` item the real suite collects, with the services it resolves to.
+
+    A subprocess running the repo's own collection, not a re-implementation of it: the
+    defect lives in what ``conftest.py`` asks ``services_for`` at collection time, so
+    anything short of a real collection grades a model of the rule instead of the rule.
+    """
+    global _T172_CORPUS_CACHE
+    if _T172_CORPUS_CACHE is not None:
+        return _T172_CORPUS_CACHE
+
+    plugin_dir = tmp_path / "t172_plugin"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "t172_corpus.py").write_text(_T172_COLLECTOR, encoding="utf-8")
+    out = tmp_path / "t172_corpus.json"
+
+    env = dict(os.environ)
+    env["T172_CORPUS_OUT"] = str(out)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(plugin_dir), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-m",
+                "docker",
+                "-p",
+                "no:cacheprovider",
+                "-p",
+                "t172_corpus",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+    except subprocess.TimeoutExpired as expiry:  # pragma: no cover - a hang is a third outcome
+        raise AssertionError(
+            "collecting the docker corpus did not finish in 240s. A gate that hangs prints "
+            "no red at all, so this is a failure and not a slow pass."
+        ) from expiry
+
+    assert completed.returncode == 0, (
+        f"collecting `-m docker` failed with rc={completed.returncode}; this gate cannot "
+        f"reason about a corpus it could not build.\nstdout tail:\n"
+        f"{completed.stdout[-2000:]}\nstderr tail:\n{completed.stderr[-2000:]}"
+    )
+    assert out.is_file(), (
+        "the collection subprocess exited 0 but wrote no corpus, so the collector plugin "
+        "never ran — every count below would have been silently zero"
+    )
+    records: list[dict[str, Any]] = json.loads(out.read_text(encoding="utf-8"))
+    _T172_CORPUS_CACHE = records
+    return records
+
+
+def _t172_declares_a_service(record: dict[str, Any]) -> bool:
+    """True when the item said what it needs, by either route the rule reads."""
+    return bool(any(record["marker_args"]) or record["mapped_fixtures"])
+
+
+def _t172_module_evidence(path: str, cache: dict[str, set[str]]) -> set[str]:
+    """The services a test module's OWN SOURCE shows any sign of talking to.
+
+    Ground truth for "could this test possibly need Redis?" that never consults
+    ``services_for`` or ``FIXTURE_SERVICES`` — so the consequence layer below is not the
+    structural layer restated, and cannot be satisfied by teaching the rule a new fixture.
+    """
+    if path not in cache:
+        source = (REPO_ROOT / path).read_text(encoding="utf-8")
+        cache[path] = {
+            service
+            for service, pattern in _T172_SERVICE_EVIDENCE.items()
+            if re.search(pattern, source, re.IGNORECASE)
+        }
+    return cache[path]
+
+
+def test_t172_the_docker_corpus_sweep_is_armed(tmp_path: Any) -> None:
+    """Before anything is concluded about the corpus, prove there IS a corpus.
+
+    Not xfail: this must hold today and must keep holding after the fix. Three sweeps in this
+    repo have gone quiet rather than red (6 -> 0 of 8, 70 -> 0 of 79, 48 -> 0 of 66), and the
+    gate below is a walk over collected items — the cheapest way to silence it is a collection
+    that finds nothing.
+
+    It also pins the two things the consequence layer depends on: that
+    :data:`_T172_SERVICE_EVIDENCE` still covers every compose service (a new service would
+    otherwise drop out of the sweep unnoticed), and that the evidence reader actually
+    discriminates — a module with narrow evidence must read narrow.
+    """
+    from proxyshop_support import reachability
+
+    assert set(_T172_SERVICE_EVIDENCE) == set(reachability.SERVICES), (
+        f"the module-evidence table covers {sorted(_T172_SERVICE_EVIDENCE)} but compose now "
+        f"runs {sorted(reachability.SERVICES)}. An uncovered service silently reads as 'no "
+        f"evidence anywhere', which would make the consequence layer below fire on every "
+        f"item, or — with the difference the other way — never fire at all"
+    )
+
+    records = _t172_collect_docker_corpus(tmp_path)
+    assert len(records) >= _T172_MIN_DOCKER_ITEMS, (
+        f"only {len(records)} `-m docker` items collected, below the {_T172_MIN_DOCKER_ITEMS} "
+        f"floor (264 at the time this was written). The gate below walks this list, so a "
+        f"shrunken corpus would let it pass by having nothing left to look at"
+    )
+    declaring = [record for record in records if _t172_declares_a_service(record)]
+    assert len(declaring) >= _T172_MIN_DOCKER_ITEMS // 2, (
+        f"only {len(declaring)} of {len(records)} docker items declare a service at all. The "
+        f"structural layer below asks every item to declare one; if almost none do, that "
+        f"layer is grading a corpus that never worked rather than a regression"
+    )
+
+    cache: dict[str, set[str]] = {}
+    narrow = [
+        record
+        for record in records
+        if _t172_module_evidence(record["nodeid"].split("::")[0], cache)
+        != set(reachability.SERVICES)
+    ]
+    assert len(narrow) >= _T172_MIN_DOCKER_ITEMS, (
+        f"only {len(narrow)} of {len(records)} docker items live in a module whose source "
+        f"shows evidence for FEWER than all {len(reachability.SERVICES)} services (250 when "
+        f"this was written). The consequence layer can only fire on those, so if the evidence "
+        f"reader started answering 'all three' everywhere it would pass vacuously"
+    )
+
+    canary = {
+        service
+        for service, pattern in _T172_SERVICE_EVIDENCE.items()
+        if re.search(pattern, "import psycopg\n", re.IGNORECASE)
+    }
+    assert canary == {"postgres"}, (
+        f"the evidence reader answered {sorted(canary)} for a module whose entire source is "
+        f"`import psycopg`. It is meant to read narrow for a narrow module; if it reads wide "
+        f"the consequence layer below can never fire"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-172: service_markers.services_for widens an item that declares no service to the "
+        "whole stack, so 8 Postgres-only docker tests — 5 schema-grants, 2 role-password, 1 "
+        "closed-loopback — are skipped at exit 0 by a Redis-only or neo4j-only outage; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t172_an_undeclared_docker_test_is_widened_to_the_whole_stack(tmp_path: Any) -> None:
+    """A test that needs one store must not be silenced by a different store being down.
+
+    Three assertions that fail for three DIFFERENT reasons, so no single edit closes the gate
+    while leaving the defect alive:
+
+    * **the corpus** — every collected docker item must say what it needs. This is the hole
+      the ticket counted: 8 items say nothing and are handed all three services.
+    * **the branch the ticket scopes** (``service_markers.py``'s ``if not named: return
+      reachability.SERVICES``) — "I declared nothing" must be distinguishable from "I declared
+      everything". Annotating the 8 tests makes the fallback unreachable from the corpus,
+      which would leave the branch free to be reverted to anything with the first assertion
+      still green; this one stays red until the branch itself stops silently widening.
+      Either shape closes it — a refusal, or an answer that is not the whole stack — because
+      prescribing one would be grading an implementation rather than the property.
+    * **the consequence**, read off ground truth that is not ``services_for``: a module whose
+      own source never mentions Redis in any spelling cannot need Redis, so no item in it may
+      be gated on Redis. This is what makes the gate survive its own fix — it cannot be
+      satisfied by teaching ``FIXTURE_SERVICES`` a new fixture, nor by stamping
+      ``@pytest.mark.docker("postgres", "neo4j-bolt", "redis")`` on the offenders, both of
+      which close the first assertion while leaving every named test just as skippable.
+    """
+    from proxyshop_support import reachability, service_markers
+
+    records = _t172_collect_docker_corpus(tmp_path)
+    assert records, "no docker items collected; see the armed-sweep guard above"
+
+    undeclared = [
+        record
+        for record in records
+        if not _t172_declares_a_service(record) and record["refusal"] is None
+    ]
+    assert undeclared == [], (
+        f"{len(undeclared)} of {len(records)} `-m docker` items declare no service — no "
+        f"marker argument and no fixture in FIXTURE_SERVICES — so services_for falls through "
+        f"to `return reachability.SERVICES` and every one of them is skipped at exit 0 by a "
+        f"single-store outage it does not depend on: "
+        f"{[record['nodeid'] for record in undeclared]}"
+    )
+
+    everything = [tuple(reachability.SERVICES)]
+    declared_whole_stack = service_markers.services_for(everything, ())
+    try:
+        widened: tuple[str, ...] | None = service_markers.services_for([], ())
+    except Exception:
+        widened = None  # a loud refusal is a fix: nothing is silently widened
+    assert widened is None or tuple(widened) != tuple(declared_whole_stack), (
+        f"services_for answers {list(declared_whole_stack)} for an item that declared the "
+        f"whole stack AND for an item that declared nothing at all, so the two are "
+        f"indistinguishable downstream and conftest skips them identically. The ticket scopes "
+        f"this branch (proxyshop_support/service_markers.py, `if not named: return "
+        f"reachability.SERVICES`): silence about a dependency must not read as depending on "
+        f"everything. Either shape closes this — raise, or answer something other than the "
+        f"full stack — but the answers must differ"
+    )
+
+    cache: dict[str, set[str]] = {}
+    over_gated: list[str] = []
+    for record in records:
+        path = record["nodeid"].split("::")[0]
+        evidence = _t172_module_evidence(path, cache)
+        surplus = sorted(set(record["services"]) - evidence)
+        if surplus:
+            over_gated.append(
+                f"{record['nodeid']} gated on {surplus} with module evidence only for "
+                f"{sorted(evidence)}"
+            )
+    assert over_gated == [], (
+        f"{len(over_gated)} docker items are gated on a service their own test module never "
+        f"mentions in any spelling, so a store they cannot possibly use still skips them at "
+        f"exit 0 — the pre-T-109 defect, surviving for exactly these items:\n  "
+        + "\n  ".join(over_gated)
+    )
+
+
+# ======================================================================================
+# T-259 — trust emits a trust event the store agent's real intake refuses
+# ======================================================================================
+#: Identity key names planted in the generated event payloads. Every one is an EXACT member
+#: of ``trust.feedback.IDENTITY_KEYS`` or carries a member of ``IDENTITY_KEY_SUBSTRINGS``, so
+#: ``scrub_report`` removes the KEY and the count it reports is exactly how many were planted
+#: — which is what lets the survival assertion below compare against the generated input
+#: rather than against a constant.
+_T259_IDENTITY_KEYS = (
+    "buyer_email",
+    "customer_name",
+    "shipping_address",
+    "phone",
+    "user_id",
+    "buyer_name",
+)
+
+#: The six values trust puts on the wire that ``contracts.TrustEventPayload`` has no room for
+#: today. A fix that DELETES them validates just as well as a fix that relocates them, and the
+#: deleted version is strictly worse — ``redacted_fields`` is the mechanism trust's own
+#: docstring says exists "so the receiving agent (and an auditor) see that a scrub happened
+#: without learning what it removed". So the gate asserts they arrive, wherever they are
+#: parked, and never asserts the address they are parked at.
+_T259_CARRIERS = (
+    "schema_version",
+    "reason_code",
+    "order_ref",
+    "identity_disclosed",
+    "redacted_fields",
+    "policy",
+)
+
+#: The pinned half of the generator's seed. XORed with fresh OS entropy on every run.
+_T259_PINNED_SEED = 0x259
+
+#: How many deltas the property draws. Large enough to cross every dimension and every ledger
+#: kind several times over, small enough that the whole sweep is well under a second.
+_T259_CASES = 60
+
+
+def _t259_rng() -> Any:
+    """A generator that is reproducible in its SHAPE and never in its DRAWS.
+
+    A pinned seed alone turns a "randomized property" into a parametrized table wearing a
+    costume: the draws become enumerable, and a fix can be tuned to exactly the values that
+    seed produces. The pinned half keeps the spread of shapes stable enough to assert on; the
+    ``SystemRandom`` half means no run can be pre-satisfied.
+    """
+    import random
+
+    return random.Random(_T259_PINNED_SEED ^ random.SystemRandom().getrandbits(48))
+
+
+def _t259_plant(rng: Any) -> tuple[dict[str, Any], int]:
+    """One generated event payload, plus how many identity KEYS were planted in it.
+
+    Shape is drawn, not just values: how many identity keys, how deep they are buried, and
+    whether the innocent fields sit beside them or below them all vary per case, so a fix that
+    only handles the flat single-key case fails most of the sweep.
+    """
+    planted = rng.sample(_T259_IDENTITY_KEYS, rng.randint(0, 3))
+    payload: dict[str, Any] = {"note": "delivered", "sku": f"sku-{rng.randrange(10_000)}"}
+    remaining = list(planted)
+    node = payload
+    for _ in range(rng.randint(0, 2)):
+        child: dict[str, Any] = {"level": rng.randrange(10)}
+        if remaining and rng.random() < 0.7:
+            child[remaining.pop()] = "someone@example.com"
+        node["detail"] = child
+        node = child
+    for key in remaining:
+        payload[key] = "someone@example.com"
+    return payload, len(planted)
+
+
+def _t259_cases() -> list[dict[str, Any]]:
+    """``_T259_CASES`` trust deltas spanning every dimension and every ledger event kind."""
+    from contracts import LedgerEventKind, TrustDimension
+
+    rng = _t259_rng()
+    dims = list(TrustDimension)
+    kinds = list(LedgerEventKind)
+    cases: list[dict[str, Any]] = []
+    for index in range(_T259_CASES):
+        payload, planted = _t259_plant(rng)
+        store_id = f"store-{index}-{rng.randrange(10**9)}"
+        cases.append(
+            {
+                "store_id": store_id,
+                "dim": dims[index % len(dims)].value,
+                "delta": rng.choice((-1.0, 1.0)) * rng.uniform(0.05, 5.0),
+                "order_ref": rng.choice((None, f"order-{index}")),
+                "reason_code": rng.choice((None, "mismatch_return", "late_dispatch")),
+                "buyer_pseudonym": f"pseudonym-{index}",
+                "event": {
+                    "event_id": f"event-{index}",
+                    "ts": AS_OF,
+                    "kind": kinds[index % len(kinds)].value,
+                    "store_id": store_id,
+                    "payload": payload,
+                },
+                "planted_identity_keys": planted,
+            }
+        )
+    return cases
+
+
+def _t259_values_by_key(node: Any, found: dict[str, list[Any]] | None = None) -> dict[str, list[Any]]:
+    """Every ``key -> values`` pair anywhere in a nested mapping, at any depth.
+
+    The gate reads the carriers back through this rather than at a pinned address, so
+    relocating them into the open ``event.payload`` mapping — the realistic fix, since
+    ``packages/contracts`` is frozen — passes, and dropping them does not.
+    """
+    found = {} if found is None else found
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.setdefault(str(key), []).append(value)
+            _t259_values_by_key(value, found)
+    elif isinstance(node, (list, tuple)):
+        for value in node:
+            _t259_values_by_key(value, found)
+    return found
+
+
+def test_t259_the_trust_event_generator_is_armed() -> None:
+    """The generator cannot be narrowed into a probe without this going red.
+
+    Not xfail, deliberately. Every assertion inside a ``strict`` xfail test is invisible in a
+    normal run — a failure there IS the expected outcome — so a canary placed inside the repro
+    below would let a silently narrowed generator sail through ``make verify`` while
+    resurrecting exactly the single-value keys the property exists to close. This is the
+    canary, and it must pass today and keep passing after the fix.
+    """
+    from contracts import LedgerEventKind, TrustDimension
+
+    cases = _t259_cases()
+    assert len(cases) == _T259_CASES, (
+        f"the generator produced {len(cases)} cases, not {_T259_CASES}; a sweep that shrinks "
+        f"is a sweep that stops proving anything"
+    )
+    assert len({case["store_id"] for case in cases}) == _T259_CASES, (
+        "two generated cases share a store_id, so the sweep is narrower than it counts"
+    )
+    assert {case["dim"] for case in cases} == {dim.value for dim in TrustDimension}, (
+        f"the generated dims cover only {sorted({case['dim'] for case in cases})} of "
+        f"{sorted(dim.value for dim in TrustDimension)} — a property that never varies the "
+        f"dimension cannot catch a fix that hard-codes one"
+    )
+    assert {case["event"]["kind"] for case in cases} == {
+        kind.value for kind in LedgerEventKind
+    }, "the generated ledger kinds no longer cover the whole frozen vocabulary"
+
+    planted = {case["planted_identity_keys"] for case in cases}
+    assert len(planted) >= 3 and 0 in planted and max(planted) >= 2, (
+        f"the generator planted only {sorted(planted)} identity keys across {_T259_CASES} "
+        f"cases. The redaction-report assertion compares `redacted_fields` against this "
+        f"number, so a generator that always plants the same count grades a constant"
+    )
+    depths = {json.dumps(case["event"]["payload"]).count('"detail"') for case in cases}
+    assert len(depths) >= 2, (
+        f"every generated payload nests to the same depth ({sorted(depths)}); the scrub walks "
+        f"recursively and a single-depth sweep never exercises that"
+    )
+    assert len({case["reason_code"] for case in cases}) >= 2, (
+        "reason_code never varies, so its round-trip assertion below grades a constant"
+    )
+    assert len({case["order_ref"] is None for case in cases}) == 2, (
+        "order_ref is either always present or always absent across the sweep"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-259: trust.feedback.trust_event_payload emits `schema_version`, `reason_code` and a "
+        "pseudonymous_context carrying `order_ref`/`identity_disclosed`/`redacted_fields`/"
+        "`policy`, and contracts.TrustEventPayload forbids extras — so the store agent's real "
+        "intake rejects 60 of 60 emitted events while both suites stay green against their own "
+        "doubles; remove this marker with the fix"
+    ),
+)
+def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -> None:
+    """The two ends of R13 must agree, and the agreement must be measured across the seam.
+
+    ``apps/trust`` pushes into a local ``_RecordingSink``; ``packages/store-agent`` ingests a
+    hand-written dict its own fixtures call "the frozen suite's TrustEventPayload, shape for
+    shape". Nothing joins the two, and ``apps/trust`` never validates its own emission against
+    ``contracts.TrustEventPayload`` — the model the intake side really does validate with. So
+    a field-name drift on either side is invisible to both suites while both stay green, which
+    is precisely what has happened.
+
+    Two assertions, because acceptance alone rewards the wrong fix. The cheapest way to make
+    the intake stop refusing is to DELETE the six fields it has no room for; that validates
+    perfectly and silently drops the redaction report an auditor needs. So the second
+    assertion reads the six carriers back off the payload the intake actually accepted,
+    wherever the fix parks them, and compares them to each case's own generated inputs.
+    """
+    from store_agent.modes import AgentRunner
+    from trust.feedback import TRUST_EVENT_SCHEMA_VERSION, trust_event_payload
+
+    cases = _t259_cases()
+    assert len(cases) == _T259_CASES, "the generator is not armed; see the guard above"
+
+    rejected: list[tuple[str, str, str]] = []
+    accepted: list[tuple[dict[str, Any], Any, Any]] = []
+    for case in cases:
+        emitted = trust_event_payload(case)
+        runner = AgentRunner(
+            {"store_id": case["store_id"]}, sink=object(), submitter=None, mode="shadow"
+        )
+        try:
+            validated = runner.ingest_trust_event(emitted)
+        except Exception as refusal:
+            rejected.append(
+                (case["dim"], type(refusal).__name__, str(refusal).splitlines()[0])
+            )
+        else:
+            accepted.append((case, validated, runner.trust_posture))
+
+    assert rejected == [], (
+        f"{len(rejected)} of {len(cases)} events trust emits are refused by the store agent's "
+        f"real intake (store_agent.modes.AgentRunner.ingest_trust_event, which validates with "
+        f"contracts.TrustEventPayload). First refusal: {rejected[0]}. Both suites stay green "
+        f"because trust only ever pushes into a local _RecordingSink and the store agent only "
+        f"ever ingests its own hand-written dict, so nothing joins the emitted payload to the "
+        f"model the intake really parses"
+    )
+
+    losses: list[str] = []
+    for case, validated, posture in accepted:
+        dumped = validated.model_dump(mode="json")
+        seen = _t259_values_by_key(dumped)
+
+        signals = {signal.dim: signal for signal in posture.signals}
+        landed = signals.get(case["dim"]) or next(
+            (signal for signal in posture.signals if str(signal.dim) == case["dim"]), None
+        )
+        if landed is None or abs(float(landed.net_delta) - case["delta"]) > 1e-9:
+            losses.append(
+                f"{case['store_id']}: the delta {case['delta']!r} did not land on "
+                f"{case['dim']!r} — posture reads {[(str(s.dim), s.net_delta) for s in posture.signals]}"
+            )
+            continue
+
+        for carrier in _T259_CARRIERS:
+            if carrier not in seen:
+                losses.append(f"{case['store_id']}: {carrier!r} is nowhere on the ingested payload")
+        if "redacted_fields" in seen and case["planted_identity_keys"] not in {
+            value for value in seen["redacted_fields"] if isinstance(value, int)
+        }:
+            losses.append(
+                f"{case['store_id']}: redacted_fields reads {seen['redacted_fields']} but "
+                f"{case['planted_identity_keys']} identity keys were planted"
+            )
+        if "identity_disclosed" in seen and any(value for value in seen["identity_disclosed"]):
+            losses.append(f"{case['store_id']}: identity_disclosed is truthy on the wire")
+        if "schema_version" in seen and TRUST_EVENT_SCHEMA_VERSION not in seen["schema_version"]:
+            losses.append(f"{case['store_id']}: schema_version does not round-trip")
+        if case["reason_code"] is not None and case["reason_code"] not in seen.get(
+            "reason_code", []
+        ):
+            losses.append(f"{case['store_id']}: reason_code {case['reason_code']!r} was dropped")
+        if case["order_ref"] is not None and case["order_ref"] not in seen.get("order_ref", []):
+            losses.append(f"{case['store_id']}: order_ref {case['order_ref']!r} was dropped")
+
+    assert losses == [], (
+        f"{len(losses)} losses across {len(accepted)} accepted events. The intake accepted the "
+        f"payload, but the values trust put on the wire did not survive the crossing — which "
+        f"is what a fix that simply DELETES the six fields contracts has no room for looks "
+        f"like. redacted_fields in particular is the only signal a store agent or an auditor "
+        f"gets that a scrub happened at all.\n  " + "\n  ".join(losses[:12])
+    )
