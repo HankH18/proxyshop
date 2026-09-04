@@ -4564,6 +4564,36 @@
       "defect": "T-064's acceptance criterion 3 -- the exchange client caches the trust snapshot and refreshes it on a version bump -- DOES NOT EXIST. There is no snapshot HTTP route (apps/trust/src/main.py mounts only /events/*), and no client, no cache and no version-bump refresh anywhere in Python or TypeScript. Zero tests name it. Criteria 1 and 2 are genuinely built and graded, which is why the epic-scoped gate passes and hides the gap. T-064 has deliberately been left OPEN rather than closed by the cycle-16 closure audit.",
       "finding_id": "98002f7cbb7972d00eebb35a3ed32d307708a15971ae8066086b663b2d98e1e4",
       "reproduction": "grep -n 'include_router\\|mount' apps/trust/src/main.py shows only the events router. git grep -rn 'snapshot' -- apps/exchange/src returns no client or cache. grep -c 'version_bump\\|refresh' apps/trust/tests/test_snapshot.py returns 0."
+    },
+    {
+      "id": "T-262",
+      "title": "T-087's GATE NAMES A FILE ITS OWN SCOPE FORBIDS IT TO CREATE, and that file sits inside a DIFFERENT ticket's scope. T-087.verify is 'pytest docs/tests/test_runbook.py -q'; T-087.scope is ['docs/demo/shopify-onboarding-extension.md'], which does not contain that path. Meanwhile T-085.scope is ['docs/demo/starting-slice.md', 'docs/tests/**'], which does. So the file that grades T-087 is owned by T-085. Consequence, reproduced live this cycle: the lane building T-082/T-085 wrote a 16,651-byte docs/tests/test_runbook.py inside its granted scope, which would have made T-087's gate satisfiable by a test T-087's lane never wrote -- the answer-key problem inverted, a third party writing the key and T-087 inheriting an unearned green. The lane was redirected and the file removed before it committed. The repair is a scope amendment: either narrow T-085's docs/tests/** glob or widen T-087's scope to include the file its gate runs. Until then T-087 is unbuildable by its own lane, because it cannot create its own grader. NOTE this is a SCOPE-field change and is NOT in the pre-approved verify-field amendment class, so it needs its own authorization.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "tickets.json:T-087"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "tickets.json:T-087",
+      "defect": "T-087's GATE NAMES A FILE ITS OWN SCOPE FORBIDS IT TO CREATE, and that file sits inside a DIFFERENT ticket's scope. T-087.verify is 'pytest docs/tests/test_runbook.py -q'; T-087.scope is ['docs/demo/shopify-onboarding-extension.md'], which does not contain that path. Meanwhile T-085.scope is ['docs/demo/starting-slice.md', 'docs/tests/**'], which does. So the file that grades T-087 is owned by T-085. Consequence, reproduced live this cycle: the lane building T-082/T-085 wrote a 16,651-byte docs/tests/test_runbook.py inside its granted scope, which would have made T-087's gate satisfiable by a test T-087's lane never wrote -- the answer-key problem inverted, a third party writing the key and T-087 inheriting an unearned green. The lane was redirected and the file removed before it committed. The repair is a scope amendment: either narrow T-085's docs/tests/** glob or widen T-087's scope to include the file its gate runs. Until then T-087 is unbuildable by its own lane, because it cannot create its own grader. NOTE this is a SCOPE-field change and is NOT in the pre-approved verify-field amendment class, so it needs its own authorization.",
+      "finding_id": "f9ae8a847d4d6b6769993227801712ae43fe32f2fb6b35cae684306428c94832",
+      "reproduction": "python -c \"import json; ts=json.load(open('tickets.json'))['tickets']; d={t['id']:t for t in ts}; print(d['T-087']['scope'], d['T-087']['verify']); print(d['T-085']['scope'])\" -- shows T-087 grading a path outside its scope and inside T-085's. docs/tests/ on main holds __init__.py, conftest.py and test_scaffold_smoke.py but no test_runbook.py, so the gate currently exits 4 'no tests ran'."
+    },
+    {
+      "id": "T-263",
+      "title": "A ticket whose DELIVERABLE IS ITS OWN GATE TARGET can never be red-checked at its merge base, so the retro red-check that guards every merge stamps it WEAK and arms a veto against a lane that did nothing wrong. T-082's gate is 'pytest e2e/test_s1_flow.py -q' and e2e/test_s1_flow.py is exactly what T-082 must create; at the merge parent the file is absent, pytest exits 4 with no tests SELECTED, and that is indistinguishable by exit code from a genuine red or from the conftest D38 abort. The same shape affects T-024, T-083, T-084, T-086 and T-087, all of which name a test file that does not exist. This is the shape the graph's 'bootstrap: true' exemption exists for, but that field is contractually allowed on one ticket only. Either these tickets need a reproduction landed on main ahead of them the way the xfail-strict repro lanes do, or the gate needs to name an existing frozen test that the deliverable turns green.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "tickets.json:T-082"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "tickets.json:T-082",
+      "defect": "A ticket whose DELIVERABLE IS ITS OWN GATE TARGET can never be red-checked at its merge base, so the retro red-check that guards every merge stamps it WEAK and arms a veto against a lane that did nothing wrong. T-082's gate is 'pytest e2e/test_s1_flow.py -q' and e2e/test_s1_flow.py is exactly what T-082 must create; at the merge parent the file is absent, pytest exits 4 with no tests SELECTED, and that is indistinguishable by exit code from a genuine red or from the conftest D38 abort. The same shape affects T-024, T-083, T-084, T-086 and T-087, all of which name a test file that does not exist. This is the shape the graph's 'bootstrap: true' exemption exists for, but that field is contractually allowed on one ticket only. Either these tickets need a reproduction landed on main ahead of them the way the xfail-strict repro lanes do, or the gate needs to name an existing frozen test that the deliverable turns green.",
+      "finding_id": "5558e10437f6237a656986aefd440dceb843185d2b130731c79cf145ceae9b52",
+      "reproduction": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_s1_flow.py -q at main exits 4 with 'no tests ran'. swarmloop.py red-check --ticket T-082 --base main stamps WEAK with selection null; check-branch --ticket T-082 then reads that stamp as a merge veto."
     }
   ]
 }
