@@ -748,8 +748,13 @@ async def _second_redemption(
     try:
         completion = await stub.buy(variant_id, quantity=quantity, code=code)
     except Exception as exc:  # noqa: BLE001 - the refusal shape is the measurement
-        return {"refused": True, "error": f"{type(exc).__name__}: {exc}", "completion": {}}
-    return {"refused": False, "error": "", "completion": completion}
+        return {
+            "refused": True,
+            "error": f"{type(exc).__name__}: {exc}",
+            "completion": {},
+            "code": code,
+        }
+    return {"refused": False, "error": "", "completion": completion, "code": code}
 
 
 def authorized_checkout_token(run: S1Run, completion: dict[str, Any]) -> str:

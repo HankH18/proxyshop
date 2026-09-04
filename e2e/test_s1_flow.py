@@ -149,6 +149,11 @@ def test_the_runs_ledger_is_a_verifiable_hash_chain(s1_run) -> None:
     ``InMemoryEventStore`` refuses an unknown kind and an unknown top-level field before it
     will chain anything, so this is also the assertion that each event the run produced is a
     well-formed ``LedgerEvent`` and not merely a dict with a plausible shape.
+
+    It is NOT the assertion that the chain is tamper-evident. Measured: this test stays green
+    with ``verify_chain`` replaced by one that always answers ``ok``. Tamper-evidence is held
+    by ``test_a_tampered_ledger_event_breaks_the_chain_it_is_in``, which edits a payload and
+    requires the verifier to name the break.
     """
     report = s1_run.chain
     assert report.get("ok") is True, f"the run's ledger chain does not verify: {report}"
@@ -229,11 +234,19 @@ def test_the_whole_run_completed_offline(s1_run) -> None:
 
 
 def test_the_paid_webhook_was_authenticated_rather_than_assumed(s1_run) -> None:
-    """The HMAC is the reason the webhook may be believed over the pixel.
+    """The run's own `orders/paid` delivery was accepted by the real verifier.
 
-    ``handle_delivery`` answers 401 on a bad signature, so an accepted decision is proof the
-    stub signed the exact bytes the merchant verified. Re-serialising the body anywhere in
-    between would break it, which is what makes this a real check and not a formality.
+    **This test does not prove the signature was checked, and its docstring used to claim it
+    did.** "``handle_delivery`` answers 401 on a bad signature, so an accepted decision is
+    proof the stub signed the exact bytes" is exactly backwards: accepting a VALID signature
+    is the one thing an always-true verifier also does. Measured, not reasoned — this test
+    stays green with ``merchant_svc.install.webhooks.verify`` replaced by ``lambda *_: True``
+    and with ``handle_delivery`` replaced by one that always answers 200.
+
+    What it is still worth: it pins that the honest path reaches 200 with an event, which is
+    the positive control the adversarial test needs in order to mean anything.
+    ``test_a_tampered_unsigned_or_reserialised_paid_webhook_is_refused`` is what actually
+    holds the property, by driving deliveries that must be REFUSED.
     """
     decision = s1_run.webhook_decision
     assert decision.status_code == 200, f"{decision.status_code}: {decision.reason}"
@@ -346,9 +359,17 @@ def test_no_off_domain_checkout_url_was_returned(s1_run, s1_fixture) -> None:
             )
             continue
         permalink = getattr(result, "permalink_url", None)
+        # The message says "returned at all", not "returned an attacker URL", because that is
+        # what a disabled guard actually produces here. Measured with
+        # `exchange.checkout.domain.assert_on_domain` neutered: `accept` does NOT hand back
+        # the attacker host — the provider rebuilds the permalink from the REGISTERED domain.
+        # The loss is that a live single-use code was minted for an off-domain offer. So the
+        # thing to refuse is the acceptance itself, and `creator.calls` below is the half that
+        # names the harm.
         assert not permalink, (
-            f"{label}: accept returned {permalink!r} for a checkout URL outside the "
-            f"registered domain {seller!r} ({url})"
+            f"{label}: accept SUCCEEDED on a bid whose checkout URL is outside the registered "
+            f"domain {seller!r} ({url}); it returned {permalink!r}. A code minted for an "
+            f"off-domain offer is already a loss even when the permalink is rebuilt on-domain"
         )
         assert not creator.calls, (
             f"{label}: the domain must be validated before a single-use code is created"
@@ -861,6 +882,12 @@ def test_the_single_use_code_is_not_honoured_a_second_time(s1_run) -> None:
     """
     second = s1_run.second_redemption
     assert second, "the run recorded no second-redemption probe"
+    # Without this the whole test is vacuous: a probe that silently offered some OTHER code
+    # would satisfy `redeemed != minted_code` by never having presented the code at all.
+    assert second["code"] == s1_run.minted_code, (
+        f"the probe offered {second['code']!r}, not the code the run minted "
+        f"({s1_run.minted_code!r}); it did not test single use"
+    )
 
     if second["refused"]:
         assert s1_run.minted_code in second["error"] or second["error"], second
