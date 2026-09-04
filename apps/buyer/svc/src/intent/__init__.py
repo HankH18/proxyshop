@@ -43,6 +43,7 @@ Imports inside this package are relative on purpose; see :mod:`buyer_svc.vault` 
 
 from __future__ import annotations
 
+from ._spellings import bind_package
 from .clarifier import CANNED_QUESTIONS, INTENT_CONTRACT, clarify
 from .confirmation import (
     AUCTION_CLIENT_METHODS,
@@ -136,3 +137,11 @@ __all__ = [
     "parse_llm_reply",
     "reset_confirmations",
 ]
+
+# LAST, and it is not decoration: this tree is importable as `buyer_svc.intent` and as
+# `apps.buyer.svc.src.intent`, and without this Python executes every file here TWICE —
+# once per spelling — leaving two `ConfirmationWithheld` classes that do not catch each
+# other and TWO confirmation ledgers, so "one confirmation opens one auction" would hold
+# only per spelling. Measured on this worktree: `apps.buyer.svc.src.intent is
+# buyer_svc.intent` was False. See `_spellings.py`.
+bind_package(__name__)

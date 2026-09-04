@@ -30,11 +30,13 @@ unless ``LLM_PROVIDER`` says otherwise — and a loop with no model still works.
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, StrictBool
 
+from ._spellings import bind_spellings
 from .clarifier import clarify
 from .confirmation import confirm
 from .errors import (
@@ -196,3 +198,9 @@ async def confirm_route(body: ConfirmBody, request: Request) -> ConfirmResponse:
         intent_id=created.intent_id,
         created_at=created.created_at,
     )
+
+
+# This module is not imported by the package `__init__` (it would drag FastAPI into every
+# consumer of `clarify`), so it binds its own alternate spelling here. See `_spellings.py`
+# for what goes wrong without it.
+bind_spellings(sys.modules[__name__])

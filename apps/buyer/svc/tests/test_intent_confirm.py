@@ -304,10 +304,10 @@ def test_a_bare_callable_client_is_accepted_as_the_last_resort(intent, ledger) -
 @pytest.mark.parametrize(
     "call",
     [
-        lambda i, c, l: confirm(i, c, confirmed=False, ledger=l),
-        lambda i, c, l: confirm(i, c, confirmed="yes", ledger=l),
-        lambda i, c, l: confirm(None, c, confirmed=True, ledger=l),
-        lambda i, c, l: confirm(i, NoDoorClient(), confirmed=True, ledger=l),
+        lambda i, c, book: confirm(i, c, confirmed=False, ledger=book),
+        lambda i, c, book: confirm(i, c, confirmed="yes", ledger=book),
+        lambda i, c, book: confirm(None, c, confirmed=True, ledger=book),
+        lambda i, c, book: confirm(i, NoDoorClient(), confirmed=True, ledger=book),
     ],
     ids=["withheld", "truthy-string", "no-intent", "no-door"],
 )
@@ -319,6 +319,5 @@ def test_a_refusal_is_never_a_builtin_call_error(intent, ledger, call) -> None:
     """
     with pytest.raises(Exception) as caught:
         call(intent, Recorder(), ledger)
-    assert not isinstance(
-        caught.value, (TypeError, AttributeError, NameError, ImportError)
-    ), type(caught.value).__name__
+    builtin_call_errors = (TypeError, AttributeError, NameError, ImportError)
+    assert not isinstance(caught.value, builtin_call_errors), type(caught.value).__name__

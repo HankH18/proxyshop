@@ -241,7 +241,7 @@ def test_the_query_is_the_buyers_own_words_and_never_a_paraphrase() -> None:
 
 
 def test_a_negated_ceiling_is_not_also_read_as_a_floor() -> None:
-    """"no more than $25" once produced `price_usd lte 25` AND `price_usd gte 25`."""
+    """A negated ceiling once produced `price_usd lte 25` AND `price_usd gte 25` at once."""
     outcome = clarify(["a wool scarf", "no more than $25"])
     prices = {(c.op, c.value) for c in outcome.intent.hard_constraints if c.field == "price_usd"}
     assert prices == {("lte", 25.0)}, prices
