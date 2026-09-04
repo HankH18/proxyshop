@@ -1,0 +1,41 @@
+# Cycle 18/102 analysis
+
+Targets met: 12/12
+
+Harness integrity at analysis time: **intact** — every frozen file re-hashed against `.swarm-loop/manifest.json`, which is itself reconciled against the append-only `.swarm-loop/freeze-log.jsonl`.
+
+> **SELECTION TRACKING IS UNAVAILABLE for 12 metric(s): `acceptance_pass_rate`, `acceptance_collected`, `build_succeeds`, `spec_criteria_passing`, `e1_foundation_passing`, `e2_ingestion_passing`, `e3_exchange_passing`, `e4_store_agent_passing`, `e5_merchant_passing`, `e6_trust_passing`, `e7_buyer_passing`, `e8_proofs_passing`.** Read every 'no selection regression' above as NOT MEASURED, never as clean.
+> `measure` records the selected/deselected columns only when the metric command's own stdout is PYTEST-SHAPED, and a correctly-authored frozen wrapper prints a BARE NUMBER as its last stdout line — so the tokens are hidden and both columns are written empty. Measured on a real frozen cycle-0 baseline: all 12 metrics blank, so the regression comparison can never fire for them at any cycle.
+> This is not the same as `0 deselected`: a missing token means zero and IS a baseline; an un-parseable output means UNKNOWN and is not. The deselection backstop is the only one of the three enforcement points that can see a filter added after the freeze — this run has two. Restore it by having the wrapper report selection out of band (a sidecar beside its metric log, or stderr) rather than by printing raw pytest output to stdout, which would break the bare-number contract every metric depends on.
+
+Acceptance coverage (the frozen suite vs the ticket graph):
+- graded_ticket_fraction: 13.6%  (37 of 273 ticket(s) carry >=1 frozen test)
+- marked_test_fraction:   100.0%  (120 of 120 scanned test(s) name a ticket; 0 grade nothing in particular)
+- 236 ticket(s) carry NO frozen test at all: T-013, T-024, T-031, T-036, T-054, T-082, T-083, T-084, T-086, T-087, T-100, T-101 …
+
+> **236 TICKET(S) ARE GRADED BY NOBODY BUT THEIR OWN AUTHOR.** ALL TARGETS MET is withheld while this stands.
+> Measured on a real run: the graph grew 44 -> 263 tickets while the frozen suite added ZERO test files, so the graded fraction fell 84% -> 14.1% and 76 tickets closed with no frozen test grading them. A metric at target says the tests that exist pass; it says nothing about the tickets no test names.
+> **The remedy no longer needs an amendment.** Write tests marked `@pytest.mark.ticket("<id>")` under the frozen acceptance path and run `swarmloop.py freeze --extend`, which adds files and metric ids only and refuses any edit to a frozen byte. Pass `--allow-ungraded-tickets` to analyze only once you have decided the gap is acceptable, and say so in the cycle report.
+> Ungraded: T-013, T-024, T-031, T-036, T-054, T-082, T-083, T-084, T-086, T-087, T-100, T-101, T-102, T-103, T-104, T-105, T-106, T-107, T-108, T-109, T-110, T-111, T-112, T-113, T-114, T-115, T-116, T-117, T-118, T-119, T-120, T-121, T-122, T-123, T-124, T-125, T-126, T-127, T-128, T-129 …
+
+> **GOALPOSTS MOVED 19x — this trend is not against a single fixed target.** Last amendment 2026-09-04T14:45:30: "ESC-013 approved class, tickets.json verify fields ONLY, 24 tickets. 23 REPOINTS at tickets that already had a gate nobody had pointed them at, plus one WIDENING of a closed ticket's half-green gate. git diff over both this and amendment 18 is 37 insertions / 37 deletions with ZERO changed lines that are not a 'verify' line (measured).\n\nTHE 23 REPOINTS (T-161, T-162, T-163, T-164, T-165, T-194, T-197, T-198, T-199, T-205, T-221, T-236, T-238, T-239, T-240, T-243, T-245, T-246, T-247, T-248, T-249, T-266, T-296) all carried the 'false  # NO GATE YET' placeholder while a test that ALREADY FAILS on the defect existed in the tree. No new test was written for any of them. Every one was measured in a bare throwaway worktree of main — no .venv, no node_modules, PROXYSHOP_WORKER unset — twice, with stable results: 24 of 24 candidates rc=1, exactly 1 test selected and 1 failed, on an assertion inside the gate's own body rather than on setup or collection, all in under 12s with no Postgres involvement. ZERO came back green, so the LIVE classification held for all of them and none is a closure candidate.\n\nTHREE CORRECTIONS THE MEASUREMENT FORCED, none of which a paper review would have caught. (1) All 24 tests are @pytest.mark.xfail(strict=True) with long multi-line decorators, so --runxfail is mandatory: without it these gates exit 0 printing '1 xfailed', silently green, measuring nothing. A naive grep for the decorator reports zero and an AST parse was needed. (2) 15 of the 24 candidate commands named .venv/bin/pytest or .venv/bin/python, which does not exist in the bare worktree red-check builds, and one used the prefix-assignment form that does not survive '&&'; several used loose -k substrings selecting more than one node. All rewritten to the house self-provisioning form with the exact function name, each selecting exactly 1. (3) T-296's recorded target_test_file named packages/contracts while its actual gating node lives in apps/exchange; the node is right and the field was wrong.\n\nT-297 WAS REFUSED A REPOINT AND STAYS GATELESS, deliberately. Its candidate test is red, but it is T-204's gate — its xfail reason opens 'T-204: exchange.openapi.json types the 409 denial_reason as a bare string', and T-297's own ticket text says verbatim 'T-204 (open) owns the enum, so do NOT mint a duplicate for it.' Repointing it would have dispatched a lane to do another ticket's work. T-297's real content is a reporting hazard plus two claims that this test does not grade, and it needs a new test rather than a borrowed one.\n\nT-204'S WIDENING is the finding that came out of refusing T-297, and it concerns an ALREADY-CLOSED ticket. T-204's verify named only its exchange-side node, which now PASSES (rc=0), while its contracts-side half is still RED. So a closed ticket's gate has been answering green on a half-red gate — the 'a gate that answers a narrower question than its caller believes' shape. Its verify now selects BOTH nodes. This does not reopen T-204; it makes the gate tell the truth if anyone re-runs it.\n\nTWO HONEST INCOMPLETENESSES RECORDED RATHER THAN GLOSSED. T-266's gate asserts on three published-but-unserved exchange paths whose owners are other tickets, so a T-266 lane cannot turn it green alone. T-296's node covers only the trust half — 3 of the 8 operations it records — leaving store-agent /v1/bid-requests, the reason T-296 was filed, ungated. Both repoints are honest and both are partial, and T-266/T-296/T-312 will share these two nodes.\n\nNo metric, target, direction, command, tolerance, acceptance test, product file, dependency or ticket dependency changed. Only 'verify' strings.". Full record: `.swarm-loop/freeze-log.jsonl`.
+
+| metric | verdict | as of | value | target | error | slope/cycle | proj. final error |
+|---|---|---|---|---|---|---|---|
+| acceptance_pass_rate | at_target | cycle 18 | 100 | 100 | 0 | – | – |
+| acceptance_collected | at_target | cycle 18 | 120 | 120 | 0 | – | – |
+| build_succeeds | at_target | cycle 18 | 1 | 1 | 0 | – | – |
+| spec_criteria_passing | at_target | cycle 18 | 8 | 8 | 0 | – | – |
+| e1_foundation_passing | at_target | cycle 18 | 10 | 10 | 0 | – | – |
+| e2_ingestion_passing | at_target | cycle 18 | 8 | 8 | 0 | – | – |
+| e3_exchange_passing | at_target | cycle 18 | 21 | 21 | 0 | – | – |
+| e4_store_agent_passing | at_target | cycle 18 | 20 | 20 | 0 | – | – |
+| e5_merchant_passing | at_target | cycle 18 | 10 | 10 | 0 | – | – |
+| e6_trust_passing | at_target | cycle 18 | 26 | 26 | 0 | – | – |
+| e7_buyer_passing | at_target | cycle 18 | 9 | 9 | 0 | – | – |
+| e8_proofs_passing | at_target | cycle 18 | 8 | 8 | 0 | – | – |
+
+**RE-MEASURE OWED — cycle(s) 7. A `freeze --amend` moved at least one target and the baseline it moved has not been re-measured since. All-targets-met is WITHHELD until 'measure --cycle <n>' has run for each: an amendment invalidates its own baseline, and a hand-entered 'record' does not satisfy it.**
+
+_Note: the stored `error` column disagreed with the current target for acceptance_collected, e3_exchange_passing, e4_store_agent_passing, e6_trust_passing, e8_proofs_passing; every error above is recomputed from `value` against the target in force now, never read from history._
+
