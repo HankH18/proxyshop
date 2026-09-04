@@ -1,0 +1,45 @@
+{
+  "_note": "Two questions, and a PRICE RANGE rather than a ceiling: `between $60 and $120` becomes the `gte`/`lte` pair plus the band the pair falls in. Carries the `prefer` direction, which the other dialogues do not exercise.",
+  "_questions_expected": 2,
+  "turns": [
+    "a daypack for commuting",
+    "between $60 and $120",
+    "something sustainable and lightweight, in navy"
+  ],
+  "llm_script": [],
+  "expected_intent": {
+    "query": "a daypack for commuting",
+    "category": "bags",
+    "budget_band": "100-250",
+    "currency": "USD",
+    "hard_constraints": [
+      {
+        "field": "color",
+        "op": "eq",
+        "value": "navy"
+      },
+      {
+        "field": "price_usd",
+        "op": "gte",
+        "value": 60.0
+      },
+      {
+        "field": "price_usd",
+        "op": "lte",
+        "value": 120.0
+      }
+    ],
+    "preferences": [
+      {
+        "field": "sustainability",
+        "direction": "prefer",
+        "weight": 0.4
+      },
+      {
+        "field": "weight_grams",
+        "direction": "minimize",
+        "weight": 0.5
+      }
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "_note": "One question, phrased BY THE MODEL - the second reply recorded in buyer_intent.json, verbatim. Its `direction: min` is a spelling of `minimize` and is normalised; the buyer's answer supplies the budget the opener lacked.",
+  "_questions_expected": 1,
+  "turns": [
+    "something good for espresso, cheap",
+    "no more than $25 a bag"
+  ],
+  "llm_script": [
+    "{\"constraints\": [{\"field\": \"brew_method\", \"op\": \"eq\", \"value\": \"espresso\"}], \"preferences\": [{\"field\": \"price_usd\", \"direction\": \"min\", \"weight\": 1.0}], \"clarifying_question\": \"What is the most you would want to spend per 12 oz bag?\"}",
+    "{\"constraints\": [], \"preferences\": [], \"clarifying_question\": null}"
+  ],
+  "expected_intent": {
+    "query": "something good for espresso, cheap",
+    "category": "coffee",
+    "budget_band": "0-50",
+    "currency": "USD",
+    "hard_constraints": [
+      {
+        "field": "brew_method",
+        "op": "eq",
+        "value": "espresso"
+      },
+      {
+        "field": "price_usd",
+        "op": "lte",
+        "value": 25.0
+      }
+    ],
+    "preferences": [
+      {
+        "field": "price_usd",
+        "direction": "minimize",
+        "weight": 1.0
+      }
+    ]
+  }
+}

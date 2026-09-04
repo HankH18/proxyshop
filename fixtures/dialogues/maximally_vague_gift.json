@@ -1,0 +1,30 @@
+{
+  "_note": "The maximally vague opener, and the three-question ceiling exactly reached. The buyer hedges twice before naming anything, then refuses the budget question - so the loop stops at three, publishes `unspecified` rather than inventing a band, and names the gap it could not close. No llm_script: this is the offline floor with no model at all.",
+  "_questions_expected": 3,
+  "turns": [
+    "hi, I need a gift",
+    "not sure, something nice",
+    "a wool scarf, black",
+    "no idea honestly"
+  ],
+  "llm_script": [],
+  "expected_intent": {
+    "query": "hi, I need a gift; not sure, something nice; a wool scarf, black",
+    "category": "accessories",
+    "budget_band": "unspecified",
+    "currency": "USD",
+    "hard_constraints": [
+      {
+        "field": "color",
+        "op": "eq",
+        "value": "black"
+      },
+      {
+        "field": "material",
+        "op": "eq",
+        "value": "wool"
+      }
+    ],
+    "preferences": []
+  }
+}
