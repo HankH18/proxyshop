@@ -18,7 +18,7 @@
         "2. compose brings up postgres+neo4j+redis healthchecked",
         "3. package layout matches DESIGN (packages/contracts, packages/store-agent, apps/{buyer,merchant,exchange,trust}, services/{ingest,shopify-stub,sim}, pixel/)"
       ],
-      "verify": "make verify",
+      "verify": "PROXYSHOP_WORKER=0 make verify",
       "scope": [
         "**"
       ],
@@ -52,7 +52,7 @@
         "5. SigningEnvelope (D52): a Bid missing any one of signer_id/key_id/issued_at/nonce/schema_version fails schema validation in py+ts, and a Bid carrying all five validates - so a schema that rejects everything cannot satisfy this",
         "6. TrustSnapshot carries exactly six dims incl. catalog_claim_accuracy (D53): a six-dim snapshot round-trips in py+ts, a snapshot omitting catalog_claim_accuracy is invalid, and a snapshot naming a seventh dimension is invalid."
       ],
-      "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts -q && npx vitest run packages/contracts",
       "scope": [
         "packages/contracts/**"
       ],
@@ -85,7 +85,7 @@
         "3. commerce_events enforces idempotency_key uniqueness and valid prev_hash; replay reproduces stream hash",
         "4. Replay store (D52): app.bid_nonces rejects a duplicate (signer_id, nonce) via the uniqueness constraint while accepting the same nonce string under a different signer_id, and app.seller_endpoints holds two live rows for one signer_id under different key_id values plus a row where a DIFFERENT signer_id reuses one of those key_id strings - so a schema keyed on key_id alone, or one key per store, fails this criterion"
       ],
-      "verify": "pytest apps/trust/tests/test_schema_grants.py apps/trust/tests/test_ledger_chain.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_schema_grants.py apps/trust/tests/test_ledger_chain.py -q",
       "scope": [
         "db/migrations/**",
         "apps/trust/src/ledger/**",
@@ -115,7 +115,7 @@
         "2. Vector+attribute candidate query returns seeded products under HashEmbedding",
         "3. Re-embed script passes on sample data; provider swap is config-only"
       ],
-      "verify": "pytest services/ingest/tests/test_graph.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/ingest/tests/test_graph.py -q",
       "scope": [
         "services/ingest/src/graph/**",
         "services/ingest/src/embeddings/**",
@@ -146,7 +146,7 @@
         "2. Permalink redemption applies valid codes and silently ignores invalid/conflicting ones (matching real behavior)",
         "3. Configurable pixel drop-rate; webhooks always delivered"
       ],
-      "verify": "pytest services/shopify-stub -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/shopify-stub -q",
       "scope": [
         "services/shopify-stub/**"
       ],
@@ -173,7 +173,7 @@
         "2. Prompt assembly puts store context before dynamic tail (cache boundary test)",
         "3. Double replays recorded fixtures deterministically; no network in tests"
       ],
-      "verify": "pytest packages/llm -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/llm -q",
       "scope": [
         "packages/llm/**"
       ],
@@ -202,7 +202,7 @@
         "3. Unchanged content produces zero re-extraction work (hash test)",
         "4. SSRF tests: private-IP and unsafe-redirect fixtures are refused; budgets enforced"
       ],
-      "verify": "pytest services/ingest/tests/test_signed_fetch.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/ingest/tests/test_signed_fetch.py -q",
       "scope": [
         "services/ingest/src/adapters/**",
         "services/ingest/tests/**"
@@ -232,7 +232,7 @@
         "2. Every claim/attribute has a SUPPORTED_BY Source with snapshot ref; low-confidence extraction is quarantined, not upserted",
         "3. Re-run on unchanged pages performs no LLM calls (double counts)"
       ],
-      "verify": "pytest services/ingest/tests/test_extraction.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/ingest/tests/test_extraction.py -q",
       "scope": [
         "services/ingest/src/extraction/**",
         "services/ingest/tests/**",
@@ -260,7 +260,7 @@
         "1. On the approved ER fixture set, precision \u2265 configured floor and GTIN matches always link",
         "2. Edges carry confidence; below-threshold pairs are not linked"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e2_ingestion.py -q -k test_gtin_matches_always_link_and_below_threshold_pairs_do_not",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e2_ingestion.py -q -k test_gtin_matches_always_link_and_below_threshold_pairs_do_not",
       "scope": [
         "services/ingest/src/er/**",
         "services/ingest/tests/**",
@@ -289,7 +289,7 @@
         "1. Adapter satisfies the CatalogAdapter interface tests",
         "2. Contract tests replay recorded MCP responses; mapping to graph upserts matches signed_fetch semantics"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e2_ingestion.py -q -k test_both_catalog_adapters_satisfy_one_interface",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e2_ingestion.py -q -k test_both_catalog_adapters_satisfy_one_interface",
       "scope": [
         "services/ingest/src/adapters/**",
         "services/ingest/tests/**",
@@ -318,7 +318,7 @@
         "2. POST /refresh/{store} triggers one store's pipeline",
         "3. No re-extraction without hash change across a full cycle"
       ],
-      "verify": "pytest services/ingest/tests/test_refresh.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/ingest/tests/test_refresh.py -q",
       "scope": [
         "services/ingest/src/scheduler/**",
         "services/ingest/tests/**"
@@ -350,7 +350,7 @@
         "3. State machine transitions logged to ledger via trust API stub",
         "4. Solicitation gate (R12/D54, fail-closed, at the public orchestration boundary, by DENIAL): solicit_bids consults SellerEligibility for every rostered store before fan-out. A BLACKLISTED store, an UNAVAILABLE store and a store whose eligibility read RAISES are each never handed to the solicitor and never appear even as a list-price fallback entry, and each is recorded in the result's denied list with a reason naming its condition. Positive control in the same test: eligible stores ARE solicited in roster order, appear as non-fallback entries, and their solicited prices survive the orchestration layer - so an orchestration that solicits nobody fails here. collect_bids keeps its (roster, responses, now) parameters unchanged and never receives an eligibility argument"
       ],
-      "verify": "pytest apps/exchange/tests/test_auction.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/exchange/tests/test_auction.py -q",
       "scope": [
         "apps/exchange/src/auction/**",
         "apps/exchange/src/eligibility/**",
@@ -383,7 +383,7 @@
         "2. Fit scores deterministic under double; logged with auction",
         "3. Latency budget test under fixture load"
       ],
-      "verify": "pytest apps/exchange/tests/test_retrieval.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/exchange/tests/test_retrieval.py -q",
       "scope": [
         "apps/exchange/src/retrieval/**",
         "apps/exchange/tests/**"
@@ -455,7 +455,7 @@
         "4. Redirect mode: off-domain checkout_url is refused (release blocker test); emitted event kinds match the Shopify-mode golden sequence",
         "5. Checkout gate (R12/D54, fail-closed, at the public orchestration boundary, by DENIAL): accept_offer(auction=, bid_ref=, code_creator=, mode=, eligibility=) in apps/exchange/src/orchestration RE-READS eligibility at accept time, so a store blacklisted after it bid is refused - no code created (assert the code creator was never called), no permalink, and a denial_reason recorded; an UNAVAILABLE read and a read that RAISES each refuse identically. Positive control in the same test: an ELIGIBLE store with an available read is accepted, mints exactly one code, and returns an on-domain permalink containing that code. accept() keeps its four positional parameters (auction, bid_id, code_creator, mode) and gains no required parameter"
       ],
-      "verify": "pytest apps/exchange/tests/test_accept.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/exchange/tests/test_accept.py -q",
       "scope": [
         "apps/exchange/src/accept/**",
         "apps/exchange/src/orchestration/**",
@@ -547,7 +547,7 @@
         "3. The port validates the offer's checkout_url host against the registered seller domain (bid['store_domain']) by exact match BEFORE any provider is asked to mint \u2014 rival domain, suffix spoof, glued-suffix spoof, userinfo spoof and subdomain are each refused with no code created (D22); an on-domain offer completes, so a surface that refuses everything cannot satisfy this criterion",
         "4. Provider selection is the mode argument accept() already receives: accept(auction, bid_id, code_creator, mode) keeps its four positional parameters and its injected code creator, and registering a further provider adds no parameter to it"
       ],
-      "verify": "pytest apps/exchange/tests/test_checkout_provider.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/exchange/tests/test_checkout_provider.py -q",
       "scope": [
         "apps/exchange/src/checkout/**",
         "apps/exchange/tests/**"
@@ -576,7 +576,7 @@
         "2. authorize_discount denies below-floor/over-cap against approved envelope fixtures",
         "3. Constructing a Claim outside hooks fails lint and runtime guard tests"
       ],
-      "verify": "pytest packages/store-agent/tests/test_hooks.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_hooks.py -q",
       "scope": [
         "packages/store-agent/src/hooks/**",
         "packages/store-agent/tests/**",
@@ -607,7 +607,7 @@
         "2. All emitted claims trace to hooks (property test over recorded runs)",
         "3. Decline path produces a valid decline with reason"
       ],
-      "verify": "pytest packages/store-agent/tests/test_runtime.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_runtime.py -q",
       "scope": [
         "packages/store-agent/src/runtime/**",
         "packages/store-agent/tests/**"
@@ -761,7 +761,7 @@
         "2. webPixelCreate called with expected settings payload",
         "3. Webhook subscriptions registered and receivable"
       ],
-      "verify": "npx vitest run apps/merchant && pytest apps/merchant/svc/tests/test_install.py -q",
+      "verify": "export PROXYSHOP_WORKER=0 && npx vitest run apps/merchant && uv run python -m pytest apps/merchant/svc/tests/test_install.py -q",
       "scope": [
         "apps/merchant/**"
       ],
@@ -789,7 +789,7 @@
         "2. Collector tolerates pixel drop-rate mode (no crash, gap visible)",
         "3. No PII fields accepted (schema rejects)"
       ],
-      "verify": "npx vitest run pixel && pytest apps/merchant/svc/tests/test_collector.py -q",
+      "verify": "export PROXYSHOP_WORKER=0 && npx vitest run pixel && uv run python -m pytest apps/merchant/svc/tests/test_collector.py -q",
       "scope": [
         "pixel/**",
         "apps/merchant/svc/src/collector/**",
@@ -820,7 +820,7 @@
         "3. Duplicate use emits integrity LedgerEvent, not an exception",
         "4. It is reachable only as a CheckoutProvider implementation: it satisfies T-036's port contract unmodified, and substituting SimulatedRedirectProvider for it changes no caller and no emitted LedgerEvent kind (C11)"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e5_merchant.py -q -k 'test_code_is_single_use_with_a_bounded_expiry or test_conflicting_combines_with_is_detected_before_redirect or test_duplicate_redemption_emits_an_integrity_event_not_an_exception'",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e5_merchant.py -q -k 'test_code_is_single_use_with_a_bounded_expiry or test_conflicting_combines_with_is_detected_before_redirect or test_duplicate_redemption_emits_an_integrity_event_not_an_exception'",
       "scope": [
         "apps/merchant/svc/src/codes/**",
         "apps/merchant/svc/tests/**"
@@ -850,7 +850,7 @@
         "2. No activation without recorded approval artifact",
         "3. Envelope edits create new versions; old versions immutable"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e5_merchant.py -q -k 'test_interview_transcript_yields_the_expected_envelope_version or test_activation_requires_a_recorded_written_approval_artifact or test_envelope_edits_create_new_versions_and_old_versions_are_immutable'",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e5_merchant.py -q -k 'test_interview_transcript_yields_the_expected_envelope_version or test_activation_requires_a_recorded_written_approval_artifact or test_envelope_edits_create_new_versions_and_old_versions_are_immutable'",
       "scope": [
         "apps/merchant/svc/src/onboarding/**",
         "apps/merchant/svc/tests/**",
@@ -911,7 +911,7 @@
         "2. Chain verification detects tampering fixture",
         "3. Replay of the fixture stream reproduces the event-stream hash exactly (this is the event-stream hash only; recomputing served trust snapshots from genesis is T-062's replay criterion, not this one)"
       ],
-      "verify": "pytest apps/trust/tests/test_events.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_events.py -q",
       "scope": [
         "apps/trust/src/events/**",
         "apps/trust/tests/**"
@@ -939,7 +939,7 @@
         "2. Webhook-only order (pixel dropped) reconciles cleanly",
         "3. Price/discount mismatch fixture yields integrity deltas sourced from webhook fields"
       ],
-      "verify": "pytest apps/trust/tests/test_reconciliation.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_reconciliation.py -q",
       "scope": [
         "apps/trust/src/reconcile/**",
         "apps/trust/tests/**"
@@ -974,7 +974,7 @@
         "5. Six dimensions, one system (D53): a contradicted product-fact claim (ingredients / compatibility / nutrition / specifications) moves catalog_claim_accuracy and leaves feedback_match untouched, while a contradicted price claim moves price_honored and leaves catalog_claim_accuracy untouched; the served snapshot exposes all six dims and no seventh",
         "6. Outcome treatment (D53): on the mapped dimension, verified moves the mean up; contradicted moves it down at weight 2.0; unsupported moves it down by the published fractional weight strictly less than contradicted's and its dominant effect is on confidence/coverage; ambiguous produces ZERO mean movement and lowers coverage/confidence only. Asserted as an ordering over four runs from one fixture state, so a no-op implementation fails"
       ],
-      "verify": "pytest apps/trust/tests/test_scoring.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_scoring.py -q",
       "scope": [
         "apps/trust/src/scoring/**",
         "apps/trust/tests/**"
@@ -1004,7 +1004,7 @@
         "2. Non-routed buyer feedback rejected",
         "3. 'Great'+returned cross-check downweights feedback (golden)"
       ],
-      "verify": "pytest apps/trust/tests/test_feedback_push.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_feedback_push.py -q",
       "scope": [
         "apps/trust/src/feedback/**",
         "apps/trust/tests/**"
@@ -1033,7 +1033,7 @@
         "2. Blacklisted store flagged; low-data store flagged until manifest N episodes",
         "3. Exchange client caches + refreshes on version bump"
       ],
-      "verify": "pytest apps/trust/tests/test_snapshot.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_snapshot.py -q",
       "scope": [
         "apps/trust/src/snapshot/**",
         "apps/trust/tests/**"
@@ -1064,7 +1064,7 @@
         "3. Comparator unit tests: boolean/string normalization, numeric tolerance, price vs offer+catalog, set containment, relationship existence; injection strings in pitch text never execute (C10 test)",
         "4. Typed routing (D53): each claim in the golden result carries a claim_type present in the manifest mapping, a product-fact claim_type routes to catalog_claim_accuracy and an offer-integrity claim_type routes to its transaction dimension, and an unmapped claim_type raises instead of silently defaulting"
       ],
-      "verify": "pytest packages/verification apps/trust/tests/test_verification.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/verification apps/trust/tests/test_verification.py -q",
       "scope": [
         "packages/verification/**",
         "apps/trust/src/verification/**",
@@ -1097,7 +1097,7 @@
         "2. Grant test: non-vault roles cannot read vault.*",
         "3. Profile objects contain no identity fields (schema property test)"
       ],
-      "verify": "npx vitest run apps/buyer && pytest apps/buyer/svc/tests/test_auth_vault.py -q",
+      "verify": "export PROXYSHOP_WORKER=0 && npx vitest run apps/buyer && uv run python -m pytest apps/buyer/svc/tests/test_auth_vault.py -q",
       "scope": [
         "apps/buyer/**"
       ],
@@ -1125,7 +1125,7 @@
         "2. Confirmation required before auction creation",
         "3. Bucket builder outputs only DESIGN profile fields; k-floor honored at configured value"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_clarification_loop_asks_at_most_three_questions or test_confirmed_intent_is_structured_with_use_case_constraints_and_budget_band or test_no_auction_is_created_before_the_buyer_confirms'",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_clarification_loop_asks_at_most_three_questions or test_confirmed_intent_is_structured_with_use_case_constraints_and_budget_band or test_no_auction_is_created_before_the_buyer_confirms'",
       "scope": [
         "apps/buyer/svc/src/intent/**",
         "apps/buyer/app/intent/**",
@@ -1156,7 +1156,7 @@
         "2. Provenance labels map from Provenance.source correctly (golden)",
         "3. Accept path e2e-to-stub returns and follows permalink"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_provenance_labels_map_store_confirmed_versus_from_their_website or test_accept_follows_the_permalink_returned_by_the_exchange'",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_provenance_labels_map_store_confirmed_versus_from_their_website or test_accept_follows_the_permalink_returned_by_the_exchange'",
       "scope": [
         "apps/buyer/app/shortlist/**",
         "apps/buyer/svc/src/accept/**",
@@ -1185,7 +1185,7 @@
         "2. Submission lands as feedback LedgerEvent",
         "3. No free-text field exists (render test)"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_feedback_prompt_is_offered_only_for_routed_orders or test_feedback_submission_lands_as_a_feedback_ledger_event'",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_feedback_prompt_is_offered_only_for_routed_orders or test_feedback_submission_lands_as_a_feedback_ledger_event'",
       "scope": [
         "apps/buyer/app/feedback/**",
         "apps/buyer/svc/src/feedback/**",
@@ -1219,7 +1219,7 @@
         "The manifest carries the mapping under the exact key `claim_type_dimensions` (that spelling is what the frozen tests read), and at least one `dishonest_store.behaviours[].dim` is `catalog_claim_accuracy`.",
         "The golden set contains at least one product-fact claim with status `verified` AND at least one with status `contradicted` \u2014 a set that is all-true or all-false does not exercise the sixth trust dimension in both directions."
       ],
-      "verify": "pytest fixtures/tests/test_seed.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest fixtures/tests/test_seed.py -q",
       "scope": [
         "fixtures/manifest/**",
         "fixtures/approval/**",
@@ -1256,7 +1256,7 @@
         "2. Dishonest script emits exactly the manifest behaviors",
         "3. Sim runs headless against compose in bounded steps"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e8_proofs.py -q -k test_dishonest_script_emits_exactly_the_manifest_behaviours",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e8_proofs.py -q -k test_dishonest_script_emits_exactly_the_manifest_behaviours",
       "scope": [
         "services/sim/**"
       ],
@@ -1285,7 +1285,7 @@
         "3. Run completes offline",
         "4. Release-blocker assertions: no blacklisted seller eligible anywhere in the run; no off-domain checkout URL returned"
       ],
-      "verify": "pytest e2e/test_s1_flow.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_s1_flow.py -q",
       "scope": [
         "e2e/**"
       ],
@@ -1318,7 +1318,7 @@
         "2. Store depth distribution shifts direction matches record (statistical test, fixed seed)",
         "3. Control store unaffected"
       ],
-      "verify": "pytest e2e/test_learning.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_learning.py -q",
       "scope": [
         "e2e/**"
       ],
@@ -1348,7 +1348,7 @@
         "2. Blacklist event emitted at expected episode \u00b1band",
         "3. Post-blacklist auctions contain zero exposure for the store"
       ],
-      "verify": "pytest e2e/test_dishonest.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_dishonest.py -q",
       "scope": [
         "e2e/**"
       ],
@@ -1378,7 +1378,7 @@
         "3. docs/tests/test_runbook.py checks the UNION of every markdown file under docs/demo/ for the required section headings and make-target existence, matching the frozen S6 lint, and fails when a referenced make target is undefined",
         "4. No timeline content (lint rule)"
       ],
-      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e8_proofs.py -q -k test_demo_runbook_has_the_required_sections_and_its_make_targets_exist",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest .swarm-loop/acceptance/test_e8_proofs.py -q -k test_demo_runbook_has_the_required_sections_and_its_make_targets_exist",
       "scope": [
         "docs/demo/starting-slice.md",
         "docs/tests/**"
@@ -1411,7 +1411,7 @@
         "e2e/test_onboarding.py",
         "e2e/support/onboarding/**"
       ],
-      "verify": "pytest e2e/test_onboarding.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_onboarding.py -q",
       "parallel_safe": false,
       "acceptance": [
         "1. A mocked interview transcript yields an economic envelope carrying every R6 field: floors, max discount, budget cap, intents to pursue, and standing commitments.",
@@ -1443,7 +1443,7 @@
         "4. The dishonest-store beat walks the T-084 episode run and its blacklist outcome",
         "5. No timeline content (lint rule)"
       ],
-      "verify": "pytest docs/tests/test_runbook.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest docs/tests/test_runbook.py -q",
       "scope": [
         "docs/demo/shopify-onboarding-extension.md"
       ],
@@ -1476,7 +1476,7 @@
         "3. _LABEL anchors with \\A/\\Z; a host ending in LF is refused",
         "4. test_stub_redemption.py:62 asserts the FULL redirect URL, not endswith('/checkouts/<token>')"
       ],
-      "verify": "pytest services/shopify-stub -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/shopify-stub -q",
       "scope": [
         "services/shopify-stub/**"
       ],
@@ -1503,7 +1503,7 @@
         "2. Alternatively the skipped product's p.embedding is REMOVED so products_missing_embeddings sees it",
         "3. A test drives a partial pass and asserts at least one detector reports the inconsistency"
       ],
-      "verify": "pytest services/ingest -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/ingest -q",
       "scope": [
         "services/ingest/**"
       ],
@@ -1530,7 +1530,7 @@
         "2. A test asserts the DELETE bit of pg_trigger.tgtype for chain_head_guard_trigger",
         "3. Re-applying the original sabotage turns at least one new test RED"
       ],
-      "verify": "pytest apps/trust/tests/test_ledger_chain.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_ledger_chain.py -q",
       "scope": [
         "apps/trust/**"
       ],
@@ -1585,7 +1585,7 @@
         "2. A test constructs the colliding pair and asserts the keys differ and the recording does not cross-replay",
         "3. The client and the double still compose identically on every prompt shape"
       ],
-      "verify": "pytest packages/llm -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/llm -q",
       "scope": [
         "packages/llm/**"
       ],
@@ -1613,7 +1613,7 @@
         "3. Webhook tests assert header VALUES, not presence",
         "4. Re-applying either sabotage turns a test RED"
       ],
-      "verify": "pytest services/shopify-stub -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/shopify-stub -q",
       "scope": [
         "services/shopify-stub/**"
       ],
@@ -1645,7 +1645,7 @@
         "4. It lives in e2e/ (in the root testpaths, importable from both) and runs in the ordinary suite, so `make verify` catches drift",
         "5. Reverting either implementation's number predicate to a safe-integer bound turns the gate RED"
       ],
-      "verify": "pytest e2e/test_jcs_conformance.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_jcs_conformance.py -q",
       "scope": [
         "e2e/**"
       ],
@@ -1676,7 +1676,7 @@
         "2. A test pins the two divergent cases above against the JCS rendering",
         "3. The change is called out as re-identifying every existing claim, so it lands before any consumer stores one"
       ],
-      "verify": "pytest packages/contracts -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/contracts -q",
       "scope": [
         "packages/contracts/**"
       ],
@@ -1703,7 +1703,7 @@
         "2. Both generated artifacts are regenerated and the drift check passes",
         "3. The existing agreement test still passes"
       ],
-      "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts -q && npx vitest run packages/contracts",
       "scope": [
         "packages/contracts/**"
       ],
@@ -1731,7 +1731,7 @@
         "2. A test asserts that a simulated single-service outage does not skip tests belonging to the other two",
         "3. The skip message names which service was unreachable"
       ],
-      "verify": "pytest apps/trust -q && pytest proxyshop_support -q",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/trust -q && uv run python -m pytest proxyshop_support -q",
       "scope": [
         "conftest.py",
         "proxyshop_support/**"
@@ -1759,7 +1759,7 @@
         "2. A test asserts a non-default env value survives a fresh-volume init",
         "3. No password literal remains in a checked-in file except as a documented dev default"
       ],
-      "verify": "pytest apps/trust/tests/test_schema_grants.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_schema_grants.py -q",
       "scope": [
         "db/init/**"
       ],
@@ -1787,7 +1787,7 @@
         "2. The chflags step reports failure rather than swallowing it",
         "3. A note records that the measurement tree needs the same provisioning as every worktree"
       ],
-      "verify": "./scripts/bootstrap.sh && ./scripts/verify.sh check",
+      "verify": "export PROXYSHOP_WORKER=0 && ./scripts/bootstrap.sh && ./scripts/verify.sh check",
       "scope": [
         "scripts/bootstrap.sh"
       ],
@@ -1815,7 +1815,7 @@
         "3. A test proves a non-default value seeds AND connects end to end on a fresh volume",
         "4. No password literal survives except one documented dev default in one place"
       ],
-      "verify": "pytest apps/trust/tests/test_schema_grants.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_schema_grants.py -q",
       "scope": [
         "docker-compose.yml",
         "proxyshop_support/**",
@@ -1873,7 +1873,7 @@
         "3. A test drives more than one DELETE statement shape, so a conditional exemption cannot hide",
         "4. The docstring's claim about which principal the arm stops is made true or corrected"
       ],
-      "verify": "pytest apps/trust/tests/test_ledger_chain.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_ledger_chain.py -q",
       "scope": [
         "apps/trust/**",
         "db/migrations/**"
@@ -1901,7 +1901,7 @@
         "2. A property-style test asserts the compiled pattern and the blank check agree over a generated character range, not a hand-written list",
         "3. Both codegen artifacts are regenerated and the drift check passes"
       ],
-      "verify": "pytest packages/contracts -q && npx vitest run packages/contracts",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts -q && npx vitest run packages/contracts",
       "scope": [
         "packages/contracts/**"
       ],
@@ -1927,7 +1927,7 @@
         "2. The EmbeddingRunIncomplete message names a remediation that actually terminates",
         "3. A test covers the same-provider skip case, not only the provider-swap case"
       ],
-      "verify": "pytest services/ingest -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest services/ingest -q",
       "scope": [
         "services/ingest/**"
       ],
@@ -1954,7 +1954,7 @@
         "2. Deselected counts are reported, not swallowed, so a green gate names what it did not run",
         "3. T-109's per-service reachability work lands consistently with this"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "scope": [
         "scripts/verify.sh",
         "conftest.py",
@@ -1983,7 +1983,7 @@
         "2. Every fix carries a test that fails without it",
         "3. No fix widens the scope of the lane it came from"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "scope": [
         "packages/llm/**",
         "services/ingest/**",
@@ -2022,7 +2022,7 @@
         "2. CanonicalisationError is the same class object under both spellings, and a cross-spelling except catches",
         "3. A test asserts both, and the existing T-106 conformance gate still passes unchanged"
       ],
-      "verify": "pytest apps/trust -q && pytest e2e/test_jcs_conformance.py -q",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/trust -q && uv run python -m pytest e2e/test_jcs_conformance.py -q",
       "scope": [
         "apps/trust/**"
       ],
@@ -2051,7 +2051,7 @@
         "2. The default-DSN assertion is scoped to the unset case explicitly rather than assuming it",
         "3. A test covers the SET case so the two branches cannot drift again"
       ],
-      "verify": "pytest proxyshop_support -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest proxyshop_support -q",
       "scope": [
         "proxyshop_support/**"
       ],
@@ -2079,7 +2079,7 @@
         "2. The 238 assertions are unchanged and still pass",
         "3. If a test's premise is now trivially satisfied, say so rather than deleting the test"
       ],
-      "verify": "pytest e2e/test_jcs_conformance.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest e2e/test_jcs_conformance.py -q",
       "scope": [
         "e2e/**"
       ],
@@ -2144,7 +2144,7 @@
         "5. Whatever mitigation is chosen must survive a full pytest run, proven by a bare `python -c` import AFTER the suite, not before",
         "6. bootstrap.sh:26-33 clears the flag RECURSIVELY on site-packages (it currently iterates one path and ends `|| true`, so it can neither cover the directory nor report failing), and then ASSERTS THE EFFECT \u2014 import one namespace, print its resolved path, fail loudly if it raises. This is the same 'assert the effect, never the exit code' rule this run already applies to installers, applied to the one provisioning step that was exempt from it."
       ],
-      "verify": "./scripts/bootstrap.sh && ./.venv/bin/python -m pytest packages/llm -q && ./.venv/bin/python -c 'import contracts, llm, trust'",
+      "verify": "export PROXYSHOP_WORKER=0 && ./scripts/bootstrap.sh && ./.venv/bin/python -m pytest packages/llm -q && ./.venv/bin/python -c 'import contracts, llm, trust'",
       "scope": [
         "scripts/bootstrap.sh",
         "conftest.py",
@@ -2176,7 +2176,7 @@
         "3. The teardown is proven by a test that fails if the finalizer is removed",
         "4. A note records that the Docker VM disk, not the host disk, is the resource these tests consume"
       ],
-      "verify": "pytest apps/trust/tests/test_schema_grants.py proxyshop_support/tests/test_role_password_end_to_end.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_schema_grants.py proxyshop_support/tests/test_role_password_end_to_end.py -q",
       "scope": [
         "apps/trust/**",
         "proxyshop_support/**"
@@ -2209,7 +2209,7 @@
         "3. A case at 10**16 and one at 2**53+1 pin accept-and-refuse respectively, across Python and TypeScript",
         "4. Reverting the fix turns the extended gate red"
       ],
-      "verify": "pytest e2e/test_jcs_conformance.py -q && npx vitest run packages/contracts",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest e2e/test_jcs_conformance.py -q && npx vitest run packages/contracts",
       "scope": [
         "packages/contracts/**",
         "e2e/**"
@@ -2237,7 +2237,7 @@
         "2. Deleting the setattr half of _publish turns a test red",
         "3. The sys.path.append fallback's global side effect on the interpreter is either removed or documented and tested"
       ],
-      "verify": "pytest apps/trust -q && pytest e2e/test_jcs_conformance.py -q",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/trust -q && uv run python -m pytest e2e/test_jcs_conformance.py -q",
       "scope": [
         "apps/trust/**"
       ],
@@ -2265,7 +2265,7 @@
         "2. Both remaining ENABLE TRIGGER sites use the ALWAYS spelling, with a test that catches the plain one",
         "3. A conditional exemption injected into the DELETE branch turns a test red whatever it keys on"
       ],
-      "verify": "pytest apps/trust/tests/test_ledger_chain.py -q",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_ledger_chain.py -q",
       "scope": [
         "apps/trust/**",
         "db/migrations/**"
@@ -2319,7 +2319,7 @@
         "2. Every fix carries a test that fails without it",
         "3. No fix widens the scope of the lane it came from"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "scope": [
         "packages/contracts/**",
         "services/ingest/**",
@@ -2352,7 +2352,7 @@
         "2. Every fix carries a test that fails without it",
         "3. Swept in one batch, after the ready feature frontier is built"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "scope": [
         "apps/exchange/**",
         "packages/store-agent/**",
@@ -2396,7 +2396,7 @@
         "3. Every fix carries a mutation that was green before and is red after",
         "4. The approved manifest's recorded digests still verify - no fix re-seals ground truth"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "refs": [
         "T-080 lane adversarial pass, 2026-09-02",
         "F1-checker-journal"
@@ -2425,7 +2425,7 @@
         "3. A test rotates a real buyer and asserts the published profiles are not trivially equal",
         "4. Whatever is decided, the objective's own wording and the docs match what the code actually provides"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "refs": [
         "T-070 lane adversarial pass, 2026-09-02"
       ],
@@ -2452,7 +2452,7 @@
         "2. app.buyer_accounts is written by the running service, not only by tests",
         "3. No exception message carries a raw identity value into a log or traceback"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "refs": [
         "T-070 lane adversarial pass, 2026-09-02"
       ],
@@ -2480,7 +2480,7 @@
         "3. A valid-signature body that cannot be parsed returns 400, never 5xx",
         "4. Every fix carries a test that fails without it"
       ],
-      "verify": "./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=0 ./scripts/verify.sh check",
       "refs": [
         "T-050 lane adversarial verifier, 2026-09-02",
         "orchestrator-verified items marked inline"
@@ -3983,7 +3983,7 @@
     {
       "id": "T-223",
       "title": "THE PRICE FLOOR IS AN EXACT EQUALITY, SO ANY POSITIVE PRICE CLEARS IT AND A 100.00 PRODUCT SELLS FOR ONE CENT. boundary.py:819 tests `priced == 0.0`, not a proportional floor, so under `max_discount_pct: 100` an offer at unit_price 0.001 is admitted through the real production door. Worse on an UNCAPPED roster row: `_is_judged` (collect.py:347) returns False when `listed <= 0`, so the offer is never judged there either, and `unit_price: 1e-09` on a 100.00 product returns HTTP 201 as a rankable bid. R10 only compels admitting a 53% undercut; this admits 99.9999999%. Measured end to end through POST /auctions by an adversarial verifier, and independently written into this module's own docstring by the orchestrator at e8aaec5 -- where it was deferred to a 'derived-authorization follow-up ticket' that was never minted. This ticket IS that follow-up. T-177 merged as the price wall and is DEFECTIVE at the production door: the attack its own ticket described is genuinely closed, and these three bypasses stand beside it. The single most actionable repair is replacing the exact-equality floor at boundary.py:819 with a proportional one, which breaks no frozen assertion.",
-      "verify": "uv run python -m pytest apps/exchange/tests/test_repro_untrusted_roster.py -q --runxfail -k t223",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/exchange/tests/test_repro_untrusted_roster.py -q --runxfail -k t223",
       "scope": [
         "packages/contracts/src/boundary.py:814-819 and apps/exchange/src/auction/collect.py"
       ],
@@ -3998,7 +3998,7 @@
     {
       "id": "T-224",
       "title": "UNAUTHENTICATED HTTP 500 OUT OF THE MIDDLE OF AN AUCTION. `list_price: 0.0` is an accepted roster value (`Field(ge=0.0)`), and on such a row `_is_judged` returns False, so an unparseable price reaches `float(...)` unguarded and raises ValueError out of the auction as a 500. One keystroke from a caller reaches it. Not a regression -- `git show main:` of that module raises the identical ValueError -- but the protection the surrounding docstring describes is conditional and the condition is caller-supplied. On the same row a silent store still mints a 0.00 rankable fallback (HTTP 201, entries=[{fallback: true, unit_price: 0.0, fallback_reason: 'no_response'}]), and negative and nan unit prices are admitted too. Recorded in the module docstring at e8aaec5 and deferred to a follow-up ticket that was never minted; this is it.",
-      "verify": "uv run python -m pytest apps/exchange/tests/test_repro_untrusted_roster.py -q --runxfail -k t224",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest apps/exchange/tests/test_repro_untrusted_roster.py -q --runxfail -k t224",
       "scope": [
         "apps/exchange/src/auction/routes.py:231 and apps/exchange/src/auction/collect.py"
       ],
@@ -4058,7 +4058,7 @@
     {
       "id": "T-228",
       "title": "make verify fails the types gate with 8 mypy errors across 3 store-agent modules merged in cycle 14, holding build_succeeds at 0 and blocking the epoch push. All 8 are UNSOUND ANNOTATIONS over CORRECT runtime behaviour, and each has a narrowing fix that makes the type system state the invariant the code already enforces. (a) modes/runner.py:317 - rationale_for() dispatches on is_decline(answer), a plain bool predicate mypy cannot narrow, so Bid|Decline is passed to _decline_clauses(Decline) and _offer_clauses(Bid); the repair is to give is_decline a TypeGuard[Decline] return type. (b) external/door.py:271,328 - signer_id/nonce/key_id are read with payload.get() (Any|None) and passed to keyring_secret(str,str) and NonceStore.consume(str,str); they cannot be None on that path because step 2 calls canonical_signing_bytes(payload), which raises CanonicalisationError unless missing_signing_fields() finds every one of REQUIRED_SIGNING_FIELDS to be a non-blank str (signing.py:315-336, 351-356) - the repair is to carry the VALIDATED envelope values forward from the canonicalization step instead of re-reading raw payload.get(), so the type reflects the guard that is already there. (c) learning/state.py:216-217 - the loop variable name 'tally' is reused: bound first to DepthTally over learned.depths, then rebound to Tally over learned.commitments (ClusterLearning declares commitments: tuple[Tally,...] at state.py:99, and Tally carries .label), so mypy keeps the first binding's type; the repair is to rename the second loop variable.",
-      "verify": "uv run python -m pytest packages/store-agent/tests -q && uv run python -m mypy",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/store-agent/tests -q && uv run python -m mypy",
       "scope": [
         "packages/store-agent/src"
       ],
@@ -4073,7 +4073,7 @@
     {
       "id": "T-229",
       "title": "THE VALIDATED BODY IS NOT THE ENQUEUED BODY. receive_bid accepts any Mapping and never snapshots it; the payload is read five separate times (missing_signing_fields, canonical_signing_bytes, the door's own envelope binding, verify_signature, then _work_item at door.py:191-206). T-228 closed the two SECURITY decisions by reading the three envelope ids once and proving them str, but _work_item still re-reads all six fields AFTERWARDS. Measured by the T-228 lane at lie_on=6: the submission is admitted while the queued work item's nonce is None and the real nonce is burned, so the work item's documented at-least-once IDEMPOTENCY KEY disagrees with the replay memory. The body variant is worse: the validated body and the enqueued body differ, with the price rewritten 89.0 -> 1.0 and the receipt reading accepted=True, reasons=(). A correctly signed bid for 89.00 is enqueued as 1.00.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_repro_external_door.py -q --runxfail -k the_body_that_was_validated",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -4088,7 +4088,7 @@
     {
       "id": "T-230",
       "title": "receive_bid is documented 'Never raises' at door.py:224 and three inputs make it raise, on a fully valid signed payload. (1) freshness_window_seconds=10**400 raises OverflowError: the handler at door.py:284-287 catches (TypeError, ValueError) only. (2) A blacklist whose __iter__ raises ValueError propagates: door.py:131-134 catches TypeError only. (3) A Mapping whose .get raises propagates OUT OF THE REJECTION PATH, because _refuse at door.py:106-107 re-reads the very payload it is refusing. This is the signed external-bid entry point; an unhandled exception here is a 500 rather than a refusal, and (3) means the error path is not safe on exactly the hostile input the error path exists for.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_repro_external_door.py -q --runxfail -k never_raises_on_the_three_inputs",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -4103,7 +4103,7 @@
     {
       "id": "T-231",
       "title": "freshness_window_seconds = nan or inf DISABLES BOTH FRESHNESS GATES, making the replay window unbounded. float() raises nothing for NaN and every NaN comparison evaluates False, so both two-sided freshness comparisons silently pass. Measured: a six-year-stale bid that is correctly refused issued_at_stale at the default window is ACCEPTED with either value. Not payload-reachable today, but this is the one knob that makes the replay window infinite, and a YAML or env config value is exactly how a NaN arrives.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_repro_external_door.py -q --runxfail -k non_finite_freshness_window",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -4118,7 +4118,7 @@
     {
       "id": "T-232",
       "title": "THE DEFAULT nonce_store SILENTLY DISABLES REPLAY PROTECTION. door.py:327 mints a fresh NonceStore() on every call when none is passed, so nothing is remembered between submissions. Measured: the identical signed bid submitted three times with no nonce_store= argument was accepted all three times. It is documented in the docstring, but the receipt of a replayed bid is indistinguishable from a real acceptance, so a caller that forgets the argument gets no replay defence and no signal that it has none.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_repro_external_door.py -q --runxfail -k no_injected_nonce_store",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -4133,7 +4133,7 @@
     {
       "id": "T-233",
       "title": "ELIGIBILITY DEFAULT IS FAIL-OPEN, AND THE ABSENT ARGUMENT IS MORE PERMISSIVE THAN THE EMPTY ONE. Measured: calling receive_bid with no trust_snapshot= and no blacklist= yields accepted=True, while passing trust_snapshot={} is refused with trust_snapshot_unavailable. The explicit empty value fails closed and the omitted value fails open, which is backwards: omission is the case that happens by accident.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_repro_external_door.py -q --runxfail -k omitting_the_eligibility_inputs",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -4148,7 +4148,7 @@
     {
       "id": "T-234",
       "title": "NonceStore.consume (nonces.py:55-59) is a NON-ATOMIC check-then-set: parse_timestamp(retain_until) is a full call between the membership test and the store. Characterised carefully by the reporting lane, which explicitly corrected its own adversarial pass for overstating this: NOT reproducible at the default GIL switch interval (0/300 direct trials, 0/120 end-to-end through receive_bid), but reproducible at 25/300 with sys.setswitchinterval(1e-6). So it is a real defect currently masked by the 5ms switch interval, and it becomes live the moment there is a concurrent HTTP caller. RELATED AND WORSE: the app.bid_nonces table (db/migrations/0003_*.sql, UNIQUE (signer_id, nonce)) is referenced only by a docstring and two schema tests - NO CODE BINDS TO IT - so across two uvicorn workers there is no cross-process replay defence at all, atomic or not.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_repro_external_door.py -q --runxfail -k racing_callers_can_spend",
       "scope": [
         "packages/store-agent/src/external/nonces.py"
       ],
@@ -4253,7 +4253,7 @@
     {
       "id": "T-241",
       "title": "EXTENDS T-229 FROM 3 FIELDS TO 6, MEASURED. The rung-2 verifier for cycle 15 batch 1 confirmed T-229 and widened it: _work_item (door.py:191-206) re-reads the payload for ALL SIX identity fields, not the three T-228 hardened. With a Mapping that answers honestly for the first N reads of one key and then lies (swap_after=7), receive_bid returns accepted=True while the enqueued work item carries the attacker's value for auction_id, store_id, issued_at, nonce, signer_id and key_id. THE SHARP PART: payload_hash covers only the bid BODY, so for issued_at, nonce, signer_id and key_id the enqueued item is INTERNALLY CONSISTENT and a downstream worker that re-hashes the submission cannot detect the swap. The door spends the honest nonce in its replay memory while enqueueing the attacker's nonce as the documented idempotency key, so the replay memory and the downstream dedup key disagree \u2014 precisely the hazard the new gate-2b comment says matters most at the nonce. Exploitability is currently ZERO because receive_bid has no production callers.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=0 uv run python -m pytest packages/store-agent/tests/test_repro_external_door.py -q --runxfail -k every_identity_field_on_the_work_item",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
