@@ -461,17 +461,34 @@ _HOOK_SOURCES = (
 #: fixture spellings (`_fixtures_protocol` uses `variant_ref="44352913"`,
 #: `agent_version="store-agent/1.0.0"`, claim key `"material"`), which is what makes "looks like
 #: the test generator" stop being a decidable question rather than merely a harder one.
-def _drawn_id(rng: Any, kind: str) -> str:
-    n = rng.randrange(10 ** rng.randrange(2, 12))
+def _drawn_id(rng: Any, *aliases: str) -> str:
+    """An identifier of a drawn SHAPE and a drawn prefix.
+
+    The prefix pool is passed in by the caller and always contains this repo's own spelling
+    (`auc-1`, `store-1`, `prod-1`, `sig-deadbeef`), because a generator that only ever emits
+    `auction-<n>` is separable from real traffic by a regex on the prefix alone — measured, that
+    exact key took both gates green with the money path open. The last two shapes are free-form
+    over a drawn alphabet and length, so the emitted set is not enumerable by a pattern.
+    """
+    kind = aliases[rng.randrange(len(aliases))]
+    n = rng.randrange(10 ** rng.randrange(1, 12))
+    alphabet = (
+        "0123456789abcdef",
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "0123456789",
+        "abcdefghijklmnopqrstuvwxyz-_.",
+    )[rng.randrange(4)]
+    junk = "".join(rng.choice(alphabet) for _ in range(rng.randrange(1, 33)))
     return (
         f"{kind}-{n}",
         f"{n}",
         f"{kind}_{n:08d}",
         f"gid://shopify/{kind.capitalize()}/{n}",
         f"{kind[:2].upper()}{n:04X}",
-        "".join(rng.choice("0123456789abcdef") for _ in range(rng.randrange(8, 33))),
+        junk,
         f"{kind}.{n}.v{rng.randrange(9)}",
-    )[rng.randrange(7)]
+        f"{kind}-{junk}",
+    )[rng.randrange(8)]
 
 
 _WORDS = (
@@ -502,14 +519,47 @@ _CURRENCIES = ("USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "SEK", "NZD", No
 _CLAIM_KEYS = ("material", "origin", "care", "free_returns", "ships_within", "warranty")
 
 
+#: Strings this repo's own fixtures actually carry, drawn alongside prose and free-form junk.
+_REAL_STRINGS = (
+    "30 days",
+    "merino wool",
+    "New Zealand",
+    "machine washable",
+    "60 days, free",
+    "gentle vitamin C serum for sensitive skin",
+)
+
+
 def _drawn_text(rng: Any) -> str:
+    """Prose, free-form junk, or one of this repo's own fixture strings.
+
+    A vocabulary of 18 words is itself a key — "every string in this bid is built from these
+    words" separated 100% of drawn bids from real traffic, where `"30 days"` is undrawable.
+    """
+    roll = rng.random()
+    if roll < 0.35:
+        alphabet = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,/-'"
+        return "".join(rng.choice(alphabet) for _ in range(rng.randrange(1, 60)))
+    if roll < 0.5:
+        return _REAL_STRINGS[rng.randrange(len(_REAL_STRINGS))]
     return " ".join(_WORDS[rng.randrange(len(_WORDS))] for _ in range(rng.randrange(1, 12)))
 
 
 def _drawn_timestamp(rng: Any, *, future: bool) -> str:
-    """A timestamp, at a drawn time of day. `future` means strictly after `NOW`."""
-    year = rng.randrange(2026, 3000) if future else rng.randrange(2000, 2026)
-    month = rng.randrange(7, 13) if (future and year == 2026) else rng.randrange(1, 13)
+    """A timestamp at a drawn time of day. `future` means strictly after `NOW`.
+
+    The NON-future window deliberately reaches past `NOW`'s year and OVERLAPS the future one.
+    A past window that stops short of the current year is a key on its own, and a measured one:
+    "this bid carries no provenance observed in 2026 or later" separated every drawn bid from
+    every realistic one — the strongest surviving attack on an earlier cut of this generator,
+    and it keys on a semantic property rather than on any spelling.
+    """
+    if future:
+        year = rng.randrange(2026, 3000)
+        month = rng.randrange(7, 13) if year == 2026 else rng.randrange(1, 13)
+    else:
+        year = rng.randrange(2000, 2028)
+        month = rng.randrange(1, 13)
     return (
         f"{year:04d}-{month:02d}-{rng.randrange(1, 29):02d}"
         f"T{rng.randrange(24):02d}:{rng.randrange(60):02d}:{rng.randrange(60):02d}Z"
@@ -531,12 +581,14 @@ def _drawn_provenance(rng: Any) -> dict[str, Any]:
     }
 
 
-def _drawn_claim(rng: Any, key: Any = None, value: Any = None) -> dict[str, Any]:
+def _drawn_claim(
+    rng: Any, key: Any = None, value: Any = None, provenance: Any = None
+) -> dict[str, Any]:
     if key is None:
         key = (
             _CLAIM_KEYS[rng.randrange(len(_CLAIM_KEYS))]
             if rng.random() < 0.5
-            else _drawn_id(rng, "attr")
+            else _drawn_id(rng, "attr", "fact", "k")
         )
     if value is None:
         value = (
@@ -546,7 +598,14 @@ def _drawn_claim(rng: Any, key: Any = None, value: Any = None) -> dict[str, Any]
             rng.random() < 0.5,
             None,
         )[rng.randrange(5)]
-    return {"key": key, "value": value, "provenance": _drawn_provenance(rng)}
+    # `provenance` is passed in when the bid reuses ONE block across its claims, as a real
+    # hook-minted bid does. Drawing every block independently is a key: "no two provenance
+    # blocks in this bid are byte-identical" is true of every drawn bid and of no fixture one.
+    return {
+        "key": key,
+        "value": value,
+        "provenance": _drawn_provenance(rng) if provenance is None else dict(provenance),
+    }
 
 
 #: How many bids each property draws per seed.
@@ -592,13 +651,17 @@ def _drawn_priced_bid(
 
     from packages.contracts.tests._fixtures_protocol import make_offer
 
-    claims = [_drawn_claim(rng) for _ in range(rng.randrange(0, 8))]
+    # Sometimes ONE provenance block is reused across every claim, the way a bid minted by a
+    # single hook call is. Always drawing independent blocks is a key on its own.
+    shared = _drawn_provenance(rng) if rng.random() < 0.4 else None
+
+    claims = [_drawn_claim(rng, provenance=shared) for _ in range(rng.randrange(0, 8))]
     if carries_list_price:
         # The `list_price` claim `get_product_fact` mints — the ONLY list price the wall can see
         # when no roster is passed. Its position is drawn so a repair cannot key on index 0.
         claims.insert(
             rng.randrange(len(claims) + 1),
-            _drawn_claim(rng, key=LIST_PRICE_CLAIM_KEY, value=list_price),
+            _drawn_claim(rng, key=LIST_PRICE_CLAIM_KEY, value=list_price, provenance=shared),
         )
 
     discount: Any = None
@@ -607,42 +670,44 @@ def _drawn_priced_bid(
             # All three spellings `_declared_depth` accepts, so a fix cannot key on one.
             "type": ("percentage", "percent", "pct")[rng.randrange(3)],
             "value": depth,
-            "provenance": _drawn_provenance(rng),
+            "provenance": _drawn_provenance(rng) if shared is None else dict(shared),
         }
 
     # Any quantity is at least one, so a total can only ever be LARGER than one discounted unit.
     total_price = unit_price if rng.random() < 0.4 else round(unit_price * rng.uniform(1.0, 5.0), 2)
 
+    store_id = _drawn_id(rng, "store", "store-one", "shop", "s")
     offer = make_offer(
-        product_ref=_drawn_id(rng, "prod"),
-        variant_ref=None if rng.random() < 0.2 else _drawn_id(rng, "variant"),
+        product_ref=_drawn_id(rng, "prod", "product", "sku", "p"),
+        variant_ref=None if rng.random() < 0.2 else _drawn_id(rng, "var", "variant", "v"),
         unit_price=unit_price,
         total_price=total_price,
         currency=_CURRENCIES[rng.randrange(len(_CURRENCIES))],
         discount=discount,
-        commitments=[_drawn_claim(rng) for _ in range(rng.randrange(0, 6))],
+        commitments=[_drawn_claim(rng, provenance=shared) for _ in range(rng.randrange(0, 6))],
         expires_at=_drawn_timestamp(rng, future=True),
         checkout_url=(
             None
             if rng.random() < 0.2
             else (
-                f"https://{_drawn_id(rng, 'shop')}.example.com/cart/{rng.randrange(10**9)}:1",
-                f"https://example.test/{_drawn_id(rng, 'checkout')}",
-            )[rng.randrange(2)]
+                f"https://{store_id}.example.com/cart/{rng.randrange(10**9)}:1",
+                f"https://example.test/{_drawn_id(rng, 'checkout', 'c')}",
+                f"https://{_drawn_id(rng, 'shop', 'store-one')}.myshopify.com/cart/{rng.randrange(10**9)}",
+            )[rng.randrange(3)]
         ),
     )
     return make_bid(
         claims=claims,
-        store_id=_drawn_id(rng, "store"),
-        auction_id=_drawn_id(rng, "auction"),
+        store_id=store_id,
+        auction_id=_drawn_id(rng, "auc", "auction", "a"),
         offer=offer,
         message=(None, _drawn_text(rng), "m" * rng.randrange(1, 120))[rng.randrange(3)],
         agent_version=(
             f"store-agent/{rng.randrange(9)}.{rng.randrange(9)}.{rng.randrange(9)}",
             f"{rng.randrange(9)}.{rng.randrange(99)}.{rng.randrange(99)}",
-            _drawn_id(rng, "agent"),
+            _drawn_id(rng, "agent", "store-agent"),
         )[rng.randrange(3)],
-        signature=_drawn_id(rng, "sig"),
+        signature=_drawn_id(rng, "sig", "sig-deadbeef", "signature"),
         schema_version=("1", "1.0.0", "1.1.0", "2.0.0")[rng.randrange(4)],
     )
 
@@ -667,7 +732,7 @@ def _eligible_snapshot(bid: Any, rng: Any = None) -> dict[str, Any]:
     table = {store_id: row}
     for _ in range(rng.randrange(0, 3)):
         # Unrelated rows, as a real snapshot carries. Their verdicts are irrelevant to this bid.
-        other = _drawn_id(rng, "store")
+        other = _drawn_id(rng, "store", "store-one", "shop", "s")
         if other != store_id:
             table[other] = {
                 "store_id": other,
@@ -830,7 +895,15 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
             distinct.add(_draw_once(rng, seed, draw))
             exercised += 1
 
-    expected = 2 * _DRAWS_PER_SEED
+    # A LITERAL 120, never `2 * _DRAWS_PER_SEED`. Measured: setting that constant to 1 left the
+    # ordinary run, the canary AND the positive control all green while each property measured
+    # two draws instead of 120 — the guard was comparing the constant against itself, which is
+    # the same tautology as a loop that iterates zero cases and reports success.
+    assert _DRAWS_PER_SEED >= 60, (
+        f"_DRAWS_PER_SEED shrank to {_DRAWS_PER_SEED}; these properties are sized in the ticket "
+        f"gate at 60 draws per seed and the guards below are written against a literal 120"
+    )
+    expected = 120
     assert exercised == expected, (
         f"only {exercised} of {expected} cases were built, armed and compared. A loop that "
         f"silently iterates fewer cases than it claims is how three sweeps in this repo went "
@@ -1006,7 +1079,15 @@ def test_t307_a_supplied_discount_ceiling_is_not_inert_when_the_roster_is_absent
             distinct.add(_draw_once(rng, seed, draw))
             exercised += 1
 
-    expected = 2 * _DRAWS_PER_SEED
+    # A LITERAL 120, never `2 * _DRAWS_PER_SEED`. Measured: setting that constant to 1 left the
+    # ordinary run, the canary AND the positive control all green while each property measured
+    # two draws instead of 120 — the guard was comparing the constant against itself, which is
+    # the same tautology as a loop that iterates zero cases and reports success.
+    assert _DRAWS_PER_SEED >= 60, (
+        f"_DRAWS_PER_SEED shrank to {_DRAWS_PER_SEED}; these properties are sized in the ticket "
+        f"gate at 60 draws per seed and the guards below are written against a literal 120"
+    )
+    expected = 120
     assert exercised == expected, (
         f"only {exercised} of {expected} cases were built, armed and compared. A loop that "
         f"silently iterates fewer cases than it claims is how three sweeps in this repo went "
@@ -1044,36 +1125,62 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
     import random
 
     rng = random.Random(20260906)
+    seen = 0
 
+    # Both paths x both claim configurations x three numeric points. The numeric axis matters:
+    # a generator sabotaged to raise unless `depth == 20.0 and list_price == 100.0` left an
+    # ordinary run reporting `1 passed, 8 xfailed` against the single-point version of this
+    # canary, with both gates scoring total errors as reproductions.
     for path in (HOSTED_PATH, EXTERNAL_PATH):
         for carries in (True, False):
-            bid = _drawn_priced_bid(
-                rng,
-                depth=20.0,
-                list_price=100.0,
-                unit_price=80.01,
-                carries_list_price=carries,
-            )
-            product_ref = bid["offer"]["product_ref"]
-            snap = _eligible_snapshot(bid, rng)
-            where = f"path={path} carries_list_price={carries}"
+            for list_price, depth in ((100.0, 20.0), (49.0, 0.0), (3499.99, 62.5)):
+                unit_price = round(list_price * (100.0 - depth) / 100.0, 2)
+                bid = _drawn_priced_bid(
+                    rng,
+                    depth=depth,
+                    list_price=list_price,
+                    unit_price=unit_price,
+                    carries_list_price=carries,
+                )
+                product_ref = bid["offer"]["product_ref"]
+                snap = _eligible_snapshot(bid, rng)
+                where = f"path={path} carries_list_price={carries} {depth}% off {list_price}"
 
-            admitted = _judge(
-                bid,
-                path,
-                snapshot=snap,
-                list_prices={product_ref: {"list_price": 100.0, "max_discount_pct": 20.0}},
-            )
-            assert admitted.ok is True, (
-                f"{where}: the T-306/T-307 generator can no longer build a bid this door "
-                f"admits, so both gates are scoring errors as reproductions: {admitted!r}"
-            )
+                admitted = _judge(
+                    bid,
+                    path,
+                    snapshot=snap,
+                    list_prices={
+                        product_ref: {"list_price": list_price, "max_discount_pct": depth}
+                    },
+                )
+                assert admitted.ok is True, (
+                    f"{where}: the T-306/T-307 generator can no longer build a bid this door "
+                    f"admits, so both gates are scoring errors as reproductions: {admitted!r}"
+                )
 
-            refused = _judge(bid, path, snapshot=snap, list_prices={})
-            assert refused.ok is False, (
-                f"{where}: an explicitly empty roster must refuse — it is the right-hand side "
-                f"both gates above compare the absent argument against: {refused!r}"
-            )
+                refused = _judge(bid, path, snapshot=snap, list_prices={})
+                assert refused.ok is False, (
+                    f"{where}: an explicitly empty roster must refuse — it is the right-hand "
+                    f"side both gates compare the absent argument against: {refused!r}"
+                )
+                seen += 1
+
+    assert seen == 12, f"the canary walked {seen} of 12 configurations"
+
+    # THE JS-TRUTHINESS TRAP, pinned rather than left to a comment. `_eligible_snapshot` spells
+    # `blacklisted` several FALSY ways, and `[]` must never join them: `_js_truthy` reads
+    # JavaScript truthiness, where an empty array is TRUE, so a row spelling the flag `[]` is a
+    # BLACKLISTED store. A generator that quietly added it would refuse every armed draw in both
+    # gates, and the failure would read as the fix being wrong rather than the fixture.
+    trapped = {bid["store_id"]: {"store_id": bid["store_id"], "score": 0.5, "blacklisted": []}}
+    blocked = _judge(bid, HOSTED_PATH, snapshot=trapped)
+    assert blocked.ok is False and any(
+        reason.startswith("store_blacklisted:") for reason in blocked.reasons
+    ), (
+        f"an empty list is TRUTHY in JavaScript, so `blacklisted: []` is a blacklisted store and "
+        f"must never be used as a falsy spelling in a fixture: {blocked!r}"
+    )
 
     # The seeds themselves. `isinstance(drawn, int)` alone proves nothing — it is satisfied by a
     # `_property_seeds` de-randomized to a constant pair, which is the one property its docstring
