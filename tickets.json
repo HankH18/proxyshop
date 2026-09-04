@@ -260,7 +260,7 @@
         "1. On the approved ER fixture set, precision \u2265 configured floor and GTIN matches always link",
         "2. Edges carry confidence; below-threshold pairs are not linked"
       ],
-      "verify": "pytest services/ingest/tests/test_entity_resolution.py -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e2_ingestion.py -q -k test_gtin_matches_always_link_and_below_threshold_pairs_do_not",
       "scope": [
         "services/ingest/src/er/**",
         "services/ingest/tests/**",
@@ -289,7 +289,7 @@
         "1. Adapter satisfies the CatalogAdapter interface tests",
         "2. Contract tests replay recorded MCP responses; mapping to graph upserts matches signed_fetch semantics"
       ],
-      "verify": "pytest services/ingest/tests/test_catalog_mcp.py -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e2_ingestion.py -q -k test_both_catalog_adapters_satisfy_one_interface",
       "scope": [
         "services/ingest/src/adapters/**",
         "services/ingest/tests/**",
@@ -820,7 +820,7 @@
         "3. Duplicate use emits integrity LedgerEvent, not an exception",
         "4. It is reachable only as a CheckoutProvider implementation: it satisfies T-036's port contract unmodified, and substituting SimulatedRedirectProvider for it changes no caller and no emitted LedgerEvent kind (C11)"
       ],
-      "verify": "pytest apps/merchant/svc/tests/test_codes.py -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e5_merchant.py -q -k 'test_code_is_single_use_with_a_bounded_expiry or test_conflicting_combines_with_is_detected_before_redirect or test_duplicate_redemption_emits_an_integrity_event_not_an_exception'",
       "scope": [
         "apps/merchant/svc/src/codes/**",
         "apps/merchant/svc/tests/**"
@@ -850,7 +850,7 @@
         "2. No activation without recorded approval artifact",
         "3. Envelope edits create new versions; old versions immutable"
       ],
-      "verify": "pytest apps/merchant/svc/tests/test_onboarding.py -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e5_merchant.py -q -k 'test_interview_transcript_yields_the_expected_envelope_version or test_activation_requires_a_recorded_written_approval_artifact or test_envelope_edits_create_new_versions_and_old_versions_are_immutable'",
       "scope": [
         "apps/merchant/svc/src/onboarding/**",
         "apps/merchant/svc/tests/**",
@@ -1125,7 +1125,7 @@
         "2. Confirmation required before auction creation",
         "3. Bucket builder outputs only DESIGN profile fields; k-floor honored at configured value"
       ],
-      "verify": "pytest apps/buyer/svc/tests/test_intent.py -q && npx vitest run apps/buyer/app/intent",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_clarification_loop_asks_at_most_three_questions or test_confirmed_intent_is_structured_with_use_case_constraints_and_budget_band or test_no_auction_is_created_before_the_buyer_confirms'",
       "scope": [
         "apps/buyer/svc/src/intent/**",
         "apps/buyer/app/intent/**",
@@ -1156,7 +1156,7 @@
         "2. Provenance labels map from Provenance.source correctly (golden)",
         "3. Accept path e2e-to-stub returns and follows permalink"
       ],
-      "verify": "npx vitest run apps/buyer/app/shortlist && pytest apps/buyer/svc/tests/test_accept_flow.py -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_provenance_labels_map_store_confirmed_versus_from_their_website or test_accept_follows_the_permalink_returned_by_the_exchange'",
       "scope": [
         "apps/buyer/app/shortlist/**",
         "apps/buyer/svc/src/accept/**",
@@ -1185,7 +1185,7 @@
         "2. Submission lands as feedback LedgerEvent",
         "3. No free-text field exists (render test)"
       ],
-      "verify": "npx vitest run apps/buyer/app/feedback && pytest apps/buyer/svc/tests/test_feedback.py -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e7_buyer.py -q -k 'test_feedback_prompt_is_offered_only_for_routed_orders or test_feedback_submission_lands_as_a_feedback_ledger_event'",
       "scope": [
         "apps/buyer/app/feedback/**",
         "apps/buyer/svc/src/feedback/**",
@@ -1256,7 +1256,7 @@
         "2. Dishonest script emits exactly the manifest behaviors",
         "3. Sim runs headless against compose in bounded steps"
       ],
-      "verify": "pytest services/sim -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e8_proofs.py -q -k test_dishonest_script_emits_exactly_the_manifest_behaviours",
       "scope": [
         "services/sim/**"
       ],
@@ -1378,7 +1378,7 @@
         "3. docs/tests/test_runbook.py checks the UNION of every markdown file under docs/demo/ for the required section headings and make-target existence, matching the frozen S6 lint, and fails when a referenced make target is undefined",
         "4. No timeline content (lint rule)"
       ],
-      "verify": "pytest docs/tests/test_runbook.py -q",
+      "verify": "uv run python -m pytest .swarm-loop/acceptance/test_e8_proofs.py -q -k test_demo_runbook_has_the_required_sections_and_its_make_targets_exist",
       "scope": [
         "docs/demo/starting-slice.md",
         "docs/tests/**"
@@ -4058,7 +4058,7 @@
     {
       "id": "T-228",
       "title": "make verify fails the types gate with 8 mypy errors across 3 store-agent modules merged in cycle 14, holding build_succeeds at 0 and blocking the epoch push. All 8 are UNSOUND ANNOTATIONS over CORRECT runtime behaviour, and each has a narrowing fix that makes the type system state the invariant the code already enforces. (a) modes/runner.py:317 - rationale_for() dispatches on is_decline(answer), a plain bool predicate mypy cannot narrow, so Bid|Decline is passed to _decline_clauses(Decline) and _offer_clauses(Bid); the repair is to give is_decline a TypeGuard[Decline] return type. (b) external/door.py:271,328 - signer_id/nonce/key_id are read with payload.get() (Any|None) and passed to keyring_secret(str,str) and NonceStore.consume(str,str); they cannot be None on that path because step 2 calls canonical_signing_bytes(payload), which raises CanonicalisationError unless missing_signing_fields() finds every one of REQUIRED_SIGNING_FIELDS to be a non-blank str (signing.py:315-336, 351-356) - the repair is to carry the VALIDATED envelope values forward from the canonicalization step instead of re-reading raw payload.get(), so the type reflects the guard that is already there. (c) learning/state.py:216-217 - the loop variable name 'tally' is reused: bound first to DepthTally over learned.depths, then rebound to Tally over learned.commitments (ClusterLearning declares commitments: tuple[Tally,...] at state.py:99, and Tally carries .label), so mypy keeps the first binding's type; the repair is to rename the second loop variable.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "uv run python -m pytest packages/store-agent/tests -q && uv run python -m mypy",
       "scope": [
         "packages/store-agent/src"
       ],
