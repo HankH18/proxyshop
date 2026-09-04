@@ -155,8 +155,6 @@ from typing import Any
 
 from contracts.boundary import (
     MAX_DISCOUNT_ROSTER_KEY,
-    OFFER_TOTAL_PRICE_SITE,
-    OFFER_UNIT_PRICE_SITE,
     REASON_PRICE_UNRECONCILABLE,
     ROSTER_PRICE_BELOW_FLOOR,
     price_floor,
