@@ -5,38 +5,30 @@
 > ledger is regenerated from it. Do not hand-edit; regenerate. Any amendment that changes the
 > graph must re-seed this file, or the human view goes stale in exactly the way nobody checks.
 
-Regenerated 2026-09-03 at cycle 15 from tickets.json @ HEAD.
+Regenerated 2026-09-03 at the cycle-15 epoch boundary, from tickets.json at HEAD.
 
-## Counts (from the graph, not recalled)
+## Counts (derived from the graph, never recalled)
 
 | | |
 |---|---|
-| tickets in graph | **176** |
-| closed | 74 |
-| ready | 72 |
-| blocked | 30 |
-| in flight this epoch | 5 — T-023, T-053, T-071, T-081, T-228 |
+| tickets in graph | **188** |
+| closed | 79 |
+| ready | 83 |
+| blocked | 26 |
 
-**Closure source.** The graph carries no status field; closure is supplied to `frontier` from
-two positive-evidence sources and nothing else: every ticket whose frozen acceptance tests all
-pass (28 tickets), unioned with the `dispatch` ledger's `accepted` verdicts. Anything
-unproven stays OPEN by design — a false-CLOSED silently drops real work, a false-OPEN only burns
-a lane.
+**Closure source.** The graph carries no status field that the scheduler reads, so closure is
+supplied to `frontier` from two positive-evidence sources and nothing else: every ticket whose
+frozen acceptance tests all pass (32 tickets), unioned with the `dispatch` ledger's
+`accepted` verdicts. Anything unproven stays OPEN by design — a false-CLOSED silently drops real
+work, a false-OPEN only burns a lane.
 
-## In flight (epoch 15)
+**A caution measured this cycle.** A passing verify is necessary and NOT sufficient evidence that
+a ticket shipped. T-081's recorded gate (`pytest services/sim -q`) exited 0 while
+`services/sim/src/__init__.py` was zero bytes — the whole selection was one vacuous scaffold
+smoke test. T-160 documents the same failure in the other direction for T-109/T-111/T-123. Where a
+ticket has frozen acceptance coverage, that coverage is the better oracle.
 
-- **T-023** — Catalog MCP adapter passes recorded-contract tests
-  - scope: `services/ingest/src/adapters/**, services/ingest/tests/**, fixtures/mcp/**`
-- **T-053** — A plain-language interview yields an approved, versioned envelope
-  - scope: `apps/merchant/svc/src/onboarding/**, apps/merchant/svc/tests/**, fixtures/interviews/**, apps/merchant/svc/src/envelope/**`
-- **T-071** — Three questions or fewer produce a confirmed structured intent
-  - scope: `apps/buyer/svc/src/intent/**, apps/buyer/app/intent/**, apps/buyer/svc/tests/**, fixtures/dialogues/**`
-- **T-081** — Simulated buyers exercise the whole network from one seed
-  - scope: `services/sim/**`
-- **T-228** — make verify fails the types gate with 8 mypy errors across 3 store-agent modules merged in cycle 14, holding b
-  - scope: `packages/store-agent/src`
-
-## Ready (dependencies closed, dispatchable)
+## Ready (dependencies closed, dispatchable now)
 
 - **T-013** — Shopify stub reproduces the exact surface the system uses
   - scope: `services/shopify-stub/**`
@@ -50,12 +42,16 @@ a lane.
   - scope: `e2e/**`
 - **T-031** — Candidate retrieval and fit scoring feed the ranker
   - scope: `apps/exchange/src/retrieval/**, apps/exchange/tests/**`
+- **T-072** — Shortlists render with provenance and accept hands off cleanly
+  - scope: `apps/buyer/app/shortlist/**, apps/buyer/svc/src/accept/**, apps/buyer/svc/tests/**`
 - **T-101** — A partial re-embed is never certified as complete
   - scope: `services/ingest/**`
 - **T-108** — The two envelope gates agree on whitespace
   - scope: `packages/contracts/**`
 - **T-104** — The prompt cache key cannot collide on separator text
   - scope: `packages/llm/**`
+- **T-083** — Both learning loops demonstrably move under seeded outcomes
+  - scope: `e2e/**`
 - **T-109** — A datastore blip cannot silently empty the security gate
   - scope: `conftest.py, proxyshop_support/**`
 - **T-111** — Provisioning fails loudly when the flat namespaces are dead
@@ -158,6 +154,30 @@ a lane.
   - scope: `pyproject.toml`
 - **T-227** — THE FROZEN TEST AND THE PRODUCT CAN SELECT DIFFERENT MANIFEST DOCUMENTS, so the suite would grade one document
   - scope: `.swarm-loop/acceptance/test_e4_store_agent.py::_load_fixture_manifest vs apps/seller-reference/src/personas/__init__.py`
+- **T-229** — THE VALIDATED BODY IS NOT THE ENQUEUED BODY. receive_bid accepts any Mapping and never snapshots it; the paylo
+  - scope: `packages/store-agent/src/external/door.py`
+- **T-230** — receive_bid is documented 'Never raises' at door.py:224 and three inputs make it raise, on a fully valid signe
+  - scope: `packages/store-agent/src/external/door.py`
+- **T-231** — freshness_window_seconds = nan or inf DISABLES BOTH FRESHNESS GATES, making the replay window unbounded. float
+  - scope: `packages/store-agent/src/external/door.py`
+- **T-232** — THE DEFAULT nonce_store SILENTLY DISABLES REPLAY PROTECTION. door.py:327 mints a fresh NonceStore() on every c
+  - scope: `packages/store-agent/src/external/door.py`
+- **T-233** — ELIGIBILITY DEFAULT IS FAIL-OPEN, AND THE ABSENT ARGUMENT IS MORE PERMISSIVE THAN THE EMPTY ONE. Measured: cal
+  - scope: `packages/store-agent/src/external/door.py`
+- **T-234** — NonceStore.consume (nonces.py:55-59) is a NON-ATOMIC check-then-set: parse_timestamp(retain_until) is a full c
+  - scope: `packages/store-agent/src/external/nonces.py`
+- **T-235** — ONE LEDGER KIND, TWO BODIES: the successful checkout path emits a code_created event carrying NONE of its thre
+  - scope: `apps/exchange/src/checkout/provider.py`
+- **T-236** — THE INGESTION PIPELINE DOES NOT EXIST AS A RUNNING THING. No production code constructs any CatalogAdapter. se
+  - scope: `services/ingest/src/main.py`
+- **T-237** — THE S2 CHAIN HAS NO PRODUCT CODE CLOSING IT: nothing turns a sub-threshold trust score into an eligibility den
+  - scope: `apps/trust/src/snapshot/builder.py`
+- **T-238** — BARE urlsplit ON ATTACKER-CONTROLLED REDIRECT TARGETS. netguard.py:398 and transport.py:353 call bare urlsplit
+  - scope: `services/ingest/src/adapters/netguard.py`
+- **T-239** — ENVELOPE VERSION HISTORY IS PROCESS-LOCAL AND DIES WITH THE PROCESS. EnvelopeVersions keeps append-only histor
+  - scope: `apps/merchant/svc/src/envelope/store.py`
+- **T-240** — THE PINNED MERCHANT CONTRACT HAS NOWHERE TO PUT AN ENVELOPE APPROVAL ARTIFACT, AND ITS OWN EXAMPLE INVITES SEL
+  - scope: `packages/contracts/openapi/merchant.openapi.json`
 - **T-107** — claim_id is computed with JCS, not json.dumps
   - scope: `packages/contracts/**`
 - **T-022** — Same products across stores link via entity resolution
@@ -172,19 +192,19 @@ a lane.
   - scope: `apps/buyer/**, packages/**`
 - **T-134** — Merchant residue: a scope guard that shreds strings, a token in repr, and six inbox findings that never reache
   - scope: `apps/merchant/**`
+- **T-024** — Differential refresh keeps the graph current at field-appropriate cadence
+  - scope: `services/ingest/src/scheduler/**, services/ingest/tests/**`
+- **T-086** — Onboarding drives a shadow store to its first real bid
+  - scope: `e2e/test_onboarding.py, e2e/support/onboarding/**`
 
 ## Blocked (waiting on an open dependency)
 
-- **T-024** — waiting on T-023 — Differential refresh keeps the graph current at field-appropriate cadence
-- **T-054** — waiting on T-052, T-053 — The dashboard shows the walls and the window
-- **T-072** — waiting on T-071 — Shortlists render with provenance and accept hands off cleanly
+- **T-054** — waiting on T-052 — The dashboard shows the walls and the window
 - **T-073** — waiting on T-072 — Routed buyers can answer one structured feedback prompt
-- **T-082** — waiting on T-072, T-081 — One scripted run proves the full S1 flow
-- **T-083** — waiting on T-081 — Both learning loops demonstrably move under seeded outcomes
+- **T-082** — waiting on T-072 — One scripted run proves the full S1 flow
 - **T-084** — waiting on T-083 — The dishonest store ends below threshold and off the shortlist
 - **T-085** — waiting on T-082 — The starting-slice demo is a runbook anyone on the team can execute
-- **T-086** — waiting on T-053 — Onboarding drives a shadow store to its first real bid
-- **T-087** — waiting on T-053, T-084, T-085 — The Shopify and onboarding extension runbook covers the beats off the starting path
+- **T-087** — waiting on T-084, T-085 — The Shopify and onboarding extension runbook covers the beats off the starting path
 - **T-100** — waiting on T-013 — Shopify stub never emits an off-domain checkout Location
 - **T-105** — waiting on T-013 — Money arithmetic is asserted absolutely, not against itself
 - **T-112** — waiting on T-110 — The role password has one source of truth on the project's own fresh volume
@@ -206,17 +226,17 @@ a lane.
 - **T-128** — waiting on T-113 — Guards that cannot refuse anything are removed, not tested tautologically
 - **T-129** — waiting on T-113, T-116, T-118 — Wave-3 verification residue: nine findings across four lanes
 
-## Scheduling constraints (blast radius the globs make explicit)
+## Scheduling constraints (blast radius the scope globs make explicit)
 
-These pairs declare INTERSECTING scope globs and may never be in flight together.
+These groups declare INTERSECTING scope globs and may never be in flight together.
 `check-wave` refuses them mechanically; they are listed so the next frontier is built knowing it.
 
 - `apps/buyer/**` — shared by T-130, T-132, T-133
 - `apps/buyer/svc/src/auth/magic_link.py` — shared by T-140, T-141
 - `apps/buyer/svc/src/profile/__init__.py` — shared by T-142, T-164, T-221
-- `apps/buyer/svc/tests/**` — shared by T-071, T-072, T-073
+- `apps/buyer/svc/tests/**` — shared by T-072, T-073
+- `apps/exchange/src/checkout/provider.py` — shared by T-157, T-235
 - `apps/merchant/**` — shared by T-130, T-134
-- `apps/merchant/svc/tests/**` — shared by T-052, T-053
 - `apps/trust/**` — shared by T-102, T-114, T-118, T-119, T-122, T-124, T-126, T-127, T-129
 - `apps/trust/**, db/migrations/**` — shared by T-114, T-127
 - `apps/trust/**, packages/contracts/**, services/ingest/**, services/shopify-stub/**` — shared by T-118, T-129
@@ -228,9 +248,10 @@ These pairs declare INTERSECTING scope globs and may never be in flight together
 - `packages/**` — shared by T-122, T-133
 - `packages/contracts/**` — shared by T-103, T-107, T-108, T-113, T-115, T-118, T-125, T-128, T-129
 - `packages/llm/**` — shared by T-104, T-118
+- `packages/store-agent/src/external/door.py` — shared by T-229, T-230, T-231, T-232, T-233
 - `proxyshop_support/**` — shared by T-109, T-112, T-117, T-120, T-122, T-123, T-124
 - `scripts/bootstrap.sh` — shared by T-111, T-123
 - `services/ingest/**` — shared by T-101, T-116, T-118, T-129
-- `services/ingest/tests/**` — shared by T-022, T-023, T-024
+- `services/ingest/tests/**` — shared by T-022, T-024
 - `services/shopify-stub/**` — shared by T-013, T-100, T-105, T-118, T-129
 

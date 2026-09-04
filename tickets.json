@@ -4249,6 +4249,141 @@
       "defect": "THE PINNED MERCHANT CONTRACT HAS NOWHERE TO PUT AN ENVELOPE APPROVAL ARTIFACT, AND ITS OWN EXAMPLE INVITES SELF-ACTIVATION. The document pins exactly three envelope routes (GET/PUT /stores/{store_id}/envelope, POST /stores/{store_id}/kill); there is no approve route, and the PUT body is a contracts.Envelope with extra='forbid', so the eight-field document has no field for approver, approved_at or envelope_hash. Yet the PUT example in that same document shows 'activation': 'active' IN THE REQUEST BODY, which reads as an invitation to activate by simply asserting it \u2014 the precise defect class E5 exists to prevent. The T-053 lane could not add a fourth route (test_the_served_routes_match_the_pinned_contract forbids it) and resolved it by carrying the artifact in an X-Envelope-Approval header, storing a body that asks for 'active' without a bound artifact in SHADOW with a 403 naming the missing paperwork. That is safe but it is a header nobody else knows about.",
       "finding_id": "8664ecbb21ce9779b0d4a82cabeec286ed47d3584d908eb77eb99d93e98233ce",
       "reproduction": "Read packages/contracts/openapi/merchant.openapi.json: three envelope routes, no approval route, PUT body is extra='forbid' Envelope, and the PUT example carries activation: active. The right fix is a contract change \u2014 a POST /stores/{store_id}/envelope/approval route, or an approval object on the PUT \u2014 and is outside any single lane's ownership."
+    },
+    {
+      "id": "T-241",
+      "title": "EXTENDS T-229 FROM 3 FIELDS TO 6, MEASURED. The rung-2 verifier for cycle 15 batch 1 confirmed T-229 and widened it: _work_item (door.py:191-206) re-reads the payload for ALL SIX identity fields, not the three T-228 hardened. With a Mapping that answers honestly for the first N reads of one key and then lies (swap_after=7), receive_bid returns accepted=True while the enqueued work item carries the attacker's value for auction_id, store_id, issued_at, nonce, signer_id and key_id. THE SHARP PART: payload_hash covers only the bid BODY, so for issued_at, nonce, signer_id and key_id the enqueued item is INTERNALLY CONSISTENT and a downstream worker that re-hashes the submission cannot detect the swap. The door spends the honest nonce in its replay memory while enqueueing the attacker's nonce as the documented idempotency key, so the replay memory and the downstream dedup key disagree \u2014 precisely the hazard the new gate-2b comment says matters most at the nonce. Exploitability is currently ZERO because receive_bid has no production callers.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/external/door.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/store-agent/src/external/door.py",
+      "defect": "EXTENDS T-229 FROM 3 FIELDS TO 6, MEASURED. The rung-2 verifier for cycle 15 batch 1 confirmed T-229 and widened it: _work_item (door.py:191-206) re-reads the payload for ALL SIX identity fields, not the three T-228 hardened. With a Mapping that answers honestly for the first N reads of one key and then lies (swap_after=7), receive_bid returns accepted=True while the enqueued work item carries the attacker's value for auction_id, store_id, issued_at, nonce, signer_id and key_id. THE SHARP PART: payload_hash covers only the bid BODY, so for issued_at, nonce, signer_id and key_id the enqueued item is INTERNALLY CONSISTENT and a downstream worker that re-hashes the submission cannot detect the swap. The door spends the honest nonce in its replay memory while enqueueing the attacker's nonce as the documented idempotency key, so the replay memory and the downstream dedup key disagree \u2014 precisely the hazard the new gate-2b comment says matters most at the nonce. Exploitability is currently ZERO because receive_bid has no production callers.",
+      "finding_id": "5a96fddefbf6c34a12d07ac5799a581235353d40afe9c1cfb94761d1cd69acbc",
+      "reproduction": "A Mapping whose .get answers truthfully for N reads of one key then returns the attacker value; swap_after=7 puts issued_at at read 8. Verifier's probe at <scratch>/pinned/probe_pin.py against the pinned tree 55eaacd, provenance confirmed. Fix as T-229 states: snapshot the payload once at entry (payload = dict(payload)) inside a try/except, since receive_bid is documented never to raise."
+    },
+    {
+      "id": "T-242",
+      "title": "THE SIMULATION VALIDATES ONLY HALF ITS OWN LEDGER, AND THE HALF IT SKIPS CONTAINS THE EXACT DEFECT CLASS THE SIM EXISTS TO CATCH. runner.py:727 validates raw_events only, fed solely from the accept path (runner.py:661). The auction state machine writes to a SEPARATE ledger_sink (runner.py:559-560) that is never read and never validated. Running validate_ledger_payload over that sink (36 events in a default run) yields FOUR unreported deviations: auction_opened missing roster_size, auction_closed missing shortlist_size, and accepted missing checkout_token and offer. The true deviation count is 7, not the 3 the sim reports. CRITICALLY: 'accepted' is emitted CORRECTLY on the accept path and INCORRECTLY on the auction path IN THE SAME RUN \u2014 the identical one-kind-two-bodies defect the sim successfully catches for code_created (T-235). Its own test test_no_kind_other_than_code_created_deviates_from_its_published_payload passes ONLY because the stream it inspects excludes the sink; folding ledger_sink.events in turns it red immediately.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/sim/src/runner.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "services/sim/src/runner.py",
+      "defect": "THE SIMULATION VALIDATES ONLY HALF ITS OWN LEDGER, AND THE HALF IT SKIPS CONTAINS THE EXACT DEFECT CLASS THE SIM EXISTS TO CATCH. runner.py:727 validates raw_events only, fed solely from the accept path (runner.py:661). The auction state machine writes to a SEPARATE ledger_sink (runner.py:559-560) that is never read and never validated. Running validate_ledger_payload over that sink (36 events in a default run) yields FOUR unreported deviations: auction_opened missing roster_size, auction_closed missing shortlist_size, and accepted missing checkout_token and offer. The true deviation count is 7, not the 3 the sim reports. CRITICALLY: 'accepted' is emitted CORRECTLY on the accept path and INCORRECTLY on the auction path IN THE SAME RUN \u2014 the identical one-kind-two-bodies defect the sim successfully catches for code_created (T-235). Its own test test_no_kind_other_than_code_created_deviates_from_its_published_payload passes ONLY because the stream it inspects excludes the sink; folding ledger_sink.events in turns it red immediately.",
+      "finding_id": "c557f049d39e5da23ab317795e363ca0c8743fa3b58bb3c26c80a7f8bc37fde7",
+      "reproduction": "Run the sim, then apply validate_ledger_payload to runner's ledger_sink.events rather than raw_events: 4 deviations across auction_opened, auction_closed and accepted. Found by the cycle-15 batch-1 rung-2 verifier."
+    },
+    {
+      "id": "T-243",
+      "title": "THE TWO-LEDGERS-UNDER-TWO-SPELLINGS HOLE IS PRESENT IN MERCHANT, AND T-071'S FIX DID NOT COVER IT. Measured at the pin and again on today's HEAD: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are DISTINCT module objects with distinct ENVELOPES singletons, distinct EnvelopeVersions classes, and distinct TranscriptRejected classes that do not catch each other (except TR_SHORT lets a TR_LONG escape). The frozen E5 acceptance suite imports the LONG spelling; production routes.py and T-053's own tests import the SHORT one. The isolation fixture at _fixtures_onboarding.py:66 patches only merchant_svc.onboarding.routes.ENVELOPES, so a consumer doing 'from merchant_svc.envelope import ENVELOPES' is not isolated and the long-spelling store is an unreset third copy. Latent today only because the acceptance suite never touches ENVELOPES. Only store-agent installs canonical aliases; merchant, ingest and sim do not. T-071's 828c75d fixed intent alone.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/merchant/svc/src/envelope/store.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/merchant/svc/src/envelope/store.py",
+      "defect": "THE TWO-LEDGERS-UNDER-TWO-SPELLINGS HOLE IS PRESENT IN MERCHANT, AND T-071'S FIX DID NOT COVER IT. Measured at the pin and again on today's HEAD: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are DISTINCT module objects with distinct ENVELOPES singletons, distinct EnvelopeVersions classes, and distinct TranscriptRejected classes that do not catch each other (except TR_SHORT lets a TR_LONG escape). The frozen E5 acceptance suite imports the LONG spelling; production routes.py and T-053's own tests import the SHORT one. The isolation fixture at _fixtures_onboarding.py:66 patches only merchant_svc.onboarding.routes.ENVELOPES, so a consumer doing 'from merchant_svc.envelope import ENVELOPES' is not isolated and the long-spelling store is an unreset third copy. Latent today only because the acceptance suite never touches ENVELOPES. Only store-agent installs canonical aliases; merchant, ingest and sim do not. T-071's 828c75d fixed intent alone.",
+      "finding_id": "a287b73ec9c07e132d7122e9db65b97496beb4ea299829389e64dd9883be0aa6",
+      "reproduction": "python -c \"import apps.merchant.svc.src.envelope.store as a, merchant_svc.envelope.store as b; print(a is b, a.ENVELOPES is b.ENVELOPES)\" -> False False. Fix pattern already in-tree: apps/buyer/svc/src/intent/_spellings.py."
+    },
+    {
+      "id": "T-244",
+      "title": "MEASUREMENT CREDIBILITY: receive_bid has 28 callers and ZERO of them are production. swarmloop reachable returns TESTS ONLY \u2014 'every caller is a test. Something goes green over this symbol and nothing the user runs reaches it.' The rung-2 discriminator was asked and the answer is YES: seven-plus tests in test_e4_store_agent.py pass because of it and contribute to E4's 20/20. So e4_store_agent_passing counts a signed-external-bid capability as met that no running process performs. The same question, same answer, for merchant 'edit': TESTS ONLY, 14 callers, 0 product, and test_e5_merchant.py:787-820 passes because of it. This is the same class as T-236 (no production code constructs any CatalogAdapter) and it is now the THIRD epic where the metric outruns the wiring.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/src/external/door.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/store-agent/src/external/door.py",
+      "defect": "MEASUREMENT CREDIBILITY: receive_bid has 28 callers and ZERO of them are production. swarmloop reachable returns TESTS ONLY \u2014 'every caller is a test. Something goes green over this symbol and nothing the user runs reaches it.' The rung-2 discriminator was asked and the answer is YES: seven-plus tests in test_e4_store_agent.py pass because of it and contribute to E4's 20/20. So e4_store_agent_passing counts a signed-external-bid capability as met that no running process performs. The same question, same answer, for merchant 'edit': TESTS ONLY, 14 callers, 0 product, and test_e5_merchant.py:787-820 passes because of it. This is the same class as T-236 (no production code constructs any CatalogAdapter) and it is now the THIRD epic where the metric outruns the wiring.",
+      "finding_id": "3270260453944b33bf0b7434b2b7c7ce6f8501e937f95e724c4ab8a74bf9c1bc",
+      "reproduction": "swarmloop.py reachable --symbol receive_bid --from <any real entry point> -> TESTS ONLY, 28 callers, 0 production. Same for merchant edit."
+    },
+    {
+      "id": "T-245",
+      "title": "T-023'S NEW SHARED MAPPING HAS NEVER REACHED A GRAPH, AND E2'S GREEN OVER IT IS STRUCTURAL ONLY. apply_upserts is the mapping's only consumer; the single signed_fetch test that exercises it (test_signed_fetch.py:881) is SKIPPED because Neo4j is unreachable, and test_catalog_mcp.py carries zero docker/graph marks \u2014 77 passed, 0 skipped, no graph test at all. CatalogMCPAdapter's only non-test caller is _satisfies_catalog_adapter, a type-check helper. The rung-2 discriminator answer is YES-but-structurally: test_e2_ingestion.py:511-545 uses inspect.signature to check the class declares the protocol's methods and NEVER CALLS the adapter. A skip is not a pass and shape is not behaviour. Compounds with T-236.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/ingest/src/adapters/mapping.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "services/ingest/src/adapters/mapping.py",
+      "defect": "T-023'S NEW SHARED MAPPING HAS NEVER REACHED A GRAPH, AND E2'S GREEN OVER IT IS STRUCTURAL ONLY. apply_upserts is the mapping's only consumer; the single signed_fetch test that exercises it (test_signed_fetch.py:881) is SKIPPED because Neo4j is unreachable, and test_catalog_mcp.py carries zero docker/graph marks \u2014 77 passed, 0 skipped, no graph test at all. CatalogMCPAdapter's only non-test caller is _satisfies_catalog_adapter, a type-check helper. The rung-2 discriminator answer is YES-but-structurally: test_e2_ingestion.py:511-545 uses inspect.signature to check the class declares the protocol's methods and NEVER CALLS the adapter. A skip is not a pass and shape is not behaviour. Compounds with T-236.",
+      "finding_id": "0f25732d7280e80ce14565edd64ba25f37fea87c2e2a03cec22d75150972b8f3",
+      "reproduction": "pytest services/ingest/tests/test_catalog_mcp.py -q -> 77 passed, 0 skipped, and git grep 'graph' in that file returns no marker. test_signed_fetch.py:881 reports SKIPPED without a datastore."
+    },
+    {
+      "id": "T-246",
+      "title": "NO PRODUCTION CONSUMER READS is_live, SO NOTHING PROVES A SHADOW OR KILLED STORE ACTUALLY STOPS BIDDING. is_live appears only in envelope/{model,store}.py and merchant tests across apps/, packages/, services/ and e2e/. Nothing on the bidding path consults envelope activation. T-053's kill switch and shadow default are correct and well unit-tested, but no executed path demonstrates the consequence the feature exists for. This is the merchant-side twin of the empty S2 seam (T-237) and the empty buyer-exchange seam: the decision is computed and nobody asks for it.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/merchant/svc/src/envelope/model.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/merchant/svc/src/envelope/model.py",
+      "defect": "NO PRODUCTION CONSUMER READS is_live, SO NOTHING PROVES A SHADOW OR KILLED STORE ACTUALLY STOPS BIDDING. is_live appears only in envelope/{model,store}.py and merchant tests across apps/, packages/, services/ and e2e/. Nothing on the bidding path consults envelope activation. T-053's kill switch and shadow default are correct and well unit-tested, but no executed path demonstrates the consequence the feature exists for. This is the merchant-side twin of the empty S2 seam (T-237) and the empty buyer-exchange seam: the decision is computed and nobody asks for it.",
+      "finding_id": "36208ce9a87dd1c541967ae81792dd23da0d512e392913b18fd2d214ec313523",
+      "reproduction": "git grep -n is_live -- apps packages services e2e | grep -v /tests/ returns only the definition and its own store."
+    },
+    {
+      "id": "T-247",
+      "title": "ORDER-DEPENDENT GLOBAL LEAK IN THE MERCHANT WEBHOOK SINK. webhooks.py:418 boots _sink = default_sink, but apps/merchant/svc/tests/test_install.py:859 restores it with set_webhook_sink(None) in its finally \u2014 to None, not to the boot default. A probe passes when run alone and fails when run after test_install.py in the same process. Nothing reads it downstream today so no suite goes red, which is exactly what makes it a latent trap for the next ticket that does.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/merchant/svc/src/install/webhooks.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/merchant/svc/src/install/webhooks.py",
+      "defect": "ORDER-DEPENDENT GLOBAL LEAK IN THE MERCHANT WEBHOOK SINK. webhooks.py:418 boots _sink = default_sink, but apps/merchant/svc/tests/test_install.py:859 restores it with set_webhook_sink(None) in its finally \u2014 to None, not to the boot default. A probe passes when run alone and fails when run after test_install.py in the same process. Nothing reads it downstream today so no suite goes red, which is exactly what makes it a latent trap for the next ticket that does.",
+      "finding_id": "4f9f8db795fd0a03253f5ed84d72b8dad1662e0f1823aa4c0a7283bcc400c4b3",
+      "reproduction": "Run a probe reading the sink alone (passes), then run it after apps/merchant/svc/tests/test_install.py in the same pytest process (fails). Found by the cycle-15 batch-1 rung-2 verifier."
+    },
+    {
+      "id": "T-248",
+      "title": "EnvelopeVersions.record() ACCEPTS A CALLER-ASSERTED activation:'active' WITH NO APPROVAL ARTIFACT. Measured: record({'version':7,'max_discount_pct':99.0,'activation':'active'}) is accepted, approval is None, and is_live returns True. Unreachable from the HTTP surface today because routes.py calls only put/activate/kill and put forces shadow \u2014 but record is public and exported, so it is one import away from defeating the whole approve-then-edit guarantee T-053 was written to establish.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/merchant/svc/src/envelope/store.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/merchant/svc/src/envelope/store.py",
+      "defect": "EnvelopeVersions.record() ACCEPTS A CALLER-ASSERTED activation:'active' WITH NO APPROVAL ARTIFACT. Measured: record({'version':7,'max_discount_pct':99.0,'activation':'active'}) is accepted, approval is None, and is_live returns True. Unreachable from the HTTP surface today because routes.py calls only put/activate/kill and put forces shadow \u2014 but record is public and exported, so it is one import away from defeating the whole approve-then-edit guarantee T-053 was written to establish.",
+      "finding_id": "de33fee2bd708f36547df1ccdafac1772d9358e3dfe84e56bc5c71e686b9399c",
+      "reproduction": "from merchant_svc.envelope.store import EnvelopeVersions; EnvelopeVersions().record({'version':7,'max_discount_pct':99.0,'activation':'active'}) -> accepted, approval=None, is_live True."
+    },
+    {
+      "id": "T-249",
+      "title": "T-023 BEHAVIOURAL DRIFT THAT NO TEST COVERS, and the 'moved VERBATIM' claim is PARTIAL. coerce_price now returns None for negative/NaN/inf, so those values FALL THROUGH to the JSON-LD offer price instead of short-circuiting: an entry price of '-5.00' with a JSON-LD price of '12.00' produced -5.0 before and 12.0 now. Availability vocabulary widened (available/limited/out_of_stock were 'unknown', now map through). Product node identity changes for GID-form id, id:0, id:True and product_id-only entries. Four more changes rode along with the move: urlsplit(...).hostname became safe_host (base_url 'http://[' raised ValueError before, now returns domain=''), the provenance version became snapshot.extractor_version or extractor_version, a NEW raise ValueError when neither names a version, and source_class became a parameter. signed_fetch's 80 tests are byte-identical and therefore assert NONE of the new behaviour.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/ingest/src/adapters/mapping.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "services/ingest/src/adapters/mapping.py",
+      "defect": "T-023 BEHAVIOURAL DRIFT THAT NO TEST COVERS, and the 'moved VERBATIM' claim is PARTIAL. coerce_price now returns None for negative/NaN/inf, so those values FALL THROUGH to the JSON-LD offer price instead of short-circuiting: an entry price of '-5.00' with a JSON-LD price of '12.00' produced -5.0 before and 12.0 now. Availability vocabulary widened (available/limited/out_of_stock were 'unknown', now map through). Product node identity changes for GID-form id, id:0, id:True and product_id-only entries. Four more changes rode along with the move: urlsplit(...).hostname became safe_host (base_url 'http://[' raised ValueError before, now returns domain=''), the provenance version became snapshot.extractor_version or extractor_version, a NEW raise ValueError when neither names a version, and source_class became a parameter. signed_fetch's 80 tests are byte-identical and therefore assert NONE of the new behaviour.",
+      "finding_id": "8f9ca4f739e6ad32332efab51a008bb6f852dc6b5b1c91e1d6e5f64475476e28",
+      "reproduction": "Feed build_upserts an entry with price '-5.00' and a JSON-LD offer price '12.00': old to_upserts yields -5.0, new yields 12.0. Verifier ran old and new side by side."
     }
   ]
 }

@@ -1,0 +1,2022 @@
+{
+  "cycle": 15,
+  "max_cycles": 102,
+  "generated": "2026-09-03T21:09:15",
+  "all_targets_met": false,
+  "harness_integrity": "intact",
+  "harness_notes": [],
+  "pending_remeasure": [
+    7
+  ],
+  "pre_amendment_metrics": [],
+  "errors_recomputed_for": [
+    "acceptance_collected",
+    "e3_exchange_passing",
+    "e4_store_agent_passing",
+    "e6_trust_passing",
+    "e8_proofs_passing"
+  ],
+  "selection_regressions": [],
+  "stale_metrics": [],
+  "manual_records": [],
+  "manual_records_trusted": false,
+  "escalated_metrics": [],
+  "goal_amendments": 11,
+  "last_amended_at": "2026-09-03T20:52:46",
+  "last_amend_reason": "ESC-013 amendment 11 \u2014 SELF-CORRECTION of my own amendment 10, under the same approval Hank gave ('Go with your best suggestions for both'), changing nothing about what was approved. T-228's verify field ONLY; the other nine gates are untouched and still stamp exactly as amendment 10 left them. Amendment 10 set T-228 to 'uv run python -m mypy'. I then did what ESC-013 promised \u2014 re-ran red-check on all ten before merging anything \u2014 and it stamped T-228 WEAK: 'exit 1, but NO tests were SELECTED'. red-check's notion of a real gate is PYTEST-SHAPED, so a pure type-checker command can never stamp red under it no matter how genuinely red it is, and check-branch --ticket vetoes on that stamp. The gate was correct about the product and wrong about the harness. THE REPAIR: 'uv run python -m pytest packages/store-agent/tests -q && uv run python -m mypy' \u2014 store-agent's own suite first, so tests are genuinely selected, then the type gate. SKILL.md names this exact shape as legitimate and unclassifiable-by-machine: 'a wrapper whose red legitimately comes from a linter after a green pytest prints exactly the same thing \u2014 read the command, the harness cannot tell those two apart and does not pretend to'. MEASURED IN A BARE THROWAWAY WORKTREE OF THE MERGE BASE 6b6040f, not the primary checkout: the pytest half exits 0 (control flow reached the '&&'), then mypy prints 'Found 8 errors in 3 files (checked 224 source files)' and the whole command exits 1 \u2014 red at base, with tests selected. Green at the branch tip 2ce5983, where the same command's mypy half reports 'no issues found in 224 source files'. Same precedent as amendment 9, which repaired amendment 8 under Hank's prior approval for the same reason: the first spelling was verified against the wrong machine state. No metric, target, acceptance test, product file, dependency or ticket dependency changed.",
+  "metrics": [
+    {
+      "id": "acceptance_pass_rate",
+      "name": "Acceptance test pass rate (%)",
+      "direction": "maximize",
+      "target": 100.0,
+      "latest_cycle": 15,
+      "latest_value": 92.5,
+      "latest_error": 7.5,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:06:10",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": -5.802808823529412,
+      "r2": 0.8689631986255935,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 3.33,
+          "error": 96.67,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 13.33,
+          "error": 86.67,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 30.0,
+          "error": 70.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 35.83,
+          "error": 64.17,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 60.83,
+          "error": 39.17,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:22:48",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 62.5,
+          "error": 37.5,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:35:55",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 63.33,
+          "error": 36.67,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:48:23",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 63.33,
+          "error": 36.67,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:10:16",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 85.83,
+          "error": 14.170000000000002,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:04",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 92.5,
+          "error": 7.5,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:06:10",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e7_buyer_passing",
+      "name": "E7 Buyer criteria passing",
+      "direction": "maximize",
+      "target": 9.0,
+      "latest_cycle": 15,
+      "latest_value": 5.0,
+      "latest_error": 4.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:32",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": -0.25441176470588234,
+      "r2": 0.7230100253653824,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 9.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:18",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:53:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 2.0,
+          "error": 7.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:15",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 5.0,
+          "error": 4.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:32",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e5_merchant_passing",
+      "name": "E5 Merchant criteria passing",
+      "direction": "maximize",
+      "target": 10.0,
+      "latest_cycle": 15,
+      "latest_value": 7.0,
+      "latest_error": 3.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:27",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": -0.43970588235294117,
+      "r2": 0.8121826027708381,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 2.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:07",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:16",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:53:06",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 4.0,
+          "error": 6.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:13",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 7.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:27",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e2_ingestion_passing",
+      "name": "E2 Ingestion criteria passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 15,
+      "latest_value": 7.0,
+      "latest_error": 1.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:23",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": -0.5823529411764706,
+      "r2": 0.8134453781512605,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 3.0,
+          "error": 5.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:05",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:13",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:53:00",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:28",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:11",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 7.0,
+          "error": 1.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:23",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e8_proofs_passing",
+      "name": "E8 Fixtures & proofs criteria passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 15,
+      "latest_value": 7.0,
+      "latest_error": 1.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:35",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": -0.5632352941176471,
+      "r2": 0.8269060571042025,
+      "projected_error_at_final_cycle": 0.0,
+      "verdict": "converging_on_track",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 8.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:10",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 5.0,
+          "error": 3.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:19",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:53:12",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:33",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:16",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 7.0,
+          "error": 1.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:35",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "acceptance_collected",
+      "name": "Acceptance tests collected (count)",
+      "direction": "maximize",
+      "target": 120.0,
+      "latest_cycle": 15,
+      "latest_value": 120.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:06:11",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:22:48",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:35:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:48:26",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:10:17",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:05",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 120.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:06:11",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "build_succeeds",
+      "name": "Root verify pipeline is green (0/1)",
+      "direction": "maximize",
+      "target": 1.0,
+      "latest_cycle": 15,
+      "latest_value": 1.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:20",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 1.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:52:57",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:26",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 0.0,
+          "error": 1.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:08",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 1.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:20",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "spec_criteria_passing",
+      "name": "SPEC cross-cutting criteria + S8 release blockers passing",
+      "direction": "maximize",
+      "target": 8.0,
+      "latest_cycle": 15,
+      "latest_value": 8.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:21",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 4.0,
+          "error": 4.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 6.0,
+          "error": 2.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:03",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:11",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:52:58",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:27",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 8.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:21",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e1_foundation_passing",
+      "name": "E1 Foundation criteria passing",
+      "direction": "maximize",
+      "target": 10.0,
+      "latest_cycle": 15,
+      "latest_value": 10.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:22",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 10.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:04",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:12",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:52:59",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:28",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:10",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 10.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:22",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e3_exchange_passing",
+      "name": "E3 Exchange criteria passing",
+      "direction": "maximize",
+      "target": 21.0,
+      "latest_cycle": 15,
+      "latest_value": 21.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:24",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 21.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 3.0,
+          "error": 18.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 3.0,
+          "error": 18.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 9.0,
+          "error": 12.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:06",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 9.0,
+          "error": 12.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:14",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 9.0,
+          "error": 12.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:53:03",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 9.0,
+          "error": 12.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:29",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 21.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:12",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 21.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:24",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e4_store_agent_passing",
+      "name": "E4 Store agent & sellers criteria passing",
+      "direction": "maximize",
+      "target": 20.0,
+      "latest_cycle": 15,
+      "latest_value": 20.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:25",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 20.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 3.0,
+          "error": 17.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 3.0,
+          "error": 17.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 3.0,
+          "error": 17.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:07",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 5.0,
+          "error": 15.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:15",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 5.0,
+          "error": 15.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:53:04",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 5.0,
+          "error": 15.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:30",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 20.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:12",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 20.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:25",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    },
+    {
+      "id": "e6_trust_passing",
+      "name": "E6 Trust & verification criteria passing",
+      "direction": "maximize",
+      "target": 26.0,
+      "latest_cycle": 15,
+      "latest_value": 26.0,
+      "latest_error": 0.0,
+      "latest_source": "measure",
+      "latest_timestamp": "2026-09-03T21:08:29",
+      "latest_selected": null,
+      "latest_deselected": null,
+      "selection_regressed": false,
+      "pre_amendment": false,
+      "n_points": 16,
+      "error_slope_per_cycle": null,
+      "r2": null,
+      "projected_error_at_final_cycle": null,
+      "verdict": "at_target",
+      "history": [
+        {
+          "cycle": 0,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T14:47:01",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 1,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-01T22:51:32",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 2,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T00:15:22",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 3,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:42:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 4,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T01:55:02",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 5,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T08:20:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 6,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T09:36:56",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 7,
+          "value": 0.0,
+          "error": 26.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T13:19:45",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 8,
+          "value": 2.0,
+          "error": 24.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T16:04:52",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 9,
+          "value": 2.0,
+          "error": 24.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T17:49:09",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 10,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-02T22:27:08",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 11,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T01:39:17",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 12,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T02:53:07",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 13,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T13:12:31",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 14,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T15:32:14",
+          "selected": null,
+          "deselected": null
+        },
+        {
+          "cycle": 15,
+          "value": 26.0,
+          "error": 0.0,
+          "source": "measure",
+          "timestamp": "2026-09-03T21:08:29",
+          "selected": null,
+          "deselected": null
+        }
+      ]
+    }
+  ],
+  "note": "Linear fit over per-cycle error. With <=10 points this is trend detection, not inference; treat slope/projection as a steering signal, not a statistical claim."
+}

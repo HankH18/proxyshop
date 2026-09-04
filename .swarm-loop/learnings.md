@@ -6,10 +6,11 @@ Entries are injected selectively into task packets — only those relevant to a 
 **This file holds process habits only.** Defects, design rules and anything actionable about
 the harness, the gates or the measurement apparatus live in `harness-review.md` (entries
 H-1..H-29), which is where the harness work is tracked. A cycle-1 curation pass moved every
-issue-shaped entry there; the cycle-13 pass merged eight near-duplicates into their siblings
-and left the **31** entries below. If you are about to append something that names a bug, a
-tool that misbehaves, or a fix someone should make — it belongs in `harness-review.md`, not
-here.
+issue-shaped entry there; the cycle-13 pass merged eight near-duplicates into their siblings,
+and a later pass merged five more pairs (gate-must-select-tests, lockfile provisioning, frontier
+closure source, gate sabotage, guard measurement) into single entries, leaving the **30** entries
+below. If you are about to append something that names a bug, a tool that misbehaves, or a fix
+someone should make — it belongs in `harness-review.md`, not here.
 
 ---
 
@@ -36,22 +37,36 @@ here.
   than serializing, because narrowing makes the veto SHARPER: two lanes that would genuinely
   write the same file are still refused, and no lane gains a file it could not touch before.
 
-- **Author a greenfield ticket's `verify` against the FROZEN acceptance tests it is graded by,
-  never against a test file the lane must itself create.** Such a gate can NEVER satisfy the
-  retro red-check: at the merge base the named file does not exist, pytest exits 4 with nothing
-  selected, and red-check stamps WEAK — permanently, because the stamp is a fact about the
-  COMMAND, not about the branch, so re-running it re-stamps WEAK forever. The veto is right and
-  must not be weakened (a gate that selects nothing is the vacuous-gate failure this repo has
-  been bitten by repeatedly); what is wrong is the command. A correct gate is red at the base
-  **with tests genuinely selected**.
+- **A ticket's `verify` must SELECT TESTS at the merge base: author it against the FROZEN
+  acceptance tests the ticket is graded by, never against a test file the lane must itself
+  create and never against a checker that selects nothing — then run the pre-dispatch checker
+  and READ THE STAMP rather than trusting that a genuinely red command will be scored red.**
+  Two measurements, one failure. A greenfield gate naming a not-yet-existing test file exits 4
+  at the base with nothing selected and stamps WEAK — and re-running the SAME command re-stamps
+  WEAK forever, because the stamp is a fact about the COMMAND, not about the branch. A
+  type-checker command proposed as a finding-ticket's gate was genuinely red at base and green
+  after the fix, and the checker still stamped it WEAK, because the checker counts SELECTED
+  TESTS and a type checker selects none. The merge gate reads the stamp, so a correct gate the
+  checker cannot classify blocks the merge exactly like a broken one. The veto is right and must
+  not be weakened (a gate that selects nothing is the vacuous-gate failure this repo has been
+  bitten by repeatedly); what is wrong is the command. Fix the command — running the project's
+  own suite first and the type checker second selected tests, stamped red, and cleared it. A
+  correct gate is red at the base **with tests genuinely selected**.
 
-- **Install the complete dependency set in the scaffold ticket, and provision every worktree
-  from EVERY committed lockfile — not just the first one found.** Parallel workers may never
-  edit a manifest, so any dependency discovered mid-wave becomes a serialized blocking ticket.
-  This repo carries both `package-lock.json` and `uv.lock`; provisioning ran only `uv sync`, so
+- **Install the complete dependency set in the scaffold ticket, provision every mutating
+  worktree from EVERY committed lockfile — not just the first one found, and not just the one
+  matching the language the ticket appears to be in — and finish by asserting the EFFECT rather
+  than reading the installer's exit code.** Parallel workers may never edit a manifest, so any
+  dependency discovered mid-wave becomes a serialized blocking ticket. Measured twice on a repo
+  carrying both `package-lock.json` and `uv.lock` where provisioning ran only `uv sync`. First:
   every lane came up without `node_modules`, and two lanes independently burned time diagnosing
-  the same npx failure as if it were their own bug. Enumerate the lockfiles, not the ecosystem
-  you happen to be thinking about.
+  the same npx failure as if it were their own bug. Then, a cycle later, the aggregate verify
+  target aborted on the missing JS dependency directory before it ever reached the type checker,
+  so three lanes could not see the eight type errors they were introducing and **all three
+  reported a green gate** — the errors landed on main, held a frozen build metric at 0 and
+  blocked an epoch push of 40 commits, while the one lane that happened to run the second
+  installer itself passed the real gate. Enumerate the lockfiles, not the ecosystem you happen
+  to be thinking about.
 
 - **Rank the frontier by GRADED-METRIC ERROR CONTRIBUTION, never by `unblocks` count.**
   `unblocks` measures graph *shape* and is blind to the goals you are actually scored on, so a
@@ -155,10 +170,10 @@ here.
   failing is indistinguishable from a gate that cannot fail. The worst instance of "cannot
   fail" this run was an integrity check written against `freeze-log.jsonl` alone — the log
   records that a freeze happened and when, and carries **no per-file digest**, so a gate that
-  iterates its entries and reports "no drift" is structurally incapable of detecting drift, in
-  the one place where a false green is most expensive. The hash map lives in `manifest.json`'s
-  16-entry `files` map. Point the check at a mutated copy and watch it go red before trusting
-  a green.
+  iterates its entries and reports "no drift" is structurally incapable of detecting drift: the
+  project's recurring *guard that rejects nothing*, in the one place where a false green is most
+  expensive. The hash map lives only in `manifest.json`'s 16-entry `files` map. Verify against
+  that map, and point the check at a mutated copy and watch it go red before trusting a green.
 
 - **Prove the shared fixture layer in one place, before dispatch, or every ticket
   re-discovers it separately.** `pg_role` — the least-privilege factory ~10 tickets depend on,
@@ -181,10 +196,15 @@ here.
   be unchanged, so nothing was mis-dispatched, but that was luck. The sharper form of the same
   failure: with no closure source wired, `frontier` reported **`0 closed` on every invocation**
   for thirteen cycles. That is a **broken instrument, not a scheduling opinion** — with nothing
-  recorded as closed it degenerates to the graph's roots and ranks the already-built scaffold
-  first, forever. Treat a suspiciously round `0 closed` as an error to diagnose, never as an
-  answer to act on. A ledger is a cache of the graph, and a cache nobody invalidated is the
-  default state.
+  recorded as closed it degenerates to the graph's roots, ranks the already-built scaffold
+  first, forever, and leaves the largest error in the run never dispatched at all. Treat a
+  suspiciously round `0 closed` as an error to diagnose, never as an answer to act on.
+  **When the graph carries no status field, derive closure from POSITIVE evidence the run
+  already owns, before dispatching anything: a ticket whose frozen acceptance tests all pass has
+  shipped, and so has one whose own declared verify passes against current base with tests
+  actually selected — and supply that set to the frontier every time.** Doing so moved the same
+  graph from 0 closed to **74 closed** and put the real remaining work on top. A ledger is a
+  cache of the graph, and a cache nobody invalidated is the default state.
 
 - **Read a ticket's own acceptance text against the frozen fixtures before quoting it into a
   packet — the ticket can be the wrong one.** T-010's acceptance 5 says a `Bid` missing any of
@@ -193,14 +213,6 @@ here.
   literally, the ticket demands the suite be broken. The resolution (a separate `SigningEnvelope`
   type) is inferable from the objective, but only if someone checks — and the packet, not the
   worker, is where that check belongs.
-
-- **An integrity check written against `freeze-log.jsonl` alone silently finds nothing — the
-  hash map lives only in `manifest.json`.** The freeze log records that a freeze happened and
-  when; it carries no per-file digest. So a harness-integrity gate that reads the log, iterates
-  its entries and reports "no drift" is structurally incapable of detecting drift — it is the
-  project's recurring *guard that rejects nothing*, in the one place where a false green is
-  most expensive. Verify against `manifest.json`'s 16-entry `files` map, and confirm the check
-  can fail: point it at a mutated copy and watch it go red before trusting a green.
 
 - **`rev-list --count main..<branch>` answers "ahead", and the reciprocal question is the one
   that bites.** Seven lanes were dispatched onto worktrees 26-27 commits behind main; the
@@ -259,23 +271,18 @@ here.
   note why this class is so expensive: dead code that *describes* the guarantee reads exactly like
   code that *provides* it, in a diff, in a review, and to the next agent.
 
-  *And the static check does not finish the job.* Wiring proves the call exists on the path, not
-  that the refusal fires. In the fixtures case `load_manifest()` was already raising
-  `DigestMismatchError` correctly on a tampered tree **while the defect was live** — so a test
-  proving *some* function detects the tamper passes without touching the bug. Name the function
-  whose refusal is the guarantee, and assert on that one.
-
-- **A correct, firing, well-named guard sitting one call away from a defect proves nothing about
-  that defect.** This is the sharpest instance the project has produced, and it is a harder case
-  than the freeze-log trap above. There, a guard could not fail. Here, `load_manifest()` **was**
-  detecting the tampered golden file and raising `DigestMismatchError` correctly — at the same
-  moment `record_approval()` accepted the same tampered tree and re-sealed it. Nothing was broken
-  about the working guard; it simply was not the one carrying the guarantee. So "confirm the check
-  can fail before trusting a green" is necessary but insufficient: a check that demonstrably fails
-  on bad input still tells you nothing unless it is the check on the path the guarantee runs
-  through. Before writing a regression test, name the exact function whose refusal *is* the
-  guarantee, and assert on that function — not on a neighbour that happens to inspect the same
-  bytes.
+  *And the static check does not finish the job: **a correct, firing, well-named guard sitting one
+  call away from a defect proves nothing about that defect.*** Wiring proves the call exists on
+  the path, not that the refusal fires — and this is a harder case than the freeze-log trap above,
+  where a guard simply could not fail. Here `load_manifest()` **was** detecting the tampered golden
+  file and raising `DigestMismatchError` correctly, at the same moment `record_approval()` accepted
+  the same tampered tree and re-sealed it. Nothing was broken about the working guard; it was not
+  the one carrying the guarantee, so a test proving *some* function detects the tamper passes
+  without touching the bug. "Sabotage the gate and confirm it can fail" is therefore necessary and
+  NOT sufficient: a check that demonstrably fails on bad input still tells you nothing unless it is
+  the check on the path the guarantee runs through. Before writing a regression test, name the
+  exact function whose refusal *is* the guarantee and assert on that function — not on a neighbour
+  that happens to inspect the same bytes.
 
 - **A findings ledger minted by string-formatting the source records is lossy, and the loss is
   invisible at the point of use.** T-130's eight MEDIUMs were generated with
@@ -490,22 +497,12 @@ frozen acceptance test currently pass because of this thing? If yes it is a meas
 credibility defect regardless of callers; if no it is unfinished work, and the answer is a
 schedule, not a ticket. Record which answer you got, so the next pass cannot re-litigate it.
 
-- (cycle 14) **Provision every mutating worktree with the installer for EVERY lockfile the
-  repo commits, not just the one matching the language the ticket appears to be in, and finish
-  by asserting the effect rather than reading the installer's exit code.** — A repo with two
-  committed lockfiles was provisioned with only the Python one. Its aggregate verify target
-  aborts on the missing JS dependency directory before it ever reaches the type checker, so
-  three lanes could not see the eight type errors they were introducing and all three reported
-  a green gate. The errors landed on main and held a frozen build metric at 0, blocking the
-  epoch push of 40 commits. The one lane that happened to run the second installer itself
-  passed the real gate.
-
-- (cycle 14) **When a ticket graph carries no status field, derive closure from POSITIVE
-  evidence the run already owns before dispatching anything: a ticket whose frozen acceptance
-  tests all pass has shipped, and so has one whose own declared verify passes against current
-  base with tests actually selected. Supply that set to the frontier every time.** — A run
-  scheduled thirteen consecutive cycles off a frontier given no closure source. It read zero
-  closed, degenerated to the graph's roots, and ranked long-shipped foundational tickets at
-  the top while the largest error in the run was never dispatched at all. Supplying closure
-  derived from the passing acceptance suite moved the same graph from 0 closed to 74 closed
-  and put the real remaining work on top.
+- (cycle 14) **Never give a lane a done-condition that runs the project's AGGREGATE gate when
+  that gate also grades files outside the lane's ownership. Name the specific steps the lane
+  can actually satisfy, and state which pre-existing failures it should expect to still see
+  and ignore.** — Four parallel lanes were each told their aggregate verify target must exit
+  0. It could not: the script runs under set -e and died at the type step on errors in a
+  package none of them owned, so the later stages never executed at all and the condition
+  could not have graded their work even had it passed. Three lanes independently measured this
+  and reported the packet defect; a less careful lane would have chased an unreachable green
+  or edited a file it did not own to reach it.
