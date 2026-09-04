@@ -332,8 +332,8 @@ make a number look finished would be the exact tampering the freeze exists to pr
   own ticket at all. Both are measurement-credibility defects, not backlog items.
 - **A gate that PASSES is still not evidence of built work, and a gate that reads WEAK is not evidence of the
   opposite.** This epoch produced both errors in one sweep: 29 green gates that needed a code audit before any
-  could be called closed, and 6 WEAK stamps that were about `npx` and nothing else. **Read what a gate SELECTED,
-  in both directions**, before believing either colour.
+  could be called closed, and 6 of 13 WEAK stamps that were about `npx` and nothing else. **Read what a gate
+  SELECTED, in both directions**, before believing either colour.
 - **Lane-authored sabotage stays mandatory in every packet.** Three-for-three again: T-223/T-224's revert was
   timed from outside, and the T-193 lane found two defects in its own gate — in opposite directions — that
   reading the test had not found, and that no green would ever have surfaced.
