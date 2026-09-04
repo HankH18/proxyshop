@@ -1,5 +1,137 @@
 # ProxyShop — ticket ledger (backlog)
 
+<!-- ============================================================================
+     RESUME STATE — written 2026-09-03 at the cycle-15/16 boundary, ahead of an
+     expected token outage. Read this block FIRST on resume; it holds the facts
+     `swarmloop.py resume` cannot reconstruct from artifacts.
+     ============================================================================ -->
+
+## RESUME STATE (read this first)
+
+### Run constants that are NOT in state.json
+
+| | |
+|---|---|
+| worktree root | `../proxyshop-worktrees` (recorded in state.json) |
+| **scratch root** | **`/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-scratch`** |
+
+**The scratch root is NOT recorded in `state.json` and `resume` will print it as
+UNRECORDED.** It was chosen by hand, deliberately, because the run's sync
+instructions forbid `init --scratch-root` and `init --force` (`--force` rebuilds
+state at cycle 0 and unfreezes the goals). Every lane gets
+`<scratch-root>/<task-id>/`; the root itself is shared and is not isolated the
+way a worktree is. Use the value above; do not invent a second one.
+
+### Where the run stands
+
+- `main` = `f642e43`, **pushed to both remotes and verified by reading each
+  remote's SHA back** (`gitlab` and `github` both `f642e43`). Zero unpushed.
+- Cycle 15 is fully closed: measured, analyzed, checkpointed, reported
+  (`reports/cycle-15.md`), committed, push gate scored and PUSHED.
+- Metrics at cycle 15: acceptance **111/120 = 92.50**, `build_succeeds` **1**,
+  7 of 12 at target, **nothing regressing or stalled**, both kill switches 0/3.
+- No escalation is open. ESC-011/ESC-012 withdrawn by the loop; ESC-013 and
+  ESC-014 granted/decided by the user and applied (freeze amendments 10 and 11).
+
+### Six lanes were in flight when this was written
+
+Their worktrees are on disk and their branches exist. **Check each for commits
+before re-dispatching anything** — a branch with zero commits is a failed or
+interrupted lane whose worktree may still hold uncommitted files worth
+salvaging (`git -C <worktree> status`). They were all told to commit WIP
+immediately ahead of the outage, so expect `wip(...)` commits.
+
+| branch | worktree | doing |
+|---|---|---|
+| `task/T-022` | `proxyshop-worktrees/T-022` | entity resolution, `services/ingest/src/er/**` |
+| `task/T-052` | `proxyshop-worktrees/T-052` | discount codes, `apps/merchant/svc/src/codes/**` |
+| `task/T-072` | `proxyshop-worktrees/T-072` | shortlist + accept, `apps/buyer/{app/shortlist,svc/src/accept}/**` |
+| `repro/R-storeagent` | `proxyshop-worktrees/R-storeagent` | reproduction tests, 22 tickets, `packages/store-agent/tests/**` |
+| `repro/R-exchange` | `proxyshop-worktrees/R-exchange` | reproduction tests, 28 tickets incl. **T-223/T-224**, `apps/exchange/tests/**` + `packages/contracts/tests/**` |
+| `repro/R-trust` | `proxyshop-worktrees/R-trust` | reproduction tests, 17 tickets, `apps/trust/tests/**` |
+
+The three `repro/*` lanes were each asked to commit a `REPRO_PROGRESS.md` under
+their own test directory listing ticket id -> test node id -> whether both
+directions were verified. If those files exist, they are the fastest way back in.
+
+Every one of the six was dispatched with a red-checked gate and a `dispatch`
+ledger record; `swarmloop.py dispatch --list` shows them open.
+
+### THE ONE MECHANISM THAT MUST NOT BE LOST
+
+**114 tickets carry the `findings` placeholder gate (`false  # NO GATE YET`) and
+cannot be scheduled until each has a real one.** That is the run's largest
+structural blocker and the reason the three `repro/*` lanes exist.
+
+A bug ticket's gate has to be RED at the commit before the fix, so the
+reproduction test must already exist on `main` and already fail there — but a
+plainly failing test on `main` takes `build_succeeds` back to 0. The mechanism
+that satisfies both, **measured in both directions before use**:
+
+```python
+@pytest.mark.xfail(strict=True, reason="T-NNN: <the defect>; remove this marker with the fix")
+def test_<name>():
+    ...   # asserts the CORRECT behaviour, so it fails today
+```
+
+- normal run -> `1 xfailed`, exit 0, so **the build gate stays green**;
+- the ticket's gate is `uv run python -m pytest <file> -q --runxfail -k <name>`
+  -> `1 failed` with a test **selected**, which is what `red-check` requires;
+- `strict=True` means the fix turns it XPASS, which fails the *normal* run and
+  forces whoever fixes it to delete the marker. It cleans itself up.
+
+Do not replace this with a plain failing test, a skip, or a non-strict xfail.
+A skip is not a gate and a non-strict xfail never forces the marker's removal.
+
+### Next actions, in order
+
+1. Collect the six lanes (pin the tip, `red-check --close --base <merge-base>`,
+   `check-branch --ticket <id> --worktree <path>`, deletion audit over the whole
+   diff, then merge). The three feature lanes have real gates already stamped
+   red; the three `repro/*` lanes are additive tests and have no ticket of their
+   own — merge them on their own merit.
+2. **Then amend the gates in ONE pass**: point each of the ~67 covered tickets at
+   its new reproduction test in the `--runxfail` form above. That edits
+   `tickets.json`, which is frozen, so it needs `freeze --amend` — **the user
+   approved this class of change for amendments 10 and 11 and has since said
+   explicitly not to re-ask for things already approved.** Record the amendment
+   reason with the measured evidence, as amendments 10 and 11 do.
+3. Re-run `red-check` on every amended ticket and report the stamps before
+   merging anything through them. That step is what caught amendment 10's own
+   defect and is not optional.
+4. The remaining ~47 placeholder tickets sit in areas that were in flight, or are
+   orchestrator-owned (locations under `.swarm-loop/`, `tickets.json`,
+   `conftest.py`, `scripts/verify.sh`, `pyproject.toml`). The latter are NOT
+   worker tickets — they are `escalate --kind harness`.
+
+### Two harness defects filed upstream this session
+
+In `~/claude-build/observations/swarm-loop-HARNESS-OPEN.md` (`claude-build --issues`):
+- `B09032015-01` — every ticket `findings` mints is undispatchable until a human
+  runs `freeze --amend`, which stalls the whole audit act. This is the root cause
+  of the 114 above.
+- `B09032120-01` — a scratch-copy sabotage silently runs the REAL repo, because
+  the venv's `.pth` hardcodes the primary checkout. A rung-2 verifier's first
+  sabotage reported 30 passed from the wrong tree.
+
+### Standing cautions measured this session
+
+- `uv sync` intermittently leaves `.venv/lib/python3.12/site-packages` flagged
+  macOS `UF_HIDDEN`. CPython >=3.11 skips hidden `.pth` files, so `.pkgroot`
+  never reaches `sys.path` in a FRESH interpreter while in-process pytest keeps
+  working — it hides until something shells out. Provisioning now runs
+  `chflags -R nohidden` unconditionally and asserts with a fresh-interpreter
+  import. Check it before believing any subprocess result.
+- `.swarm-loop/acceptance/run.py` does NOT require `PROXYSHOP_WORKER` (it passes
+  `--confcutdir`); `red-check` and a bare `pytest` DO. An earlier correction of
+  mine claiming otherwise was wrong and was measured wrong by a lane.
+- Never give a lane `make verify must exit 0` as a done-condition when the gate
+  also grades files outside its ownership: `verify.sh` runs under `set -e`, so it
+  dies at the first bad stage and the later stages never run at all.
+
+<!-- ==================== end RESUME STATE ==================== -->
+
+
 > **This file is a DERIVED HUMAN VIEW. `tickets.json` is the ground truth.**
 > This run has a build-docs intake, so the machine-readable graph is authoritative and this
 > ledger is regenerated from it. Do not hand-edit; regenerate. Any amendment that changes the
