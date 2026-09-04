@@ -831,7 +831,7 @@ _RECIPE_PATH = re.compile(r"(?<![\w/.\-$])((?:\./)?(?:[\w.-]+/)+[\w.-]+|\./[\w.-
 #: of ``_RECIPE_PATH`` require a ``/``, so a bare name was invisible to the path scan, and the
 #: only other net (``shutil.which(head)``) inspects the HEAD, which in that recipe is ``bash``
 #: and is of course on PATH. Measured against the merged rewrite: ``@bash no_such_root.sh`` and
-#: ``@python no_such_root.py`` both left the gate at its baseline 13 PASS / 4 FAIL, while
+#: ``@python no_such_root.py`` both left the gate at the then-baseline 13 PASS / 4 FAIL, while
 #: ``@bash ./no_such_root.sh`` and ``@bash docs/demo/no_such_root.sh`` were caught. A missing
 #: directory component was the whole difference between red and silent.
 _RECIPE_BARE_SCRIPT = re.compile(r"(?<![\w/.\-$*])([\w.-]+\.(?:sh|py))(?![\w/])")
@@ -1987,9 +1987,12 @@ def test_a_recipe_script_named_without_a_directory_is_still_resolved(
     """FAIL-OPEN 2. A missing DIRECTORY COMPONENT used to be the difference between red and mute.
 
     Measured against the merged rewrite, adding one chunk to the recipe of a target the runbook
-    names: `@bash ./no_such_root.sh` and `@bash docs/demo/no_such_root.sh` were caught (13 PASS /
-    4 FAIL became 12 PASS / 5 FAIL), while `@bash no_such_root.sh`, `@python no_such_root.py` and
-    `@uv run no_such_root.py` left the tally EXACTLY at baseline. Both alternations of
+    names: `@bash ./no_such_root.sh` and `@bash docs/demo/no_such_root.sh` were caught (the
+    then-baseline 13 PASS / 4 FAIL became 12 PASS / 5 FAIL), while `@bash no_such_root.sh`,
+    `@python no_such_root.py` and `@uv run no_such_root.py` left the tally EXACTLY at that
+    baseline. Re-measured after ESC-018 step (b) against the current 17 PASS / 0 FAIL: all six
+    spellings now give 16 PASS / 1 FAIL and exit 1, and the four negative controls below give
+    the baseline tally and exit 0. Both alternations of
     `_RECIPE_PATH` require a `/`, and the only other net inspects the recipe's HEAD — which in
     those three spellings is `bash`, `python` or `uv`, all of them on PATH.
 
@@ -2044,6 +2047,9 @@ def test_the_raw_make_cross_check_reads_a_command_wherever_a_command_can_stand(
     `Then make e2e-live`, `Time …`, `Do …`, `Else …`, `Sudo …` and `Env …` were all read as
     English. Measured on 45 prefixed `make e2e-live` lines hidden inside a fence the parser skips:
     19 caught, 26 silent, with the sweep's tally byte-identical to baseline in every case.
+    Re-measured against the current baseline, C1-C6 all exit 1 — and note WHERE: the tally stays
+    17 PASS / 0 FAIL and the catch is `test_the_parse_covers_the_raw_text` plus a DROPPED entry,
+    so anyone grading this class of sabotage by FAIL count alone would call it uncaught.
 
     Two corrections to the original report, both measured: `run make X` is missed in EVERY casing
     because "run" was never in the vocabulary at all, not because of case; and the largest holes
@@ -2170,6 +2176,48 @@ def test_every_line_inside_an_unread_fence_lands_in_the_counted_dropped_bucket(
     assert all(r.verdict != VERDICT_UNCLASSIFIED for r in results), (
         f"nothing here should reach UNCLASSIFIED: {[r.render() for r in results]}"
     )
+
+
+def test_the_gates_failure_report_actually_names_the_broken_step_and_the_dropped_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's report is only worth having if something renders it.
+
+    ESC-018 step (b) took the runbook to 17 PASS / 0 FAIL, which is the right outcome and has a
+    side effect worth pinning: the gate below now never takes its failure branch, so the message
+    it exists to produce — the FAIL list, the tally, the UNCLASSIFIED bucket and the DROPPED
+    bucket — is rendered by no test at all. Dead formatting rots, and this file's whole argument
+    is that a bucket which is not PRINTED is a bucket that is not counted.
+
+    So: drive the gate over a fixture runbook that has both a broken step and a declined line,
+    and assert on the text it raises. This is the only test that executes that branch.
+    """
+    _fixture_runbook(
+        tmp_path,
+        monkeypatch,
+        "# Fixture\n\n```bash\ndocker compose --profile e2e up -d no-such-service\n```\n\n"
+        "```text\nlint ok; don't rerun\n```\n",
+    )
+    with pytest.raises(AssertionError) as excinfo:
+        test_c19_every_command_the_demo_runbook_names_resolves()
+    message = str(excinfo.value)
+
+    for needle, why in (
+        ("[FAIL]", "the failing step must be listed"),
+        ("no-such-service", "the report must name WHAT is broken, not merely that something is"),
+        ("--- DROPPED", "the dropped bucket must be printed, not merely counted"),
+        (
+            "[DROPPED:unread-fence-language]",
+            "each dropped line must carry its machine-readable reason into the report",
+        ),
+        ("lint ok; don't rerun", "the dropped line's text must appear so a reader can judge it"),
+        ("1 DROPPED", "the tally must carry the dropped count"),
+        ("1 FAIL", "the tally must carry the failure count"),
+    ):
+        assert needle in message, (
+            f"the gate's failure report is missing {needle!r} — {why}. A report that omits it is "
+            f"how a step goes quiet rather than red. Full message:\n{message}"
+        )
 
 
 # =====================================================================================
