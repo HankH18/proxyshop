@@ -42,7 +42,7 @@ import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.parse import urlencode, urljoin
 
 from .base import CatalogAdapter as _CatalogAdapter
 from .base import (
@@ -62,6 +62,8 @@ from .mapping import (
     composite_hash,
     native_product_key,
     product_id_for,
+    safe_host,
+    safe_split,
     variant_id_for,
 )
 from .netguard import FetchRefused
@@ -123,8 +125,21 @@ class SignedFetchAdapter:
         client = self._client or SafeHTTPClient(
             policy=request.policy, user_agent=self.user_agent, signer=self.signer
         )
-        base = request.base_url.rstrip("/")
-        host = (urlsplit(base).hostname or "").lower()
+        base = str(request.base_url or "").rstrip("/")
+        if safe_split(base) is None:
+            # `urlsplit("http://[")` raises. Every URL this crawl builds is derived from the
+            # base, so one that does not parse has to end the crawl here rather than as a
+            # ValueError out of the transport's host check.
+            return CatalogSnapshot(
+                store_id=request.store_id,
+                base_url=base,
+                observed_at=observed_at,
+                adapter=ADAPTER_NAME,
+                usage=ledger.snapshot(),
+                extractor_version=EXTRACTOR_VERSION,
+                warnings=(f"base_url {request.base_url!r} does not parse; crawl abandoned",),
+            )
+        host = safe_host(base)
         allowed = tuple(dict.fromkeys((host, *request.allowed_hosts)))
 
         resources: list[FetchedResource] = []
@@ -246,7 +261,7 @@ class SignedFetchAdapter:
                 method="POST",
                 body=payload,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                allowed_hosts=(urlsplit(base).hostname or "",),
+                allowed_hosts=(safe_host(base),),
                 ledger=ledger,
             )
         except (FetchRefused, TransportError) as exc:

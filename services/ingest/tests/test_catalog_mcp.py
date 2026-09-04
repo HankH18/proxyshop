@@ -46,6 +46,7 @@ from ingest.adapters.catalog_mcp import (
     LIST_PRODUCTS_TOOL,
     CatalogMCPAdapter,
     MCPError,
+    MCPSession,
     MCPToolError,
     RecordedMCPSession,
     UnrecordedMCPCall,
@@ -223,6 +224,13 @@ def test_the_adapter_satisfies_the_one_catalog_adapter_interface():
     assert isinstance(adapter, CatalogAdapter)
     assert callable(adapter.fetch_catalog) and callable(adapter.to_upserts)
     assert _satisfies_catalog_adapter()
+
+
+def test_the_recorded_session_satisfies_the_declared_transport_seam():
+    """The seam is a Protocol, so the only thing that keeps it honest is checking it."""
+    session = RecordedMCPSession.from_path(CASSETTE)
+    assert isinstance(session, MCPSession)
+    assert not isinstance(object(), MCPSession), "a positive control that admits anything is none"
 
 
 def test_both_adapters_are_the_same_interface_and_not_the_same_class():
@@ -641,7 +649,14 @@ def test_a_malformed_catalog_entry_is_skipped_with_a_warning(products: list[Any]
     adapter = CatalogMCPAdapter(session=_one_page(products), clock=_clock())
     snapshot = adapter.fetch_catalog(_request())
     assert snapshot.warnings, "a skipped entry has to be reported"
-    assert adapter.to_upserts(snapshot) is not None  # it maps rather than raising
+    ops = adapter.to_upserts(snapshot)
+    assert isinstance(ops, list), "a malformed entry must still map, not raise"
+    # Whatever survived is well formed: no nameless product, no offer without a price.
+    for product in snapshot.products:
+        assert product.product_id.startswith("prod_")
+        for variant in product.variants:
+            assert variant.variant_id.startswith("var_")
+    assert all(op.kind != "offer" or op.node.price >= 0 for op in ops)
 
 
 def test_a_result_carrying_no_products_list_is_reported_not_treated_as_an_empty_store():
@@ -767,3 +782,53 @@ def test_a_base_url_with_no_host_reads_nothing_and_says_why():
     snapshot = _adapter().fetch_catalog(_request(base_url="not-a-url"))
     assert snapshot.products == ()
     assert any("names no host" in w for w in snapshot.warnings), snapshot.warnings
+
+
+def test_a_base_url_that_does_not_parse_is_a_warning_not_a_valueerror():
+    """`urlsplit("http://[")` raises; an adapter that promises warnings must not pass it on."""
+    snapshot = _adapter().fetch_catalog(_request(base_url="http://["))
+    assert snapshot.products == ()
+    assert any("does not parse" in w for w in snapshot.warnings), snapshot.warnings
+    # The page fetcher shares the guard and the same promise.
+    fetched = SignedFetchAdapter(clock=_clock()).fetch_catalog(_request(base_url="http://["))
+    assert fetched.products == ()
+    assert any("does not parse" in w for w in fetched.warnings), fetched.warnings
+
+
+def test_a_product_url_that_does_not_parse_cannot_abort_the_read():
+    """A merchant string reaching urlsplit is a remote way to end somebody else's crawl."""
+    entry = _entry(online_store_url="http://[")
+    adapter = CatalogMCPAdapter(
+        session=_one_page([entry, _entry(id=2, handle="b")]), clock=_clock()
+    )
+    snapshot = adapter.fetch_catalog(_request())
+
+    assert len(snapshot.products) == 2, "the second product must survive the first one's URL"
+    assert snapshot.products[0].source_url == mcp_resource_url(SHOP, LIST_PRODUCTS_TOOL)
+    assert any("does not parse" in w for w in snapshot.warnings), snapshot.warnings
+
+
+def test_the_shared_mapping_refuses_a_snapshot_that_names_no_extractor_version():
+    """A Source that cannot name the code that produced it is provenance in name only."""
+    from ingest.adapters.mapping import build_upserts
+
+    blank = _snapshot(adapter="catalog_mcp", extractor_version="")
+    with pytest.raises(ValueError, match="extractor version"):
+        build_upserts(blank)
+    # Positive control: naming one, either on the snapshot or in the call, maps fine.
+    assert build_upserts(blank, extractor_version="catalog_mcp@1.0.0")
+    assert build_upserts(_snapshot(adapter="catalog_mcp", extractor_version="x@1"))
+
+
+def test_the_store_domain_survives_a_base_url_that_does_not_parse():
+    """build_upserts is shared, so its URL handling has to be as forgiving as the adapters'."""
+    from dataclasses import replace
+
+    from ingest.adapters.mapping import build_upserts
+
+    snapshot = replace(
+        _snapshot(adapter="catalog_mcp", extractor_version="x@1"), base_url="http://["
+    )
+    store = build_upserts(snapshot)[0]
+    assert store.kind == "store"
+    assert store.node.domain == ""

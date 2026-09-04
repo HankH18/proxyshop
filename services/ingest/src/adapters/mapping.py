@@ -33,7 +33,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from ..graph.model import Category, Offer, Product, Source, Store, Variant
 from .base import CatalogSnapshot, UpsertOp
@@ -49,6 +49,8 @@ __all__ = [
     "native_key",
     "native_product_key",
     "product_id_for",
+    "safe_host",
+    "safe_split",
     "stable_id",
     "variant_id_for",
 ]
@@ -115,6 +117,26 @@ def coerce_price(value: Any) -> float | None:
     if price < 0:
         return None
     return price
+
+
+def safe_split(url: Any) -> SplitResult | None:
+    """``urlsplit`` that answers ``None`` instead of raising on a URL that will not parse.
+
+    ``urlsplit("http://[")`` raises ``ValueError: Invalid IPv6 URL``, and the strings this
+    package splits include ones a *merchant* chose (a product's ``online_store_url``) and ones
+    a caller passed in. An adapter whose contract is "a bad read is a warning, never an
+    exception" cannot have a store-supplied string that aborts the whole run.
+    """
+    try:
+        return urlsplit(str(url or ""))
+    except ValueError:
+        return None
+
+
+def safe_host(url: Any) -> str:
+    """The lower-cased hostname of ``url``, or ``""`` when there is not one to be had."""
+    split = safe_split(url)
+    return (split.hostname or "").lower() if split is not None else ""
 
 
 def stable_id(*parts: Any) -> str:
@@ -270,7 +292,7 @@ def build_upserts(
             kind="store",
             node=Store(
                 store_id=snapshot.store_id,
-                domain=(urlsplit(snapshot.base_url).hostname or "").lower(),
+                domain=safe_host(snapshot.base_url),
             ),
             source=store_source,
         )

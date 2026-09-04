@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from .base import CatalogAdapter as _CatalogAdapter
 from .base import (
@@ -82,6 +82,8 @@ from .mapping import (
     native_key,
     native_product_key,
     product_id_for,
+    safe_host,
+    safe_split,
     variant_id_for,
 )
 
@@ -397,7 +399,7 @@ class CatalogMCPAdapter:
         observed_at = self._clock()
         ledger = CrawlLedger(request.budget)
         base = str(request.base_url or "").rstrip("/")
-        shop = (urlsplit(base).hostname or "").lower()
+        shop = safe_host(base)
         warnings: list[str] = []
         resources: list[FetchedResource] = []
         products: list[ProductRecord] = []
@@ -413,6 +415,8 @@ class CatalogMCPAdapter:
         max_products = max(0, int(request.max_products))
         if self.session is None:
             warnings.append("no MCP session configured; nothing was read")
+        elif safe_split(base) is None:
+            warnings.append(f"base_url {request.base_url!r} does not parse; nothing was read")
         elif not shop:
             warnings.append(f"base_url {request.base_url!r} names no host; nothing was read")
         elif max_products <= 0:
@@ -699,7 +703,10 @@ class CatalogMCPAdapter:
         if len(candidate) > MAX_SOURCE_URL_LENGTH:
             warnings.append(f"{fallback}: product URL is {len(candidate)} chars; ignored")
             return fallback
-        split = urlsplit(candidate)
+        split = safe_split(candidate)
+        if split is None:
+            warnings.append(f"{fallback}: product URL {candidate!r} does not parse; ignored")
+            return fallback
         if split.scheme.lower() not in ("http", "https"):
             warnings.append(f"{fallback}: product URL {candidate!r} is not http(s); ignored")
             return fallback
