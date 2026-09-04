@@ -230,9 +230,20 @@ here only so a reader knows where the boundary is and where to go next.
 
   A live development-store run is **demo procedure only**. It is never a ticket's
   verification gate (C9), and no ticket may depend on it. The target is defined in the repo
-  root Makefile and shells out to `docs/demo/e2e_live.sh`, which lands with the extension
-  runbook — until then the target exits rather than running anything, which is the correct
-  behaviour for a procedure that is off this page's path.
+  root Makefile and shells out to `docs/demo/e2e_live.sh`.
+
+  The live *procedure* lands with the extension runbook. Until it does, the script is a
+  **preflight**: it selects the real embedding model (D18), then reads the repo's own
+  configuration surface and reports, one line each, whether five live preconditions hold —
+  the app's `SHOPIFY_API_KEY`/`SHOPIFY_API_SECRET`, a `MERCHANT_APP_URL` Shopify can actually
+  reach, `SHOPIFY_STUB_URL` **unset** (it silently redirects "live" Admin calls back to the
+  offline stub), a `CHECKOUT_MODE` that is not the simulated `redirect` provider, and an
+  `EMBEDDING_PROVIDER` that can really embed. It then refuses, naming what is unmet.
+
+  **It always exits non-zero** — `2` when a precondition is unmet, `3` when they all hold and
+  only the live driver is missing. That is deliberate: a command that runs nothing and reports
+  success is the failure this whole page is meant to be free of. Nothing about the offline
+  starting slice above needs any of it.
 
 - **The merchant onboarding interview.** T-053 turns a plain-language interview into a
   drafted envelope, a written merchant approval and a versioned record, and its gate is a
