@@ -1710,3 +1710,265 @@ def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -
         f"like. redacted_fields in particular is the only signal a store agent or an auditor "
         f"gets that a scrub happened at all.\n  " + "\n  ".join(losses[:12])
     )
+
+
+# ======================================================================================
+# T-303 — T-237's remaining halves: the decision is dropped, and nobody asks for it
+# ======================================================================================
+#: How many unknown store ids the fail-closed canary draws. A wiring that answers ELIGIBLE for
+#: a store it has never heard of is worse than no wiring at all, so this must pass today AND
+#: keep passing through whatever fix lands.
+_T303_UNKNOWN_STORES = 60
+
+
+def _t303_simulation_run() -> Any:
+    """One whole S2 run of the only product caller of ``build_snapshot``.
+
+    Datastore-free, socket-free, clock-free and seeded: ``services/sim/src/runner.py`` states
+    that in its own header and the repo's ``pytest-socket`` guard is armed while this runs.
+    Measured at ~0.02s warm, so this is a behavioural gate and not a slow one.
+    """
+    from fixtures.manifest import load_manifest
+    from sim.runner import run_simulation
+
+    manifest = load_manifest()
+    return run_simulation(manifest, int(manifest["seed"]))
+
+
+def _t303_auction_body(store_ids: Any) -> dict[str, Any]:
+    """A roster request built from the route's own model, not hand-written JSON.
+
+    ``list_price`` is required and ``store_id`` has a length bound; a body that 422s would
+    make the gate below error on its own request shape rather than on the substance.
+    """
+    return {
+        "intent": {"intent_id": "intent-t303", "cluster_id": "cluster-t303"},
+        "roster": [
+            {"store_id": str(store_id), "tier": 1, "list_price": 19.99}
+            for store_id in store_ids
+        ],
+    }
+
+
+def test_t303_the_delisting_and_eligibility_sweeps_are_armed() -> None:
+    """Both halves below walk something. Prove there is something to walk.
+
+    Not xfail. The first half asserts about the delistings a real run computes and the events
+    it sealed; the second asserts about the stores a served auction answered for. Either
+    becomes a vacuous pass the moment its list is empty — which is how three sweeps in this
+    repo went quiet instead of red — so the counts are pinned here, outside the xfail.
+    """
+    from fastapi.testclient import TestClient
+    from trust.scoring import BLACKLIST_THRESHOLD
+
+    run = _t303_simulation_run()
+    assert run.chain_ok, "the simulation's own event chain does not verify; nothing below is trustworthy"
+    assert len(run.events) >= 20, (
+        f"the simulation sealed only {len(run.events)} events (36 when this was written). The "
+        f"first half below looks for a delisting INSIDE this stream; a stream this short "
+        f"means the run stopped doing the thing being graded"
+    )
+    delistings = run.snapshot["delistings"]
+    assert len(delistings) >= 1, (
+        f"the run computed {len(delistings)} delistings, so there is no dropped decision left "
+        f"to notice. Either the dishonest store stopped scoring below BLACKLIST_THRESHOLD "
+        f"({BLACKLIST_THRESHOLD}) or the delisting seam stopped emitting — both make the gate "
+        f"below pass while saying nothing"
+    )
+    scores = {
+        store_id: entry["score"] for store_id, entry in run.snapshot["stores"].items()
+    }
+    assert any(score < BLACKLIST_THRESHOLD for score in scores.values()), (
+        f"no store in the run scores below the published threshold {BLACKLIST_THRESHOLD}; "
+        f"scores were {scores}. S2 has nothing to catch"
+    )
+    assert any(score >= BLACKLIST_THRESHOLD for score in scores.values()), (
+        f"every store in the run scores below {BLACKLIST_THRESHOLD}, so 'an honest store is "
+        f"not delisted' is not being exercised by anything; scores were {scores}"
+    )
+
+    from exchange.main import create_app
+
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.post("/auctions", json=_t303_auction_body(("store-a", "store-b")))
+    assert response.status_code == 201, (
+        f"POST /auctions answered {response.status_code}, not 201: {response.text[:400]}. The "
+        f"second half below reads this body, so a request the route refuses would make it "
+        f"error on its own shape instead of on the wiring"
+    )
+    body = response.json()
+    assert len(body["solicited"]) + len(body["denied"]) == 2, (
+        f"the served auction accounted for {len(body['solicited'])} solicited + "
+        f"{len(body['denied'])} denied out of a 2-store roster, so the gate below would be "
+        f"reading a partial answer"
+    )
+
+
+def test_t303_the_exchange_eligibility_gate_never_fails_open() -> None:
+    """Whatever the exchange ends up asking, it must not admit a store it never heard of.
+
+    Not xfail: this passes today and must keep passing through the fix. It is the property
+    that stops the obvious wrong way to green the repro below — wiring a source whose default
+    is ELIGIBLE, or one that swallows its backend being down. ``read_eligibility`` is the
+    repo's own fail-closed reader, so this grades the rule the gates actually apply rather
+    than a re-derivation of it.
+    """
+    import random
+
+    from exchange.eligibility import ELIGIBLE, read_eligibility
+    from exchange.main import create_app
+    from fastapi.testclient import TestClient
+
+    app = create_app()
+    with TestClient(app) as client:
+        client.post("/auctions", json=_t303_auction_body(("store-warmup",)))
+    source = getattr(app.state, "seller_eligibility", None)
+    assert source is not None, (
+        "the served exchange exposes no seller_eligibility after answering an auction, so "
+        "there is nothing to probe — which is itself the wiring gap T-303 names"
+    )
+
+    rng = random.Random(0x303 ^ random.SystemRandom().getrandbits(48))
+    unknown = [f"store-unknown-{rng.randrange(10**12)}" for _ in range(_T303_UNKNOWN_STORES)]
+    assert len(set(unknown)) == _T303_UNKNOWN_STORES, "the unknown-store draw collided"
+
+    admitted: list[str] = []
+    raised: list[str] = []
+    for store_id in unknown:
+        try:
+            decision = read_eligibility(source, store_id)
+        except Exception as failure:  # a raising source must be read as a denial, not escape
+            raised.append(f"{store_id}: {type(failure).__name__}: {failure}")
+            continue
+        if decision.status == ELIGIBLE or decision.eligible:
+            admitted.append(store_id)
+
+    assert raised == [], (
+        f"{len(raised)} of {_T303_UNKNOWN_STORES} eligibility reads escaped as exceptions "
+        f"instead of denying; read_eligibility exists so a backend that is down denies rather "
+        f"than throwing.\n  " + "\n  ".join(raised[:5])
+    )
+    assert admitted == [], (
+        f"the wired eligibility source admitted {len(admitted)} of {_T303_UNKNOWN_STORES} "
+        f"store ids it has never heard of, e.g. {admitted[:3]}. A source that says yes by "
+        f"default is indistinguishable from asking nobody, and it would satisfy the repro "
+        f"below without the exchange ever consulting trust"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-303 (a): the sim computes snapshot['delistings'] and drops it — nothing appends the "
+        "blacklisted/blacklist_expired events into the chain the run seals, so the delisting "
+        "decision is recorded nowhere an exchange, an auditor or an appeal can read it; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t303_a_delisting_the_run_computes_lands_in_the_chain_the_run_seals() -> None:
+    """The decision is computed. S2 is only closed when it is also RECORDED.
+
+    Behavioural on purpose. The nine T-237 gates above grade ``snapshot['delistings']``'s
+    payload, idempotence and threshold — all of which pass — and an AST sweep for "some module
+    both reads ``delistings`` and calls ``append``" would be closed by one added subscript in
+    ``services/sim/src/runner.py``, which already contains a bare ``append(...)`` 44 lines
+    earlier inside a loop that has finished by then. Co-occurrence in a file is not data flow.
+
+    So this runs the chain instead of scanning for it: drive the only product caller of
+    ``build_snapshot``, then ask the sealed event stream whether the delisting it computed is
+    in there. The negative half is asserted too — a store the run did NOT delist must not
+    acquire a blacklisted event — so "append one for everybody" is not a way through.
+    """
+    run = _t303_simulation_run()
+    delistings = run.snapshot["delistings"]
+    assert delistings, "no delisting computed; see the armed guard above"
+
+    sealed = {str(event.get("event_id")) for event in run.events}
+    dropped = [
+        f"{event['kind']} for {event['payload']['store_id']} ({event['event_id']})"
+        for event in delistings
+        if str(event.get("event_id")) not in sealed
+    ]
+    assert dropped == [], (
+        f"{len(dropped)} of {len(delistings)} delisting decisions the run computed are absent "
+        f"from the {len(run.events)}-event chain it sealed, so they are computed and dropped: "
+        f"{dropped}. The exchange, an auditor and an appeal all read the ledger, and none of "
+        f"them can see a decision that was only ever a dict on a dataclass — note "
+        f"SimulationRun.to_json() does not even carry the snapshot, so replay determinism "
+        f"never compares it either"
+    )
+
+    delisted = {str(event["payload"]["store_id"]) for event in delistings}
+    spurious = sorted(
+        {
+            str(event.get("store_id"))
+            for event in run.events
+            if str(event.get("kind")) in _BLACKLIST_EVENT_KINDS
+            and str(event.get("store_id")) not in delisted
+        }
+    )
+    assert spurious == [], (
+        f"the chain carries a delisting event for {spurious}, which the trust snapshot did not "
+        f"delist. Recording a decision nobody made is not the fix for dropping the one that "
+        f"was made"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-303 (b): apps/exchange/src/auction/routes.py._eligibility lazily builds an empty "
+        "StaticSellerEligibility and no product caller ever passes configure_auctions a "
+        "trust-backed source, so the served exchange denies every store 'static-eligibility' "
+        "and cannot tell an honest store from a delisted one; remove this marker with the fix"
+    ),
+)
+def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one() -> None:
+    """S2's end: the exchange stops asking a dishonest store. It cannot ask anyone today.
+
+    Measured against the app the deployment actually serves — ``exchange.main.create_app()``
+    with no test-side ``configure_auctions`` call — because the wiring gap is invisible to
+    every test that configures the app itself. The roster is the manifest's own five stores,
+    one of which the trust engine scores far below ``BLACKLIST_THRESHOLD`` and three of which
+    it scores well above; a served exchange that answers identically for all five is not
+    consulting trust, whatever it is consulting.
+
+    Deliberately NOT asserted here, and asserted in
+    ``test_t303_the_exchange_eligibility_gate_never_fails_open`` instead: that the wiring is
+    fail-closed. Splitting them matters — the one-line way to satisfy this test alone is a
+    source whose default is ELIGIBLE, and that companion is what makes that route red.
+    """
+    from fastapi.testclient import TestClient
+    from fixtures.manifest import load_manifest
+    from exchange.main import create_app
+
+    store_ids = [str(store["store_id"]) for store in load_manifest()["stores"]]
+    assert len(store_ids) >= 3, f"the manifest roster is too small to discriminate: {store_ids}"
+
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.post("/auctions", json=_t303_auction_body(store_ids))
+    assert response.status_code == 201, f"POST /auctions -> {response.status_code}: {response.text[:400]}"
+    body = response.json()
+
+    denials = {entry["store_id"]: entry["reason"] for entry in body["denied"]}
+    unasked = sorted(
+        store_id
+        for store_id, reason in denials.items()
+        if "static-eligibility" in str(reason)
+    )
+    assert unasked == [], (
+        f"the served exchange denied {len(unasked)} of {len(store_ids)} rostered stores with a "
+        f"reason naming the deterministic double — {unasked} — so it asked "
+        f"StaticSellerEligibility, which was built with no rows and answers 'unavailable' for "
+        f"every store alive. solicited={body['solicited']}. configure_auctions(app, "
+        f"eligibility=...) has no product caller: the only non-test call in the tree is "
+        f"e2e/support/s1/flow.py, and it hands over statuses read out of a JSON fixture. So "
+        f"the deployed exchange cannot stop asking a dishonest store, because it is not asking "
+        f"anyone"
+    )
+    assert body["solicited"], (
+        f"the served exchange solicited no store at all from a {len(store_ids)}-store roster, "
+        f"so S2's chain has no end-to-end path even for the honest stores"
+    )
