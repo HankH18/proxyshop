@@ -41,6 +41,7 @@ from .candidates import candidates_from_entries
 
 __all__ = [
     "DEFAULT_SHORTLIST_CAPACITY",
+    "ENV_RANKING_WEIGHTS",
     "ShortlistStore",
     "configure_ranking",
     "rank_auction",

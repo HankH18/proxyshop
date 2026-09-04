@@ -69,6 +69,9 @@ from .state import AuctionStateMachine, UnknownAuction
 __all__ = [
     "DEFAULT_BID_TIMEOUT_SECONDS",
     "MAX_BID_TIMEOUT_SECONDS",
+    "MAX_EXCLUSION_REASONS_PER_BID",
+    "MAX_HARD_CONSTRAINTS",
+    "MAX_ROSTER_ENTRIES",
     "NullSolicitor",
     "bid_window_seconds",
     "configure_auctions",
