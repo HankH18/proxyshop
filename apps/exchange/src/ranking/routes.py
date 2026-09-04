@@ -22,7 +22,7 @@ from __future__ import annotations
 from contracts.protocol import Shortlist
 from fastapi import APIRouter, HTTPException, Request
 
-from .serving import shortlist_store
+from .serving import DEFAULT_SHORTLIST_CAPACITY, shortlist_store
 
 __all__ = ["router"]
 
@@ -31,20 +31,27 @@ router = APIRouter(tags=["ranking"])
 
 @router.get("/auctions/{auction_id}/shortlist", response_model=Shortlist)
 async def read_shortlist(auction_id: str, request: Request) -> dict:
-    """This auction's shortlist — 404 before it has closed, and once its TTL has run out.
+    """This auction's shortlist — 404 before it has closed, and once the store has let it go.
 
     404 rather than an empty shortlist, and the distinction is the point: an auction whose
     every candidate was excluded has a real shortlist with no slots, and answering that with
     the same body as "no such auction" would tell a buyer that a ranking which ran and refused
     everything is indistinguishable from one that never happened.
+
+    The detail names FOUR causes, and the fourth is the one an operator will actually hit:
+    :class:`~exchange.ranking.serving.ShortlistStore` holds 512 auctions, so a burst evicts
+    entries that are nowhere near their TTL. An earlier draft of this message listed three
+    causes and put eviction under "its 15-minute TTL has taken it away", which is a diagnosis
+    that sends the reader to the wrong knob.
     """
     shortlist = shortlist_store(request.app).get(auction_id)
     if shortlist is None:
         raise HTTPException(
             status_code=404,
             detail=(
-                f"no shortlist for auction {auction_id!r}: it has not closed, it never "
-                f"existed, or its 15-minute TTL has taken it away"
+                f"no shortlist for auction {auction_id!r}: it has not closed yet, it never "
+                f"existed, its 15-minute TTL has taken it away, or it was evicted because "
+                f"this process has ranked {DEFAULT_SHORTLIST_CAPACITY} more recent auctions"
             ),
         )
     return shortlist

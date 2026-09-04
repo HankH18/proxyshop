@@ -30,6 +30,7 @@ from __future__ import annotations
 import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 from contracts.ranking import RankingWeights
@@ -56,7 +57,24 @@ __all__ = [
 #: time bound is a memory leak anybody can drive by posting in a loop. The TTL is the auction's
 #: own — DESIGN pins ``auction:{id}`` at 15 minutes — so a shortlist never outlives the auction
 #: it describes, and the cap evicts the oldest first when a burst arrives inside one window.
+#:
+#: **The cap is itself reachable by an unauthenticated caller**, and that is stated here rather
+#: than left as a footnote: 513 cheap posts inside one window evict every shortlist written
+#: before them. The route's 404 therefore names eviction among its causes, because an operator
+#: told "the TTL took it away" about a 30-second-old auction is being told the wrong thing.
 DEFAULT_SHORTLIST_CAPACITY = 512
+
+#: The weight set this process ranks with, resolved ONCE at import.
+#:
+#: At import, not per request, and the difference is the whole point. ``from_env`` raises on a
+#: malformed set or one that does not sum to 1.0 — deliberately, because a shortlist produced
+#: under weights nobody can reproduce is worse than a failure. Resolved lazily, that raise
+#: became a 500 on every ``POST /auctions`` in a container that still booted and still answered
+#: its ``/openapi.json`` healthcheck: measured, ``RANK_W_M=0.9`` with the other four unset gave
+#: a healthy-looking exchange whose only auction-opening route was totally dead. Resolved here,
+#: the same typo fails ``create_app()``, so the container never reports healthy and the
+#: operator is told which variable is wrong.
+ENV_RANKING_WEIGHTS: RankingWeights = RankingWeights.from_env()
 
 
 class ShortlistStore:
@@ -80,24 +98,37 @@ class ShortlistStore:
         self._entries: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 
     def put(self, auction_id: str, shortlist: Mapping[str, Any], *, now: float) -> None:
-        """Record one auction's shortlist, evicting the oldest when the cap is reached."""
+        """Record one auction's shortlist, evicting the oldest when the cap is reached.
+
+        Stored as a deep copy, and read back as one. ``dict(shortlist)`` alone is shallow: the
+        same ``slots`` list would be simultaneously in this store and in the
+        ``CreateAuctionResponse`` the route hands to pydantic, so one caller mutating what it
+        was given would silently rewrite what the next reader of
+        ``GET /auctions/{id}/shortlist`` is served. Nothing mutates it today; a store whose
+        contents can be changed from outside it is not a store.
+        """
         key = str(auction_id)
         self._entries.pop(key, None)
-        self._entries[key] = (float(now), dict(shortlist))
+        self._entries[key] = (float(now), deepcopy(dict(shortlist)))
         while len(self._entries) > self.capacity:
             self._entries.popitem(last=False)
 
     def get(self, auction_id: str, *, now: float | None = None) -> dict[str, Any] | None:
-        """One auction's shortlist, or ``None`` once its TTL has taken it away."""
+        """One auction's shortlist, or ``None`` once its TTL has taken it away.
+
+        The comparison is ``>=``: at exactly ``ttl_seconds`` the entry is gone. With ``>`` an
+        auction whose Redis record had expired at the same instant still had a readable
+        shortlist here, which is the one instant this store is not allowed to outlive it by.
+        """
         entry = self._entries.get(str(auction_id))
         if entry is None:
             return None
         written_at, shortlist = entry
         moment = time.time() if now is None else float(now)
-        if moment - written_at > self.ttl_seconds:
+        if moment - written_at >= self.ttl_seconds:
             self._entries.pop(str(auction_id), None)
             return None
-        return dict(shortlist)
+        return deepcopy(shortlist)
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -164,22 +195,16 @@ def registered_domains_of(app: Any) -> Any:
 
 
 def weights_of(app: Any) -> RankingWeights:
-    """The weight set this app ranks with, resolved once from the environment.
+    """The weight set this app ranks with: its own override, else this process's.
 
     ``contracts.ranking.RankingWeights.from_env`` is the published loader and reads
     ``RANK_W_M``…``RANK_W_D`` plus ``RANK_WEIGHTS_VERSION``, falling back to the published
-    defaults when none is set. It raises on a set that is malformed or does not sum to 1.0 —
-    deliberately, because a shortlist produced under weights nobody can reproduce is worse than
-    a request that fails. Resolution is lazy and memoised on ``app.state`` (the pattern the
-    auction route already uses for its collaborators); a deployment that wants a malformed
-    weight set to fail at BOOT rather than on the first ranked auction passes
-    ``configure_ranking(app, weights=RankingWeights.from_env())`` at startup.
+    defaults when none is set. It is called exactly once, at this module's import — see
+    :data:`ENV_RANKING_WEIGHTS` for why a lazy call was a live outage rather than a tidier
+    default.
     """
     weights = getattr(app.state, "ranking_weights", None)
-    if weights is None:
-        weights = RankingWeights.from_env()
-        app.state.ranking_weights = weights
-    return weights
+    return ENV_RANKING_WEIGHTS if weights is None else weights
 
 
 def rank_auction(
