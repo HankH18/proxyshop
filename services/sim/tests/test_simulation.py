@@ -250,6 +250,106 @@ def test_the_ledger_chain_verifies_and_every_kind_is_one_of_the_frozen_kinds(
     assert not unknown, f"the run emitted ledger kinds outside the frozen enum: {sorted(unknown)}"
 
 
+def test_the_platform_derives_the_offer_integrity_attacks_from_the_event_stream_alone(
+    sim_manifest: dict[str, Any],
+) -> None:
+    """The adversarial question the frozen criterion cannot ask: is the attack *detectable*?
+
+    ``sim.dishonest`` reads the manifest's ``dim``/``type`` off the approved document and
+    hands them to the scorer — which is right, because the manifest is ground truth. But it
+    means the simulation never asks whether the platform could have worked those out for
+    itself from what a dishonest checkout actually leaves behind.
+
+    This asks. It takes the approved ``aggressive`` persona's *pitched* values, plays a
+    checkout that breaks both promises, and hands the raw ``accepted`` / ``checkout_pixel``
+    / ``order_paid`` triple to ``trust.reconcile`` — nothing tells it what the manifest
+    says. The verdicts it returns unaided must be exactly the ``(dim, type)`` pairs the
+    manifest declares for ``bait_and_switch_unit_price`` and ``phantom_discount``.
+
+    Only those two of the approved seven are decidable this way: ``RECONCILED_DIMENSIONS``
+    grades ``price`` and ``discount`` and nothing else, so dispatch, returns, the two
+    catalog claims and buyer feedback reach trust through other seams. That limit is the
+    finding this test pins, not a gap in this assertion.
+    """
+    from trust.reconcile import reconcile, reconciled_observations
+
+    scripted = {
+        str(behaviour["kind"]): behaviour
+        for behaviour in sim_manifest["dishonest_store"]["behaviours"]
+    }
+    claims = {
+        str(claim["claim_type"]): claim
+        for claim in sim_manifest["personas"]["aggressive"]["scripted_claims"]
+    }
+    pitched_price = float(claims["unit_price"]["value"])
+    pitched_discount = float(str(claims["discount"]["value"]).rstrip("%"))
+    # What checkout really does: charges more than pitched, applies a fifth of the discount.
+    charged = round(pitched_price * 1.2, 2)
+    applied = round(pitched_discount / 5.0, 2)
+    stamp = str(sim_manifest["approval"]["approved_at"])
+    store_id = str(sim_manifest["dishonest_store"]["store_id"])
+
+    def event(event_id: str, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "event_id": event_id,
+            "ts": stamp,
+            "kind": kind,
+            "auction_id": "sim-probe",
+            "store_id": store_id,
+            "order_ref": "sim-probe-order",
+            "payload": payload,
+        }
+
+    stream = [
+        event(
+            "ev-accepted",
+            "accepted",
+            {
+                "bid_ref": "sim-probe-bid",
+                "checkout_token": "ck-probe",
+                "offer": {
+                    "product_ref": "p-1",
+                    "unit_price": pitched_price,
+                    "total_price": pitched_price,
+                    "discount": {"type": "percentage", "value": pitched_discount},
+                },
+            },
+        ),
+        event(
+            "ev-pixel",
+            "checkout_pixel",
+            {
+                "checkout_token": "ck-probe",
+                "clientId": "cid-probe",
+                "total_price": charged,
+                "discountApplications": [{"type": "percentage", "value": applied}],
+            },
+        ),
+        event(
+            "ev-paid",
+            "order_paid",
+            {
+                "checkout_token": "ck-probe",
+                "order_ref": "sim-probe-order",
+                "total_price": charged,
+                "discountApplications": [{"type": "percentage", "value": applied}],
+            },
+        ),
+    ]
+
+    derived = {
+        (str(row["dim"]), str(row["type"])) for row in reconciled_observations(reconcile(stream))
+    }
+    for kind in ("bait_and_switch_unit_price", "phantom_discount"):
+        behaviour = scripted[kind]
+        expected = (str(behaviour["dim"]), str(behaviour["type"]))
+        assert expected in derived, (
+            f"the approved behaviour {kind!r} declares {expected}, but reconciling the "
+            f"checkout it produces derived only {sorted(derived)}. The platform cannot see "
+            "the attack in its own event stream."
+        )
+
+
 def test_no_kind_other_than_code_created_deviates_from_its_published_payload(
     sim_run: Any,
 ) -> None:
