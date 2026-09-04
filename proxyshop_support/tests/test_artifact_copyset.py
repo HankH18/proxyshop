@@ -145,7 +145,6 @@ from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
-import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
