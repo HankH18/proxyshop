@@ -168,7 +168,7 @@ def delisting_events(
     events: list[dict[str, Any]] = []
     for entry in entries:
         store_id = entry.get("store_id")
-        identity = entry.get("business_identity") or business_identity_of(entry)
+        identity = business_identity_of(entry)
         if store_id is None or not identity:
             continue
         store_id = str(store_id)

@@ -48,15 +48,6 @@ def _copy_sources(dockerfile: Path) -> list[str]:
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-193: apps/trust/Dockerfile copies contracts, proxyshop_support and apps/trust/src "
-        "and NOT packages/verification, and links only contracts and trust into /app/.pkgroot, "
-        "so trust.verification.verify raises ModuleNotFoundError in the shipped image; remove "
-        "this marker with the fix"
-    ),
-)
 def test_the_trust_image_ships_the_verifier_its_own_seam_reaches_for() -> None:
     """T-065's verification engine is absent from the artifact that ships.
 
