@@ -101,6 +101,12 @@ LOG_ENV_VAR = "PROXYSHOP_NEO4J_LOCK_LOG"
 #: Values of :data:`LOG_ENV_VAR` that mean "write nothing".
 LOG_DISABLED_VALUES = frozenset({"", "0", "off", "no", "none", "false"})
 
+#: Rotate the log to ``<log>.1`` once it passes this. The default path is machine-global
+#: and appended to by every graph test on the host forever, so "it is only ~350 bytes a
+#: line" is exactly the reasoning that leaves a multi-gigabyte file in ``/tmp`` a month
+#: later. One generation is kept: this is a working measurement, not an audit trail.
+MAX_LOG_BYTES = 32 * 1024 * 1024
+
 #: How long a contended acquisition waits before raising :class:`Neo4jLockTimeout` (T-191).
 #:
 #: **This number is not free.** It has to end, with margin, INSIDE ``pyproject.toml``'s
@@ -282,6 +288,21 @@ def lock_log_path(path: Path | str | None = None) -> Path | None:
     return Path(f"{_key(path)}.log")
 
 
+def _rotate_if_oversized(log_path: Path) -> None:
+    """Move an oversized log to ``<log>.1``, keeping one generation.
+
+    ``os.replace`` is atomic, so two processes racing here produce one rename and one
+    harmless miss rather than a torn file; and because every writer opens the log fresh per
+    record, nobody is left appending to a rotated inode.
+    """
+    try:
+        if log_path.stat().st_size < MAX_LOG_BYTES:
+            return
+    except OSError:
+        return
+    os.replace(log_path, Path(f"{log_path}.1"))
+
+
 def _append_record(lock_path: Path, stats: Acquisition) -> None:
     """Append one acquisition to the log. Never raises.
 
@@ -297,6 +318,7 @@ def _append_record(lock_path: Path, stats: Acquisition) -> None:
             return
         line = json.dumps(stats.as_record(lock_path), separators=(",", ":")) + "\n"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_if_oversized(log_path)
         # One short append per record: O_APPEND makes concurrent writers from separate
         # processes land whole lines rather than interleaved fragments.
         with log_path.open("a", encoding="utf-8") as handle:

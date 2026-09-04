@@ -255,6 +255,20 @@ def test_the_record_is_written_after_the_flock_is_released(
     assert seen == [0], f"the record was written while the lock was still held: {seen}"
 
 
+def test_an_oversized_log_is_rotated_rather_than_growing_without_bound(
+    monkeypatch: pytest.MonkeyPatch, lock_file: Path
+) -> None:
+    """The default log is machine-global and appended to forever. It has to have an end."""
+    monkeypatch.setattr(neo4j_lock, "MAX_LOG_BYTES", 200)
+    log_path = neo4j_lock.lock_log_path(lock_file)
+    assert log_path is not None
+    log_path.write_text("x" * 500, encoding="utf-8")
+    with neo4j_lock.neo4j_flock(path=lock_file):
+        pass
+    assert Path(f"{log_path}.1").read_text(encoding="utf-8") == "x" * 500
+    assert len(neo4j_lock.read_lock_log(log_path)) == 1
+
+
 def test_a_half_written_final_line_is_skipped_rather_than_raising(lock_file: Path) -> None:
     """Live processes append while a reader reads; a torn tail is normal, not an error."""
     with neo4j_lock.neo4j_flock(path=lock_file):
