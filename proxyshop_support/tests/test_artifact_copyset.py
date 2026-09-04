@@ -1490,15 +1490,6 @@ def compose_fragments() -> tuple[str, ...]:
     return tuple(str(entry) for entry in included)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-313: services/ingest, services/sim, packages/store-agent and "
-        "apps/seller-reference are included in the root compose stack but their fragments "
-        "are still the T-000 `services: {}` stubs and none of the four has a Dockerfile, so "
-        "they cannot be deployed at all; remove this marker with the fix"
-    ),
-)
 def test_t313_every_component_the_stack_includes_is_actually_deployable() -> None:
     """Four components are in the deployable stack on paper and have no artifact.
 

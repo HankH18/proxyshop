@@ -1,11 +1,54 @@
 # Compose fragment included by the root docker-compose.yml. Created by T-000 as a valid
 # empty stub so the root file's `include:` list is static from day one and no worker ever
-# edits it (B6(ii)). Owner: the ingest lane.
+# edits it (B6(ii)). Owner: the ingest lane. Filled by T-313.
 #
-# The ingest worker service.
-#
-# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
-# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
-# only env-overridable ports (D40), and keep the service name unique across all nine
-# fragments.
-services: {}
+# The ingest worker service. `ingest.main:app` mounts the two routers its glob finds,
+# `/er` (entity resolution) and `/extraction` (policy pages and claim extraction).
+services:
+  ingest:
+    build:
+      # Relative to THIS file's directory, so the context is the repo root and the flat-src
+      # layout (D42) can be reproduced inside the image. See ../../.dockerignore for why the
+      # root context does not mean a 950 MiB upload.
+      context: ../..
+      dockerfile: services/ingest/Dockerfile
+    # D40: env-overridable, never hard-coded. 8085 continues the 808x block after trust's
+    # 8084; nothing else in the repo references it.
+    ports:
+      - "${INGEST_PORT:-8085}:8085"
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # D18: the hash embedding, never the local BGE model. The image deliberately does not
+      # install sentence-transformers/torch (they are an optional extra in the root manifest
+      # and NEVER installed by default), and embeddings/local_bge.py:93 defers that import
+      # into _load(), so selecting `local_bge` here would fail at first use rather than at
+      # startup. `hash` is the provider this deployable is built for.
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-hash}"
+      # graph/reembed.py:377,391 read these when graph_driver() opens the bolt session.
+      # Inside the compose network `neo4j` is the host, not localhost — a .env copied from
+      # .env.example is written for the HOST side and must not leak in here.
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_USER: "${NEO4J_USER:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-proxyshop_dev_pw}"
+      # D20: the offline double unless something says otherwise. extraction/llm_extractor.py
+      # builds its client through packages/llm, which defaults to the deterministic double.
+      LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    # The probe is `/openapi.json` rather than `/healthz` because there IS no health route:
+    # services/ingest/src/main.py is orchestrator-frozen (B6(iii)) and neither router under
+    # it declares one. A 200 proves the ASGI app imported, both discovered routers mounted
+    # and uvicorn is answering on the port. It does NOT prove neo4j is reachable.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8085/openapi.json').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    # D10: memory is the binding constraint. One uvicorn worker holding a FastAPI app and
+    # the crawl adapters; no model is loaded (EMBEDDING_PROVIDER=hash above).
+    mem_limit: 256m
+    stop_grace_period: 10s
+    restart: unless-stopped

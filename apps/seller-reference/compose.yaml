@@ -1,11 +1,36 @@
 # Compose fragment included by the root docker-compose.yml. Created by T-000 as a valid
 # empty stub so the root file's `include:` list is static from day one and no worker ever
-# edits it (B6(ii)). Owner: T-045.
+# edits it (B6(ii)). Owner: T-045. Filled by T-313.
 #
-# The reference seller agent.
+# The reference seller agent — the unharnessed personas (R18/S8/A3).
 #
-# When you fill this in: declare an explicit `mem_limit` (D10 — every service carries one;
-# the datastore stack already commits 3.125 GiB of the ~4.85 GiB measured headroom), publish
-# only env-overridable ports (D40), and keep the service name unique across all nine
-# fragments.
-services: {}
+# ⚠️ READ THIS BEFORE DEPLOYING IT. This component is a LIBRARY, not a service, and this
+# fragment does not pretend otherwise. `apps/seller-reference/src` is two files (one of them
+# empty) exporting `build_persona()` and `persona_names()`; there is no server, no
+# `main.py`, no `__main__.py` and no `routes.py`, so there is nothing to `uvicorn` and
+# nothing to keep running.
+#
+# The container is therefore a ONE-SHOT SELF-CHECK: it imports the package, builds every
+# persona and exits 0. That is a genuinely useful artifact rather than a placeholder —
+# `persona_names()` goes through `load_manifest()`, which re-verifies the sha256 digest
+# chain across fixtures/manifest.json, the golden set and the seed catalog on every call, so
+# the run proves the library is installable AND that its fixture chain verifies inside the
+# image. Nothing else in the stack checks that.
+#
+# It is here because the component is named in the root stack's `include:` list and had no
+# artifact at all (T-313). The alternatives were worse: a `sleep infinity` container claims
+# a service that does not exist, and leaving `services: {}` is the defect itself.
+#
+# Run it with `docker compose run --rm seller-reference`. `docker compose up` will run it
+# once and leave it exited, which is correct for a job.
+services:
+  seller-reference:
+    build:
+      # Relative to THIS file's directory, so the context is the repo root.
+      context: ../..
+      dockerfile: apps/seller-reference/Dockerfile
+    # No ports, no healthcheck, no depends_on: it opens no socket, serves no endpoint and
+    # touches no datastore. `restart: "no"` so a non-zero exit — which means the manifest
+    # chain failed to verify inside the image — stays visible instead of becoming a loop.
+    restart: "no"
+    mem_limit: 128m       # D10. Three file reads and a handful of dataclasses.
