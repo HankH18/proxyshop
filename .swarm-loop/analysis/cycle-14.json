@@ -1,12 +1,10 @@
 {
   "cycle": 14,
   "max_cycles": 102,
-  "generated": "2026-09-03T15:32:56",
+  "generated": "2026-09-03T20:04:21",
   "all_targets_met": false,
   "harness_integrity": "intact",
-  "harness_notes": [
-    "1 of 16 frozen file(s) are not in git history yet \u2014 commit .swarm-loop/, tickets.json so 'restore-harness' can repair a tamper (first: tickets.json)"
-  ],
+  "harness_notes": [],
   "pending_remeasure": [
     7
   ],

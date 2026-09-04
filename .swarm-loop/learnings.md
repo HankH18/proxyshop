@@ -489,3 +489,23 @@ APPLY: before accepting or refuting any "nothing calls this" finding, ask ONE qu
 frozen acceptance test currently pass because of this thing? If yes it is a measurement-
 credibility defect regardless of callers; if no it is unfinished work, and the answer is a
 schedule, not a ticket. Record which answer you got, so the next pass cannot re-litigate it.
+
+- (cycle 14) **Provision every mutating worktree with the installer for EVERY lockfile the
+  repo commits, not just the one matching the language the ticket appears to be in, and finish
+  by asserting the effect rather than reading the installer's exit code.** — A repo with two
+  committed lockfiles was provisioned with only the Python one. Its aggregate verify target
+  aborts on the missing JS dependency directory before it ever reaches the type checker, so
+  three lanes could not see the eight type errors they were introducing and all three reported
+  a green gate. The errors landed on main and held a frozen build metric at 0, blocking the
+  epoch push of 40 commits. The one lane that happened to run the second installer itself
+  passed the real gate.
+
+- (cycle 14) **When a ticket graph carries no status field, derive closure from POSITIVE
+  evidence the run already owns before dispatching anything: a ticket whose frozen acceptance
+  tests all pass has shipped, and so has one whose own declared verify passes against current
+  base with tests actually selected. Supply that set to the frontier every time.** — A run
+  scheduled thirteen consecutive cycles off a frontier given no closure source. It read zero
+  closed, degenerated to the graph's roots, and ranked long-shipped foundational tickets at
+  the top while the largest error in the run was never dispatched at all. Supplying closure
+  derived from the passing acceptance suite moved the same graph from 0 closed to 74 closed
+  and put the real remaining work on top.
