@@ -259,10 +259,20 @@ def test_t239_the_envelope_version_store_has_a_durability_seam() -> None:
     live_store = store_mod.ENVELOPES
     cls = type(live_store)
 
-    # Observable consequence today: a second store shares nothing with the first.
-    first = store_mod.EnvelopeVersions()
-    first.record(_envelope("s-t239-durable"))
-    second = store_mod.EnvelopeVersions()
+    # Observable consequence today, for the failure message only: a second store shares
+    # nothing with the first. Defensive because a fix that gives EnvelopeVersions durable
+    # backing may make a bare `EnvelopeVersions()` reach for a datastore, and this evidence
+    # must never be what decides the verdict.
+    witness = "not measured"
+    try:
+        first = store_mod.EnvelopeVersions()
+        first.record(_envelope("s-t239-durable"))
+        second = store_mod.EnvelopeVersions()
+        witness = (
+            f"a fresh instance sees {second.stores()!r} after another recorded {first.stores()!r}"
+        )
+    except Exception as exc:  # noqa: BLE001 - evidence only, never the verdict
+        witness = f"a second instance could not be built to compare: {exc!r}"
 
     takes_backing = len(inspect.signature(cls.__init__).parameters) > 1
     persistence_members = sorted(
@@ -278,27 +288,28 @@ def test_t239_the_envelope_version_store_has_a_durability_seam() -> None:
         f"{cls.__module__}.{cls.__qualname__} — the type of the module-level ENVELOPES "
         f"singleton — takes no backing store ({inspect.signature(cls.__init__)}) and exposes "
         "no load/persist member, so the version history exists only for the lifetime of one "
-        f"process: a fresh instance sees {second.stores()!r} after another recorded "
-        f"{first.stores()!r}"
+        f"process: {witness}"
     )
 
 
 # ======================================================================================
 # T-247 — the merchant install suite leaves the process-global webhook sink set to None
 # ======================================================================================
-#: Run inside a fresh interpreter: capture the boot sink, run the one merchant install test
-#: that installs its own sink, then report what the module global was left as.
+#: Run inside a fresh interpreter: capture the boot sink, run the merchant install suite,
+#: then report what the module global was left as.
+#:
+#: The whole FILE is run rather than ``-k`` on the one test that installs a sink
+#: (``test_a_sink_that_refuses_a_delivery_gets_the_retry_not_a_duplicate``). Measured: a ``-k``
+#: that matches nothing exits 5 with the sink untouched, which reads as ``after_is_default``
+#: and would XPASS this gate — i.e. renaming that test would silently report the defect fixed.
+#: Naming the file cannot miss.
 _SINK_RESIDUE_PROBE = """
-import json, pathlib, sys
+import json, pathlib
 import pytest
 from merchant_svc.install import webhooks
 
 boot = webhooks.webhook_sink()
-code = pytest.main([
-    "apps/merchant/svc/tests/test_install.py",
-    "-q", "-p", "no:cacheprovider",
-    "-k", "test_a_sink_that_refuses_a_delivery_gets_the_retry_not_a_duplicate",
-])
+code = pytest.main(["apps/merchant/svc/tests/test_install.py", "-q", "-p", "no:cacheprovider"])
 after = webhooks.webhook_sink()
 print("PROBE" + json.dumps({
     "module_file": str(pathlib.Path(webhooks.__file__).resolve()),
@@ -355,10 +366,13 @@ def test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it() -> None
         f"({REPO_ROOT}) — a .pth leak, not a measurement"
     )
 
-    # Controls: the suite really ran, and the boot default really is the default sink.
+    # Controls: the suite really ran and passed, and the boot default really is the default
+    # sink. Without the first one, a run that collected nothing would leave the sink untouched
+    # and this gate would XPASS — reporting the defect fixed when it was never exercised.
     assert payload["pytest_rc"] == 0, (
-        f"the install test did not pass in the probe (rc={payload['pytest_rc']}); the residue "
-        f"reading is not meaningful.\nstdout:\n{completed.stdout[-4000:]}"
+        f"apps/merchant/svc/tests/test_install.py did not pass inside the probe "
+        f"(pytest exit code {payload['pytest_rc']}; 5 means nothing was collected), so the "
+        f"residue reading is not meaningful.\nstdout:\n{completed.stdout[-4000:]}"
     )
     assert payload["boot_is_default"] is True, (
         "fixture error: the module did not boot with default_sink installed"
