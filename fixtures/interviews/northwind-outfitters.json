@@ -1,0 +1,164 @@
+{
+  "fixture_version": 1,
+  "description": "One complete plain-language onboarding interview and the envelope it produces. The merchant answers in sentences — 'twenty percent off', 'ninety-five dollars', 'camp cooking isn't really us' — and nothing here is a form field, so the golden envelope grades the parse rather than a copy.",
+  "recorded_by": "merchant onboarding, Northwind Outfitters, recorded 2026-01-04",
+  "transcript": {
+    "interview_id": "interview-northwind-001",
+    "completed_at": "2026-01-04T17:35:00+00:00",
+    "turns": [
+      {
+        "role": "interviewer",
+        "text": "Hi — this takes about five minutes. I'll ask a few questions in plain English and turn your answers into the rules your agent has to stay inside. You can change any of it afterwards."
+      },
+      {
+        "role": "interviewer",
+        "question": "store",
+        "text": "First, which shop are we setting up?"
+      },
+      {
+        "role": "merchant",
+        "text": "We're Northwind Outfitters — the shop is Northwind-Outfitters.myshopify.com."
+      },
+      {
+        "role": "interviewer",
+        "question": "max_discount_pct",
+        "text": "When a shopper's agent asks you for a better price, what's the deepest discount you would ever authorise?"
+      },
+      {
+        "role": "merchant",
+        "text": "Twenty percent off, and that's the ceiling — I don't want anything past it."
+      },
+      {
+        "role": "interviewer",
+        "question": "budget_cap",
+        "text": "And across a whole month, how much are you willing to give away in discounts all told?"
+      },
+      {
+        "role": "merchant",
+        "text": "Let's cap it at $500 a month."
+      },
+      {
+        "role": "interviewer",
+        "question": "price_floor",
+        "product_ref": null,
+        "text": "Is there a price no order should ever fall below, whatever the item is?"
+      },
+      {
+        "role": "merchant",
+        "text": "Nothing under forty dollars — below that the shipping eats the whole order."
+      },
+      {
+        "role": "interviewer",
+        "question": "price_floor",
+        "product_ref": "gid://shopify/ProductVariant/1001",
+        "text": "The Merino Base Layer sells at $130. What's the lowest you'd ever let one go for?"
+      },
+      {
+        "role": "merchant",
+        "text": "Ninety-five dollars. Not a cent under — the wool costs what it costs."
+      },
+      {
+        "role": "interviewer",
+        "question": "price_floor",
+        "product_ref": "gid://shopify/ProductVariant/2002",
+        "text": "And the Trail Runner Cap, at $45?"
+      },
+      {
+        "role": "merchant",
+        "text": "No, nothing special there — the store-wide number is fine."
+      },
+      {
+        "role": "interviewer",
+        "question": "pursue_clusters",
+        "options": [
+          { "cluster_id": "cluster-warm-layers", "label": "warm layers" },
+          { "cluster_id": "cluster-trail-running", "label": "trail running" },
+          { "cluster_id": "cluster-camp-cooking", "label": "camp cooking" }
+        ],
+        "text": "Which kinds of shopper should your agent go after — warm layers, trail running, camp cooking?"
+      },
+      {
+        "role": "merchant",
+        "text": "Warm layers for sure, and trail running. Camp cooking isn't really us."
+      },
+      {
+        "role": "interviewer",
+        "question": "standing_commitment",
+        "commitment_key": "free_returns",
+        "claim_type": "return_policy",
+        "text": "What do you always promise on returns?"
+      },
+      {
+        "role": "merchant",
+        "text": "Free returns for 30 days."
+      },
+      {
+        "role": "interviewer",
+        "question": "standing_commitment",
+        "commitment_key": "ships_within",
+        "claim_type": "dispatch_window",
+        "text": "And how fast do you always get an order out of the door?"
+      },
+      {
+        "role": "merchant",
+        "text": "Ships within 2 business days."
+      },
+      {
+        "role": "interviewer",
+        "question": "standing_commitment",
+        "commitment_key": "price_match",
+        "claim_type": "promo_eligibility",
+        "text": "Anything you promise about matching a rival's price?"
+      },
+      {
+        "role": "merchant",
+        "text": "No — we don't price match."
+      },
+      {
+        "role": "interviewer",
+        "question": "activation",
+        "text": "Last one. This envelope starts in shadow mode: your agent rehearses against real auctions but nothing it says reaches a shopper until you've signed off in writing. Understood?"
+      },
+      {
+        "role": "merchant",
+        "text": "Understood — keep it in shadow until I've signed."
+      }
+    ]
+  },
+  "expected_envelope": {
+    "store_id": "northwind-outfitters",
+    "version": 1,
+    "floors": [
+      { "product_ref": null, "min_price": 40.0 },
+      { "product_ref": "gid://shopify/ProductVariant/1001", "min_price": 95.0 }
+    ],
+    "max_discount_pct": 20.0,
+    "budget_cap": 500.0,
+    "pursue_clusters": ["cluster-warm-layers", "cluster-trail-running"],
+    "standing_commitments": [
+      {
+        "key": "free_returns",
+        "value": "Free returns for 30 days",
+        "provenance": {
+          "source": "owner_statement",
+          "ref": "envelope:northwind-outfitters:v1#free_returns",
+          "observed_at": "2026-01-04T17:35:00Z",
+          "authority_rank": 1
+        },
+        "claim_type": "return_policy"
+      },
+      {
+        "key": "ships_within",
+        "value": "Ships within 2 business days",
+        "provenance": {
+          "source": "owner_statement",
+          "ref": "envelope:northwind-outfitters:v1#ships_within",
+          "observed_at": "2026-01-04T17:35:00Z",
+          "authority_rank": 1
+        },
+        "claim_type": "dispatch_window"
+      }
+    ],
+    "activation": "shadow"
+  }
+}
