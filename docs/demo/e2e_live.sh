@@ -75,15 +75,24 @@ echo
 # ---------------------------------------------------------------------------------------
 
 echo "--- live-run preconditions ---"
+# `tee` rather than a plain redirect: the operator watches the preflight as it runs, AND
+# the script keeps a copy to check afterwards. `${PIPESTATUS[0]}` below is the python's
+# status, not tee's — without it every preflight would look like it exited 0.
+PREFLIGHT_LOG="$(mktemp)"
+trap 'rm -f "$PREFLIGHT_LOG"' EXIT
 set +e
-PYTHONPATH="$ROOT/.pkgroot${PYTHONPATH:+:$PYTHONPATH}" "$ROOT/.venv/bin/python" - <<'PY'
+PYTHONPATH="$ROOT/.pkgroot${PYTHONPATH:+:$PYTHONPATH}" "$ROOT/.venv/bin/python" - <<'PY' 2>&1 | tee "$PREFLIGHT_LOG"
 import os
 import sys
 
-unmet = []
+unmet: list[str] = []
+#: Every tag `report` was called with. The denominator is COUNTED, never written down,
+#: so adding a sixth check cannot leave the summary still saying "of 5".
+CHECKS: list[str] = []
 
 
 def report(tag: str, ok: bool, detail: str) -> None:
+    CHECKS.append(tag)
     print(f"{tag} {'OK     ' if ok else 'MISSING'} {detail}")
     if not ok:
         unmet.append(tag)
@@ -171,11 +180,27 @@ except Exception as exc:  # noqa: BLE001 - any failure here is the same verdict
 else:
     report("LIVE-5", True, f"EMBEDDING_PROVIDER={os.environ['EMBEDDING_PROVIDER']!r} embeds")
 
-print(f"--- {len(unmet)} of 5 live preconditions unmet ---")
+print(f"--- {len(unmet)} of {len(CHECKS)} live preconditions unmet ---")
 sys.exit(len(unmet))
 PY
-UNMET=$?
+UNMET=${PIPESTATUS[0]}
 set -e
+
+# `$UNMET` is a COUNT only when the block reached its own tally line. An interpreter that dies
+# on an uncaught exception — a renamed symbol, a missing module — also exits 1, which is
+# indistinguishable from "one precondition unmet", and this script used to answer that with
+# "1 of the 5 preconditions above are unmet. Each MISSING line names what to set." printed
+# under a traceback and zero MISSING lines. So the tally line is the evidence that the status
+# means anything, and its absence is its own refusal.
+if ! grep -q -- "live preconditions unmet ---" "$PREFLIGHT_LOG"; then
+  rm -f "$PREFLIGHT_LOG"
+  echo >&2
+  echo "REFUSED: the preflight did not finish — it never reached its own tally line, so the" >&2
+  echo "         precondition results above are INCOMPLETE and the exit status is not a" >&2
+  echo "         count. The error above this line is the failure to fix." >&2
+  exit 2
+fi
+rm -f "$PREFLIGHT_LOG"
 echo
 
 # ---------------------------------------------------------------------------------------
@@ -191,7 +216,7 @@ fi
 
 if [ "$UNMET" -gt 0 ]; then
   echo
-  echo "REFUSED: this machine cannot host a live development-store run — $UNMET of the 5"
+  echo "REFUSED: this machine cannot host a live development-store run — $UNMET of the"
   echo "         preconditions above are unmet. Each MISSING line names what to set."
   echo
   echo "         Nothing was run. The offline starting slice needs none of this:"

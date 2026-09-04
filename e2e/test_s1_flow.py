@@ -905,7 +905,21 @@ def test_the_single_use_code_is_not_honoured_a_second_time(s1_run) -> None:
     )
 
     if second["refused"]:
-        assert s1_run.minted_code in second["error"] or second["error"], second
+        # An outright refusal IS the single-use property, and the code identity was already
+        # pinned above, so there is nothing further to prove here. What this DOES check is
+        # that a refusal is internally coherent: a reason to show a reader, and no completion
+        # smuggled alongside it.
+        #
+        # This branch used to read `assert minted_code in error or error`, which `or` binds as
+        # `(minted_code in error) or error` — and `error` is built as f"{type}: {exc}" and is
+        # therefore never empty, so the whole assertion was unconditionally true and the `in`
+        # was dead. Restoring the `in` would not fix it either: `StubClient.buy` raises on the
+        # HTTP status and its message need not carry the code at all.
+        assert second["error"], f"a refusal with no reason: {second}"
+        assert not second["completion"], (
+            f"the probe reported the second redemption as refused AND returned a completed "
+            f"order: {second}"
+        )
         return
 
     completion = second["completion"]
