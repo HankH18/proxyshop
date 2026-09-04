@@ -4384,6 +4384,186 @@
       "defect": "T-023 BEHAVIOURAL DRIFT THAT NO TEST COVERS, and the 'moved VERBATIM' claim is PARTIAL. coerce_price now returns None for negative/NaN/inf, so those values FALL THROUGH to the JSON-LD offer price instead of short-circuiting: an entry price of '-5.00' with a JSON-LD price of '12.00' produced -5.0 before and 12.0 now. Availability vocabulary widened (available/limited/out_of_stock were 'unknown', now map through). Product node identity changes for GID-form id, id:0, id:True and product_id-only entries. Four more changes rode along with the move: urlsplit(...).hostname became safe_host (base_url 'http://[' raised ValueError before, now returns domain=''), the provenance version became snapshot.extractor_version or extractor_version, a NEW raise ValueError when neither names a version, and source_class became a parameter. signed_fetch's 80 tests are byte-identical and therefore assert NONE of the new behaviour.",
       "finding_id": "8f9ca4f739e6ad32332efab51a008bb6f852dc6b5b1c91e1d6e5f64475476e28",
       "reproduction": "Feed build_upserts an entry with price '-5.00' and a JSON-LD offer price '12.00': old to_upserts yields -5.0, new yields 12.0. Verifier ran old and new side by side."
+    },
+    {
+      "id": "T-250",
+      "title": "The exact-equality price floor T-223 was filed against is STILL LIVE in the shared contracts boundary. The T-223 lane closed the attack at the exchange door (apps/exchange/src/auction/collect.py) because that was its granted ownership, but the ticket's own scope field names boundary.py:819 as the site. Any other consumer of the shared boundary -- including the TypeScript peer door, which mirrors this arithmetic -- still accepts a thousandth of a cent as a valid price. Port _below_the_price_floor's threshold into the boundary and delete the duplicate.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/boundary.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/contracts/src/boundary.py:819",
+      "defect": "The exact-equality price floor T-223 was filed against is STILL LIVE in the shared contracts boundary. The T-223 lane closed the attack at the exchange door (apps/exchange/src/auction/collect.py) because that was its granted ownership, but the ticket's own scope field names boundary.py:819 as the site. Any other consumer of the shared boundary -- including the TypeScript peer door, which mirrors this arithmetic -- still accepts a thousandth of a cent as a valid price. Port _below_the_price_floor's threshold into the boundary and delete the duplicate.",
+      "finding_id": "77116b9ab3dc56894aefff01c6d61459b4fd190b6b213c916376a42bb8f9974b",
+      "reproduction": "contracts.boundary.price_reasons(unit=0.001, depth=100.0, cap=100) returns []; contracts.boundary.price_reasons(unit=1e-09, depth=None, cap=100) returns []. Both measured by the T-223 lane at commit b5ae9b7. The same three inputs routed through collect_bids now correctly return fallback=True, unit_price=100.0."
+    },
+    {
+      "id": "T-251",
+      "title": "The test's comment asserts the repo root 'is not handed over ... on purpose', but the venv's _proxyshop.pth hands it over anyway at interpreter startup. The measurement is accidentally correct only because sys.path.insert(0, '.pkgroot') outranks the leaked entry. A reordering would silently start grading the live checkout.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/tests/test_claim_identity.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "packages/contracts/tests/test_claim_identity.py:152",
+      "defect": "The test's comment asserts the repo root 'is not handed over ... on purpose', but the venv's _proxyshop.pth hands it over anyway at interpreter startup. The measurement is accidentally correct only because sys.path.insert(0, '.pkgroot') outranks the leaked entry. A reordering would silently start grading the live checkout.",
+      "finding_id": "890b1e5d63816330d293d402a0e1fbc3419135d787067629048aca68bf5be51d",
+      "reproduction": "Run that test's child argv with -c 'import sys; print(sys.path)' and observe the checkout root at position 7 despite the hermetic env dict."
+    },
+    {
+      "id": "T-252",
+      "title": "Imports from a scratch tree whose module name happens not to exist in the live checkout. Safe today purely by name luck: a rename collision would make it silently start grading the repo instead of the scratch tree. Same shape at apps/trust/tests/test_schema_grants.py:120.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "proxyshop_support/tests/test_fixture_loader.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "proxyshop_support/tests/test_fixture_loader.py:114",
+      "defect": "Imports from a scratch tree whose module name happens not to exist in the live checkout. Safe today purely by name luck: a rename collision would make it silently start grading the repo instead of the scratch tree. Same shape at apps/trust/tests/test_schema_grants.py:120.",
+      "finding_id": "c5b5d6a27823d1c7e7794e820c1da6a883d47034ec9b520616f6c68ef48c0c38",
+      "reproduction": "The venv _proxyshop.pth places the checkout root and .pkgroot on sys.path for every process using this venv, regardless of PYTHONPATH. Add a module to the checkout with the same name the scratch tree uses and the import resolves to the checkout."
+    },
+    {
+      "id": "T-253",
+      "title": "utc_now() has zero callers repo-wide, and its docstring asserts an invariant that is false: it claims to exist so time can be frozen 'without every module reaching for datetime.now independently', but frozen_clock does not exist anywhere in the repo and state.py:513 calls datetime.now(UTC) directly. Implemented-but-uncalled code whose comment misdescribes the system.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/shopify-stub/src/codes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "services/shopify-stub/src/codes.py:245",
+      "defect": "utc_now() has zero callers repo-wide, and its docstring asserts an invariant that is false: it claims to exist so time can be frozen 'without every module reaching for datetime.now independently', but frozen_clock does not exist anywhere in the repo and state.py:513 calls datetime.now(UTC) directly. Implemented-but-uncalled code whose comment misdescribes the system.",
+      "finding_id": "2eff4d12a68ad9784892526b7aac3723cbd044ad4905065da65486fa2e3aec01",
+      "reproduction": "grep -rn 'utc_now' services/ shows the definition and no call site. grep -rn 'frozen_clock' returns nothing. state.py:513 reads datetime.now(UTC)."
+    },
+    {
+      "id": "T-254",
+      "title": "ExtractedClaim.as_claim() has zero callers and zero tests. This is the DESIGN Claim projection ({key, value, provenance}) named in T-021's objective 'decompose to atomic Claims'; its sibling as_attribute() IS wired into the upsert path. So ingestion writes AttributeValues and the Claim projection is defined but never produced -- T-021's objective outruns its wiring.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/ingest/src/extraction/claims.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "services/ingest/src/extraction/claims.py:370",
+      "defect": "ExtractedClaim.as_claim() has zero callers and zero tests. This is the DESIGN Claim projection ({key, value, provenance}) named in T-021's objective 'decompose to atomic Claims'; its sibling as_attribute() IS wired into the upsert path. So ingestion writes AttributeValues and the Claim projection is defined but never produced -- T-021's objective outruns its wiring.",
+      "finding_id": "4d9252031bd0caf94b1f2e293059a719b9fde405dce1d5948d1775e795f30d51",
+      "reproduction": "grep -rn 'as_claim' services/ returns the definition only. The upsert path calls as_attribute() at claims.py:357."
+    },
+    {
+      "id": "T-255",
+      "title": "DiscountCode.is_redeemable_at() has zero callers and zero tests. The live redemption path uses rejection() at codes.py:213. A future caller would silently get the 'no other discount on the cart' narrowing that the live path does not apply.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "services/shopify-stub/src/codes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "services/shopify-stub/src/codes.py:240",
+      "defect": "DiscountCode.is_redeemable_at() has zero callers and zero tests. The live redemption path uses rejection() at codes.py:213. A future caller would silently get the 'no other discount on the cart' narrowing that the live path does not apply.",
+      "finding_id": "13a7f6a31cf0bb95293a1aae9830ccb7949d5d24be5da39f9ceadf1374f96ca1",
+      "reproduction": "grep -rn 'is_redeemable_at' services/ returns the definition only."
+    },
+    {
+      "id": "T-256",
+      "title": "T-065's PERSISTENCE HALF IS ENTIRELY UNIMPLEMENTED. Its objective requires verification results to persist to ledger tables and emit trust_observations and claim_verified events. The tables ledger.claims, ledger.claim_verifications, ledger.verification_evidence_refs, ledger.trust_observations and ledger.trust_scores all exist in db/migrations/0002_ledger_tables.sql:436,473,494 and NOTHING in the repo writes any of them. So T-065's acceptance item 2 ('writes nothing') is graded only as pure-function idempotency, which it satisfies trivially. Two independent auditors reached this by grep. Compounding it: apps/trust/src/verification/__init__.py is a 99-line lazy-import shim and is that package's ENTIRE contents -- its __getattr__ defers the import specifically so the missing Dockerfile COPY fails at first call rather than at startup, which is the code being shaped around the T-193 defect rather than the defect being fixed.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/src/verification/__init__.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/trust/src/verification/__init__.py:64",
+      "defect": "T-065's PERSISTENCE HALF IS ENTIRELY UNIMPLEMENTED. Its objective requires verification results to persist to ledger tables and emit trust_observations and claim_verified events. The tables ledger.claims, ledger.claim_verifications, ledger.verification_evidence_refs, ledger.trust_observations and ledger.trust_scores all exist in db/migrations/0002_ledger_tables.sql:436,473,494 and NOTHING in the repo writes any of them. So T-065's acceptance item 2 ('writes nothing') is graded only as pure-function idempotency, which it satisfies trivially. Two independent auditors reached this by grep. Compounding it: apps/trust/src/verification/__init__.py is a 99-line lazy-import shim and is that package's ENTIRE contents -- its __getattr__ defers the import specifically so the missing Dockerfile COPY fails at first call rather than at startup, which is the code being shaped around the T-193 defect rather than the defect being fixed.",
+      "finding_id": "f85efc35d235e538b710fb3d967253bf8cf66baf28fd3fc35f0dfc611728d69b",
+      "reproduction": "git grep -n 'claim_verifications\\|verification_evidence_refs\\|trust_observations' -- ':(exclude)db/migrations' ':(exclude)*test*' returns no product write site. wc -l apps/trust/src/verification/__init__.py is 99 and the file contains no persistence code."
+    },
+    {
+      "id": "T-257",
+      "title": "T-112's RECORDED GATE COLLECTS NONE OF ITS OWN GRADING TESTS. The gate is 'pytest apps/trust/tests/test_schema_grants.py -q', and that file contains no occurrence of the string T-112. Every actual T-112 grader lives in proxyshop_support/tests/test_role_password_end_to_end.py, which that gate never collects. This is stronger than the known T-110/T-112 non-discrimination: the gate is not merely unable to tell the two tickets apart, it cannot see T-112 at all, so the gate would stay green if every T-112 behaviour were deleted.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "tickets.json:T-112"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "tickets.json:T-112",
+      "defect": "T-112's RECORDED GATE COLLECTS NONE OF ITS OWN GRADING TESTS. The gate is 'pytest apps/trust/tests/test_schema_grants.py -q', and that file contains no occurrence of the string T-112. Every actual T-112 grader lives in proxyshop_support/tests/test_role_password_end_to_end.py, which that gate never collects. This is stronger than the known T-110/T-112 non-discrimination: the gate is not merely unable to tell the two tickets apart, it cannot see T-112 at all, so the gate would stay green if every T-112 behaviour were deleted.",
+      "finding_id": "4b1356256c009b673dcce94a9fcf58ca1dcfe31705be36ba67ee12a7f469e786",
+      "reproduction": "grep -c 'T-112' apps/trust/tests/test_schema_grants.py returns 0. PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_schema_grants.py -q --collect-only lists no test from test_role_password_end_to_end.py."
+    },
+    {
+      "id": "T-258",
+      "title": "T-102's gate is FULLY VACUOUS on any machine without docker. Every behavioural and catalog assertion for T-102 carries @pytest.mark.docker, and the root conftest converts those to skips, so 'pytest apps/trust/tests/test_ledger_chain.py -q' exits 0 having executed only three static source scans. Unlike its gate-sharing sibling T-114, T-102 retains NO non-docker grader at all. 49 of the file's 120 tests are docker-marked.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_ledger_chain.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/tests/test_ledger_chain.py:1833",
+      "defect": "T-102's gate is FULLY VACUOUS on any machine without docker. Every behavioural and catalog assertion for T-102 carries @pytest.mark.docker, and the root conftest converts those to skips, so 'pytest apps/trust/tests/test_ledger_chain.py -q' exits 0 having executed only three static source scans. Unlike its gate-sharing sibling T-114, T-102 retains NO non-docker grader at all. 49 of the file's 120 tests are docker-marked.",
+      "finding_id": "e9b92c7a9d238a1f230377fb29a3f1832080a6898a12cc3a0fcfbcb636f18daf",
+      "reproduction": "docker ps fails on this machine. PROXYSHOP_WORKER=0 uv run python -m pytest apps/trust/tests/test_ledger_chain.py -q exits 0; the same command with --collect-only -m docker lists 49 items."
+    },
+    {
+      "id": "T-259",
+      "title": "T-063's acceptance 1 grades a FIXTURE, not the system. Every push_trust_event call in this file and in the frozen .swarm-loop/acceptance/test_e6_trust.py:1154 uses a local _RecordingSink defined at line 80. Nothing anywhere joins trust's emitted payload to packages/store-agent/src/modes/runner.py:471 ingest_trust_event, and apps/trust never validates its payload against contracts.TrustEventPayload -- the model the intake side DOES validate with at runner.py:458. A field-name drift on either side is invisible to both suites while both stay green.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/tests/test_feedback_push.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/tests/test_feedback_push.py:80",
+      "defect": "T-063's acceptance 1 grades a FIXTURE, not the system. Every push_trust_event call in this file and in the frozen .swarm-loop/acceptance/test_e6_trust.py:1154 uses a local _RecordingSink defined at line 80. Nothing anywhere joins trust's emitted payload to packages/store-agent/src/modes/runner.py:471 ingest_trust_event, and apps/trust never validates its payload against contracts.TrustEventPayload -- the model the intake side DOES validate with at runner.py:458. A field-name drift on either side is invisible to both suites while both stay green.",
+      "finding_id": "d1b4fd82e53712e7fe7674f4da4e155f0b266b1de5e874749d24b34540b8e4a5",
+      "reproduction": "grep -n '_RecordingSink' apps/trust/tests/test_feedback_push.py shows the local definition and every use. grep -rn 'ingest_trust_event' apps/trust returns nothing. The closing test would be one that feeds trust_event_payload(...) output straight into AdvocateRunner.ingest_trust_event."
+    },
+    {
+      "id": "T-260",
+      "title": "The exchange's retrieval package has ZERO production callers. CandidateRetrieval at service.py:106 and record_fit_scores at fit.py:269 are referenced only by apps/exchange/tests/test_retrieval.py, their own __all__, and the usage example in retrieval/__init__.py:42-46. apps/exchange/src/auction/routes.py never retrieves. Correct code that nothing invokes -- unfinished rather than dead. No frozen acceptance test passes because of it, so this is a scheduling gap and not a measurement-credibility defect; the missing consumer is the ranker wiring nominally in T-034's scope.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/retrieval/service.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/retrieval/service.py:106",
+      "defect": "The exchange's retrieval package has ZERO production callers. CandidateRetrieval at service.py:106 and record_fit_scores at fit.py:269 are referenced only by apps/exchange/tests/test_retrieval.py, their own __all__, and the usage example in retrieval/__init__.py:42-46. apps/exchange/src/auction/routes.py never retrieves. Correct code that nothing invokes -- unfinished rather than dead. No frozen acceptance test passes because of it, so this is a scheduling gap and not a measurement-credibility defect; the missing consumer is the ranker wiring nominally in T-034's scope.",
+      "finding_id": "febefff4f9696447de62b2ced269b09cd334d60ea9036fd20a047348d6c4756f",
+      "reproduction": "codegraph explore 'CandidateRetrieval record_fit_scores' reports callers only from tests and __init__. git grep -n 'CandidateRetrieval' -- apps/exchange/src returns the definition and the docstring example only."
+    },
+    {
+      "id": "T-261",
+      "title": "T-064's acceptance criterion 3 -- the exchange client caches the trust snapshot and refreshes it on a version bump -- DOES NOT EXIST. There is no snapshot HTTP route (apps/trust/src/main.py mounts only /events/*), and no client, no cache and no version-bump refresh anywhere in Python or TypeScript. Zero tests name it. Criteria 1 and 2 are genuinely built and graded, which is why the epic-scoped gate passes and hides the gap. T-064 has deliberately been left OPEN rather than closed by the cycle-16 closure audit.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/src/snapshot/builder.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/src/snapshot/builder.py:181",
+      "defect": "T-064's acceptance criterion 3 -- the exchange client caches the trust snapshot and refreshes it on a version bump -- DOES NOT EXIST. There is no snapshot HTTP route (apps/trust/src/main.py mounts only /events/*), and no client, no cache and no version-bump refresh anywhere in Python or TypeScript. Zero tests name it. Criteria 1 and 2 are genuinely built and graded, which is why the epic-scoped gate passes and hides the gap. T-064 has deliberately been left OPEN rather than closed by the cycle-16 closure audit.",
+      "finding_id": "98002f7cbb7972d00eebb35a3ed32d307708a15971ae8066086b663b2d98e1e4",
+      "reproduction": "grep -n 'include_router\\|mount' apps/trust/src/main.py shows only the events router. git grep -rn 'snapshot' -- apps/exchange/src returns no client or cache. grep -c 'version_bump\\|refresh' apps/trust/tests/test_snapshot.py returns 0."
     }
   ]
 }
