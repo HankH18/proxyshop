@@ -202,6 +202,7 @@ class HostedAgentSolicitor:
         self.asked: list[str] = []
 
     def solicit(self, store: Any) -> dict[str, Any] | None:
+        from store_agent.runtime import Decline
         from store_agent.runtime import bid as run_agent
 
         store_id = str(store["store_id"])
@@ -217,6 +218,16 @@ class HostedAgentSolicitor:
             "respond_by": "2999-01-01T00:00:00Z",
         }
         answer = run_agent(request, _store_context(row, self._fixture["intent"]["cluster_id"]))
+        # `bid` returns `Bid | Decline` and never raises — a store agent that cannot price
+        # declines rather than blowing up. A hosted store that declines here would be
+        # collected as a silent store's list-price fallback, which is a DIFFERENT scenario
+        # wearing this one's name, so it fails the run loudly instead. `isinstance` rather
+        # than `is_decline`, whose `TypeGuard` narrows only the positive branch.
+        if isinstance(answer, Decline):
+            raise AssertionError(
+                f"the hosted agent for {store_id!r} declined to bid ({answer.reason}); the "
+                f"run needs a real hosted pitch here, not a manufactured fallback"
+            )
         payload = answer.model_dump(mode="json")
         self.bids[store_id] = payload
         return {"store_id": store_id, "received_at": T_NOW, "bid": payload}
@@ -811,6 +822,14 @@ def _merchant_events(
     if not decision.accepted:
         raise AssertionError(
             f"the paid webhook was refused: {decision.status_code} {decision.reason}"
+        )
+    if decision.event is None:
+        # `accepted` is a status-code range and `event` is separately optional — a 2xx with
+        # no event is how `handle_delivery` reports an acknowledged DUPLICATE. Recording one
+        # would be the double-count the merchant's de-duplication exists to prevent.
+        raise AssertionError(
+            f"the merchant accepted the paid webhook ({decision.status_code} "
+            f"{decision.reason}, duplicate={decision.duplicate}) but produced no event"
         )
     record = ledger_record(decision.event)
     order_paid_event = build_event(

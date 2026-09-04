@@ -709,9 +709,9 @@ def test_a_tampered_unsigned_or_reserialised_paid_webhook_is_refused(s1_run) -> 
     reserialised = json.dumps(json.loads(body), sort_keys=True, indent=2).encode("utf-8")
     assert reserialised != body, "the re-serialisation produced identical bytes; case is vacuous"
 
-    tampered_body = bytearray(body)
-    tampered_body[-2] ^= 0x01
-    tampered_body = bytes(tampered_body)
+    flipped = bytearray(body)
+    flipped[-2] ^= 0x01
+    tampered_body = bytes(flipped)
     assert tampered_body != body
 
     unsigned = {key: value for key, value in headers.items() if key != HEADER_HMAC.lower()}
