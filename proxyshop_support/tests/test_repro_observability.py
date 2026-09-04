@@ -56,6 +56,12 @@ rather than red (T-229 6->0 of 8, T-281 70->0 of 79, T-241 48->0 of 66): a loop 
 nothing and passes. Every count this file derives is therefore floor-checked BEFORE it is
 compared, and reported in the failure message.
 
+**A second limitation, same reason.** A ``SocketHandler``/``SysLogHandler`` delivers to a real
+collector but writes nothing this probe can read, so a syslog-only repair reads red here. That
+is deliberate: a socket handler pointed at a dead endpoint drops every record silently and is
+indistinguishable from one that works, so counting it would reopen exactly the hole that
+``NullHandler`` opened. A syslog repair must also configure a local sink.
+
 **Known limitation, recorded so nobody "fixes" it by weakening the gate.** All five Dockerfiles
 start their service through ``uvicorn``, and ``uvicorn`` runs its own ``dictConfig``. A repair
 delivered *only* as a ``--log-config`` flag in the Dockerfiles would leave these gates red,
@@ -74,6 +80,7 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import uuid
 import warnings
 from typing import Any
 
@@ -190,8 +197,28 @@ def _logging_call_sites(tree: ast.AST) -> list[tuple[int, str, str]]:
     return sites
 
 
+def _http_surface_aliases(tree: ast.AST) -> set[str]:
+    """The local names ``APIRouter``/``FastAPI`` are reachable under in this module.
+
+    ``from fastapi import APIRouter as R`` followed by ``R()`` is a real HTTP surface, and a
+    literal-name check would make that service invisible to BOTH gates while 7 -> 6 still
+    cleared the floor — an entire service leaving the sweep with no signal.
+    """
+    names = set(HTTP_SURFACE_NAMES)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if node.module.split(".")[0] not in {"fastapi", "starlette"}:
+            continue
+        for alias in node.names:
+            if alias.name in HTTP_SURFACE_NAMES:
+                names.add(alias.asname or alias.name)
+    return names
+
+
 def _instantiates_http_surface(tree: ast.AST) -> bool:
-    """True when this module CALLS ``APIRouter(...)`` or ``FastAPI(...)``."""
+    """True when this module CALLS ``APIRouter(...)`` or ``FastAPI(...)``, under any alias."""
+    names = _http_surface_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = (
@@ -199,7 +226,7 @@ def _instantiates_http_surface(tree: ast.AST) -> bool:
                 if isinstance(node.func, ast.Attribute)
                 else getattr(node.func, "id", None)
             )
-            if name in HTTP_SURFACE_NAMES:
+            if name in names:
                 return True
     return False
 
@@ -468,11 +495,18 @@ for module_name, lineno, receiver, sentinel in targets:
 
     probe_handler = _Capture()
     logger.addHandler(probe_handler)
+    # logging.Handler.handleError writes "--- Logging error ---" plus the record's ARGS to the
+    # real stderr whenever a handler raises. That means a handler with a broken formatter, an
+    # unwritable path or an encoding fault echoes the sentinel to stderr at exactly the moment
+    # it FAILS to deliver -- and would read as success. Silencing it makes a broken handler
+    # deliver nothing, which is what an operator actually gets.
+    logging.raiseExceptions = False
     try:
         logger.info("%s", sentinel)
     except Exception as exc:
         entry["emit_error"] = repr(exc)
     finally:
+        logging.raiseExceptions = True
         logger.removeHandler(probe_handler)
     entry["emitted"] = len(captured)
 
@@ -611,6 +645,14 @@ def test_t308_an_info_record_from_a_service_logger_reaches_an_installed_handler(
         f"({sorted(services)}), below the floor of {MIN_SERVICE_PACKAGES} — the sweep is "
         "broken, not the product"
     )
+
+    factory_packages = {name.rsplit(".", 1)[0] for name in _asgi_factories()}
+    unclassified = sorted(factory_packages - set(services))
+    assert not unclassified, (
+        f"{unclassified} ship an ASGI create_app but were not classified as services by the "
+        f"APIRouter/FastAPI scan (found {sorted(services)}) — two derivations that must agree "
+        "disagree, so the sweep is broken, not the product"
+    )
     assert files_inspected >= MIN_FILES_INSPECTED, (
         f"only {files_inspected} product files were parsed across {sorted(services)}, below "
         f"the floor of {MIN_FILES_INSPECTED} — the sweep is broken, not the product"
@@ -627,7 +669,9 @@ def test_t308_an_info_record_from_a_service_logger_reaches_an_installed_handler(
     chosen: dict[tuple[str, str], int] = {}
     for module, line, receiver in sorted(info_sites):
         chosen.setdefault((module, receiver), line)
-    sentinels = {key: f"t308-sentinel-{index}" for index, key in enumerate(sorted(chosen))}
+    # Unguessable per run. A deterministic sentinel is enumerable, and a `print()` of it in
+    # product source reads as delivery without a single record being handled.
+    sentinels = {key: f"t308-{uuid.uuid4().hex}" for key in sorted(chosen)}
     targets: list[list[object]] = [
         [module, chosen[(module, receiver)], receiver, sentinels[(module, receiver)]]
         for module, receiver in sorted(chosen)
@@ -721,6 +765,14 @@ def test_t308_every_service_package_has_at_least_one_logging_call_site() -> None
         f"the .pkgroot service derivation found only {len(services)} packages "
         f"({sorted(services)}), below the floor of {MIN_SERVICE_PACKAGES} — the sweep is "
         "broken, not the product"
+    )
+
+    factory_packages = {name.rsplit(".", 1)[0] for name in _asgi_factories()}
+    unclassified = sorted(factory_packages - set(services))
+    assert not unclassified, (
+        f"{unclassified} ship an ASGI create_app but were not classified as services by the "
+        f"APIRouter/FastAPI scan (found {sorted(services)}) — two derivations that must agree "
+        "disagree, so the sweep is broken, not the product"
     )
     assert files_inspected >= MIN_FILES_INSPECTED, (
         f"only {files_inspected} product files were parsed across {sorted(services)}, below the "
