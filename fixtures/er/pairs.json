@@ -1,0 +1,115 @@
+{
+  "fixture_version": "1.0.0",
+  "notes": [
+    "The ER evaluation set for T-022 acceptance 1: 'precision >= configured floor and GTIN",
+    "matches always link'. Ground truth read in ONE direction — the resolver is graded",
+    "against these labels and never writes them, so a change that lowers quality shows up as",
+    "a failing gate rather than as a regenerated fixture.",
+    "",
+    "Each pair carries `same` (the truth) and `why` (what the pair is testing). The records",
+    "are the shape services/ingest/src/er reads: product_id, gtin, canonical_name, brand.",
+    "product_id values are shaped like the real graph's (mapping.product_id_for), and the",
+    "two sides of every pair come from DIFFERENT stores, because that is the case the ticket",
+    "exists for: one trade item, two storefronts, two Product nodes.",
+    "",
+    "GTINs here are REAL: every one that is meant to be usable carries a valid GS1 modulo-10",
+    "check digit, and the two deliberately-broken ones are labelled as such. A fixture full",
+    "of made-up barcode numbers would grade a resolver that ignores the check digit as",
+    "equivalent to one that honours it."
+  ],
+  "precision_floor": 0.95,
+  "recall_floor": 0.8,
+  "threshold": 0.86,
+  "pairs": [
+    {
+      "why": "Same GTIN, different encodings (UPC-A vs GTIN-14) and an untranslatable name. Identity must beat text.",
+      "same": true,
+      "left": {"product_id": "prod_a1", "gtin": "00012345678905", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"},
+      "right": {"product_id": "prod_b1", "gtin": "012345678905", "canonical_name": "Zapatilla de trail para hombre", "brand": "Cascade"}
+    },
+    {
+      "why": "Same GTIN written with the hyphen separators a printed barcode uses.",
+      "same": true,
+      "left": {"product_id": "prod_a2", "gtin": "0-12345-67890-5", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"},
+      "right": {"product_id": "prod_b2", "gtin": "00012345678905", "canonical_name": "Trail Runner Shoe (Men's)", "brand": "Cascade"}
+    },
+    {
+      "why": "EAN-8 zero-pads to the same GTIN-14 as its 14-digit rendering.",
+      "same": true,
+      "left": {"product_id": "prod_a3", "gtin": "96385074", "canonical_name": "Ceramic Burr Coffee Grinder", "brand": "Kettleworks"},
+      "right": {"product_id": "prod_b3", "gtin": "00000096385074", "canonical_name": "Burr Grinder, Ceramic", "brand": "Kettleworks"}
+    },
+    {
+      "why": "No GTIN either side; identical product under a plural and a brand suffix.",
+      "same": true,
+      "left": {"product_id": "prod_a4", "gtin": "", "canonical_name": "Merino Wool Hiking Sock", "brand": "Cascade"},
+      "right": {"product_id": "prod_b4", "gtin": "", "canonical_name": "Merino Wool Hiking Socks", "brand": "Cascade Outdoors"}
+    },
+    {
+      "why": "Same product, word order and punctuation differ, brands identical.",
+      "same": true,
+      "left": {"product_id": "prod_a5", "gtin": "", "canonical_name": "Coffee Grinder - Ceramic Burr", "brand": "Kettleworks"},
+      "right": {"product_id": "prod_b5", "gtin": "", "canonical_name": "Ceramic Burr Coffee Grinder", "brand": "Kettleworks"}
+    },
+    {
+      "why": "Accents and case only. One storefront types the accent, the other does not.",
+      "same": true,
+      "left": {"product_id": "prod_a6", "gtin": "", "canonical_name": "Café Press Carafe", "brand": "Kettleworks"},
+      "right": {"product_id": "prod_b6", "gtin": "", "canonical_name": "CAFE PRESS CARAFE", "brand": "Kettleworks"}
+    },
+    {
+      "why": "Two different trade items, both carrying valid but different GTINs. The strongest negative signal in commerce data.",
+      "same": false,
+      "left": {"product_id": "prod_a7", "gtin": "00012345678905", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"},
+      "right": {"product_id": "prod_b7", "gtin": "00000000000017", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"}
+    },
+    {
+      "why": "Unrelated products, unrelated brands. The pair the frozen acceptance test refuses at 0.9.",
+      "same": false,
+      "left": {"product_id": "prod_a8", "gtin": "00099999999999", "canonical_name": "Ceramic Burr Coffee Grinder", "brand": "Kettleworks"},
+      "right": {"product_id": "prod_b8", "gtin": "00088888888888", "canonical_name": "Merino Wool Hiking Sock", "brand": "Cascade"}
+    },
+    {
+      "why": "Same brand, same product line, different product. Brand agreement must not carry a pair on its own.",
+      "same": false,
+      "left": {"product_id": "prod_a9", "gtin": "", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"},
+      "right": {"product_id": "prod_b9", "gtin": "", "canonical_name": "Trail Runner Jacket", "brand": "Cascade"}
+    },
+    {
+      "why": "Same category word, different model. One token of a three-token title differing is not a match.",
+      "same": false,
+      "left": {"product_id": "prod_a10", "gtin": "", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"},
+      "right": {"product_id": "prod_b10", "gtin": "", "canonical_name": "Road Runner Shoe", "brand": "Cascade"}
+    },
+    {
+      "why": "Identical titles, different manufacturers. A generic product name is not an identity.",
+      "same": false,
+      "left": {"product_id": "prod_a11", "gtin": "", "canonical_name": "Stainless Steel Water Bottle", "brand": "Cascade"},
+      "right": {"product_id": "prod_b11", "gtin": "", "canonical_name": "Stainless Steel Water Bottle", "brand": "Kettleworks"}
+    },
+    {
+      "why": "Both GTINs are the unset-field placeholder, so they are not identifiers and must not link two different products.",
+      "same": false,
+      "left": {"product_id": "prod_a12", "gtin": "00000000000000", "canonical_name": "Merino Wool Hiking Sock", "brand": "Cascade"},
+      "right": {"product_id": "prod_b12", "gtin": "00000000000000", "canonical_name": "Ceramic Burr Coffee Grinder", "brand": "Kettleworks"}
+    },
+    {
+      "why": "Neither side has a name. Two nameless records are an absence of evidence, not a match.",
+      "same": false,
+      "left": {"product_id": "prod_a13", "gtin": "", "canonical_name": "", "brand": "Cascade"},
+      "right": {"product_id": "prod_b13", "gtin": "", "canonical_name": "", "brand": "Cascade"}
+    },
+    {
+      "why": "A knock-off evading resolution with a Cyrillic homoglyph. Folding it is what keeps the evasion from working.",
+      "same": true,
+      "left": {"product_id": "prod_a14", "gtin": "", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"},
+      "right": {"product_id": "prod_b14", "gtin": "", "canonical_name": "Тrail Runner Shoe", "brand": "Сascade"}
+    },
+    {
+      "why": "Same GTIN but one side's check digit is wrong, so it is not an identifier. The names and brands still agree, so the pair links on similarity.",
+      "same": true,
+      "left": {"product_id": "prod_a15", "gtin": "00012345678905", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"},
+      "right": {"product_id": "prod_b15", "gtin": "00012345678904", "canonical_name": "Trail Runner Shoe", "brand": "Cascade"}
+    }
+  ]
+}
