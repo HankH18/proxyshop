@@ -5674,6 +5674,36 @@
       "defect": "T-237'S STATED END-STATE IS NOT REACHED, AND ONE OF ITS GATES WAS ALREADY GREEN BEFORE THE WORK. snapshot['delistings'] has ZERO production consumers; auction/routes.py:239 and accept/routes.py:229 still build StaticSellerEligibility() with no rows; nothing appends the computed events to the ledger. The discriminating question was answered BOTH ways: against the frozen ACCEPTANCE suite the answer is NO (grep delisting over .swarm-loop/acceptance/*.py returns nothing; e6_trust_passing 26->26), so this is unfinished work rather than a measurement-credibility defect there; but against the frozen metric build_succeeds the answer is YES \u2014 11 non-xfail T-237 tests ride inside it. Worse, test_the_published_threshold_is_read_by_product_code_and_not_only_by_tests PASSES on services/sim/src/runner.py, which already carried BLACKLIST_THRESHOLD at :524/:582/:677 AT THE PIN \u2014 so that gate grades nothing the batch changed. runner.py also still hand-computes the comparison twice, contradicting delisting.py's claim to replace that duplication.",
       "finding_id": "bfa89892cc8e926d28f2254cfdf3e0547dfe24c78269b32a446bfe199805c2a7",
       "reproduction": "git grep -n 'delistings' -- apps | grep -v tests -> no production consumer; read auction/routes.py:239. Measured by rung2-c18."
+    },
+    {
+      "id": "T-336",
+      "title": "THE TYPESCRIPT DOOR CARRIES THE IDENTICAL list_prices ASYMMETRY, SO T-306/T-307 ARE A TWO-LANGUAGE FIX. boundary.ts:545 and :580 abstain on an absent roster exactly as the Python door does at :637/:677. WORSE, THE PARITY CORPUS CANNOT SEE THE DIVERGENCE BETWEEN THEM: Python tests `list_prices is None` while TypeScript tests `listPrices === undefined`, so an explicit `null` ABSTAINS in Python and is REFUSED in TypeScript \u2014 the two doors already disagree today on a value a real caller can send. boundary.test.ts:956 maps `?? undefined`, which is precisely what hides it from the shared corpus. So the cross-language parity apparatus reports agreement on a pair of doors that behave differently, which is a stronger defect than either door's abstention.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/ts/boundary.ts"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/contracts/src/ts/boundary.ts",
+      "defect": "THE TYPESCRIPT DOOR CARRIES THE IDENTICAL list_prices ASYMMETRY, SO T-306/T-307 ARE A TWO-LANGUAGE FIX. boundary.ts:545 and :580 abstain on an absent roster exactly as the Python door does at :637/:677. WORSE, THE PARITY CORPUS CANNOT SEE THE DIVERGENCE BETWEEN THEM: Python tests `list_prices is None` while TypeScript tests `listPrices === undefined`, so an explicit `null` ABSTAINS in Python and is REFUSED in TypeScript \u2014 the two doors already disagree today on a value a real caller can send. boundary.test.ts:956 maps `?? undefined`, which is precisely what hides it from the shared corpus. So the cross-language parity apparatus reports agreement on a pair of doors that behave differently, which is a stronger defect than either door's abstention.",
+      "finding_id": "dcc4b94d41f5a16fdd4865659bfdf86e57c38add555520c0b41086ef05c55c86",
+      "reproduction": "Send an explicit null list_prices to each door: Python abstains (accepts), TypeScript refuses. Then read boundary.test.ts:956 and observe the `?? undefined` normalisation that prevents the corpus from ever constructing the divergent case."
+    },
+    {
+      "id": "T-337",
+      "title": "THE OBVIOUS TWO-SITE FIX FOR T-306/T-307 IS INSUFFICIENT, AND THE SCOPE IS 99 TESTS ACROSS TWO LANGUAGES. Measured: normalising only boundary.py:637 and :677 DIVERGES at seed 20260904 draw 3, because _price_reasons:804 still reads `authorized = depth if list_prices is None else 0.0` \u2014 a complete repair must normalise before that line, so it is three sites, not two. Blast radius, measured twice independently: 99 tests. Some are tests whose PURPOSE is the abstention and which must be re-decided rather than mechanically updated \u2014 test_boundary_dual_path.py::test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price, and test_boundary_price_roster.py::test_the_cap_is_never_consulted_without_a_roster, which is the exact inverse of T-307's claim \u2014 plus 3 rows in the shared price_parity_corpus.json and boundary.test.ts:1064. The bulk (about 70) is collateral routed through test_boundary_dual_path.py's shared check() helper, which never passes a roster. The fix must also remove FIVE xfail markers, not two: T-161, T-162 and T-194 also XPASS under the candidate fix. AND THE CHARACTER OF THE TICKET IS DIFFERENT FROM ITS TEXT: the no-roster abstention is a DOCUMENTED DELIBERATE OPT-IN pinned by existing tests, so T-306/T-307 assert that the opt-in itself is wrong. That is a behaviour change to be decided, not an oversight to be patched, and it should be sized and scheduled as one.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/boundary.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/contracts/src/boundary.py",
+      "defect": "THE OBVIOUS TWO-SITE FIX FOR T-306/T-307 IS INSUFFICIENT, AND THE SCOPE IS 99 TESTS ACROSS TWO LANGUAGES. Measured: normalising only boundary.py:637 and :677 DIVERGES at seed 20260904 draw 3, because _price_reasons:804 still reads `authorized = depth if list_prices is None else 0.0` \u2014 a complete repair must normalise before that line, so it is three sites, not two. Blast radius, measured twice independently: 99 tests. Some are tests whose PURPOSE is the abstention and which must be re-decided rather than mechanically updated \u2014 test_boundary_dual_path.py::test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price, and test_boundary_price_roster.py::test_the_cap_is_never_consulted_without_a_roster, which is the exact inverse of T-307's claim \u2014 plus 3 rows in the shared price_parity_corpus.json and boundary.test.ts:1064. The bulk (about 70) is collateral routed through test_boundary_dual_path.py's shared check() helper, which never passes a roster. The fix must also remove FIVE xfail markers, not two: T-161, T-162 and T-194 also XPASS under the candidate fix. AND THE CHARACTER OF THE TICKET IS DIFFERENT FROM ITS TEXT: the no-roster abstention is a DOCUMENTED DELIBERATE OPT-IN pinned by existing tests, so T-306/T-307 assert that the opt-in itself is wrong. That is a behaviour change to be decided, not an oversight to be patched, and it should be sized and scheduled as one.",
+      "finding_id": "25bb038ca0f1b6daa2a436591f5fe2d124b1ad026e87b93e4cbad59e2267fa55",
+      "reproduction": "Apply the two-site normalisation to a scratch copy and run the T-306 property at seed 20260904: it diverges at draw 3 via _price_reasons:804. Separately count the tests that fail under the candidate fix: 99, with 5 xfail markers XPASSing."
     }
   ]
 }
