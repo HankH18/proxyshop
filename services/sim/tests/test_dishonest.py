@@ -150,11 +150,15 @@ def test_the_published_weight_is_read_from_the_manifest_not_invented() -> None:
     manifest = _approved_manifest()
     weights = manifest["observation_weights"]
     for record in run_dishonest_script(manifest, manifest["seed"]):
-        assert record["weight"] == float(weights[record["type"]]), record["kind"]
+        assert record["published_weight"] == float(weights[record["type"]]), record["kind"]
 
     # ...and moving the approved weight moves the emitted one.
     manifest["observation_weights"]["contradicted"] = 9.25
-    moved = [r["weight"] for r in run_dishonest_script(manifest, 1) if r["type"] == "contradicted"]
+    moved = [
+        r["published_weight"]
+        for r in run_dishonest_script(manifest, 1)
+        if r["type"] == "contradicted"
+    ]
     assert moved and set(moved) == {9.25}, (
         "a weight amended in the manifest must reach the emitted record; a simulator with "
         "its own copy would keep emitting 2.0"

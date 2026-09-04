@@ -236,7 +236,13 @@ def run_dishonest_script(
         record["sequence"] = index
         record["store_id"] = store_id
         record["business_identity"] = str(identity) if isinstance(identity, str) else None
-        record["weight"] = _behaviour_weight(manifest, str(behaviour["type"]), where)
+        # NOT spelled `weight`, and the distinction is load-bearing. A trust observation's
+        # `weight` field is a RELATIVE multiplier in [0, 1] — a buyer's track record (R14) —
+        # while this is the published ABSOLUTE weight for the observation type, which the
+        # engine looks up itself from `type`. `trust.scoring.score` raises
+        # `InvalidObservationWeight` on a `weight` of 2.0 (measured), so a record spelling it
+        # `weight` would be a record that cannot be handed to the engine it is aimed at.
+        record["published_weight"] = _behaviour_weight(manifest, str(behaviour["type"]), where)
         # One episode per day, counted from the first observed episode — the replay rule's
         # own words. The trust engine decays each observation from its own day.
         record["observed_day"] = int(episode) - FIRST_OBSERVED_EPISODE
