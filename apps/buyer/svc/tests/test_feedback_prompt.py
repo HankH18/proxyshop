@@ -203,3 +203,38 @@ def test_the_prompt_is_subscriptable_as_well_as_attribute_addressed() -> None:
     assert prompt["question"] == prompt.question
     with pytest.raises(KeyError):
         prompt["nope"]
+
+
+@pytest.mark.parametrize(
+    ("value", "routed"),
+    [
+        (False, False),
+        (0, False),
+        (0.0, False),  # MEASURED hole: `isinstance(0.0, int)` is False, so this used to
+        ("0", False),  # read as "the record does not say" and fall through to ROUTED.
+        ("off", False),
+        (True, True),
+        (1, True),
+        (1.0, True),
+        ("1", True),
+        ("on", True),
+    ],
+)
+def test_every_numeric_and_textual_spelling_of_the_flag_is_read_the_same_way(value, routed) -> None:
+    order = {"order_ref": "o", "store_id": "s", "auction_id": "a", "routed": value}
+    assert routing(order).routed is routed, f"routed={value!r} read the wrong way"
+    assert (feedback_prompt(order) is not None) is routed
+
+
+def test_a_routing_flag_that_is_not_a_boolean_at_all_is_reported(caplog) -> None:
+    """Falling back to the auction is the safe reading; doing it silently is not."""
+    with caplog.at_level("WARNING"):
+        routing({"order_ref": "o", "auction_id": "a", "routed": {"nested": "object"}})
+    assert any("not a boolean in any spelling" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize("absent", [None, ""])
+def test_an_absent_flag_is_not_reported_as_malformed(absent, caplog) -> None:
+    with caplog.at_level("WARNING"):
+        routing({"order_ref": "o", "auction_id": "a", "routed": absent})
+    assert caplog.records == []

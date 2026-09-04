@@ -109,6 +109,12 @@ def flag(value: Any) -> bool | None:
         if lowered in FALSE_WORDS:
             return False
         return None
-    if isinstance(value, int) and value in (0, 1):
+    if isinstance(value, (int, float)) and value in (0, 1):
+        # ``float`` as well as ``int``, and this was a MEASURED hole rather than a
+        # completeness exercise: a numeric column, a JSON encoder that writes ``0.0``, or a
+        # pandas/numpy round-trip all deliver ``routed`` as a float, and reading ``0.0`` as
+        # "this record does not say" made it fall through to the auction check and come back
+        # ROUTED. ``0.0 == 0`` is true, so the membership test covers both once the isinstance
+        # does. A ``Decimal`` still reads as "does not say"; nothing in this repo produces one.
         return bool(value)
     return None

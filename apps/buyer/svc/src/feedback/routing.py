@@ -50,11 +50,14 @@ on ``eligible``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from ._reading import first, flag, read
 from .errors import UnusableOrder
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "ORDER_REF_FIELDS",
@@ -151,6 +154,17 @@ def routing(order: Any) -> Routing:
         if raw is None:
             continue
         said = flag(raw)
+        if said is None and raw != "":
+            # The record HAS a routing flag and it is not a boolean in any spelling. Falling
+            # back to the auction check is the safe reading, but it is also a silent one, and
+            # a field that stopped being a boolean upstream would otherwise never be noticed.
+            _log.warning(
+                "order %s carries %s=%r, which is not a boolean in any spelling; falling back "
+                "to whether the order names an auction",
+                first(order, ORDER_REF_FIELDS) or "<unnamed>",
+                field_name,
+                type(raw).__name__,
+            )
         break
 
     if said is False:
