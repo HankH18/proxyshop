@@ -365,9 +365,13 @@ def _survey(
 _BLACKOUT_PROBE = """
 import asyncio, importlib, json, logging, pathlib, sys
 
-targets = json.loads(sys.argv[1])
-factories = json.loads(sys.argv[2])
-packages = json.loads(sys.argv[3])
+# Read the whole brief off stdin and consume it BEFORE any product module is imported,
+# so the sentinels are never visible to the code under test. They used to travel on argv,
+# where a `print(sys.argv)` in a startup path read as delivery with nothing logged at all.
+_brief = json.loads(sys.stdin.read())
+targets = _brief["targets"]
+factories = _brief["factories"]
+packages = _brief["packages"]
 
 
 def snapshot():
@@ -495,6 +499,10 @@ for module_name, lineno, receiver, sentinel in targets:
 
     probe_handler = _Capture()
     logger.addHandler(probe_handler)
+    window = len(results)
+    entry["window"] = window
+    for stream in (sys.stdout, sys.stderr):
+        print("<<<T308-OPEN-" + str(window) + ">>>", file=stream, flush=True)
     # logging.Handler.handleError writes "--- Logging error ---" plus the record's ARGS to the
     # real stderr whenever a handler raises. That means a handler with a broken formatter, an
     # unwritable path or an encoding fault echoes the sentinel to stderr at exactly the moment
@@ -530,6 +538,8 @@ for module_name, lineno, receiver, sentinel in targets:
         except Exception:
             pass
     entry["wrote_to_file"] = wrote_to_file
+    for stream in (sys.stdout, sys.stderr):
+        print("<<<T308-CLOSE-" + str(window) + ">>>", file=stream, flush=True)
     results.append(entry)
 
 print("PROBE" + json.dumps({
@@ -547,8 +557,8 @@ print("PROBE" + json.dumps({
 
 def _run_probe(
     targets: list[list[object]], factories: list[str], packages: list[str]
-) -> tuple[dict[str, Any], str]:
-    """Run the blackout probe in a fresh interpreter and return ``(payload, child_output)``."""
+) -> tuple[dict[str, Any], str, str]:
+    """Run the blackout probe in a fresh interpreter, returning ``(payload, stdout, stderr)``."""
     # The subprocess must import the tree under test, and only PYTHONPATH makes that true. A
     # bare ``python -c`` gets the repo's import roots from this venv's
     # ``site-packages/_proxyshop.pth`` — which names whichever checkout provisioned the venv,
@@ -564,17 +574,25 @@ def _run_probe(
         PROXYSHOP_WORKER=os.environ.get("PROXYSHOP_WORKER", "0"),
         PYTHONPATH=f"{roots}{os.pathsep}{inherited}" if inherited else roots,
     )
-    argv = [
-        sys.executable,
-        "-c",
-        textwrap.dedent(_BLACKOUT_PROBE),
-        json.dumps(targets),
-        json.dumps(factories),
-        json.dumps(packages),
-    ]
+    source = textwrap.dedent(_BLACKOUT_PROBE)
+    # Compile the probe HERE, in the parent, so that a typo in it fails loudly and specifically
+    # instead of arriving as "the probe produced no verdict line" -- which, under --runxfail,
+    # is indistinguishable from a genuine RED and once hid a broken probe behind a green-looking
+    # "2 failed". _BLACKOUT_PROBE is a non-raw string, so any backslash escape written into it
+    # is interpreted when THIS file is parsed; that is exactly how it broke.
+    compile(source, "<t308-blackout-probe>", "exec")
+
+    argv = [sys.executable, "-c", source]
+    brief = json.dumps({"targets": targets, "factories": factories, "packages": packages})
     try:
         completed = subprocess.run(
-            argv, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=180
+            argv,
+            cwd=REPO_ROOT,
+            env=env,
+            input=brief,
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
     except subprocess.TimeoutExpired as exc:  # pragma: no cover - only on a hung startup path
         # TimeoutExpired carries output as bytes-or-None, so decode defensively rather than
@@ -590,13 +608,30 @@ def _run_probe(
             f"stderr:\n{_text(exc.stderr)[-4000:]}"
         ) from exc
 
-    child_output = completed.stdout + completed.stderr
     marker = [line for line in completed.stdout.splitlines() if line.startswith("PROBE")]
     assert marker, (
         "the blackout probe produced no verdict line.\n"
         f"stdout:\n{completed.stdout[-4000:]}\nstderr:\n{completed.stderr[-4000:]}"
     )
-    return json.loads(marker[-1][len("PROBE") :]), child_output
+    return json.loads(marker[-1][len("PROBE") :]), completed.stdout, completed.stderr
+
+
+def _emit_window(stream: str, window: int) -> str:
+    """The slice of one child stream bracketed around a single emit.
+
+    Delivery is scored only inside this slice. Everything a service writes while starting up
+    — including anything it prints of its own environment — falls outside every window and
+    therefore cannot be mistaken for a delivered record.
+    """
+    opened = f"<<<T308-OPEN-{window}>>>"
+    closed = f"<<<T308-CLOSE-{window}>>>"
+    start = stream.find(opened)
+    if start < 0:
+        return ""
+    end = stream.find(closed, start)
+    if end < 0:
+        return ""
+    return stream[start + len(opened) : end]
 
 
 # ======================================================================================
@@ -678,7 +713,7 @@ def test_t308_an_info_record_from_a_service_logger_reaches_an_installed_handler(
     ]
 
     factories = _asgi_factories()
-    payload, child_output = _run_probe(targets, factories, sorted(services))
+    payload, child_stdout, child_stderr = _run_probe(targets, factories, sorted(services))
 
     # The .pth guard, applied to the STARTUP path first. This venv's site-packages puts a
     # checkout on sys.path for every process that uses it, and that has already produced one
@@ -710,7 +745,10 @@ def test_t308_an_info_record_from_a_service_logger_reaches_an_installed_handler(
             " — a .pth leak, not a measurement"
         )
         sentinel = sentinels[(entry["module"], entry["receiver"])]
-        delivered = bool(entry["wrote_to_file"]) or sentinel in child_output
+        window = entry["window"]
+        delivered = bool(entry["wrote_to_file"]) or any(
+            sentinel in _emit_window(stream, window) for stream in (child_stdout, child_stderr)
+        )
         if not entry["emitted"] or not delivered:
             silent.append(
                 f"{entry['module']}:{entry['lineno']} (logger {entry['logger_name']!r} via "
@@ -779,7 +817,7 @@ def test_t308_every_service_package_has_at_least_one_logging_call_site() -> None
         f"floor of {MIN_FILES_INSPECTED} — a sweep that inspects nothing passes everything"
     )
 
-    payload, _ = _run_probe([], _asgi_factories(), sorted(services))
+    payload, _out, _err = _run_probe([], _asgi_factories(), sorted(services))
     loaded = set(payload["loaded"])
 
     started = list(payload["started"])
