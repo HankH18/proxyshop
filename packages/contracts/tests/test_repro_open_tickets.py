@@ -464,9 +464,33 @@ def _drawn_claim(rng: Any, key: Any = None, value: Any = None) -> dict[str, Any]
     }
 
 
+#: How many bids each property draws per seed.
+_DRAWS_PER_SEED = 60
+
+
+def _property_seeds(pinned: int) -> tuple[int, int]:
+    """One PINNED seed and one drawn fresh on every run. Both properties run over both.
+
+    The pinned seed is what makes a red run reproducible. The unpinned one closes the hole the
+    pinned seed leaves, and that hole is measured rather than theoretical: with a constant seed
+    the 60 "drawn" bids are a constant TABLE, and an adversarial review of this very gate keyed
+    a fail-open on five of their fields in turn — `store_id`, `auction_id`, `product_ref`,
+    `offer.expires_at`, `signature` — normalizing the absent roster only for the 60 values the
+    table happens to contain. All five took both gates green with the money-path fail-open fully
+    alive for a realistic bid. That is the same shape as the four keys that sank the T-233 gate's
+    predecessor, and no enumeration of payloads closes it: the defence is a table the patch has
+    not seen. Every failure message names its seed, so a red run from the unpinned half is
+    reproduced by pinning the seed it printed.
+    """
+    import random
+
+    return (pinned, random.SystemRandom().randrange(2**32))
+
+
 def _drawn_priced_bid(
     rng: Any,
     *,
+    tag: str,
     depth: float,
     list_price: float,
     unit_price: float,
@@ -503,7 +527,9 @@ def _drawn_priced_bid(
         }
 
     offer = make_offer(
-        product_ref=f"prod-{rng.randrange(10**9)}",
+        # `tag` is the seed and draw index, so distinctness across a run is STRUCTURAL rather
+        # than a collision probability the `len(distinct) == exercised` guard below could flake on.
+        product_ref=f"prod-{tag}-{rng.randrange(10**9)}",
         variant_ref=f"var-{rng.randrange(10**9)}",
         unit_price=unit_price,
         total_price=unit_price,
@@ -574,14 +600,26 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
             'price_unreconcilable:offer.unit_price:list_price_unavailable']
 
     A caller who said nothing about its catalog got a MORE permissive answer than one who said
-    "I hold no catalog", and the door's own docstring calls this "the door it matters most on".
-    `_roster_list_price` is explicit that a supplied roster is evidence and every way of failing
-    to read it is a refusal; the only thing that is not evidence is the argument nobody passed,
-    which is precisely the call a caller makes by forgetting.
+    "I hold no catalog". `_roster_list_price` is explicit that a supplied roster is evidence and
+    that every way of failing to read it is a refusal; the only thing that is not evidence is
+    the argument nobody passed, which is precisely the call a caller makes by forgetting.
+
+    **What this gate does NOT rest on**, because it was checked and it is not what it looked
+    like: the phrase "the door it matters most on" (boundary.py:1136) is in
+    `validate_external_submission`'s docstring, and read in full it is an argument for PASSING a
+    roster at the Tier-2 door — "Pass the roster here or that choice is the only list price
+    anybody checks" — not the door confessing to this asymmetry. The no-roster abstention is
+    documented as a deliberate opt-in, and existing tests pin it
+    (`test_boundary_dual_path.py::test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price`,
+    `test_boundary_price_roster.py::test_the_cap_is_never_consulted_without_a_roster`). So this
+    gate is a claim that the OPT-IN ITSELF is the defect on the money path, and closing it is a
+    deliberate behaviour change with a measured blast radius — not the correction of an
+    oversight. Whoever fixes it has to re-baseline those tests, and the TypeScript peer carries
+    the identical asymmetry at `src/ts/boundary.ts:545` and `:580`.
 
     The property is about the ARGUMENT and therefore holds for every bid, which is why it is
-    drawn rather than written — see the module comment above for the four measured gaming keys
-    a table of named shapes leaves open.
+    drawn rather than written — see the module comment above for the measured gaming keys a
+    table of named shapes leaves open.
 
     Each draw arms itself twice before the comparison. With a roster that really prices the
     product the same bid must be ADMITTED, so the refusals below are the roster argument
@@ -592,12 +630,9 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
     """
     import random
 
-    rng = random.Random(20260904)  # fixed seed: randomized coverage, deterministic reruns
-    armed = 0
-    compared = 0
-    distinct: set[str] = set()
-
-    for draw in range(60):
+    def _draw_once(rng: Any, seed: int, draw: int) -> str:
+        """Build one case, arm it twice, then assert the property. Returns its `product_ref` so
+        the caller can prove afterwards that the draws were genuinely distinct."""
         list_price = round(rng.uniform(5.0, 5000.0), 2)
         row_cap = round(rng.uniform(5.0, 60.0), 1)
         depth = round(rng.uniform(0.0, row_cap), 1)
@@ -607,56 +642,63 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
 
         bid = _drawn_priced_bid(
             rng,
+            tag=f"{seed}-{draw}",
             depth=depth,
             list_price=list_price,
             unit_price=unit_price,
             carries_list_price=rng.random() < 0.5,
         )
-        distinct.add(bid["offer"]["product_ref"])
-        roster = {
-            bid["offer"]["product_ref"]: {
-                "list_price": list_price,
-                "max_discount_pct": row_cap,
-            }
-        }
+        product_ref = bid["offer"]["product_ref"]
+        roster = {product_ref: {"list_price": list_price, "max_discount_pct": row_cap}}
 
         supplied = _judge(bid, path, list_prices=roster)
         assert supplied.ok is True, (
-            f"draw {draw}: arming — with a roster that prices this product at {list_price} and "
-            f"authorizes {row_cap}%, an honest bid declaring {depth}% at {unit_price} must be "
-            f"admitted, or the refusals below say nothing about the roster ARGUMENT. "
-            f"path={path} bid={bid!r} result={supplied!r}"
+            f"seed {seed} draw {draw}: arming — with a roster that prices this product at "
+            f"{list_price} and authorizes {row_cap}%, an honest bid declaring {depth}% at "
+            f"{unit_price} must be admitted, or the refusals below say nothing about the roster "
+            f"ARGUMENT. path={path} bid={bid!r} result={supplied!r}"
         )
 
         empty = _judge(bid, path, list_prices={})
         assert empty.ok is False, (
-            f"draw {draw}: control — a roster that cannot price this product is an unavailable "
-            f"read and must be refused, never degraded back to the abstention. "
+            f"seed {seed} draw {draw}: control — a roster that cannot price this product is an "
+            f"unavailable read and must be refused, never degraded back to the abstention. "
             f"path={path} bid={bid!r} result={empty!r}"
         )
-        armed += 1
 
         omitted = _judge(bid, path)
         assert _verdict(omitted) == _verdict(empty), (
-            f"draw {draw}: omitting list_prices gave {_verdict(omitted)} where passing an "
-            f"explicit empty roster gave {_verdict(empty)}. The absent argument must be the "
-            f"empty one for EVERY bid, not for the ones this file happens to name — a default "
-            f"that reads any part of the submission to decide how permissive to be is the "
-            f"T-233 defect with a different key, on the money path. path={path} bid={bid!r}"
+            f"seed {seed} draw {draw}: omitting list_prices gave {_verdict(omitted)} where "
+            f"passing an explicit empty roster gave {_verdict(empty)}. The absent argument must "
+            f"be the empty one for EVERY bid, not for the ones this file happens to name — a "
+            f"default that reads any part of the submission to decide how permissive to be is "
+            f"the T-233 defect with a different key, on the money path. path={path} bid={bid!r}"
         )
         assert omitted.ok is False, (
-            f"draw {draw}: a bid judged with NO catalog argument at all was admitted while the "
-            f"same bid judged with an explicitly empty catalog was refused {list(empty.reasons)}."
-            f" Omission is the case that happens by accident, and it is the more permissive of "
-            f"the two. path={path} bid={bid!r} result={omitted!r}"
+            f"seed {seed} draw {draw}: a bid judged with NO catalog argument at all was admitted "
+            f"while the same bid judged with an explicitly empty catalog was refused "
+            f"{list(empty.reasons)}. Omission is the case that happens by accident, and it is "
+            f"the more permissive of the two. path={path} bid={bid!r} result={omitted!r}"
         )
-        compared += 1
+        return product_ref
 
-    assert armed == 60, f"only {armed} of 60 draws were armed; the generator has drifted"
-    assert compared == 60, f"only {compared} of 60 draws reached the property comparison"
-    assert len(distinct) == 60, (
-        f"the generator produced {len(distinct)} distinct products across 60 draws; a property "
-        f"asserted over one repeated bid is a single-payload probe wearing a loop"
+    exercised = 0
+    distinct: set[str] = set()
+    for seed in _property_seeds(20260904):
+        rng = random.Random(seed)
+        for draw in range(_DRAWS_PER_SEED):
+            distinct.add(_draw_once(rng, seed, draw))
+            exercised += 1
+
+    expected = 2 * _DRAWS_PER_SEED
+    assert exercised == expected, (
+        f"only {exercised} of {expected} cases were built, armed and compared. A loop that "
+        f"silently iterates fewer cases than it claims is how three sweeps in this repo went "
+        f"QUIET rather than red (6->0 of 8, 70->0 of 79, 48->0 of 66)"
+    )
+    assert len(distinct) == expected, (
+        f"the generator produced {len(distinct)} distinct products across {expected} draws; a "
+        f"property asserted over one repeated bid is a single-payload probe wearing a loop"
     )
 
 
@@ -695,27 +737,39 @@ def test_t307_a_supplied_discount_ceiling_is_not_inert_when_the_roster_is_absent
     itself honestly against its OWN carried list price, so the only thing that can refuse it is
     the ceiling. Three controls arm each draw before the property is asserted:
 
-    * with no roster and no ceiling the bid is ADMITTED — the door has no other objection, so a
-      refusal below is the ceiling and not the expiry, the schema, R8 or R12;
-    * with a roster that prices the product, the same ceiling REFUSES it with
-      `discount_over_authorized_depth:offer.discount` — proving the ceiling is a number this
-      door knows how to read and that this bid genuinely exceeds it;
+    * with a roster that prices the product AND authorizes exactly the depth the bid declares,
+      the bid is ADMITTED — so every wall other than the ceiling passes on this bid: schema, R8
+      provenance at all three claim-bearing sites, expiry, R12 eligibility, and the arithmetic
+      itself. A refusal below is therefore the ceiling answering and not something else;
+    * with a roster that prices the product but authorizes nothing of its own, the same ceiling
+      REFUSES it with `discount_over_authorized_depth:offer.discount` — proving the ceiling is a
+      number this door knows how to read and that this bid genuinely exceeds it;
     * with an explicitly empty roster and the same ceiling, it is refused too — so the equality
       below cannot be satisfied by collapsing both sides to `ok=True`.
 
+    **The first control is deliberately NOT "with no roster and no ceiling this bid is
+    admitted", which is the obvious way to write it.** That call is precisely T-306's fail-open,
+    and arming on it would make these two gates CONTRADICT each other: the repair that closes
+    T-306 makes that same call refuse, so T-307 would go red for the fix that is supposed to
+    close it, and the only patches taking both green would be ones keyed on the drawn payloads.
+    Measured — a gate armed that way, run against the candidate T-306 fix, failed on its own
+    precondition rather than on its property. A gate that can only be satisfied by cheating is
+    worse than no gate.
+
     Any repair that makes the supplied ceiling bind satisfies this: reading it against the
-    carried list price, treating the absent roster as an empty one, or refusing the call
-    outright. What is refused is only the outcome that is actually wrong — a clean `ok=True`
-    for a bid that took 85% off under a ceiling of 20.
+    carried list price, or treating the absent roster as an empty one. RAISING on a ceiling
+    supplied without a roster does not, and deliberately so — `validate_bid` is documented to
+    never raise, because "a boundary that threw would make reject and crash indistinguishable
+    to the caller", so an exception is a different defect rather than a repair. What is refused
+    here is the outcome that is actually wrong: a clean `ok=True` for a bid that took 85% off
+    under a ceiling of 20.
     """
     import random
 
-    rng = random.Random(20260905)
-    armed = 0
-    compared = 0
-    distinct: set[str] = set()
-
-    for draw in range(60):
+    def _draw_once(rng: Any, seed: int, draw: int) -> str:
+        """Build one case, arm it three times, then assert the property. Returns its
+        `product_ref` so the caller can prove afterwards that the draws were genuinely
+        distinct."""
         list_price = round(rng.uniform(5.0, 5000.0), 2)
         ceiling = round(rng.uniform(0.0, 30.0), 1)
         depth = round(rng.uniform(ceiling + 10.0, 95.0), 1)
@@ -724,60 +778,130 @@ def test_t307_a_supplied_discount_ceiling_is_not_inert_when_the_roster_is_absent
 
         bid = _drawn_priced_bid(
             rng,
+            tag=f"{seed}-{draw}",
             depth=depth,
             list_price=list_price,
             unit_price=unit_price,
             carries_list_price=True,
         )
-        distinct.add(bid["offer"]["product_ref"])
-        # Prices the product and authorizes nothing of its own, so the CALLER-WIDE ceiling is
-        # the number `_authorized_depth` has to fall through to.
-        roster = {bid["offer"]["product_ref"]: list_price}
+        product_ref = bid["offer"]["product_ref"]
 
-        unbounded = _judge(bid, path)
-        assert unbounded.ok is True, (
-            f"draw {draw}: arming — with neither roster nor ceiling this bid must be admitted, "
-            f"or a refusal below is some other wall answering. path={path} bid={bid!r} "
-            f"result={unbounded!r}"
+        # ARM 1 — the bid is otherwise clean. A roster that prices the product AND authorizes
+        # exactly the depth it declares admits it, so a refusal below is the ceiling and not the
+        # schema, R8, the expiry, R12 or the arithmetic. This is stated with a roster PRESENT on
+        # purpose; see the docstring for why arming on the no-roster call would put this gate in
+        # direct contradiction with T-306's.
+        authorizing = {product_ref: {"list_price": list_price, "max_discount_pct": depth}}
+        clean = _judge(bid, path, list_prices=authorizing)
+        assert clean.ok is True, (
+            f"seed {seed} draw {draw}: arming — a bid declaring {depth}% at {unit_price} for a "
+            f"product the roster prices at {list_price} and authorizes {depth}% on must be "
+            f"admitted, or the refusals below say nothing about the CEILING. path={path} "
+            f"bid={bid!r} result={clean!r}"
         )
 
-        bounded = _judge(bid, path, list_prices=roster, max_discount_pct=ceiling)
+        # ARM 2 — the ceiling is a number this door reads, and this bid exceeds it. The roster
+        # prices the product and authorizes nothing of its own, so the CALLER-WIDE ceiling is
+        # what `_authorized_depth` has to fall through to.
+        bounded = _judge(bid, path, list_prices={product_ref: list_price}, max_discount_pct=ceiling)
         assert bounded.ok is False and any(
             reason.startswith("discount_over_authorized_depth:") for reason in bounded.reasons
         ), (
-            f"draw {draw}: arming — a bid declaring {depth}% under a caller ceiling of "
-            f"{ceiling}% must be refused for exceeding the authorized depth once a roster is "
+            f"seed {seed} draw {draw}: arming — a bid declaring {depth}% under a caller ceiling "
+            f"of {ceiling}% must be refused for exceeding the authorized depth once a roster is "
             f"present, or this draw does not exercise the ceiling at all. path={path} "
             f"bid={bid!r} result={bounded!r}"
         )
 
+        # ARM 3 — the explicit empty roster with the same ceiling refuses, so the equality below
+        # cannot be satisfied by collapsing both sides to `ok=True`.
         empty = _judge(bid, path, list_prices={}, max_discount_pct=ceiling)
         assert empty.ok is False, (
-            f"draw {draw}: control — an explicitly empty roster with a ceiling of {ceiling}% "
-            f"must refuse. path={path} bid={bid!r} result={empty!r}"
+            f"seed {seed} draw {draw}: control — an explicitly empty roster with a ceiling of "
+            f"{ceiling}% must refuse. path={path} bid={bid!r} result={empty!r}"
         )
-        armed += 1
 
         omitted = _judge(bid, path, max_discount_pct=ceiling)
         assert _verdict(omitted) == _verdict(empty), (
-            f"draw {draw}: supplying max_discount_pct={ceiling} with the roster OMITTED gave "
-            f"{_verdict(omitted)} where supplying it with an explicit empty roster gave "
-            f"{_verdict(empty)}. The ceiling is the caller's authorization, and which of the "
-            f"two arguments the caller forgot must not decide whether the other one is read. "
-            f"path={path} bid={bid!r}"
+            f"seed {seed} draw {draw}: supplying max_discount_pct={ceiling} with the roster "
+            f"OMITTED gave {_verdict(omitted)} where supplying it with an explicit empty roster "
+            f"gave {_verdict(empty)}. The ceiling is the caller's authorization, and which of "
+            f"the two arguments the caller forgot must not decide whether the other one is "
+            f"read. path={path} bid={bid!r}"
         )
         assert omitted.ok is False, (
-            f"draw {draw}: a bid declaring {depth}% off was ADMITTED under a caller ceiling of "
-            f"{ceiling}% because the roster was absent. The ceiling was supplied and never "
-            f"read: an authorization the door drops on the floor is worse than one that was "
-            f"never given, because the caller believes it is protected. path={path} "
+            f"seed {seed} draw {draw}: a bid declaring {depth}% off was ADMITTED under a caller "
+            f"ceiling of {ceiling}% because the roster was absent. The ceiling was supplied and "
+            f"never read: an authorization the door drops on the floor is worse than one that "
+            f"was never given, because the caller believes it is protected. path={path} "
             f"bid={bid!r} result={omitted!r}"
         )
-        compared += 1
+        return product_ref
 
-    assert armed == 60, f"only {armed} of 60 draws were armed; the generator has drifted"
-    assert compared == 60, f"only {compared} of 60 draws reached the property comparison"
-    assert len(distinct) == 60, (
-        f"the generator produced {len(distinct)} distinct products across 60 draws; a property "
-        f"asserted over one repeated bid is a single-payload probe wearing a loop"
+    exercised = 0
+    distinct: set[str] = set()
+    for seed in _property_seeds(20260905):
+        rng = random.Random(seed)
+        for draw in range(_DRAWS_PER_SEED):
+            distinct.add(_draw_once(rng, seed, draw))
+            exercised += 1
+
+    expected = 2 * _DRAWS_PER_SEED
+    assert exercised == expected, (
+        f"only {exercised} of {expected} cases were built, armed and compared. A loop that "
+        f"silently iterates fewer cases than it claims is how three sweeps in this repo went "
+        f"QUIET rather than red (6->0 of 8, 70->0 of 79, 48->0 of 66)"
+    )
+    assert len(distinct) == expected, (
+        f"the generator produced {len(distinct)} distinct products across {expected} draws; a "
+        f"property asserted over one repeated bid is a single-payload probe wearing a loop"
+    )
+
+
+def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
+    """A canary for the two gates above, and it is deliberately NOT xfail-marked.
+
+    ``xfail(strict=True)`` scores a runtime ERROR exactly like a reproduction. A gate whose
+    generator raises — an ImportError, a schema change that makes the drawn bid unbuildable —
+    still reports ``xfailed``, the ordinary suite stays green, and the gate silently measures
+    nothing. That is the same "went quiet rather than red" failure three sweeps in this repo
+    have already had, one level up: not a loop iterating zero cases, but a whole gate scoring
+    zero assertions and being congratulated for it.
+
+    So this drives the same generator down the same arming path outside any xfail. It asserts
+    only what is true BOTH before and after T-306/T-307 are fixed — a roster that prices the
+    product admits an honest bid, an empty roster refuses it — so it never has to be edited
+    when the defect is closed, and a broken generator fails an ordinary ``make verify``.
+    """
+    import random
+
+    rng = random.Random(20260906)
+    bid = _drawn_priced_bid(
+        rng,
+        tag="canary",
+        depth=20.0,
+        list_price=100.0,
+        unit_price=80.01,
+        carries_list_price=True,
+    )
+    product_ref = bid["offer"]["product_ref"]
+
+    admitted = _judge(
+        bid, HOSTED_PATH, list_prices={product_ref: {"list_price": 100.0, "max_discount_pct": 20.0}}
+    )
+    assert admitted.ok is True, (
+        f"the T-306/T-307 generator can no longer build a bid this door admits, so both gates "
+        f"are scoring errors as reproductions: {admitted!r}"
+    )
+
+    refused = _judge(bid, HOSTED_PATH, list_prices={})
+    assert refused.ok is False, (
+        f"an explicitly empty roster must refuse — it is the right-hand side both gates above "
+        f"compare the absent argument against: {refused!r}"
+    )
+
+    pinned, drawn = _property_seeds(20260906)
+    assert pinned == 20260906 and isinstance(drawn, int), (
+        f"_property_seeds must return the pinned seed plus one drawn per run, got "
+        f"{(pinned, drawn)!r}"
     )
