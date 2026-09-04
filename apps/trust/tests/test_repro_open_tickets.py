@@ -1015,3 +1015,131 @@ def test_the_published_threshold_is_read_by_product_code_and_not_only_by_tests()
         "BLACKLIST_THRESHOLD is exported and compared only in tests again — the published "
         "threshold decides nothing until product code reads it (S2)"
     )
+
+
+def test_the_threshold_comparison_is_strict_and_a_score_exactly_at_it_stays_listed() -> None:
+    """T-237's boundary, which no gate above pins: ``<`` and not ``<=``.
+
+    ``trust.scoring``'s own export line calls ``BLACKLIST_THRESHOLD`` "the published score
+    BELOW which a store is out", and :func:`below_blacklist_threshold` commits in its
+    docstring to "Strict ``<``". Nothing graded it. Every other T-237 gate scores a store
+    either uniformly contradicted (far below the floor) or uniformly verified (far above
+    it), so relaxing the comparison to ``<=`` leaves all nine of them green while it
+    delists a store sitting exactly ON the published floor -- a store the manifest says is
+    IN. The two neighbours are asserted as well, so this cannot be satisfied by a function
+    that simply refuses every float.
+    """
+    import math
+
+    from trust.scoring import BLACKLIST_THRESHOLD
+    from trust.snapshot.delisting import below_blacklist_threshold
+
+    assert below_blacklist_threshold(BLACKLIST_THRESHOLD) is False, (
+        f"a store scoring exactly the published floor ({BLACKLIST_THRESHOLD}) was read as "
+        f"sub-threshold; the comparison is `<=` where the published reading is strict `<`, "
+        f"so the floor itself is now a delisting"
+    )
+    assert below_blacklist_threshold(math.nextafter(BLACKLIST_THRESHOLD, 0.0)) is True, (
+        "the largest float below the floor was not read as sub-threshold, so the "
+        "comparison has moved off the published threshold entirely"
+    )
+    assert below_blacklist_threshold(math.nextafter(BLACKLIST_THRESHOLD, 1.0)) is False
+
+
+def test_the_expiry_decision_is_an_event_the_ledger_can_actually_hold_too() -> None:
+    """The ``blacklisted`` half is graded against ``contracts.ledger``; the expiry half was not.
+
+    ``LEDGER_PAYLOAD_SHAPES["blacklist_expired"]`` publishes ``("store_id", "reason_code")``.
+    The lapsed-listing gate above reads only ``payload["reason_code"]``, so dropping
+    ``store_id`` from the expiry payload -- or emitting an envelope the writer refuses --
+    turned nothing red, and the event would have failed at the ledger rather than in the
+    suite. Same three checks the delisting half already gets: the published payload shape,
+    the writer's envelope validation, and a real append.
+    """
+    from contracts.ledger import LEDGER_PAYLOAD_SHAPES, validate_ledger_payload
+    from trust.events import InMemoryEventStore, append, normalise_event
+    from trust.scoring import Blacklist
+    from trust.snapshot import build_snapshot
+
+    blacklist = Blacklist()
+    blacklist.add(
+        business_identity="bad-co",
+        reason_code="manual_review",
+        expires_at="2025-01-01T00:00:00Z",
+    )
+    snapshot = build_snapshot(
+        [_store("s-bad", "bad-co", _dishonest_observations("s-bad"))],
+        blacklist=blacklist,
+        as_of=AS_OF,
+    )
+    expired = [event for event in snapshot["delistings"] if event["kind"] == "blacklist_expired"]
+    assert len(expired) == 1, (
+        f"a lapsed listing must record exactly one expiry; got "
+        f"{[event['kind'] for event in snapshot['delistings']]}"
+    )
+
+    event = expired[0]
+    assert set(LEDGER_PAYLOAD_SHAPES["blacklist_expired"]) <= set(event["payload"]), (
+        f"the blacklist_expired payload is missing published keys: "
+        f"{sorted(set(LEDGER_PAYLOAD_SHAPES['blacklist_expired']) - set(event['payload']))}"
+    )
+    assert validate_ledger_payload("blacklist_expired", event["payload"]) == []
+    assert normalise_event(event)["kind"] == "blacklist_expired"
+
+    store = InMemoryEventStore()
+    outcome = append(store, event)
+    assert outcome.inserted and outcome.seq == 1
+    written = store.read()[0]["payload"]
+    assert written["store_id"] == "s-bad", (
+        "the expiry event does not name the store it releases, so a reader cannot tell "
+        "WHICH listing lapsed"
+    )
+    assert written["reason_code"] == "manual_review"
+
+
+def test_the_delisting_seam_itself_compares_a_score_to_the_published_threshold() -> None:
+    """The gate above greps the file TEXT of the WHOLE tree, and both halves of that leak.
+
+    Measured, which is why this exists rather than a looser sibling:
+
+    * **Prose satisfies a text grep.** ``delisting.py`` names ``BLACKLIST_THRESHOLD`` in its
+      module docstring as well as in its code, so gutting the module to comments leaves the
+      substring gate green.
+    * **Another module holds the whole-tree gate green.** ``services/sim/src/runner.py``
+      loads the constant independently, so *any* whole-tree "somebody reads it" assertion --
+      substring or AST -- stays green with every reader inside the trust app deleted.
+    * **Not every load is a decision.** ``delisting.py`` also puts the constant in a payload
+      (``"threshold": BLACKLIST_THRESHOLD``), so an "is it loaded here" check stays green with
+      the one comparison that actually delists a store removed.
+
+    So this asks the narrowest true question: the module that EMITS the delisting must use
+    the published threshold as an operand of a COMPARISON. The module is resolved through the
+    product's own import, not a hard-coded path, so moving the seam keeps this green and
+    hollowing it out turns it red.
+    """
+    from trust.snapshot import delisting
+
+    source_path = pathlib.Path(delisting.__file__ or "")
+    assert source_path.is_file(), f"the delisting seam has no readable source at {source_path}"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    def _names_the_threshold(node: ast.AST) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id == "BLACKLIST_THRESHOLD"
+        return isinstance(node, ast.Attribute) and node.attr == "BLACKLIST_THRESHOLD"
+
+    comparisons = sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        and any(_names_the_threshold(side) for side in (node.left, *node.comparators))
+    )
+
+    assert comparisons, (
+        f"{source_path.name} emits the delisting decision but never COMPARES anything to "
+        f"BLACKLIST_THRESHOLD -- every remaining occurrence is a docstring, a comment, an "
+        f"unused import, or a payload field that reports the threshold without applying it. "
+        f"The published threshold decides nothing until the seam compares a score to it (S2), "
+        f"and neither a text grep nor a whole-tree 'somebody loads it' check can see that: "
+        f"services/sim/src/runner.py loads it independently and would hold both green"
+    )
