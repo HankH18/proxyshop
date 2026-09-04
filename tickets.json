@@ -3983,7 +3983,7 @@
     {
       "id": "T-223",
       "title": "THE PRICE FLOOR IS AN EXACT EQUALITY, SO ANY POSITIVE PRICE CLEARS IT AND A 100.00 PRODUCT SELLS FOR ONE CENT. boundary.py:819 tests `priced == 0.0`, not a proportional floor, so under `max_discount_pct: 100` an offer at unit_price 0.001 is admitted through the real production door. Worse on an UNCAPPED roster row: `_is_judged` (collect.py:347) returns False when `listed <= 0`, so the offer is never judged there either, and `unit_price: 1e-09` on a 100.00 product returns HTTP 201 as a rankable bid. R10 only compels admitting a 53% undercut; this admits 99.9999999%. Measured end to end through POST /auctions by an adversarial verifier, and independently written into this module's own docstring by the orchestrator at e8aaec5 -- where it was deferred to a 'derived-authorization follow-up ticket' that was never minted. This ticket IS that follow-up. T-177 merged as the price wall and is DEFECTIVE at the production door: the attack its own ticket described is genuinely closed, and these three bypasses stand beside it. The single most actionable repair is replacing the exact-equality floor at boundary.py:819 with a proportional one, which breaks no frozen assertion.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "uv run python -m pytest apps/exchange/tests/test_repro_untrusted_roster.py -q --runxfail -k t223",
       "scope": [
         "packages/contracts/src/boundary.py:814-819 and apps/exchange/src/auction/collect.py"
       ],
@@ -3998,7 +3998,7 @@
     {
       "id": "T-224",
       "title": "UNAUTHENTICATED HTTP 500 OUT OF THE MIDDLE OF AN AUCTION. `list_price: 0.0` is an accepted roster value (`Field(ge=0.0)`), and on such a row `_is_judged` returns False, so an unparseable price reaches `float(...)` unguarded and raises ValueError out of the auction as a 500. One keystroke from a caller reaches it. Not a regression -- `git show main:` of that module raises the identical ValueError -- but the protection the surrounding docstring describes is conditional and the condition is caller-supplied. On the same row a silent store still mints a 0.00 rankable fallback (HTTP 201, entries=[{fallback: true, unit_price: 0.0, fallback_reason: 'no_response'}]), and negative and nan unit prices are admitted too. Recorded in the module docstring at e8aaec5 and deferred to a follow-up ticket that was never minted; this is it.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "uv run python -m pytest apps/exchange/tests/test_repro_untrusted_roster.py -q --runxfail -k t224",
       "scope": [
         "apps/exchange/src/auction/routes.py:231 and apps/exchange/src/auction/collect.py"
       ],
