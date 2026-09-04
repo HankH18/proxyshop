@@ -158,8 +158,12 @@ from contracts.boundary import (
     OFFER_TOTAL_PRICE_SITE,
     OFFER_UNIT_PRICE_SITE,
     REASON_PRICE_UNRECONCILABLE,
+    ROSTER_PRICE_BELOW_FLOOR,
+    price_floor,
     price_reasons,
 )
+from contracts.boundary import MINIMUM_PAYABLE_AMOUNT as _MINIMUM_PAYABLE_AMOUNT
+from contracts.boundary import PRICE_FLOOR_FRACTION as _PRICE_FLOOR_FRACTION
 
 __all__ = [
     "BidEntry",
@@ -207,34 +211,18 @@ UNRECONCILABLE_PRICE_REASON = "bid_price_unreconcilable"
 #: that is what `BidEntry.price_reasons` carries.
 ILLEGIBLE_OFFER_REASON = f"{REASON_PRICE_UNRECONCILABLE}:offer:illegible"
 
-#: The smallest amount of money a price is allowed to name — one minor unit of the currency the
-#: exchange prices in. A number under this is not a cheap price, it is a price nobody can pay: no
-#: settlement rail moves 0.001, and 1e-09 is nine orders of magnitude under the smallest coin
-#: there is. It is the ABSOLUTE half of the floor and it is what makes the floor bite on a cheap
-#: product, where a percentage of the list price is itself a fraction of a cent.
-MINIMUM_PAYABLE_AMOUNT = 0.01
-
-#: ...and the PROPORTIONAL half, as a fraction of the roster row's own ``list_price``, which is
-#: what makes the floor bite on an expensive one: 0.02 on a product listed at 1,000,000.00 is a
-#: payable amount and still not a price for it.
-#:
-#: **Why 0.1% and not something stricter.** The frozen R10 contract pins how far this may go.
-#: ``test_auction_price_wall.py::test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized``
-#: asserts that 99.00, 80.00 **and 1.00** are all admitted on a row listing at 100.00 with no
-#: authorized depth, so any floor at or above 1.00 on that row breaks a standing assertion — the
-#: ceiling on this constant is therefore 1%, and 0.1% takes it with an order of magnitude of
-#: margin while still refusing the 0.001 and the 1e-09 that T-223 measured through the real door.
-#: Everything between the floor and the roster's own cap remains the caller's word; see the last
-#: section of this module's docstring for the port that does not exist yet.
-PRICE_FLOOR_FRACTION = 0.001
-
-#: The boundary-vocabulary name for a price that clears zero and nothing else. Spelled the way
-#: :data:`contracts.boundary.ROSTER_PRICE_NOT_POSITIVE` is, and kept apart from it deliberately:
-#: ``not_positive`` is "this is not a number a price can be" and this is "this is a number, and it
-#: is not enough of one". Reporting one bad price under two names is the mislabelling
-#: :data:`FALLBACK_REASONS` was split apart to end, so a price that is zero, negative or unreadable
-#: keeps the boundary's own name for that and never also collects this one.
-PRICE_BELOW_FLOOR_REASON = "below_price_floor"
+#: The floor's three constants, **re-exported from the shared boundary rather than defined here**
+#: (T-250). They were defined here, with the arithmetic, because the boundary's own floor was an
+#: exact equality at zero and this door had to close the gap in front of it. The boundary now
+#: carries the threshold itself, so a second copy of the number would be a second thing to keep in
+#: step — and a floor that differs between the shared boundary and the door in front of it is the
+#: same defect the threshold replaced, wearing a different number. The names stay, so that a caller
+#: or a test importing them from `exchange.auction.collect` still resolves; only the definitions
+#: moved. See :func:`contracts.boundary.price_floor` for both halves and for the R10 ceiling that
+#: bounds :data:`~contracts.boundary.PRICE_FLOOR_FRACTION` from above.
+MINIMUM_PAYABLE_AMOUNT = _MINIMUM_PAYABLE_AMOUNT
+PRICE_FLOOR_FRACTION = _PRICE_FLOOR_FRACTION
+PRICE_BELOW_FLOOR_REASON = ROSTER_PRICE_BELOW_FLOOR
 
 FALLBACK_REASONS: tuple[str, ...] = (
     "tier_0_no_agent",
@@ -429,30 +417,12 @@ def _priced_at_nothing(offer: Any, rostered: Mapping[str, Any]) -> bool:
     return False
 
 
-def _price_floor(listed: float) -> float:
-    """The lowest number that is still a price for a product the roster lists at ``listed``.
+def _below_the_price_floor(offer: Any, rostered: Mapping[str, Any]) -> bool:
+    """Is this offer's price positive and still not a price? — T-223's defect, T-250's port.
 
-    Both halves at once — ``max`` of the proportional floor and one minor currency unit — because
-    each covers the case the other misses. On a 100.00 product the proportional half dominates
-    (0.10); on a 0.50 product the absolute half does (0.01, where 0.1% would be five
-    thousandths of a cent and would refuse nothing). The absolute half is dropped, not clamped,
-    where the roster itself lists the product below one minor unit: a catalog genuinely pricing
-    something at 0.005 is not describing a giveaway, and a floor above its own list price would
-    refuse every bid on it — closed rather than fail-closed, which is the failure mode this whole
-    wall's positive controls exist to catch.
-    """
-    floor = listed * PRICE_FLOOR_FRACTION
-    if listed >= MINIMUM_PAYABLE_AMOUNT:
-        floor = max(floor, MINIMUM_PAYABLE_AMOUNT)
-    return floor
-
-
-def _below_the_price_floor(offer: Any, rostered: Mapping[str, Any]) -> list[str]:
-    """Reasons for a price that is positive and still not a price — T-223's own defect.
-
-    :func:`_priced_at_nothing` is the floor at exactly zero, and the boundary's is written
-    ``priced == 0.0``: an EXACT equality, so the answer to it is to write ``0.001`` instead of
-    ``0.0``. Measured through ``POST /auctions`` before this function existed, on a roster row
+    :func:`_priced_at_nothing` is the floor at exactly zero. The boundary's own used to be written
+    ``priced == 0.0`` — an EXACT equality, so the answer to it was to write ``0.001`` instead of
+    ``0.0``. Measured through ``POST /auctions`` before either fix, on a roster row
     ``{list_price: 100.0, max_discount_pct: 100.0}``::
 
         offer(0.001, 0.001)              ->  HTTP 201  fallback=false  unit_price=0.001
@@ -465,30 +435,33 @@ def _below_the_price_floor(offer: Any, rostered: Mapping[str, Any]) -> list[str]
     once; an equality at zero is the one relation no depth can satisfy, and it is defeated by
     adding a thousandth.
 
-    So the floor is a THRESHOLD rather than an equality: see :func:`_price_floor` for the number
-    and for why it cannot be tighter. Prices at or below zero and prices that will not read as
-    numbers are deliberately NOT reported here — the boundary already names those ``:negative``,
-    ``:not_positive`` and ``:not_a_number``, and one bad number reported twice is the mislabelling
-    :data:`FALLBACK_REASONS` was split apart to end.
+    **T-223 closed that here, at the exchange door only; T-250 moved the threshold into
+    :func:`contracts.boundary.price_reasons` itself**, where the TypeScript peer and every other
+    consumer of the shared boundary reach it too. So this function no longer REPORTS anything —
+    reporting it here as well would name one bad price twice, which is the mislabelling
+    :data:`FALLBACK_REASONS` was split apart to end. What is left is the one job the boundary
+    cannot do from where it sits: answering :func:`_is_judged`, which decides whether the boundary
+    is consulted about this offer *at all*. R10 requires an undeclared undercut on an
+    unauthorized row to be ADMITTED, so silence is normally an abstention here — and a price under
+    the floor is the case where it must not be.
 
-    Empty, as :func:`_priced_at_nothing` is, when the roster cannot price the product above zero:
-    there is no proportion to take of a list price that is missing, zero or unreadable. The row
-    that reaches that state through the exchange's own door is refused before it gets here —
+    The threshold comes from :func:`contracts.boundary.price_floor` rather than from a copy kept
+    in this module, so the door and the boundary behind it cannot drift to two different floors.
+
+    ``False``, as :func:`_priced_at_nothing` is, when the roster cannot price the product above
+    zero: there is no proportion to take of a list price that is missing, zero or unreadable. The
+    row that reaches that state through the exchange's own door is refused before it gets here —
     ``RosterEntry.list_price`` is ``Field(gt=0.0)``.
     """
     listed = _number(rostered.get("list_price"))
     if listed is None or listed <= 0.0 or not isinstance(offer, Mapping):
-        return []
-    floor = _price_floor(listed)
-    reasons: list[str] = []
-    for site, key in (
-        (OFFER_UNIT_PRICE_SITE, "unit_price"),
-        (OFFER_TOTAL_PRICE_SITE, "total_price"),
-    ):
+        return False
+    floor = price_floor(listed)
+    for key in ("unit_price", "total_price"):
         priced = _number(offer.get(key))
         if priced is not None and 0.0 < priced < floor:
-            reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{site}:{PRICE_BELOW_FLOOR_REASON}")
-    return reasons
+            return True
+    return False
 
 
 def _price_is_unreadable(offer: Any) -> bool:
@@ -554,7 +527,7 @@ def _is_judged(offer: Any, rostered: Mapping[str, Any]) -> bool:
         or _states_an_authorized_depth(rostered)
         or _priced_at_nothing(offer, rostered)
         or _price_is_unreadable(offer)
-        or bool(_below_the_price_floor(offer, rostered))
+        or _below_the_price_floor(offer, rostered)
     )
 
 
@@ -575,18 +548,20 @@ def _price_refusal(bid: Mapping[str, Any], rostered: Mapping[str, Any]) -> list[
     the exchange to keep. That is the ONLY abstention left; it used to be "any offer that declares
     no discount", which admitted a 0.00 bid on a 100.00 product at the production door.
 
-    :func:`_below_the_price_floor`'s verdict is appended to the boundary's rather than replacing
-    it, because the boundary genuinely has nothing to say about this case: its own floor is an
-    exact equality at zero and every other relation it runs is an inequality against a depth the
-    request body supplies, so an offer of 0.001 under ``max_discount_pct: 100`` comes back ``[]``.
-    Appending keeps whatever else it did find — a price under an authorized depth is still
-    reported as one — and the refused store is represented at its list price either way.
+    The floor's own refusal is NOT appended here any more (T-250). It used to be, because the
+    boundary genuinely had nothing to say about a price of 0.001: its floor was an exact equality
+    at zero and every other relation it runs is an inequality against a depth the request body
+    supplies, so ``price_reasons`` came back ``[]`` under ``max_discount_pct: 100``. The threshold
+    now lives in the boundary, which names the refusal itself
+    (:data:`contracts.boundary.ROSTER_PRICE_BELOW_FLOOR`), so appending a second copy would report
+    one bad price twice. :func:`_below_the_price_floor` still gates :func:`_is_judged` above — that
+    is the part the boundary cannot do from where it sits — and the refused store is represented at
+    its list price exactly as before.
     """
     offer = bid.get("offer")
     if not _is_judged(offer, rostered):
         return []
     refused = price_reasons(bid, list_prices={rostered.get("product_ref"): rostered})
-    refused.extend(_below_the_price_floor(offer, rostered))
     if refused or isinstance(offer, Mapping):
         return refused
     # The boundary read no offer here, so it said nothing — and nothing means "no refusal".

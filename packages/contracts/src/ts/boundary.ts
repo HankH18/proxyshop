@@ -155,6 +155,61 @@ export const ROSTER_MAX_DISCOUNT_UNREADABLE = "unreadable_authorized_depth";
  */
 export const ROSTER_PRICE_NOT_POSITIVE = "not_positive";
 
+/**
+ * The same floor one keystroke over: the offer's price clears zero and nothing else. Kept apart
+ * from `ROSTER_PRICE_NOT_POSITIVE` deliberately, because they say different things to the operator
+ * reading a rejection: `not_positive` is "this is not a number a price can be" and this is "this is
+ * a number, and it is not enough of one". A price that is zero, negative or unreadable keeps this
+ * boundary's own name for that and never also collects this one — one bad number reported under
+ * two names is a mislabelling, not a second finding. Identical to the Python peer's constant.
+ */
+export const ROSTER_PRICE_BELOW_FLOOR = "below_price_floor";
+
+/**
+ * The smallest amount of money a price is allowed to name — one minor unit of the currency the
+ * exchange prices in. A number under this is not a cheap price, it is a price nobody can pay: no
+ * settlement rail moves 0.001, and 1e-09 is nine orders of magnitude under the smallest coin there
+ * is. It is the ABSOLUTE half of `priceFloor` and it is what makes the floor bite on a cheap
+ * product, where a percentage of the list price is itself a fraction of a cent. Identical to the
+ * Python peer's constant.
+ */
+export const MINIMUM_PAYABLE_AMOUNT = 0.01;
+
+/**
+ * ...and the PROPORTIONAL half, as a fraction of the roster row's own list price, which is what
+ * makes the floor bite on an expensive one: 0.02 on a product listed at 1,000,000.00 is a payable
+ * amount and still not a price for it.
+ *
+ * Why 0.1% and not something stricter: the frozen R10 contract pins how far this may go. The
+ * exchange's `test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized` asserts
+ * that 99.00, 80.00 and 1.00 are all admitted on a row listing at 100.00 with no authorized depth,
+ * so any floor at or above 1.00 on that row breaks a standing assertion — the ceiling on this
+ * constant is therefore 1%, and 0.1% takes it with an order of magnitude of margin while still
+ * refusing 0.001 and 1e-09. Identical to the Python peer's constant.
+ */
+export const PRICE_FLOOR_FRACTION = 0.001;
+
+/**
+ * The lowest number that is still a price for a product the roster lists at `listed`.
+ *
+ * Both halves at once — the larger of the proportional floor and one minor currency unit — because
+ * each covers the case the other misses. On a 100.00 product the proportional half dominates
+ * (0.10); on a 0.50 product the absolute half does (0.01, where 0.1% would be five thousandths of
+ * a cent and would refuse nothing). The absolute half is dropped, not clamped, where the roster
+ * itself lists the product below one minor unit: a catalog genuinely pricing something at 0.005 is
+ * not describing a giveaway, and a floor above its own list price would refuse every bid on it —
+ * closed rather than fail-closed.
+ *
+ * The line-for-line peer of `price_floor` in `contracts/boundary.py`. The two doors must round the
+ * same way or the shared price-parity corpus reports a divergence, which is exactly what it is for.
+ */
+export function priceFloor(listed: number): number {
+  const proportional = listed * PRICE_FLOOR_FRACTION;
+  return listed >= MINIMUM_PAYABLE_AMOUNT
+    ? Math.max(proportional, MINIMUM_PAYABLE_AMOUNT)
+    : proportional;
+}
+
 export interface TrustSnapshotRow {
   store_id?: string;
   score?: number;
@@ -643,14 +698,31 @@ function priceReasonsFor(
   //
   // Deliberately `rostered`, never `listed`: a carried claim must not switch this on, or the
   // emitter would choose its own floor and every no-roster verdict would stop being identical.
-  // Exactly zero only — a negative price is already `:negative` above.
+  //
+  // And it is a THRESHOLD, not an equality. It was written `priced === 0`, which has exactly one
+  // satisfying value while every other relation here is an inequality against a caller-supplied
+  // depth — so the floor was one keystroke wide, and the answer to it was to write `0.001` instead
+  // of `0`. Measured on the Python peer at HEAD, roster `{'prod-1': 100.0}` with a cap of 100:
+  // `priceReasons(bid(0.001, depth=100))` and `priceReasons(bid(1e-09))` both came back `[]` —
+  // this boundary saying it has no objection to a 99.999% undercut on a 100.00 product. See
+  // `priceFloor` for the number and for why it cannot be tighter.
+  //
+  // The two refusals are kept apart and never both reported for one price: `not_positive` is "this
+  // is not a number a price can be" (exactly zero — a negative price is already `:negative` above)
+  // and `below_price_floor` is "this is a number, and it is not enough of one".
   if (rostered.listed !== undefined && rostered.listed > 0) {
+    const floor = priceFloor(rostered.listed);
     for (const [site, priced] of [
       [OFFER_UNIT_PRICE_SITE, unitPrice],
       [OFFER_TOTAL_PRICE_SITE, totalPrice],
     ] as const) {
-      if (priced !== undefined && priced === 0) {
+      if (priced === undefined) {
+        continue;
+      }
+      if (priced === 0) {
         reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_PRICE_NOT_POSITIVE}`);
+      } else if (priced > 0 && priced < floor) {
+        reasons.push(`${REASON_PRICE_UNRECONCILABLE}:${site}:${ROSTER_PRICE_BELOW_FLOOR}`);
       }
     }
   }

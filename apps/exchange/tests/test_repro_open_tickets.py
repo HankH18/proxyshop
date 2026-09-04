@@ -603,16 +603,6 @@ def _t250_bid(price: float, depth: float | None = None) -> dict[str, Any]:
     return {"auction_id": "auc-1", "store_id": "store-1", "offer": offer, "claims": []}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-250: packages/contracts/src/boundary.py's roster price floor tests `priced == 0.0`, "
-        "an EXACT equality, so price_reasons() returns [] — no objection — for a unit_price of "
-        "0.001 on a product its own roster prices at 100.00; a sibling lane closed this at the "
-        "exchange door only, and the shared boundary every other consumer runs on, including "
-        "the TypeScript peer, still carries the equality; remove this marker with the fix"
-    ),
-)
 def test_t250_the_shared_boundary_refuses_a_thousandth_of_a_cent_for_a_hundred_dollar_product() -> (
     None
 ):
