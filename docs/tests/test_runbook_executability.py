@@ -423,6 +423,24 @@ def _strip_redirects(toks: list[str]) -> list[str]:
     return out
 
 
+_BASH_C = re.compile(
+    r"^(?:[\w./-]*/)?(?:bash|sh|zsh)\s+(?:-\w+\s+)*-c\s+(?P<q>['\"])(?P<script>.+)(?P=q)\s*$"
+)
+
+
+def _expand_inline_script(piece: str) -> list[str]:
+    """``bash -c 'make check && make demo-seed'`` becomes the two commands it actually runs.
+
+    Grading the wrapper instead of its contents left the inner commands ungraded while the raw
+    text still named them, which reddened the cross-check on a perfectly legitimate line — and,
+    worse, would have let a real step hide inside a quoted string.
+    """
+    m = _BASH_C.match(piece.strip())
+    if not m:
+        return [piece]
+    return _split_chain(m.group("script")) or [piece]
+
+
 def extract_commands(path: Path) -> tuple[list[Command], list[Block]]:
     """Every command a runbook instructs an operator to run, derived from the document.
 
@@ -442,9 +460,10 @@ def extract_commands(path: Path) -> tuple[list[Command], list[Block]]:
             continue
         for lineno, span, line in _logical_lines(block.lines, block.lang in PROMPT_LANGS):
             for piece in _split_chain(line):
-                commands.append(
-                    Command(text=piece, doc=doc, lineno=lineno, kind="shell", span=span)
-                )
+                for sub in _expand_inline_script(piece):
+                    commands.append(
+                        Command(text=sub, doc=doc, lineno=lineno, kind="shell", span=span)
+                    )
 
     prose = _mask_fences(text, blocks)
     for hit in _INLINE_MAKE.finditer(prose):
@@ -579,10 +598,43 @@ def parse_makefile(path: Path) -> dict[str, Rule]:
     }
 
 
-_RECIPE_PATH = re.compile(r"(?<![\w-])((?:\.{1,2}/)?(?:[\w.-]+/)*[\w.-]+\.(?:sh|py))(?![\w])")
+#: Any REPO-RELATIVE path a recipe names, whatever its extension. Restricting this to ``.sh``
+#: and ``.py`` left every other program a recipe invokes ungraded, and six one-line recipe edits
+#: — ``@node docs/demo/e2e_live.js``, ``@bash …e2e_live.sh && ./scripts/e2e_live_extra`` — turned
+#: a target that dies with exit 2 into a green gate without the runbook being touched at all.
+#: The lookbehind excludes absolute paths: ``/bin/bash`` is not a file in this repository.
+_RECIPE_PATH = re.compile(r"(?<![\w/.\-$])((?:\./)?(?:[\w.-]+/)+[\w.-]+|\./[\w.-]+)(?![\w/])")
 _RECIPE_MODULE = re.compile(r"-m\s+([A-Za-z_][\w.]*)")
-_RECIPE_SUBMAKE = re.compile(r"\$\(MAKE\)((?:\s+--?[\w-]+)*)\s+([A-Za-z0-9][\w.-]*)")
 _UNEXPANDED = re.compile(r"\$[({](?!MAKE[)}])(?P<name>[A-Za-z_][\w.]*)[)}]")
+
+#: Shell syntax and builtins, which name no program to resolve.
+_SHELL_WORDS = {
+    "echo", "cd", "exit", "true", "false", "set", "test", "read", "printf", "shift", "local",
+    "return", "eval", "trap", "unset", "export", "source", "wait", "umask", "ulimit", "times",
+    "[", "]", "[[", "]]", "{", "}", "(", ")", ":", "if", "then", "else", "elif", "fi", "for",
+    "while", "until", "do", "done", "case", "esac", "function", "&&", "||", "|",
+}  # fmt: skip
+
+
+def _recipe_chunks(recipe: str) -> list[list[str]]:
+    """Each command in a recipe, as a token list, split on newlines and shell separators."""
+    chunks: list[list[str]] = []
+    for line in recipe.split("\n"):
+        for chunk in re.split(r"&&|\|\||[;|]", line):
+            toks = chunk.split()
+            if toks:
+                chunks.append(toks)
+    return chunks
+
+
+def _recipe_head(toks: list[str]) -> str:
+    """The program a recipe chunk runs, past ``@``/``-`` prefixes and ``VAR=value`` settings."""
+    for idx, tok in enumerate(toks):
+        word = tok.lstrip("@-+") if idx == 0 else tok
+        if not word or _is_assignment(word):
+            continue
+        return word.strip("\"'")
+    return ""
 
 
 def _undefined_program_vars(recipe: str) -> list[str]:
@@ -662,10 +714,13 @@ def check_make_target(target: str, seen: set[str] | None = None) -> tuple[bool, 
         if rel.startswith(".venv/") or "/.venv/" in token:
             continue  # provisioned environment, not a repo artefact
         path = REPO_ROOT / rel
-        if not path.is_file():
+        if not path.exists():
             problems.append(
                 f"recipe for `{target}` invokes {rel}, which does not exist in the repo"
             )
+            continue
+        if rel.endswith((".sh", ".py")) and not path.is_file():
+            problems.append(f"recipe for `{target}` invokes {rel}, which is not a file")
             continue
         prev = _preceding_token(rule.recipe, token)
         if not (prev and _is_interpreter(prev)) and not os.access(path, os.X_OK):
@@ -680,10 +735,45 @@ def check_make_target(target: str, seen: set[str] | None = None) -> tuple[bool, 
             if not ok:
                 problems.append(f"recipe for `{target}` runs `-m {module}`, which {why}")
 
-    for _flags, sub in _RECIPE_SUBMAKE.findall(rule.recipe):
-        ok, sub_problems = check_make_target(sub, seen)
-        if not ok:
-            problems.extend(f"via `$(MAKE) {sub}`: {p}" for p in sub_problems)
+    # EVERY program the recipe runs, not just the two extensions this gate happens to parse.
+    # Grading only `.sh`/`.py` left `@node docs/demo/e2e_live.js`, `@proxyshop-live-runner`,
+    # `@docker compose run --rm no-such-service` and `${MAKE} does-not-exist` all unchecked —
+    # six one-line recipe edits that turned a target dying with exit 2 into a green gate without
+    # the runbook being touched, so the "E8 catches the other direction" argument cannot apply.
+    services: dict[str, list[str]] | None = None
+    for toks in _recipe_chunks(rule.recipe):
+        head = _recipe_head(toks)
+        if not head or head in _SHELL_WORDS or "/" in head:
+            continue  # shell syntax, or a repo path the scan above already graded
+        rest = toks[toks.index(head) + 1 :] if head in toks else toks[1:]
+        if re.fullmatch(r"\$[({]MAKE[)}]", head):
+            for sub in _positional_args(rest, _MAKE_VALUE_FLAGS):
+                if "=" in sub:
+                    continue
+                ok, sub_problems = check_make_target(sub, seen)
+                if not ok:
+                    problems.extend(f"via `$(MAKE) {sub}`: {p}" for p in sub_problems)
+            continue
+        if "$" in head:
+            continue  # an undefined program variable is reported by _undefined_program_vars
+        if head == "docker" and rest[:1] == ["compose"]:
+            if services is None:
+                services = _compose_services()[0]
+            named = _positional_args(
+                rest[1:], {"--profile", "-f", "--file", "-p", "--project-name"}
+            )
+            unknown = [t for t in named if t not in services and t not in _COMPOSE_WORDS]
+            if services and unknown:
+                problems.append(
+                    f"recipe for `{target}` runs `docker compose` against "
+                    f"{', '.join(unknown)}, which the merged compose config defines as no service"
+                )
+            continue
+        if not shutil.which(head):
+            problems.append(
+                f"recipe for `{target}` invokes `{head}`, which is neither a file in this "
+                f"repository nor a program on PATH, so this target cannot run as written"
+            )
 
     for prereq in dict.fromkeys(rule.prereqs):
         if prereq in rules:
@@ -1198,9 +1288,21 @@ def _raw_make_mentions(line: str, targets: set[str]) -> list[str]:
     spans = [(m.start(), m.end()) for m in _BACKTICK_SPAN.finditer(line)]
     out: list[str] = []
     for m in re.finditer(r"(?<![\w-])make\b", line, re.IGNORECASE):
-        at_start = line.strip().lower().startswith(("make ", "make\t"))
-        in_code = any(a < m.start() < b for a, b in spans)
-        if not (at_start or in_code):
+        # `make` must sit where a COMMAND sits, not merely at the start of the line. Requiring
+        # line-initial-or-backticked let `time make e2e-live`, `$ make e2e-live` and
+        # `cd "$REPO" && make e2e-live` vanish from this scan AND from the real parser at once
+        # (in a fence language the parser skips) — a full bypass. Accepting any position instead
+        # reads the English sentence "will make check pass" as a command. So: the text before it
+        # must be empty, a shell separator, a prompt, a backtick, or a wrapper word.
+        prefix = line[: m.start()].rstrip()
+        last = prefix.split()[-1] if prefix.split() else ""
+        command_position = (
+            not prefix
+            or prefix.endswith(("`", "&", "|", ";", "(", "{", "$", "%", ">"))
+            or last in _WRAPPERS
+            or last in {"time", "then", "else", "do", "&&", "||"}
+        )
+        if not (command_position or any(a < m.start() < b for a, b in spans)):
             continue
         # Consume flags (skipping the value of a value-taking one), collect target words, and
         # STOP at the first token that is neither. Scanning to end-of-line instead read
