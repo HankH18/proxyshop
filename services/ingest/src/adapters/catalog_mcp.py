@@ -136,6 +136,12 @@ def mcp_resource_url(shop: str, tool: str, cursor: str | None = None) -> str:
     There is no HTTP URL to point at, but a ``Source`` must name *what* was read and a
     ``known_hashes`` entry must be keyed on something that does not move between runs. A
     page's cursor is part of its identity, so it is in the URL.
+
+    Caveat worth knowing rather than engineering around: MCP cursors are opaque and a server
+    is free to rotate them between runs, in which case page two's key moves and its
+    ``FetchedResource.changed`` reads ``True`` on every run. Nothing downstream depends on
+    that — change detection for *products* is keyed on ``product:<product_id>``, which no
+    cursor touches, so the "unchanged content produces zero upserts" guarantee is unaffected.
     """
     suffix = f"?cursor={quote(str(cursor), safe='')}" if cursor else ""
     return f"mcp://{shop}/{tool}{suffix}"
@@ -714,7 +720,7 @@ class CatalogMCPAdapter:
             warnings.append(f"{fallback}: product URL carries credentials; ignored")
             return fallback
         host = (split.hostname or "").lower()
-        allowed = {h.lower() for h in (shop, *request.allowed_hosts) if h}
+        allowed = {str(h).lower() for h in (shop, *request.allowed_hosts) if h}
         if not host or not (host in allowed or any(host.endswith(f".{a}") for a in allowed)):
             warnings.append(f"{fallback}: product URL host {host!r} is not this store's; ignored")
             return fallback
