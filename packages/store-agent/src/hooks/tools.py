@@ -28,6 +28,7 @@ byte-for-byte from its inputs (S4) and what lets the whole suite run offline.
 from __future__ import annotations
 
 import math
+import threading
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -221,40 +222,67 @@ class _AdmissionLedger:
     ledger were a plain set, "one grant is spendable once" would silently become "this *depth* is
     spendable once per bid", and calling the hook a second time would buy nothing. Counting keeps
     the sentence true as written: N authorizations, N spends.
+
+    **"N authorizations, N spends" is an exactly-once property, so every mutation below is
+    atomic.** `spend` used to test `_spent[fp] >= _emitted[fp]` and then increment `_spent`, with
+    nothing holding the two halves together — the same check-then-set shape as the replay
+    defence in `external/nonces.py` (T-234), on the same kind of claim. Two callers redeeming
+    the same fingerprint concurrently could both pass the test before either incremented,
+    double-spending one discount grant across two offers, which is precisely what R8's
+    exactly-once argument above exists to make impossible. `ToolHooks` documents a facade REUSED
+    across auctions and nothing here enforces a single thread, so "the GIL happens to serialize
+    it" is a scheduler accident rather than a defence. The lock costs an uncontended acquire per
+    hook call and removes the question.
     """
 
-    __slots__ = ("_emitted", "_spent")
+    __slots__ = ("_emitted", "_lock", "_spent")
 
     def __init__(self) -> None:
         self._emitted: Counter[str] = Counter()
         self._spent: Counter[str] = Counter()
+        #: Guards every read-modify-write and every snapshot of the two counters above.
+        self._lock = threading.RLock()
 
     def record(self, fingerprint: str) -> None:
-        self._emitted[fingerprint] += 1
+        with self._lock:
+            self._emitted[fingerprint] += 1
 
     def spend(self, fingerprint: str) -> bool:
-        """Redeem one emission. False when every emission of it has already been redeemed."""
-        if self._spent[fingerprint] >= self._emitted[fingerprint]:
-            return False
-        self._spent[fingerprint] += 1
-        return True
+        """Redeem one emission. False when every emission of it has already been redeemed.
+
+        The test and the increment are one critical section: redeeming a grant is a single
+        decision, not a question followed by an unrelated write.
+        """
+        with self._lock:
+            if self._spent[fingerprint] >= self._emitted[fingerprint]:
+                return False
+            self._spent[fingerprint] += 1
+            return True
 
     def remaining(self, fingerprint: str) -> int:
         """How many emissions of `fingerprint` are still unspent."""
-        return max(0, self._emitted[fingerprint] - self._spent[fingerprint])
+        with self._lock:
+            return max(0, self._emitted[fingerprint] - self._spent[fingerprint])
 
     @property
     def emitted(self) -> frozenset[str]:
-        return frozenset(self._emitted)
+        with self._lock:
+            return frozenset(self._emitted)
 
     @property
     def spent(self) -> frozenset[str]:
-        """Fingerprints with no unspent emission left — what the boundary refuses as spent."""
-        return frozenset(
-            fingerprint
-            for fingerprint, count in self._emitted.items()
-            if self._spent[fingerprint] >= count
-        )
+        """Fingerprints with no unspent emission left — what the boundary refuses as spent.
+
+        Taken under the lock: it iterates `_emitted` while reading `_spent`, so a concurrent
+        `record` would otherwise be free to raise `RuntimeError: dictionary changed size during
+        iteration` out of a property the refusal path reads.
+        """
+        with self._lock:
+            return frozenset(
+                fingerprint
+                for fingerprint, count in self._emitted.items()
+                if self._spent[fingerprint] >= count
+            )
 
 
 class ToolHooks:
