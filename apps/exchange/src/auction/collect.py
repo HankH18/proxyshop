@@ -404,7 +404,20 @@ def _priced_at_nothing(offer: Any, rostered: Mapping[str, Any]) -> bool:
     are kept apart because they report differently: this one lets the boundary name the price
     ``:not_positive`` or ``:negative`` in its own vocabulary, and that one has a name of its own.
     """
-    listed = _number(rostered.get("list_price"))
+    stated = rostered.get("list_price")
+    listed = _number(stated)
+    if listed is None and stated is not None:
+        # PRESENT BUT UNREADABLE is a caller asserting something the exchange cannot read, and it
+        # is not the same statement as naming no price at all. Collapsing the two is what let a
+        # rung-2 verifier mint a free item: `list_price: 1e400` is legal JSON, `inf > 0.0` is True
+        # so `Field(gt=0.0)` admitted it, `_number` then excluded it as non-finite, and BOTH price
+        # guards took this early-out — so the entire wall switched off on the row, while the
+        # catalog fallback minted a rankable 0.00 that was the CHEAPEST offer in the auction and
+        # therefore WON. Refusing here keeps the wall on without changing what price is minted:
+        # the row reports through the boundary's existing `:not_positive` vocabulary rather than
+        # being ranked. Presence-not-readability is `_states_an_authorized_depth`'s own rule,
+        # applied to the field on the other side of the same wall.
+        return True
     if listed is None or listed <= 0.0:
         return False
     if not isinstance(offer, Mapping):

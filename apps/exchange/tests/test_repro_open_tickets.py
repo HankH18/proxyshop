@@ -44,7 +44,11 @@ EXCHANGE_SRC = Path(__file__).resolve().parents[1] / "src"
 #: The published exchange contract. It is the *specification* of the served surface, which is
 #: what makes a path it declares and the app does not serve a defect rather than a preference.
 EXCHANGE_OPENAPI = (
-    Path(__file__).resolve().parents[3] / "packages" / "contracts" / "openapi" / "exchange.openapi.json"
+    Path(__file__).resolve().parents[3]
+    / "packages"
+    / "contracts"
+    / "openapi"
+    / "exchange.openapi.json"
 )
 
 
@@ -251,6 +255,7 @@ def test_t170_the_served_exchange_app_exposes_the_published_accept_path() -> Non
 # =====================================================================================
 # T-204 — `denial_reason` is a persisted, client-visible field with no vocabulary
 # =====================================================================================
+
 
 #: A bid whose offer is on the seller's own domain, so nothing refuses it for an unrelated
 #: reason. Rebuilt per test: ``accept()`` MUTATES the auction it is handed (``accepted_bid_ref``).
@@ -545,7 +550,9 @@ def test_t235_a_successful_checkout_emits_the_published_code_created_body() -> N
         "redirect",
         registered_domains=StaticRegisteredDomains({"store-a": "store-a.example.com"}),
     )
-    assert result.accepted is True, f"premise moved: the accept was refused ({result.denial_reason})"
+    assert result.accepted is True, (
+        f"premise moved: the accept was refused ({result.denial_reason})"
+    )
 
     created = [event for event in result.events if event["kind"] == "code_created"]
     assert len(created) == 1, [event["kind"] for event in result.events]

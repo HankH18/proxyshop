@@ -149,7 +149,15 @@ class RosterEntry(BaseModel):
     #: ``ge``: a caller that cannot price a product cannot auction it, and "prices it at nothing"
     #: is not a different statement from "does not price it". That zero was also the switch that
     #: turned the price wall off entirely on the row carrying it — see the class docstring.
-    list_price: float = Field(gt=0.0)
+    #: ``allow_inf_nan=False`` is load-bearing and was added after a rung-2 verifier drove a free
+    #: item through this field. ``gt=0.0`` does NOT refuse ``+inf``: ``inf > 0.0`` is ``True``, and
+    #: ``1e400`` is legal RFC-8259 JSON needing no malformed body and no lenient parser. An ``inf``
+    #: row then read as UNREADABLE everywhere downstream — ``_number`` excludes non-finite by
+    #: design — so ``_below_the_price_floor`` and ``_priced_at_nothing`` both took their
+    #: ``listed is None`` early-out and the entire price wall switched off on that row, while
+    #: ``_list_price_bid`` minted a rankable ``0.00``. That is T-224's own reproduction reached
+    #: through a field T-224 was supposed to have closed.
+    list_price: float = Field(gt=0.0, allow_inf_nan=False)
     #: The deepest percentage discount the caller states is authorized on this product — the
     #: policy `Envelope`'s own spelling. Optional, and its absence is not permissive: a bid
     #: DECLARING a discount on a row that authorizes none is refused and falls back to the list

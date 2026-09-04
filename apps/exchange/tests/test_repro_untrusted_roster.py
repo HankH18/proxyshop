@@ -433,3 +433,52 @@ def test_t224_the_door_refuses_a_zero_list_price_the_same_way_it_refuses_a_missi
     priced = _post(UNCAPPED_ROW, None)
     assert priced.status_code == 201, priced.text
     assert priced.json()["entries"][0]["unit_price"] == 100.0
+
+
+# ======================================================================================
+# F1 — a non-finite list price re-opened T-223 AND T-224 through the real door
+# ======================================================================================
+def test_a_non_finite_roster_list_price_is_refused_at_the_door() -> None:
+    """``1e400`` is legal RFC-8259 JSON and ``inf > 0.0`` is ``True``.
+
+    So ``Field(gt=0.0)`` accepted it, ``_number`` then excluded it as non-finite, and every
+    downstream guard took its ``listed is None`` early-out — switching the entire price wall
+    off on that row. Found by a rung-2 adversarial verifier, not by this suite.
+    """
+    from exchange.auction.routes import RosterEntry
+    from pydantic import ValidationError
+
+    for hostile in (float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValidationError):
+            RosterEntry(store_id="s1", product_ref="p1", list_price=hostile, tier=1)
+
+    assert (
+        RosterEntry(store_id="s1", product_ref="p1", list_price=100.0, tier=1).list_price == 100.0
+    )
+
+
+def test_an_unreadable_roster_list_price_keeps_the_price_wall_on() -> None:
+    """The library path, which no door validates — and where the fail-open actually lived.
+
+    Both price guards opened with ``if listed is None or listed <= 0.0: return []``, and
+    ``_number`` returns ``None`` for a non-finite or non-numeric list price. So a row the caller
+    priced at ``inf`` switched the ENTIRE wall off, and an underpriced bid on that row was
+    admitted at its stated price rather than refused.
+
+    PRESENT-BUT-UNREADABLE is now distinguished from ABSENT: the former is a caller asserting
+    something the exchange cannot read, and it keeps the wall on. The latter keeps its historical
+    behaviour, which the assertion at the end of this test pins so the distinction cannot quietly
+    collapse back into one case.
+    """
+    for hostile in (float("inf"), float("nan"), "cheap", True):
+        entry = _collect(
+            [dict(UNCAPPED_ROW, list_price=hostile)],
+            [_reply({"unit_price": 1e-09, "total_price": 1e-09})],
+        )[0]
+        assert entry.fallback is True, (
+            f"list_price={hostile!r} admitted a 1e-09 bid at its stated price: an unreadable "
+            f"catalog price switched the price wall off on the row carrying it"
+        )
+
+    absent = _collect([{k: v for k, v in UNCAPPED_ROW.items() if k != "list_price"}], [])[0]
+    assert absent.unit_price == 0.0
