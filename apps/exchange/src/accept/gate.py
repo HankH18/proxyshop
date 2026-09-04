@@ -27,7 +27,6 @@ from typing import Any
 from ..checkout import DEFAULT_CHECKOUT_MODE
 from ..eligibility import (
     ELIGIBLE,
-    UNAVAILABLE,
     EligibilityDecision,
     read_eligibility,
     speaks_supported_interface,
@@ -39,25 +38,42 @@ from ..eligibility import (
 # lookup" — which is how this gate first shipped, and how it failed: every accept through it
 # was refused with "exposes neither domain_for(store_id) nor __call__(store_id)".
 from .offer import _UNSET, AcceptResult, _read, _refused, accept, next_slot
+from .reasons import (
+    DENIAL_REASONS,
+    DENIAL_UNAVAILABLE,
+    denial_code,
+    denial_reason,
+    describe,
+)
 
 __all__ = ["accept_offer"]
 
 
 def _denial_reason(decision: EligibilityDecision) -> str:
-    """The recorded reason, guaranteed to name the condition itself.
+    """The recorded reason, guaranteed to begin with a **declared** denial code (T-204).
 
     The status word goes at the front rather than being left to the source's prose: an
     eligibility backend that answers ``BLACKLISTED`` with an empty reason — or with one in
     another language — must still produce a refusal an auditor can classify. This mirrors
     ``orchestration.solicitation._denial`` deliberately; two gates that describe the same
     condition differently are two policies wearing one name.
+
+    The prefix test is now an exact match on the declared code rather than a case-insensitive
+    ``startswith`` on the status word, and that is the T-204 repair: a source answering
+    ``BLACKLISTED`` with the reason ``"Blacklisted for chargeback fraud"`` used to be passed
+    through untouched, which put ``"Blacklisted for chargeback fraud"`` — the whole sentence —
+    where the vocabulary term belongs, because nothing after it was a colon. It now reads
+    ``blacklisted: Blacklisted for chargeback fraud``: one declared token, then the source's
+    own words. A status this exchange does not speak degrades to ``unavailable``, which is
+    the same fail-closed answer ``read_eligibility`` already gives it.
     """
     reason = (decision.reason or "").strip()
+    code = decision.status if decision.status in DENIAL_REASONS else DENIAL_UNAVAILABLE
     if not reason:
-        return decision.status
-    if reason.lower().startswith(decision.status.lower()):
+        return code
+    if denial_code(reason) == code:
         return reason
-    return f"{decision.status}: {reason}"
+    return denial_reason(code, reason)
 
 
 def accept_offer(
@@ -108,9 +124,15 @@ def accept_offer(
             auction,
             ref,
             mode,
-            f"{UNAVAILABLE}: the eligibility source speaks interface version {declared!r}, "
-            f"which this exchange does not support; refusing to create a discount code for "
-            f"{store_id!r} against an interface it cannot read",
+            denial_reason(
+                DENIAL_UNAVAILABLE,
+                # `describe`, not `{declared!r}`: `interface_version` is whatever the injected
+                # source put there, and an object with the default `__repr__` would render a
+                # memory address into a persisted, client-visible payload (T-264).
+                f"the eligibility source speaks interface version {describe(declared)}, which "
+                f"this exchange does not support; refusing to create a discount code for "
+                f"{store_id!r} against an interface it cannot read",
+            ),
             store_id=store_id,
             reoffer_bid_ref=next_slot(auction, ref),
         )

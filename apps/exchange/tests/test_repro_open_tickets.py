@@ -309,15 +309,6 @@ def _declared_denial_vocabulary() -> tuple[str, set[str]] | None:
     return None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-204: denial_reason is persisted into a policy_event payload and published as a bare "
-        "string, but its vocabulary is whatever `type(exc).__name__` happens to be — six "
-        "distinct leading tokens today, one of which renders a memory address; no enum and no "
-        "exported constant declares the set; remove this marker with the fix"
-    ),
-)
 def test_t204_a_denial_reason_is_drawn_from_a_declared_vocabulary() -> None:
     """A client-visible, persisted field whose values are exception class names is a contract
     by accident.

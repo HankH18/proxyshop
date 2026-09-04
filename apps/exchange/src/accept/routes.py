@@ -80,6 +80,12 @@ from ..eligibility import StaticSellerEligibility
 from ._spellings import bind_spellings
 from .gate import accept_offer
 from .offer import use_registered_domains
+from .reasons import (
+    DENIAL_AUCTION_NOT_ACCEPTABLE,
+    DENIAL_UNSPECIFIED,
+    denial_code,
+    denial_reason,
+)
 
 __all__ = [
     "AcceptBidRequest",
@@ -263,10 +269,23 @@ def _checkout_mode(request: Request) -> str:
 
 
 def _denied(reason: str) -> JSONResponse:
-    """The 409 body the contract publishes: ``{accepted, denial_reason}`` and nothing else."""
+    """The 409 body the contract publishes: ``{accepted, denial_reason}`` and nothing else.
+
+    This is where the declared vocabulary becomes a property of the **published surface**
+    rather than only of ``accept()`` (T-204). A reason arriving here with a code nothing
+    declares — a future refusal added elsewhere, an eligibility source's own prose that got
+    through — is re-published under ``unspecified`` with its words kept intact, so a client
+    parsing ``denial_reason`` never has to handle a token outside
+    :data:`~.reasons.DENIAL_REASONS`, and no diagnosis is thrown away to achieve that.
+    """
+    text = str(reason).strip()
+    if denial_code(text) is None:
+        text = denial_reason(
+            DENIAL_UNSPECIFIED, text or "the accept was refused and named no reason"
+        )
     return JSONResponse(
         status_code=409,
-        content=AcceptDeniedResponse(accepted=False, denial_reason=reason).model_dump(),
+        content=AcceptDeniedResponse(accepted=False, denial_reason=text).model_dump(),
     )
 
 
@@ -302,8 +321,11 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     # refuse the second accept either. See the module docstring on what this does not close.
     if ACCEPTED not in TRANSITIONS.get(record.state, frozenset()):
         return _denied(
-            f"auction_not_acceptable: auction {auction_id!r} is {record.state!r}, from which "
-            f"{ACCEPTED!r} is not a legal move; no discount code is created for it"
+            denial_reason(
+                DENIAL_AUCTION_NOT_ACCEPTABLE,
+                f"auction {auction_id!r} is {record.state!r}, from which {ACCEPTED!r} is not "
+                f"a legal move; no discount code is created for it",
+            )
         )
 
     now = time.time()
@@ -331,7 +353,7 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if not result.accepted:
-        return _denied(str(result.denial_reason or "accept_refused: the accept was refused"))
+        return _denied(str(result.denial_reason or ""))
 
     try:
         machine.accept(auction_id, result.bid_ref, now=now)
@@ -339,8 +361,11 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
         # The auction moved between the legality check above and here — the T-158 window.
         # A code may already exist for it; `accept()` has filed the events that name it.
         return _denied(
-            f"auction_not_acceptable: auction {auction_id!r} could not be stamped as accepted "
-            f"({exc}); the acceptance is not recorded, so no permalink is returned"
+            denial_reason(
+                DENIAL_AUCTION_NOT_ACCEPTABLE,
+                f"auction {auction_id!r} could not be stamped as accepted ({exc}); the "
+                f"acceptance is not recorded, so no permalink is returned",
+            )
         )
 
     return AcceptedOfferResponse(permalink_url=str(result.permalink_url), code=result.code)
