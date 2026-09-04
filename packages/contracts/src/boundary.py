@@ -190,12 +190,65 @@ REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH = "discount_over_authorized_depth"
 #:   it. Alone among the suffixes here it is not a statement about reading the roster; it is the
 #:   one refusal in the whole price walk that no declared depth and no authorized cap can talk its
 #:   way out of. See the floor in `_price_reasons`.
+#: * `below_price_floor` — the same floor one keystroke over: the offer's price clears zero and
+#:   nothing else. Kept apart from `not_positive` deliberately, because they say different things
+#:   to the operator reading a rejection: `not_positive` is "this is not a number a price can be"
+#:   and this is "this is a number, and it is not enough of one". A price that is zero, negative
+#:   or unreadable keeps the boundary's own name for that and never also collects this one — one
+#:   bad number reported under two names is a mislabelling, not a second finding.
 ROSTER_LIST_PRICE_UNAVAILABLE = "list_price_unavailable"
 ROSTER_LIST_PRICE_UNREADABLE = "unreadable_roster_list_price"
 ROSTER_LIST_PRICE_CONTRADICTED = "list_price_contradicts_roster"
 ROSTER_MAX_DISCOUNT_UNAVAILABLE = "authorized_depth_unavailable"
 ROSTER_MAX_DISCOUNT_UNREADABLE = "unreadable_authorized_depth"
 ROSTER_PRICE_NOT_POSITIVE = "not_positive"
+ROSTER_PRICE_BELOW_FLOOR = "below_price_floor"
+
+#: The smallest amount of money a price is allowed to name — one minor unit of the currency the
+#: exchange prices in. A number under this is not a cheap price, it is a price nobody can pay: no
+#: settlement rail moves 0.001, and 1e-09 is nine orders of magnitude under the smallest coin
+#: there is. It is the ABSOLUTE half of :func:`price_floor` and it is what makes the floor bite on
+#: a cheap product, where a percentage of the list price is itself a fraction of a cent.
+MINIMUM_PAYABLE_AMOUNT = 0.01
+
+#: ...and the PROPORTIONAL half, as a fraction of the roster row's own list price, which is what
+#: makes the floor bite on an expensive one: 0.02 on a product listed at 1,000,000.00 is a payable
+#: amount and still not a price for it.
+#:
+#: **Why 0.1% and not something stricter.** The frozen R10 contract pins how far this may go.
+#: ``apps/exchange/tests/test_auction_price_wall.py``'s
+#: ``test_r10_still_admits_an_undeclared_undercut_where_nothing_is_authorized`` asserts that
+#: 99.00, 80.00 **and 1.00** are all admitted on a row listing at 100.00 with no authorized depth,
+#: so any floor at or above 1.00 on that row breaks a standing assertion — the ceiling on this
+#: constant is therefore 1%, and 0.1% takes it with an order of magnitude of margin while still
+#: refusing the 0.001 and the 1e-09 that were measured through the real door. Everything between
+#: the floor and the roster's own cap remains the caller's word.
+PRICE_FLOOR_FRACTION = 0.001
+
+
+def price_floor(listed: float) -> float:
+    """The lowest number that is still a price for a product the roster lists at `listed`.
+
+    Both halves at once — `max` of the proportional floor and one minor currency unit — because
+    each covers the case the other misses. On a 100.00 product the proportional half dominates
+    (0.10); on a 0.50 product the absolute half does (0.01, where 0.1% would be five thousandths
+    of a cent and would refuse nothing). The absolute half is dropped, not clamped, where the
+    roster itself lists the product below one minor unit: a catalog genuinely pricing something at
+    0.005 is not describing a giveaway, and a floor above its own list price would refuse every
+    bid on it — closed rather than fail-closed, which is the failure mode this wall's positive
+    controls exist to catch.
+
+    Public because it is the SHARED number. The exchange's own door
+    (`apps/exchange/src/auction/collect.py`) reaches the floor a second time, to decide whether it
+    holds anything to judge an undeclared bid against at all, and it calls THIS function to get
+    the threshold rather than keeping a copy of the arithmetic — two implementations of a floor
+    are two things to keep in step, and a floor that differs between the shared boundary and the
+    door in front of it is the same defect this one replaced, wearing a different number.
+    """
+    floor = listed * PRICE_FLOOR_FRACTION
+    if listed >= MINIMUM_PAYABLE_AMOUNT:
+        floor = max(floor, MINIMUM_PAYABLE_AMOUNT)
+    return floor
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -809,15 +862,39 @@ def _price_reasons(
     # Deliberately `rostered`, never `listed`: a carried claim must not be able to switch this on,
     # both because the emitter would then choose its own floor and because every no-roster verdict
     # would stop being byte-identical — with no roster, `rostered` is `None` and this is dead code.
-    # And exactly zero only: a negative price is already `:negative` above, and one bad number
-    # reported twice is the reporting fault the fallback reasons were split apart to end.
+    #
+    # And it is a THRESHOLD, not an equality. It was written `priced == 0.0`, which has exactly one
+    # satisfying value while every other relation in this walk is an inequality against a
+    # caller-supplied depth — so the floor was one keystroke wide, and the answer to it was to
+    # write `0.001` instead of `0.0`. Measured on this function at HEAD, roster
+    # `{'prod-1': 100.0}` with `max_discount_pct=100.0`::
+    #
+    #     price_reasons(bid(0.001, depth=100.0))  ->  []
+    #     price_reasons(bid(1e-09))               ->  []
+    #     price_reasons(bid(0.0,   depth=100.0))  ->  [...:not_positive, ...:not_positive]
+    #
+    # An empty reason list is this boundary saying it has no objection, so the wall refused the
+    # absence of a price spelled `0.0` and admitted the same absence spelled `0.001` — a
+    # 99.999% undercut ranked as a winning consideration for a product the roster prices at
+    # 100.00. `price_floor` is the number and carries the argument for why it cannot be tighter.
+    #
+    # The two refusals are kept apart and never both reported for one price: `not_positive` is
+    # "this is not a number a price can be" (exactly zero — a negative price is already `:negative`
+    # above) and `below_price_floor` is "this is a number, and it is not enough of one". One bad
+    # number reported under two names is the reporting fault the fallback reasons were split apart
+    # to end, which is why the second test is `0.0 < priced` and not `priced < floor` alone.
     if rostered is not None and rostered > 0.0:
+        floor = price_floor(rostered)
         for site, priced in (
             (OFFER_UNIT_PRICE_SITE, unit_price),
             (OFFER_TOTAL_PRICE_SITE, total_price),
         ):
-            if priced is not None and priced == 0.0:
+            if priced is None:
+                continue
+            if priced == 0.0:
                 reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{site}:{ROSTER_PRICE_NOT_POSITIVE}")
+            elif 0.0 < priced < floor:
+                reasons.append(f"{REASON_PRICE_UNRECONCILABLE}:{site}:{ROSTER_PRICE_BELOW_FLOOR}")
 
     if listed is not None and unit_price + PRICE_RECONCILIATION_TOLERANCE < (
         listed * (100.0 - authorized) / 100.0
@@ -1081,12 +1158,14 @@ __all__ = [
     "HOSTED_PATH",
     "LIST_PRICE_CLAIM_KEY",
     "MAX_DISCOUNT_ROSTER_KEY",
+    "MINIMUM_PAYABLE_AMOUNT",
     "NON_HOOK_PROVENANCE_SOURCES",
     "OFFER_COMMITMENTS_SITE",
     "OFFER_DISCOUNT_SITE",
     "OFFER_TOTAL_PRICE_SITE",
     "OFFER_UNIT_PRICE_SITE",
     "PERCENTAGE_DISCOUNT_TYPES",
+    "PRICE_FLOOR_FRACTION",
     "PRICE_RECONCILIATION_TOLERANCE",
     "REASON_CLAIM_PROVENANCE_EMPTY_SOURCE",
     "REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE",
@@ -1110,8 +1189,10 @@ __all__ = [
     "ROSTER_LIST_PRICE_UNREADABLE",
     "ROSTER_MAX_DISCOUNT_UNAVAILABLE",
     "ROSTER_MAX_DISCOUNT_UNREADABLE",
+    "ROSTER_PRICE_BELOW_FLOOR",
     "ROSTER_PRICE_NOT_POSITIVE",
     "parse_timestamp",
+    "price_floor",
     "price_reasons",
     "validate_bid",
     "validate_external_submission",
