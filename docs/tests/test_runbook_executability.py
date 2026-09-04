@@ -68,9 +68,13 @@ never fired. The other two were a Makefile recipe naming a script with no direct
 (``@bash no_such_root.sh`` passed; ``@bash ./no_such_root.sh`` failed) and a command-position
 guard that was an exact-case allow-list of thirteen words while the ``make`` match beside it was
 ``IGNORECASE`` (``Then make e2e-live``, ``run make e2e-live``, ``- make e2e-live`` all silent;
-12 of 36 realistic positions were read). **All three were invisible to the exit code**, because a
-new FAIL lands inside the strict-xfail gate at the bottom of this file, which is already expected
-to fail — which is why the regression pins for them assert on the sweep's own output.
+12 of 36 realistic positions were read). **All three were invisible to the exit code** when they
+were found, because a new FAIL then landed inside a strict-xfail gate that was already expected
+to fail — which is why the regression pins for them assert on the SWEEP'S OWN OUTPUT rather than
+on the run's exit status. That indirection is deliberate and is kept: it is what made the three
+measurable at all, and it is what will make the next one measurable if this gate is ever put back
+under an xfail. Since ESC-018 step (b) the gate is a plain test at 17 PASS / 0 FAIL, so a broken
+step now also reddens an ordinary run on its own — belt as well as braces.
 
 **What this gate deliberately does NOT grade: semantics.** ``docs/demo/e2e_live.sh`` containing
 only ``exit 0`` resolves, and this file passes it. That is the correct boundary — what that
@@ -88,13 +92,14 @@ names ``make e2e-live``. This pins *executability* — that what it names resolv
 edited to stop naming a broken command satisfies this file and is caught by E8; a command named
 but broken satisfies E8 and is caught here.
 
-Mechanism, both directions (the ``test_repro_open_tickets.py`` idiom):
-
-* a normal run reports ``xfailed`` and exits 0, so ``make verify`` stays green;
-* the ticket's gate runs this file with ``--runxfail`` and gets a real ``1 failed``, whose
-  message names the broken step rather than only going red;
-* ``strict=True`` turns the eventual repair into an XPASS *failure*, so whoever writes
-  ``docs/demo/e2e_live.sh`` and ``e2e/test_s1_flow.py`` must delete the marker.
+**Mechanism.** This file landed under the ``test_repro_open_tickets.py`` idiom — a normal run
+reporting ``xfailed`` while the ticket's gate ran it with ``--runxfail`` — because the two steps
+it graded did not resolve. ESC-018 step (b) wrote ``docs/demo/e2e_live.sh`` and
+``e2e/test_s1_flow.py``, the sweep went to 17 PASS / 0 FAIL, and the marker was removed: a
+``strict=True`` xfail on a passing test is an XPASS failure, which is the same defect pointing the
+other way. So the gate is now an ordinary test and a command that stops resolving reddens
+``make verify`` directly. Put the marker back only alongside a measurement naming a command that
+does not resolve.
 
 This file writes the gate and nothing else — a lane that repairs the defect it was asked to
 reproduce destroys the gate that would have graded the repair. No ticket id is minted for this
@@ -112,11 +117,15 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# `import pytest` used to live here for the `@pytest.mark.xfail` on the gate below. Removing
-# that marker made this the file's only remaining use of the name, and ruff's F401 fails
-# `make verify` on a dead import — so it goes with the marker. Nothing else here needs pytest:
-# every check is a plain assertion, and the one pytest subprocess this file runs is spawned
-# through `sys.executable -m pytest`.
+# `import pytest` was here for the `@pytest.mark.xfail` on the gate below, and ESC-018 step (b)
+# removed BOTH together — correctly, since with the marker gone the import was dead and ruff's
+# F401 fails `make verify` on a dead import. It comes back because the name is live again for a
+# different reason: the regression pins added below use `pytest.mark.parametrize` and take
+# `pytest.MonkeyPatch`. That is worth a sentence rather than a silent re-add, because the two
+# changes merged CLEAN and produced a file that does not import — eight `pytest.` uses from one
+# side, no import from the other, no conflict marker anywhere, `NameError: name 'pytest' is not
+# defined` at collection. Git cannot see that; only running the file can.
+import pytest
 
 #: Repo root, reached from this file rather than from a hard-coded string so a moved test
 #: cannot silently start scanning nothing.
@@ -1866,11 +1875,14 @@ def test_the_runbook_command_sweep_is_armed() -> None:
 # Regression pins for three fail-opens this file shipped with
 #
 # Each of the three was measured on two disjoint copies of the repo, and each was INVISIBLE TO
-# THE EXIT CODE: a new FAIL lands inside the strict-xfail gate below, which is already expected
-# to fail, so the sweep could lose a whole step and the run still reported `1 failed` either way.
-# The tests here therefore assert on the sweep's own output rather than on the run's exit status,
-# and they grade FIXTURE documents under `tmp_path` — the real runbook belongs to another lane,
-# and a regression pin that needs the production document edited is a pin nobody can run.
+# THE EXIT CODE when found: a new FAIL landed inside the then-strict-xfail gate below, which was
+# already expected to fail, so the sweep could lose a whole step and the run still reported
+# `1 failed` either way. ESC-018 step (b) has since taken the sweep to 17 PASS / 0 FAIL and
+# removed that marker, so a fourth fail-open would now redden an ordinary run too — but these
+# tests still assert on the SWEEP'S OWN OUTPUT, because that is the property that does not depend
+# on whether the gate happens to be xfailed today, and the xfail is one measurement away from
+# coming back. They grade FIXTURE documents under `tmp_path`: the real runbook belongs to another
+# lane, and a regression pin that needs the production document edited is a pin nobody can run.
 # =====================================================================================
 
 
