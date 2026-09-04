@@ -1030,21 +1030,13 @@ def test_the_exchange_import_closure_probe_is_armed() -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-310: nothing the exchange app imports reaches exchange.ranking — "
-        "auction/routes.py:39-42 imports eligibility, orchestration, fanout and state and "
-        "nothing else, and no other served module names the package — so rank(), the hard "
-        "constraint filters and the shortlist builder are on no served path while "
-        "docs/demo/starting-slice.md 3.4 claims they run in the auction. READ THE DOCSTRING "
-        "BEFORE FIXING: the one-line wiring crashes the deployed image, because "
-        "exchange.ranking transitively imports `ingest`, which apps/exchange/Dockerfile does "
-        "not ship (T-299). Remove this marker with the fix"
-    ),
-)
 def test_t310_the_served_exchange_app_reaches_the_published_ranking() -> None:
-    """The ranker is fully built, fully tested, and imported by no running process.
+    """The ranker must be imported by the process that serves auctions.
+
+    **Everything below "Measured at HEAD" is the defect as it stood when this gate was
+    written, kept because a gate that forgets what it was for is a gate somebody deletes.**
+    It is no longer the present tense: the wiring landed with the removal of this test's
+    ``xfail`` marker, and the two paragraphs at the end say what replaced it.
 
     ``apps/exchange/src/ranking`` is T-032's deliverable: the published deterministic scoring
     formula, the hard-constraint eligibility filters, and the shortlist construction. It has
@@ -1087,27 +1079,35 @@ def test_t310_the_served_exchange_app_reaches_the_published_ranking() -> None:
     that imports it, an orchestration step that scores the fan-out — while today's tree, in
     which nothing on the served side names the package at all, cannot.
 
-    **Do not fix this with the one-line import until T-299 is fixed — it takes the exchange
-    DOWN.** Measured, not theorised. ``exchange.ranking.filters:39`` does
-    ``from ..retrieval.criteria import HardCriterion, MalformedIntent``, which executes
-    ``exchange.retrieval.__init__``, which imports ``sources``/``service``, which do
-    ``from ingest.graph import ...`` and ``from ingest.embeddings import ...`` at module
-    scope. So importing ``exchange.ranking`` pulls in eleven ``ingest.*`` modules. In the repo
-    that resolves, because ``.pkgroot/ingest`` is there. In the deployed image it does not:
-    ``apps/exchange/Dockerfile`` copies ``packages/contracts``, ``proxyshop_support`` and
-    ``apps/exchange/src`` and creates exactly two ``.pkgroot`` links (``contracts``,
-    ``exchange``) — no ``services/ingest`` and no ``ingest`` link. Reproduced against a tree
-    holding only what that Dockerfile copies::
+    **The image blocker this docstring used to end on is GONE, and the sentence is corrected
+    rather than deleted so nobody re-derives a phantom.** What was true until ``cf07eab``:
+    ``exchange.ranking.filters:39`` does ``from ..retrieval.criteria import HardCriterion,
+    MalformedIntent``, which executes ``exchange.retrieval.__init__``, which imports
+    ``sources``/``service``, which do ``from ingest.graph import ...`` and ``from
+    ingest.embeddings import ...`` at module scope — so importing ``exchange.ranking`` pulls
+    in eleven ``ingest.*`` modules, and ``apps/exchange/Dockerfile`` shipped no ``ingest``.
+    Wiring ranking in would have turned a booting service into a crash loop. **T-299 shipped
+    the library**: the Dockerfile now copies ``services/ingest/src/{__init__.py,graph/,
+    embeddings/}`` and creates the third ``.pkgroot`` link, and the artifact gate measures the
+    exchange at 0 broken modules of 79 by importing inside a real container. The one-line
+    wiring is safe.
 
-        import exchange.main; exchange.main.create_app()  -> APP BUILDS OK
-        import exchange.ranking                           -> ModuleNotFoundError: 'ingest'
-        import exchange.retrieval                         -> ModuleNotFoundError: 'ingest'
+    What the fix here actually is, since "one import line" would also have been the wrong
+    shape: ``exchange.ranking.serving`` resolves the ranker's collaborators off ``app.state``
+    with the same fail-closed defaults the auction route already uses (an empty trust snapshot
+    denies every store; no registered-domain source vouches for no checkout host),
+    ``exchange.ranking.candidates`` projects the auction's ``BidEntry`` objects into candidate
+    records by NAMING their fields — never passing a store's own bid through, which would let
+    a bidder write its own ``intent_match`` — and ``exchange.ranking.routes`` serves the
+    published ``GET /auctions/{auction_id}/shortlist``. ``POST /auctions`` ranks at close.
 
-    ``CMD uvicorn exchange.main:app`` builds the app at import time, so wiring ranking into a
-    served route module today would turn a service that boots and answers three paths into a
-    container that crash-loops on start. The gate stays as written — the defect is real and
-    the property is the right one — but the repair is "make ``ingest`` reachable from the
-    exchange image, or break ranking's dependency on it, THEN wire it", not one import line.
+    Neo4j is NOT in that path, and it was worth measuring rather than assuming: ``filters``
+    imports ``retrieval.criteria`` only, never ``retrieval.sources``/``service``, and
+    ``criteria`` reaches ``ingest.graph.model.slug`` and ``AttributeFilter`` — pure
+    in-process string folding and a frozen dataclass. Reproduced with a meta-path finder that
+    raises on any ``neo4j`` import and ``socket`` disabled: ``rank()`` ran to completion and
+    applied its R12/R19/C10 exclusions. A Neo4j session, the driver pin and ``NEO4J_*`` env
+    are what ``exchange.retrieval`` needs (T-260), not what this gate is about.
     """
     modules = _exchange_app_import_closure()
     ranking = sorted(name for name in modules if name.split(".")[:2] == ["exchange", "ranking"])
