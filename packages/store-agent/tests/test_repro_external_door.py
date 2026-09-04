@@ -571,7 +571,7 @@ def test_omitting_the_eligibility_inputs_is_not_more_permissive_than_passing_emp
     ),
 )
 def test_only_one_of_two_racing_callers_can_spend_the_same_nonce(monkeypatch) -> None:
-    """"Spend this nonce" must be atomic, or it is not a replay defence.
+    """ "Spend this nonce" must be atomic, or it is not a replay defence.
 
     ``consume`` reads::
 
