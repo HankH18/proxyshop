@@ -38,18 +38,43 @@ adversarial review. So a command is never simply skipped:
 * Only a command that names nothing checkable lands in the explicit ``UNCLASSIFIED`` bucket, and
   that bucket is **counted and printed** in the gate's own report. "I could not classify these
   three commands" is a fine outcome; not mentioning them is not.
+* And a *line* the parser declines to read at all — an unknown fence language, an unprompted line
+  inside a transcript, a comment — lands in the ``DROPPED`` bucket, which is likewise counted and
+  printed. Every non-blank line inside every fence leaves the parse as exactly one of a graded
+  command or a dropped line with a reason, and ``test_the_runbook_command_sweep_is_armed``
+  asserts that partition line by line. This is not decoration: the version of this file merged at
+  ``e57268e`` skipped an unreadable fence with a bare ``continue``, so relabelling one fence from
+  ` ```bash ` to ` ```console ` deleted a whole step from the sweep (17 commands became 16) and
+  pointing that step at a compose service that does not exist produced no failure at all.
 
 **Two independent parses, cross-checked — because enumerating markdown does not work.** Every
 rule that enumerated a *shape* a document may take became simultaneously a bypass and a false
 positive. Bounding fence indentation at three spaces (CommonMark measures it relative to the
 containing block) hid a fence at column 4 inside a list item *and* dropped legitimate nested
 fences. Allow-listing fence languages sanctioned hiding the procedure under ```` ```text ````
-*and* hard-failed on ```` ```plaintext ````. So fence indentation is unbounded and an unknown
-language is skipped, and the arming pin is instead ``test_the_parse_covers_the_raw_text``: a
-second, deliberately stupid scan of the raw bytes for every ``make`` target the **Makefile**
-defines, every ``*.sh`` token and every ``dir/file.py`` token, each of which must have produced a
-graded command on that line. A fence this parser cannot read is then a loud mismatch instead of a
-silent zero, and no fence rule has to be right for the gate to hold.
+*and* hard-failed on ```` ```plaintext ````. So fence indentation is unbounded; a line inside an
+unknown language is graded when its head names a program this gate classifies and DROPPED with a
+reason otherwise; and the arming pin is ``test_the_parse_covers_the_raw_text``: a second,
+deliberately stupid scan of the raw bytes for every ``make`` target the **Makefile** defines,
+every ``*.sh`` token, every ``dir/file.py`` token **and every ``docker compose`` invocation**,
+each of which must have produced a graded command on that line. A fence this parser cannot read
+is then a loud mismatch instead of a silent zero, and no fence rule has to be right for the gate
+to hold.
+
+The compose half of that scan is new, and its absence was the third of three measured fail-opens
+in the merged rewrite: the raw backstop knew about ``make``, ``*.sh`` and ``dir/*.py`` and about
+nothing else, so a re-fenced ``docker compose`` step was outside its vocabulary and the mismatch
+never fired. The other two were a Makefile recipe naming a script with no directory component
+(``@bash no_such_root.sh`` passed; ``@bash ./no_such_root.sh`` failed) and a command-position
+guard that was an exact-case allow-list of thirteen words while the ``make`` match beside it was
+``IGNORECASE`` (``Then make e2e-live``, ``run make e2e-live``, ``- make e2e-live`` all silent;
+12 of 36 realistic positions were read). **All three were invisible to the exit code** when they
+were found, because a new FAIL then landed inside a strict-xfail gate that was already expected
+to fail — which is why the regression pins for them assert on the SWEEP'S OWN OUTPUT rather than
+on the run's exit status. That indirection is deliberate and is kept: it is what made the three
+measurable at all, and it is what will make the next one measurable if this gate is ever put back
+under an xfail. Since ESC-018 step (b) the gate is a plain test at 17 PASS / 0 FAIL, so a broken
+step now also reddens an ordinary run on its own — belt as well as braces.
 
 **What this gate deliberately does NOT grade: semantics.** ``docs/demo/e2e_live.sh`` containing
 only ``exit 0`` resolves, and this file passes it. That is the correct boundary — what that
@@ -67,13 +92,14 @@ names ``make e2e-live``. This pins *executability* — that what it names resolv
 edited to stop naming a broken command satisfies this file and is caught by E8; a command named
 but broken satisfies E8 and is caught here.
 
-Mechanism, both directions (the ``test_repro_open_tickets.py`` idiom):
-
-* a normal run reports ``xfailed`` and exits 0, so ``make verify`` stays green;
-* the ticket's gate runs this file with ``--runxfail`` and gets a real ``1 failed``, whose
-  message names the broken step rather than only going red;
-* ``strict=True`` turns the eventual repair into an XPASS *failure*, so whoever writes
-  ``docs/demo/e2e_live.sh`` and ``e2e/test_s1_flow.py`` must delete the marker.
+**Mechanism.** This file landed under the ``test_repro_open_tickets.py`` idiom — a normal run
+reporting ``xfailed`` while the ticket's gate ran it with ``--runxfail`` — because the two steps
+it graded did not resolve. ESC-018 step (b) wrote ``docs/demo/e2e_live.sh`` and
+``e2e/test_s1_flow.py``, the sweep went to 17 PASS / 0 FAIL, and the marker was removed: a
+``strict=True`` xfail on a passing test is an XPASS failure, which is the same defect pointing the
+other way. So the gate is now an ordinary test and a command that stops resolving reddens
+``make verify`` directly. Put the marker back only alongside a measurement naming a command that
+does not resolve.
 
 This file writes the gate and nothing else — a lane that repairs the defect it was asked to
 reproduce destroys the gate that would have graded the repair. No ticket id is minted for this
@@ -91,11 +117,15 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# `import pytest` used to live here for the `@pytest.mark.xfail` on the gate below. Removing
-# that marker made this the file's only remaining use of the name, and ruff's F401 fails
-# `make verify` on a dead import — so it goes with the marker. Nothing else here needs pytest:
-# every check is a plain assertion, and the one pytest subprocess this file runs is spawned
-# through `sys.executable -m pytest`.
+# `import pytest` was here for the `@pytest.mark.xfail` on the gate below, and ESC-018 step (b)
+# removed BOTH together — correctly, since with the marker gone the import was dead and ruff's
+# F401 fails `make verify` on a dead import. It comes back because the name is live again for a
+# different reason: the regression pins added below use `pytest.mark.parametrize` and take
+# `pytest.MonkeyPatch`. That is worth a sentence rather than a silent re-add, because the two
+# changes merged CLEAN and produced a file that does not import — eight `pytest.` uses from one
+# side, no import from the other, no conflict marker anywhere, `NameError: name 'pytest' is not
+# defined` at collection. Git cannot see that; only running the file can.
+import pytest
 
 #: Repo root, reached from this file rather than from a hard-coded string so a moved test
 #: cannot silently start scanning nothing.
@@ -167,6 +197,19 @@ class RunbookParseError(AssertionError):
     """The document is shaped in a way this parser cannot honestly grade."""
 
 
+def _rel(path: Path) -> str:
+    """``path`` relative to the repo root, or its absolute form when it lies outside.
+
+    The fallback is what lets the regression tests below point ``RUNBOOK_DIR`` at a ``tmp_path``
+    holding a synthetic runbook. Grading a fixture document is the only honest way to pin a
+    parser bypass: the alternative is editing the real runbook, which another lane owns.
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _is_interpreter(token: str) -> bool:
     """Does ``token`` name a program that takes a script path as its argument?"""
     tok = token.strip("\"'").lstrip("@-")
@@ -209,6 +252,87 @@ class Result:
         body = f"\n        {self.category}: {self.reason}"
         extra = "".join(f"\n            {d}" for d in self.details)
         return head + body + extra
+
+
+@dataclass
+class Dropped:
+    """A line inside a fenced block that the parser declined to grade, and WHY.
+
+    The bucket exists because "neither graded nor mentioned" is the failure this gate keeps
+    being defeated by. Three drafts of this file were beaten by edits that changed how the
+    document parses without changing what it says, and the merged rewrite reopened it: relabelling
+    one fence from ``bash`` to ``console`` made a whole step disappear from the sweep with no
+    count moving that anyone would look at. A line the parser will not grade must still be
+    COUNTED and PRINTED, so that "I did not grade these two lines, here they are" is a visible
+    outcome and silence is not.
+    """
+
+    doc: str
+    lineno: int
+    text: str
+    why: str
+    #: ``"comment"`` | ``"transcript-output"`` | ``"unread-fence-language"``. A machine-readable
+    #: reason, because the arming pin below has to treat the three differently: a comment is
+    #: legitimately not a step, while the other two are lines the parser CHOSE not to read and
+    #: must therefore be provably not commands.
+    kind: str = "comment"
+    span: frozenset[int] = field(default_factory=frozenset)
+
+    @property
+    def where(self) -> str:
+        return f"{self.doc}:{self.lineno}"
+
+    def render(self) -> str:
+        return f"  [DROPPED:{self.kind}] {self.where}  `{self.text}`\n        {self.why}"
+
+
+#: Program names this gate knows how to grade. A line naming one of these is a COMMAND wherever
+#: it is written — inside a fence language this parser does not read, or unprompted inside a
+#: transcript — and is promoted back out of the dropped bucket rather than believed to be output.
+_CLASSIFIABLE_HEADS = {
+    "make", "pytest", "python", "python3", "docker", "docker-compose",
+    "bash", "sh", "zsh", "cp", "uv", "node",
+}  # fmt: skip
+
+
+def _normalized_head(text: str) -> tuple[str, list[str]] | None:
+    """``(lower-cased basename of the program, remaining tokens)``, past the usual noise."""
+    try:
+        toks = _strip_redirects(shlex.split(text))
+    except ValueError:
+        return None
+    while toks and _is_assignment(toks[0]):
+        toks = toks[1:]
+    while toks and toks[0] in _WRAPPERS:
+        toks = toks[1:]
+    if not toks:
+        return None
+    return Path(toks[0].strip("\"'")).name.lower(), toks[1:]
+
+
+def _looks_like_a_command(text: str) -> bool:
+    """Would this line be graded if it were written in a fence this parser reads?
+
+    Deliberately head-driven rather than shape-driven. Grading every unprompted transcript line
+    as a command was tried and is wrong — ``lint ok; don't rerun`` is program output and becomes
+    an unparseable FAIL — but "this fence is a transcript" is not a licence to drop a line that
+    plainly runs ``docker compose`` or ``make``. So: a recognised program, an explicit
+    ``./script`` head, or any operand shaped like a repository path is a command; everything else
+    is output, and lands in the counted, printed dropped bucket instead of nowhere.
+    """
+    head_rest = _normalized_head(text)
+    if head_rest is None:
+        return False
+    head, rest = head_rest
+    if head in _CLASSIFIABLE_HEADS:
+        return True
+    try:
+        toks = _strip_redirects(shlex.split(text))
+    except ValueError:
+        return False
+    if toks and (toks[0].startswith("./") or toks[0].startswith("../")):
+        return True
+    return any(_repo_shaped(t) for t in rest)
 
 
 #: Indentation is deliberately unbounded. CommonMark measures a fence's indent relative to its
@@ -329,13 +453,26 @@ def _strip_comment(line: str) -> str:
 
 def _logical_lines(
     body: list[tuple[int, str]], prompt_only: bool
-) -> list[tuple[int, frozenset[int], str]]:
-    """``(first_lineno, every_lineno_covered, command_text)``.
+) -> tuple[list[tuple[int, frozenset[int], str]], list[tuple[int, frozenset[int], str, str, str]]]:
+    """``(commands, declined)`` — and NOTHING is in neither.
+
+    ``commands`` are ``(first_lineno, every_lineno_covered, command_text)``. ``declined`` is
+    ``(first_lineno, every_lineno_covered, raw_text, why)`` for every logical line this function
+    refused to turn into a command, each carrying the reason it was refused.
+
+    Returning the refusals is the structural half of this gate, not bookkeeping. A line that is
+    dropped here is dropped from the sweep, from the tally and from the report at once, and that
+    is precisely how a re-fenced step vanished: ` ```bash ` relabelled to ` ```console ` turned
+    ``docker compose --profile e2e up -d shopify-stub`` into "program output", 17 commands became
+    16, and pointing the step at a service that does not exist produced no signal at all. Every
+    caller now has to say what happened to each line.
 
     Joins backslash continuations and strips comments. ``#`` starts a comment and never a root
     prompt — treating ``# `` as a prompt turned ``# don't run this twice`` into an unparseable
     command. In a session/transcript fence ``prompt_only`` is set and lines without a ``$``/``%``
-    prompt are program OUTPUT, not commands.
+    prompt are program OUTPUT rather than commands — but see ``_looks_like_a_command``: a line
+    that names a program this gate classifies is promoted back out of the output bucket, because
+    "it is inside a transcript fence" is a claim about the fence, not about the line.
     """
     joined: list[tuple[int, list[int], str]] = []
     pending: str | None = None
@@ -357,19 +494,36 @@ def _logical_lines(
         joined.append((first, covered, pending))
 
     out: list[tuple[int, frozenset[int], str]] = []
+    declined: list[tuple[int, frozenset[int], str, str, str]] = []
     for lineno, lines, line in joined:
+        span = frozenset(lines)
         text = line.strip()
+        if not text:
+            continue  # a blank line names nothing and is not a hiding place
         prompted = text[:2] in ("$ ", "% ")
         if prompted:
             text = text[2:]
-        elif prompt_only:
-            continue  # program output inside a transcript block
+        elif prompt_only and not _looks_like_a_command(text):
+            declined.append(
+                (
+                    lineno,
+                    span,
+                    text,
+                    "session/transcript fence and this line carries no `$`/`%` prompt, so it "
+                    "reads as program OUTPUT; it also names no program this gate classifies",
+                    "transcript-output",
+                )
+            )
+            continue
         if text.startswith("#"):
+            declined.append((lineno, span, text, "shell comment, not a step", "comment"))
             continue
         text = _strip_comment(text)
         if text:
-            out.append((lineno, frozenset(lines), text))
-    return out
+            out.append((lineno, span, text))
+        else:
+            declined.append((lineno, span, line.strip(), "the whole line is a comment", "comment"))
+    return out, declined
 
 
 def _split_chain(text: str) -> list[str]:
@@ -445,7 +599,7 @@ def _expand_inline_script(piece: str) -> list[str]:
     return _split_chain(m.group("script")) or [piece]
 
 
-def extract_commands(path: Path) -> tuple[list[Command], list[Block]]:
+def extract_commands(path: Path) -> tuple[list[Command], list[Block], list[Dropped]]:
     """Every command a runbook instructs an operator to run, derived from the document.
 
     Three sources: fenced code blocks (the procedure), inline spans that are exactly
@@ -453,21 +607,85 @@ def extract_commands(path: Path) -> tuple[list[Command], list[Block]]:
     sweep for ``*.sh`` paths — ``docs/demo/e2e_live.sh`` is named *only* in prose. Nothing is
     de-duplicated: the raw-text cross-check asserts coverage per LINE, so a second mention on a
     second line has to produce its own graded command.
+
+    The third return value is the **dropped bucket**, and it is the structural repair of a
+    measured regression. A fence whose language this parser does not read used to be skipped with
+    a bare ``continue``: the lines inside it produced no command, no INFO, no UNCLASSIFIED entry
+    and no mention anywhere in the report. Relabelling ``docs/demo/starting-slice.md:63`` from
+    ` ```bash ` to ` ```console ` therefore deleted the ``docker compose … shopify-stub`` step
+    from the sweep — 17 commands became 16 — and pointing that step at a service the compose
+    config does not define still produced NO failure. Now every non-blank line inside every fence
+    leaves this function as exactly one of a graded ``Command`` or a ``Dropped`` carrying its
+    reason, and ``test_the_runbook_command_sweep_is_armed`` checks that partition line by line.
     """
-    doc = str(path.relative_to(REPO_ROOT))
+    doc = _rel(path)
     text = path.read_text(encoding="utf-8")
     blocks = _fenced_blocks(text, doc)
     commands: list[Command] = []
+    dropped: list[Dropped] = []
 
     for block in blocks:
         if block.lang not in SHELL_LANGS:
+            # NOT a bare `continue` any more. An unknown fence language is a statement about the
+            # fence, not about the lines inside it, so a line that plainly runs a program this
+            # gate classifies is graded anyway and the rest is recorded with its reason.
+            for lineno, raw in block.lines:
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                if stripped[:2] in ("$ ", "% "):
+                    stripped = stripped[2:].strip()  # a prompt is furniture, not the command
+                if stripped.startswith("#"):
+                    dropped.append(
+                        Dropped(
+                            doc=doc,
+                            lineno=lineno,
+                            text=stripped,
+                            why="comment, not a step",
+                            kind="comment",
+                            span=frozenset({lineno}),
+                        )
+                    )
+                    continue
+                if _looks_like_a_command(stripped):
+                    for piece in _split_chain(stripped):
+                        for sub in _expand_inline_script(piece):
+                            commands.append(
+                                Command(
+                                    text=sub,
+                                    doc=doc,
+                                    lineno=lineno,
+                                    kind="shell",
+                                    span=frozenset({lineno}),
+                                )
+                            )
+                else:
+                    dropped.append(
+                        Dropped(
+                            doc=doc,
+                            lineno=lineno,
+                            text=stripped,
+                            why=(
+                                f"fence language `{block.lang or '<none>'}` is not one this "
+                                f"parser reads as a procedure, and the line names no program "
+                                f"this gate classifies"
+                            ),
+                            kind="unread-fence-language",
+                            span=frozenset({lineno}),
+                        )
+                    )
             continue
-        for lineno, span, line in _logical_lines(block.lines, block.lang in PROMPT_LANGS):
+        graded, declined = _logical_lines(block.lines, block.lang in PROMPT_LANGS)
+        for lineno, span, line in graded:
             for piece in _split_chain(line):
                 for sub in _expand_inline_script(piece):
                     commands.append(
                         Command(text=sub, doc=doc, lineno=lineno, kind="shell", span=span)
                     )
+        for lineno, span, line, why, kind in declined:
+            dropped.append(
+                Dropped(doc=doc, lineno=lineno, text=line, why=why, kind=kind, span=span)
+            )
 
     prose = _mask_fences(text, blocks)
     for hit in _INLINE_MAKE.finditer(prose):
@@ -495,7 +713,7 @@ def extract_commands(path: Path) -> tuple[list[Command], list[Block]]:
             )
         )
 
-    return commands, blocks
+    return commands, blocks, dropped
 
 
 def runbooks() -> list[Path]:
@@ -608,8 +826,24 @@ def parse_makefile(path: Path) -> dict[str, Rule]:
 #: a target that dies with exit 2 into a green gate without the runbook being touched at all.
 #: The lookbehind excludes absolute paths: ``/bin/bash`` is not a file in this repository.
 _RECIPE_PATH = re.compile(r"(?<![\w/.\-$])((?:\./)?(?:[\w.-]+/)+[\w.-]+|\./[\w.-]+)(?![\w/])")
+
+#: A script named WITHOUT a directory component — ``@bash no_such_root.sh``. Both alternations
+#: of ``_RECIPE_PATH`` require a ``/``, so a bare name was invisible to the path scan, and the
+#: only other net (``shutil.which(head)``) inspects the HEAD, which in that recipe is ``bash``
+#: and is of course on PATH. Measured against the merged rewrite: ``@bash no_such_root.sh`` and
+#: ``@python no_such_root.py`` both left the gate at the then-baseline 13 PASS / 4 FAIL, while
+#: ``@bash ./no_such_root.sh`` and ``@bash docs/demo/no_such_root.sh`` were caught. A missing
+#: directory component was the whole difference between red and silent.
+_RECIPE_BARE_SCRIPT = re.compile(r"(?<![\w/.\-$*])([\w.-]+\.(?:sh|py))(?![\w/])")
 _RECIPE_MODULE = re.compile(r"-m\s+([A-Za-z_][\w.]*)")
 _UNEXPANDED = re.compile(r"\$[({](?!MAKE[)}])(?P<name>[A-Za-z_][\w.]*)[)}]")
+
+#: Programs whose FIRST positional operand is a script this repository has to contain. Narrower
+#: than ``_INTERPRETER_NAMES`` on purpose: ``uv``, ``pytest`` and ``node`` take subcommands and
+#: package names in that position, so demanding a file there produces false FAILs. This closes
+#: the extensionless spelling of the same hole — ``@bash no_such_root`` names no ``.sh`` for
+#: ``_RECIPE_BARE_SCRIPT`` to find and is otherwise as invisible as the ``.sh`` form was.
+_SCRIPT_TAKING_INTERPRETERS = {"bash", "sh", "zsh", "dash", "python", "python3"}
 
 #: Shell syntax and builtins, which name no program to resolve.
 _SHELL_WORDS = {
@@ -733,6 +967,42 @@ def check_make_target(target: str, seen: set[str] | None = None) -> tuple[bool, 
                 f"(mode {oct(path.stat().st_mode & 0o777)})"
             )
 
+    # The same scan for a script named with NO directory component. `_RECIPE_PATH` above cannot
+    # see one — both of its alternations require a `/` — and `@bash no_such_root.sh` therefore
+    # passed this gate while `@bash ./no_such_root.sh` failed it, which is a rule about
+    # punctuation rather than about whether the target runs.
+    # EXISTENCE only, deliberately. A bare name in HEAD position is already graded by the
+    # `shutil.which(head)` fallback further down (measured: `@no_such_root.sh` is caught today),
+    # so demanding `+x` here would only add a way to be wrong about `@uv run seed.py`.
+    for token in dict.fromkeys(_RECIPE_BARE_SCRIPT.findall(rule.recipe)):
+        if not (REPO_ROOT / token).is_file():
+            problems.append(
+                f"recipe for `{target}` invokes {token}, which does not exist in the repo "
+                f"(named without a directory component, which is not a reason to skip it)"
+            )
+
+    # And the extensionless spelling: an interpreter's first operand IS a script path, whatever
+    # it is called. `_RECIPE_BARE_SCRIPT` keys on `.sh`/`.py`, so `@bash no_such_root` would
+    # otherwise walk straight through both scans and the `shutil.which("bash")` fallback.
+    for toks in _recipe_chunks(rule.recipe):
+        head = _recipe_head(toks)
+        if Path(head.strip("\"'")).name.lower() not in _SCRIPT_TAKING_INTERPRETERS:
+            continue
+        rest = toks[toks.index(head) + 1 :] if head in toks else toks[1:]
+        if "-c" in rest or "-m" in rest:
+            continue  # an inline script or a module, neither of which is a path
+        operands = [t for t in _positional_args(rest, set()) if "$" not in t]
+        if not operands:
+            continue
+        first = operands[0].strip("\"'")
+        if first.endswith((".sh", ".py")) or "/" in first:
+            continue  # already graded by one of the two path scans above
+        if not (REPO_ROOT / first).is_file():
+            problems.append(
+                f"recipe for `{target}` runs `{head} {first}` and {first} is not a file in this "
+                f"repository, so what that interpreter would execute does not exist"
+            )
+
     for module in dict.fromkeys(_RECIPE_MODULE.findall(rule.recipe)):
         if module != "pytest":
             ok, why = _module_resolves(module)
@@ -760,12 +1030,11 @@ def check_make_target(target: str, seen: set[str] | None = None) -> tuple[bool, 
             continue
         if "$" in head:
             continue  # an undefined program variable is reported by _undefined_program_vars
-        if head == "docker" and rest[:1] == ["compose"]:
+        if (head == "docker" and rest[:1] == ["compose"]) or head == "docker-compose":
             if services is None:
                 services = _compose_services()[0]
-            named = _positional_args(
-                rest[1:], {"--profile", "-f", "--file", "-p", "--project-name"}
-            )
+            after = rest[1:] if head == "docker" else rest
+            named = _positional_args(after, {"--profile", "-f", "--file", "-p", "--project-name"})
             unknown = [t for t in named if t not in services and t not in _COMPOSE_WORDS]
             if services and unknown:
                 problems.append(
@@ -1223,6 +1492,12 @@ def classify_and_check(cmd: Command) -> Result:
     if base == "docker" and len(toks) > 1 and toks[1] == "compose" and "$" not in head:
         return _check_docker_compose(cmd, toks)
 
+    # `docker-compose up -d shopify-stub` is the SAME command as `docker compose up -d
+    # shopify-stub`, and grading only the spaced spelling made a hyphen a bypass. Normalised to
+    # the two-token form so one checker serves both.
+    if base == "docker-compose" and "$" not in head:
+        return _check_docker_compose(cmd, ["docker", "compose", *toks[1:]])
+
     if (head.startswith("./") or head.startswith("../")) and "$" not in head:
         rel = head[2:] if head.startswith("./") else head
         if rel.endswith(".sh"):
@@ -1264,15 +1539,26 @@ def classify_and_check(cmd: Command) -> Result:
     )
 
 
-def audit() -> tuple[list[Command], list[Result], list[tuple[Path, list[Block], list[Command]]]]:
-    """Grade every runbook under ``docs/demo/``."""
+#: One graded document: its path, its fences, the commands taken from it, and the lines the
+#: parser declined with the reason for each.
+PerDoc = tuple[Path, list["Block"], list["Command"], list["Dropped"]]
+
+
+def audit() -> tuple[list[Command], list[Result], list[PerDoc], list[Dropped]]:
+    """Grade every runbook under ``docs/demo/``.
+
+    Returns the dropped bucket alongside the results, because a caller that cannot see what was
+    NOT graded cannot tell a clean sweep from an empty one.
+    """
     commands: list[Command] = []
-    per_doc: list[tuple[Path, list[Block], list[Command]]] = []
+    dropped: list[Dropped] = []
+    per_doc: list[PerDoc] = []
     for path in runbooks():
-        found, blocks = extract_commands(path)
-        per_doc.append((path, blocks, found))
+        found, blocks, skipped = extract_commands(path)
+        per_doc.append((path, blocks, found, skipped))
         commands.extend(found)
-    return commands, [classify_and_check(c) for c in commands], per_doc
+        dropped.extend(skipped)
+    return commands, [classify_and_check(c) for c in commands], per_doc, dropped
 
 
 # =====================================================================================
@@ -1280,11 +1566,36 @@ def audit() -> tuple[list[Command], list[Result], list[tuple[Path, list[Block], 
 # =====================================================================================
 
 
+#: Words that can stand immediately before a command — in a shell line, or in the imperative
+#: English a runbook is written in. Compared LOWER-CASED, which is the whole repair of one of
+#: the three fail-opens: the ``make`` match is ``IGNORECASE`` while this membership test was
+#: exact-case, so ``Then make e2e-live``, ``Time …``, ``Do …``, ``Else …``, ``Sudo …`` and
+#: ``Env …`` all sailed past it. Measured against the merged rewrite, 45 prefixed ``make`` lines
+#: hidden in a fence the parser skips: 19 caught, 26 silent.
+#:
+#: ``run`` is here for a different reason and the distinction was measured rather than assumed —
+#: it is missed in EVERY casing, because it was never in the vocabulary at all. So this is an
+#: allow-list that has to be wide, not merely case-folded. The English false positive it must
+#: still exclude is the one the earlier draft was bitten by: "will make check pass on the first
+#: try" — ``will`` is not a command lead, and no modal or auxiliary is.
+_COMMAND_LEAD_WORDS = _WRAPPERS | {
+    "time", "then", "else", "do", "done", "fi", "and", "or", "&&", "||",
+    "run", "rerun", "re-run", "rerunning", "running", "try", "just", "again",
+    "if", "elif", "while", "until", "for", "xargs", "watch", "also", "first", "next",
+    "finally", "now", "please", "type", "invoke", "call",
+}  # fmt: skip
+
+#: Markdown furniture that is not part of the command: bullets, ordered-list numbers, block
+#: quotes. ``- make e2e-live`` inside a fence this parser skips was silent, which makes an
+#: ordinary bulleted procedure a bypass.
+_MARKDOWN_LEAD = re.compile(r"^(?:\s*(?:[-*+>]|\d+[.)])\s*)+")
+
+
 def _raw_make_mentions(line: str, targets: set[str]) -> list[str]:
     """``make <target>`` mentions on ``line`` that a reader would read as a command.
 
-    Only a mention at the start of the line (a code block) or inside an inline ``code`` span
-    counts. Without that, the English sentence "will make check pass on the first try" reads as a
+    Only a mention where a COMMAND could stand, or inside an inline ``code`` span, counts.
+    Without that, the English sentence "will make check pass on the first try" reads as a
     reference to the ``check`` target and the cross-check fires on prose. Flags between ``make``
     and the target are skipped, because ``make -f Makefile e2e-live`` was a bypass, and the match
     is case-insensitive because this filesystem resolves ``Make`` too.
@@ -1297,14 +1608,15 @@ def _raw_make_mentions(line: str, targets: set[str]) -> list[str]:
         # `cd "$REPO" && make e2e-live` vanish from this scan AND from the real parser at once
         # (in a fence language the parser skips) — a full bypass. Accepting any position instead
         # reads the English sentence "will make check pass" as a command. So: the text before it
-        # must be empty, a shell separator, a prompt, a backtick, or a wrapper word.
-        prefix = line[: m.start()].rstrip()
-        last = prefix.split()[-1] if prefix.split() else ""
+        # must be empty, markdown list furniture, a shell separator, a prompt, a backtick, or a
+        # word from `_COMMAND_LEAD_WORDS` — matched case-insensitively.
+        prefix = _MARKDOWN_LEAD.sub("", line[: m.start()].rstrip()).strip()
+        words = prefix.split()
+        last = words[-1].strip("`'\"").lower() if words else ""
         command_position = (
             not prefix
             or prefix.endswith(("`", "&", "|", ";", "(", "{", "$", "%", ">"))
-            or last in _WRAPPERS
-            or last in {"time", "then", "else", "do", "&&", "||"}
+            or last in _COMMAND_LEAD_WORDS
         )
         if not (command_position or any(a < m.start() < b for a, b in spans)):
             continue
@@ -1328,16 +1640,42 @@ def _raw_make_mentions(line: str, targets: set[str]) -> list[str]:
     return out
 
 
-def _named_by_line(commands: list[Command]) -> tuple[dict[int, set[str]], dict[int, set[str]]]:
-    """``({line: make targets graded there}, {line: repo paths graded there})``.
+#: A ``docker compose`` invocation, seen by the dumb raw scan. It resolves a name the REPOSITORY
+#: controls — the merged compose config's service list — so it belongs in the cross-check
+#: alongside `make` targets and `*.sh` paths, and its absence there was the third fail-open.
+#: Measured: re-fencing `docs/demo/starting-slice.md:63` from ` ```bash ` to ` ```console ` made
+#: the `docker compose --profile e2e up -d shopify-stub` step vanish (17 commands became 16),
+#: and pointing the same step at `no-such-service` under that fence produced rc=0 and no FAIL,
+#: where the identical edit under ` ```bash ` reports
+#: `[FAIL] … the merged compose config defines no service named no-such-service`.
+#: Both spellings, because they are one command. Measured: the hyphenated legacy spelling in a
+#: fence the parser does not read produced `swept 16 ... 1 DROPPED` — accounted for, but the
+#: sweep count still fell by one with nothing failing, which is the shape of the defect.
+#: The trailing `(?![\w.-])` keeps a prose mention of the FILE `docker-compose.yml` out of
+#: the scan — that names a config, not a step, and flagging it would be a false positive on
+#: the document this net exists to protect.
+_RAW_COMPOSE = re.compile(r"(?<![\w-])docker[-\s]+compose(?![\w.-])", re.IGNORECASE)
+
+
+def _named_by_line(
+    commands: list[Command],
+) -> tuple[dict[int, set[str]], dict[int, set[str]], set[int]]:
+    """``({line: make targets graded there}, {line: repo paths graded there}, {compose lines})``.
 
     The cross-check compares per MENTION, not per line, and this is what makes that possible.
     Per-line coverage was exploitable: ``make check   # then: make e2e-live`` has the comment
     stripped by the real parser, so ``e2e-live`` went ungraded while the decoy ``make check`` on
     the same line kept the line "covered" and the raw scan silent.
+
+    The third element is per LINE rather than per service name, and deliberately so: the sabotage
+    that has to be caught names a service the compose config does NOT define, so a set of known
+    service names would not contain it and would go quiet on exactly the input that matters.
+    What the cross-check can honestly demand is that a line saying ``docker compose`` produced a
+    compose command the parser graded.
     """
     makes: dict[int, set[str]] = {}
     paths: dict[int, set[str]] = {}
+    compose: set[int] = set()
     for cmd in commands:
         lines = cmd.span or frozenset({cmd.lineno})
         if cmd.kind == "script-reference":
@@ -1363,11 +1701,14 @@ def _named_by_line(commands: list[Command]) -> tuple[dict[int, set[str]], dict[i
                 if "=" not in target:
                     for ln in lines:
                         makes.setdefault(ln, set()).add(target)
+        head_name = Path(toks[0]).name.lower()
+        if (head_name == "docker" and toks[1:2] == ["compose"]) or head_name == "docker-compose":
+            compose |= set(lines)
         for tok in toks[1:]:
             if _repo_shaped(tok):
                 for ln in lines:
                     paths.setdefault(ln, set()).add(tok.split("::")[0])
-    return makes, paths
+    return makes, paths, compose
 
 
 def _coverage_gaps(path: Path, commands: list[Command]) -> list[str]:
@@ -1381,7 +1722,7 @@ def _coverage_gaps(path: Path, commands: list[Command]) -> list[str]:
     """
     text = path.read_text(encoding="utf-8")
     targets = set(parse_makefile(MAKEFILE))
-    graded_makes, graded_paths = _named_by_line(commands)
+    graded_makes, graded_paths, graded_compose = _named_by_line(commands)
     gaps: list[str] = []
     for idx, raw in enumerate(text.splitlines(), start=1):
         missing: list[str] = []
@@ -1394,9 +1735,11 @@ def _coverage_gaps(path: Path, commands: list[Command]) -> list[str]:
         for hit in _RAW_PY.finditer(raw):
             if hit.group(1) not in graded_paths.get(idx, set()):
                 missing.append(hit.group(1))
+        if _RAW_COMPOSE.search(raw) and idx not in graded_compose:
+            missing.append("`docker compose`")
         if missing:
             gaps.append(
-                f"  {path.relative_to(REPO_ROOT)}:{idx} mentions {', '.join(sorted(set(missing)))}"
+                f"  {_rel(path)}:{idx} mentions {', '.join(sorted(set(missing)))}"
                 f" but the parser graded no command naming it on that line"
                 f"\n      | {raw.strip()[:110]}"
             )
@@ -1416,11 +1759,11 @@ def test_the_parse_covers_the_raw_text() -> None:
     hidden from, because it does not interpret anything.
     """
     docs = runbooks()
-    assert docs, f"no runbook markdown found under {RUNBOOK_DIR.relative_to(REPO_ROOT)}/"
+    assert docs, f"no runbook markdown found under {_rel(RUNBOOK_DIR)}/"
 
-    _, _, per_doc = audit()
+    _, _, per_doc, _ = audit()
     gaps: list[str] = []
-    for path, _blocks, found in per_doc:
+    for path, _blocks, found, _dropped in per_doc:
         gaps.extend(_coverage_gaps(path, found))
 
     assert not gaps, (
@@ -1440,21 +1783,43 @@ def test_the_runbook_command_sweep_is_armed() -> None:
     *reporting* a healthy 15 commands while grading a decoy.
     """
     docs = runbooks()
-    assert docs, f"no runbook markdown found under {RUNBOOK_DIR.relative_to(REPO_ROOT)}/"
+    assert docs, f"no runbook markdown found under {_rel(RUNBOOK_DIR)}/"
 
-    commands, results, per_doc = audit()
+    commands, results, per_doc, dropped = audit()
 
-    for path, blocks, found in per_doc:
-        doc = path.relative_to(REPO_ROOT)
+    for path, blocks, found, skipped in per_doc:
+        doc = _rel(path)
         for block in blocks:
-            if block.lang not in SHELL_LANGS or block.lang in PROMPT_LANGS:
-                continue
-            end = block.lines[-1][0] if block.lines else block.open_lineno
-            got = [c for c in found if c.kind == "shell" and block.open_lineno <= c.lineno <= end]
-            assert got, (
-                f"{doc}:{block.open_lineno} is a shell code fence that produced ZERO commands. "
-                f"An empty sweep over a real block PASSES, which is exactly the quiet-sweep "
-                f"failure this guard exists to prevent."
+            if block.lang in SHELL_LANGS and block.lang not in PROMPT_LANGS:
+                end = block.lines[-1][0] if block.lines else block.open_lineno
+                got = [
+                    c for c in found if c.kind == "shell" and block.open_lineno <= c.lineno <= end
+                ]
+                assert got, (
+                    f"{doc}:{block.open_lineno} is a shell code fence that produced ZERO "
+                    f"commands. An empty sweep over a real block PASSES, which is exactly the "
+                    f"quiet-sweep failure this guard exists to prevent."
+                )
+
+            # THE PARTITION, and it holds for EVERY fence whatever its language. Each non-blank
+            # line inside a block is either covered by a graded command's span or present in the
+            # dropped bucket with a reason. "Neither" is the state this gate keeps being defeated
+            # from: relabelling one fence `bash` -> `console` moved a whole step into "neither",
+            # the tally went 17 -> 16, and a step pointed at a nonexistent compose service still
+            # produced rc=0. A count that only ever goes down quietly is not a count.
+            covered: set[int] = set()
+            for cmd in found:
+                covered |= set(cmd.span or frozenset({cmd.lineno}))
+            for drop in skipped:
+                covered |= set(drop.span or frozenset({drop.lineno}))
+            orphans = [
+                (ln, raw.strip()) for ln, raw in block.lines if raw.strip() and ln not in covered
+            ]
+            assert not orphans, (
+                f"{doc}:{block.open_lineno} (```{block.lang or ''}) has {len(orphans)} line(s) "
+                f"that produced NEITHER a graded command NOR an entry in the dropped bucket, so "
+                f"they left the sweep without being counted anywhere:\n"
+                + "\n".join(f"    {doc}:{ln}  {text}" for ln, text in orphans)
             )
 
     resolvable = [r for r in results if r.category in RESOLVABLE_CATEGORIES]
@@ -1480,8 +1845,378 @@ def test_the_runbook_command_sweep_is_armed() -> None:
         ("shell script referenced in the runbook", "at least one *.sh reference"),
     ):
         assert required in categories, (
-            f"the sweep found no {label} under {RUNBOOK_DIR.relative_to(REPO_ROOT)}/; the parser "
+            f"the sweep found no {label} under {_rel(RUNBOOK_DIR)}/; the parser "
             f"and the documents have drifted apart. Categories found: {sorted(categories)}"
+        )
+
+    # Every dropped line must carry a reason, and a line the parser DECLINED to read must not be
+    # one it would have classified — otherwise `_looks_like_a_command` and the two places that
+    # consult it have drifted apart, and the promotion that pulls a command back out of a
+    # transcript or an unread fence is silently inert.
+    unreasoned = [d for d in dropped if not (d.why and d.text)]
+    assert not unreasoned, (
+        "these lines were dropped with no reason recorded, which is the same as not being "
+        "counted:\n" + "\n".join(d.render() for d in unreasoned)
+    )
+    misdropped = [
+        d
+        for d in dropped
+        if d.kind in ("transcript-output", "unread-fence-language")
+        and _looks_like_a_command(d.text)
+    ]
+    assert not misdropped, (
+        "these lines name a program this gate classifies but were dropped as output or as an "
+        "unreadable fence language — a command hiding behind a fence label is the exact bypass "
+        "the promotion rule exists to close:\n" + "\n".join(d.render() for d in misdropped)
+    )
+
+
+# =====================================================================================
+# Regression pins for three fail-opens this file shipped with
+#
+# Each of the three was measured on two disjoint copies of the repo, and each was INVISIBLE TO
+# THE EXIT CODE when found: a new FAIL landed inside the then-strict-xfail gate below, which was
+# already expected to fail, so the sweep could lose a whole step and the run still reported
+# `1 failed` either way. ESC-018 step (b) has since taken the sweep to 17 PASS / 0 FAIL and
+# removed that marker, so a fourth fail-open would now redden an ordinary run too — but these
+# tests still assert on the SWEEP'S OWN OUTPUT, because that is the property that does not depend
+# on whether the gate happens to be xfailed today, and the xfail is one measurement away from
+# coming back. They grade FIXTURE documents under `tmp_path`: the real runbook belongs to another
+# lane, and a regression pin that needs the production document edited is a pin nobody can run.
+# =====================================================================================
+
+
+def _fixture_runbook(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
+    """Point the sweep at a synthetic runbook and return its path."""
+    doc = tmp_path / "fixture-runbook.md"
+    doc.write_text(body, encoding="utf-8")
+    monkeypatch.setitem(globals(), "RUNBOOK_DIR", tmp_path)
+    return doc
+
+
+@pytest.mark.parametrize("spelling", ["docker compose", "docker-compose"])
+@pytest.mark.parametrize("lang", ["console", "shell-session", "text", "plaintext", "output"])
+def test_a_step_does_not_vanish_when_its_fence_is_relabelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lang: str, spelling: str
+) -> None:
+    """FAIL-OPEN 1. Re-fencing a step used to delete it from the sweep, silently.
+
+    Measured against the merged rewrite, on `docs/demo/starting-slice.md:63`: changing ` ```bash `
+    to ` ```console ` took the sweep from 17 commands to 16 and the `docker compose … shopify-stub`
+    step simply stopped existing. Pointed at a service the merged compose config does not define,
+    that same re-fenced step produced `rc=0` and NO failure line, where the identical edit under
+    ` ```bash ` reports `[FAIL] … the merged compose config defines no service named …`. A
+    ```` ```text ```` fence behaved the same way, and neither left an UNCLASSIFIED entry, a
+    dropped line, or any count a reader would notice.
+
+    Two independent repairs are pinned here. The command is PROMOTED out of the unread fence
+    because its head is a program this gate classifies; and, separately,
+    `test_the_compose_cross_check_fires_when_a_compose_step_is_ungraded` pins the raw-text
+    backstop that catches it even if the promotion list is ever wrong.
+
+    Both spellings, because a hyphen was a bypass of its own: measured, `docker-compose …` inside
+    a ```text fence produced `swept 16 … 1 DROPPED` — accounted for, but the sweep count still
+    fell by one with no test failing, which is the shape of the defect wearing a different name.
+    """
+    doc = _fixture_runbook(
+        tmp_path,
+        monkeypatch,
+        "# Fixture\n\nBring the stub up:\n\n"
+        f"```{lang}\n"
+        f"{spelling} --profile e2e up -d no-such-service\n"
+        "```\n",
+    )
+    commands, results, per_doc, dropped = audit()
+
+    compose = [r for r in results if r.category == "docker compose service"]
+    assert compose, (
+        f"a ```{lang} fence naming `docker compose` produced no graded compose command at all. "
+        f"swept={[c.text for c in commands]} dropped={[d.text for d in dropped]}"
+    )
+    assert [r.verdict for r in compose] == [VERDICT_FAIL], (
+        f"the step names `no-such-service`, which the merged compose config does not define, and "
+        f"must be graded FAIL under a ```{lang} fence exactly as under ```bash: "
+        f"{[r.render() for r in compose]}"
+    )
+    assert "defines no service named no-such-service" in compose[0].reason, compose[0].render()
+
+    # And it must not ALSO be sitting in the dropped bucket, which would mean the two halves of
+    # the partition disagree about the same line.
+    assert not [d for d in dropped if "docker compose" in d.text], (
+        f"the compose step was graded AND dropped: {[d.render() for d in dropped]}"
+    )
+    # The raw cross-check must be quiet, because the line was graded.
+    assert not _coverage_gaps(doc, per_doc[0][2]), _coverage_gaps(doc, per_doc[0][2])
+
+
+def test_the_compose_cross_check_fires_when_a_compose_step_is_ungraded(tmp_path: Path) -> None:
+    """FAIL-OPEN 1, second net. The dumb raw scan now knows about `docker compose`.
+
+    The rewrite's stated defence against a re-fenced step is `test_the_parse_covers_the_raw_text`
+    — "a fence this parser cannot read is a loud mismatch instead of a silent zero". It scanned
+    for `make` targets, `*.sh` tokens and `dir/file.py` tokens, and for nothing else, so a
+    `docker compose` step was outside its vocabulary and the mismatch never fired. That gap is
+    what made re-fencing work at all.
+
+    Graded with an EMPTY command list, which is the state the parser is in when a fence defeats
+    it. A service name is deliberately not required to be one the config defines: the sabotage
+    that matters names a service that does NOT exist, so a check keyed on known service names
+    would go quiet on precisely the input it is for.
+    """
+    doc = tmp_path / "fixture-runbook.md"
+    doc.write_text(
+        "```console\ndocker compose --profile e2e up -d no-such-service\n```\n", encoding="utf-8"
+    )
+    gaps = _coverage_gaps(doc, [])
+    assert len(gaps) == 1 and "docker compose" in gaps[0], (
+        f"a raw line running `docker compose` with no graded command on it must be reported as a "
+        f"coverage gap; got {gaps!r}"
+    )
+    # And it must stay quiet when the line IS graded, or the net is just noise.
+    doc2 = tmp_path / "graded.md"
+    doc2.write_text(
+        "```bash\ndocker compose --profile e2e up -d no-such-service\n```\n", encoding="utf-8"
+    )
+    graded, _blocks, _dropped = extract_commands(doc2)
+    assert not _coverage_gaps(doc2, graded), _coverage_gaps(doc2, graded)
+
+
+def test_a_recipe_script_named_without_a_directory_is_still_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAIL-OPEN 2. A missing DIRECTORY COMPONENT used to be the difference between red and mute.
+
+    Measured against the merged rewrite, adding one chunk to the recipe of a target the runbook
+    names: `@bash ./no_such_root.sh` and `@bash docs/demo/no_such_root.sh` were caught (the
+    then-baseline 13 PASS / 4 FAIL became 12 PASS / 5 FAIL), while `@bash no_such_root.sh`,
+    `@python no_such_root.py` and `@uv run no_such_root.py` left the tally EXACTLY at that
+    baseline. Re-measured after ESC-018 step (b) against the current 17 PASS / 0 FAIL: all six
+    spellings now give 16 PASS / 1 FAIL and exit 1, and the four negative controls below give
+    the baseline tally and exit 0. Both alternations of
+    `_RECIPE_PATH` require a `/`, and the only other net inspects the recipe's HEAD — which in
+    those three spellings is `bash`, `python` or `uv`, all of them on PATH.
+
+    The control cases matter as much as the sabotages: a bare script that EXISTS must still pass,
+    or this pin would be satisfied by a gate that fails on everything.
+    """
+    (tmp_path / "ok_root.sh").write_text("#!/usr/bin/env bash\necho ok\n", encoding="utf-8")
+    (tmp_path / "ok_root.py").write_text("print('ok')\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "MAKEFILE", tmp_path / "Makefile")
+
+    caught = {
+        "bare .sh behind an interpreter": "@bash no_such_root.sh",
+        "bare .py behind an interpreter": "@python no_such_root.py",
+        "bare .py behind python3": "@python3 no_such_root.py",
+        "bare .py behind uv run": "@uv run no_such_root.py",
+        "extensionless behind an interpreter": "@bash no_such_root",
+        "dot-slash (already caught before)": "@bash ./no_such_root.sh",
+        "with a directory (already caught before)": "@bash docs/demo/no_such_root.sh",
+        "head position (already caught before)": "@no_such_root.sh",
+    }
+    passes = {
+        "an existing bare .sh": "@bash ok_root.sh",
+        "an existing bare .py": "@python ok_root.py",
+        "an existing bare .py behind uv run": "@uv run ok_root.py",
+        "a shell builtin": "@echo nothing to resolve here",
+    }
+    for label, recipe in {**caught, **passes}.items():
+        (tmp_path / "Makefile").write_text(f"probe: ; {recipe}\n", encoding="utf-8")
+        ok, problems = check_make_target("probe")
+        if label in caught:
+            assert not ok, (
+                f"{label}: `probe: ; {recipe}` names a script this repository does not contain, "
+                f"and the gate reported it runnable. A name without a `/` in it is not a reason "
+                f"to stop looking — that spelling alone took a broken recipe past this gate."
+            )
+            assert any("no_such_root" in p for p in problems), (
+                f"{label}: the refusal must NAME the missing script, or the gate reports that "
+                f"something is wrong without saying what: {problems}"
+            )
+        else:
+            assert ok, f"{label}: `probe: ; {recipe}` is runnable and must pass: {problems}"
+
+
+def test_the_raw_make_cross_check_reads_a_command_wherever_a_command_can_stand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAIL-OPEN 3. The raw scan's command-position guard was an exact-case allow-list of ~13 words.
+
+    The `make` match is `IGNORECASE` — deliberately, because this filesystem resolves `Make` —
+    while the membership test that decides whether `make` sits where a COMMAND sits was not. So
+    `Then make e2e-live`, `Time …`, `Do …`, `Else …`, `Sudo …` and `Env …` were all read as
+    English. Measured on 45 prefixed `make e2e-live` lines hidden inside a fence the parser skips:
+    19 caught, 26 silent, with the sweep's tally byte-identical to baseline in every case.
+    Re-measured against the current baseline, C1-C6 all exit 1 — and note WHERE: the tally stays
+    17 PASS / 0 FAIL and the catch is `test_the_parse_covers_the_raw_text` plus a DROPPED entry,
+    so anyone grading this class of sabotage by FAIL count alone would call it uncaught.
+
+    Two corrections to the original report, both measured: `run make X` is missed in EVERY casing
+    because "run" was never in the vocabulary at all, not because of case; and the largest holes
+    were not casing but ordinary markdown furniture — `- make e2e-live`, `* make e2e-live`,
+    `1. make e2e-live` — plus the shell control words `if`, `while`, `until`, `xargs`, `watch`.
+
+    The false positive this guard must still refuse is the one an earlier draft was bitten by:
+    the English sentence "will make check pass on the first try" is not an instruction to run
+    `make check`.
+    """
+    targets = {"check", "e2e-live", "bootstrap"}
+
+    must_be_read_as_commands = [
+        "make e2e-live",
+        "then make e2e-live",
+        "Then make e2e-live",
+        "THEN make e2e-live",
+        "time make e2e-live",
+        "Time make e2e-live",
+        "do make e2e-live",
+        "Do make e2e-live",
+        "else make e2e-live",
+        "Else make e2e-live",
+        "sudo make e2e-live",
+        "Sudo make e2e-live",
+        "env make e2e-live",
+        "Env make e2e-live",
+        "run make e2e-live",
+        "Run make e2e-live",
+        "rerun make e2e-live",
+        "if make e2e-live",
+        "while make e2e-live",
+        "until make e2e-live",
+        "xargs make e2e-live",
+        "watch make e2e-live",
+        "just make e2e-live",
+        "and make e2e-live",
+        "now make e2e-live",
+        "- make e2e-live",
+        "* make e2e-live",
+        "+ make e2e-live",
+        "1. make e2e-live",
+        "12) make e2e-live",
+        "> make e2e-live",
+        "  - make e2e-live",
+        "$ make e2e-live",
+        'cd "$REPO" && make e2e-live',
+        "make -f Makefile e2e-live",
+        "Make e2e-live",
+    ]
+    for line in must_be_read_as_commands:
+        assert _raw_make_mentions(line, targets) == ["make e2e-live"], (
+            f"{line!r} puts `make e2e-live` exactly where a command stands, and the raw-text "
+            f"cross-check must see it. This scan is the only net left when a fence language "
+            f"defeats the real parser, and every line it cannot read is a step that can be "
+            f"hidden: got {_raw_make_mentions(line, targets)!r}"
+        )
+
+    must_not_be_read_as_commands = [
+        "will make check pass on the first try",
+        "that would make check unnecessary",
+        "to make check faster, cache the venv",
+        "we can make check run in parallel",
+    ]
+    for line in must_not_be_read_as_commands:
+        assert _raw_make_mentions(line, targets) == [], (
+            f"{line!r} is English prose using the verb 'make', and reading it as a command turns "
+            f"the cross-check into a false positive on the document it is meant to protect: got "
+            f"{_raw_make_mentions(line, targets)!r}"
+        )
+
+    # End to end, through the sweep: a `make` step hidden in a fence the parser does not read is
+    # either graded or reported, never both silent.
+    doc = _fixture_runbook(
+        tmp_path,
+        monkeypatch,
+        "# Fixture\n\nFollow the steps:\n\n```text\n- Then make e2e-live\n```\n",
+    )
+    _, _, per_doc, _dropped = audit()
+    graded = [c.text for c in per_doc[0][2]]
+    gaps = _coverage_gaps(doc, per_doc[0][2])
+    assert "make e2e-live" in graded or gaps, (
+        "a `make e2e-live` step written as `- Then make e2e-live` inside a ```text fence was "
+        "neither graded by the parser nor reported by the raw cross-check, which is the state "
+        "this whole file exists to make impossible"
+    )
+
+
+def test_every_line_inside_an_unread_fence_lands_in_the_counted_dropped_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A line the parser declines must be counted and printed, never merely absent.
+
+    The old code skipped a fence whose language it did not read with a bare `continue`. That is
+    the shape of every quiet-sweep failure in this repo: the work simply does not happen, and
+    nothing in the report changes except a number nobody is diffing. Program OUTPUT is a real
+    category and must stay droppable — grading `lint ok; don't rerun` as a command produced an
+    unparseable FAIL — so the fix is not "grade everything", it is "say what you did with it".
+    """
+    _fixture_runbook(
+        tmp_path,
+        monkeypatch,
+        "# Fixture\n\n```text\nlint ok; don't rerun\nall green\n```\n\n"
+        "```console\n$ make check\nlint ok; don't rerun\n```\n",
+    )
+    commands, results, _per_doc, dropped = audit()
+
+    assert [c.text for c in commands] == ["make check"], (
+        f"the prompted `make check` is the only command here: {[c.text for c in commands]}"
+    )
+    assert len(dropped) == 3, (
+        f"three non-blank lines were declined and all three must be recorded with a reason; "
+        f"got {[d.render() for d in dropped]}"
+    )
+    assert {d.kind for d in dropped} == {"unread-fence-language", "transcript-output"}, (
+        f"each dropped line must say WHY it was dropped: {[(d.kind, d.text) for d in dropped]}"
+    )
+    for drop in dropped:
+        rendered = drop.render()
+        assert drop.why and drop.text and str(drop.lineno) in rendered and drop.text in rendered, (
+            f"a dropped line must render with its location, its text and its reason, so the "
+            f"gate's report can print it: {rendered!r}"
+        )
+    assert all(r.verdict != VERDICT_UNCLASSIFIED for r in results), (
+        f"nothing here should reach UNCLASSIFIED: {[r.render() for r in results]}"
+    )
+
+
+def test_the_gates_failure_report_actually_names_the_broken_step_and_the_dropped_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's report is only worth having if something renders it.
+
+    ESC-018 step (b) took the runbook to 17 PASS / 0 FAIL, which is the right outcome and has a
+    side effect worth pinning: the gate below now never takes its failure branch, so the message
+    it exists to produce — the FAIL list, the tally, the UNCLASSIFIED bucket and the DROPPED
+    bucket — is rendered by no test at all. Dead formatting rots, and this file's whole argument
+    is that a bucket which is not PRINTED is a bucket that is not counted.
+
+    So: drive the gate over a fixture runbook that has both a broken step and a declined line,
+    and assert on the text it raises. This is the only test that executes that branch.
+    """
+    _fixture_runbook(
+        tmp_path,
+        monkeypatch,
+        "# Fixture\n\n```bash\ndocker compose --profile e2e up -d no-such-service\n```\n\n"
+        "```text\nlint ok; don't rerun\n```\n",
+    )
+    with pytest.raises(AssertionError) as excinfo:
+        test_c19_every_command_the_demo_runbook_names_resolves()
+    message = str(excinfo.value)
+
+    for needle, why in (
+        ("[FAIL]", "the failing step must be listed"),
+        ("no-such-service", "the report must name WHAT is broken, not merely that something is"),
+        ("--- DROPPED", "the dropped bucket must be printed, not merely counted"),
+        (
+            "[DROPPED:unread-fence-language]",
+            "each dropped line must carry its machine-readable reason into the report",
+        ),
+        ("lint ok; don't rerun", "the dropped line's text must appear so a reader can judge it"),
+        ("1 DROPPED", "the tally must carry the dropped count"),
+        ("1 FAIL", "the tally must carry the failure count"),
+    ):
+        assert needle in message, (
+            f"the gate's failure report is missing {needle!r} — {why}. A report that omits it is "
+            f"how a step goes quiet rather than red. Full message:\n{message}"
         )
 
 
@@ -1511,10 +2246,11 @@ def test_c19_every_command_the_demo_runbook_names_resolves() -> None:
 
     The message is the point as much as the red is: it names the document, the line, the command
     and what is missing, so the gate reports *which step is broken*. It also prints the
-    UNCLASSIFIED bucket unconditionally, including on the failing path — a command this parser
-    could not grade is a hole in the sweep, and the one thing it must never be is invisible.
+    UNCLASSIFIED and DROPPED buckets unconditionally, including on the failing path — a command
+    this parser could not grade, and a line it declined to read at all, are both holes in the
+    sweep, and the one thing they must never be is invisible.
     """
-    commands, results, _ = audit()
+    commands, results, _, dropped = audit()
 
     assert commands, "extracted 0 commands — refusing to report PASS on an empty sweep"
 
@@ -1525,13 +2261,23 @@ def test_c19_every_command_the_demo_runbook_names_resolves() -> None:
 
     tally = (
         f"(swept {len(commands)} commands out of "
-        f"{[str(p.relative_to(REPO_ROOT)) for p in runbooks()]}; {len(passes)} PASS, "
-        f"{len(failures)} FAIL, {len(infos)} INFO, {len(unclassified)} UNCLASSIFIED)"
+        f"{[_rel(p) for p in runbooks()]}; {len(passes)} PASS, "
+        f"{len(failures)} FAIL, {len(infos)} INFO, {len(unclassified)} UNCLASSIFIED, "
+        f"{len(dropped)} DROPPED)"
     )
     unclassified_report = (
         "\n\n--- UNCLASSIFIED: named nothing this gate could resolve ---\n"
         + "\n".join(r.render() for r in unclassified)
         if unclassified
+        else ""
+    )
+    # The DROPPED bucket is printed for the same reason UNCLASSIFIED is, and it is the newer of
+    # the two lessons: a fence relabelled `bash` -> `console` used to remove a step from the
+    # sweep leaving nothing but a count one lower than yesterday's, which nobody was comparing.
+    dropped_report = (
+        "\n\n--- DROPPED: lines inside a fence that the parser declined to grade ---\n"
+        + "\n".join(d.render() for d in dropped)
+        if dropped
         else ""
     )
 
@@ -1543,5 +2289,6 @@ def test_c19_every_command_the_demo_runbook_names_resolves() -> None:
             + f"\n\n--- the {len(passes) + len(infos)} that do ---\n"
             + "\n".join(r.render() for r in passes + infos)
             + unclassified_report
+            + dropped_report
             + f"\n\n{tally}"
         )

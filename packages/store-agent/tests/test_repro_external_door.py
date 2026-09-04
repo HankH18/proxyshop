@@ -14,10 +14,25 @@ from __future__ import annotations
 
 import random
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+
+
+def _common_prefix(values: Sequence[str]) -> str:
+    """The longest literal every value starts with — the shape a fail-open keys on."""
+    if not values:
+        return ""
+    shared = values[0]
+    for value in values[1:]:
+        while not value.startswith(shared):
+            shared = shared[:-1]
+            if not shared:
+                return ""
+    return shared
+
 
 SIGNER = "store-external-1"
 KEY_ID = "key-2026-01"
@@ -832,44 +847,142 @@ def test_omitting_the_eligibility_inputs_is_not_more_permissive_than_passing_emp
     )
 
 
+#: How many bids the property below draws per seed.
+_DRAWS_PER_SEED = 60
+
+
+def _property_seeds(pinned: int) -> tuple[int, int]:
+    """One PINNED seed and one drawn fresh on every run. The property runs over both.
+
+    Back-ported verbatim in shape from `packages/contracts/tests/test_repro_open_tickets.py`,
+    where it exists for a measured reason rather than a stylistic one. The pinned seed is what
+    makes a red run reproducible; the unpinned one closes the hole the pinned seed leaves, and
+    that hole is what defeated THIS gate. With a single constant seed the 60 "drawn" bids are a
+    constant TABLE, so any field every row of that table happens to share is a viable key for a
+    fail-open: an adversarial review keyed the T-233 defect on `offer.expires_at` (every drawn
+    offer expired in 2027-2999 against `now=2026`) and on a `store_id` prefix (every drawn id
+    began with the literal `store-`), and this file came back byte-identical to baseline both
+    times with the fail-open fully alive for a realistic bid. No enumeration of payloads closes
+    that — the defence is a table the patch has not seen. Every failure message names its seed,
+    so a red run from the unpinned half is reproduced by pinning the seed it printed.
+    """
+    return (pinned, random.SystemRandom().randrange(2**32))
+
+
+#: `NOW` as a datetime, so a drawn `expires_at` is placed RELATIVE to the door's clock instead
+#: of in a band chosen by hand. Pinned against the `NOW` string itself in the generator's own
+#: regression test — a constant that drifted from `NOW` would quietly move every drawn offer
+#: back into the far future this generator exists to leave.
+NOW_DT = datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC)
+
+#: Word stock for drawn identifiers, deliberately heterogeneous. The generator this replaced
+#: spelled every id with a constant literal prefix — `store-`, `auc-`, `prod-`, `nonce-`,
+#: `ext-` — and a fail-open keyed on `store_id.startswith("store-")` therefore survived all 60
+#: of its draws. A prefix every draw shares is a key every draw misses.
+_WORDS = (
+    "north", "kettle", "acme", "vega", "lumen", "orchid", "basalt", "tundra", "quill", "amber",
+    "corvid", "delta", "fern", "gable", "harbor", "ingot", "juniper", "krill", "larch", "moss",
+    "nimbus", "opal", "pelican", "quarry", "rowan", "sable", "thistle", "umber", "vellum", "wren",
+)  # fmt: skip
+
+#: Separators, so not even the punctuation between the words is constant. `""` is included:
+#: a run of concatenated words is a perfectly ordinary store id and shares no separator at all.
+_SEPARATORS = ("-", "_", ".", "", "~", "+")
+
+
+def _drawn_token(rng: random.Random) -> str:
+    """An identifier sharing no prefix, separator, case or length with the next one drawn."""
+    words = [rng.choice(_WORDS) for _ in range(rng.randrange(1, 4))]
+    if rng.random() < 0.45:
+        words.insert(rng.randrange(len(words) + 1), str(rng.randrange(10**7)))
+    token = rng.choice(_SEPARATORS).join(words)
+    case = rng.randrange(3)
+    return token.upper() if case == 1 else (token.capitalize() if case == 2 else token)
+
+
+def _drawn_expires_at(rng: random.Random) -> str:
+    """An offer expiry spanning REALISTIC values around `now`, not only the far future.
+
+    This is the fix for the measured blindness, so the shape of the distribution is the point.
+    The old generator drew the year uniformly from 2027-2999 against `now=2026`, which means no
+    draw it could ever produce resembled a bid a store actually submits — a live auction's offer
+    expires in minutes or days, not in three centuries. A fail-open keyed on
+    `offer.expires_at >= "2027"` was therefore invisible to 60 of 60 draws while staying alive
+    for every real bid. Most of the mass now sits inside the day; the far-future tail is kept so
+    the shapes the old table covered are not LOST, only outnumbered.
+
+    The one hard constraint: the shared boundary refuses `offer_expired` when
+    `expires_at <= now`, so every draw must land strictly after `NOW_DT` or the arming assertion
+    would start failing for a reason that has nothing to do with eligibility.
+    """
+    band = rng.random()
+    if band < 0.55:  # the realistic band: this offer expires within the hour or the day
+        delta = timedelta(seconds=rng.randrange(5, 86_400))
+    elif band < 0.80:  # weeks to a year out
+        delta = timedelta(days=rng.randrange(1, 366))
+    elif band < 0.93:  # one to ten years
+        delta = timedelta(days=rng.randrange(366, 3653))
+    else:  # the far future the old table lived in, kept as a tail rather than as the whole thing
+        delta = timedelta(days=rng.randrange(3653, 355_000))
+    return (NOW_DT + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _drawn_claim(rng: random.Random, *, source: str) -> dict[str, Any]:
+    """One claim whose key, value, ref and `observed_at` are all drawn.
+
+    Deliberately NOT `_claim`: that helper stamps `observed_at=ISSUED_AT` and
+    `ref="pitch:gate-1#<key>"`, both constants, and a constant inside a "randomized" bid is a
+    key. `source` is held to the caller's choice because R8 admits `seller_asserted` only in
+    `bid.claims` and only `owner_statement` at `offer.commitments`; a drawn source would make
+    the bid unbuildable rather than harder to game.
+    """
+    observed = NOW_DT - timedelta(seconds=rng.randrange(0, 240))
+    return {
+        "key": _drawn_token(rng),
+        "value": f"{_drawn_token(rng)} {rng.randrange(10**4)}",
+        "provenance": {
+            "source": source,
+            "ref": f"{_drawn_token(rng)}:{rng.randrange(10**6)}#{_drawn_token(rng)}",
+            "observed_at": observed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "authority_rank": rng.randrange(1, 5),
+        },
+    }
+
+
 def _randomized_bid(rng: random.Random) -> dict[str, Any]:
     """A valid, signable bid whose every caller-visible field is drawn rather than fixed.
 
     `signer_id`/`key_id` are held to the keyring because a bid nobody can authenticate never
-    reaches the eligibility gate at all; everything else varies.
+    reaches the eligibility gate at all, and `schema_version` is held to `"1"` because the
+    envelope has no other version. `offer.discount` stays `None`: a present discount engages
+    R8's provenance rules at `offer.discount` AND T-177's depth/price consistency check, and a
+    drawn one would fail the ARMING assertion for reasons unrelated to eligibility — that is an
+    honest limit of this generator and is recorded here rather than left to be rediscovered.
+    Everything else varies, prefixes and separators included.
     """
-    unit_price = round(rng.uniform(1.0, 5000.0), 2)
-    expires_at = (
-        f"{rng.randrange(2027, 3000)}-{rng.randrange(1, 13):02d}-{rng.randrange(1, 29):02d}"
-        "T00:00:00Z"
-    )
-    claims = [
-        _claim(f"attr-{rng.randrange(10**6)}", f"value-{rng.randrange(10**6)}")
-        for _ in range(rng.randrange(0, 4))
-    ]
-    commitments = [
-        _claim(f"commit-{rng.randrange(10**6)}", "60 days, free", source="owner_statement")
-        for _ in range(rng.randrange(0, 2))
-    ]
+    unit_price = round(rng.uniform(0.5, 50_000.0), 2)
+    issued = NOW_DT - timedelta(seconds=rng.randrange(0, 240))
+    claims = [_drawn_claim(rng, source="seller_asserted") for _ in range(rng.randrange(0, 4))]
+    commitments = [_drawn_claim(rng, source="owner_statement") for _ in range(rng.randrange(0, 2))]
     return {
-        "auction_id": f"auc-{rng.randrange(10**9)}",
-        "store_id": f"store-{rng.randrange(10**9)}",
+        "auction_id": _drawn_token(rng),
+        "store_id": _drawn_token(rng),
         "offer": {
-            "product_ref": f"prod-{rng.randrange(10**9)}",
+            "product_ref": _drawn_token(rng),
             "unit_price": unit_price,
             "total_price": unit_price,
             "discount": None,
             "commitments": commitments,
-            "expires_at": expires_at,
+            "expires_at": _drawn_expires_at(rng),
         },
         "claims": claims,
-        "message": "x" * rng.randrange(1, 200),
-        "agent_version": f"ext-{rng.randrange(9)}.{rng.randrange(9)}.{rng.randrange(9)}",
+        "message": " ".join(_drawn_token(rng) for _ in range(rng.randrange(1, 12))),
+        "agent_version": f"{_drawn_token(rng)}/{rng.randrange(99)}.{rng.randrange(99)}",
         "schema_version": "1",
         "signer_id": SIGNER,
         "key_id": KEY_ID,
-        "issued_at": ISSUED_AT,
-        "nonce": f"nonce-{rng.randrange(10**12)}",
+        "issued_at": issued.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "nonce": _drawn_token(rng),
     }
 
 
@@ -897,10 +1010,7 @@ def test_the_absent_eligibility_argument_is_indistinguishable_from_the_empty_one
     """
     from store_agent.external import NonceStore, receive_bid, sign_bid
 
-    rng = random.Random(20260904)  # fixed seed: randomized coverage, deterministic reruns
-    armed = 0
-
-    for i in range(60):
+    def _draw_once(rng: random.Random, seed: int, draw: int) -> str:
         payload = _randomized_bid(rng)
         signature = sign_bid(payload, KEY)
 
@@ -918,11 +1028,10 @@ def test_the_absent_eligibility_argument_is_indistinguishable_from_the_empty_one
 
         supplied = _receive(trust_snapshot=_trust_snapshot_for(payload))
         assert supplied.accepted is True, (
-            f"draw {i}: with a real eligibility row this randomized bid must be admitted, or the "
-            f"comparison below is between two refusals that have nothing to do with eligibility. "
-            f"payload={payload!r} receipt={supplied!r}"
+            f"seed {seed} draw {draw}: with a real eligibility row this randomized bid must be "
+            f"admitted, or the comparison below is between two refusals that have nothing to do "
+            f"with eligibility. payload={payload!r} receipt={supplied!r}"
         )
-        armed += 1
 
         omitted = _receive()
         empty = _receive(trust_snapshot={})
@@ -930,19 +1039,135 @@ def test_the_absent_eligibility_argument_is_indistinguishable_from_the_empty_one
             empty.accepted,
             tuple(empty.reasons or ()),
         ), (
-            f"draw {i}: omitting trust_snapshot gave "
+            f"seed {seed} draw {draw}: omitting trust_snapshot gave "
             f"{(omitted.accepted, tuple(omitted.reasons or ()))} where passing an explicit empty "
             f"snapshot gave {(empty.accepted, tuple(empty.reasons or ()))}. The absent argument "
             f"must be the empty one for EVERY bid, not for the ones this file happens to name — "
             f"a default that reads any part of the submission to decide how permissive to be is "
-            f"the T-233 defect with a different key. payload={payload!r}"
+            f"the T-233 defect with a different key. Reproduce with random.Random({seed}) and "
+            f"take draw {draw}. payload={payload!r}"
         )
         assert omitted.accepted is False, (
-            f"draw {i}: a submission judged with no eligibility input at all was admitted. "
-            f"payload={payload!r} receipt={omitted!r}"
+            f"seed {seed} draw {draw}: a submission judged with no eligibility input at all was "
+            f"admitted. payload={payload!r} receipt={omitted!r}"
+        )
+        return repr(payload)
+
+    armed = 0
+    distinct: set[str] = set()
+    for seed in _property_seeds(20260904):
+        rng = random.Random(seed)
+        for draw in range(_DRAWS_PER_SEED):
+            distinct.add(_draw_once(rng, seed, draw))
+            armed += 1
+
+    # A LITERAL 120, never `2 * _DRAWS_PER_SEED`: a guard written in terms of the constant it is
+    # guarding compares the constant against itself, which is the same tautology as a loop that
+    # iterates zero cases and reports success.
+    assert _DRAWS_PER_SEED >= 60, (
+        f"_DRAWS_PER_SEED shrank to {_DRAWS_PER_SEED}; this property is sized at 60 draws per "
+        f"seed and the guards below are written against a literal 120"
+    )
+    assert armed == 120, (
+        f"only {armed} of 120 draws were built, armed and compared. A loop that silently "
+        f"iterates fewer cases than it claims is how three sweeps in this repo went QUIET rather "
+        f"than red (6->0 of 8, 70->0 of 79, 48->0 of 66)"
+    )
+    assert len(distinct) == 120, (
+        f"the generator produced {len(distinct)} distinct bids across 120 draws; a property "
+        f"asserted over one repeated bid is a single-payload probe wearing a loop"
+    )
+
+
+def test_the_t233_generator_is_not_a_constant_far_future_table() -> None:
+    """The generator's own gate: the three properties that make the property above able to see.
+
+    Every assertion here is a regression pin on a MEASURED blindness, not a style preference.
+    The generator this replaced drew `offer.expires_at` from `randrange(2027, 3000)` against
+    `now=2026` and spelled every id with a constant literal prefix, and against that generator a
+    fail-open keyed on `offer.expires_at` and one keyed on `store_id.startswith("store-")` both
+    came back byte-identical to baseline — the gate went quiet rather than red while the T-233
+    defect was live for a realistic bid. Amendment 17 names `offer.expires_at` as one of the four
+    gaming keys that sank this gate's predecessor.
+
+    Revert any part of that widening and this test fails, which is the point: the next rewrite
+    cannot re-open the hole by tidying the generator back into a constant table.
+    """
+    # The seeds. `isinstance(drawn, int)` alone proves nothing — it is satisfied by a
+    # `_property_seeds` de-randomized to a constant pair, which is the one property its docstring
+    # calls load-bearing. Two calls must disagree on the drawn half; collision odds are 2**-32.
+    first_pinned, first_drawn = _property_seeds(20260904)
+    second_pinned, second_drawn = _property_seeds(20260904)
+    assert first_pinned == second_pinned == 20260904, (
+        f"_property_seeds must return the pinned seed it was given, got "
+        f"{(first_pinned, second_pinned)!r}"
+    )
+    assert first_drawn != second_drawn, (
+        f"_property_seeds returned the same 'drawn' seed twice ({first_drawn}), so the property "
+        f"is running over a constant table after all — which is precisely the hole the unpinned "
+        f"seed exists to close, and two measured fail-open keys walk through it"
+    )
+
+    # `NOW_DT` must BE `NOW`, or every "realistic" band below is measured against a clock the
+    # door does not use and the widening is cosmetic.
+    assert NOW_DT.strftime("%Y-%m-%dT%H:%M:%SZ") == NOW, (
+        f"NOW_DT ({NOW_DT!r}) has drifted from NOW ({NOW!r}); the drawn expiries are then placed "
+        f"relative to the wrong clock"
+    )
+
+    rng = random.Random(20260904)
+    bids = [_randomized_bid(rng) for _ in range(_DRAWS_PER_SEED)]
+    assert len(bids) == _DRAWS_PER_SEED >= 60, "the sample itself must be armed"
+
+    expiries = [b["offer"]["expires_at"] for b in bids]
+    assert all(e > NOW for e in expiries), (
+        f"an offer expiring at or before now is refused `offer_expired` by the shared boundary, "
+        f"so it would break the property's ARMING assertion rather than harden it: "
+        f"{sorted(e for e in expiries if e <= NOW)[:5]}"
+    )
+    # The blindness itself, stated as a number. The old generator scored 0 here for 60 of 60.
+    within_a_day = [e for e in expiries if e < "2026-01-02"]
+    assert len(within_a_day) >= 15, (
+        f"only {len(within_a_day)} of {len(expiries)} drawn offers expire within a day of "
+        f"now={NOW}. The generator this replaced scored ZERO — every draw expired in 2027-2999 — "
+        f"and a fail-open keyed on `offer.expires_at` was invisible to all 60 of them while "
+        f"staying alive for the near-term expiry a live auction actually carries"
+    )
+    assert len({e[:4] for e in expiries}) >= 5, (
+        f"the drawn expiry years are {sorted({e[:4] for e in expiries})}; a distribution narrow "
+        f"enough to enumerate is a distribution a patch can key on"
+    )
+
+    # No constant prefix on any drawn identifier. `store-`, `auc-`, `prod-`, `nonce-` and `ext-`
+    # were all constants of the old generator, and a prefix every draw shares is a key every
+    # draw misses.
+    for field, values in (
+        ("store_id", [b["store_id"] for b in bids]),
+        ("auction_id", [b["auction_id"] for b in bids]),
+        ("offer.product_ref", [b["offer"]["product_ref"] for b in bids]),
+        ("nonce", [b["nonce"] for b in bids]),
+        ("agent_version", [b["agent_version"] for b in bids]),
+        ("message", [b["message"] for b in bids]),
+    ):
+        shared = _common_prefix(values)
+        assert len(shared) <= 1, (
+            f"every drawn `{field}` starts with {shared!r}. That literal is a key: a fix that "
+            f"keeps the fail-open alive for everything NOT matching it passes all "
+            f"{len(values)} draws — which is exactly how `store-` defeated this gate"
+        )
+        assert len(set(values)) >= len(values) - 5, (
+            f"`{field}` took only {len(set(values))} distinct values across {len(values)} draws; "
+            f"a field that repeats is a field a patch can enumerate"
         )
 
-    assert armed == 60, f"only {armed} of 60 draws were armed; the generator has drifted"
+    # `issued_at` is a timestamp, so a shared prefix is inevitable and meaningless — what matters
+    # is that it is not the single frozen `ISSUED_AT` constant the old generator stamped on every
+    # draw, which was itself a viable key.
+    issued = [b["issued_at"] for b in bids]
+    assert len(set(issued)) >= 20, (
+        f"`issued_at` took only {len(set(issued))} distinct values across {len(issued)} draws "
+        f"(the generator this replaced stamped one constant on all of them): {sorted(set(issued))}"
+    )
 
 
 # =============================================================================================
