@@ -1,6 +1,6 @@
 {
-  "frozen_at": "2026-09-04T04:46:52",
-  "amendments": 17,
+  "frozen_at": "2026-09-04T14:45:30",
+  "amendments": 19,
   "files": {
     ".swarm-loop/acceptance/README.md": "650910301dc909eb6fb13bd1fcebabc4766e372e0c08210d08e18d84e42e596e",
     ".swarm-loop/acceptance/conftest.py": "298928bc45944aaaa58dcf39d2d1e7b5515b879c89d7658adae3aff03f7796bf",
@@ -14,11 +14,11 @@
     ".swarm-loop/acceptance/test_e7_buyer.py": "9eb36ab742687abaa06f125c6bc73274c4780b4937d1334ce87e98468882da1c",
     ".swarm-loop/acceptance/test_e8_proofs.py": "da6af18421977cafa1945a3d0f1c2b926da4a575906d22b648b9500fed301d98",
     ".swarm-loop/acceptance/test_spec_criteria.py": "47e7bd7a58d05b3855e6a32a06c116b6b42f0f0a57ec4728bf2b3dabb4df43d5",
-    ".swarm-loop/goals.json": "a05f0798659ac7b225701980899a6824c097b8148f08b7bca52a9055df8ca093",
+    ".swarm-loop/goals.json": "0b1cc8f74d6def074ed5f4acad39bb9b28c6df06865e4eef9b086df427213851",
     "Makefile": "5667e65a172b98035e56e39d12b5cf44063e29de592cb0f93a91322eacc89c62",
     "scripts/verify.sh": "dea3c2974e02ffcd52e4b0e5c5ccecf3557b32378609805c1ac3752976e94622",
     "scripts/check_verify_contracts.py": "f41ee158357ba9027649c11732044f3c7c167d9777c4403d0735b1d4015dd1e5",
-    "tickets.json": "cf60960a8db7f33c8108a853e6713f8b041bb67d8522eb046712dd6b89bd0db7"
+    "tickets.json": "cc489609e4b1fedbd3f4539da009647851309c273013b2933c758860334151d5"
   },
   "targets": {
     "acceptance_pass_rate": 100.0,
@@ -35,5 +35,79 @@
     "e8_proofs_passing": 8.0
   },
   "goals_canon": "968c4996d90b13565555da6796be7101e63de4db96a152c9af20b9e78cfe728e",
-  "log_seq": 38
+  "log_seq": 40,
+  "metric_defs": {
+    "acceptance_pass_rate": {
+      "target": 100.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --pass-rate",
+      "tolerance": 0.0
+    },
+    "acceptance_collected": {
+      "target": 120.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --total",
+      "tolerance": 0.0
+    },
+    "build_succeeds": {
+      "target": 1.0,
+      "direction": "maximize",
+      "command": "if PROXYSHOP_WORKER=0 make verify >.swarm-loop/reports/verify-last.log 2>&1; then echo 1; else echo 0; fi",
+      "tolerance": 0.0
+    },
+    "spec_criteria_passing": {
+      "target": 8.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic SPEC",
+      "tolerance": 0.0
+    },
+    "e1_foundation_passing": {
+      "target": 10.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E1",
+      "tolerance": 0.0
+    },
+    "e2_ingestion_passing": {
+      "target": 8.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E2",
+      "tolerance": 0.0
+    },
+    "e3_exchange_passing": {
+      "target": 21.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E3",
+      "tolerance": 0.0
+    },
+    "e4_store_agent_passing": {
+      "target": 20.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E4",
+      "tolerance": 0.0
+    },
+    "e5_merchant_passing": {
+      "target": 10.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E5",
+      "tolerance": 0.0
+    },
+    "e6_trust_passing": {
+      "target": 26.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E6",
+      "tolerance": 0.0
+    },
+    "e7_buyer_passing": {
+      "target": 9.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E7",
+      "tolerance": 0.0
+    },
+    "e8_proofs_passing": {
+      "target": 8.0,
+      "direction": "maximize",
+      "command": ".venv/bin/python .swarm-loop/acceptance/run.py --count-passing --epic E8",
+      "tolerance": 0.0
+    }
+  }
 }

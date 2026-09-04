@@ -2933,7 +2933,7 @@
     {
       "id": "T-161",
       "title": "A provenance block nested inside a hook-provenanced claim's opaque `value` is not walked. Measured: make_bid(claims=[{\"key\":\"x\",\"value\":{\"provenance\": seller_asserted}, \"provenance\": hook}]) returns hosted ok=True. _source_verdict reads holder[\"provenance\"] only. NOT fixed by the T-135 lane by deliberate choice: Claim.value is typed Any, and walking arbitrary values for provenance-shaped dicts would reject legitimate structured values. Speculative today (nothing downstream reads it) and closing it needs a schema decision about Claim.value.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts/tests/test_repro_open_tickets.py -q --runxfail -k test_a_provenance_nested_in_a_claim_value_is_not_invisible_to_the_hosted_door",
       "scope": [
         "packages/contracts/src/boundary.py:157 (_source_verdict)"
       ],
@@ -2950,7 +2950,7 @@
     {
       "id": "T-162",
       "title": "The boundary checks provenance SOURCE but never discount AUTHORISATION. make_bid(claims=[make_claim(\"policy\", {\"authorized_discount_pct\": 25.0}, hook_provenance)]) returns hosted ok=True. The boundary cannot do better on its own \u2014 it holds no hook ledger. The store-agent guard covers this for hosted Tier-1 (packages/store-agent/src/hooks/provenance.py:555) but there is NO equivalent for the external path, so an external submitter's stated discount authorisation is unchecked by anything.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts/tests/test_repro_open_tickets.py -q --runxfail -k test_an_external_submitters_self_asserted_discount_authorisation_is_not_taken_on_trust",
       "scope": [
         "packages/contracts/src/boundary.py (validate_bid) \u2014 external path"
       ],
@@ -2967,7 +2967,7 @@
     {
       "id": "T-163",
       "title": "T-133 item (c): SessionStore.open() validates only that the subject carries the 'psn-' PREFIX \u2014 it never checks vault membership. Any psn--prefixed string therefore opens a session, so the pseudonym is treated as a bearer credential whose format is its only proof. The T-139 lane deferred this deliberately and correctly: closing it requires threading a vault reference into SessionStore, which changes that seam's contract and touches MagicLinkAuth wiring plus every SessionStore subclass \u2014 more than the 'small and self-contained' scope it was given. It is the largest remaining R5 auth gap.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session",
       "scope": [
         "apps/buyer/svc/src/auth/sessions.py"
       ],
@@ -2984,7 +2984,7 @@
     {
       "id": "T-164",
       "title": "build_buckets() and anonymise_cohort() are public and run NO identity-leak check; only build_profile()/build_profiles() do. Harmless at HEAD because every publishing path goes through build_profile and publish_profile only accepts a BuyerProfile \u2014 but it is a live trap for the next lane: T-142 wires publish_profile, and if it sources buckets from build_buckets instead of build_profile it bypasses the backstop entirely. Either run the check inside build_buckets or make the unguarded entry points private.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t164_no_public_bucket_builder_publishes_identity_without_the_backstop",
       "scope": [
         "apps/buyer/svc/src/profile/__init__.py"
       ],
@@ -3001,7 +3001,7 @@
     {
       "id": "T-165",
       "title": "No rate limiter on the unauthenticated magic-link endpoint, and the session/pending-link store behind it is process-local (ProcessLocalStateUnsafe), so state is neither shared across replicas nor durable. T-133 item (b) bounded the session table (sweep expired, then refuse with SessionsExhausted at max_sessions=50000, refuse-don't-evict) which closes the unbounded-growth half, but the request-rate half needs shared infrastructure plus a migration and is correctly outside a buyer-scoped lane.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t165_repeated_unauthenticated_magic_link_requests_are_eventually_refused",
       "scope": [
         "apps/buyer/svc/src/auth/routes.py (POST /buyer/auth/magic-link) + routes.py:57 ProcessLocalStateUnsafe"
       ],
@@ -3494,7 +3494,7 @@
     {
       "id": "T-194",
       "title": "THE TWO DOORS DO NOT RUN THE SAME SCHEMA CHECK \u2014 21 measured ok-divergences. TypeScript validates through ajv WITH ajv-formats, so `format: date-time` is enforced on all eight timestamp fields; Python validates through the generated pydantic models where every one of those fields is a bare `str`, so the format keyword is unenforced. The Python door admits timestamps the TypeScript door rejects (6 of the 21 divergences). Separately, the docstring claim that both read blacklisted truthily 'the same way' is false for empty containers: Python's bool([]) is False while JavaScript's [] is truthy, so blacklisted: [] is ADMITTED by Python and REFUSED by TypeScript. Both suites iterate the same 5-value list that happens to miss the divergent cases.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts/tests/test_repro_open_tickets.py -q --runxfail -k test_the_python_door_enforces_the_date_time_format_the_typescript_door_enforces",
       "scope": [
         "packages/contracts/src/ts/schemas.ts:63-65 (ajv + ajv-formats) vs packages/contracts/src/boundary.py:353-365 (pydantic)"
       ],
@@ -3545,7 +3545,7 @@
     {
       "id": "T-197",
       "title": "Identity fragments shorter than 4 characters are never tracked ANYWHERE in the leak backstop, so short names walk straight out: first_name='Ann', last_name='Lee', category 'ann lee gear' BUILDS as ['ann-lee-gear'] with the backstop reporting clean. Not introduced by T-189. The constant feeds the whole backstop and its own comment records why it is 4 (avoiding a collision with a two-letter region code), so lowering it has a repo-wide regression surface and is a policy decision, not a bug fix \u2014 which is why the lane correctly did not change it.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t197_a_three_letter_name_in_a_category_slug_is_still_a_leak",
       "scope": [
         "apps/buyer/svc/src/profile/__init__.py:436 (_MIN_LEAKABLE = 4)"
       ],
@@ -3562,7 +3562,7 @@
     {
       "id": "T-198",
       "title": "Two residual identity channels the T-189 fix deliberately stopped short of. (a) A number REGROUPED rather than repunctuated still escapes: 'gift 5550100 gear' -> ['gift-5550100-gear'] with leaks == []; deciding which digits of a phone number are the phone number is a normalisation design, not a guess to make mid-ticket. (b) Only the email LOCAL PART is split into words while the domain is added whole, so a vanity domain rides out: x@reyes-family.example with category 'reyes family gear' -> BUILDS ['reyes-family-gear']. Low severity because shared domains carry no identity, but a vanity domain does.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t198_a_a_regrouped_phone_number_in_a_category_slug_is_still_a_leak",
       "scope": [
         "apps/buyer/svc/src/profile/__init__.py:918 (_identity_sources) and"
       ],
@@ -3579,7 +3579,7 @@
     {
       "id": "T-199",
       "title": "The bucket vocabulary holds every CATEGORY_TAXONOMY label out of the leak haystack on the grounds that they are values a coarsener chose from a fixed table. That is true at k>1, but at rung 0 category_affinity carries the account's OWN slugs, so the justification does not hold at the default floor: a buyer whose surname is 'Home' buying 'home' publishes their surname and the backstop skips it \u2014 {'last_name':'Home'}, category 'home' -> BUILDS ['home']. Defensible as the same DoS trade the exemption exists for, but the stated reason is wrong for this bucket at k=1, and narrowing it is a policy call about roughly eleven common English words.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t199_a_surname_that_is_also_a_taxonomy_label_is_still_a_leak",
       "scope": [
         "apps/buyer/svc/src/profile/__init__.py:1038 (_BUCKET_VOCABULARY['category_affinity'])"
       ],
@@ -3664,7 +3664,7 @@
     {
       "id": "T-204",
       "title": "REFUSAL REASONS ARE UNENUMERATED AND NOTHING ASSERTS ON THEM. accept() formats type(exc).__name__ into denial_reason, which is PERSISTED into a policy_event payload, and the published OpenAPI types it as a bare string. Three reason values changed in this branch alone (OrphanedOffDomainCheckout, UnusableDiscount, and a double-named 'OrphanedCheckoutCode: <Original>: ...'). Nothing in the repo asserts on any of them, so nothing broke \u2014 and nothing would catch a regression either. A persisted, client-visible field whose vocabulary is an exception class name is a contract by accident.",
-      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t204_a_denial_reason_is_drawn_from_a_declared_vocabulary",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py packages/contracts/tests/test_repro_open_tickets.py -q --runxfail -k \"test_t204_a_denial_reason_is_drawn_from_a_declared_vocabulary or test_the_published_denial_reason_has_an_enumerated_vocabulary\"",
       "scope": [
         "packages/contracts/openapi/exchange.openapi.json:169 (denial_reason) + apps/exchange/src/accept/offer.py"
       ],
@@ -3681,7 +3681,7 @@
     {
       "id": "T-205",
       "title": "SECOND LATENT except-ImportError VACUITY, found by the AST sweep T-159 asked for. The whole module skips if shopify_stub.app:app fails to import. It is CURRENTLY LIVE (the import succeeds), so this is latent rather than active \u2014 but the failure mode is the one T-159 names: any transitive import breakage silently converts 219 stub tests into a skip that reports green. The lane scanned 219 stub and 35 exchange tests by AST and found nothing else skipped, xfailed, tautological, or looping over an empty set, which is real coverage of that question for those two trees.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest services/shopify-stub/tests/test_repro_open_tickets.py -q --runxfail -k test_the_stub_url_fixture_does_not_turn_a_broken_import_into_a_skip",
       "scope": [
         "services/shopify-stub/tests/test_stub_contract.py:40 via conftest.py"
       ],
@@ -3953,7 +3953,7 @@
     {
       "id": "T-221",
       "title": "THE K-ANONYMITY FLOOR T-138 DELIVERED IS SWITCHED OFF BY DEFAULT, so the re-linkability T-138 exists to prevent still holds on the path the product actually takes. Two independent reasons, both measured at HEAD 7279452. (1) DEFAULT_K_ANONYMITY = 1 at profile/__init__.py:175 \u2014 a floor of 1 is not a floor, it is a no-op, and it is only raised if PROXYSHOP_BUYER_K_ANONYMITY is set in the environment. (2) The single-account entry point build_profile NEVER CALLS anonymise_cohort at all; only build_profiles does. So the generalisation ladder (:397), k_anonymity_floor (:721) and anonymise_cohort (:825) that commit 958fead added are correct code sitting behind a switch that is off and a caller that does not call it. T-138 was closed on the existence of the mechanism; this ticket is about its reachability. This is the BUILT-UNWIRED shape the repo keeps producing, and it is the shape a green suite cannot see.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_the_production_path",
       "scope": [
         "apps/buyer/svc/src/profile/__init__.py"
       ],
@@ -4178,7 +4178,7 @@
     {
       "id": "T-236",
       "title": "THE INGESTION PIPELINE DOES NOT EXIST AS A RUNNING THING. No production code constructs any CatalogAdapter. services/ingest/src/main.py mounts only extraction/routes.py, and services/ingest/src/scheduler/ contains nothing but __init__.py. swarmloop.py reachable reports the newly built CatalogMCPAdapter UNREACHED from services/ingest/src/main.py \u2014 and reports the ALREADY-MERGED SignedFetchAdapter and apply_upserts as equally UNREACHED. Both catalog adapters and the graph write path are defined-but-not-wired; nothing calls a catalog read outside tests. The frozen-test discriminator was asked and the answer is YES, a frozen acceptance test passes because of this code (test_both_catalog_adapters_satisfy_one_interface), so this is a MEASUREMENT-CREDIBILITY defect and not merely unfinished wiring: e2_ingestion counts an ingestion capability as met that no running process performs.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest services/ingest/tests/test_repro_open_tickets.py -q --runxfail -k test_the_running_ingest_app_can_reach_a_catalog_adapter_that_is_actually_built",
       "scope": [
         "services/ingest/src/main.py"
       ],
@@ -4208,7 +4208,7 @@
     {
       "id": "T-238",
       "title": "BARE urlsplit ON ATTACKER-CONTROLLED REDIRECT TARGETS. netguard.py:398 and transport.py:353 call bare urlsplit on URLs derived from redirect Location headers, which a hostile server controls. urlsplit('http://[') raises ValueError: Invalid IPv6 URL, so a malformed Location is a live path to an unhandled ValueError instead of the FetchRefused the guard is supposed to produce. The T-023 lane guarded the adapter ENTRY points (mapping.safe_split/safe_host) but deliberately did not touch netguard/transport, because changing their parse behaviour would move the refusal reasons T-020's suite asserts on. Contained today only because signed_fetch refuses a base URL that will not parse before any of those run.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest services/ingest/tests/test_repro_open_tickets.py -q --runxfail -k test_a_malformed_redirect_location_is_refused_rather_than_raised",
       "scope": [
         "services/ingest/src/adapters/netguard.py"
       ],
@@ -4223,7 +4223,7 @@
     {
       "id": "T-239",
       "title": "ENVELOPE VERSION HISTORY IS PROCESS-LOCAL AND DIES WITH THE PROCESS. EnvelopeVersions keeps append-only history, version-never-backwards and activate-the-head in memory (ENVELOPES = EnvelopeVersions() at module level), in the same spirit as merchant_svc.collector.PIXEL_INBOX. DESIGN puts the real history in sealed.envelopes (versioned, no grant for the exchange role). Losing it can only STOP a store bidding, never start one, so the failure mode is the safe one \u2014 but the three invariants are lost at the persistence boundary unless a migration carries them. Reported by the T-053 lane as a known limitation of what it could build inside its ownership, not as an oversight.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t239_the_envelope_version_store_has_a_durability_seam",
       "scope": [
         "apps/merchant/svc/src/envelope/store.py"
       ],
@@ -4238,7 +4238,7 @@
     {
       "id": "T-240",
       "title": "THE PINNED MERCHANT CONTRACT HAS NOWHERE TO PUT AN ENVELOPE APPROVAL ARTIFACT, AND ITS OWN EXAMPLE INVITES SELF-ACTIVATION. The document pins exactly three envelope routes (GET/PUT /stores/{store_id}/envelope, POST /stores/{store_id}/kill); there is no approve route, and the PUT body is a contracts.Envelope with extra='forbid', so the eight-field document has no field for approver, approved_at or envelope_hash. Yet the PUT example in that same document shows 'activation': 'active' IN THE REQUEST BODY, which reads as an invitation to activate by simply asserting it \u2014 the precise defect class E5 exists to prevent. The T-053 lane could not add a fourth route (test_the_served_routes_match_the_pinned_contract forbids it) and resolved it by carrying the artifact in an X-Envelope-Approval header, storing a body that asks for 'active' without a bound artifact in SHADOW with a 403 naming the missing paperwork. That is safe but it is a header nobody else knows about.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts/tests/test_repro_open_tickets.py -q --runxfail -k test_the_pinned_merchant_contract_can_express_an_envelope_approval",
       "scope": [
         "packages/contracts/openapi/merchant.openapi.json"
       ],
@@ -4283,7 +4283,7 @@
     {
       "id": "T-243",
       "title": "THE TWO-LEDGERS-UNDER-TWO-SPELLINGS HOLE IS PRESENT IN MERCHANT, AND T-071'S FIX DID NOT COVER IT. Measured at the pin and again on today's HEAD: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are DISTINCT module objects with distinct ENVELOPES singletons, distinct EnvelopeVersions classes, and distinct TranscriptRejected classes that do not catch each other (except TR_SHORT lets a TR_LONG escape). The frozen E5 acceptance suite imports the LONG spelling; production routes.py and T-053's own tests import the SHORT one. The isolation fixture at _fixtures_onboarding.py:66 patches only merchant_svc.onboarding.routes.ENVELOPES, so a consumer doing 'from merchant_svc.envelope import ENVELOPES' is not isolated and the long-spelling store is an unreset third copy. Latent today only because the acceptance suite never touches ENVELOPES. Only store-agent installs canonical aliases; merchant, ingest and sim do not. T-071's 828c75d fixed intent alone.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t243_the_merchant_envelope_store_has_exactly_one_module_identity",
       "scope": [
         "apps/merchant/svc/src/envelope/store.py"
       ],
@@ -4313,7 +4313,7 @@
     {
       "id": "T-245",
       "title": "T-023'S NEW SHARED MAPPING HAS NEVER REACHED A GRAPH, AND E2'S GREEN OVER IT IS STRUCTURAL ONLY. apply_upserts is the mapping's only consumer; the single signed_fetch test that exercises it (test_signed_fetch.py:881) is SKIPPED because Neo4j is unreachable, and test_catalog_mcp.py carries zero docker/graph marks \u2014 77 passed, 0 skipped, no graph test at all. CatalogMCPAdapter's only non-test caller is _satisfies_catalog_adapter, a type-check helper. The rung-2 discriminator answer is YES-but-structurally: test_e2_ingestion.py:511-545 uses inspect.signature to check the class declares the protocol's methods and NEVER CALLS the adapter. A skip is not a pass and shape is not behaviour. Compounds with T-236.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest services/ingest/tests/test_repro_open_tickets.py -q --runxfail -k test_catalog_entries_with_no_identifier_do_not_collapse_onto_one_product_node",
       "scope": [
         "services/ingest/src/adapters/mapping.py"
       ],
@@ -4328,7 +4328,7 @@
     {
       "id": "T-246",
       "title": "NO PRODUCTION CONSUMER READS is_live, SO NOTHING PROVES A SHADOW OR KILLED STORE ACTUALLY STOPS BIDDING. is_live appears only in envelope/{model,store}.py and merchant tests across apps/, packages/, services/ and e2e/. Nothing on the bidding path consults envelope activation. T-053's kill switch and shadow default are correct and well unit-tested, but no executed path demonstrates the consequence the feature exists for. This is the merchant-side twin of the empty S2 seam (T-237) and the empty buyer-exchange seam: the decision is computed and nobody asks for it.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t246_some_production_code_reads_the_envelope_activation_decision",
       "scope": [
         "apps/merchant/svc/src/envelope/model.py"
       ],
@@ -4343,7 +4343,7 @@
     {
       "id": "T-247",
       "title": "ORDER-DEPENDENT GLOBAL LEAK IN THE MERCHANT WEBHOOK SINK. webhooks.py:418 boots _sink = default_sink, but apps/merchant/svc/tests/test_install.py:859 restores it with set_webhook_sink(None) in its finally \u2014 to None, not to the boot default. A probe passes when run alone and fails when run after test_install.py in the same process. Nothing reads it downstream today so no suite goes red, which is exactly what makes it a latent trap for the next ticket that does.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it",
       "scope": [
         "apps/merchant/svc/src/install/webhooks.py"
       ],
@@ -4358,7 +4358,7 @@
     {
       "id": "T-248",
       "title": "EnvelopeVersions.record() ACCEPTS A CALLER-ASSERTED activation:'active' WITH NO APPROVAL ARTIFACT. Measured: record({'version':7,'max_discount_pct':99.0,'activation':'active'}) is accepted, approval is None, and is_live returns True. Unreachable from the HTTP surface today because routes.py calls only put/activate/kill and put forces shadow \u2014 but record is public and exported, so it is one import away from defeating the whole approve-then-edit guarantee T-053 was written to establish.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact",
       "scope": [
         "apps/merchant/svc/src/envelope/store.py"
       ],
@@ -4373,7 +4373,7 @@
     {
       "id": "T-249",
       "title": "T-023 BEHAVIOURAL DRIFT THAT NO TEST COVERS, and the 'moved VERBATIM' claim is PARTIAL. coerce_price now returns None for negative/NaN/inf, so those values FALL THROUGH to the JSON-LD offer price instead of short-circuiting: an entry price of '-5.00' with a JSON-LD price of '12.00' produced -5.0 before and 12.0 now. Availability vocabulary widened (available/limited/out_of_stock were 'unknown', now map through). Product node identity changes for GID-form id, id:0, id:True and product_id-only entries. Four more changes rode along with the move: urlsplit(...).hostname became safe_host (base_url 'http://[' raised ValueError before, now returns domain=''), the provenance version became snapshot.extractor_version or extractor_version, a NEW raise ValueError when neither names a version, and source_class became a parameter. signed_fetch's 80 tests are byte-identical and therefore assert NONE of the new behaviour.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest services/ingest/tests/test_repro_open_tickets.py -q --runxfail -k test_a_refused_entry_price_does_not_promote_the_other_surfaces_price",
       "scope": [
         "services/ingest/src/adapters/mapping.py"
       ],
@@ -4628,7 +4628,7 @@
     {
       "id": "T-266",
       "title": "THE SERVED EXCHANGE IS MISSING FOUR PUBLISHED PATHS, NOT ONE. create_app().openapi() answers only ['/auctions', '/auctions/{auction_id}'] while packages/contracts declares five. Three absences belong to scheduled tickets (T-032 shortlist, T-044 external bids); the fourth, /auctions/{auction_id}/accept, is the one the earlier T-176 adjudication records as owned by nobody, and is now gated as T-170. Recording the full count because the ticket graph currently describes this as a single missing path.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes",
       "scope": [
         "apps/exchange/src/main.py"
       ],
@@ -5078,7 +5078,7 @@
     {
       "id": "T-296",
       "title": "EIGHT PUBLISHED OPENAPI OPERATIONS THAT NO APP SERVES, AND FOUR OF THEM ARE OWNED BY NOBODY. Measured by BOOTING each app and reading `app.openapi()['paths']`, not by grepping decorators, at merged main. Published-but-unserved: exchange `/auctions/{auction_id}/shortlist`, `/v1/auctions/{auction_id}/bids`, `/internal/outcomes`; ingest `/refresh/{store_id}`; store-agent `/v1/bid-requests`; trust `/feedback/{order_ref}`, `/snapshot`, `/stores/{store_id}/trust`. It was NINE before this cycle -- exchange `/auctions/{auction_id}/accept` was the ninth and T-170 closed it in this same merge, which is the proof this class is fixable one route at a time. GENUINELY UNOWNED, and the reason this is filed: (a) store-agent `/v1/bid-requests` -- the door the exchange solicits stores through, and that app serves ZERO paths (`mounted_routers == []`, `openapi()['paths'] == {}`). T-044 is NOT its owner as previously reported: T-044's text names the path only to declare it OUT of scope (\"hosted solicitation path (POST /v1/bid-requests) unchanged\"), its scope is packages/store-agent/src/external/**, and none of its seven acceptance criteria mentions an HTTP route. (b) trust `/stores/{store_id}/trust` and (c) trust `/feedback/{order_ref}` -- zero hits for either literal path across all 240 tickets, and zero hits for `order_ref`. T-073 mentions \"intake wiring to trust feedback API\" but is scoped to apps/buyer/** -- it is the client, not the server. (d) exchange `/internal/outcomes` (operationId recordOutcome, \"Trust reports an outcome back to the exchange for the bandit update\") -- zero hits for `/internal/outcomes` or `internal/outcomes`. ALREADY TICKETED, do not re-mint: ingest `/refresh/{store_id}` is T-024 (open, acceptance 2 spells it `/refresh/{store}`); exchange `/v1/auctions/{auction_id}/bids` is gated by T-190 via packages/contracts/tests/test_repro_open_tickets.py:200 (still XFAIL); exchange `/auctions/{auction_id}/shortlist` is attributed to T-032 by T-266 rather than by T-032's own text (T-032 is scoped to apps/exchange/src/ranking/** and grades the ranking library); T-266 already records the exchange half of this gap; trust `/snapshot` IS owned -- by T-261, which states verbatim \"There is no snapshot HTTP route (apps/trust/src/main.py mounts only /events/*)\". CORRECTION to the brief this was filed from: /snapshot was listed as unowned and is not. ALSO TRUE IN THE OTHER DIRECTION and unchecked by anything: 14 served paths are published nowhere -- exchange /auctions/{auction_id}, six ingest /er/* and /extraction/*, three merchant /install*, four trust /events/* -- plus the entire 9-path buyer surface, which has no published document at all. packages/contracts/tests/test_openapi_contracts.py:39 compares DOCUMENTS to PINNED_ROUTES; nothing compares either to what actually boots.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publishes",
       "scope": [
         "packages/contracts/openapi/trust.openapi.json"
       ],
@@ -5108,7 +5108,7 @@
     {
       "id": "T-298",
       "title": "THE MERCHANT CONTAINER CANNOT START. apps/merchant/Dockerfile does not COPY the exchange package, while apps/merchant/svc/src/codes/offer.py:36 (which is merchant_svc/codes/offer.py under the .pkgroot symlink) does 'from exchange.checkout.discounts import ...' at MODULE SCOPE, column 0. So merchant_svc.main raises ModuleNotFoundError: No module named 'exchange' at import. Same mechanism as T-193 but EAGER rather than lazy, so it fails at startup rather than at first call. Confirmed by TWO independent methods sharing no assumptions: a runtime probe that materialises the Dockerfile's own COPY set and imports the entry module, and a static check that every import in an image's shipped tree resolves to a package in that image's COPY set. 7 of merchant's 48 shipped modules are unimportable. The fix has an in-repo precedent, verbatim: apps/exchange/Dockerfile:61,68 exposes the same package with 'COPY apps/exchange/src/' plus 'ln -s ../apps/exchange/src /app/.pkgroot/exchange'. A positive control confirmed the probe sees that fix (FAIL as shipped -> OK with the two lines added). THIS IS INVISIBLE TO EVERY EXISTING GATE: the frozen acceptance suite, make verify and all twelve frozen metrics import from a checkout where every package is present, so this has been true at 120/120 for an unknown number of cycles and no number moved.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -q --runxfail -k test_t298",
       "scope": [
         "apps/merchant/Dockerfile"
       ],
@@ -5123,7 +5123,7 @@
     {
       "id": "T-299",
       "title": "THE EXCHANGE IMAGE STARTS AND THEN CANNOT RANK OR RETRIEVE -- silent degradation with a green board, which is worse than a crash because a crash gets found. apps/exchange/Dockerfile does not COPY the ingest package. exchange.main imports fine, so an entry-point startup check passes it FOREVER; but 11 of its 53 shipped modules are unimportable for want of ingest, including exchange.ranking, ranking.filters, ranking.reasons, ranking.scoring, ranking.shortlist and exchange.retrieval. Seven direct import sites, ALL at module scope: retrieval/criteria.py:45,46; retrieval/service.py:33,34; plus three more. The 7 direct sites produce the 11 unimportable modules by transitive closure, and the runtime and static methods agree on that arithmetic. Also strands the only bid_placed emitter (retrieval/fit.py:312). OPEN QUESTION THAT MUST BE ANSWERED BEFORE FIXING: whether ingest is MEANT to be in the exchange image. A deliberate service split with an HTTP boundary would make this a non-defect and the correct repair would be to remove the imports rather than add the COPY. Nobody has read the architecture on this point; do not assume either way.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -q --runxfail -k test_t299",
       "scope": [
         "apps/exchange/Dockerfile"
       ],
@@ -5138,7 +5138,7 @@
     {
       "id": "T-300",
       "title": "THE BUYER'S CLARIFICATION LOOP RUNS MODEL-LESS IN THE SHIPPED IMAGE, and NO RUNTIME PROBE AT ANY DEPTH CAN SEE IT. packages/llm is absent from the buyer image's COPY set (it copies contracts, proxyshop_support and apps/buyer/svc/src, and links only contracts and buyer_svc), while intent/routes.py:99 is 'from llm import build_llm' -- INDENTED, so inside a function, and wrapped in a try/except that logs a warning rather than raising. So the import is BOTH lazy AND swallowed: every shipped module imports cleanly, the failure occurs only when that path executes, and it then degrades silently. A runtime import probe reports 0 unimportable modules for buyer, which is NOT a clean bill. Confirmed only by COPY-set analysis. The pragma comment on that line, '# pragma: no cover - only with a broken sys.path', is describing the shipped image.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -q --runxfail -k test_t300",
       "scope": [
         "apps/buyer/svc/src/intent/routes.py"
       ],
@@ -5153,7 +5153,7 @@
     {
       "id": "T-301",
       "title": "NOTHING IN THIS REPO GRADES THE DEPLOYABLE ARTIFACTS, only the checkout -- and that is a category the existing suite structurally cannot enter, not a coverage gap it can close. Every gate (the frozen acceptance suite, make verify, all twelve frozen metrics, both peer instruments) imports from a tree where every package is present. Of five shipped images, one cannot start, one starts crippled and one runs a feature permanently degraded, and no number moved. Exactly ONE image had a COPY-set test -- apps/trust, via T-193's repaired probe -- and the four unguarded images are where all the defects are; that asymmetry is how this got here. THE GATE TO BUILD, primary: a STATIC check that every 'import X'/'from X import' in an image's shipped tree has X in that image's COPY set, derived per-image with first-party names read from the repo's own .pkgroot (no hardcoded package list, so a new package is picked up automatically). It needs no subprocess, no -S, no symlink fidelity and no Docker-COPY equivalence assumption, and it catches all three classes INCLUDING the lazy-and-swallowed one no runtime probe reaches. It should derive fatal-vs-silent by counting module-scope sites rather than being told. SECONDARY, and NOT redundant: a runtime probe that materialises the COPY set and imports each shipped module, which covers the one case the static check cannot -- a module that IS shipped but broken for another reason (syntax, an import side effect, a missing third-party dep). Both belong; do not drop one as duplicative. A working implementation of each exists in an outside session's scratchpad and should be re-verified rather than trusted. CAVEAT the runtime half rests on and nobody has verified: that Docker's COPY behaves like shutil.copytree(symlinks=True).",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -q --runxfail -k test_t301",
       "scope": [
         "tests/"
       ],
@@ -5198,7 +5198,7 @@
     {
       "id": "T-304",
       "title": "A PATH THAT RESOLVES CORRECTLY IN THE CHECKOUT AND WRONGLY IN THE IMAGE. recordings.py computes parent.parent / 'fixtures', which resolves to /app/fixtures in the flattened container while that Dockerfile's COPY lands the fixtures at /app/services/shopify-stub/fixtures. Latent today because nothing in src/ imports it -- but it is the same checkout-versus-artifact divergence class as the Dockerfile COPY findings, reached by a different mechanism (a relative path rather than a missing package), so a COPY-set gate would NOT catch it.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -q --runxfail -k test_t304",
       "scope": [
         "services/shopify-stub/src/recordings.py"
       ],
@@ -5228,7 +5228,7 @@
     {
       "id": "T-306",
       "title": "list_prices IS THE IDENTICAL FAIL-OPEN TO T-233, ONE ARGUMENT OVER, and it is on the money path. A signed bid awarding itself 85% off is ACCEPTED when list_prices is omitted (accepted=True, reasons=()) and REFUSED when it is passed empty (price_unreconcilable:offer.unit_price:list_price_unavailable). Cause is the same shape T-233 had: boundary.py:637 and :677 both open with 'if list_prices is None: return None, []' -- the ABSENT argument is more permissive than an explicit one. The door's own docstring calls this 'the door it matters most on'. Found by the lane that closed T-233, in the same sweep, and deliberately not fixed because packages/contracts is another lane's ownership. Everything else of this shape was checked and is CLEAN: blacklist (None equivalent to []), keyring (None equivalent to {}), queue, nonce_store, and trust_snapshot itself now that T-233 has landed.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts/tests/test_repro_open_tickets.py -q --runxfail -k test_t306",
       "scope": [
         "packages/contracts/src/boundary.py"
       ],
@@ -5243,7 +5243,7 @@
     {
       "id": "T-307",
       "title": "max_discount_pct SUPPLIED WITHOUT list_prices IS NEVER READ, so a caller that sets a 0% ceiling and forgets the roster silently admits an 85%-off bid. boundary.py:637 returns before the cap is consulted, so the authorization ceiling is inert whenever the roster prices are absent. This compounds the sibling finding: the two arguments together are the price wall, and omitting one disarms both rather than failing closed on the missing input.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/contracts/tests/test_repro_open_tickets.py -q --runxfail -k test_t307",
       "scope": [
         "packages/contracts/src/boundary.py"
       ],
@@ -5258,7 +5258,7 @@
     {
       "id": "T-308",
       "title": "THE SYSTEM HAS NO OBSERVABILITY AT ALL, AND EVERY INFO-LEVEL CALL IS SILENTLY DISCARDED. Repo-wide grep for basicConfig|dictConfig|FileHandler|structlog|logging.config across apps, packages, services, proxyshop_support and scripts returns ZERO hits -- nothing anywhere configures logging. Measured consequence: the root logger has handlers=[] and effective level 30, so _log.info(...) is silently dropped and only WARNING+ reaches stderr via logging.lastResort. Four of the twelve real call sites are INFO and therefore invisible by default, including the ones that matter operationally: merchant collector/routes.py:64 (lossy pixel), merchant codes/routes.py:133 (no code minted), merchant onboarding/routes.py:154 (envelope stays shadow), buyer feedback/submission.py:493. Per-service files containing ANY logging: exchange 0/42, trust 0/33, shopify-stub 0/12, ingest 0/37, store-agent 0/20, proxyshop_support 0/23, buyer 7/34, merchant 5/37. There are no request ids, no correlation ids, no log files, and no aggregation. An operator cannot watch a request flow through the system. The nearest audit trail is the hash-chained ledger (GET /events, /events/replay, /events/verify) which requires Postgres and 503s without it.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_repro_observability.py -q --runxfail -k test_t308",
       "scope": [
         "proxyshop_support/"
       ],
@@ -5273,7 +5273,7 @@
     {
       "id": "T-309",
       "title": "THE STORE AGENT SERVES ZERO HTTP PATHS. Its app object exists and app.openapi()['paths'] is EMPTY; no routes.py exists anywhere under packages/store-agent/. The published contract declares POST /v1/bid-requests -- the door the exchange solicits stores through -- and nothing answers it. The demo runbook's section 3.3 beat, 'hosted store agents bid', therefore has no HTTP surface behind it at all. This is distinct from receive_bid being unreachable in production (already known): the function exists and is well tested, but there is no server route that reaches it, so the solicitation path the whole auction depends on is a library call with no transport.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k test_t309",
       "scope": [
         "packages/store-agent/src/main.py"
       ],
@@ -5288,7 +5288,7 @@
     {
       "id": "T-310",
       "title": "THE RANKER IS ORPHANED: NOTHING IN apps/exchange/src IMPORTS exchange.ranking. Grep across the served source returns zero hits; auction/routes.py:39-42 imports only eligibility, orchestration, fanout and state. So exchange.ranking.rank -- the hard-constraint filters and shortlist construction -- is on no served path. docs/demo/starting-slice.md section 3.4 explicitly claims 'exchange.ranking.rank applies the hard-constraint filters and builds the shortlist', which is a promise the running system does not keep. Compounding it, the retrieval package is separately orphaned (already filed as T-260) and the exchange image does not even ship ingest, which retrieval imports at module scope -- so the two halves of candidate selection are both dead in different ways.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t310",
       "scope": [
         "apps/exchange/src/auction/routes.py"
       ],
@@ -5318,7 +5318,7 @@
     {
       "id": "T-312",
       "title": "SEVEN PUBLISHED ROUTES ARE UNSERVED ACROSS THREE SERVICES, measured by constructing each app and reading app.openapi()['paths']. TRUST publishes GET /snapshot, GET /stores/{id}/trust and POST /feedback/{order_ref}; none is served -- GET /snapshot measured 404. Only the raw ledger is exposed. EXCHANGE publishes GET /auctions/{id}/shortlist, POST /internal/outcomes and POST /v1/auctions/{id}/bids, all unserved (its /accept gap closed this session). INGEST publishes POST /refresh/{store_id}, measured 404 -- and inversely, the six routes ingest DOES serve appear in no contract at all, so the divergence runs both ways. Merchant is the only service whose published set is fully served. Partially overlaps T-266 and T-296; this record is the measured per-service breakdown behind them.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py services/ingest/tests/test_repro_open_tickets.py -q --runxfail -k test_t312",
       "scope": [
         "packages/contracts/openapi/trust.openapi.json"
       ],
@@ -5333,7 +5333,7 @@
     {
       "id": "T-313",
       "title": "FOUR COMPONENTS HAVE NO DOCKERFILE AND CANNOT BE DEPLOYED: ingest, store-agent, sim and seller-reference. Their compose fragments are literally 'services: {}'. ingest.main:app boots and serves six routes locally, so this is a packaging gap rather than missing code -- but it means the ingestion service, the store agent and the simulator exist only as things you can run from a checkout. Combined with the four Dockerfile COPY defects already filed (T-298..T-301), the deployable surface of this system is: merchant (cannot start), exchange (starts, retrieval and ranking dead), trust (needs Postgres), buyer (degraded), shopify-stub (image never built) -- and four components with no image at all.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -q --runxfail -k test_t313",
       "scope": [
         "services/ingest/"
       ],
@@ -5348,7 +5348,7 @@
     {
       "id": "T-314",
       "title": "THE ONE FULLY-WORKING SERVICE HAS AN IMAGE THAT HAS NEVER BEEN BUILT, and the runbook's step 1 tells you to run exactly that. services/shopify-stub/compose.yaml carries its own warning: 'NOT VERIFIED OFFLINE... the image has never been BUILT here... expect to debug the build, not the service.' The stub runs perfectly under uvicorn (measured: GET /healthz -> 200, 11 control routes, fully offline), so the fix for a demo is to document the uvicorn form rather than the compose form -- but as written the runbook sends an operator into an unbuilt image on the first step of the first section.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=0 && uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -q --runxfail -k test_t314",
       "scope": [
         "services/shopify-stub/compose.yaml"
       ],
