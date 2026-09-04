@@ -5584,6 +5584,96 @@
       "defect": "ONLY 16 OF 141 TICKET GATES REACH THE FROZEN ACCEPTANCE SUITE, AND 44 OF 141 GATED TICKETS HAVE NO TRACEABLE GRADER ANYWHERE. All 120 @pytest.mark.ticket(...) nodes live under .swarm-loop/acceptance/, which `norecursedirs` hides from every ordinary pytest run \u2014 `make verify` collects 2822 of 2943 nodes and ZERO acceptance nodes. The exclusion itself is CORRECT and deliberate: the frozen suite is the scorer and is driven by its own runner, not by the repo suite, and mixing them would let the graded tree grade itself. The defect is the consequence nobody stated: the markers that `graded_ticket_fraction` counts live in a tier that ticket gates almost never execute, so 'this ticket has a frozen grader' and 'this ticket's gate runs that grader' are nearly disjoint facts. Nothing is broken today \u2014 all 74 tier-A unselected nodes pass \u2014 but the two tiers can drift arbitrarily far apart without any signal, and a run can look healthy on the metric while the gates enforce something else entirely.",
       "finding_id": "25c8da02248e7f05010a8dc3c3ea8d0ee5ad5774487aa521ffa0915b26063bfd",
       "reproduction": "pytest --collect-only -q | wc -l vs the same over .swarm-loop/acceptance/; then count how many ticket verify commands name a path under .swarm-loop/acceptance/ (16 of 141)."
+    },
+    {
+      "id": "T-330",
+      "title": "THE RUNBOOK GATE'S POST-MERGE REWRITE INTRODUCED THREE FAIL-OPENS, ALL INVISIBLE TO ITS EXIT CODE. The hardened version merged at e57268e (+492/-201) is WEAKER than the version verified at the pin, in three measured ways, each reproduced on two disjoint copies with printed __file__ provenance. (a) Re-fencing starting-slice.md:63 from ```bash to ```console makes the `docker compose ... shopify-stub` step VANISH from the sweep \u2014 17 commands become 16, rc=0; pointed at a nonexistent service it STILL produces no signal, where the pinned version returned '[FAIL] ... defines no service named ...'. The claimed raw-text backstop does not cover compose services. (b) A recipe invoking `no_such_root.sh` \u2014 a missing DIRECTORY component \u2014 now PASSES, while `./no_such_root.sh` is still caught. (c) The raw-text cross-check misses `Then make X` and `run make X` in prose, because the `last in {time, then, ...}` guard at :1298-1304 is CASE-SENSITIVE while the `make` match is IGNORECASE. All three are invisible to the exit code because a new FAIL lands inside the strict-xfail gate, which is already expected to fail. This is the run's signature failure \u2014 a sweep going QUIET rather than red \u2014 reproduced inside a rewrite whose stated purpose was to fix exactly that in its own predecessor.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "docs/tests/test_runbook_executability.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "docs/tests/test_runbook_executability.py",
+      "defect": "THE RUNBOOK GATE'S POST-MERGE REWRITE INTRODUCED THREE FAIL-OPENS, ALL INVISIBLE TO ITS EXIT CODE. The hardened version merged at e57268e (+492/-201) is WEAKER than the version verified at the pin, in three measured ways, each reproduced on two disjoint copies with printed __file__ provenance. (a) Re-fencing starting-slice.md:63 from ```bash to ```console makes the `docker compose ... shopify-stub` step VANISH from the sweep \u2014 17 commands become 16, rc=0; pointed at a nonexistent service it STILL produces no signal, where the pinned version returned '[FAIL] ... defines no service named ...'. The claimed raw-text backstop does not cover compose services. (b) A recipe invoking `no_such_root.sh` \u2014 a missing DIRECTORY component \u2014 now PASSES, while `./no_such_root.sh` is still caught. (c) The raw-text cross-check misses `Then make X` and `run make X` in prose, because the `last in {time, then, ...}` guard at :1298-1304 is CASE-SENSITIVE while the `make` match is IGNORECASE. All three are invisible to the exit code because a new FAIL lands inside the strict-xfail gate, which is already expected to fail. This is the run's signature failure \u2014 a sweep going QUIET rather than red \u2014 reproduced inside a rewrite whose stated purpose was to fix exactly that in its own predecessor.",
+      "finding_id": "cb09d3c411b75678ce628cde37b22eec1226c1bd8b31a83d74c64e9201f18c50",
+      "reproduction": "On a copy: re-fence starting-slice.md:63 to ```console and run the gate \u2014 command count drops 17->16 with rc unchanged. Separately add a Makefile recipe calling no_such_root.sh and observe PASS. Measured by rung2-c18 at e57268e."
+    },
+    {
+      "id": "T-331",
+      "title": "T-233'S RANDOMIZED GATE CANNOT SEE THE FAIL-OPEN CLASS IT WAS BUILT FOR, AND THE FIX ALREADY EXISTS ONE FILE OVER. Its generator at :900 uses random.Random(20260904) ONLY, and every payload it can build carries expires_at in 2027-2999 (:843 randrange(2027,3000); :29 FAR_FUTURE=2999) against now=2026 \u2014 so NO DRAW EVER RESEMBLES A REALISTIC BID. Amendment 17 names offer.expires_at as one of the four gaming keys that sank this gate's predecessor. Measured: a synthetic trust snapshot keyed on offer.expires_at (S1-B) and one keyed on a store_id prefix (S1-C) are NOT CAUGHT \u2014 the suite is byte-identical to baseline and a 4,959-test full-suite differential is an EMPTY DIFF, with the fail-open live for a realistic bid. The successor lane fixed precisely this in packages/contracts (:615-631, `_property_seeds` = a pinned seed PLUS SystemRandom, so the table is not constant), and the hardening was never back-ported. Positive control fired: WITNESS S1_ABSENT_TRUST_SNAPSHOT_BRANCH x70, with the sabotaged copy proven by printed door.__file__.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/store-agent/tests/test_repro_external_door.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/store-agent/tests/test_repro_external_door.py",
+      "defect": "T-233'S RANDOMIZED GATE CANNOT SEE THE FAIL-OPEN CLASS IT WAS BUILT FOR, AND THE FIX ALREADY EXISTS ONE FILE OVER. Its generator at :900 uses random.Random(20260904) ONLY, and every payload it can build carries expires_at in 2027-2999 (:843 randrange(2027,3000); :29 FAR_FUTURE=2999) against now=2026 \u2014 so NO DRAW EVER RESEMBLES A REALISTIC BID. Amendment 17 names offer.expires_at as one of the four gaming keys that sank this gate's predecessor. Measured: a synthetic trust snapshot keyed on offer.expires_at (S1-B) and one keyed on a store_id prefix (S1-C) are NOT CAUGHT \u2014 the suite is byte-identical to baseline and a 4,959-test full-suite differential is an EMPTY DIFF, with the fail-open live for a realistic bid. The successor lane fixed precisely this in packages/contracts (:615-631, `_property_seeds` = a pinned seed PLUS SystemRandom, so the table is not constant), and the hardening was never back-ported. Positive control fired: WITNESS S1_ABSENT_TRUST_SNAPSHOT_BRANCH x70, with the sabotaged copy proven by printed door.__file__.",
+      "finding_id": "8dbbdfe6bd9f48ac44d1391c4cc7b311453c89c7402fc12defb5a419ba0f9db2",
+      "reproduction": "Apply a synthetic trust snapshot keyed on offer.expires_at to a scratch copy of the door; run the T-233 property; observe no failure and an empty full-suite differential. Measured by rung2-c18."
+    },
+    {
+      "id": "T-332",
+      "title": "A DELISTING EVENT NAMING NO STORE PASSES EVERY LAYER, AND IS THEN INVISIBLE TO THE AUDITOR THE MODULE EXISTS TO SERVE. delisting.py:180 guards `store_id is None` but not '' or '   ', while the sibling identity path IS normalised (business_identity_of does str(v).strip() or None). Measured end to end: validate_ledger_payload('blacklisted', ...) returns [] for '', '   ' AND None \u2014 it is presence-only; normalise_event accepts; append accepts and a real row was written as trust_rw. LedgerEvent.store_id is the ONE store_id in protocol.schema.json with no minLength (:503, versus minLength:1 on all seven siblings) and the column is nullable text. HARM: store.read(store_id=...), read_events(store_id=...) and GET /events?store_id= all return ZERO ROWS, so a blacklisting that did happen cannot be found by the store it happened to.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/src/snapshot/delisting.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/trust/src/snapshot/delisting.py",
+      "defect": "A DELISTING EVENT NAMING NO STORE PASSES EVERY LAYER, AND IS THEN INVISIBLE TO THE AUDITOR THE MODULE EXISTS TO SERVE. delisting.py:180 guards `store_id is None` but not '' or '   ', while the sibling identity path IS normalised (business_identity_of does str(v).strip() or None). Measured end to end: validate_ledger_payload('blacklisted', ...) returns [] for '', '   ' AND None \u2014 it is presence-only; normalise_event accepts; append accepts and a real row was written as trust_rw. LedgerEvent.store_id is the ONE store_id in protocol.schema.json with no minLength (:503, versus minLength:1 on all seven siblings) and the column is nullable text. HARM: store.read(store_id=...), read_events(store_id=...) and GET /events?store_id= all return ZERO ROWS, so a blacklisting that did happen cannot be found by the store it happened to.",
+      "finding_id": "acc65149518122ebc1c67c86dd335eb392c3aaad9d712b62c792a25acff3d243",
+      "reproduction": "delisting_events([{'store_id':'','business_identity':'bad-co','score':0.01,'blacklisted':False}], blacklist=Blacklist(), as_of='2026-06-01T00:00:00Z') -> emits 'blacklisted::2026-06-01T00:00:00Z'. Measured by rung2-c18."
+    },
+    {
+      "id": "T-333",
+      "title": "delisting.py IS THE ONLY LEDGER-EVENT PRODUCER THAT NEVER CALLS validate_ledger_payload. Every other producing boundary does: exchange/auction/ledger.py:146, merchant/svc/src/codes/ledger.py:99, buyer/svc/src/feedback/submission.py:429, exchange/retrieval/fit.py:227. The only validation these events receive lives in a TEST, applied to events the test itself constructs \u2014 so the production path is unvalidated and the test path validates a different object than production emits. This is why the blank-store_id defect reaches the ledger at all.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/trust/src/snapshot/delisting.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/trust/src/snapshot/delisting.py",
+      "defect": "delisting.py IS THE ONLY LEDGER-EVENT PRODUCER THAT NEVER CALLS validate_ledger_payload. Every other producing boundary does: exchange/auction/ledger.py:146, merchant/svc/src/codes/ledger.py:99, buyer/svc/src/feedback/submission.py:429, exchange/retrieval/fit.py:227. The only validation these events receive lives in a TEST, applied to events the test itself constructs \u2014 so the production path is unvalidated and the test path validates a different object than production emits. This is why the blank-store_id defect reaches the ledger at all.",
+      "finding_id": "59d3c7519e866c8b0e516d87a60159871c09fd6a1ee726366ac113225874a9bb",
+      "reproduction": "git grep -n validate_ledger_payload -- apps packages services; note delisting.py is absent from the producers that call it. Measured by rung2-c18."
+    },
+    {
+      "id": "T-334",
+      "title": "T-301'S BLIND SPOT IS CIRCULAR: REMOVING A COPY REMOVES THE EVIDENCE THAT IT IS MISSING. _unwired_for reports a package only if some SHIPPED module statically imports it. claim_verification's sole column-0 importer is packages/verification/__init__.py:47 \u2014 a file the COPY under test is what ships. So deleting the COPY deletes the importer, and the checker reports nothing wrong. Measured on a sabotaged trust spec: _unwired_for -> [] (silent) while package_wiring(..., 'claim_verification') -> (False, 'no COPY covers packages/verification/src/'). THE ANSWER IS ALREADY COMPUTED AND NO TEST CONSUMES IT. The fix is one rule over the dangling-symlink branch at :428 that already derives it. Note the real-image control DID catch this sabotage, and the T-193 probe did \u2014 only the static checker went quiet.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "proxyshop_support/tests/test_artifact_copyset.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "proxyshop_support/tests/test_artifact_copyset.py",
+      "defect": "T-301'S BLIND SPOT IS CIRCULAR: REMOVING A COPY REMOVES THE EVIDENCE THAT IT IS MISSING. _unwired_for reports a package only if some SHIPPED module statically imports it. claim_verification's sole column-0 importer is packages/verification/__init__.py:47 \u2014 a file the COPY under test is what ships. So deleting the COPY deletes the importer, and the checker reports nothing wrong. Measured on a sabotaged trust spec: _unwired_for -> [] (silent) while package_wiring(..., 'claim_verification') -> (False, 'no COPY covers packages/verification/src/'). THE ANSWER IS ALREADY COMPUTED AND NO TEST CONSUMES IT. The fix is one rule over the dangling-symlink branch at :428 that already derives it. Note the real-image control DID catch this sabotage, and the T-193 probe did \u2014 only the static checker went quiet.",
+      "finding_id": "b98baf03dc43455c584e08d3ddd8181636c7d9780f88112b5c890a82c30abd98",
+      "reproduction": "Drop the packages/verification COPY from a scratch trust Dockerfile while keeping the ln -s; the static gate reports 10 passed. Measured by rung2-c18."
+    },
+    {
+      "id": "T-335",
+      "title": "T-237'S STATED END-STATE IS NOT REACHED, AND ONE OF ITS GATES WAS ALREADY GREEN BEFORE THE WORK. snapshot['delistings'] has ZERO production consumers; auction/routes.py:239 and accept/routes.py:229 still build StaticSellerEligibility() with no rows; nothing appends the computed events to the ledger. The discriminating question was answered BOTH ways: against the frozen ACCEPTANCE suite the answer is NO (grep delisting over .swarm-loop/acceptance/*.py returns nothing; e6_trust_passing 26->26), so this is unfinished work rather than a measurement-credibility defect there; but against the frozen metric build_succeeds the answer is YES \u2014 11 non-xfail T-237 tests ride inside it. Worse, test_the_published_threshold_is_read_by_product_code_and_not_only_by_tests PASSES on services/sim/src/runner.py, which already carried BLACKLIST_THRESHOLD at :524/:582/:677 AT THE PIN \u2014 so that gate grades nothing the batch changed. runner.py also still hand-computes the comparison twice, contradicting delisting.py's claim to replace that duplication.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/auction/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/auction/routes.py",
+      "defect": "T-237'S STATED END-STATE IS NOT REACHED, AND ONE OF ITS GATES WAS ALREADY GREEN BEFORE THE WORK. snapshot['delistings'] has ZERO production consumers; auction/routes.py:239 and accept/routes.py:229 still build StaticSellerEligibility() with no rows; nothing appends the computed events to the ledger. The discriminating question was answered BOTH ways: against the frozen ACCEPTANCE suite the answer is NO (grep delisting over .swarm-loop/acceptance/*.py returns nothing; e6_trust_passing 26->26), so this is unfinished work rather than a measurement-credibility defect there; but against the frozen metric build_succeeds the answer is YES \u2014 11 non-xfail T-237 tests ride inside it. Worse, test_the_published_threshold_is_read_by_product_code_and_not_only_by_tests PASSES on services/sim/src/runner.py, which already carried BLACKLIST_THRESHOLD at :524/:582/:677 AT THE PIN \u2014 so that gate grades nothing the batch changed. runner.py also still hand-computes the comparison twice, contradicting delisting.py's claim to replace that duplication.",
+      "finding_id": "bfa89892cc8e926d28f2254cfdf3e0547dfe24c78269b32a446bfe199805c2a7",
+      "reproduction": "git grep -n 'delistings' -- apps | grep -v tests -> no production consumer; read auction/routes.py:239. Measured by rung2-c18."
     }
   ]
 }
