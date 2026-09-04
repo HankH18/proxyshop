@@ -5224,6 +5224,36 @@
       "defect": "FOUR COMMENTS MADE FALSE BY THE FIXES THAT LANDED THIS CYCLE, self-reported by the lane that invalidated them: apps/trust/src/verification/__init__.py:17-22 and :53-58 (their stated reason for the lazy PEP-562 import was that the Dockerfile does not COPY packages/verification -- it now does), apps/trust/compose.yaml:29-32, and the T-193 failure message in apps/trust/tests/test_repro_open_tickets.py. Same class as T-207: prose that contradicts the code beside it, which the next reader will trust. Recording rather than fixing because a comment sweep is its own pass and this one was found incidentally.",
       "finding_id": "65101fe4ee46d9dbf1d2ea0ee356dc79eefd66008779767ade3563d6883ca9e3",
       "reproduction": "Read each against the current Dockerfile and the landed COPY pair plus ln -s."
+    },
+    {
+      "id": "T-306",
+      "title": "list_prices IS THE IDENTICAL FAIL-OPEN TO T-233, ONE ARGUMENT OVER, and it is on the money path. A signed bid awarding itself 85% off is ACCEPTED when list_prices is omitted (accepted=True, reasons=()) and REFUSED when it is passed empty (price_unreconcilable:offer.unit_price:list_price_unavailable). Cause is the same shape T-233 had: boundary.py:637 and :677 both open with 'if list_prices is None: return None, []' -- the ABSENT argument is more permissive than an explicit one. The door's own docstring calls this 'the door it matters most on'. Found by the lane that closed T-233, in the same sweep, and deliberately not fixed because packages/contracts is another lane's ownership. Everything else of this shape was checked and is CLEAN: blacklist (None equivalent to []), keyring (None equivalent to {}), queue, nonce_store, and trust_snapshot itself now that T-233 has landed.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/boundary.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/contracts/src/boundary.py:637",
+      "defect": "list_prices IS THE IDENTICAL FAIL-OPEN TO T-233, ONE ARGUMENT OVER, and it is on the money path. A signed bid awarding itself 85% off is ACCEPTED when list_prices is omitted (accepted=True, reasons=()) and REFUSED when it is passed empty (price_unreconcilable:offer.unit_price:list_price_unavailable). Cause is the same shape T-233 had: boundary.py:637 and :677 both open with 'if list_prices is None: return None, []' -- the ABSENT argument is more permissive than an explicit one. The door's own docstring calls this 'the door it matters most on'. Found by the lane that closed T-233, in the same sweep, and deliberately not fixed because packages/contracts is another lane's ownership. Everything else of this shape was checked and is CLEAN: blacklist (None equivalent to []), keyring (None equivalent to {}), queue, nonce_store, and trust_snapshot itself now that T-233 has landed.",
+      "finding_id": "7a56033b0865394b7e5221381c8773b7ca8475e4dedbe6125dbd02690f55f735",
+      "reproduction": "Call the boundary's price reconciliation with a bid awarding itself 85% off: omitted list_prices -> accepted=True reasons=(); list_prices={} -> refused with price_unreconcilable:offer.unit_price:list_price_unavailable. Read boundary.py:637 and :677."
+    },
+    {
+      "id": "T-307",
+      "title": "max_discount_pct SUPPLIED WITHOUT list_prices IS NEVER READ, so a caller that sets a 0% ceiling and forgets the roster silently admits an 85%-off bid. boundary.py:637 returns before the cap is consulted, so the authorization ceiling is inert whenever the roster prices are absent. This compounds the sibling finding: the two arguments together are the price wall, and omitting one disarms both rather than failing closed on the missing input.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "packages/contracts/src/boundary.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "packages/contracts/src/boundary.py:637",
+      "defect": "max_discount_pct SUPPLIED WITHOUT list_prices IS NEVER READ, so a caller that sets a 0% ceiling and forgets the roster silently admits an 85%-off bid. boundary.py:637 returns before the cap is consulted, so the authorization ceiling is inert whenever the roster prices are absent. This compounds the sibling finding: the two arguments together are the price wall, and omitting one disarms both rather than failing closed on the missing input.",
+      "finding_id": "c772558d83aeb5a2a08de66d45569de9cad234fb1aa88ab7c928eb66c441e88a",
+      "reproduction": "Pass max_discount_pct=0 with list_prices omitted and a bid taking 85% off; it is admitted. Read the early return at boundary.py:637 and confirm the cap check sits after it."
     }
   ]
 }
