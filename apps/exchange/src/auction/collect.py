@@ -697,11 +697,16 @@ def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | Non
     """
     refusal = response.get(REFUSAL_FIELD)
     if refusal is not None and str(refusal).strip():
-        family, _, detail = str(refusal).strip().partition(":")
-        return refusal_reason(
-            family if family in FALLBACK_REASONS else STORE_REFUSED_REASON,
-            detail or None,
-        )
+        stated = str(refusal).strip()
+        family, _, detail = stated.partition(":")
+        if family in FALLBACK_REASONS:
+            return refusal_reason(family, detail or None)
+        # A family this module does not publish is not half-parsed into one: the WHOLE string
+        # becomes the detail, and the allowlist then answers it. Splitting an unrecognised
+        # value on its first colon would report `totally_made_up:404` as a `store_refused:404`
+        # — a detail the exchange took out of a string it had already decided it could not
+        # read, which is a worse answer than saying it could not read it.
+        return refusal_reason(STORE_REFUSED_REASON, stated)
 
     bid = response.get("bid")
     if not isinstance(bid, Mapping):

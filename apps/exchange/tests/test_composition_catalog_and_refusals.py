@@ -12,8 +12,9 @@ which is what a person running the service does.
 
 The two defects
 ---------------
-**1. No deployment document could supply a catalog snapshot.** ``composition.py`` contained
-the string ``catalog`` zero times, so ``ranking.serving.catalog_of`` kept its
+**1. No deployment document could supply a catalog snapshot.** ``composition.py`` named no
+catalog key and no catalog collaborator — every occurrence of the word in it was ``catalogue``,
+about clusters — so ``ranking.serving.catalog_of`` kept its
 ``NoCatalogSnapshots`` default in every deployment there is. With no catalog the verifier is
 never run, every claim comes back ``unsupported``, R19 refuses to let an unsupported claim
 satisfy a hard constraint, and an intent carrying any must-have is answered with an empty
@@ -52,6 +53,7 @@ from exchange.composition import (
     solicitation_profile,
 )
 from exchange.main import create_app
+from exchange.ranking.verification import MAX_CATALOG_PRODUCTS
 from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 
@@ -163,6 +165,15 @@ def _market_app() -> FastAPI:
     def refuses(bid_request: BidRequest) -> JSONResponse:
         """A store that rejects a solicitation it could in fact read — a store-side refusal."""
         return JSONResponse(status_code=422, content={"detail": "this store is not bidding"})
+
+    @app.post("/misreporter/v1/bid-requests")
+    def misreports(bid_request: BidRequest) -> JSONResponse:
+        """A 503 that also sends the DECLINE header, to claim it chose not to bid."""
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "down"},
+            headers={"x-proxyshop-decline-reason": "no_matching_product"},
+        )
 
     return app
 
@@ -395,6 +406,38 @@ def test_a_shopper_who_states_a_must_have_can_actually_buy_what_they_are_shown(
             "states no 'product_ref'",
             id="product-names-no-ref",
         ),
+        pytest.param(
+            {
+                "catalog": {
+                    "s1": {
+                        "snapshot_id": "snap-s1",
+                        "products": [
+                            {"product_ref": f"p{n}"} for n in range(MAX_CATALOG_PRODUCTS + 1)
+                        ],
+                    }
+                }
+            },
+            f"this exchange reads at most {MAX_CATALOG_PRODUCTS} per store",
+            id="over-the-product-cap",
+        ),
+        # A name that is PRESENT and falsy, and one that is present and not a name at all.
+        # `str(row.get(field) or "")` reads both as absent, which tells the operator to add a
+        # line that is already there — and lets `true` through as the ref "True".
+        pytest.param(
+            {"catalog": {"s1": {"snapshot_id": "snap-s1", "products": [{"product_ref": 0}]}}},
+            "states product_ref=0, which is not a name",
+            id="product-ref-is-a-falsy-number",
+        ),
+        pytest.param(
+            {"catalog": {"s1": {"snapshot_id": "snap-s1", "products": [{"product_ref": True}]}}},
+            "states product_ref=True, which is not a name",
+            id="product-ref-is-a-boolean",
+        ),
+        pytest.param(
+            {"catalog": {"s1": {"snapshot_id": ["a"], "products": [{"product_ref": PRODUCT}]}}},
+            "states snapshot_id=['a'], which is not a name",
+            id="snapshot-id-is-a-list",
+        ),
     ],
 )
 def test_a_malformed_catalog_is_a_503_that_names_the_offending_row(
@@ -560,17 +603,22 @@ def test_a_profile_the_buyer_did_state_is_carried_through_unchanged() -> None:
 def test_a_store_that_refuses_is_named_rather_than_reported_as_silent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
 ) -> None:
-    """Four stores, one auction: one bids, three refuse in three different ways.
+    """Five stores, one auction: one bids, four refuse in four different ways.
 
-    Before this repair all three refusals read ``fallback_reason: "no_response"`` — measured
-    over HTTP on the same market — so a store that declined, a store that rejected the
-    request body and a store that was switched off were one fact. The bidder is the control:
-    without it, a solicitor that answered "refused" to everything would pass.
+    Before this repair every refusal read ``fallback_reason: "no_response"`` — measured over
+    HTTP on the same market — so a store that declined, a store that rejected the request body
+    and a store that was switched off were one fact. The bidder is the control: without it, a
+    solicitor that answered "refused" to everything would pass.
 
-    The 4 KiB decline reason is the second control, on the other axis. That header is chosen
-    by a third-party store on an unauthenticated path and is echoed once per rostered store in
-    a ``201``, so what reaches the answer is bounded — and bounded to a NAMED value, because
-    an unrenderable reason and an absent one are different facts.
+    ``shouter`` is the second control, on the other axis. That header is chosen by a
+    third-party store on an unauthenticated path and is echoed once per rostered store in a
+    ``201``, so what reaches the answer is bounded — and bounded to a NAMED value, because an
+    unrenderable reason and an absent one are different facts.
+
+    ``misreporter`` is the third: it sends the DECLINE header on a ``503``. The header is the
+    contract's word for a 204 and for nothing else, so an agent that is down cannot describe
+    itself as a store that chose not to bid — the two have different owners and different
+    fixes, which is the entire point of splitting them.
     """
     document = _document(agent_url, with_catalog=True)
     document["sellers"].extend(
@@ -581,10 +629,10 @@ def test_a_store_that_refuses_is_named_rather_than_reported_as_silent(
                 "registered_domain": f"{store_id}.example.com",
                 "bid_endpoint": f"{agent_url}/{store_id}/v1/bid-requests",
             }
-            for store_id in ("decliner", "shouter", "refuser")
+            for store_id in ("decliner", "shouter", "refuser", "misreporter")
         ]
     )
-    for store_id in ("decliner", "shouter", "refuser"):
+    for store_id in ("decliner", "shouter", "refuser", "misreporter"):
         document["trust_snapshot"]["stores"][store_id] = {
             "store_id": store_id,
             "blacklisted": False,
@@ -603,7 +651,7 @@ def test_a_store_that_refuses_is_named_rather_than_reported_as_silent(
             "list_price": 130.0,
             "max_discount_pct": 20.0,
         }
-        for store_id in ("decliner", "shouter", "refuser")
+        for store_id in ("decliner", "shouter", "refuser", "misreporter")
     ]
 
     with served_exchange() as client:
@@ -625,6 +673,7 @@ def test_a_store_that_refuses_is_named_rather_than_reported_as_silent(
     assert reasons["decliner"] == "store_declined:no_matching_product", reasons
     assert reasons["refuser"] == "store_refused:422", reasons
     assert reasons["shouter"] == "store_declined:undisclosed", reasons
+    assert reasons["misreporter"] == "store_refused:503", reasons
     assert "no_response" not in set(reasons.values()), (
         f"a store that ANSWERED is still being reported as silent: {reasons}"
     )
@@ -635,11 +684,11 @@ def test_a_deployed_exchange_solicits_successfully_when_the_buyer_names_no_profi
 ) -> None:
     """``profile`` is optional on ``POST /auctions`` and required on ``POST /v1/bid-requests``.
 
-    The doubles in this module accept any body, so this case cannot fail here for the store
-    agent's reasons — what it pins is that the exchange still SOLICITS and still shortlists
-    with no profile in the request, which is the shape a buyer service sends. The paired
-    measurement against the real, validating agent is in the module docstring: with the old
-    coercion it answered ``422`` and the exchange reported ``no_response``.
+    The doubles in this module declare the pinned ``BidRequest``, exactly as
+    ``packages/store-agent``'s real door does, so the old coercion fails this case here for
+    the same reason and by the same model — measured: reverting `for_auction` to
+    ``profile if isinstance(profile, Mapping) else {}`` turns this red and nothing else in
+    the file.
     """
     document = tmp_path / "deployment.json"
     document.write_text(
@@ -698,3 +747,200 @@ def test_the_refusal_vocabulary_is_the_one_the_collector_publishes() -> None:
         assert fallback_reason_family(reason) == reason
     assert fallback_reason_family("store_refused:503") == STORE_REFUSED_REASON
     assert fallback_reason_family(None) is None
+
+
+def test_a_buyer_stated_profile_the_contract_rejects_is_named_rather_than_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """The residual the profile repair deliberately does NOT close, pinned as behaviour.
+
+    ``ProfileBuckets`` is ``extra="forbid"``, and the exchange does not rewrite a profile the
+    buyer actually stated — inventing a different one would be answering a question the shopper
+    did not ask. So a bucket key the contract does not declare still costs the auction every
+    bid. What must never happen again is that it costs them SILENTLY: the caller has to be able
+    to see that the profile it sent is what lost the auction.
+
+    The control is the second case: the same request with the undeclared key removed, which
+    bids and shortlists. Without it this test would pass on an exchange that refused everything.
+    """
+    document = tmp_path / "deployment.json"
+    document.write_text(
+        json.dumps(_document(agent_url, with_catalog=True), indent=2), encoding="utf-8"
+    )
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(document))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    def entries_for(profile: dict[str, Any]) -> list[dict[str, Any]]:
+        with served_exchange() as client:
+            response = client.post(
+                "/auctions",
+                json={"intent": CONSTRAINED_INTENT, "profile": profile, "roster": _roster()},
+            )
+        assert response.status_code == 201, f"{response.status_code}: {response.text}"
+        return response.json()["entries"]
+
+    refused = entries_for({"pseudonym": "psn-1", "buckets": {"totally_unknown": "x"}})
+    assert [entry["fallback_reason"] for entry in refused] == [
+        "store_refused:422",
+        "store_refused:422",
+    ], refused
+
+    # The control.
+    accepted = entries_for({"pseudonym": "psn-1", "buckets": {"budget_band": "mid"}})
+    assert [entry["fallback_reason"] for entry in accepted] == [None, None], accepted
+
+
+def test_a_solicitor_cannot_spend_the_response_on_a_refusal_it_invented() -> None:
+    """``collect_bids`` re-normalises the refusal field; it does not echo it.
+
+    :data:`REFUSAL_FIELD` is written by the exchange's own solicitor, so this is defence in
+    depth rather than a hole — but ``collect_bids`` is the PUBLIC boundary and it already
+    bounds a store's prices and its arrival stamp. A second caller, or a second solicitor,
+    must not be able to put 64 KiB of anything into an unauthenticated ``201``.
+
+    The control is the first case: a well-formed refusal survives unchanged, so this is not
+    measuring a function that discards everything.
+    """
+    from exchange.auction.collect import REFUSAL_FIELD, collect_bids  # noqa: PLC0415
+
+    roster = [{"store_id": "s1", "tier": 1, "product_ref": PRODUCT, "list_price": 10.0}]
+
+    def reason_for(refusal: Any) -> str | None:
+        entries = collect_bids(
+            roster, [{"store_id": "s1", "received_at": 1.0, REFUSAL_FIELD: refusal}], 2.0
+        )
+        return entries[0].fallback_reason
+
+    # The control: a refusal the solicitor really writes comes back verbatim.
+    assert reason_for("store_declined:no_matching_product") == "store_declined:no_matching_product"
+
+    assert reason_for("store_refused:" + "z" * 65_536) == "store_refused:undisclosed"
+    assert reason_for("z" * 65_536) == "store_refused:undisclosed"
+    # A family nothing published is not honoured as one, and its tail is not mined for a
+    # detail either: the whole string is the detail, and the allowlist answers it.
+    assert reason_for("totally_made_up:404") == "store_refused:undisclosed"
+    assert reason_for("no_matching_product") == "store_refused:no_matching_product"
+    # An empty field is not a refusal at all, and the store is NOT reported as silent either:
+    # a response is in hand, it simply carries no bid, which is the label that already existed
+    # for exactly that.
+    assert reason_for("") == "response_carried_no_bid"
+
+
+def test_a_bid_cannot_spend_the_operators_catalogue_by_carrying_more_claims() -> None:
+    """The bidder's factor no longer multiplies the operator's, and no verdict changes.
+
+    ``claims`` arrives from a third-party store agent and the verifier walked the operator's
+    product list once per claim, so the two multiplied. Measured over a real socket with ten
+    bidding stores, a catalogue at ``MAX_CATALOG_PRODUCTS`` and 9,000 claims per bid:
+    ``POST /auctions -> 201 in 34.71s`` before, ``3.67s`` after, against a ``3.30s`` control
+    with no catalog configured.
+
+    What is asserted here is the property that makes that safe: the verdicts are IDENTICAL to
+    the ones the whole document produces. A bound that changed an answer would be a denial of
+    service wearing a fix's name — which is what a cap on the claim COUNT was, and why it is
+    not what landed: a cap grades the first N in the bidder's own order, so an honest store
+    whose deciding evidence sits at position N+1 loses a constraint it satisfies.
+    """
+    from exchange.ranking.attestation import ATTESTATION_FIELD  # noqa: PLC0415
+    from exchange.ranking.verification import (  # noqa: PLC0415
+        StaticCatalogSnapshots,
+        attest_candidate_claims,
+    )
+
+    # The auction's product is the LAST row, so a narrowing that took the first would answer
+    # differently and this test would see it.
+    decoys = [
+        {"product_ref": f"decoy-{n}", "attributes": {"capacity_l": {"value": 1}}}
+        for n in range(200)
+    ]
+    snapshot = {
+        "snapshot_id": "snap-s1",
+        "products": [
+            *decoys,
+            {
+                "product_ref": PRODUCT,
+                "attributes": {
+                    "capacity_l": {"value": CATALOGUE_CAPACITY, "unit": "l"},
+                    "colour": {"value": "black"},
+                },
+            },
+        ],
+    }
+    catalog = StaticCatalogSnapshots({"s1": snapshot})
+
+    # 200 claims — well past any cap a count-based bound would have used — with the one that
+    # decides the shopper's must-have at the very end.
+    claims = [{"key": "colour", "value": "black"} for _ in range(200)]
+    claims.append({"key": "capacity_l", "value": CATALOGUE_CAPACITY})
+
+    attested = attest_candidate_claims(claims, store_id="s1", product_ref=PRODUCT, catalog=catalog)
+
+    assert len(attested) == len(claims), "a presented claim was dropped rather than graded"
+    statuses = [row[ATTESTATION_FIELD]["status"] for row in attested]
+    assert set(statuses) == {"verified"}, statuses
+    # The unit is the EXCHANGE's, read off the narrowed row rather than off the decoys.
+    assert attested[-1][ATTESTATION_FIELD]["unit"] == "l", attested[-1][ATTESTATION_FIELD]
+
+    # The control, and the assertion that makes the bound honest: the same claims graded
+    # against a snapshot holding ONLY that product answer identically, verdict for verdict.
+    one_product = StaticCatalogSnapshots(
+        {"s1": {"snapshot_id": "snap-s1", "products": [snapshot["products"][-1]]}}
+    )
+    alone = attest_candidate_claims(claims, store_id="s1", product_ref=PRODUCT, catalog=one_product)
+    assert [row[ATTESTATION_FIELD] for row in alone] == [row[ATTESTATION_FIELD] for row in attested]
+
+
+def test_a_snapshot_holding_several_products_and_no_named_one_stays_ambiguous() -> None:
+    """Narrowing happens only when the AUCTION names a product, and this is why.
+
+    With no ``product_ref``, a snapshot holding several products is the case
+    ``claim_verification`` decides ``ambiguous`` — which of them the seller meant is exactly
+    what is undecidable. A narrowing that picked one would turn an undecidable claim into a
+    verified one, which is the direction R19 exists to refuse.
+    """
+    from exchange.ranking.attestation import ATTESTATION_FIELD  # noqa: PLC0415
+    from exchange.ranking.verification import (  # noqa: PLC0415
+        StaticCatalogSnapshots,
+        attest_candidate_claims,
+    )
+
+    catalog = StaticCatalogSnapshots(
+        {
+            "s1": {
+                "snapshot_id": "snap-s1",
+                "products": [
+                    {"product_ref": "a", "attributes": {"capacity_l": {"value": 35}}},
+                    {"product_ref": "b", "attributes": {"capacity_l": {"value": 35}}},
+                ],
+            }
+        }
+    )
+    claims = [{"key": "capacity_l", "value": 35}]
+
+    unnamed = attest_candidate_claims(claims, store_id="s1", product_ref=None, catalog=catalog)
+    assert unnamed[0][ATTESTATION_FIELD]["status"] == "ambiguous", unnamed[0]
+
+    # The control: naming one resolves it, so the ambiguity above is about the missing ref and
+    # not about a catalog this test built wrong.
+    named = attest_candidate_claims(claims, store_id="s1", product_ref="b", catalog=catalog)
+    assert named[0][ATTESTATION_FIELD]["status"] == "verified", named[0]
+
+
+def test_the_catalog_a_source_hands_back_cannot_be_rewritten_through_the_copy() -> None:
+    """``StaticCatalogSnapshots.snapshots`` is a DEEP copy, because a shallow one is not one.
+
+    The composition root reads this back out of a catalog it has just validated. A one-level
+    copy shares the ``products`` list, so a holder of the result could append a product to the
+    catalogue the ranker grades claims against.
+    """
+    from exchange.ranking.verification import StaticCatalogSnapshots  # noqa: PLC0415
+
+    source = StaticCatalogSnapshots(
+        {"s1": {"snapshot_id": "snap-s1", "products": [{"product_ref": PRODUCT}]}}
+    )
+    handed_back = source.snapshots
+    handed_back["s1"]["products"].append({"product_ref": "injected"})
+
+    still_held = source.snapshot_for("s1")
+    assert still_held is not None
+    assert [p["product_ref"] for p in still_held["products"]] == [PRODUCT], still_held

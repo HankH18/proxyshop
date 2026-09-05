@@ -116,7 +116,8 @@ The document
         without "catalog": ranked [], 0 shortlist slots, both stores excluded
                            "hard_constraint_unsatisfied: 'capacity_l': the candidate carries
                             no such attribute, so the constraint is undecidable and does not
-                            count as satisfied (R19)"
+                            count as satisfied (R19) — only a verified supporting claim
+                            satisfies a hard constraint (R19)"
         with    "catalog": ranked ['s1', 's2'], 2 shortlist slots, excluded []
 
     A real shopper sentence always yields at least a price constraint, so before this key
@@ -622,7 +623,27 @@ ANONYMOUS_PSEUDONYM_PREFIX = "anon"
 
 
 def solicitation_profile(profile: Any, *, auction_id: str) -> dict[str, Any]:
-    """The ``BuyerProfile`` this solicitation carries — always a valid one.
+    """The ``BuyerProfile`` this solicitation carries, repaired where the EXCHANGE broke it.
+
+    Stated exactly, because the first version of this docstring said "always a valid one" and
+    that was measured false. What this guarantees is that **the exchange's own coercion no
+    longer produces a body the published contract rejects** — the ``{}`` it used to write for
+    every buyer who named no profile. What it does not and must not do is rewrite a profile the
+    buyer DID state: ``ProfileBuckets`` is ``extra="forbid"``, so an undeclared bucket key, a
+    bucket of the wrong type, or an extra field beside ``pseudonym``/``buckets`` still makes
+    the store answer ``422``. Measured, one store, one auction each::
+
+        omitted                201  fallback=False  reason=None                shortlist 1
+        empty-object           201  fallback=False  reason=None                shortlist 1
+        undeclared-bucket-key  201  fallback=True   reason='store_refused:422' shortlist 0
+        extra-profile-field    201  fallback=True   reason='store_refused:422' shortlist 0
+
+    Those three are the buyer's own statement and the exchange declines to invent a different
+    one — which is bearable only because of the other half of this repair: the refusal reads
+    ``store_refused:422`` rather than ``no_response``, so the caller can see that the profile
+    it sent is what lost the auction. ``intent`` is treated the same way one layer up: the
+    route takes whatever shape a buyer service sends and lets the reader of the field decide
+    what it means.
 
     ``CreateAuctionRequest.profile`` is ``dict | None``: the buyer service may omit it, and
     the published ``BidRequest`` may not. This used to be written as ``profile if
