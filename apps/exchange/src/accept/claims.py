@@ -69,12 +69,13 @@ measured rather than aesthetic. An auction id in production is ``auction-{uuid4(
 never seen twice; an auction id in a test suite is ``auction-1`` and names a different auction
 in dozens of tests inside one process. Defaulting to a process-lifetime table makes the second
 test to touch ``auction-1`` fail as "already accepted", and that is not a hypothetical: with
-one wired in, four tests of the frozen acceptance suite went red —
-``test_redirect_and_shopify_modes_emit_identical_event_kinds``,
+one wired in, the frozen acceptance suite went from ``120 passed`` to ``5 failed, 115 passed``
+— ``test_redirect_and_shopify_modes_emit_identical_event_kinds``,
 ``test_double_accept_on_one_auction_is_rejected``,
-``test_accept_gate_refuses_a_bid_whose_store_became_ineligible_after_bidding`` and
-``test_both_eligibility_gates_require_a_versioned_seller_eligibility_interface`` — each of them
-a legitimate first accept refused by a *previous test's* claim.
+``test_accept_gate_refuses_a_bid_whose_store_became_ineligible_after_bidding``,
+``test_both_eligibility_gates_require_a_versioned_seller_eligibility_interface`` and
+``test_spec_criteria.py::test_offdomain_checkout_url_is_refused`` — each of them a legitimate
+first accept refused by a *previous test's* claim.
 
 It is also the wrong shape on its own merits, and the ticket's own reproduction says why: an
 in-process double cannot tell process memory from durable state, so a process-lifetime ledger
@@ -82,18 +83,41 @@ turns an in-process test green while the second uvicorn worker mints the second 
 has to live where the auction lives. That is :class:`StoreAcceptanceClaims`, and it is what
 wiring an app gets you without asking.
 
+**What this costs, stated exactly rather than overstated.** ``test_repro_open_tickets.py``'s
+``test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code`` calls bare
+``accept()`` with nothing wired and requires the second call on one auction id to be refused,
+so it stays red. That gate is not *unsatisfiable* alongside the frozen suite — it was made
+green simultaneously with all 120 by keying the process-lifetime table on "did the caller pass
+a real ``registered_domains``", which happens to separate the two suites. It is not shipped
+because ``registered_domains`` answers "is this checkout URL on the store's registered host"
+and carries no information about whether this auction was already accepted; because it would
+let any caller disable the money guard by omitting one unrelated argument, and the caller who
+omits it is already the *less* verified one (T-169); and because it depends on process-global
+wiring nothing at the call site controls — arm that rule and also call
+``use_registered_domains(<real registry>)`` in the same process and five frozen goals go red.
+The honest statement is that the gate is satisfiable only by keying a money guard on an
+unrelated argument and on global wiring state, which is worse than leaving it red.
+
 Why a *claim* and not a lock
 -----------------------------
 
 Nothing here blocks, nothing is held for a duration, and there is nothing to time out. A
 claim is won or it is not, and the loser is told who won. The only lifetime involved is the
-auction's own fifteen-minute TTL, which the reservation shares (D-pinned in
-:data:`~apps.exchange.src.auction.state.RESERVATION_KEY_TEMPLATE`), so a crashed process
-cannot wedge an auction for longer than the auction was going to live anyway.
+auction's own fifteen-minute TTL budget, which the reservation shares — see
+:data:`~apps.exchange.src.auction.state.RESERVATION_KEY_TEMPLATE` on why a reservation in fact
+expires slightly *earlier* than its record — so a crashed process cannot wedge an auction for
+longer than the auction was going to live anyway.
 
 :meth:`AcceptanceClaims.release` exists because A5 says a refused accept re-offers the next
 slot rather than ending the auction. A mint that fails gives the claim back; a mint that
-succeeds keeps it forever, which is what "one auction, one code" means.
+succeeded keeps it, which is what "one auction, one code" means — and "succeeded" is decided
+by whether a code EXISTS, not by whether this accept returned one. A refusal carrying
+:attr:`~apps.exchange.src.checkout.provider.OrphanedCheckoutCode.orphan` is a refusal that
+happened after ``POST /codes`` already issued a live discount, so it keeps the claim: A5's
+argument for re-offering the next slot does not extend to re-minting against an auction that
+already cost the seller a code. (On ``main`` that release was unconditional and a second
+sequential accept on an orphaned auction minted a second live code — byte-identical on both
+trees, so this is a repair rather than a regression, but it is a repair.)
 """
 
 from __future__ import annotations
