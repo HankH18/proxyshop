@@ -272,7 +272,16 @@ def _claims(request: Request) -> Any:
     """
     claims = getattr(request.app.state, "acceptance_claims", None)
     if claims is None:
-        claims = StoreAcceptanceClaims(_machine(request).store)
+        store = _machine(request).store
+        try:
+            claims = StoreAcceptanceClaims(store)
+        except TypeError as exc:
+            # A store that cannot hold a reservation cannot make this exchange safe, and the
+            # honest answer is that the DEPLOYMENT is broken — not that this buyer's offer was
+            # refused. Same 503 the unusable bid source gets, for the same reason: dressing a
+            # misconfiguration up as a decision about the buyer hides it from the operator,
+            # and letting it through would mint on a path with no one-accept guard at all.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         request.app.state.acceptance_claims = claims
     return claims
 
