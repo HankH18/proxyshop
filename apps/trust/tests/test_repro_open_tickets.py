@@ -2072,6 +2072,7 @@ def _t256_cases() -> list[dict[str, Any]]:
     assertion below is a function of the generated input rather than of a constant.
     """
     import random
+    import uuid
 
     from claim_verification import VERIFICATION_STATUSES
     from trust.scoring import CLAIM_TYPE_DIMENSIONS
@@ -2088,7 +2089,13 @@ def _t256_cases() -> list[dict[str, Any]]:
                     "key": f"{claim_type}.value",
                     "status": status,
                     "confidence": round(rng.uniform(0.0, 1.0), 6),
-                    "catalog_snapshot_id": f"snapshot-{rng.randrange(10**9)}",
+                    # A real UUID, because the column is `uuid not null`. Measured: with
+                    # `f"snapshot-{n}"` here, live Postgres answers
+                    # `InvalidTextRepresentation: invalid input syntax for type uuid`, so
+                    # every one of the 56 cases was un-insertable and the conformance
+                    # assertion below could only ever have been the column-name check it
+                    # already is. A gate defanged by its own fixture data.
+                    "catalog_snapshot_id": str(uuid.UUID(int=rng.getrandbits(128))),
                     "verifier_version": f"verifier-{rng.randrange(100)}.0.0",
                     "evidence_refs": [
                         f"evidence-{rng.randrange(10**9)}" for _ in range(rng.randint(1, 3))
@@ -2116,11 +2123,16 @@ class _T256RecordingCursor:
             self._log.append((str(sql), params))
         return self
 
+    #: What a ``returning claim_id`` / ``returning verification_id`` reads back. A cursor that
+    #: answers ``None`` makes the writer pass NULL for the very foreign keys the migration
+    #: marks NOT NULL, so a correct writer would look broken and an incorrect one identical.
+    RETURNED_ID = "00000000-0000-0000-0000-0000000000ff"
+
     def fetchone(self) -> Any:
-        return None
+        return (self.RETURNED_ID,)
 
     def fetchall(self) -> list[Any]:
-        return []
+        return [(self.RETURNED_ID,)]
 
     def close(self) -> None:
         return None
@@ -2190,6 +2202,51 @@ def _t256_find_seams() -> list[tuple[str, str, Any]]:
     return found
 
 
+def _t256_seam_home(seam: Any) -> pathlib.Path | None:
+    """The directory a seam is really defined in, resolved through symlinks.
+
+    Not derived from the module NAME. ``trust.verification`` is reached through the tracked
+    ``.pkgroot/trust -> ../apps/trust/src`` symlink, so the string ``trust/verification`` never
+    appears in any real product path and a name-derived exclusion filters nothing at all —
+    measured: 0 of 272 swept files, for all six searched modules. That made the caller check
+    satisfiable by the seam's own ``def`` line, which is the whole demand inverted.
+    """
+    try:
+        source = inspect.getsourcefile(seam)
+    except TypeError:
+        return None
+    return pathlib.Path(source).resolve().parent if source else None
+
+
+def _t256_inside(path: pathlib.Path, home: pathlib.Path | None) -> bool:
+    """Whether ``path`` lives in the seam's own package, resolved on both sides."""
+    if home is None:
+        return False
+    return path.resolve().is_relative_to(home)
+
+
+def _t256_calls(source: str, name: str) -> bool:
+    """Whether this module CALLS ``name`` — an AST call site, not a text match.
+
+    A regex for ``name(`` matches the ``def`` line, a docstring, a comment and a string
+    literal equally well, so it cannot tell a caller from a definition. Only an
+    :class:`ast.Call` whose callee resolves to that identifier counts.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if isinstance(callee, ast.Name) and callee.id == name:
+            return True
+        if isinstance(callee, ast.Attribute) and callee.attr == name:
+            return True
+    return False
+
+
 def test_t256_the_verification_persistence_sweep_is_armed() -> None:
     """The five tables, the two vocabularies and the cross product all still exist.
 
@@ -2256,6 +2313,30 @@ def test_t256_the_verification_persistence_sweep_is_armed() -> None:
         "generated store ids collide, so the sweep is narrower than it counts"
     )
 
+    import uuid
+
+    uuid_columns = {
+        column
+        for body in bodies.values()
+        for column in re.findall(
+            r"^\s*([a-z_][a-z0-9_]*)\s+uuid\b", body, re.MULTILINE | re.IGNORECASE
+        )
+    }
+    assert uuid_columns, f"{_T256_MIGRATION} declares no uuid column; the reader lost its shape"
+    for column in sorted(uuid_columns & set(cases[0])):
+        for case in cases:
+            uuid.UUID(str(case[column]))  # raises ValueError if the fixture is un-insertable
+
+    assert _t256_calls("persist_it(1)", "persist_it"), "the call detector sees no plain call"
+    assert _t256_calls("mod.persist_it(1)", "persist_it"), "the call detector sees no method call"
+    assert not _t256_calls("def persist_it(a):\n    pass\n", "persist_it"), (
+        "the call detector counts a DEFINITION as a call, so a seam nobody invokes would read "
+        "as called — measured, that is exactly how this gate's caller demand was inverted"
+    )
+    assert not _t256_calls('x = "persist_it(1)"\n# persist_it(2)\n', "persist_it"), (
+        "the call detector counts a string literal or a comment as a call"
+    )
+
 
 @pytest.mark.xfail(
     strict=True,
@@ -2303,20 +2384,19 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
         "so T-065's acceptance item 2 grades pure-function idempotency and nothing else"
     )
 
-    product_sources = {
-        str(path.relative_to(REPO_ROOT)): path.read_text(encoding="utf-8")
+    shipped = {
+        path: source
         for path in _product_python_files()
+        if _T256_SHIPPED_CALLER.match(str(path.relative_to(REPO_ROOT)))
+        and (source := path.read_text(encoding="utf-8"))
     }
-    assert product_sources, "the product file sweep found nothing to search for callers"
+    assert shipped, "the product file sweep found no shipped module to search for callers"
     uncalled: list[str] = []
-    for module_name, name, _ in seams:
-        home = module_name.replace(".", "/")
+    for module_name, name, seam_object in seams:
         callers = [
-            path
-            for path, source in product_sources.items()
-            if home not in path
-            and _T256_SHIPPED_CALLER.match(path)
-            and re.search(rf"\b{re.escape(name)}\s*\(", source)
+            str(path.relative_to(REPO_ROOT))
+            for path, source in shipped.items()
+            if not _t256_inside(path, _t256_seam_home(seam_object)) and _t256_calls(source, name)
         ]
         if not callers:
             uncalled.append(f"{module_name}.{name}")
@@ -2382,19 +2462,29 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
     }
     seam(**payload)
     seam(**payload)
-    replayed = [
-        statement
-        for statement, _ in replay.log
-        if re.search(r"insert\s+into\s+ledger\.claim_verifications\b", statement, re.IGNORECASE)
-    ]
-    assert len(replayed) <= 1 or all(
-        re.search(r"on\s+conflict", statement, re.IGNORECASE) for statement in replayed
-    ), (
-        f"replaying the identical (claim_ref, catalog_snapshot_id, verifier_version) emitted "
-        f"{len(replayed)} claim_verifications INSERTs and none defers to the "
-        f"claim_verifications_idempotency_key UNIQUE constraint with ON CONFLICT. T-065's "
-        f"acceptance 2 is about rows, not statements: a second ROW is the failure, and letting "
-        f"the constraint refuse it is the design the migration was written for"
+    doubled: list[str] = []
+    for table in _T256_TABLES:
+        statements = [
+            statement
+            for statement, _ in replay.log
+            if re.search(rf"insert\s+into\s+{re.escape(table)}\b", statement, re.IGNORECASE)
+        ]
+        once = len(statements) // 2 if statements else 0
+        unguarded = [
+            statement
+            for statement in statements
+            if not re.search(r"on\s+conflict", statement, re.IGNORECASE)
+        ]
+        if len(statements) > max(once, 1) and unguarded:
+            doubled.append(f"{table}: {len(statements)} INSERTs, {len(unguarded)} unguarded")
+    assert doubled == [], (
+        f"replaying the identical (claim_ref, catalog_snapshot_id, verifier_version) writes a "
+        f"second row into {[entry.split(':')[0] for entry in doubled]} — {doubled}. T-065's "
+        f"acceptance 2 is about ROWS, not statements: deferring to a UNIQUE constraint with "
+        f"ON CONFLICT is fine and is the design claim_verifications_idempotency_key exists "
+        f"for, but ledger.trust_observations carries NO unique constraint at all, so nothing "
+        f"but the writer can stop a replay double-counting an observation — which is exactly "
+        f"the corruption that acceptance item is about"
     )
 
 
