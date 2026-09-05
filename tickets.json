@@ -2576,7 +2576,7 @@
     {
       "id": "T-140",
       "title": "AccountDirectory has exactly one implementation and no production populator. build_auth_service() never passes accounts=, so production runs the empty default InMemoryAccountDirectory, and MagicLinkAuth.redeem (line 304) writes only {'email': email} (+orders: []). Every coarsener therefore runs on an empty account in production: GET /buyer/profile returns an identical, information-free profile for every buyer. The passing acceptance test injects a rich account dict straight into build_profile and is not evidence that any production path builds a real profile.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-9} uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k t140",
       "scope": [
         "apps/buyer/svc/src/auth/magic_link.py"
       ],
@@ -2610,7 +2610,7 @@
     {
       "id": "T-142",
       "title": "publish_profile \u2014 the only writer of app.buyer_accounts, described as 'the store-visible working set' \u2014 has zero production call sites, and no code outside the buyer service consumes BuyerProfile or reads app.buyer_accounts. The R5 deliverable 'the BuyerProfile handed to stores' is never handed to a store: GET /buyer/profile requires an X-Buyer-Session header, which only the buyer holds. The hardening commit names publish_profile as dead code but its fix wires only PostgresPseudonymStore, leaving publish_profile dead.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-3} uv run python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k t142",
       "scope": [
         "apps/buyer/svc/src/profile/__init__.py"
       ],
@@ -2848,7 +2848,7 @@
     {
       "id": "T-156",
       "title": "offer.total_price is never reconciled against unit_price: an offer stating unit_price=80.0 with total_price=1.0 is admitted. Offer carries no quantity, and the quantity that would relate the two lives in apps/exchange/src/checkout/codes.py:111, so the relation is not decidable from a bid alone. The T-153 lane scoped this out explicitly and documented it in the refusal's docstring rather than leaving it silent. Closing it requires deciding where quantity enters the bid \u2014 a design question, not a bug fix.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t156",
       "scope": [
         "packages/store-agent/src/hooks/provenance.py (_price_reconciliation_refusal)"
       ],
@@ -4598,7 +4598,7 @@
     {
       "id": "T-264",
       "title": "A MEMORY ADDRESS IS RENDERED INTO A PERSISTED, CLIENT-VISIBLE EVENT PAYLOAD. A TypeError raised from an unusable registered_domains argument is formatted into denial_reason, producing a literal '<object object at 0x...>' string that is both stored in the policy_event and returned to the caller. That leaks process memory layout to an unauthenticated client and makes the denial reason unparseable by anything downstream. Within T-204's ambit (denial reasons drawn from a declared vocabulary) but is a distinct and more serious defect than the vocabulary gap itself.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-1} uv run python -m pytest apps/exchange/tests/test_accept_denials.py -q --runxfail -k t264",
       "scope": [
         "apps/exchange/src/checkout/provider.py"
       ],
@@ -4823,7 +4823,7 @@
     {
       "id": "T-279",
       "title": "A TOTAL try/except Exception ERODES THE GATE IT WAS MEANT TO SATISFY. receive_bid (door.py:358) is now a thin catch-all wrapper around _receive_bid (door.py:410): the try at :386 and `except Exception` at :401 return _refuse(REASON_DOOR_FAILED_CLOSED, payload=payload) at :407 for ANY escaping exception. The test that grades this property, packages/store-agent/tests/test_repro_external_door.py:398 test_the_door_never_raises_on_the_three_inputs_that_make_it_raise, only asserts that each of its three hostile inputs returns with `accepted is not True` (:470-479). With the catch-all in place that assertion is satisfied by the wrapper alone, so the test can no longer distinguish 'each of the three inputs is handled by name inside _receive_bid' -- which is what its own docstring at :401-416 enumerates (the overflowing freshness_window_seconds, the blacklist whose __iter__ raises, and _refuse re-reading the payload it is refusing) -- from 'everything is swallowed at the outer frame'. If any of the three named fixes regresses, the test stays green. The wrapper is the right belt-and-braces (an anonymous POST must never 500), but it must not be the only thing holding the property up: the three inner fixes need assertions that see BELOW the wrapper -- e.g. driving _receive_bid directly, or asserting the refusal REASON is the by-name one rather than door_failed_closed.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-12} uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t279",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -5513,7 +5513,7 @@
     {
       "id": "T-325",
       "title": "THREE TICKETS NOW SHARE TWO GATE NODES, AND TWO OF THEM WILL GO GREEN ON A FIX THAT DOES NOT ADDRESS THEM. Amendment 19 repointed T-266 and T-296 at `test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes` and `test_t312_the_trust_service_serves_exactly_...`, which are T-312's own tests; amendment 18 gave T-312 the verify `-k test_t312`, which selects BOTH of those plus the ingest one. Measured over all 24 of amendment 19's repoints: exactly 2 are entangled this way and the other 22 either name their own ticket or carry no ticket id in the selector at all. THE CONSEQUENCE IS THE T-204 SHAPE, MANUFACTURED RATHER THAN INHERITED: when T-312 is fixed, T-266's and T-296's gates go green too, and neither ticket is thereby resolved. T-296's node covers only the TRUST half \u2014 3 of the 8 operations T-296 records \u2014 leaving store-agent POST /v1/bid-requests, which T-296's own text calls the reason it was filed, and ingest POST /refresh/{store_id} outside its gate entirely. T-266's assertion names three published-but-unserved exchange paths whose owners are OTHER tickets (T-032 shortlist, T-044 /v1/auctions/{id}/bids, and /internal/outcomes which T-296 records as owned by nobody), so a T-266 lane cannot turn its own gate green by doing T-266's work. Both repoints were flagged as partial by the agent that measured them and were applied anyway, on the reasoning that a partial gate beats a placeholder \u2014 that reasoning is defensible and the resulting false-green risk is real, so it is recorded here rather than left in an orchestrator's context.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-3} uv run python -m pytest apps/exchange/tests/test_accept_denials.py -q --runxfail -k \"t325 or ticket_gate_ownership_scan\"",
       "scope": [
         "apps/exchange/tests/test_repro_open_tickets.py"
       ],
@@ -5528,7 +5528,7 @@
     {
       "id": "T-326",
       "title": "THE SAME ADDRESS LEAK T-264 DESCRIBES, ONE FILE OVER AND STILL UNFIXED, ON A CLIENT-VISIBLE PATH. providers.py:110 carries f\"injected code creator {creator!r} ...\" \u2014 the byte-identical defect shape to the one T-264's fix repaired, on the sibling injected argument `code_creator`. Measured live: accept(...) with an unusable creator yields denial_reason = 'checkout_refused: CheckoutCreatorError: injected code creator <object object at 0x1045fd2e0> ...'. That string is PERSISTED in a policy_event, and routes.py::_denied republishes it verbatim in the 409 body because `checkout_refused` is a declared code \u2014 so a raw heap address reaches both durable storage and the client. Two further live reproductions inside T-264's OWN scoped file: provider.py:1100-1106 and offer.py:541 pass lookup exceptions through unsanitized, so a registry raising KeyError(<object>) leaks the address; and T-264's literal recipe is a `registered_domains` value that RAISES TypeError ON USE, whereas the landed fix is a CALLABILITY check \u2014 a value that actually raises on use still leaks its own repr. HOW THIS WAS NEARLY LOST: a triage agent read commit 330eb13, verified provider.py:1093-1096 now renders type(source).__name__, reasons.py:111-129 added a scalar-only describe(), and gate.py:131 uses it \u2014 all TRUE \u2014 probed accept(registered_domains=object()) and saw no address, and classified T-264 ALREADY_FIXED. An independent refuter confirmed every one of those claims literally and then reproduced the defect three ways at HEAD 219200a. T-264 also sits on the 'already gated by an existing test' list with a named gate that is GREEN at HEAD, so closing it on the triage verdict would have recorded a high-severity leak as fixed, repointed its verify at a passing test, and dropped the work under a green light.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-15} uv run python -m pytest apps/exchange/tests/test_accept_denials.py -q --runxfail -k t326",
       "scope": [
         "apps/exchange/src/checkout/providers.py"
       ],
@@ -5543,7 +5543,7 @@
     {
       "id": "T-327",
       "title": "T-264'S PROPOSED GATE IS UNSOUND AND WOULD CERTIFY THE LEAK. Run verbatim against HEAD it reports '3 passed in 0.30s' while the defect reproduces three ways. The cause is that it never varies `code_creator` \u2014 it grades the specific PATCH that landed (the registered_domains callability check) rather than the PROPERTY that no injected collaborator's repr reaches a denial reason. The hardening suggested in its own gate_design does not close this either. This is the run's recurring shape stated exactly: a gate answering a narrower question than its caller believes. The replacement must be a property over ALL injected collaborators \u2014 registered_domains, code_creator, and any sibling \u2014 asserting that no denial_reason, persisted policy_event or 409 body contains a repr-shaped substring, and it must be ARMED (assert a non-zero count of injected collaborators exercised) so it cannot pass by iterating nothing.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} uv run python -m pytest apps/exchange/tests/test_accept_denials.py -q --runxfail -k \"injected_collaborator\"",
       "scope": [
         "apps/exchange/tests/test_accept_denials.py"
       ],
