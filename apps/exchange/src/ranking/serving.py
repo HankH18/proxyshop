@@ -38,11 +38,13 @@ from contracts.ranking import RankingWeights
 from ..auction.state import AUCTION_TTL_SECONDS
 from . import rank
 from .candidates import candidates_from_entries
+from .verification import NoCatalogSnapshots, attest_candidates
 
 __all__ = [
     "DEFAULT_SHORTLIST_CAPACITY",
     "ENV_RANKING_WEIGHTS",
     "ShortlistStore",
+    "catalog_of",
     "configure_ranking",
     "rank_auction",
     "registered_domains_of",
@@ -149,6 +151,7 @@ def configure_ranking(
     registered_domains: Any = None,
     shortlists: ShortlistStore | None = None,
     weights: RankingWeights | None = None,
+    catalog: Any = None,
 ) -> None:
     """Wire an app's ranking collaborators. Anything omitted keeps what is already there."""
     if trust_snapshot is not None:
@@ -159,6 +162,8 @@ def configure_ranking(
         app.state.shortlists = shortlists
     if weights is not None:
         app.state.ranking_weights = weights
+    if catalog is not None:
+        app.state.ranking_catalog = catalog
 
 
 def shortlist_store(app: Any) -> ShortlistStore:
@@ -202,6 +207,25 @@ def registered_domains_of(app: Any) -> Any:
     return platform_registered_domains()
 
 
+def catalog_of(app: Any) -> Any:
+    """This app's catalog-snapshot source — what the exchange grades a store's claims against.
+
+    The default is :class:`~exchange.ranking.verification.NoCatalogSnapshots`, which holds a
+    snapshot for nobody, and the consequence is stated plainly rather than left to be
+    discovered: an exchange with no catalog wired verifies no claim, so no hard constraint is
+    satisfied and a hard-constrained auction shortlists nobody (ESC-020). It is the same
+    direction :func:`trust_snapshot_of` fails in — an exchange that cannot check something
+    denies rather than admits — and, like the trust snapshot, it is a wiring the operator has
+    to do rather than one this module can invent, because the alternative to "no catalog" is
+    "the bidder's own catalog", which is no check at all.
+    """
+    catalog = getattr(app.state, "ranking_catalog", None)
+    if catalog is None:
+        catalog = NoCatalogSnapshots()
+        app.state.ranking_catalog = catalog
+    return catalog
+
+
 def weights_of(app: Any) -> RankingWeights:
     """The weight set this app ranks with: its own override, else this process's.
 
@@ -224,6 +248,7 @@ def rank_auction(
     trust_snapshot: Any,
     registered_domains: Any = None,
     weights: RankingWeights | None = None,
+    catalog: Any = None,
 ) -> dict[str, Any]:
     """Rank one closed auction's collected bids and build its shortlist.
 
@@ -238,12 +263,21 @@ def rank_auction(
     once per candidate, inside the synchronous window R10 bounds. The blacklist still fails
     closed here: it is derived from ``trust_snapshot``, which is the published four-argument
     surface, and a store with no row is denied.
+
+    The CATALOG is passed through, and it is what makes the claims on these candidates
+    evidence rather than assertions (ESC-020). Between the projection and the ranking, each
+    store's claims are checked by :func:`claim_verification.verify` against the snapshot this
+    exchange holds for that store, and the verdict is sealed with a key the bidder does not
+    have. Whatever the store wrote under ``status`` is dropped on the way through and is read
+    by nothing. A catalog of ``None`` verifies nothing, which is a denial rather than an
+    admission: see :func:`catalog_of`.
     """
     candidates = candidates_from_entries(
         entries,
         auction_id=auction_id,
         registered_domains=registered_domains,
     )
+    candidates = attest_candidates(candidates, catalog=catalog)
     return rank(
         candidates,
         intent,

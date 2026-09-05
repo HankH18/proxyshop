@@ -57,6 +57,7 @@ from pydantic import BaseModel, Field
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
 from ..ranking.serving import (
+    catalog_of,
     rank_auction,
     registered_domains_of,
     shortlist_store,
@@ -564,6 +565,7 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         trust_snapshot=trust_snapshot_of(request.app),
         registered_domains=registered_domains_of(request.app),
         weights=weights_of(request.app),
+        catalog=catalog_of(request.app),
     )
     shortlist = ranking["shortlist"]
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)

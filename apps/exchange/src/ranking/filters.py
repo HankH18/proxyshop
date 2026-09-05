@@ -27,6 +27,23 @@ Deciding the constraint itself is delegated to
 :class:`~exchange.retrieval.criteria.HardCriterion`, which is where the op vocabulary and
 the undecidable-is-never-satisfied rule already live. Restating either here would be a
 second answer to a question that has one.
+
+WHOSE "verified" (ESC-020)
+--------------------------
+This module used to answer that question with `claim["status"]` — a field on a document the
+BIDDER wrote, which the published `Claim` does not declare (`additionalProperties: false`)
+and which nothing on the auction path validated. A store wrote the string and satisfied any
+hard constraint it liked; two identical stores, one adding it, and the liar took the whole
+shortlist while the honest one was excluded `hard_constraint_unsatisfied`. It moved
+`verified_hard_fit_count` too, which is the first published tie-break (D13).
+
+So the status is now read through :func:`~exchange.ranking.attestation.sealed_status`, which
+returns a verdict only when this exchange's own MAC over the claim holds. A store-supplied
+`status`, and a store-supplied `exchange_verification` block, are both read by nothing. The
+producer of real verdicts is :mod:`exchange.ranking.verification`, which runs
+:func:`claim_verification.verify` against the exchange's catalog snapshot — so an exchange
+that holds no catalog snapshot satisfies no hard constraint and shortlists nobody, the same
+direction an exchange with no trust snapshot already fails in.
 """
 
 from __future__ import annotations
@@ -37,6 +54,7 @@ from typing import Any
 
 from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
+from .attestation import ATTESTATION_FIELD, sealed_status
 from .reasons import (
     REASON_BLACKLIST_UNREADABLE,
     REASON_BLACKLISTED,
@@ -223,7 +241,7 @@ def domain_reason(candidate: Any, offer: Any) -> str | None:
 # ---------------------------------------------------------------------------------
 # R19 — hard constraints, decided against verified evidence only
 # ---------------------------------------------------------------------------------
-def verified_attributes(claims: Any) -> list[dict[str, Any]]:
+def verified_attributes(claims: Any, *, store_id: Any = None) -> list[dict[str, Any]]:
     """The candidate's `verified` claims, projected into the attribute shape
     :meth:`HardCriterion.decide` reads.
 
@@ -231,21 +249,39 @@ def verified_attributes(claims: Any) -> list[dict[str, Any]]:
     rule: an ambiguous, unsupported or contradicted claim is not weaker support for a hard
     constraint, it is no support at all, and a constraint with no support is undecidable —
     which :class:`HardCriterion` already refuses to count as satisfied.
+
+    "Verified" means THIS EXCHANGE said so. The verdict is read out of the claim's sealed
+    :data:`~exchange.ranking.attestation.ATTESTATION_FIELD` block and never out of a `status`
+    the claim's author wrote, so a bidder gains nothing by writing either one (ESC-020). A
+    claim carrying no readable exchange verdict is unverified — which is not a claim about
+    the seller's honesty, it is the plain fact that nothing checked it.
+
+    `store_id` is the candidate's EXCHANGE-ATTRIBUTED store — `collect_bids` stamps it over
+    whatever the payload claimed — so a verdict sealed for one store cannot be presented on
+    behalf of another.
     """
     attributes: list[dict[str, Any]] = []
     for claim in claims or ():
-        if str(_enum_value(read(claim, "status", ""))) != VERIFIED:
-            continue
         key = read(claim, "key", None)
         if key is None:
             continue
         value = read(claim, "value", None)
+        unit = read(claim, "unit", None)
+        status = sealed_status(
+            read(claim, ATTESTATION_FIELD, None),
+            key=key,
+            value=value,
+            unit=unit,
+            subject=store_id,
+        )
+        if str(_enum_value(status)) != VERIFIED:
+            continue
         attribute: dict[str, Any] = {
             "key": str(key),
             "value_string": None,
             "value_number": None,
             "value_bool": None,
-            "unit": read(claim, "unit", None),
+            "unit": unit,
         }
         # bool before number: `isinstance(True, int)` is True, so a bool tested as a number
         # would be filed under value_number and never match an `eq` on a bool.
@@ -308,15 +344,17 @@ def read_criteria(intent: Any) -> tuple[list[HardCriterion], str | None]:
 
 
 def hard_constraint_reasons(
-    claims: Any, criteria: Sequence[HardCriterion]
+    claims: Any, criteria: Sequence[HardCriterion], *, store_id: Any = None
 ) -> tuple[list[str], int]:
     """`(reasons, verified_hard_fit_count)` for one candidate.
 
     `verified_hard_fit_count` is the number of hard constraints this candidate meets on
     verified evidence. It is the first published tie-breaker (D13), which is why it is
-    counted here rather than recomputed by the sorter.
+    counted here rather than recomputed by the sorter — and why the evidence behind it has to
+    be the exchange's own (ESC-020): a tie-break a bidder can set is a tie-break a bidder
+    wins.
     """
-    attributes = verified_attributes(claims)
+    attributes = verified_attributes(claims, store_id=store_id)
     reasons: list[str] = []
     satisfied = 0
     for criterion in criteria:
@@ -381,7 +419,9 @@ def exclusion_reasons(
         reasons.append(intent_reason)
         return reasons, 0
 
-    hard, satisfied = hard_constraint_reasons(read(candidate, "claims", None), criteria)
+    hard, satisfied = hard_constraint_reasons(
+        read(candidate, "claims", None), criteria, store_id=store_id
+    )
     reasons.extend(hard)
     return reasons, satisfied
 

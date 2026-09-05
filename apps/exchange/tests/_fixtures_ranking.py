@@ -9,10 +9,19 @@ Two audiences, one set of builders:
   ``test_ranking.py`` does — a builder that exists twice is a builder that can disagree with
   itself about what a candidate looks like.
 
-The shapes here are the ones the frozen acceptance suite drives ``rank()`` with: hard-
-constraint evidence carried by ``claims[i]["status"]``, the seller's registered domain at
-``store_domain``, a float epoch ``expires_at``, and ``config={"now": ...}``. Nothing reads
-the wall clock.
+The shapes here are the ones the frozen acceptance suite drives ``rank()`` with: the seller's
+registered domain at ``store_domain``, a float epoch ``expires_at``, and
+``config={"now": ...}``. Nothing reads the wall clock.
+
+Hard-constraint evidence is the one shape that CHANGED (ESC-020). It used to be a plain
+``claims[i]["status"]`` string, which is a field the published ``Claim`` does not declare and
+which nothing but the bidder ever wrote — so a store satisfied any hard constraint by
+asserting that it had. :func:`make_claim` therefore mints the verdict through
+:func:`exchange.ranking.attestation.attest_claim`, which seals it with this process's key.
+The fixture is standing in for the exchange here, which is exactly what it is entitled to do:
+it is inside the trust boundary, and a bid arriving over HTTP is not. A test that wants to
+drive the FORGERY writes ``status`` on the claim by hand and asserts it buys nothing — see
+``test_ranking_claim_forgery.py``.
 """
 
 from __future__ import annotations
@@ -20,6 +29,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from exchange.ranking.attestation import attest_claim
 
 T_NOW = 1_700_000_000.0
 T_PAST = 1_600_000_000.0
@@ -37,18 +47,25 @@ TRUST_DIMENSIONS = (
 def make_claim(
     key: str, value: Any, *, source: str = "owner_statement", status: str = "verified"
 ) -> dict[str, Any]:
-    """One supporting fact. `status` is the only evidence R19 reads."""
-    return {
-        "key": key,
-        "value": value,
-        "provenance": {
-            "source": source,
-            "ref": f"ref:{key}",
-            "observed_at": T_PAST,
-            "authority_rank": 1,
+    """One supporting fact, carrying the exchange's sealed verdict on it.
+
+    `status` is the verdict the fixture is asking the exchange to have reached — it is passed
+    to the sealer, never written onto the claim, because a `status` on the claim is the one
+    thing R19 may not read (ESC-020).
+    """
+    return attest_claim(
+        {
+            "key": key,
+            "value": value,
+            "provenance": {
+                "source": source,
+                "ref": f"ref:{key}",
+                "observed_at": T_PAST,
+                "authority_rank": 1,
+            },
         },
-        "status": status,
-    }
+        status=status,
+    )
 
 
 def make_candidate(
