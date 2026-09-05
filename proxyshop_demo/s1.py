@@ -297,6 +297,22 @@ def _deployment_document(
                 for store in stores
             }
         },
+        # The exchange performs intent-cluster assignment (DESIGN.md:34). The clarifier mints
+        # a cluster_id by hashing the query, while a store's envelope authorises NAMED
+        # catalogue clusters — so without this the two namespaces can never meet and every
+        # agent answers `204 cluster_not_pursued`. Which clusters exist is a deployment fact
+        # nobody can infer, so it is stated here in the same {cluster_id, label} spelling the
+        # merchant onboarding flow resolves a merchant's prose against. `cluster-espresso` is
+        # what this run's store envelopes actually pursue.
+        "intent_clusters": [
+            {
+                "cluster_id": "cluster-espresso",
+                "label": "Espresso machines",
+                "category": "coffee",
+                "terms": ["espresso machine", "espresso"],
+                "attributes": {"brew_method": "espresso"},
+            }
+        ],
         "checkout_mode": "redirect",
     }
 
@@ -571,11 +587,30 @@ def _beat_one(say: Narrator, result: JourneyResult, buyer: Any, fixture: Mapping
     if probe_url:
         import httpx
 
+        # Ask the agent the way the EXCHANGE asks it, not the way the clarifier speaks.
+        # The clarifier mints `cluster_id` by hashing the query; a store envelope authorises
+        # NAMED catalogue clusters. The exchange performs that assignment (DESIGN.md:34) —
+        # so probing with the raw hash measures a hop nothing performs and reports a gap the
+        # product does not have. Read back what the exchange actually assigned to the auction
+        # the confirmation just opened, and ask with that.
+        probe_intent = dict(intent)
+        auction_id = ""
+        if confirmed.status_code in (200, 201):
+            auction_id = str(confirmed.json().get("auction_id") or "")
+        if auction_id and result.exchange_url:
+            opened = httpx.get(
+                f"{result.exchange_url}/auctions/{auction_id}", timeout=REQUEST_TIMEOUT_SECONDS
+            )
+            assigned = str((opened.json() or {}).get("cluster_id") or "")
+            if opened.status_code == 200 and assigned:
+                probe_intent["cluster_id"] = assigned
+                say.fact("cluster the exchange assigned", assigned)
+
         probe = httpx.post(
             f"{probe_url}/v1/bid-requests",
             json={
                 "auction_id": "auction-demo-probe",
-                "intent": intent,
+                "intent": probe_intent,
                 "profile": fixture["profile"],
                 "respond_by": FAR_FUTURE,
             },
@@ -588,7 +623,11 @@ def _beat_one(say: Narrator, result: JourneyResult, buyer: Any, fixture: Mapping
         result.agent_probe_status = int(probe.status_code)
         result.agent_probe_reason = decline_reason
 
-    if decline_reason:
+    # Report THIS gap only when the agent actually declined for THIS reason. The exchange now
+    # performs intent-cluster assignment, so a store that declines `no_matching_product` has
+    # pursued the cluster and rejected the product — a different answer, and reporting it as
+    # the namespace gap would name a defect the product no longer has.
+    if decline_reason == "cluster_not_pursued":
         _gap(
             say,
             result,
