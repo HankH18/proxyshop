@@ -5,12 +5,16 @@
  * and already tested, and is reused rather than re-stated:
  *
  *   * `intent.ts`        — `clarifyTurns` and `assertConfirmable`. Its `confirmIntent` is
- *                          NOT used: its body has no `profile` field, and
- *                          `contracts.BidRequest` makes one required. Measured against the
- *                          running stack, confirming without a profile has the exchange
- *                          coerce it to `{}`, every store agent answer 422, and the exchange
- *                          report `fallback_reason: "no_response"` for all of them — a
- *                          silently empty shortlist blamed on the market. `wire.ts`'s
+ *                          NOT used: its body has no `profile` field, and this page states
+ *                          R5's handle itself rather than letting the exchange name the
+ *                          shopper. (This entry used to say that confirming without a profile
+ *                          has the exchange coerce it to `{}`, every store agent answer 422,
+ *                          and the exchange report `fallback_reason: "no_response"` for all of
+ *                          them. Both halves are now false —
+ *                          `exchange.composition.solicitation_profile` mints an
+ *                          `anon-{auction_id}` pseudonym instead of `{}`, and a refusal that
+ *                          does happen is named `store_refused:422`. `wire.ts`'s
+ *                          `BuyerProfile` has the whole story.) `wire.ts`'s
  *                          `confirmWithProfile` is the same request with the field, and it
  *                          reuses that module's `assertConfirmable` rather than restating it.
  *   * `IntentConfirm`    — the clarifying question OR the confirm screen. While a question
