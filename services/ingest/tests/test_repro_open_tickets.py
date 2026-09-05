@@ -205,15 +205,28 @@ def _adapter_constructions(
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-236: no production code constructs a CatalogAdapter — the only non-test "
-        "constructions of SignedFetchAdapter and CatalogMCPAdapter are the "
-        "_satisfies_catalog_adapter type-check helpers, so nothing the ingest app can run "
-        "reads a catalog; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-236 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-236: no production code constructs a CatalogAdapter — the only non-test "
+#         "constructions of SignedFetchAdapter and CatalogMCPAdapter are the "
+#         "_satisfies_catalog_adapter type-check helpers, so nothing the ingest app can run "
+#         "reads a catalog; remove this marker with the fix"))
+#
+# What it encoded: no module `ingest.main.create_app()` imports builds a catalog adapter, so
+# the ingestion pipeline exists as a library and as no running process. Its own reason text
+# says to remove it with the fix, and `strict=True` means leaving it would turn the repair
+# into a red build.
+#
+# Would this test still be wrong if my change were reverted? YES, and it was measured rather
+# than assumed: with `services/ingest/src/scheduler/{catalog,routes}.py` moved out of the
+# tree the test returns to `xfailed`, and with them restored it passes. The cause is
+# `ingest.scheduler.routes`, a module `create_app`'s `*/routes.py` glob mounts, importing
+# `ingest.scheduler.catalog`, which constructs `SignedFetchAdapter` and `CatalogMCPAdapter`
+# in `build_catalog_adapter` and runs one end to end through `fetch_catalog` ->
+# `to_upserts` -> `apply_upserts` behind `POST /refresh/{store_id}`.
+#
+# No assertion below is touched.
 def test_the_running_ingest_app_can_reach_a_catalog_adapter_that_is_actually_built() -> None:
     """A capability the acceptance metric counts as met, that no running process performs.
 
