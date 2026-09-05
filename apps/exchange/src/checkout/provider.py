@@ -737,16 +737,33 @@ class CheckoutProvider:
         #    every fallback bid the exchange had just built for itself, and a Tier-0 store
         #    could be ranked and shortlisted but never bought from.
         #
-        #    An absent URL is no longer that offer's everyday shape. `ranking/candidates.py`
-        #    now completes a FALLBACK entry's offer with a checkout_url built from the
-        #    platform-registered domain it has already looked up, and
-        #    `auction/routes.py::collected_bid_records` builds the bid book out of those same
-        #    projected candidates — so a fallback that reached the shortlist arrives here
-        #    WITH a URL and this comparison does run on it. Absent is still reachable and
-        #    still legal: a direct caller of `checkout()` can hand over an offer that has
-        #    none, and `NoRegisteredDomains` — the fail-closed wired default — holds no
-        #    domain to build one from, so a fallback under it still arrives with nothing here
-        #    to look at.
+        #    `ranking/candidates.py` now completes a FALLBACK entry's offer with a
+        #    checkout_url built from the platform-registered domain it has already looked
+        #    up. A doc sweep (edbc422) concluded from that this comparison had started
+        #    running on a shortlisted fallback, and wrote so here. THAT IS FALSE, and it was
+        #    measured false: an absent URL is still the everyday shape of every bid arriving
+        #    at this port, hosted and fallback alike.
+        #
+        #    The chain breaks one file over. `auction/routes.py` hands
+        #    `collected_bid_records` the value `ranking["candidates"]`, and that is NOT the
+        #    projection above — `ranking/__init__.py` sets `"candidates": rows`, the rank-ROW
+        #    projection, whose keys are bid_id, components, eligible, exclusion_reasons,
+        #    features, price, provenance_labels, rank_score, store_id, trust, trust_summary
+        #    and verified_hard_fit_count. No `offer`, no `store_domain`. So the book records
+        #    `candidate.get("offer") or {}` -> `{}`. Measured over the HTTP door, one hosted
+        #    bid and one silent store, both shortlisted:
+        #
+        #        [{"bid_id": "…:store-a",      "offer": {}, "store_id": "store-a"},
+        #         {"bid_id": "…:store-silent", "offer": {}, "store_id": "store-silent"}]
+        #
+        #    This is PRE-EXISTING and is not R10 damage: the hosted bid's real checkout_url,
+        #    expires_at, variant_ref and quantity are dropped by the same line. Its cost is
+        #    real and is recorded where the fix would go, in `collected_bid_records`.
+        #
+        #    Absent is also reachable for reasons that have nothing to do with that: a direct
+        #    caller of `checkout()` can hand over an offer that has none, and
+        #    `NoRegisteredDomains` — the fail-closed wired default — holds no domain to build
+        #    one from.
         #
         #    Nothing is relaxed by allowing it: with no URL there is no untrusted host in
         #    play at all, the provider builds the permalink from `registered` below, and
