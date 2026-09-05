@@ -72,12 +72,42 @@ def _normalise(path: str) -> str:
     return path.strip().replace("\\", "/").lstrip("./").casefold()
 
 
-def is_shared_grader(path: str) -> bool:
-    """A path no ticket owns because every ticket may be graded by it."""
+def graders_named_by(tickets: list[dict[str, Any]]) -> dict[str, set[str]]:
+    """``{path: {ticket ids whose verify names it}}`` — how SHARED each grader actually is."""
+    named: dict[str, set[str]] = {}
+    for ticket in tickets:
+        verify = str(ticket.get("verify", ""))
+        if verify.startswith("false"):
+            continue
+        for segment in pytest_segments(verify):
+            for operand in selection_operands(segment):
+                named.setdefault(_normalise(operand), set()).add(ticket["id"])
+    return named
+
+
+def is_shared_grader(path: str, named_by: dict[str, set[str]] | None = None) -> bool:
+    """A path no single ticket owns, because it is a gate several tickets are graded by.
+
+    Three tests, all by explicit rule and NEVER by asking whether the file exists — the
+    defect's own worst case satisfies an existence test, so keying on existence reports
+    green exactly when the answer-key inversion completes.
+
+    The third test is the principled one and the other two are conventions that predate it.
+    A grader named by two or more DISTINCT tickets is shared by construction: no one of them
+    can own it, and a lane that fixes its own defect makes only its own selected test go
+    green. That measurement is what separates the real defect from its look-alike here.
+    ``docs/tests/test_runbook.py`` is named by exactly ONE ticket, T-087, and sits inside a
+    different ticket's scope — nobody else is graded by it, so it is T-087's own grader that
+    T-087 may not write. ``proxyshop_support/tests/test_artifact_copyset.py`` is named by
+    SEVEN, which makes it a shared gate of the same kind as the ``test_repro_*.py`` files
+    (themselves named by five to ten tickets apiece) and not an ownership defect at all.
+    """
     normalised = _normalise(path)
     if any(normalised.startswith(prefix) for prefix in _SHARED_GRADER_DIRS):
         return True
-    return fnmatch.fnmatch(Path(normalised).name, _SHARED_GRADER_BASENAME)
+    if fnmatch.fnmatch(Path(normalised).name, _SHARED_GRADER_BASENAME):
+        return True
+    return len((named_by or {}).get(normalised, set())) >= 2
 
 
 def pytest_segments(verify: str) -> list[list[str]]:
@@ -230,12 +260,13 @@ def ownership_violations(
 ) -> list[tuple[str, str, list[str], list[str]]]:
     """Clause A — a ticket's gate must not be graded by a file another ticket owns."""
     owners: list[tuple[str, dict[str, Any]]] = [(t["id"], t) for t in tickets]
+    named_by = graders_named_by(tickets)
     found: list[tuple[str, str, list[str], list[str]]] = []
     for ticket in graded_population(tickets):
         own_scope = ticket.get("scope")
         for segment in pytest_segments(str(ticket["verify"])):
             for operand in selection_operands(segment):
-                if is_shared_grader(operand) or scope_covers(operand, own_scope):
+                if is_shared_grader(operand, named_by) or scope_covers(operand, own_scope):
                     continue
                 holders = [
                     f"{other_id} [{other.get('status') or 'no status'}]"
@@ -388,6 +419,24 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     assert not is_shared_grader("docs/tests/test_runbook.py")
     assert not is_shared_grader("docs/tests/test_runbook_executability.py")
 
+    # The shared-grader COUNT, which is what separates T-087's grader from a gate file that
+    # simply grades many tickets. Both numbers are read off the graph, not hard-coded.
+    named_by = graders_named_by(tickets)
+    copyset = _normalise("proxyshop_support/tests/test_artifact_copyset.py")
+    runbook = _normalise("docs/tests/test_runbook.py")
+    assert len(named_by.get(copyset, set())) >= 5, (
+        f"only {len(named_by.get(copyset, set()))} tickets are graded by the artifact "
+        "copy-set file; it was 7, and if it stops being shared the sweep starts calling "
+        "those tickets ownership defects when they are not"
+    )
+    assert is_shared_grader("proxyshop_support/tests/test_artifact_copyset.py", named_by)
+    assert len(named_by.get(runbook, set())) == 1, (
+        "docs/tests/test_runbook.py is now named by "
+        f"{len(named_by.get(runbook, set()))} tickets; T-087 was its only namer, which is "
+        "exactly what made it T-087's own ungrantable grader rather than a shared gate"
+    )
+    assert not is_shared_grader("docs/tests/test_runbook.py", named_by)
+
     # Clause B's operand test, in both directions.
     assert selection_operands(shlex.split("uv run python -m pytest docs/tests/x.py -q")) == [
         "docs/tests/x.py"
@@ -401,14 +450,14 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-262: not-yet-closed tickets that are graded by a file they cannot write. T-087's "
-        "verify runs `docs/tests/test_runbook.py`, a path its own scope "
-        "(`docs/demo/shopify-onboarding-extension.md`) forbids it to create and that sits "
-        "inside open T-085's `docs/tests/**`, so it would inherit an unearned green from a "
-        "test another lane wrote. Measured at HEAD: eleven, namely T-087, T-228, T-298, "
-        "T-299, T-300, T-301, T-304, T-313 and T-314 by ownership, plus T-130 and T-134 "
-        "whose gate is a whole-suite run that grades nothing they own. Remove this marker "
-        "with the scope amendment"
+        "T-262: not-yet-closed tickets graded by a file they cannot write. T-087's verify "
+        "runs `docs/tests/test_runbook.py`, a path its own scope "
+        "(`docs/demo/shopify-onboarding-extension.md`) forbids it to create, that sits "
+        "inside open T-085's `docs/tests/**`, and that no other ticket is graded by — so "
+        "T-087 cannot write its own grader and would inherit an unearned green from a test "
+        "another lane wrote. Measured at HEAD: four, namely T-087 and T-228 by ownership, "
+        "plus T-130 and T-134 whose gate is a whole-suite run that grades nothing they own. "
+        "Remove this marker with the scope amendment"
     ),
 )
 def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
@@ -448,15 +497,34 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
     as owning what is under it. ``proxyshop_support/tests/test_runbook_shape.py`` is not
     either: closed T-122's scope reaches it through ``proxyshop_support/**``.
 
-    THE REFUSAL OF THE EXISTENCE CLAUSE IS NOT HYPOTHETICAL, and the sweep found the proof
-    once its population was widened past ``status == "open"``. T-298, T-299, T-300 and
-    T-301 all run ``proxyshop_support/tests/test_artifact_copyset.py``, a file none of them
-    owns — and that file EXISTS, is collected, and its syntax tree already names all four
-    ids. Their answer key has already been written by a third party. An invariant keyed on
-    "the path does not exist yet" would report those four as clean precisely because the
-    inversion is complete, which is the whole argument for asking about ownership instead.
-    T-304, T-313 and T-314 name the same file and are worse off still: it does not mention
-    them at all, so their gates select nothing.
+    WHAT SEPARATES THIS DEFECT FROM ITS LOOK-ALIKE, and it took a wrong answer to find.
+    Widening the population past ``status == "open"`` pulled in seven tickets — T-298 to
+    T-301, T-304, T-313, T-314 — whose gates all run
+    ``proxyshop_support/tests/test_artifact_copyset.py``, a file none of them owns. That
+    looked like six more T-087s. It is not, and calling it one would have been the gate
+    asserting something false:
+
+    * a third party writing the grader is the LADDER'S DESIGN, not the defect. Gate author
+      and fixer are meant to be different agents.
+    * the discriminating question is whether a lane can make its own gate green WITHOUT
+      fixing the defect. For those seven it cannot: the gate file is outside every one of
+      their scopes (``apps/merchant/Dockerfile``, ``services/ingest/``, and so on), so a
+      lane can change only its own subject, and the one edit it may make to the gate file —
+      removing a strict-xfail marker — turns a still-failing test into a FAILURE, never a
+      pass.
+    * measured, rather than reasoned by analogy: each of those gates selects exactly one
+      test and that test passes (``-k test_t304`` -> ``1 passed, 9 deselected``). An earlier
+      draft of this docstring claimed they "select nothing"; that was wrong, and it was
+      wrong because the ids appear in those function NAMES in the ``test_t304`` spelling
+      rather than as ``T-304`` string literals, which is a fact about a scan, not about the
+      graph.
+
+    So the rule now asks the shared-ness question directly, and the numbers do the
+    separating: ``docs/tests/test_runbook.py`` is named by exactly ONE ticket's gate and
+    lives in another ticket's scope, while ``test_artifact_copyset.py`` is named by SEVEN
+    and is a shared gate of the same kind as the ``test_repro_*.py`` files. Counting
+    distinct namers is a better allowlist than the basename convention it generalises, and
+    unlike an existence test it cannot be satisfied by the defect completing.
 
     ONE ESCAPE IS OPEN AND IS NAMED HERE RATHER THAN LEFT TO BE DISCOVERED: this asks
     "does someone else own it", not "may I create it". Repointing T-087 at an UNOWNED path
@@ -483,10 +551,7 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
         f"  {ticket_id}: its gate runs `{operand}`, which its own scope {own} does not "
         f"grant, and which is owned by {', '.join(holders)}"
         for ticket_id, operand, own, holders in ownership
-    ] + [
-        f"  {ticket_id}: `{command}` names no path, so it selects by -k and grades nothing it owns"
-        for ticket_id, command in selector
-    ]
+    ] + [f"  {ticket_id}: {command}" for ticket_id, command in selector]
 
     assert not report, (
         f"{len(ownership) + len(selector)} open ticket(s) are graded by a file they cannot "
