@@ -114,7 +114,9 @@ def _run_collection() -> list[str]:
         text=True,
         timeout=240,
     )
-    files = sorted({line.split("::", 1)[0].strip() for line in completed.stdout.splitlines() if "::" in line})
+    files = sorted(
+        {line.split("::", 1)[0].strip() for line in completed.stdout.splitlines() if "::" in line}
+    )
     if not files:
         raise AssertionError(
             "collection returned no test files, so every selection below would be empty and "
@@ -186,7 +188,9 @@ def pytest_selection(verify: str, files: list[str]) -> set[str] | str | None:
             continue
         invokes_pytest = True
         index = 0
-        while index < len(words) and not (words[index] == "pytest" or words[index].endswith("/pytest")):
+        while index < len(words) and not (
+            words[index] == "pytest" or words[index].endswith("/pytest")
+        ):
             index += 1
         index += 1
         operands: list[str] = []
@@ -564,7 +568,11 @@ def _measure(shape: dict[str, Any], workdir: Path, scratch: Path) -> dict[str, i
     holder = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
         [sys.executable, str(holder_script), str(lock), str(sentinel), "20"],
         cwd=str(REPO_ROOT),
-        env={**os.environ, "PROXYSHOP_WORKER": str(shape["worker"]), "PROXYSHOP_NEO4J_LOCK_LOG": "0"},
+        env={
+            **os.environ,
+            "PROXYSHOP_WORKER": str(shape["worker"]),
+            "PROXYSHOP_NEO4J_LOCK_LOG": "0",
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -639,7 +647,9 @@ def test_t210_the_lock_attribution_sweep_is_armed() -> None:
                 time.sleep(0.02)
             assert sentinel.exists(), "the holder subprocess never took the scratch flock"
             with pytest.raises(neo4j_lock.Neo4jLockTimeout):
-                with neo4j_lock.neo4j_flock(timeout=0.3, poll=0.05, path=lock, report=lambda _m: None):
+                with neo4j_lock.neo4j_flock(
+                    timeout=0.3, poll=0.05, path=lock, report=lambda _m: None
+                ):
                     pass
         finally:
             holder.terminate()
@@ -771,4 +781,3 @@ def test_t210_lock_contention_and_a_product_defect_do_not_share_an_exit_status()
         "a machine condition that reports success is invisible in the metrics rather than "
         "merely misattributed"
     )
-

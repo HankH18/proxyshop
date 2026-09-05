@@ -166,7 +166,9 @@ def graded_population(tickets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def ownership_violations(tickets: list[dict[str, Any]]) -> list[tuple[str, str, list[str], list[str]]]:
+def ownership_violations(
+    tickets: list[dict[str, Any]],
+) -> list[tuple[str, str, list[str], list[str]]]:
     """Clause A — a ticket's gate must not be graded by a file another ticket owns."""
     owners: list[tuple[str, dict[str, Any]]] = [(t["id"], t) for t in tickets]
     found: list[tuple[str, str, list[str], list[str]]] = []
@@ -222,7 +224,12 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     population = graded_population(tickets)
     assert len(population) >= 40, f"only {len(population)} open tickets carry a real gate"
 
-    operands = [op for t in population for seg in pytest_segments(str(t["verify"])) for op in selection_operands(seg)]
+    operands = [
+        op
+        for t in population
+        for seg in pytest_segments(str(t["verify"]))
+        for op in selection_operands(seg)
+    ]
     # Measured at HEAD across the open population: 44 operand occurrences, 19 distinct. The
     # distinct count is the one worth pinning low — a graph that started spelling gates as
     # `-k` selections would drop it, and clause B is what turns that into a failure rather
@@ -230,7 +237,9 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     assert len(operands) >= 30, f"the sweep extracted {len(operands)} path operands to check"
     assert len(set(operands)) >= 15, f"only {len(set(operands))} distinct operands; 19 at HEAD"
 
-    owning = [t for t in tickets if any(isinstance(e, str) and "/" in e for e in t.get("scope") or ())]
+    owning = [
+        t for t in tickets if any(isinstance(e, str) and "/" in e for e in t.get("scope") or ())
+    ]
     assert len(owning) >= 100, (
         f"only {len(owning)} tickets carry a path-shaped scope entry, so almost nothing owns "
         "anything and the ownership question below can never be answered yes"
@@ -244,7 +253,9 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     )
     assert not scope_covers("docs/tests/test_runbook.py", ["**"]), "`**` must confer no ownership"
     assert not scope_covers("docs/tests/test_runbook.py", ["ORCHESTRATION — a prose scope"])
-    assert scope_covers("tickets.json", ["tickets.json:T-087"]), "a `path:SUFFIX` entry grants its prefix"
+    assert scope_covers("tickets.json", ["tickets.json:T-087"]), (
+        "a `path:SUFFIX` entry grants its prefix"
+    )
 
     # The allowlists, in both directions.
     assert is_shared_grader(".swarm-loop/acceptance/test_e8_proofs.py")
@@ -253,7 +264,9 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     assert not is_shared_grader("docs/tests/test_runbook_executability.py")
 
     # Clause B's operand test, in both directions.
-    assert selection_operands(shlex.split("uv run python -m pytest docs/tests/x.py -q")) == ["docs/tests/x.py"]
+    assert selection_operands(shlex.split("uv run python -m pytest docs/tests/x.py -q")) == [
+        "docs/tests/x.py"
+    ]
     assert selection_operands(shlex.split("uv run python -m pytest -k runbook -q")) == [], (
         "a `-k`-only command now reports an operand, so clause B would stop firing on the "
         "spelling escape it exists to catch"
@@ -324,7 +337,10 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
         f"  {ticket_id}: its gate runs `{operand}`, which its own scope {own} does not "
         f"grant, and which is owned by {', '.join(holders)}"
         for ticket_id, operand, own, holders in ownership
-    ] + [f"  {ticket_id}: `{command}` names no path, so it selects by -k and grades nothing it owns" for ticket_id, command in selector]
+    ] + [
+        f"  {ticket_id}: `{command}` names no path, so it selects by -k and grades nothing it owns"
+        for ticket_id, command in selector
+    ]
 
     assert not report, (
         f"{len(ownership) + len(selector)} open ticket(s) are graded by a file they cannot "
