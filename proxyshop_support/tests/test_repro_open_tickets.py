@@ -629,19 +629,30 @@ def test_t160_the_gate_vacuity_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-160: closed tickets whose recorded `verify` cannot fail for their own reason — "
-        "it names no selector, or selects no test that grades the ticket, or runs the whole "
-        "suite so that no failure is attributable to it. Nine when this gate was written "
-        "(T-000, T-010, T-111, T-112, T-118, T-122, T-123, T-129, T-133); re-measured after "
-        "the orchestrator's repointing amendment, ONE remains — T-133, whose gate is "
-        "`verify.sh check` while `apps/buyer/svc/tests/test_profile_identity_leaks.py` "
-        "grades it. Repaired by repointing its verify at one of the tests named beside it "
-        "in the failure output. Remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED because the defect it tracked is FIXED, which is what its own final
+# clause instructed ("Remove this marker with the fix"). It read, verbatim:
+#
+#   "T-160: closed tickets whose recorded `verify` cannot fail for their own reason —
+#    it names no selector, or selects no test that grades the ticket, or runs the whole
+#    suite so that no failure is attributable to it. Nine when this gate was written
+#    (T-000, T-010, T-111, T-112, T-118, T-122, T-123, T-129, T-133); re-measured after
+#    the orchestrator's repointing amendment, ONE remains — T-133 ..."
+#
+# What it encodes: a ticket closed on a gate must have been closable on that gate.
+# That requirement is UNCHANGED and this test still enforces it — only the expectation
+# of failure is removed, and no assertion below is touched.
+#
+# The discriminating question, answered: would this test still be wrong if the change
+# were reverted? NO — revert the T-133 repoint and it fails again, correctly, and the
+# marker would belong back. The marker is not wrong in principle; it is now STALE,
+# because the last of its nine offenders was repaired. Leaving it is not the safe
+# option: xfail(strict=True) turns a now-passing test into XPASS(strict) -> FAILED,
+# which reds `make verify` and takes the frozen build_succeeds metric from 1 to 0.
+#
+# Fixed by freeze --amend 33 under the ESC-028 verify-field class: T-133's gate moved
+# off the whole-suite `verify.sh check` and onto its own grader,
+# apps/buyer/svc/tests/test_profile_identity_leaks.py (633 lines, names T-133 five
+# times, inside T-133's own declared scope, 21 tests selected and passing at HEAD).
 def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
     """A ticket that was closed on a gate must have been closable on that gate.
 

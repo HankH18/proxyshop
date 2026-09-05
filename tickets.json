@@ -2452,7 +2452,7 @@
         "2. app.buyer_accounts is written by the running service, not only by tests",
         "3. No exception message carries a raw identity value into a log or traceback"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} ./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} uv run python -m pytest apps/buyer/svc/tests/test_profile_identity_leaks.py -q",
       "refs": [
         "T-070 lane adversarial pass, 2026-09-02"
       ],
