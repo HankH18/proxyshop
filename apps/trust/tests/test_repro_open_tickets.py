@@ -1389,17 +1389,20 @@ def test_t172_an_undeclared_docker_test_is_widened_to_the_whole_stack(tmp_path: 
     records = _t172_collect_docker_corpus(tmp_path)
     assert records, "no docker items collected; see the armed-sweep guard above"
 
-    undeclared = [
-        record
-        for record in records
-        if not _t172_declares_a_service(record) and record["refusal"] is None
-    ]
+    # A refused item counts as undeclared. It used to be excluded (`refusal is None`), which
+    # measured as a real hole: making the fallback raise then EMPTIES this list with zero
+    # annotations, and the only thing still forcing them was the unrelated `returncode == 0`
+    # check above — which holds only because conftest happens to re-raise the ValueError as a
+    # UsageError. A conftest that logged-and-widened instead would have left this green with
+    # all 8 offenders still bare.
+    undeclared = [record for record in records if not _t172_declares_a_service(record)]
     assert undeclared == [], (
         f"{len(undeclared)} of {len(records)} `-m docker` items declare no service — no "
-        f"marker argument and no fixture in FIXTURE_SERVICES — so services_for falls through "
-        f"to `return reachability.SERVICES` and every one of them is skipped at exit 0 by a "
-        f"single-store outage it does not depend on: "
-        f"{[record['nodeid'] for record in undeclared]}"
+        f"marker argument and no fixture in FIXTURE_SERVICES — so nothing but the fallback "
+        f"decides what they need, and a single-store outage they do not depend on skips them "
+        f"at exit 0 (or, once the fallback is loud, refuses them at collection). Every one has "
+        f"to say what it needs, or drop the marker: "
+        f"{[(record['nodeid'], record['refusal']) for record in undeclared]}"
     )
 
     everything = [tuple(reachability.SERVICES)]
@@ -2575,18 +2578,24 @@ def _t257_declaring_modules(ticket_id: str) -> dict[str, int]:
     already collects — a change that reads as a legitimate cross-reference and that a reviewer
     would wave through. ``apps/trust/tests/test_schema_grants.py`` sits one word away from
     qualifying that way: five of its collected tests already drive
-    ``PROXYSHOP_ROLE_PASSWORD`` through a fresh-volume container. Matching only the module
-    docstring means the cheapest remaining evasion is to rewrite a 56-test module's declared
-    subject line, which is a visible claim about the whole file rather than a parenthetical.
+    ``PROXYSHOP_ROLE_PASSWORD`` through a fresh-volume container.
 
-    KNOWN RESIDUAL, recorded rather than papered over: that rewrite would still work. Measured
-    alternatives that do NOT discriminate, and why they were rejected — an anchor
-    co-occurrence check over each test's reachable source finds 5 graders inside
+    A docstring rule alone was still not enough, and a control lane measured it: prepending
+    ``T-112: `` to ``test_schema_grants.py``'s own module docstring — eight characters — turned
+    this gate green with 0 of the 14 real graders collected, and defeated the armed guard too
+    (its ``>= 10`` floor then read 54 instead of 14). So a declaration is only honoured from a
+    module inside the ticket's OWN declared ``scope``: T-112 scopes
+    ``proxyshop_support/**``, which contains its grader module and does not contain
+    ``apps/trust/tests/``. The discriminator comes from the ticket, not from a path typed here.
+
+    Measured alternatives that do NOT discriminate, and why they were rejected — an anchor
+    co-occurrence check over each test's reachable source finds 5 false graders inside
     ``test_schema_grants.py`` (its module-level ``COMPOSE_FILE`` plus the role-password
     environment it passes to ``_fresh_volume_postgres``), and narrowing that to anchors inside
-    an ``assert`` expression finds 0 in BOTH modules, so neither separates the two.
+    an ``assert`` expression finds 0 in BOTH modules.
     """
     pattern = _t257_ticket_pattern(ticket_id)
+    scope = _t257_ticket_scope(ticket_id)
     declaring: dict[str, int] = {}
     for root in _t257_testpath_roots():
         base = REPO_ROOT / root
@@ -2601,13 +2610,42 @@ def _t257_declaring_modules(ticket_id: str) -> dict[str, int]:
                 continue
             if not pattern.search(ast.get_docstring(tree) or ""):
                 continue
-            declaring[str(path.relative_to(REPO_ROOT))] = sum(
+            relative = str(path.relative_to(REPO_ROOT))
+            if not _t257_in_scope(relative, scope):
+                continue
+            declaring[relative] = sum(
                 1
                 for node in ast.walk(tree)
                 if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
                 and node.name.startswith("test_")
             )
     return declaring
+
+
+def _t257_ticket_scope(ticket_id: str) -> list[str]:
+    """A ticket's own declared ``scope`` globs, read out of tickets.json."""
+    tickets = json.loads((REPO_ROOT / "tickets.json").read_text(encoding="utf-8"))["tickets"]
+    ticket = next((entry for entry in tickets if entry["id"] == ticket_id), None)
+    assert ticket is not None, f"{ticket_id} is not in tickets.json"
+    return [str(entry) for entry in ticket.get("scope") or []]
+
+
+def _t257_in_scope(relative: str, scope: list[str]) -> bool:
+    """Whether a repo-relative path falls inside any of a ticket's declared scope globs.
+
+    A scope entry is either a glob (``proxyshop_support/**``) or a bare path
+    (``docker-compose.yml``); a directory-shaped entry covers everything beneath it. An empty
+    scope admits everything, because a ticket that declares no scope cannot exclude anyone.
+    """
+    import fnmatch
+
+    if not scope:
+        return True
+    for entry in scope:
+        stem = entry.rstrip("*").rstrip("/")
+        if fnmatch.fnmatch(relative, entry) or (stem and relative.startswith(f"{stem}/")):
+            return True
+    return False
 
 
 def _t257_declares(source: str, ticket_id: str) -> bool:
@@ -2675,7 +2713,7 @@ def test_t257_the_grader_discovery_is_armed_and_ignores_prose() -> None:
     strict=True,
     reason=(
         "T-257: T-112's recorded verify is `pytest apps/trust/tests/test_schema_grants.py -q`, "
-        "which collects 56 tests from a module whose docstring declares T-011 and zero from "
+        "which collects every test in a module whose docstring declares T-011, and none from "
         "proxyshop_support/tests/test_role_password_end_to_end.py, whose docstring declares "
         "T-112 and holds its 14 graders — so the gate would stay green with every T-112 "
         "behaviour deleted; remove this marker with the fix"
@@ -2698,8 +2736,17 @@ def test_t257_the_recorded_gate_for_t112_collects_at_least_one_of_its_own_grader
     verify = next(ticket for ticket in tickets if ticket["id"] == "T-112")["verify"]
     args = _t257_pytest_args(verify)
 
-    roots = tuple(f"{root}/" for root in _t257_testpath_roots())
-    named_paths = [token for token in args if token.startswith(roots)]
+    # A bare root — `pytest proxyshop_support -q`, the exact command the grader module's own
+    # docstring says the lane gate runs and the most thorough available fix — used to fail this
+    # assertion because only `<root>/...` was accepted. Refusing the most complete form of the
+    # fix is the gate being wrong, not the fix.
+    roots = _t257_testpath_roots()
+    named_paths = [
+        token
+        for token in args
+        if not token.startswith("-")
+        and any(token == root or token.startswith(f"{root}/") for root in roots)
+    ]
     assert named_paths, (
         f"T-112's verify names no path under any testpaths root ({args}), so it is either the "
         f"whole suite wearing a ticket's name or it points outside the project. A ticket gate "
@@ -2712,6 +2759,18 @@ def test_t257_the_recorded_gate_for_t112_collects_at_least_one_of_its_own_grader
     declaring = _t257_declaring_modules("T-112")
     collected_files = {node_id.split("::")[0] for node_id in node_ids}
     seen = sorted(collected_files & set(declaring))
+    thinned = [
+        f"{module}: {len([n for n in node_ids if n.split('::')[0] == module])} of "
+        f"{declaring[module]} graders collected"
+        for module in seen
+        if len([n for n in node_ids if n.split("::")[0] == module]) < declaring[module]
+    ]
+    assert not thinned, (
+        f"T-112's gate reaches its grader module but collects only part of it: {thinned}. "
+        f"Parametrisation only ever inflates the node count above the function count, so a "
+        f"shortfall means an `-k`/`--deselect` narrowed the verify down to a token grader — "
+        f"which satisfies 'the gate can see them' while still not running them"
+    )
     assert seen, (
         f"T-112's recorded gate collects {len(node_ids)} tests from {sorted(collected_files)} "
         f"and NONE of them come from a module that declares itself a T-112 grader. The graders "
