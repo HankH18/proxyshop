@@ -17,7 +17,11 @@ from typing import Any
 
 import pytest
 from merchant_svc.envelope.digest import approval_digest
-from merchant_svc.envelope.model import ACTIVE, KILLED, SHADOW, ApprovalRejected
+from merchant_svc.envelope.model import ACTIVE, KILLED, SHADOW, ApprovalRejected, Envelope
+from merchant_svc.envelope.repository import (
+    InMemoryEnvelopeRepository,
+    PostgresEnvelopeRepository,
+)
 from merchant_svc.envelope.store import EnvelopeVersions
 from merchant_svc.envelope.versions import activate_envelope, edit_envelope
 
@@ -157,3 +161,141 @@ def test_a_kill_through_one_spelling_is_visible_through_the_other() -> None:
     # spelling has to catch what the other raises, or a promised 409 becomes a 500.
     with pytest.raises(long_.UnknownStore):
         versions.current("s-never-seen")
+
+
+# ======================================================================================
+# T-239 — the history crosses the persistence boundary with its invariants intact
+# ======================================================================================
+class _FakeCursor:
+    """Enough of a DB-API cursor to capture what the Postgres repository actually sends."""
+
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
+        self._connection.statements.append((statement, parameters))
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._connection.rows)
+
+
+class _FakeConnection:
+    """A connection that records statements and replays rows. NOT a database.
+
+    Stated plainly because it matters: this proves the SQL this repository *sends* and the
+    documents it rebuilds from rows, not that Postgres accepts either. The compose stack is
+    routinely down in this repo and a skipping test is not a gate, so the live-database
+    coverage of ``PostgresEnvelopeRepository`` is honestly zero and is reported as such.
+    """
+
+    def __init__(self, rows: list[tuple[Any, ...]] | None = None) -> None:
+        self.rows = rows or []
+        self.statements: list[tuple[str, tuple[Any, ...]]] = []
+        self.commits = 0
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def test_a_fresh_store_over_the_same_repository_sees_the_whole_history() -> None:
+    """The seam's whole purpose: a restart is a new object over the same backing store."""
+    backing = InMemoryEnvelopeRepository()
+
+    first = EnvelopeVersions(backing)
+    first.put("s-durable", _envelope("s-durable"))
+    first.put("s-durable", _envelope("s-durable", max_discount_pct=7.5))
+
+    # The "restart": nothing is shared but the repository.
+    after_restart = EnvelopeVersions(backing)
+    assert after_restart.stores() == ("s-durable",)
+    assert [version.version for version in after_restart.history("s-durable")] == [1, 2]
+    assert after_restart.current("s-durable").max_discount_pct == 7.5
+
+
+def test_the_default_store_shares_nothing_which_is_the_old_behaviour_kept() -> None:
+    """Control. Two bare stores must still be independent, or every existing test is a lie."""
+    first = EnvelopeVersions()
+    first.put("s-default", _envelope("s-default"))
+    assert EnvelopeVersions().stores() == ()
+
+
+def test_a_backing_store_that_hands_back_a_backwards_history_is_refused() -> None:
+    """The version rule is re-checked on the way IN, not trusted for coming from a table."""
+    versions = EnvelopeVersions()
+    head = versions.record(_envelope("s-backwards", version=4))
+    older = versions.record(_envelope("s-backwards", version=4)).with_activation(SHADOW, None)
+    tampered = InMemoryEnvelopeRepository({"s-backwards": [head, _rewind(older, 3)]})
+    with pytest.raises(Exception, match="goes backwards"):
+        EnvelopeVersions(tampered)
+
+
+def test_a_stored_active_version_with_no_surviving_approval_comes_back_in_shadow() -> None:
+    """Fail-safe, in the direction the ticket names: a restart may stop a store, never start one."""
+    orphaned = Envelope.from_obj(_envelope("s-orphan", activation=ACTIVE), approval=None)
+    restored = EnvelopeVersions(InMemoryEnvelopeRepository({"s-orphan": [orphaned]}))
+    assert restored.current("s-orphan").activation == SHADOW
+    assert restored.is_live("s-orphan") is False
+
+
+def test_a_failed_durable_write_does_not_leave_the_process_ahead_of_the_store() -> None:
+    """persist() first, append second. A store that thinks it filed v4 over a table at v3
+    is the stale writer the version rule exists to refuse."""
+
+    class _Refusing(InMemoryEnvelopeRepository):
+        def persist(self, envelope: Envelope) -> None:
+            raise RuntimeError("the envelope table is unreachable")
+
+    versions = EnvelopeVersions(_Refusing())
+    with pytest.raises(RuntimeError, match="unreachable"):
+        versions.record(_envelope("s-write-fails"))
+    assert versions.stores() == (), "a failed durable write still landed in memory"
+
+
+def test_the_postgres_repository_writes_one_row_per_version_to_sealed_envelopes() -> None:
+    """The SQL is asserted, not assumed — including that it is an INSERT and not an UPSERT."""
+    connection = _FakeConnection()
+    repository = PostgresEnvelopeRepository(connection)
+    versions = EnvelopeVersions(repository)
+    versions.put("s-pg", _envelope("s-pg", max_discount_pct=12.5))
+
+    assert len(connection.statements) == 2, connection.statements
+    select_sql, _ = connection.statements[0]
+    insert_sql, parameters = connection.statements[1]
+    assert select_sql.startswith("select ") and "sealed.envelopes" in select_sql
+    assert insert_sql.startswith("insert into sealed.envelopes ")
+    assert "on conflict" not in insert_sql.lower(), (
+        "an upsert would answer a racing writer with 'your version vanished'"
+    )
+    assert parameters[:5] == ("s-pg", 1, SHADOW, 12.5, 100.0)
+    assert connection.commits == 1
+
+
+def test_the_postgres_repository_rebuilds_a_history_from_rows() -> None:
+    """Rows in, envelopes out — including a jsonb column the driver handed back as text."""
+    rows = [
+        ("s-rows", 1, SHADOW, 10.0, 100.0, "[]", "[]", "[]"),
+        ("s-rows", 2, ACTIVE, 5.0, 50.0, [], ["shoes"], []),
+    ]
+    versions = EnvelopeVersions(PostgresEnvelopeRepository(_FakeConnection(rows)))
+    assert [version.version for version in versions.history("s-rows")] == [1, 2]
+    head = versions.current("s-rows")
+    assert head.pursue_clusters == ("shoes",)
+    # sealed.envelopes has no approval column, so v2's stored `active` cannot be honoured.
+    assert head.activation == SHADOW
+    assert versions.is_live("s-rows") is False
+
+
+def _rewind(envelope: Envelope, version: int) -> Envelope:
+    """A version-renumbered copy, built for the tamper case only."""
+    document = envelope.to_dict()
+    document["version"] = version
+    return Envelope.from_obj(document, approval=None)

@@ -1,15 +1,25 @@
 """An append-only history of a store's envelope versions.
 
 DESIGN puts the real thing in ``sealed.envelopes`` (versioned, and with **no grant for the
-exchange role** — S7). This is the process-local stand-in the merchant service's own routes
-read and write, in the same spirit as ``merchant_svc.collector.PIXEL_INBOX``: a real
-structure with the real invariants, so the rules are written and tested here rather than
-discovered later inside a migration.
+exchange role** — S7), and :mod:`merchant_svc.envelope.repository` is the seam that reaches
+it. This module is where the *rules* live, over whatever backing store it was handed: the
+default is in-memory, so a merchant service booted without a database behaves exactly as it
+always has, and the forgetting is now a choice of repository rather than a property of the
+class (T-239).
 
 The invariant that earns the module: **a version number never goes backwards.** Every state
 the envelope has ever been in is appended, nothing is overwritten, and a record whose version
 is lower than the head's is refused. An envelope store that let a stale writer put v3 back
 after v4 landed would silently reinstate limits the merchant had already replaced.
+
+Two rules and one boundary, and the boundary is the reason both rules are stated here rather
+than in the repository:
+
+* **a version never goes backwards** — checked on every ``record`` AND on every load, so a
+  table that somehow holds v4 before v3 is refused rather than trusted for having come from
+  a database;
+* **live means approved** — an ``active`` version carries the approval artifact that
+  authorized it (R6, T-248), on the way in and on the way back.
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ from typing import Any
 
 from .digest import approval_covers, approval_digest
 from .model import ACTIVE, SHADOW, ApprovalRejected, Envelope, EnvelopeError
+from .repository import EnvelopeRepository, InMemoryEnvelopeRepository, restorable
 from .versions import activate_envelope, edit_envelope, kill_envelope
 
 
@@ -82,11 +93,47 @@ def _refuse_unapproved_activation(candidate: Envelope) -> None:
 class EnvelopeVersions:
     """Every version of every store's envelope, newest last, nothing ever rewritten."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository: EnvelopeRepository | None = None) -> None:
+        """Open the history, loading whatever the backing store already holds.
+
+        Args:
+            repository: where versions outlive this process. ``None`` — the default, and what
+                the module-level :data:`ENVELOPES` gets — is an
+                :class:`~merchant_svc.envelope.repository.InMemoryEnvelopeRepository`, so a
+                merchant service booted without a database behaves exactly as it always has.
+
+        The load goes through :meth:`_restore` rather than straight into ``_history``, so the
+        three invariants are re-checked on the way in: a table that somehow holds v4 before v3
+        for one store, or a version filed ``active`` whose approval artifact did not survive
+        the boundary, is refused or downgraded here rather than trusted because it came from
+        a database (T-239, T-248).
+        """
+        self._repository: EnvelopeRepository = repository or InMemoryEnvelopeRepository()
         self._history: dict[str, list[Envelope]] = {}
         # `record` is a read-modify-write over `_history`, and FastAPI runs synchronous route
         # handlers in the anyio threadpool, so two writers really are concurrent.
         self._lock = threading.Lock()
+        self._restore(self._repository.load())
+
+    def _restore(self, loaded: Mapping[str, Any]) -> None:
+        """Seed the in-memory history from the backing store, re-checking every invariant."""
+        for store_id, versions in loaded.items():
+            for stored in versions:
+                candidate = restorable(Envelope.from_obj(stored))
+                _refuse_unapproved_activation(candidate)
+                history = self._history.setdefault(candidate.store_id, [])
+                if history and candidate.version < history[-1].version:
+                    raise VersionWentBackwards(
+                        f"the backing store returned store {store_id!r} envelope "
+                        f"v{candidate.version} after v{history[-1].version}; a history that "
+                        "goes backwards on disk is not a history"
+                    )
+                history.append(candidate)
+
+    @property
+    def repository(self) -> EnvelopeRepository:
+        """The backing store this history persists to and was loaded from."""
+        return self._repository
 
     def record(self, envelope: Any) -> Envelope:
         """Append one envelope state to its store's history and return what was stored.
@@ -106,13 +153,21 @@ class EnvelopeVersions:
         candidate = Envelope.from_obj(envelope)
         _refuse_unapproved_activation(candidate)
         with self._lock:
-            history = self._history.setdefault(candidate.store_id, [])
+            # `get`, not `setdefault`: this store may still be refused below, and a
+            # `setdefault` would have already created an empty history for it — enough to make
+            # `stores()` report a store whose only version never landed.
+            history = self._history.get(candidate.store_id)
             if history and candidate.version < history[-1].version:
                 raise VersionWentBackwards(
                     f"store {candidate.store_id!r} is on envelope v{history[-1].version}; "
                     f"v{candidate.version} is older and would reinstate replaced limits"
                 )
-            history.append(candidate)
+            # Durable first, in-memory second, both inside the lock. A failed write leaves
+            # this process's history unchanged rather than one version ahead of the backing
+            # store — believing you filed v4 while the table stops at v3 is exactly the stale
+            # writer the version rule exists to refuse.
+            self._repository.persist(candidate)
+            self._history.setdefault(candidate.store_id, []).append(candidate)
         return candidate
 
     def current(self, store_id: str) -> Envelope:
@@ -192,6 +247,13 @@ class EnvelopeVersions:
         return self.record(kill_envelope(self.current(store_id)))
 
 
-#: The service-wide history. Process-local, exactly like the pixel inbox: a restart forgets
-#: it, and losing it can only *stop* a store bidding, never start one.
+#: The service-wide history. Backed by an
+#: :class:`~merchant_svc.envelope.repository.InMemoryEnvelopeRepository` because the merchant
+#: service is deployed with no ``PROXYSHOP_PG_DSN_*`` at all (``apps/merchant/compose.yaml``
+#: says so, and deliberately), so this default is what a booted service really gets: a restart
+#: still forgets it, and losing it can only *stop* a store bidding, never start one. What has
+#: changed is that the forgetting is now a **choice of repository** rather than a property of
+#: the class — hand ``EnvelopeVersions`` a
+#: :class:`~merchant_svc.envelope.repository.PostgresEnvelopeRepository` over a connection
+#: authorized for ``sealed.*`` and the same three invariants hold across the boundary.
 ENVELOPES = EnvelopeVersions()

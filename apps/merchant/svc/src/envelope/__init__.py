@@ -35,6 +35,12 @@ from .model import (
     EnvelopeInvalid,
     as_document,
 )
+from .repository import (
+    ENVELOPES_TABLE,
+    EnvelopeRepository,
+    InMemoryEnvelopeRepository,
+    PostgresEnvelopeRepository,
+)
 from .store import (
     ENVELOPES,
     EnvelopeVersions,
@@ -49,6 +55,7 @@ __all__ = [
     "DIGEST_ALGORITHM",
     "EDITABLE_FIELDS",
     "ENVELOPES",
+    "ENVELOPES_TABLE",
     "ENVELOPE_FIELDS",
     "FIRST_VERSION",
     "KEEP",
@@ -61,8 +68,11 @@ __all__ = [
     "EnvelopeEditRefused",
     "EnvelopeError",
     "EnvelopeInvalid",
+    "EnvelopeRepository",
     "EnvelopeVersions",
     "FrozenDict",
+    "InMemoryEnvelopeRepository",
+    "PostgresEnvelopeRepository",
     "StoreMismatch",
     "UnknownStore",
     "VersionWentBackwards",

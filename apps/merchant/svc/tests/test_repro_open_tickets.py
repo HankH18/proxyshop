@@ -376,17 +376,24 @@ def test_t246_some_production_code_reads_the_envelope_activation_decision() -> N
 # ======================================================================================
 # T-239 — the envelope version history is process-local and dies with the process
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-239: ENVELOPES = EnvelopeVersions() at envelope/store.py:149 keeps the whole "
-        "append-only history, the version-never-backwards rule and activate-the-head in "
-        "memory; the class takes no backing store, exposes no load/persist member, imports no "
-        "database driver, and db/migrations/0003_sealed_vault_app_tables.sql:41's "
-        "sealed.envelopes table — where DESIGN puts the real history — has no production "
-        "reader or writer anywhere in the repo; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-239 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-239: ENVELOPES = EnvelopeVersions() at envelope/store.py:149 keeps the whole "
+#       "append-only history, the version-never-backwards rule and activate-the-head in "
+#       "memory; the class takes no backing store, exposes no load/persist member, imports no "
+#       "database driver, and db/migrations/0003_sealed_vault_app_tables.sql:41's "
+#       "sealed.envelopes table — where DESIGN puts the real history — has no production "
+#       "reader or writer anywhere in the repo; remove this marker with the fix"))
+#
+# What it encodes: while the history can only live in one process's memory this test must
+# fail, and strict=True makes it fail loudly once it starts passing, so the marker cannot
+# outlive the bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with envelope/repository.py moved aside and store.py restored from the T-248 commit, the
+# test reports `1 xfailed`; with the seam back it reports `1 passed`. My change is the cause.
+# The assertion body is untouched — the diff removes the decorator and nothing else.
 def test_t239_the_envelope_version_store_has_a_durability_seam() -> None:
     """The three invariants have to be able to cross the persistence boundary.
 
