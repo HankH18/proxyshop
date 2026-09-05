@@ -185,6 +185,36 @@ if [ "$STEP" = all ] || [ "$STEP" = pytest ]; then run_pytest -q -m "not needs_m
 # on it, and one that waits past the lock's budget fails with Neo4jLockTimeout for a machine
 # reason. That is tracked separately; the fix belongs in the fixture's scope, not here.
 if [ "$STEP" = check ]; then run_pytest -q -m "not needs_model and not slow"; fi
-if [ "$STEP" = all ] || [ "$STEP" = vitest ]; then npx --no-install vitest run --passWithNoTests; fi
+run_vitest() {
+  # The TypeScript half of `build_succeeds`, held to the same standard as run_pytest above.
+  # It used to pass `--passWithNoTests`, which ASKS the runner to report success on an empty
+  # collection: measured, `vitest run --passWithNoTests 'no/such/pattern/**'` exits 0, so a
+  # glob change, a config edit or a moved directory could take this half of a scored metric
+  # from 864 tests to nothing without moving the number. The flag earned its place when this
+  # repo had no TypeScript tests at all; that stopped being true long ago.
+  local log rc total
+  log="$(mktemp)"
+  set +e
+  npx --no-install vitest run 2>&1 | tee "$log"
+  rc=${PIPESTATUS[0]}
+  # Read the count BEFORE restoring `set -e`: on an empty collection these greps match
+  # nothing and exit nonzero, which under `set -e` would kill this function with vitest's
+  # own status before the FATAL below could fire. That is not hypothetical — it is what the
+  # first draft of this function did, and the empty-collection control is what caught it.
+  total="$(grep -a 'Tests ' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)"
+  set -e
+  # Vitest exits 1 on an empty collection now that --passWithNoTests is gone, so rc alone
+  # would report "some test failed" for a suite that never ran. Say which it was.
+  if [ "$rc" -ne 0 ] && [ -z "$total" ]; then
+    rm -f "$log"
+    echo "FATAL: vitest collected 0 tests." >&2
+    echo "       An empty suite is not a passing suite. If the TypeScript tests genuinely" >&2
+    echo "       moved, point the config at them; if they were deleted, that is the finding." >&2
+    return 2
+  fi
+  rm -f "$log"
+  return "$rc"
+}
+if [ "$STEP" = all ] || [ "$STEP" = vitest ]; then run_vitest; fi
 if [ "$STEP" = all ] || [ "$STEP" = check ]; then python scripts/check_verify_contracts.py; fi
 echo "OK: $STEP"
