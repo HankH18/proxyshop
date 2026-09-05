@@ -184,9 +184,20 @@ __all__ = [
 #:
 #: The auction's OWN TTL rather than a number invented here. DESIGN pins ``auction:{id}`` at
 #: fifteen minutes (:data:`~apps.exchange.src.auction.state.AUCTION_TTL_SECONDS`) and
-#: ``ranking.serving.ShortlistStore`` forgets on the same clock, so a fallback that outlived it
-#: would be an offer nobody could look up any more, and one that expired sooner would be an
-#: offer the shortlist was still advertising after it died.
+#: ``ranking.serving.ShortlistStore`` uses the same duration, so a fallback lives about as long
+#: as the shortlist that advertises it and the record that explains it.
+#:
+#: **About**, not exactly, and the first draft of this comment said "forgets on the same clock",
+#: which is measurably false in BOTH directions.  The two are anchored at different instants: an
+#: offer expires at ``deadline + TTL`` while the shortlist expires at ``closed_at + TTL``, and
+#: ``closed_at`` is a second clock reading taken after the fan-out returns.  A fan-out that
+#: finishes early leaves ``closed_at < deadline`` and the offer outlives the shortlist;  one that
+#: overruns its window leaves ``closed_at > deadline`` and the offer dies first.  Measured:
+#: ``window=10.0`` with instant replies gave the offer ``+9.998s`` of life past the shortlist,
+#: and ``window=2.0`` against a 5-second solicitor gave ``-0.013s``.  The skew is bounded by the
+#: bid window — seconds against fifteen minutes — so it changes nothing about which offers are
+#: shown;  it is written down because "the same clock" is the kind of claim a later reader would
+#: build on.
 FALLBACK_OFFER_TTL_SECONDS: float = float(AUCTION_TTL_SECONDS)
 
 #: Why an entry ended up at list price. Recorded on the entry so a downstream reader (the

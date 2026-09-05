@@ -182,7 +182,24 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
       that discards whatever arrived under that store's name and substitutes a catalogue offer
       the exchange wrote. A HOSTED bid that omits its checkout URL is left exactly as it was and
       is still excluded, because completing it would let a store post no URL and be handed a
-      platform-built one — the store choosing which check it faces.
+      platform-built one.
+
+      **But "hosted" is not the complement of "fallback", and an earlier draft of this bullet
+      claimed it was.** ``entry.fallback`` is true for all seven reasons in
+      :data:`~apps.exchange.src.auction.collect.FALLBACK_REASONS`, not only ``no_response``, so
+      a store CAN reach this completion by answering — it just has to answer *unusably*.
+      Measured over the HTTP door: a reply whose ``offer`` is ``[]``, ``"free"``, ``null``, ``3``
+      or absent comes back ``fallback=True`` with ``fallback_reason:
+      bid_price_unreconcilable``, and the entry is completed and shortlisted. So is a Tier-0
+      store, and so is one the T-177 price wall degraded.
+
+      That is a real widening of the door and it is written down rather than implied — but it is
+      not a lever, because of WHAT is on the other side of it. Everything the store wrote is
+      already gone by then: ``_list_price_bid`` rebuilds the offer from the ROSTER, at the
+      roster's list price, with an empty ``claims`` list, and ``shortlist`` labels the slot
+      ``unverified`` rather than ``store-confirmed``. A store that garbles its reply to reach
+      this branch trades its own price and every claim it could have made for its catalogue
+      list price. There is no bid it could have sent that this is better than.
     * **Never over a URL that is already there.** A fallback carries none by construction; if one
       is somehow present it is not overwritten, so this can only ever add a destination where
       there was none, never redirect one.
@@ -199,6 +216,18 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
     now be *established*, not because the check was relaxed for anyone. Reading any
     store-supplied value to build this URL WOULD loosen S8 — which is why the reply, the roster
     row and ``bid["store_domain"]`` are all unreachable from this function.
+
+    **What the filter is worth on a fallback, stated plainly because an overclaiming comment is
+    how the next reader stops looking:** ``domain_reason`` compares this URL against the same
+    registry value it was built from, so for a completed fallback the C10 check is a tautology
+    and provides no independent evidence. It can only fail where the registry ROW is malformed
+    enough to move ``urlsplit``'s host — which is exactly the fail-closed behaviour the verbatim
+    interpolation above is for. The consequence is that a bad registry row is not caught here:
+    rows spelled ``127.0.0.1``, ``localhost``, ``*.example.com`` or a look-alike homograph all
+    build a URL that passes, because the platform said that is where the seller lives. That is
+    garbage-in on the platform's own record, not a spoof a store can mount — the store cannot
+    write a registry row — but the check vouches for nothing on this path, and the real evidence
+    for a fallback's destination is the registry's own correctness.
 
     Nothing read here came from the silent store. It could not have: the store never answered.
     """

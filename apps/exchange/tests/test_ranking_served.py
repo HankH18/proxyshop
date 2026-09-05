@@ -45,7 +45,6 @@ is about the ranker being ON the served path, that one is about what the served 
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +63,7 @@ from exchange.auction.routes import (
     MAX_ROSTER_ENTRIES,
     configure_auctions,
 )
+from exchange.auction.state import AUCTION_TTL_SECONDS
 from exchange.checkout.sellers import StaticRegisteredDomains
 from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
 from exchange.main import create_app
@@ -638,11 +638,23 @@ def test_the_fallbacks_expiry_and_checkout_url_are_the_exchanges_facts_never_a_s
 
     The roster row below is loaded with the fields a caller might hope get copied — an
     ``expires_at`` fifty years out, a ``checkout_url`` on an attacker host, and a
-    ``store_domain`` naming another one. None of them reaches the offer or the candidate. (The
+    ``store_domain`` naming another one. **Neither COMPLETED field reads any of them.** (The
     silent store itself supplied nothing, which is the point: it never answered. The roster is
     the nearest thing to a store-authored field on this path, so it is what the probe uses.)
+
+    The claim is deliberately narrower than "nothing on the offer comes from the caller", which
+    an earlier draft of this docstring made and which is FALSE: ``_list_price_bid`` has always
+    copied ``product_ref`` and ``currency`` off the roster row, and ``product_ref`` is a real
+    ``RosterEntry`` field, so an unauthenticated caller does put bytes on a fallback offer
+    through it. That is pre-existing and is not what this test is about; it is asserted below
+    rather than glossed, so the boundary is where a reader can see it.
+
+    The expected instant is written out as a LITERAL. Recomputing it from
+    ``FALLBACK_OFFER_TTL_SECONDS`` — the constant under test — is the tautology this test had
+    first: it stayed green with the TTL changed from 900 to 1, so none of the reasoning about
+    why the number must be the auction's own TTL was actually pinned.
     """
-    deadline = 1_800_000_000.0
+    deadline = 1_800_000_000.0  # 2027-01-15T08:00:00Z
     hostile = {
         "store_id": STORE_A,
         "tier": 1,
@@ -657,10 +669,14 @@ def test_the_fallbacks_expiry_and_checkout_url_are_the_exchanges_facts_never_a_s
     offer = entries[0].bid["offer"]
 
     assert entries[0].fallback is True
-    expected = datetime.fromtimestamp(deadline + FALLBACK_OFFER_TTL_SECONDS, tz=UTC)
-    assert offer["expires_at"] == expected.isoformat().replace("+00:00", "Z")
-    assert offer["expires_at"] == fallback_expires_at(deadline)
-    assert "attacker" not in str(offer), offer
+    # Literal, and fifteen minutes after the deadline to the second. Both halves are load
+    # bearing: the instant pins the arithmetic, and the constant is pinned to the auction's own
+    # TTL rather than to itself.
+    assert offer["expires_at"] == "2027-01-15T08:15:00Z"
+    assert FALLBACK_OFFER_TTL_SECONDS == AUCTION_TTL_SECONDS == 900
+    assert fallback_expires_at(deadline) == "2027-01-15T08:15:00Z"
+    # The caller's own `expires_at` was fifty years out and is nowhere near the answer.
+    assert "2075" not in str(offer), offer
 
     candidate = candidate_from_entry(
         entries[0],
@@ -670,10 +686,96 @@ def test_the_fallbacks_expiry_and_checkout_url_are_the_exchanges_facts_never_a_s
 
     assert candidate["offer"]["checkout_url"] == f"https://{_domain(STORE_A)}/cart/1:1"
     assert candidate["store_domain"] == _domain(STORE_A)
-    assert "attacker" not in str(candidate), candidate
+    assert "attacker" not in candidate["offer"]["checkout_url"]
+    assert "attacker" not in str(candidate["store_domain"])
+    assert "attacker" not in str(candidate["offer"]["expires_at"])
+    # What the roster DOES reach, named rather than left for someone to trip over: these two
+    # keys are copied verbatim and always were. Neither is a field this fix completes.
+    assert offer["product_ref"] == "product-1"
+    assert offer["currency"] == "USD"
     # The projection copied, it did not edit: the entry the route renders as `entries` still
     # holds the offer `collect_bids` built.
     assert "checkout_url" not in entries[0].bid["offer"]
+
+
+def test_the_completion_never_overwrites_a_checkout_url_that_is_already_there():
+    """It can only ever ADD a destination where there was none — never redirect one.
+
+    Unpinned until an adversarial pass measured it: a mutation making
+    ``_completed_fallback_offer`` overwrite an existing ``checkout_url`` left all fifty tests in
+    this file green. The property is the difference between "supply the missing half" and "the
+    exchange decides where every fallback checks out", and only the first is what R10 asks for.
+    """
+    entry = BidEntry(
+        store_id=STORE_A,
+        tier=1,
+        fallback=True,
+        bid={
+            "offer": {
+                "product_ref": "product-1",
+                "unit_price": 100.0,
+                "total_price": 100.0,
+                "checkout_url": "https://already.example.com/cart/9:2",
+            }
+        },
+    )
+
+    candidate = candidate_from_entry(
+        entry,
+        auction_id="auction-1",
+        registered_domains=StaticRegisteredDomains({STORE_A: _domain(STORE_A)}),
+    )
+
+    assert candidate["offer"]["checkout_url"] == "https://already.example.com/cart/9:2"
+
+
+@pytest.mark.parametrize("registry", [None, StaticRegisteredDomains({}), StaticRegisteredDomains])
+def test_no_registered_domain_means_no_checkout_url_is_invented(registry):
+    """Fail closed at the PROJECTION, where it is observable.
+
+    ``test_an_exchange_holding_no_registered_domain_shortlists_no_fallback_either`` drives this
+    through HTTP and cannot actually see it: ``domain_reason``'s FIRST guard already denies a
+    candidate that names no registered domain, so the shortlist is empty whether or not a URL
+    was invented. An adversarial mutation that built a URL from an absent domain left every test
+    in this file green. This one reads the offer directly, so the two outcomes differ.
+
+    The third parameter is the CLASS rather than an instance — a callable that is not a usable
+    lookup. A registry this module cannot read must be treated as one that knows nobody.
+    """
+    entry = BidEntry(
+        store_id=STORE_A,
+        tier=1,
+        fallback=True,
+        bid={"offer": {"product_ref": "product-1", "unit_price": 100.0, "total_price": 100.0}},
+    )
+
+    candidate = candidate_from_entry(entry, auction_id="auction-1", registered_domains=registry)
+
+    assert candidate["store_domain"] in (None, ""), candidate["store_domain"]
+    assert "checkout_url" not in candidate["offer"], candidate["offer"]
+
+
+def test_a_store_that_answers_unusably_is_completed_too_and_gets_nothing_for_it():
+    """``fallback`` is not "never answered" — it is every reason a reply was unusable.
+
+    Worth pinning because the completion follows ``collect_bids``' verdict, not R10's wording,
+    so a store CAN reach it by answering badly on purpose. What it gets is the point: the roster
+    list price, no claims, and an ``unverified`` slot label rather than ``store-confirmed``. Its
+    own price and every claim it could have made are gone. There is no bid this is better than,
+    which is why the widened door is not a lever.
+    """
+    garbled = _bid(STORE_A, 1.0)
+    garbled["offer"] = "free"
+    app = _wired_app(bidders=Bidders({STORE_A: garbled}), stores=(STORE_A,))
+
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+
+    entry = body["entries"][0]
+    assert entry["fallback"] is True
+    assert entry["unit_price"] == 100.0, "the ROSTER's list price, not the 1.0 the store wrote"
+    slots = body["shortlist"]["slots"]
+    assert [slot["bid_ref"] for slot in slots] == [mint_bid_id(body["auction_id"], STORE_A)]
+    assert slots[0]["provenance_labels"] == ["unverified"], slots[0]
 
 
 def test_an_undatable_auction_close_leaves_the_fallback_unexpirable_and_therefore_unshown():
