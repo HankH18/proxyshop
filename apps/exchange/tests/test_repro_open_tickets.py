@@ -1649,12 +1649,22 @@ def test_the_unusable_code_creator_corpus_is_armed() -> None:
             f"refusal at all (seed {case['seed']})"
         )
 
-    reasons = {case["denial_reason"] for case in cases}
+    # Distinctness is measured with the ADDRESSES STRIPPED, and that is not a detail: an
+    # adversarial pass found the previous version circularly armed. Comparing raw messages,
+    # twelve creators that all render as the SAME class name are still "distinct" today,
+    # because the leaked pointer differs per instance — so the check passed for exactly the
+    # reason the gate exists to remove, and only began working after the defect was fixed.
+    # Stripping `0x…` first makes it measure what it claims: dependence on the creator's
+    # identity, not on where the allocator happened to put it.
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    address = re.compile(T293_ADDRESS)
+    reasons = {address.sub("0xREDACTED", case["denial_reason"]) for case in cases}
     assert len(reasons) == len(cases), (
-        f"the {len(cases)} refusals collapsed to {len(reasons)} distinct messages, so the "
-        "message no longer depends on WHICH creator was injected — the corpus can no longer "
-        "tell a repair that redacts the address from one that deleted the object entirely "
-        f"(seed {cases[0]['seed']})"
+        f"the {len(cases)} refusals collapse to {len(reasons)} distinct messages once memory "
+        "addresses are masked, so the message no longer depends on WHICH creator was injected "
+        "— the corpus can no longer tell a repair that redacts the address from one that "
+        f"deleted the object entirely (seed {cases[0]['seed']})"
     )
 
 
@@ -1784,12 +1794,17 @@ def _t294_corpus() -> dict[str, Any]:
     the gate demands one.
 
     ``checkout_mode="redirect"`` is the simulated provider that mints locally and needs no
-    merchant client, so the corpus needs no ``code_creator`` and touches no network. The
-    solicitor's ``store_domain`` and the registered-domain source AGREE, which is the honest
-    configuration: the platform's registry vouches for the domain the store actually bid from.
-    That agreement is also what makes the forbidden roster-rebuild fail — a bid rebuilt from a
-    ``RosterEntry`` carries no ``store_domain`` at all, so there is nothing for the registry to
-    match and the checkout is refused.
+    merchant client, so the corpus needs no ``code_creator`` and touches no network.
+
+    **The store's bid ref and its domain are per-store random tokens, and that is what makes
+    the forbidden roster-rebuild fail.** A first repair of this gate wired the registry as
+    ``lambda store_id: f"{store_id}.example"`` and minted refs as ``bid-{store_id}``, and
+    claimed in this docstring that a roster-rebuilt bid could not clear the domain check. An
+    adversarial pass MEASURED that claim false: a formula-registry vouches for any string
+    handed to it without ever reading the bid, so the rebuild minted a live single-use code at
+    a list price the store never offered. Both values are now drawn from a token table the
+    roster does not contain — ``RosterEntry`` has no bid id and no ``store_domain`` — so a
+    rebuilt bid cannot be FOUND, and if it were found it could not clear the domain check.
 
     The gate still passes for ANY honest wiring: a ``POST /auctions`` that records
     ``[entry.bid for entry in result.entries]`` into whatever bid store the app carries
@@ -1811,6 +1826,25 @@ def _t294_corpus() -> dict[str, Any]:
     seed = _drawn_seed()
     rng = random.Random(seed)
 
+    known = {f"store-{index}": ELIGIBLE for index in range(1, 80)}
+
+    #: Per-store secrets the ROSTER DOES NOT CONTAIN, and this is the load-bearing part.
+    #:
+    #: An adversarial pass defeated the previous version of this corpus with the very fix the
+    #: ticket forbids by name: rebuilding bids from ``roster``. It worked because both the bid
+    #: ref (``bid-{store_id}``) and the domain (``{store_id}.example``) were DERIVABLE FROM THE
+    #: STORE ID, so a rebuilt row could reproduce them and mint a live single-use code at a
+    #: list price the store never offered. Nothing about the corpus made the real bid special.
+    #:
+    #: Now the store agent mints a token no caller can guess, and puts it in the two places
+    #: that decide an accept: the bid ref ``_find_bid`` matches on, and the domain the platform
+    #: registry vouches for. A ``RosterEntry`` carries neither — it has no bid id and no
+    #: ``store_domain`` — so a roster-rebuilt bid cannot be found, and if it were found it
+    #: could not clear the domain check. The forbidden fix now fails on two independent counts.
+    tokens = {store_id: f"{rng.randrange(16**8):08x}" for store_id in known}
+    bid_refs = {store_id: f"bid-{token}" for store_id, token in tokens.items()}
+    domains = {store_id: f"{token}.example" for store_id, token in tokens.items()}
+
     class _Solicitor:
         """A store agent that answers honestly, under its own list price.
 
@@ -1826,10 +1860,10 @@ def _t294_corpus() -> dict[str, Any]:
             return {
                 "store_id": store_id,
                 "bid": {
-                    "bid_id": f"bid-{store_id}",
-                    "bid_ref": f"bid-{store_id}",
+                    "bid_id": bid_refs[store_id],
+                    "bid_ref": bid_refs[store_id],
                     "store_id": store_id,
-                    "store_domain": f"{store_id}.example",
+                    "store_domain": domains[store_id],
                     "offer": {
                         "product_ref": store.get("product_ref") or "prod-1",
                         "unit_price": unit,
@@ -1843,14 +1877,15 @@ def _t294_corpus() -> dict[str, Any]:
 
         __call__ = solicit
 
-    known = {f"store-{index}": ELIGIBLE for index in range(1, 80)}
     app = create_app()
     configure_auctions(app, eligibility=StaticSellerEligibility(known), solicitor=_Solicitor())
     # A complete deployment EXCEPT `bids=`. Every keyword here is one a real operator must
     # set; the omitted one is the seam the ticket is about, so it keeps `NoRecordedBids`.
+    # The registry answers from the SAME token table the store bid from — a real platform
+    # registry, not a formula that vouches for any string handed to it.
     configure_accept(
         app,
-        registered_domains=lambda store_id: f"{store_id}.example",
+        registered_domains=lambda store_id: domains.get(str(store_id)),
         eligibility=StaticSellerEligibility(known),
         checkout_mode="redirect",
     )
@@ -1884,12 +1919,13 @@ def _t294_corpus() -> dict[str, Any]:
                 "auction_id": body.get("auction_id", ""),
                 "denied": body.get("denied", []),
                 "roster_size": len(roster),
-                # The ref the solicitor minted and `collect_bids` carried through on
-                # `BidEntry.bid['bid_id']`. `AuctionEntryOut` publishes no bid ref of its own,
-                # which is a second face of this same gap; the store knows what it called its
-                # own bid, so this is the ref a real buyer's agent would present.
+                # The UNGUESSABLE ref the store agent minted, carried through by
+                # `collect_bids` on `BidEntry.bid['bid_id']`. `AuctionEntryOut` publishes no
+                # bid ref of its own — a second face of this same gap — so this is the ref a
+                # real buyer's agent would present, having been told it by the store. It is
+                # deliberately NOT derivable from `store_id`: see the `tokens` table above.
                 "bids": [
-                    {"store_id": entry["store_id"], "bid_ref": f"bid-{entry['store_id']}"}
+                    {"store_id": entry["store_id"], "bid_ref": bid_refs[entry["store_id"]]}
                     for entry in entries
                 ],
             }
@@ -2080,16 +2116,24 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
 # =====================================================================================
 
 
-def _store_agent_app_import_closure() -> dict[str, str]:
-    """Every module BUILDING the store agent's real app pulls in, name -> file.
+def _store_agent_app_probe() -> dict[str, Any]:
+    """What BUILDING the store agent's real app imports, AND what it ends up serving.
 
     A sibling of :func:`_exchange_app_import_closure` and a subprocess for the same reason —
     in-process, ``sys.modules`` already holds whatever the rest of the session imported, and a
     reachability question answered against a polluted module table answers itself in the
-    affirmative every time. It differs in one deliberate way: it returns the WHOLE table, not
-    just the ``store_agent.*`` slice, because the property under test is whether a module
-    holding a production call site — which may live in any package — is reached by the process
-    that serves requests.
+    affirmative every time. It differs in two deliberate ways.
+
+    First, it returns the WHOLE module table, not just the ``store_agent.*`` slice, because a
+    production call site may live in any package and the question is whether the serving
+    process reaches it.
+
+    Second, it reports ``paths`` and ``mounted`` as well, and that is not decoration. An
+    adversarial pass defanged the earlier module-only version with a file containing nothing
+    but ``router = None`` beside a dead function naming ``receive_bid``: ``create_app()``'s
+    glob IMPORTS every ``<feature>/routes.py`` it finds and only then checks for a ``router``
+    attribute, so a module that mounts nothing still lands in the import closure. Being
+    imported is not being served; the gate now asks for both.
     """
     import os  # noqa: PLC0415 - kept out of this file's frozen import head
     import subprocess  # noqa: PLC0415
@@ -2099,9 +2143,13 @@ def _store_agent_app_import_closure() -> dict[str, str]:
     code = (
         "import json, sys\n"
         "import store_agent.main\n"
-        "store_agent.main.create_app()\n"
-        "print(json.dumps({name: getattr(module, '__file__', '') or ''\n"
-        "                  for name, module in sys.modules.items()}))\n"
+        "app = store_agent.main.create_app()\n"
+        "print(json.dumps({\n"
+        "    'modules': {name: getattr(module, '__file__', '') or ''\n"
+        "                for name, module in sys.modules.items()},\n"
+        "    'paths': sorted(app.openapi().get('paths', {})),\n"
+        "    'mounted': list(getattr(app.state, 'mounted_routers', []) or []),\n"
+        "}))\n"
     )
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(repo_root), str(repo_root / ".pkgroot")])
@@ -2164,12 +2212,17 @@ def test_the_store_agent_import_closure_probe_is_armed() -> None:
     it turned out to be wrong.
     """
     repo_root = Path(__file__).resolve().parents[3]
-    modules = _store_agent_app_import_closure()
+    probe = _store_agent_app_probe()
+    modules = probe["modules"]
 
     assert modules, "building the store agent app imported no module at all; the probe is wrong"
     assert "store_agent.main" in modules, (
         f"store_agent.main is missing from its own app's import closure; the probe is not "
         f"measuring the served app (it saw {len(modules)} modules)"
+    )
+    assert isinstance(probe.get("paths"), list) and isinstance(probe.get("mounted"), list), (
+        "the probe reported no route table; it can no longer tell an imported module from a "
+        f"served one, which is the distinction the gate rests on: {sorted(probe)}"
     )
     for name, filename in sorted(modules.items()):
         if not filename or not name.startswith("store_agent"):
@@ -2258,23 +2311,39 @@ def test_t244_the_external_bid_door_is_reachable_from_a_served_process() -> None
     instead as the arming control for the AST scanner, where a symbol with a known production
     caller is exactly what is needed.
     """
-    modules = _store_agent_app_import_closure()
+    probe = _store_agent_app_probe()
+    modules = probe["modules"]
+    served = [path for path in probe["paths"] if not path.startswith("/openapi")]
     call_sites = _t244_production_call_sites("receive_bid")
 
-    door_modules = sorted(name for name in modules if name.startswith("store_agent.external"))
-    reached = [
+    # The module that DEFINES receive_bid, matched exactly. An adversarial pass defeated a
+    # `startswith("store_agent.external")` test with a package called `store_agent.externalz`,
+    # which satisfies the prefix while the real door is never imported.
+    door_imported = "store_agent.external.door" in modules
+
+    # A call site in a module the built app imports. `_calls_named` also matches an attribute
+    # of the same name, so the join below — the file must be one the SERVING process loaded —
+    # is what stops a stub's `self._door.receive_bid(...)` from counting as wiring.
+    reached = sorted(
         f"{name}:{lineno}"
         for _stem, path, lineno in call_sites
         for name, filename in modules.items()
         if filename and Path(filename).resolve() == path.resolve()
-    ]
+    )
 
-    assert door_modules and reached, (
-        "the Tier-2 external bid door is not reachable from any served process. The store "
-        f"agent's app imports {len(modules)} modules and {len(door_modules)} of them are "
-        f"store_agent.external.*; the AST scan found {len(call_sites)} production call site(s) "
-        f"of receive_bid {[f'{p}:{n}' for _s, p, n in call_sites][:5]}, of which {len(reached)} "
-        "live in a module the built app actually imports. Both halves must hold: a call site "
-        "in a module nothing imports is not wiring, and an imported module that never calls "
-        "the door is not wiring either."
+    # Imported is not served. `create_app()` imports every `<feature>/routes.py` its glob finds
+    # and only THEN looks for a `router` attribute, so a file containing `router = None` beside
+    # a function naming receive_bid lands in the closure while mounting nothing — measured, and
+    # it turned the earlier two-part version of this gate green with no wiring whatsoever.
+    assert door_imported and reached and served, (
+        "the Tier-2 external bid door is not reachable from any served process, and all three "
+        "halves of that are required. Measured now: the store agent's app imports "
+        f"{len(modules)} modules and store_agent.external.door is "
+        f"{'among them' if door_imported else 'NOT among them'}; the AST scan found "
+        f"{len(call_sites)} production call site(s) of receive_bid "
+        f"{[f'{p}:{n}' for _s, p, n in call_sites][:5]}, of which {len(reached)} live in a "
+        f"module the built app imports; and the app serves {served or 'NO routes at all'} "
+        f"(mounted routers: {probe['mounted'] or 'none'}). A call site in a module nothing "
+        "imports is not wiring; an imported module that never calls the door is not wiring; "
+        "and a module that mounts no route serves nobody however thoroughly it is imported."
     )
