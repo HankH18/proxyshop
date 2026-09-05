@@ -22,10 +22,16 @@ The exchange client is read from ``app.state.exchange_client`` and is **not** co
 here, for the same reason T-071's ``/buyer/intent/confirm`` does not construct its auction
 client: a buyer service that mints its own exchange client cannot be pointed at a stub, and
 a deployment that forgot to wire one should hear about it as a 503 rather than discover it
-when the first buyer accepts. **Nothing in this repository sets that attribute yet** — the
-buyer→exchange seam has no composition root on either side (``exchange.auction.routes.
-configure_auctions`` likewise has only test callers). That gap is reported in this ticket's
-NEEDS rather than papered over here with a module-level global.
+when the first buyer accepts.
+
+That attribute was set by nothing in this repository when this file was written, and it is
+now set by :mod:`buyer_svc.composition` from the deployment document in ``BUYER_DEPLOYMENT``
+/ ``BUYER_DEPLOYMENT_JSON``, through the request-time hook :func:`_bind_the_deployment`
+below — the same object that ``/buyer/intent/confirm`` opens the auction with, because the
+exchange that ran the auction is the only one that can accept a bid in it. A service with no
+document configured still binds nothing and answers exactly the 503 it answered before.
+``/render`` does **not** take the hook: R2's property is that this handler cannot reach an
+exchange client, and a composition hook in it would be an exchange client in its scope.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, StrictBool
 
+from ..composition import DeploymentConfigurationError, ExchangeCallFailed, ensure_configured
 from ._spellings import bind_spellings
 from .errors import (
     AcceptError,
@@ -130,9 +137,27 @@ async def render_route(body: RenderBody) -> RenderResponse:
     return RenderResponse(slots=[RenderedSlot(**slot.to_dict()) for slot in slots])
 
 
+def _bind_the_deployment(request: Request) -> None:
+    """Run the composition root once for this app, before the exchange client is read.
+
+    ``apps/buyer/svc/src/main.py`` is orchestrator-frozen (B6(iii)), so a deployment cannot be
+    composed inside ``create_app``. This is the start-up hook, taken at the top of the request
+    instead; it binds nothing that is already bound, so a test or a deployment that sets
+    ``app.state.exchange_client`` itself still wins. A malformed deployment document is a
+    **503** naming the problem, never a 500.
+    """
+    try:
+        ensure_configured(request.app)
+    except DeploymentConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
 @router.post("/accept", response_model=AcceptResponse)
 async def accept_route(body: AcceptBody, request: Request) -> AcceptResponse:
     """Accept one slot and hand back the exchange's checkout permalink (R3)."""
+    _bind_the_deployment(request)
     client = getattr(request.app.state, EXCHANGE_CLIENT_ATTR, None)
     try:
         accepted = accept(body.slot, client, expected_domain=body.expected_domain)
@@ -154,6 +179,13 @@ async def accept_route(body: AcceptBody, request: Request) -> AcceptResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    except ExchangeCallFailed as exc:
+        # 502, for the reason the next clause gives: the buyer's request was fine and the
+        # upstream's answer was not. A 404 from the exchange (the auction expired) reaches
+        # here rather than being re-dressed as a decision about this buyer's offer — the
+        # exchange's own 409, which IS such a decision, is returned by the client as a parsed
+        # body and becomes `AcceptRefusedByExchange` above.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except (NoPermalinkReturned, UnsafePermalink) as exc:
         # 502: the buyer's request was fine and the upstream's answer was not. A 500 here
         # would blame this service for a permalink the exchange chose.

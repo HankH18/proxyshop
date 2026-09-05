@@ -25,6 +25,14 @@ a deployment that forgot to wire one should hear about it as a 503 rather than d
 when the first buyer confirms. The LLM client is resolved lazily through
 :func:`buyer_llm`, defaulting to ``build_llm("buyer")`` — which is D20's offline double
 unless ``LLM_PROVIDER`` says otherwise — and a loop with no model still works.
+
+**Who sets that attribute:** :mod:`buyer_svc.composition`, from the deployment document in
+``BUYER_DEPLOYMENT`` / ``BUYER_DEPLOYMENT_JSON``, through the request-time hook
+:func:`_bind_the_deployment` below. ``create_app`` cannot do it — ``main.py`` is
+orchestrator-frozen (B6(iii)) — and a service with no document configured binds nothing and
+answers exactly the 503 it answered before that module existed. ``/clarify`` does **not**
+take the hook: R1's property is that this handler cannot reach an auction client, and a
+composition hook in it would be an auction client in its scope.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, StrictBool
 
+from ..composition import DeploymentConfigurationError, ExchangeCallFailed, ensure_configured
 from ._spellings import bind_spellings
 from .clarifier import clarify
 from .confirmation import confirm
@@ -169,9 +178,34 @@ async def clarify_route(body: ClarifyBody) -> ClarifyResponse:
     )
 
 
+def _bind_the_deployment(request: Request) -> None:
+    """Run the composition root once for this app, before the auction client is read.
+
+    ``apps/buyer/svc/src/main.py`` is orchestrator-frozen (B6(iii)), so a deployment cannot
+    be composed inside ``create_app`` — which is exactly why nothing composed it, and why a
+    deployed buyer service answered 503 to every confirmed intent. This is the start-up hook,
+    taken at the top of the request instead, and it binds nothing that is already bound, so a
+    test or a deployment that sets ``app.state.auction_client`` itself still wins.
+
+    A malformed deployment document is a **503**, not a 500 and not a silent fail-closed
+    answer: a buyer service told to read a deployment it cannot read is misconfigured, and
+    that is a different thing from a buyer service nobody has configured.
+    """
+    try:
+        ensure_configured(request.app)
+    except DeploymentConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
 @router.post("/confirm", response_model=ConfirmResponse, status_code=status.HTTP_201_CREATED)
 async def confirm_route(body: ConfirmBody, request: Request) -> ConfirmResponse:
     """Create the one auction a confirmed intent is entitled to (R1)."""
+    # Before the client is read. R1 is untouched by this: binding a client is not creating an
+    # auction — `HttpExchangeClient` opens no socket until something calls it — and
+    # `confirm()`'s FIRST statement is still `confirmed is not True`.
+    _bind_the_deployment(request)
     client = getattr(request.app.state, AUCTION_CLIENT_ATTR, None)
     try:
         created = confirm(
@@ -193,6 +227,13 @@ async def confirm_route(body: ConfirmBody, request: Request) -> ConfirmResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+    except ExchangeCallFailed as exc:
+        # 502: the buyer's request was fine and the upstream's answer was not — the same
+        # split T-072's accept route already makes for `NoPermalinkReturned`. Before a real
+        # outbound client existed this could not happen from a deployment, only from a test
+        # double; with one wired, an exchange that is down or answers 422 would otherwise
+        # escape as a **500**, which blames this service for the exchange's state.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     return ConfirmResponse(
         auction_id=created.auction_id,
         intent_id=created.intent_id,
