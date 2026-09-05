@@ -1584,11 +1584,24 @@ def test_t175_the_unread_total_price_sweep_is_armed() -> None:
        gate's red a measurement rather than an assertion about an absent apparatus: the SAME
        node, at the SAME placement, with the SAME number spelled `unit_price` instead of
        `total_price`, must be REFUSED today, naming `unit_price`. Sixteen controls, all sixteen
-       red at HEAD. If the walls ever stopped refusing under-floor prices at all, these fail
+       red at HEAD. If BOTH price walls ever stopped refusing under-floor prices, these fail
        first and the gate below stops being evidence.
-    4. **The walls refuse everything.** A fix that refused every dict-built bid would satisfy a
-       gate that only ever looks at dishonest ones. An honest bid at each placement — the list
-       price itself, which clears both floors — is required to be ADMITTED.
+
+       Stated exactly, because an earlier draft of this docstring overclaimed and a verifier
+       caught it: the control proves *a* price wall refused, not that the FLOOR wall did.
+       Disabling the floor wall alone leaves it green, because every drawn price is also far
+       under the honest price for a declared 0% and `_price_reconciliation_refusal` fires with a
+       message carrying the same `.unit_price` path. No draw in this sweep can isolate the two —
+       both roster floors sit under the list price these products carry — and the gate does not
+       need it to. It needs "the identical number one field over IS refused", which is what this
+       measures.
+    4. **The walls refuse everything, or refuse the FIELD.** A fix that refused every dict-built
+       bid would satisfy a gate that only ever looks at dishonest ones — so an honest bid at each
+       placement, at the list price itself, is required to be ADMITTED. And the same is required
+       of an honest bid spelled `total_price`, which is the assertion that separates the repair
+       this ticket asks for from a cheap imitation of it: a `_walk` that simply REFUSED any node
+       naming a product and a bare total would green the gate below while refusing honest
+       traffic. Measured — that exact edit greens the gate and reds this control.
     5. **The two spellings differ in something other than the field name.** The control bid and
        the gate bid are asserted to be identical dicts once the one key is renamed.
     """
@@ -1642,24 +1655,30 @@ def test_t175_the_unread_total_price_sweep_is_armed() -> None:
             f"({reasons}); the gate below reads offender text the same way"
         )
 
-    # 4. An honest bid at each placement still gets in.
+    # 4. An honest bid at each placement still gets in — in BOTH spellings. The `total_price`
+    #    half is what forbids the cheap imitation of this ticket's repair: banning the field
+    #    instead of checking it against the floor.
     for placement in T175_PLACEMENTS:
         for product in sorted(T175_FLOORS):
             listed = float(_t156_fixture()["catalog"][product]["list_price"])
-            honest = _t175_bid(
-                {
-                    "product": product,
-                    "placement": placement,
-                    "floor": T175_FLOORS[product],
-                    "price": listed,
-                },
-                "unit_price",
-            )
-            assert _t175_refusal(honest) == [], (
-                f"{product} at .{placement}: an HONEST bid stating the list price {listed} was "
-                f"refused {_t175_refusal(honest)}; a wall that refuses honest bids would satisfy "
-                "the gate below without reading anything"
-            )
+            case = {
+                "product": product,
+                "placement": placement,
+                "floor": T175_FLOORS[product],
+                "price": listed,
+            }
+            for field in ("unit_price", "total_price"):
+                honest = _t175_bid(case, field)
+                reasons = _t175_refusal(honest)
+                assert reasons == [], (
+                    f"{product} at .{placement}.{field}: an HONEST bid stating the list price "
+                    f"{listed} — above the {T175_FLOORS[product]} floor, at no discount — was "
+                    f"refused {reasons}. A wall that refuses honest bids would satisfy the gate "
+                    "below without reading anything, and a walk that simply REFUSED a node "
+                    "naming a product and a bare total would green the gate while refusing "
+                    "traffic the merchant approved. What the ticket asks for is that the total "
+                    "be CHECKED against the envelope, exactly as the unit price is — not banned"
+                )
 
 
 @pytest.mark.xfail(
@@ -2090,6 +2109,19 @@ def _t280_payload(depth: int) -> dict[str, Any]:
     }
 
 
+def _refuse_reads(payload: Any) -> tuple[Any, Any]:
+    """What `door._refuse` would put on the receipt if it were handed `payload`.
+
+    The door's own accessor, not `payload["signer_id"]`: `_refuse` reads through `.get` behind a
+    guard and keeps the value only if it is a `str`. Asking the same way is what makes "the
+    identity was readable" a measurement of the refusal path rather than of the fixture.
+    """
+    from store_agent.external.door import _refuse  # noqa: PLC0415
+
+    receipt = _refuse("probe", payload=payload)
+    return receipt.signer_id, receipt.nonce
+
+
 def _t280_receipt(depth: int, *, signature: Any = None) -> Any:
     from store_agent.external import NonceStore, receive_bid, sign_bid  # noqa: PLC0415
 
@@ -2132,11 +2164,14 @@ def test_t280_the_anonymous_receipt_sweep_is_armed() -> None:
     """
     for depth in T280_DEPTHS:
         payload = _t280_payload(depth)
-        assert isinstance(payload["signer_id"], str) and payload["signer_id"], (
-            f"depth {depth}: the submission carries no readable signer_id"
-        )
-        assert isinstance(payload["nonce"], str) and payload["nonce"], (
-            f"depth {depth}: the submission carries no readable nonce"
+        # The identity is readable BY THE SAME ACCESSOR the refusal path uses — `_refuse` reads
+        # `payload.get(...)` behind a guard, so this asks the payload the way the door would
+        # rather than asserting that two literals written six lines above are strings, which is
+        # what an earlier draft did and could not fail.
+        assert _refuse_reads(payload) == (T280_SIGNER, payload["nonce"]), (
+            f"depth {depth}: reading this submission the way `_refuse` does yields "
+            f"{_refuse_reads(payload)}, not its stated identity. 'The receipt has no identity' "
+            "could then be explained by there being none to carry"
         )
 
         receipt = _t280_receipt(depth)
@@ -2421,17 +2456,36 @@ def test_t220_the_suite_grades_depths_a_reintroduced_bound_could_hide_behind() -
 #: three files would miss a fourth copy appearing tomorrow, which is the same drift the ticket is
 #: about.
 T321_GATE_FILE = "test_repro_open_tickets.py"
-T321_ROOTS = ("apps", "packages", "services", "proxyshop_support")
+
+#: Every root pytest collects from — `pyproject.toml`'s `testpaths`, in full. It was the four
+#: source roots first, and an adversarial verifier put a twelfth copy in `e2e/` where the scan
+#: could not see it: a file that RUNS in `make verify` and is invisible to the sweep that exists
+#: to count it. The list is the collector's, so it cannot drift from what actually runs.
+T321_ROOTS = (
+    "apps",
+    "packages",
+    "services",
+    "proxyshop_support",
+    "pixel",
+    "fixtures",
+    "e2e",
+    "docs",
+)
 
 #: The six helpers, grouped by ROLE rather than by name, because the copies do not even share
 #: their names: this package spells the normaliser `normalise` and the other two spell it
 #: `_normalise_route`. Grouping by role is what lets the sweep see that they are the same helper
 #: wearing different labels — a sweep keyed on the literal name would report one definition each
 #: and conclude, wrongly, that nothing is duplicated.
+#:
+#: `published_raw` sits with `published_operations` rather than in a role of its own, and that is
+#: a correction rather than a tidy-up: this package split the raw variant into its own function
+#: while the other two express it as the `raw=True` branch of one, so a separate role for it
+#: reported ONE definition of a rule that genuinely exists in three places — the exact near-miss
+#: this table's own comment warns about, committed inside the table. One rule, one role.
 T321_ROLES: dict[str, tuple[str, ...]] = {
     "path normaliser": ("normalise", "_normalise_route"),
-    "published operations": ("published_operations", "_published_operations"),
-    "raw published operations": ("published_raw",),
+    "published operations": ("published_operations", "_published_operations", "published_raw"),
     "served operations": ("served_operations", "_served_operations"),
     "divergence message": ("divergence", "_operation_divergence"),
     "contract probe app": ("probe_app_for", "_contract_probe_app"),
@@ -2488,23 +2542,44 @@ def _t321_definitions(roles: dict[str, tuple[str, ...]] | None = None) -> dict[s
     return found
 
 
-def _t321_normalisers() -> dict[str, Any]:
-    """`{module name: the path normaliser it defines}`, for every gate file that has one."""
+def _t321_implementations() -> dict[str, dict[str, Any]]:
+    """`{role: {"<module>.<name>": <function>}}`, resolved by IMPORT rather than by file name.
+
+    This is the measurement the gate grades, and resolving through the module rather than the
+    file is what makes it about *implementations* instead of *definition sites*. An adversarial
+    verifier greened the file-name version by lifting each sibling's private copy into its own
+    new module and importing it back: three implementations still, nothing shared, and a scan
+    that only reads files called `test_repro_open_tickets.py` saw one definition each. An
+    imported name is still a module attribute, so this sees it — and sees that the three
+    attributes are three DIFFERENT functions.
+    """
     import importlib  # noqa: PLC0415
 
-    resolved: dict[str, Any] = {}
+    resolved: dict[str, dict[str, Any]] = {role: {} for role in T321_ROLES}
     for path in _t321_gate_files():
-        parts = path.relative_to(REPO_ROOT).with_suffix("").parts
-        name = ".".join(parts)
+        name = ".".join(path.relative_to(REPO_ROOT).with_suffix("").parts)
         try:
             module = importlib.import_module(name)
         except Exception:  # noqa: BLE001 - a module that will not import has no helper to compare
             continue
-        for alias in T321_ROLES["path normaliser"]:
-            helper = getattr(module, alias, None)
-            if callable(helper):
-                resolved[f"{name}.{alias}"] = helper
+        for role, aliases in T321_ROLES.items():
+            for alias in aliases:
+                helper = getattr(module, alias, None)
+                if callable(helper):
+                    resolved[role][f"{name}.{alias}"] = helper
     return resolved
+
+
+def _t321_distinct(functions: dict[str, Any]) -> set[Any]:
+    """How many genuinely different implementations are behind these names.
+
+    Keyed on `__code__`, so three modules that all import ONE shared helper collapse to one
+    entry — which is the arrangement the ticket asks for — while three copies of the same source
+    text stay three, because each `def` compiles to its own code object. Comparing source text
+    would call three identical copies "one"; comparing names would call one shared helper
+    "three".
+    """
+    return {getattr(fn, "__code__", fn) for fn in functions.values()}
 
 
 def test_t321_the_duplicated_helper_scan_is_armed() -> None:
@@ -2532,7 +2607,7 @@ def test_t321_the_duplicated_helper_scan_is_armed() -> None:
         f"only {len(files)} gate file(s) named {T321_GATE_FILE} were found under {T321_ROOTS}; "
         "the scan has stopped seeing the copies it exists to count"
     )
-    assert any(path.name == T321_GATE_FILE and "store-agent" in str(path) for path in files), (
+    assert any("store-agent" in str(path) for path in files), (
         f"the scan did not find this very file among {[str(p) for p in files]}"
     )
 
@@ -2557,11 +2632,21 @@ def test_t321_the_duplicated_helper_scan_is_armed() -> None:
     )
 
     # 4. The copies AGREE today — which is the whole reason nothing has noticed.
-    normalisers = _t321_normalisers()
+    implementations = _t321_implementations()
+    normalisers = implementations["path normaliser"]
     assert len(normalisers) >= 3, (
         f"only {len(normalisers)} path normaliser(s) could be imported and compared "
         f"({sorted(normalisers)}); the agreement check below is not covering the copies"
     )
+    # 5. The gate below counts IMPLEMENTATIONS, so the resolver has to actually resolve. Every
+    #    role must be reachable through an import from at least two of the sweeping packages, or
+    #    a "one implementation" verdict could just be a resolver that found nothing to compare.
+    for role in T321_ROLES:
+        assert len(implementations[role]) >= 2, (
+            f"the {role} resolved through only {len(implementations[role])} module(s) "
+            f"({sorted(implementations[role])}); the gate below would call that unified when it "
+            "is really unreachable"
+        )
     for path in T321_MALFORMED:
         answers = {name: helper(path) for name, helper in normalisers.items()}
         assert len(set(answers.values())) == 1, (
@@ -2597,17 +2682,37 @@ def test_t321_each_contract_sweep_helper_has_exactly_one_implementation() -> Non
     conclude nothing is duplicated. That near-miss is recorded here because it is how this gate
     could have been written green.
 
-    MEASURED at HEAD, by AST over every `test_repro_open_tickets.py` in the repo rather than the
-    three the ticket names — there are eleven files with that name, and a fourth copy appearing
+    **It counts IMPLEMENTATIONS, not definition sites, and that is a repair rather than a
+    refinement.** The first version of this gate walked every file named
+    `test_repro_open_tickets.py` with `ast` and counted module-level `def`s. An adversarial
+    verifier greened it without unifying anything: lift each sibling's private copy into a new
+    module of its own — `proxyshop_support/sweep_helpers_exchange.py`,
+    `..._ingest.py` — and import it back. Three implementations still, nothing shared, and a scan
+    keyed on one file name saw one definition each. So the count is now taken on `__code__`
+    identity across the helpers the three modules actually EXPOSE: three modules importing one
+    shared helper collapse to a single code object, three copies of identical source text stay
+    three. Relocation cannot green it, and neither can renaming — the arming test's agreement
+    check stops finding comparable copies and goes red instead.
+
+    Deleting a sibling's sweep rather than sharing one is refused from the other side: the arming
+    test requires every role to resolve through at least two modules.
+
+    MEASURED at HEAD across every `test_repro_open_tickets.py` under pytest's own `testpaths`
+    rather than the three files the ticket names — there are eleven, and a twelfth appearing
     tomorrow is the same defect.
     """
-    definitions = _t321_definitions()
-    duplicated = {role: entries for role, entries in definitions.items() if len(entries) > 1}
+    implementations = _t321_implementations()
+    duplicated = {
+        role: functions
+        for role, functions in implementations.items()
+        if len(_t321_distinct(functions)) > 1
+    }
     assert not duplicated, (
-        f"{len(duplicated)} of {len(T321_ROLES)} contract-sweep helper roles are implemented more "
-        "than once, with nothing comparing the copies:\n  "
+        f"{len(duplicated)} of {len(T321_ROLES)} contract-sweep helper roles have more than one "
+        "implementation behind them, with nothing comparing the copies:\n  "
         + "\n  ".join(
-            f"{role}: {len(entries)} definitions — {entries}"
-            for role, entries in sorted(duplicated.items())
+            f"{role}: {len(_t321_distinct(functions))} distinct implementations behind "
+            f"{sorted(functions)}"
+            for role, functions in sorted(duplicated.items())
         )
     )
