@@ -654,6 +654,7 @@ def test_a_deployment_that_sets_only_the_generic_app_dsn_keeps_working(
     assert PostgresEventStore()._resolve_dsn() == app_dsn
 
 
+@pytest.mark.docker
 def test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_var(
     monkeypatch: pytest.MonkeyPatch,
     ledger_migrated: str,
@@ -710,6 +711,7 @@ def test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_
     assert may_append, "the role the writer resolved cannot append to the ledger at all"
 
 
+@pytest.mark.docker
 def test_the_writer_appends_to_the_real_ledger_as_trust_rw(
     monkeypatch: pytest.MonkeyPatch,
     ledger_clean: Any,

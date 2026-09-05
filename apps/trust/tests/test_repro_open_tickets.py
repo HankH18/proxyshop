@@ -172,15 +172,24 @@ def _branches_on_a_status_code(tree: ast.AST) -> list[str]:
     return [ast.unparse(test) for test in conditions if _reads_a_status_code(test, tainted)]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-166: test_replay_with_snapshots_names_the_missing_scorer_rather_than_returning_"
-        "nothing still branches on `if response.status_code == 503`, a branch the landed "
-        "T-062 scorer makes unreachable, so half the test is dead; remove this marker with "
-        "the fix"
-    ),
-)
+# JUSTIFY-TEST-EDIT (T-166) — xfail marker REMOVED because the defect it encoded is fixed.
+#
+# The marker read, verbatim:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-166: test_replay_with_snapshots_names_the_missing_scorer_rather_than_returning_"
+#         "nothing still branches on `if response.status_code == 503`, a branch the landed "
+#         "T-062 scorer makes unreachable, so half the test is dead; remove this marker with "
+#         "the fix"))
+#
+# What it encoded: the subject test in apps/trust/tests/test_events.py still contained a
+# `if response.status_code == 503:` arm that the landed T-062 scorer made unreachable, so
+# the assertions inside it graded nothing. The marker asserted that defect was still live.
+#
+# Would this test still be wrong if my change were reverted? YES, and that was MEASURED, not
+# reasoned: with apps/trust/tests/test_events.py restored to its HEAD content this gate goes
+# "1 failed"; with the fix restored it goes "1 passed". The pass is caused by this lane's
+# edit to the subject test — the branch removal — and by nothing else. No assertion body in
+# this gate was touched; only the marker above it was deleted.
 def test_the_replay_snapshot_test_does_not_branch_on_a_status_it_can_never_reach() -> None:
     """A test that branches on its own subject's status covers whichever branch it took.
 
@@ -643,14 +652,27 @@ def _match_claim_polarity(text: str) -> set[str]:
     return polarity
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-207: scoring/engine.py glosses mismatch_return as 'the buyer said it matched and "
-        "then returned it', while the approved manifest defines it as the buyer reporting a "
-        "MISMATCH; remove this marker with the fix"
-    ),
-)
+# JUSTIFY-TEST-EDIT (T-207) — xfail marker REMOVED because the defect it encoded is fixed.
+#
+# The marker read, verbatim:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-207: scoring/engine.py glosses mismatch_return as 'the buyer said it matched and "
+#         "then returned it', while the approved manifest defines it as the buyer reporting a "
+#         "MISMATCH; remove this marker with the fix"))
+#
+# What it encoded: the weight-table gloss in apps/trust/src/scoring/engine.py contradicted
+# fixtures/manifest.json — the human-approved authority (SPEC A3) — on what the 1.5-weight
+# `mismatch_return` observation is applied to. The marker asserted that contradiction was
+# still live.
+#
+# Would this test still be wrong if my change were reverted? YES, and that was MEASURED: with
+# apps/trust/src/scoring/engine.py restored to its HEAD content this gate goes "1 failed";
+# with the fix restored it goes "1 passed". The gloss now reads "the buyer reports a mismatch
+# and returns the item", which agrees with the manifest's own description ("The buyer reports
+# that what arrived does not match what was pitched, and returns it") rather than merely
+# dodging the one phrase the pre-T-287 assertion banned. Note the manifest was NOT touched —
+# the authority this gate reads is outside this lane's edit scope, so the gate is not grading
+# a file this lane can write. No assertion body was touched; only the marker was deleted.
 def test_the_mismatch_return_gloss_agrees_with_the_approved_manifest() -> None:
     """Load-bearing documentation next to a number that decides trust must be true.
 
@@ -795,15 +817,30 @@ _DATASTORE_FIXTURES = frozenset(
 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-212: test_events_hardening.py's two live-database tests request datastore "
-        "fixtures but carry no @pytest.mark.docker, so T-109's per-service reachability "
-        "inference cannot route them and they skip through the fixture nag path instead; "
-        "remove this marker with the fix"
-    ),
-)
+# JUSTIFY-TEST-EDIT (T-212) — xfail marker REMOVED because the defect it encoded is fixed.
+#
+# The marker read, verbatim:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-212: test_events_hardening.py's two live-database tests request datastore "
+#         "fixtures but carry no @pytest.mark.docker, so T-109's per-service reachability "
+#         "inference cannot route them and they skip through the fixture nag path instead; "
+#         "remove this marker with the fix"))
+#
+# What it encoded: two tests in apps/trust/tests/test_events_hardening.py request the
+# `ledger_migrated`/`ledger_clean`/`worker_database` fixtures — i.e. they open a real
+# Postgres — while carrying no @pytest.mark.docker, so T-109's per-service reachability
+# inference could not route them to postgres and they ran unprotected under `verify.sh check`.
+#
+# Would this test still be wrong if my change were reverted? YES, and that was MEASURED: with
+# apps/trust/tests/test_events_hardening.py restored to its HEAD content this gate goes
+# "1 failed" naming test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_
+# role_var and test_the_writer_appends_to_the_real_ledger_as_trust_rw; with the two markers
+# added it goes "1 passed".
+#
+# NOTE FOR THE GRAPH: ticket T-212 is recorded `status: closed` with status_evidence
+# "REFUTED, WITH A REPRODUCTION" (T-217). That closure is stale — this gate is genuinely RED
+# at HEAD because a later merge REINTRODUCED the defect by adding two DB-backed tests without
+# the marker. The fix applied here is additive (two decorators) and touches no assertion.
 def test_every_database_backed_hardening_test_carries_the_docker_marker() -> None:
     """A test that needs a datastore must say so with the marker, not with a fixture nag.
 
