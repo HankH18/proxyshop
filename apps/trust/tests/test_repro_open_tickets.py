@@ -2309,15 +2309,18 @@ def _t256_cases() -> list[dict[str, Any]]:
 class _T256RecordingCursor:
     """A DB-API cursor that remembers every statement instead of executing one."""
 
-    def __init__(self, log: list[tuple[str, Any]]) -> None:
+    def __init__(self, log: list[tuple[str, Any]], seen: dict[tuple[str, str], int]) -> None:
         self._log = log
+        self._seen = seen
         self._last = ""
+        self._params: Any = None
         self.description = None
         self.rowcount = -1
 
     def execute(self, sql: Any, params: Any = None) -> _T256RecordingCursor:
         self._log.append((str(sql), params))
         self._last = str(sql)
+        self._params = params
         return self
 
     def executemany(self, sql: Any, seq: Any = None) -> _T256RecordingCursor:
@@ -2333,14 +2336,36 @@ class _T256RecordingCursor:
     def _answer(self) -> Any:
         """What the last statement would plausibly have read back.
 
-        Contextual, because a fixed uuid is not a universal answer: a writer asking
-        ``select coalesce(max(snapshot_version), 0) + 1`` needs a NUMBER, and answering it a
-        uuid made ``int()`` raise on every case — the whole sweep erroring before a single
-        assertion ran. A double that can only answer one shape refuses honest writers.
+        Contextual and, for one route, STATEFUL — because two rounds of measurement showed a
+        double that cannot answer differently on a replay grades the correct writer exactly
+        like the broken one.
+
+        * ``insert ... on conflict ... do nothing ... returning <x>_id`` returns a row the
+          first time a given (statement, params) pair is seen and **nothing** afterwards. That
+          is what real Postgres does, and it is the channel by which a writer learns "this was
+          a replay" — the correct design gates its trust_observations insert on exactly that.
+          ``do update ... returning`` is deliberately NOT suppressed: it legitimately returns a
+          row on every call, which is what the ``claims`` upsert relies on.
+        * an aggregate needs a NUMBER; answering it a uuid made ``int()`` raise on every case
+          and errored the whole sweep before a single assertion ran.
+
+        What it still cannot model, stated rather than hidden: durability. An implementation
+        that remembers replays in a process-local ``set()`` looks identical to one that asks
+        the database, so the replay below re-imports the seam between the two calls, which
+        clears process memory and leaves this connection's state intact.
         """
-        if re.search(r"returning\s+[\w.\"]*id\b", self._last, re.IGNORECASE):
+        statement = " ".join(self._last.split()).lower()
+        key = (statement, repr(self._params))
+        occurrence = self._seen.get(key, 0)
+        self._seen[key] = occurrence + 1
+
+        if "insert" in statement and re.search(r"on\s+conflict", statement):
+            suppressible = not re.search(r"do\s+update", statement)
+            if suppressible and re.search(r"\breturning\b", statement):
+                return (self.RETURNED_ID,) if occurrence == 0 else None
+        if re.search(r"returning\s+[\w.\"]*id\b", statement):
             return (self.RETURNED_ID,)
-        if re.search(r"\b(count|max|min|sum|coalesce)\s*\(", self._last, re.IGNORECASE):
+        if re.search(r"\b(count|max|min|sum|coalesce)\s*\(", statement):
             return (0,)
         return (self.RETURNED_ID,)
 
@@ -2365,9 +2390,12 @@ class _T256RecordingConnection:
 
     def __init__(self) -> None:
         self.log: list[tuple[str, Any]] = []
+        #: Shared across every cursor this connection hands out, because a real database's
+        #: state does not reset when a writer opens a new cursor.
+        self.seen: dict[tuple[str, str], int] = {}
 
     def cursor(self, *_: Any, **__: Any) -> _T256RecordingCursor:
-        return _T256RecordingCursor(self.log)
+        return _T256RecordingCursor(self.log, self.seen)
 
     def commit(self) -> None:
         return None
@@ -2376,7 +2404,7 @@ class _T256RecordingConnection:
         return None
 
     def execute(self, sql: Any, params: Any = None) -> _T256RecordingCursor:
-        return _T256RecordingCursor(self.log).execute(sql, params)
+        return _T256RecordingCursor(self.log, self.seen).execute(sql, params)
 
     def __enter__(self) -> _T256RecordingConnection:
         return self
@@ -2604,6 +2632,8 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
        carries ``on conflict``", so the constraint-based design the migration was written for
        is accepted rather than the fixer being pushed toward a racy select-then-skip.
     """
+    import importlib
+
     seams = _t256_find_seams()
     assert seams, (
         "no trust-side callable persists a verification outcome. Searched the public surface "
@@ -2690,14 +2720,43 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
 
     once = _T256RecordingConnection()
     twice = _T256RecordingConnection()
-    payload = {key: value for key, value in dict(cases[0]).items() if key in parameters}
+    # A FRESH case, never one the 56-case sweep above already wrote. Measured: reusing
+    # `cases[0]` let a writer with a process-local memo emit NOTHING at replay time — the
+    # sweep had already recorded that key — so the comparison read "0 INSERTs against 0" and
+    # called it idempotent. The demand was satisfiable by a writer that had stopped writing.
+    replay_case = _t256_cases()[0]
+    assert replay_case["claim_ref"] not in {case["claim_ref"] for case in cases}, (
+        "the replay case collides with one the sweep already wrote, so a writer that "
+        "remembers what it has seen would be graded on a key it has already retired"
+    )
+    payload = {key: value for key, value in dict(replay_case).items() if key in parameters}
     seam(**dict(payload, connection=once))
     seam(**dict(payload, connection=twice))
-    seam(**dict(payload, connection=twice))
+    # Re-import the seam before the replay. An idempotency check that lives in a process-local
+    # `set()` is not idempotency — it forgets on every restart and never applies across
+    # processes — but an in-process double cannot tell it from durable state. Reloading clears
+    # module-level memory while leaving this connection's state intact, so only a writer that
+    # asks the DATABASE still refuses the second write.
+    replay_seam = seam
+    try:
+        reloaded = importlib.reload(importlib.import_module(module_name))
+        replay_seam = getattr(reloaded, name, seam)
+    except Exception:  # a package that will not reload is graded on the seam we already hold
+        replay_seam = seam
+    replay_seam(**dict(payload, connection=twice))
+
+    baseline = {table: len(_t256_inserts(once, table)) for table in _T256_TABLES}
+    silent = sorted(table for table, count in baseline.items() if count == 0)
+    assert silent == [], (
+        f"the replay comparison has nothing to compare: a single call wrote no row at all to "
+        f"{silent}. 'zero INSERTs and zero INSERTs' is not idempotence, it is a writer that "
+        f"has stopped writing — the same defanged-by-its-own-fixture shape as un-insertable "
+        f"fixture data, one level up"
+    )
 
     doubled: list[str] = []
     for table in _T256_TABLES:
-        first = len(_t256_inserts(once, table))
+        first = baseline[table]
         replayed = _t256_inserts(twice, table)
         if len(replayed) <= first:
             continue
@@ -2707,9 +2766,17 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
             re.search(r"on\s+conflict", statement, re.IGNORECASE) for statement in extra
         ):
             continue
+        guarded = sum(
+            1 for statement in extra if re.search(r"on\s+conflict", statement, re.IGNORECASE)
+        )
         doubled.append(
-            f"{table}: {first} INSERT(s) on one call, {len(replayed)} on two"
-            + ("" if protected else " — and this table has no UNIQUE for ON CONFLICT to catch")
+            f"{table}: {first} INSERT(s) on one call, {len(replayed)} on two; "
+            + (
+                f"{guarded} of the {len(extra)} extra carry ON CONFLICT but this table has no "
+                f"UNIQUE for it to catch, so the clause is decoration"
+                if not protected
+                else f"{guarded} of the {len(extra)} extra carry ON CONFLICT"
+            )
         )
     assert doubled == [], (
         f"replaying the identical (claim_ref, catalog_snapshot_id, verifier_version) writes "
