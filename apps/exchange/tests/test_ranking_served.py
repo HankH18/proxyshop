@@ -562,6 +562,27 @@ def test_a_silent_stores_list_price_fallback_reaches_the_shortlist():
     asserted next door, in
     :func:`test_a_fallback_still_satisfies_no_hard_constraint_and_is_excluded_on_that_alone`.
 
+    **The strongest evidence that this door was meant to be open is a test nobody had to
+    change.** ``apps/exchange/tests/test_ranking.py::test_an_offer_with_no_checkout_url_is_not_
+    shortlisted`` states the rule it enforces in its own words:
+
+        "``checkout.domain`` leaves "absent" to its caller because an R10 list-price fallback
+        bid carries no URL. For RANKING the answer is deny: a candidate whose checkout
+        destination cannot be established is one the buyer cannot be sent to, so it must not
+        occupy a shortlist slot."
+
+    The rule is "a destination that cannot be **established**", not "a fallback". It names R10
+    as the specific reason ``checkout.domain`` hands "absent" back to its caller instead of
+    raising — it was written to leave exactly this door open. The fix establishes the
+    destination from the platform's own registry, so that rule does not reach it; that test
+    builds its candidate directly with the URL popped, never touches ``candidate_from_entry``,
+    is untouched on this branch and is still green.
+
+    So **C10/S8 is satisfied rather than loosened.** S8 requires that no checkout URL is ever
+    returned off the seller's registered domain, and the URL here IS the registered domain —
+    the platform's record, not the store's claim. The filter's comparison is unchanged and the
+    candidate still has to pass it.
+
     The intent here carries no hard constraint, and that is deliberate rather than convenient:
     ``starting-slice.md`` §3.3 says a fallback "asserts no claims at all, which is why it can
     never be the evidence that satisfies one", so R10's second half is only reachable on an

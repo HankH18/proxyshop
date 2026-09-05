@@ -190,6 +190,16 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
       exchange with no seller registry still shortlists no fallback. The absent lookup is a
       denial here exactly as it is everywhere else on this path.
 
+    **C10/S8 is satisfied here, not loosened, and that distinction is the whole safety
+    property.** S8's rule is that no checkout URL is ever returned off the seller's registered
+    domain. The URL this builds IS the seller's registered domain — the platform's own record,
+    read through the same ``RegisteredDomains`` port the accept path mints against. Nothing
+    about the comparison in ``ranking.filters.domain_reason`` changes: the candidate still has
+    to pass ``is_on_domain`` against ``store_domain``, and it passes because the destination can
+    now be *established*, not because the check was relaxed for anyone. Reading any
+    store-supplied value to build this URL WOULD loosen S8 — which is why the reply, the roster
+    row and ``bid["store_domain"]`` are all unreachable from this function.
+
     Nothing read here came from the silent store. It could not have: the store never answered.
     """
     if not isinstance(offer, Mapping):
