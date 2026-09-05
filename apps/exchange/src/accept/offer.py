@@ -454,11 +454,16 @@ def accept(
             nothing is wired at all the port falls back to the bid's own claim and the result
             says so via :attr:`AcceptResult.domain_verified`.
         claims: the acceptance-claim table (:mod:`.claims`) — the durable one-accept guard,
-            taken before the merchant is asked to mint. Omitted, the source wired by
-            :func:`~.claims.use_acceptance_claims` is used, and failing that a process-local
-            table which is a floor rather than a guarantee. Pass ``None`` to run with no claim
-            at all: only the object-scoped stamp then applies, which is the pre-T-158
-            behaviour and is not safe on a money path.
+            taken before the merchant is asked to mint. Omitted, whatever
+            :func:`~.claims.platform_acceptance_claims` reports is used: the table this
+            request is scoped to (:func:`~.routes.accept_bid` opens one over its own app's
+            store on every served accept), else the one wired by
+            :func:`~.claims.use_acceptance_claims`, else **nothing**. There is deliberately no
+            default table — see :mod:`.claims` on why a process-lifetime one is the wrong
+            shape twice over — so a call with none in force runs on the object-scoped stamp
+            alone, which is the pre-T-158 behaviour and is not safe on a money path.
+            :attr:`AcceptResult.claim_verified` reports which of the two actually applied.
+            Passing ``None`` explicitly forces that unguarded mode.
 
     Returns:
         :class:`AcceptResult`. ``accepted`` is the outcome; a refusal carries
