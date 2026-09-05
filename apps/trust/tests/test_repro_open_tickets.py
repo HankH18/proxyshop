@@ -2628,9 +2628,36 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
     3. **its SQL is executable** — every column the migration marks NOT NULL with no DEFAULT
        must be named. A recording cursor accepts an INSERT that omits all of them, so without
        this the whole cross product passes against SQL Postgres would reject on row one;
-    4. **a replay writes no second ROW** — asserted as "no second INSERT, or an INSERT that
-       carries ``on conflict``", so the constraint-based design the migration was written for
-       is accepted rather than the fixer being pushed toward a racy select-then-skip.
+    4. **a replay writes no second ROW** — compared against a ONE-call baseline, with
+       ``on conflict`` accepted as a defence only where a UNIQUE exists for it to catch.
+
+    WHAT THIS DOUBLE CAN AND CANNOT SEE, because the next person to touch demand 4 will hit
+    this and three rounds of live-Postgres measurement went into learning it.
+
+    It can see the ``on conflict ... do nothing ... returning`` route: the recording cursor
+    answers a row the first time a ``(statement, params)`` pair arrives and nothing after,
+    which is what Postgres does and is the channel the correct writer reads. It deliberately
+    does NOT model ``select``-then-skip or a ``count(*)`` gate, because doing so means
+    reimplementing a query engine inside a test double; a writer that reads the database in
+    one of those shapes will fail here even though it is correct, and the honest response is
+    this paragraph rather than a wider double. It also cannot see DURABILITY at all — an
+    in-process ``set()`` is indistinguishable from a table — which is why the replay call
+    crosses an ``importlib.reload``.
+
+    THE REAL REMEDY IS A MIGRATION, and it is a defect in the product rather than in this
+    gate. ``ledger.trust_observations`` carries no uniqueness over its real columns: its only
+    unique index is the primary key on ``observation_id``, declared
+    ``uuid ... default gen_random_uuid()`` and therefore fresh on every INSERT, so there is no
+    arbiter a bare ``ON CONFLICT DO NOTHING`` could ever match. Measured on a dedicated
+    database: three identical calls leave the table at 3 rows both without the clause and
+    with it, the rows sharing ``verification_id``, ``store_id``, ``dim`` and ``weight`` and
+    differing only in the generated id, while ``claim_verifications`` stays at 1 because it
+    has ``claim_verifications_idempotency_key UNIQUE (claim_id, catalog_snapshot_id,
+    verifier_version)`` to arbitrate. A redelivered queue message or a replay is enough to
+    double-count an observation in a store's trust score, silently. Until a
+    ``UNIQUE (verification_id, dim, observation_type)`` exists, correctness here rests
+    entirely on writer discipline — which is exactly why this demand has to infer intent from
+    SQL text instead of checking something the database enforces.
     """
     import importlib
 
