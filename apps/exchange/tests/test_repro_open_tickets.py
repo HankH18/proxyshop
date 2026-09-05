@@ -1231,8 +1231,22 @@ def _t270_at(node: Any, path: tuple[Any, ...]) -> Any:
     return node
 
 
-def _t270_plant(template: Any, path: tuple[Any, ...], literal: str) -> str:
-    """The request bytes with ``literal`` written at ``path``.
+#: How a non-finite literal is wrapped before being planted. ``bare`` is the scalar case;
+#: the other two BURY it inside a container, which is what forces the error renderer to
+#: recurse rather than glance at a top-level value.
+#:
+#: This exists because an adversarial pass shipped a deliberately NON-recursive repair — one
+#: that sanitises only a scalar ``input`` and walks nothing — and the gate went green. Every
+#: case the corpus drew put the non-finite at the top of the echoed value, so recursion was
+#: never actually required. A handler that stops at depth one now fails on two thirds of the
+#: battery.
+T270_WRAPPINGS: tuple[str, ...] = ("bare", "in_list", "in_object")
+
+_T270_SENTINEL = "__T270_PLANTED__"
+
+
+def _t270_plant(template: Any, path: tuple[Any, ...], literal: str, wrapping: str) -> str:
+    """The request bytes with ``literal`` written at ``path``, wrapped per ``wrapping``.
 
     Built as text, not through ``json.dumps(..., allow_nan=True)`` on a Python ``float('nan')``,
     because the *client* is the attacker here: an httpx/requests caller that hands ``json=``
@@ -1241,15 +1255,21 @@ def _t270_plant(template: Any, path: tuple[Any, ...], literal: str) -> str:
     """
     import copy  # noqa: PLC0415 - kept out of this file's frozen import head
 
+    if wrapping == "in_list":
+        planted = f"[1.0, {literal}, 2.0]"
+    elif wrapping == "in_object":
+        planted = f'{{"depth_one": {{"depth_two": [{literal}]}}}}'
+    else:
+        planted = literal
+
     if not path:
-        return literal
+        return planted
     body = copy.deepcopy(template)
-    sentinel = "__T270_PLANTED__"
     node = body
     for key in path[:-1]:
         node = node[key]
-    node[path[-1]] = sentinel
-    return json.dumps(body).replace(f'"{sentinel}"', literal)
+    node[path[-1]] = _T270_SENTINEL
+    return json.dumps(body).replace(f'"{_T270_SENTINEL}"', planted)
 
 
 def _t270_corpus() -> list[dict[str, Any]]:
@@ -1272,6 +1292,7 @@ def _t270_corpus() -> list[dict[str, Any]]:
         template = _t270_auction_shape(rng)
         for path in _t270_positions(template):
             literal = rng.choice(T270_NON_FINITE_LITERALS)
+            wrapping = rng.choice(T270_WRAPPINGS)
             cases.append(
                 {
                     "seed": seed,
@@ -1281,26 +1302,29 @@ def _t270_corpus() -> list[dict[str, Any]]:
                     "path": path,
                     "kind": type(_t270_at(template, path)).__name__,
                     "literal": literal,
-                    "raw": _t270_plant(template, path, literal),
+                    "wrapping": wrapping,
+                    "raw": _t270_plant(template, path, literal, wrapping),
                 }
             )
         # The second route matters on its own: ``AcceptBidRequest`` has exactly one property
         # and it is a ``string``, so a repair that introspects numeric fields cannot reach it.
         accept_template = {"bid_ref": f"bid-{rng.randrange(10**6)}"}
         for path in _t270_positions(accept_template):
-            literal = rng.choice(T270_NON_FINITE_LITERALS)
-            cases.append(
-                {
-                    "seed": seed,
-                    "route": "POST /auctions/{auction_id}/accept",
-                    "url": f"/auctions/auction-{rng.randrange(10**6)}/accept",
-                    "template": accept_template,
-                    "path": path,
-                    "kind": type(_t270_at(accept_template, path)).__name__,
-                    "literal": literal,
-                    "raw": _t270_plant(accept_template, path, literal),
-                }
-            )
+            for wrapping in T270_WRAPPINGS:
+                literal = rng.choice(T270_NON_FINITE_LITERALS)
+                cases.append(
+                    {
+                        "seed": seed,
+                        "route": "POST /auctions/{auction_id}/accept",
+                        "url": f"/auctions/auction-{rng.randrange(10**6)}/accept",
+                        "template": accept_template,
+                        "path": path,
+                        "kind": type(_t270_at(accept_template, path)).__name__,
+                        "literal": literal,
+                        "wrapping": wrapping,
+                        "raw": _t270_plant(accept_template, path, literal, wrapping),
+                    }
+                )
     _T270_CORPUS = cases
     return cases
 
@@ -1321,22 +1345,71 @@ def _t270_clients() -> list[tuple[str, Any]]:
 
     ``raise_server_exceptions=False`` so the transport answers 500 the way uvicorn does,
     instead of re-raising into the test and turning a served 500 into an ERROR.
+
+    **This function measures only the fresh build; the served object is measured in a
+    subprocess** by :func:`_t270_served_app_statuses`, and that split is not fussiness. Whether
+    the in-process ``exchange.main.app`` was built before or after a feature module is a
+    property of THIS PROCESS'S IMPORT HISTORY, not of the code under test. Measured: running
+    this gate alone is red, but running ``test_t294_… test_t270_…`` together turned it GREEN
+    under a repair that leaves the deployed app broken — because ``_t294_corpus`` imports
+    ``exchange.auction.routes`` first, so an import-time patch landed before ``main.py:52``
+    executed. The full-directory run survived only by alphabetical accident. A subprocess that
+    imports ``exchange.main`` first, with nothing else loaded, is the only way to ask the
+    question the deployment actually poses.
     """
-    import exchange.main  # noqa: PLC0415
+    from exchange.main import create_app  # noqa: PLC0415
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
-    return [
-        # First, because it is the one that ships. `exchange.main:app` is what the container
-        # runs; a gate that never touches it is grading a sibling of the deployed service.
-        (
-            "exchange.main:app (the served ASGI object)",
-            TestClient(exchange.main.app, raise_server_exceptions=False),
-        ),
-        (
-            "exchange.main.create_app()",
-            TestClient(exchange.main.create_app(), raise_server_exceptions=False),
-        ),
-    ]
+    return [("exchange.main.create_app()", TestClient(create_app(), raise_server_exceptions=False))]
+
+
+def _t270_served_app_statuses(cases: list[dict[str, Any]]) -> list[int]:
+    """POST every corpus case at ``exchange.main:app`` in a FRESH interpreter, and report status.
+
+    The subprocess imports ``exchange.main`` as its first repo import, so the module-level
+    ``app = create_app()`` at ``main.py:52`` runs exactly as it does under
+    ``uvicorn exchange.main:app`` — before any feature module has been imported by anything
+    else. In-process this is unmeasurable: pytest has already imported half the tree, and the
+    answer changes with collection order.
+    """
+    import os  # noqa: PLC0415 - kept out of this file's frozen import head
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    repo_root = Path(__file__).resolve().parents[3]
+    payload = json.dumps([{"url": case["url"], "raw": case["raw"]} for case in cases])
+    code = (
+        "import json, sys\n"
+        "import exchange.main\n"
+        "from fastapi.testclient import TestClient\n"
+        "client = TestClient(exchange.main.app, raise_server_exceptions=False)\n"
+        "cases = json.loads(sys.stdin.read())\n"
+        "out = []\n"
+        "for case in cases:\n"
+        "    try:\n"
+        "        response = client.post(case['url'], content=case['raw'].encode(),\n"
+        "                               headers={'content-type': 'application/json'})\n"
+        "        out.append(response.status_code)\n"
+        "    except Exception:\n"
+        "        out.append(599)\n"
+        "print(json.dumps(out))\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(repo_root), str(repo_root / ".pkgroot")])
+    env["PROXYSHOP_WORKER"] = env.get("PROXYSHOP_WORKER", "0")
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, "-c", code],
+        cwd=str(repo_root),
+        env=env,
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert completed.returncode == 0, (
+        f"the served-app probe would not run:\n{completed.stderr[-3000:]}"
+    )
+    return list(json.loads(completed.stdout.strip().splitlines()[-1]))
 
 
 def test_the_non_finite_payload_corpus_is_armed() -> None:
@@ -1359,10 +1432,21 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
 
     assert len(cases) >= 60, f"the corpus built only {len(cases)} cases; the sweep is unarmed"
 
-    assert len(clients) == 2, (
-        f"the gate probes {len(clients)} app(s); it must ask BOTH the module-level "
-        "`exchange.main:app` that uvicorn serves and a fresh `create_app()`, because a "
-        "handler installed at feature-module import time reaches only the latter"
+    assert len(clients) == 1, (
+        f"the in-process client list holds {len(clients)} entries; the served object is "
+        "measured by subprocess, not here"
+    )
+
+    # The served-app probe must actually run and actually see the defect's shape. A probe that
+    # returned 599 for everything (its own exception sentinel) would make the gate red for the
+    # wrong reason forever, and one that returned nothing would make it green.
+    control_statuses = _t270_served_app_statuses(cases[:5])
+    assert len(control_statuses) == 5, (
+        f"the served-app subprocess returned {control_statuses}; it is not measuring the corpus"
+    )
+    assert all(status != 599 for status in control_statuses), (
+        f"the served-app subprocess could not dispatch at all (599 is its own exception "
+        f"sentinel): {control_statuses}"
     )
 
     routes = {case["route"] for case in cases}
@@ -1386,6 +1470,14 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
 
     paths = {(case["route"], case["path"]) for case in cases}
     assert len(paths) >= 12, f"only {len(paths)} distinct positions are covered; too narrow"
+
+    wrappings = {case["wrapping"] for case in cases}
+    assert set(T270_WRAPPINGS) <= wrappings, (
+        f"the corpus only plants {sorted(wrappings)}; without `in_list` and `in_object` the "
+        "non-finite always sits at the top of the echoed value, so a repair that sanitises a "
+        "scalar and recurses into nothing passes — measured, that exact non-recursive handler "
+        "turned this gate green"
+    )
 
     # EVERY drawn template, on EVERY app, not just the first. An earlier version of this loop
     # `break`ed after one case, so it validated one of the four templates the corpus draws —
@@ -1481,6 +1573,16 @@ def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
 
     failures: list[str] = []
     probed = 0
+
+    def _record(label: str, case: dict[str, Any], status: int) -> None:
+        if status < 500:
+            return
+        where = ".".join(str(part) for part in case["path"]) or "<the whole body>"
+        failures.append(
+            f"[{label}] {case['route']} with {case['literal']} at {where} "
+            f"(a {case['kind']} position) -> {status}"
+        )
+
     for label, client in clients:
         for case in cases:
             response = client.post(
@@ -1489,15 +1591,21 @@ def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
                 headers={"content-type": "application/json"},
             )
             probed += 1
-            if response.status_code >= 500:
-                where = ".".join(str(part) for part in case["path"]) or "<the whole body>"
-                failures.append(
-                    f"[{label}] {case['route']} with {case['literal']} at {where} "
-                    f"(a {case['kind']} position) -> {response.status_code}"
-                )
+            _record(label, case, response.status_code)
 
-    assert probed == len(cases) * len(clients), (
-        f"{probed} probes ran, expected {len(cases) * len(clients)}; the sweep is unarmed"
+    # The object uvicorn serves, measured in a clean interpreter so the answer does not depend
+    # on what this pytest process happened to import first.
+    served_statuses = _t270_served_app_statuses(cases)
+    assert len(served_statuses) == len(cases), (
+        f"the served-app probe returned {len(served_statuses)} statuses for {len(cases)} cases; "
+        "it is not measuring the corpus"
+    )
+    for case, status in zip(cases, served_statuses, strict=True):
+        probed += 1
+        _record("exchange.main:app (the served ASGI object)", case, status)
+
+    assert probed == len(cases) * (len(clients) + 1), (
+        f"{probed} probes ran, expected {len(cases) * (len(clients) + 1)}; the sweep is unarmed"
     )
 
     assert not failures, (
@@ -1537,6 +1645,7 @@ def _t293_corpus() -> list[dict[str, Any]]:
     import random  # noqa: PLC0415 - kept out of this file's frozen import head
     import string  # noqa: PLC0415
 
+    from exchange.accept import accept  # noqa: PLC0415
     from exchange.accept.routes import InMemoryAuctionBids, configure_accept  # noqa: PLC0415
     from exchange.auction.routes import configure_auctions  # noqa: PLC0415
     from exchange.eligibility import ELIGIBLE, StaticSellerEligibility  # noqa: PLC0415
@@ -1595,6 +1704,49 @@ def _t293_corpus() -> list[dict[str, Any]]:
             ],
         )
         refused = client.post(f"/auctions/{auction_id}/accept", json={"bid_ref": "bid-a"})
+
+        # The DURABLE half, measured separately. The ticket says the address reaches an
+        # unauthenticated HTTP client AND a persisted event, and only the first was being
+        # captured — an adversarial pass exploited exactly that gap, scrubbing `0x…` inside
+        # `accept/routes.py:_denied` (the HTTP boundary) and leaving the policy_event's
+        # `reason` untouched, address included. Gate green, pointer still written down
+        # forever. `accept()` is called directly here because the event is not on the wire.
+        persisted = ""
+        try:
+            direct = accept(
+                {
+                    "auction_id": auction_id,
+                    "intent_id": f"intent-{index}",
+                    "cluster_id": "cluster-1",
+                    "accepted_bid_ref": None,
+                    "now": 1_700_000_000.0,
+                    "bids": [
+                        {
+                            "bid_id": "bid-a",
+                            "store_id": store_id,
+                            "store_domain": domain,
+                            "offer": {
+                                "product_ref": "prod-1",
+                                "unit_price": 90.0,
+                                "total_price": 90.0,
+                                "checkout_url": f"https://{domain}/cart/1:1",
+                                "expires_at": 2_000_000_000.0,
+                            },
+                        }
+                    ],
+                },
+                "bid-a",
+                creator,
+                "shopify",
+                registered_domains=lambda _store_id, _domain=domain: _domain,
+            )
+            payloads = [
+                event["payload"] for event in direct.events if event["kind"] == "policy_event"
+            ]
+            persisted = str(payloads[0].get("reason", "")) if payloads else ""
+        except Exception as exc:  # pragma: no cover - reported by the armer, never swallowed
+            persisted = f"<the persisted-event probe raised {type(exc).__name__}: {exc}>"
+
         cases.append(
             {
                 "seed": seed,
@@ -1603,6 +1755,7 @@ def _t293_corpus() -> list[dict[str, Any]]:
                 "status": refused.status_code,
                 "body": refused.text,
                 "denial_reason": str(refused.json().get("denial_reason", "")),
+                "persisted_reason": persisted,
             }
         )
     _T293_CORPUS = cases
@@ -1647,6 +1800,14 @@ def test_the_unusable_code_creator_corpus_is_armed() -> None:
         assert case["denial_reason"].startswith("checkout_refused"), (
             f"the refusal was {case['denial_reason'][:200]!r}, which is not a checkout "
             f"refusal at all (seed {case['seed']})"
+        )
+        # The persisted-event probe must have produced a real refusal, not an exception it
+        # swallowed. Without this, a broken direct-`accept()` call would silently make the
+        # gate's durable half unfalsifiable — the empty string matches no address.
+        assert case["persisted_reason"].startswith("checkout_refused"), (
+            "the persisted policy_event probe did not produce a checkout refusal, so the "
+            "gate's durable half is grading nothing: "
+            f"{case['persisted_reason'][:250]!r} (seed {case['seed']})"
         )
 
     # Distinctness is measured with the ADDRESSES STRIPPED, and that is not a detail: an
@@ -1746,9 +1907,23 @@ def test_t293_an_unusable_code_creator_does_not_render_a_memory_address() -> Non
     leaked = [case for case in cases if address.search(case["body"])]
     assert not leaked, (
         f"{len(leaked)} of {len(cases)} unauthenticated 409 bodies carry a live CPython "
-        f"memory address (corpus seed {cases[0]['seed']}); the same string is persisted into "
-        "the policy_event, so the pointer is both published and durable:\n  "
+        f"memory address (corpus seed {cases[0]['seed']}):\n  "
         + "\n  ".join(case["denial_reason"][:200] for case in leaked[:3])
+    )
+
+    # The DURABLE half, asserted separately from the published one and NOT as a restatement
+    # of it. An adversarial pass scrubbed `0x…` at the HTTP boundary in `_denied` and left the
+    # policy_event untouched: the gate went green, the whole apps/exchange suite stayed green,
+    # and the pointer was still being written into a persisted event forever. The ticket names
+    # both halves; both are now measured, and a boundary-only redaction fails here.
+    durable = [case for case in cases if address.search(case["persisted_reason"])]
+    assert not durable, (
+        f"{len(durable)} of {len(cases)} persisted policy_event reasons carry a live CPython "
+        f"memory address (corpus seed {cases[0]['seed']}). Redacting only the HTTP response "
+        "leaves the pointer in the durable record, which is the half an operator reads back "
+        "months later; the fix belongs where the message is BUILT "
+        "(checkout/providers.py), not at the boundary:\n  "
+        + "\n  ".join(case["persisted_reason"][:200] for case in durable[:3])
     )
 
     forgotten = [case for case in cases if case["class_name"] not in case["body"]]
@@ -2071,6 +2246,7 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     )
 
     refusals: list[str] = []
+    fabricated: list[str] = []
     minted = 0
     examined = 0
     for auction in auctions:
@@ -2080,13 +2256,29 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
         # or `already_accepted` for reasons that have nothing to do with the bid store.
         bid = auction["bids"][0]
         examined += 1
+
+        # FIRST, a ref the exchange never published. A store with a real BOOK refuses it; a
+        # store that FABRICATES a bid for whatever ref it is handed mints for it. That second
+        # shape passed the earlier version of this gate — the unguessable token protects only
+        # against an attacker who has to guess, and `accept_bid` is handed the ref — so the
+        # question is asked directly. It runs before the real accept because a refusal leaves
+        # the auction open, while an acceptance would close it.
+        forged_ref = f"bid-{'f' * 8}{examined:04d}"
+        forged = client.post(
+            f"/auctions/{auction['auction_id']}/accept", json={"bid_ref": forged_ref}
+        )
+        forged_payload = forged.json()
+        if forged.status_code == 200 and forged_payload.get("code"):
+            fabricated.append(
+                f"{forged_ref} (never published by this auction) -> 200 "
+                f"{forged_payload.get('code')}"
+            )
+
         answer = client.post(
             f"/auctions/{auction['auction_id']}/accept", json={"bid_ref": bid["bid_ref"]}
         )
         payload = answer.json()
-        # The positive form: a 200 carrying a real permalink and a real single-use code. No
-        # relabelling of a denial constant can manufacture one, and a bid rebuilt from the
-        # roster cannot reach it because it carries no `store_domain` to vouch for.
+        # The positive form: a 200 carrying a real permalink and a real single-use code.
         if answer.status_code == 200 and payload.get("code") and payload.get("permalink_url"):
             minted += 1
             continue
@@ -2102,6 +2294,14 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
         f"only {examined} auctions carried a bid to accept (seed {seed}); the sweep is unarmed"
     )
 
+    assert not fabricated, (
+        f"{len(fabricated)} auction(s) minted a discount code for a bid ref the exchange NEVER "
+        f"PUBLISHED (seed {seed}). That is not a bid store, it is a rubber stamp: the accept "
+        "path must be able to say no to a ref it has no record of, or 'the bid was recorded' "
+        "and 'the exchange says yes to anything' are indistinguishable:\n  "
+        + "\n  ".join(fabricated[:5])
+    )
+
     assert not refusals, (
         f"{minted} of {examined} bids that the exchange itself returned in its own `entries` "
         f"were acceptable; {len(refusals)} were refused (seed {seed}). The deployment is fully "
@@ -2114,6 +2314,167 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
 # =====================================================================================
 # T-244 — the external bid door runs for nobody, and a frozen metric counts it as met
 # =====================================================================================
+
+
+def _bid_door_dispatch_probe() -> dict[str, Any]:
+    """Build the real apps, POST at every door they serve, and report whether ``receive_bid`` RAN.
+
+    **This replaced an AST-plus-import-closure conjunction that an adversarial pass defeated
+    eleven ways, and the reason it failed is worth stating once: co-location is not execution.**
+    That version asked three static questions — is ``store_agent.external.door`` in the built
+    app's import closure, does some module in that closure contain a ``Call`` node named
+    ``receive_bid``, does the app serve any route — and all three were satisfiable without a
+    single request ever reaching the door. Measured, with ``door._receive_bid`` instrumented:
+
+    * a mounted ``/healthz`` plus an unused ``_unused_probe`` in ``main.py`` — green, 0 entries;
+    * a real ``POST /v1/bid-requests`` returning a canned ``{"accepted": true}`` beside an
+      ``_unused_helper`` nobody calls — green, 0 entries, and that "door" admits every
+      submission with no signature check at all;
+    * a handler calling a LOCAL function it defines itself and names ``receive_bid`` — green, 0
+      entries. It never imports ``door.py``; the closure conjunct passes because importing
+      ``store_agent.external.routes`` executes the package ``__init__``, which already does
+      ``from .door import receive_bid``, and ``_calls_named`` matches a NAME, not a binding.
+
+    Worse, it was anti-correlated in both directions. The genuine wiring with
+    ``include_in_schema=False`` was reported RED with a self-contradicting message ("the app
+    serves NO routes at all (mounted routers: ['store_agent.external.routes'])"), because the
+    served set was read from ``app.openapi()`` — a documentation artifact — while the real
+    route table was collected and never asserted on.
+
+    So the probe now DISPATCHES. It wraps ``door._receive_bid`` (the module global the total
+    wrapper resolves at call time, so ``from .door import receive_bid`` cannot bypass the
+    counter), builds each app, and POSTs a bid-shaped body at every POST route each app serves.
+    "Reachable" then means what the ticket means: a request that arrives at a published door
+    traverses the function. A dead helper cannot fake it and a local shadow cannot fake it.
+
+    **Both services are asked, and that is deliberate.** The store agent's own contract says of
+    ``POST /v1/bid-requests``: "SOLICITATION ONLY: exchange -> seller. This is not the inbound
+    door. An external seller submits a bid to the exchange's ``POST
+    /v1/auctions/{auction_id}/bids`` instead." Pinning the store-agent path would pin the door
+    to a path the contract says is not the door, and an exchange-side wiring — the shape the
+    contract actually describes — was falsely reported RED by the store-agent-only version.
+    Either service reaching the door satisfies the property.
+    """
+    import os  # noqa: PLC0415 - kept out of this file's frozen import head
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    repo_root = Path(__file__).resolve().parents[3]
+    code = r"""
+import json, sys
+
+entries = {"n": 0}
+import store_agent.external.door as door
+
+_real = door._receive_bid
+
+
+def _counting(*args, **kwargs):
+    entries["n"] += 1
+    return _real(*args, **kwargs)
+
+
+door._receive_bid = _counting
+
+# A plausible signed external submission. It does NOT have to be VALID: `receive_bid` is
+# documented "Never raises" and refuses hostile input by returning a receipt, so ENTERING it
+# is the measurement. A handler that answers without entering it is the thing being detected.
+BODIES = [
+    {"payload": {"auction_id": "a-1", "store_id": "s-1", "signer_id": "s-1", "key_id": "k-1",
+                 "issued_at": 0, "nonce": "n-1", "schema_version": "1.0.0",
+                 "offer": {"product_ref": "p-1", "unit_price": 1.0, "total_price": 1.0}},
+     "signature": "sig", "keyring": {"s-1": {"k-1": "secret"}}},
+    {"auction_id": "a-1", "store_id": "s-1", "signature": "sig",
+     "offer": {"product_ref": "p-1", "unit_price": 1.0, "total_price": 1.0}},
+    {},
+]
+
+# Every POST path the app serves, walking NESTED routers.
+#
+# `app.routes` is not flat on this FastAPI: `include_router` leaves `_IncludedRouter`
+# wrappers whose own `.routes` hold the real entries, and the wrappers carry no `path` or
+# `methods` of their own. A non-recursive walk sees only /openapi.json, /docs and /redoc,
+# which is exactly the empty POST set an earlier version of this probe measured.
+#
+# NB: no triple-quoted string may appear anywhere in this subprocess source. It is carried
+# in a triple-quoted literal in the enclosing file, and the formatter normalises that
+# literal's quote style, so an inner docstring silently terminates it and the rest of this
+# code becomes module-level syntax in the TEST file. That is a real bug this file already hit.
+def _post_paths(app):
+    found = set()
+    stack = list(getattr(app, "routes", []) or [])
+    seen = 0
+    while stack and seen < 5000:
+        seen += 1
+        node = stack.pop()
+        stack.extend(getattr(node, "routes", []) or [])
+        # `_IncludedRouter` is a dispatch shim with no `routes` of its own; the APIRouter that
+        # actually holds the entries hangs off `original_router`. `app` covers sub-application
+        # mounts. Following all three keeps this working whatever wrapper the version uses.
+        for attr in ("original_router", "app"):
+            nested = getattr(node, attr, None)
+            if nested is not None and nested is not node:
+                stack.append(nested)
+        path = getattr(node, "path", None)
+        methods = getattr(node, "methods", None) or set()
+        if path and "POST" in methods:
+            found.add(path)
+    return sorted(found)
+
+
+report = {}
+for label, builder in (("store_agent", "store_agent.main"), ("exchange", "exchange.main")):
+    before = entries["n"]
+    try:
+        import importlib
+
+        module = importlib.import_module(builder)
+        app = module.create_app()
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app, raise_server_exceptions=False)
+        posts = _post_paths(app)
+        for path in posts:
+            concrete = path
+            for opening, closing in (("{", "}"),):
+                while opening in concrete:
+                    head, _, rest = concrete.partition(opening)
+                    _var, _, tail = rest.partition(closing)
+                    concrete = head + "x-1" + tail
+            for body in BODIES:
+                try:
+                    client.post(concrete, json=body)
+                except Exception:
+                    pass
+        report[label] = {
+            "built": True,
+            "posts": posts,
+            "mounted": list(getattr(app.state, "mounted_routers", []) or []),
+            "door_entries": entries["n"] - before,
+        }
+    except Exception as exc:
+        report[label] = {"built": False, "error": f"{type(exc).__name__}: {exc}",
+                         "posts": [], "mounted": [], "door_entries": entries["n"] - before}
+
+report["modules"] = {name: getattr(m, "__file__", "") or "" for name, m in sys.modules.items()}
+report["total_door_entries"] = entries["n"]
+print(json.dumps(report))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(repo_root), str(repo_root / ".pkgroot")])
+    env["PROXYSHOP_WORKER"] = env.get("PROXYSHOP_WORKER", "0")
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, "-c", code],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert completed.returncode == 0, (
+        f"the bid-door dispatch probe would not run:\n{completed.stderr[-3000:]}"
+    )
+    return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
 def _store_agent_app_probe() -> dict[str, Any]:
@@ -2212,17 +2573,25 @@ def test_the_store_agent_import_closure_probe_is_armed() -> None:
     it turned out to be wrong.
     """
     repo_root = Path(__file__).resolve().parents[3]
-    probe = _store_agent_app_probe()
+    probe = _bid_door_dispatch_probe()
     modules = probe["modules"]
 
-    assert modules, "building the store agent app imported no module at all; the probe is wrong"
-    assert "store_agent.main" in modules, (
-        f"store_agent.main is missing from its own app's import closure; the probe is not "
-        f"measuring the served app (it saw {len(modules)} modules)"
+    assert modules, "the dispatch probe imported no module at all; the probe is wrong"
+    assert "store_agent.external.door" in modules, (
+        "the probe never imported store_agent.external.door, so its instrumentation of "
+        f"`_receive_bid` was never installed and a zero entry count means nothing "
+        f"(it saw {len(modules)} modules)"
     )
-    assert isinstance(probe.get("paths"), list) and isinstance(probe.get("mounted"), list), (
-        "the probe reported no route table; it can no longer tell an imported module from a "
-        f"served one, which is the distinction the gate rests on: {sorted(probe)}"
+    for label in ("store_agent", "exchange"):
+        assert probe[label]["built"], (
+            f"the {label} app would not build inside the probe, so its door-entry count of "
+            f"{probe[label]['door_entries']} is not evidence of anything: "
+            f"{probe[label].get('error')}"
+        )
+    assert probe["exchange"]["posts"], (
+        "the exchange app served no POST route inside the probe; it serves POST /auctions and "
+        "POST /auctions/{auction_id}/accept, so the probe is dispatching against the wrong "
+        f"object (it saw mounted={probe['exchange']['mounted']})"
     )
     for name, filename in sorted(modules.items()):
         if not filename or not name.startswith("store_agent"):
@@ -2311,39 +2680,26 @@ def test_t244_the_external_bid_door_is_reachable_from_a_served_process() -> None
     instead as the arming control for the AST scanner, where a symbol with a known production
     caller is exactly what is needed.
     """
-    probe = _store_agent_app_probe()
-    modules = probe["modules"]
-    served = [path for path in probe["paths"] if not path.startswith("/openapi")]
+    probe = _bid_door_dispatch_probe()
+    entries = int(probe["total_door_entries"])
     call_sites = _t244_production_call_sites("receive_bid")
 
-    # The module that DEFINES receive_bid, matched exactly. An adversarial pass defeated a
-    # `startswith("store_agent.external")` test with a package called `store_agent.externalz`,
-    # which satisfies the prefix while the real door is never imported.
-    door_imported = "store_agent.external.door" in modules
-
-    # A call site in a module the built app imports. `_calls_named` also matches an attribute
-    # of the same name, so the join below — the file must be one the SERVING process loaded —
-    # is what stops a stub's `self._door.receive_bid(...)` from counting as wiring.
-    reached = sorted(
-        f"{name}:{lineno}"
-        for _stem, path, lineno in call_sites
-        for name, filename in modules.items()
-        if filename and Path(filename).resolve() == path.resolve()
+    detail = "; ".join(
+        f"{label}: built={probe[label]['built']}, POST routes={probe[label]['posts'] or 'none'}, "
+        f"mounted={probe[label]['mounted'] or 'none'}, "
+        f"door entries={probe[label]['door_entries']}"
+        + (f", error={probe[label]['error']}" if not probe[label]["built"] else "")
+        for label in ("store_agent", "exchange")
     )
 
-    # Imported is not served. `create_app()` imports every `<feature>/routes.py` its glob finds
-    # and only THEN looks for a `router` attribute, so a file containing `router = None` beside
-    # a function naming receive_bid lands in the closure while mounting nothing — measured, and
-    # it turned the earlier two-part version of this gate green with no wiring whatsoever.
-    assert door_imported and reached and served, (
-        "the Tier-2 external bid door is not reachable from any served process, and all three "
-        "halves of that are required. Measured now: the store agent's app imports "
-        f"{len(modules)} modules and store_agent.external.door is "
-        f"{'among them' if door_imported else 'NOT among them'}; the AST scan found "
-        f"{len(call_sites)} production call site(s) of receive_bid "
-        f"{[f'{p}:{n}' for _s, p, n in call_sites][:5]}, of which {len(reached)} live in a "
-        f"module the built app imports; and the app serves {served or 'NO routes at all'} "
-        f"(mounted routers: {probe['mounted'] or 'none'}). A call site in a module nothing "
-        "imports is not wiring; an imported module that never calls the door is not wiring; "
-        "and a module that mounts no route serves nobody however thoroughly it is imported."
+    assert entries > 0, (
+        "no request that either service serves reaches the Tier-2 external bid door. Every "
+        "POST route on the built store-agent app and the built exchange app was dispatched a "
+        "bid-shaped body, and `store_agent.external.door._receive_bid` — the function behind "
+        "the six gates the frozen E4 suite exercises directly — was entered zero times. The "
+        f"AST scan separately finds {len(call_sites)} production call site(s) of receive_bid "
+        f"{[f'{p}:{n}' for _s, p, n in call_sites][:5]}, which is context, not the assertion: "
+        "a call site proves someone wrote the name, and this gate is about whether a request "
+        f"arrives. Measured: {detail}. So e4_store_agent_passing counts a signed-external-bid "
+        "capability that no running process performs."
     )
