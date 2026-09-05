@@ -320,6 +320,52 @@ def test_a_deployed_exchange_shortlists_a_hard_constrained_intent(
         )
 
 
+def test_a_shopper_who_states_a_must_have_can_actually_buy_what_they_are_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """The shortlist is not the finish line — the whole journey, on one hard constraint.
+
+    Asserted separately from the shortlist because they fail for different reasons and the
+    accept path re-decides things the ranking did not: it re-reads R12 and checks the checkout
+    host against the platform registry. A shortlist nobody can buy from would satisfy every
+    other assertion in this file.
+
+    ``test_composition_root.py`` already drives an accept end to end — on an intent stating
+    NO must-have, which is the one case in which none of this module's subject matter is
+    engaged.
+    """
+    document = tmp_path / "deployment.json"
+    document.write_text(
+        json.dumps(_document(agent_url, with_catalog=True), indent=2), encoding="utf-8"
+    )
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(document))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    with served_exchange() as client:
+        opened = client.post(
+            "/auctions",
+            json={
+                "intent": CONSTRAINED_INTENT,
+                "profile": {"pseudonym": "psn-buy-1", "buckets": {}},
+                "roster": _roster(),
+            },
+        )
+        assert opened.status_code == 201, f"{opened.status_code}: {opened.text}"
+        body = opened.json()
+        assert body["shortlist"]["slots"], f"nothing to buy; exclusions were {body['excluded']}"
+
+        top = body["shortlist"]["slots"][0]
+        accepted = client.post(
+            f"/auctions/{body['auction_id']}/accept", json={"bid_ref": top["bid_ref"]}
+        )
+
+    assert accepted.status_code == 200, f"{accepted.status_code}: {accepted.text}"
+    payload = accepted.json()
+    assert payload["code"].startswith("PSX-"), payload
+    assert payload["permalink_url"].startswith(f"https://{STORES[0]['domain']}/cart/"), payload
+    assert f"discount={payload['code']}" in payload["permalink_url"], payload
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected"),
     [
