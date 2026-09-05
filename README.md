@@ -324,6 +324,7 @@ ports listed are what its Dockerfile's CMD binds.
 | `e2e/` | Cross-service pytest: `test_s1_flow.py` (the scripted S1 proof), `test_jcs_conformance.py`, `test_scaffold_smoke.py`, and the fixtures under `e2e/support/s1/`. |
 | `db/` | Raw SQL — one init script and four migrations. |
 | `fixtures/` | A uv workspace member with a digest-pinned `manifest.json` and its loader. |
+| `docs/deploy.md` | **Read this before deploying or scaling anything.** How each service is told about the others, and why `--workers 1` on the exchange is a correctness pin rather than tuning: raising it, adding `deploy.replicas`, or running `--scale exchange=N` re-opens a double-spend that mints two live discount codes for one purchase. Nothing shipped is broken — the pin holds it shut — but nothing else in the documentation will tell you that before you change it. |
 
 ---
 
