@@ -311,18 +311,30 @@ def test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact()
 # ======================================================================================
 # T-246 — nothing in production reads the activation decision
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-246: `is_live` appears only at its two definition sites "
-        "(envelope/model.py:254, envelope/store.py:89) and in merchant tests — no production "
-        "module anywhere in apps/, packages/, services/ or e2e/ reads it, so nothing "
-        "demonstrates that a shadow or killed store actually stops bidding; the store-agent's "
-        "activation gate (store-agent/src/modes/runner.py:105 _envelope_states) reads a "
-        "context mapping that no production code ever builds from an envelope; remove this "
-        "marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-246 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-246: `is_live` appears only at its two definition sites "
+#       "(envelope/model.py:254, envelope/store.py:89) and in merchant tests — no production "
+#       "module anywhere in apps/, packages/, services/ or e2e/ reads it, so nothing "
+#       "demonstrates that a shadow or killed store actually stops bidding; the store-agent's "
+#       "activation gate (store-agent/src/modes/runner.py:105 _envelope_states) reads a "
+#       "context mapping that no production code ever builds from an envelope; remove this "
+#       "marker with the fix"))
+#
+# What it encodes: while no production file reads the activation decision this test must
+# fail, and strict=True makes it fail loudly once it starts passing, so the marker cannot
+# outlive the bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with apps/merchant/svc/src/bidding/ moved aside the test reports `1 xfailed`; with the
+# producer back it reports `1 passed`. My change is the cause. The assertion body is
+# untouched — the diff removes the decorator and nothing else.
+#
+# The fix takes the SECOND shape this test's own docstring says it accepts: a merchant-side
+# producer (merchant_svc.bidding.gate) that feeds the store-agent's activation gate. It is
+# driven against the REAL consumer — store_agent.modes.runner._envelope_states — in
+# test_envelope_hardening.py, not against a fake.
 def test_t246_some_production_code_reads_the_envelope_activation_decision() -> None:
     """A decision the product computes and nobody asks for is not wired up.
 

@@ -16,6 +16,7 @@ import importlib
 from typing import Any
 
 import pytest
+from merchant_svc.bidding import store_agent_context, store_may_bid
 from merchant_svc.envelope.digest import approval_digest
 from merchant_svc.envelope.model import ACTIVE, KILLED, SHADOW, ApprovalRejected, Envelope
 from merchant_svc.envelope.repository import (
@@ -299,3 +300,86 @@ def _rewind(envelope: Envelope, version: int) -> Envelope:
     document = envelope.to_dict()
     document["version"] = version
     return Envelope.from_obj(document, approval=None)
+
+
+# ======================================================================================
+# T-246 — the activation decision reaches the consumer that was written to read it
+# ======================================================================================
+def _live(versions: EnvelopeVersions, store_id: str) -> None:
+    """Put a store's envelope on file and activate it against a real approval."""
+    stored = versions.put(store_id, _envelope(store_id))
+    versions.activate(store_id, _approval(stored))
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_activation", "expected_may_bid"),
+    [
+        ("unknown", SHADOW, False),
+        ("shadow", SHADOW, False),
+        ("active", ACTIVE, True),
+        ("killed", KILLED, False),
+    ],
+)
+def test_the_store_agent_gate_reads_the_merchant_decision(
+    state: str, expected_activation: str, expected_may_bid: bool
+) -> None:
+    """Driven through the REAL consumer, not a fake.
+
+    ``store_agent.modes.runner._envelope_states`` is the activation gate T-246 says is fed by
+    nobody. This test builds the context with the merchant's producer and hands it to that
+    exact function, so what is proved is that the two halves of the seam agree — not that a
+    mapping this test wrote has the keys this test expects.
+
+    ``_envelope_states`` is imported inside the test rather than at module scope so a failure
+    to import it is charged to this test and reads as "the seam's consumer is gone", instead
+    of erroring the whole file at collection time.
+    """
+    from store_agent.modes.runner import _envelope_states  # noqa: PLC0415
+
+    versions = EnvelopeVersions()
+    store_id = f"s-gate-{state}"
+    if state == "shadow":
+        versions.put(store_id, _envelope(store_id))
+    elif state == "active":
+        _live(versions, store_id)
+    elif state == "killed":
+        _live(versions, store_id)
+        versions.kill(store_id)
+
+    context = store_agent_context(store_id, versions=versions)
+    assert _envelope_states(context).value == expected_activation
+    assert store_may_bid(store_id, versions=versions) is expected_may_bid
+    assert context["may_bid"] is expected_may_bid
+
+
+def test_the_producer_states_shadow_rather_than_relying_on_the_consumers_default() -> None:
+    """An unknown store gets an explicit `shadow`, not an omitted key.
+
+    Omitting it also fails closed today — the runner's gate defaults a missing activation to
+    shadow — but it would fail closed by leaning on the CONSUMER's default. The day that
+    default is loosened, a seam that granted activation by silence starts granting it.
+    """
+    context = store_agent_context("s-never-onboarded", versions=EnvelopeVersions())
+    assert context["envelope"]["activation"] == SHADOW
+    assert "no envelope" in context["reason"]
+
+
+def test_the_decision_is_asked_of_is_live_and_not_re_derived() -> None:
+    """A fourth activation state must not be readable as live by one of two spellings.
+
+    ``contracts.EnvelopeActivation`` has three members, so a genuinely unknown state cannot be
+    filed through the normal path. This drives the accessor directly instead: whatever
+    ``is_live`` says is what the gate says, because the gate asks it rather than re-spelling
+    the equality.
+    """
+
+    class _Fourth(EnvelopeVersions):
+        def is_live(self, store_id: str) -> bool:
+            return False
+
+    versions = _Fourth()
+    _live(versions, "s-fourth")
+    assert versions.current("s-fourth").activation == ACTIVE
+    assert store_may_bid("s-fourth", versions=versions) is False, (
+        "the gate re-derived the decision instead of asking is_live"
+    )
