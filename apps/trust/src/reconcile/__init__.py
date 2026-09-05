@@ -11,7 +11,16 @@ the bottom makes both spellings resolve to the same objects — see :mod:`trust.
 :data:`RECONCILED_KIND`      ``"reconciled"``, already in the frozen 18-kind vocabulary.
 :func:`reconciled_observations`  those verdicts -> the trust observations the scorer reads.
 :func:`observation_events`   the same, as ``offer_integrity`` events the ledger replays.
+:func:`discount_codes_of`    the single-use codes an event names, in every real spelling.
+:data:`CODE_BRIDGE_KINDS`    ``code_created`` / ``checkout_redirect`` — read for a join key
+                             and nothing else.
 ===========================  ===========================================================
+
+The join is not only on tokens. The exchange's ``checkout_token`` and the merchant's are two
+unrelated values for one checkout — the exchange mints its own after calling the merchant and
+transmits it nowhere — so the offer and the order meet on the single-use discount code, which
+:data:`CODE_BRIDGE_KINDS` carries alongside the exchange's token. :func:`discount_codes_of`
+documents what that key is worth and the three guards that keep a weaker key honest.
 
 The one rule (R4): **every integrity comparison derives from the ``order_paid`` webhook.**
 The pixel is recorded and never consulted. :mod:`.engine` carries the full rationale and
