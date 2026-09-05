@@ -561,3 +561,210 @@ def test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it() -> None
         "default, so every authenticated delivery a later test in that process makes is "
         "verified, put in the display ring, and handed to nobody"
     )
+
+
+# ======================================================================================
+# T-285 — the SyntaxWarning helper in THIS file was written and never wired up
+# ======================================================================================
+#: This file, which is also the file under test. Unavoidable for a test-hygiene ticket: the
+#: defect *is* in the test file, so the gate and its subject are the same path. It is called
+#: out rather than glossed, because "a test may never grade a file inside its own author's
+#: write scope" is a real rule and this is the one shape that cannot honour it.
+THIS_FILE = pathlib.Path(__file__).resolve()
+
+#: The product file whose non-raw docstring is the reason `_parse` exists at all.
+_WARNING_SOURCE = REPO_ROOT / "services" / "ingest" / "src" / "er" / "identity.py"
+
+
+def _ast_parse_call_sites(tree: ast.AST) -> list[int]:
+    """Line numbers of every ``ast.parse(...)`` CALL in ``tree`` — a call, not a mention."""
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "parse"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ast"
+    )
+
+
+def _helper_body_lines(tree: ast.AST, name: str) -> range:
+    """The line span of the named module-level function, or an empty range if it is gone."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+    return range(0)
+
+
+def test_t285_the_syntax_warning_helper_is_armed() -> None:
+    """Control for T-285, and it must PASS. Three things the red below depends on.
+
+    Without all three, a red on the gate would be an accident of collection rather than the
+    defect: the helper could have been renamed, the warning it mutes could have been fixed at
+    source, or this file could have stopped containing any ``ast.parse`` at all.
+    """
+    tree = _parse(THIS_FILE)
+    assert tree is not None, f"{THIS_FILE} does not parse"
+
+    # 1. The helper is still here, under this name, with a body.
+    span = _helper_body_lines(tree, "_parse")
+    assert len(span) > 1, "_parse is gone from this file; T-285 is about a helper that exists"
+
+    # 2. It really does mute a SyntaxWarning — the muting is inside its span, not decorative.
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "simplefilter"
+        for node in ast.walk(tree)
+        if getattr(node, "lineno", -1) in span
+    ), "_parse no longer mutes anything, so there is nothing for a call site to inherit"
+
+    # 3. The warning it was written for is STILL EMITTED by the product tree today. If
+    #    services/ingest fixes that docstring the helper stops being needed and this control
+    #    goes red — which is the honest signal that T-285's premise expired, not a pass.
+    assert _WARNING_SOURCE.is_file(), f"{_WARNING_SOURCE} is gone"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", SyntaxWarning)
+        ast.parse(_WARNING_SOURCE.read_text(encoding="utf-8"))
+    assert any(issubclass(w.category, SyntaxWarning) for w in caught), (
+        f"{_WARNING_SOURCE} no longer emits a SyntaxWarning, so `_parse` has nothing to mute "
+        "and T-285's premise has expired — retire the helper rather than wiring it"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-285: `_parse` (this file) wraps ast.parse in catch_warnings/simplefilter('ignore', "
+        "SyntaxWarning) and its docstring names exactly why — services/ingest/src/er/"
+        "identity.py has \\s in a non-raw docstring — but the two call sites it was written "
+        "to replace still call ast.parse bare, so the warning is still charged to "
+        "test_t246_some_production_code_reads_the_envelope_activation_decision. Worse than "
+        "noise: under -W error::SyntaxWarning CPython raises the escalated warning as a "
+        "SyntaxError, which the bare site's `except SyntaxError: continue` swallows, silently "
+        "dropping identity.py from a scan that claims to walk every product file; remove this "
+        "marker with the fix"
+    ),
+)
+def test_t285_every_ast_parse_in_this_file_goes_through_the_muting_helper() -> None:
+    """The helper is only a fix if the call sites use it.
+
+    Deliberately NOT asserted here: "``_parse`` has at least one caller". This gate's own
+    control calls it, so that assertion would be satisfied by this file's arrival rather than
+    by the repair — a gate that counts its own call is a gate that passes itself. What is
+    asserted is the remedy the ticket actually names: the bare call sites go through the
+    helper (or the helper goes away, which makes the set below empty just as well).
+    """
+    tree = _parse(THIS_FILE)
+    assert tree is not None, f"{THIS_FILE} does not parse"
+
+    inside_helper = _helper_body_lines(tree, "_parse")
+    bare = [line for line in _ast_parse_call_sites(tree) if line not in inside_helper]
+
+    assert bare == [], (
+        f"{THIS_FILE.name} calls ast.parse directly at line(s) {bare}, bypassing the `_parse` "
+        "helper written to mute the SyntaxWarning that services/ingest/src/er/identity.py "
+        "emits. The consequence is not cosmetic: with SyntaxWarning escalated to an error "
+        "CPython raises it as a SyntaxError, and a bare site guarded by "
+        "`except SyntaxError: continue` then drops that file from a scan that claims to walk "
+        "every product file — a coverage hole in the gate, reported as a clean pass"
+    )
+
+
+# ======================================================================================
+# T-317 — the merchant serves routes that appear in no published contract
+# ======================================================================================
+#: HTTP methods an OpenAPI path item can carry. `parameters` and `summary` are path-item keys
+#: too and are not operations, so a plain `for method in item` over-counts.
+_OPERATION_METHODS = frozenset(
+    {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
+)
+
+
+def _served_operations() -> set[tuple[str, str]]:
+    """Every ``(method, path)`` the merchant app actually answers, from the built app."""
+    from merchant_svc.main import create_app  # noqa: PLC0415
+
+    schema = create_app().openapi()
+    return {
+        (method.lower(), path)
+        for path, item in schema["paths"].items()
+        for method in item
+        if method.lower() in _OPERATION_METHODS
+    }
+
+
+def _published_operations() -> set[tuple[str, str]]:
+    """Every ``(method, path)`` the pinned merchant contract declares.
+
+    Read through ``contracts.openapi``, the repo's own loader, rather than by re-opening the
+    JSON: the document is ``packages/contracts/openapi/merchant.openapi.json``, which is
+    outside this service's tree, and that is the point — the thing this gate grades the
+    service against is not a file the service's own lane can edit.
+    """
+    from contracts.openapi import documents  # noqa: PLC0415
+
+    paths = documents()["merchant"]["paths"]
+    return {
+        (method.lower(), path)
+        for path, item in paths.items()
+        for method in item
+        if method.lower() in _OPERATION_METHODS
+    }
+
+
+def test_t317_the_merchant_route_comparison_is_armed() -> None:
+    """Control for T-317, and it must PASS. The comparison machinery works both ways.
+
+    A red below has to mean "the service serves something the contract does not declare". It
+    must not be able to mean "the app would not build", "the contract would not load", or
+    "the two are described in different vocabularies and nothing ever matches".
+    """
+    served = _served_operations()
+    published = _published_operations()
+
+    assert served, "the merchant app served no operations at all"
+    assert published, "the pinned merchant contract declared no operations at all"
+
+    # The vocabularies really do meet: several routes match exactly, so a non-match below is
+    # a real gap and not two spellings passing each other.
+    assert len(served & published) >= 3, (
+        f"served and published overlap in only {sorted(served & published)}, which is too "
+        "little to trust a diff between them"
+    )
+    # And the other direction is clean today, so the red below is unambiguously about
+    # served-but-unpublished and carries no second cause.
+    assert published - served == set(), (
+        f"the contract pins routes the service does not answer: {sorted(published - served)}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-317: the merchant serves GET /install, GET /install/callback and GET "
+        "/install/shops (apps/merchant/svc/src/install/routes.py:145, :173, :248) and none of "
+        "the three appears in packages/contracts/openapi/merchant.openapi.json. Undeclared "
+        "served routes are a security and review surface: nothing in the contract review "
+        "process ever looks at them. test_merchant_hardening.py:413-417 hard-exempts exactly "
+        "these three while its own docstring justifies only 'the install's own OAuth pair' — "
+        "/install/shops is an administrative JSON endpoint, not a browser redirect; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t317_every_route_the_merchant_serves_is_in_its_published_contract() -> None:
+    """A served route nobody declared is a surface nobody reviews.
+
+    Either direction of drift is a defect, and the published-but-not-served direction is
+    already clean (asserted in the armed control above), so this gate is about the other one.
+    Two repairs make it pass and the gate does not care which: publish the three routes in
+    the merchant contract, or stop serving them.
+    """
+    served = _served_operations()
+    published = _published_operations()
+
+    unpublished = sorted(served - published)
+    assert unpublished == [], (
+        f"the merchant service answers {len(unpublished)} operation(s) that appear in no "
+        f"published contract: {unpublished}. They are reachable, they are not generated into "
+        "any client, and no contract review has ever seen them"
+    )
