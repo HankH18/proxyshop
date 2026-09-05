@@ -122,6 +122,22 @@ false green — so the choice here is still the right one.
   to ``0 broken`` with no error, no checker edit and no ``.dockerignore`` edit. A stray line
   now changes nothing (no stdout line is parsed), and a short report is an assertion
   failure naming the missing names rather than a clean bill of health.
+* A private channel and a full set of verdicts are NOT sufficient, and this bullet exists
+  because the previous one was read as if they were. An adversarial review measured four
+  more ways a single shipped module — which runs inside the probe's own process — could
+  zero the report while satisfying both: forging an origin on the dotted spelling the
+  origin guard did not examine (``10 broken of 79`` to ``6``, hiding all four
+  ``envelope/*`` modules), forging the whole report and then ``chmod 444``-ing the channel
+  so the probe's own final write died (``0 broken`` at exit 0, unchecked ``returncode``),
+  reducing every verdict to ``{"file": None}``, and — in the guard file rather than here —
+  re-adding a stdout reader as a FALLBACK, which all three guard tests missed. So a report
+  is now graded only if the subprocess exited 0, every asked name has a verdict, every
+  verdict carries a non-empty ``error`` or ``file`` string, and every clean verdict's origin
+  resolves inside the container-shaped tree WHATEVER its top-level spelling. All four cost
+  nothing on a clean tree: 914 verdicts across nine images, zero null origins, zero origins
+  outside the tree, nine probes exiting 0. :data:`_PROBE_CHANNEL` carries the detail, and
+  ``test_artifact_copyset_probe_channel.py`` holds one guard test per hole, each one proved
+  red by reverting its own check.
 * :func:`test_the_static_copy_set_checker_detects_a_fix_and_a_regression` is the positive
   control: it synthesises a fixed Dockerfile and a broken one in memory — no file in the
   repo is touched — and proves the checker flips in both directions. A checker that cannot
@@ -904,24 +920,61 @@ sys.meta_path.insert(0, _PipLayerOnly())
 #: imported. No line a module writes to stdout is read by this gate at all; stdout is kept
 #: only as diagnostic text for the assertion messages (:meth:`ProbeRun.diagnosis`).
 #:
-#: **What that does and does not buy, stated rather than implied.** It removes the ACCIDENT
+#: **What that does and does not buy, stated at the strength the evidence supports — which
+#: is weaker than the first version of this paragraph claimed.** It removes the ACCIDENT
 #: entirely: no amount of printing, on stdout or stderr, can now alter, shorten or replace
 #: the report, which is the failure this repair exists for — a debugging ``print`` left in
-#: any of the 513 shipped modules. It does not, and cannot, make the measurement proof
-#: against a shipped module that is deliberately trying to defeat it: that module runs
-#: in the probe's own process, so it could scan the temp directory for the channel file,
-#: read the graded name list out of ``sys.argv``, or simply replace ``builtins.open``. No
-#: in-process probe can be hardened against the code it imports. The defence against that
-#: is the other half of this repair — every name must come back with a verdict and every
-#: verdict must grade something — which makes a report that does not add up an assertion
-#: failure rather than a green image, so forging one takes deliberate, legible work
-#: instead of a stray line.
+#: any of the 515 shipped modules. It does not, and cannot, make the measurement proof
+#: against a shipped module that is deliberately trying to defeat it: that module runs in
+#: the probe's own process. This paragraph used to hedge that with three "could"s. All
+#: three have since been MEASURED on a scratch copy of this tree at ``c5d2a15``, so they
+#: are facts, and none of them needs ``builtins.open``:
+#:
+#: * the channel path is not a secret. ``os.environ.pop`` hides it from the ENVIRONMENT,
+#:   not from the process: the probe keeps it in ``__main__._CHANNEL``, and one line in a
+#:   shipped module (``sys.modules["__main__"]._CHANNEL``) prints it. The file is also
+#:   globbable — ``/private/var/folders/*/*/T/copyset-probe-*.json`` found it.
+#: * the graded name list is not a secret either. It is ``sys.argv[1]``, so a forged report
+#:   can be exactly set-equal to what was asked.
+#: * ``_emit`` itself is reachable: rebinding ``__main__._emit`` replaces the finished
+#:   report while the probe still exits 0.
+#:
+#: **So the claim that used to close this paragraph is withdrawn.** "Every name must come
+#: back with a verdict and every verdict must grade something" is NOT the defence: an
+#: adversarial review satisfied both conditions three separate ways while hiding a merchant
+#: image that cannot start. What actually grades a report is four checks, split across
+#: :func:`run_in_image` and :func:`image_import_report`, each of which closed one measured
+#: hole:
+#:
+#: 1. the probe subprocess must exit 0. A module that wrote a complete forged report and
+#:    then ``chmod 444``'d the channel killed the probe's own final ``_emit`` with
+#:    ``PermissionError`` and still reported ``0 broken of 79``.
+#: 2. every name asked for must come back with a verdict; and
+#: 3. every verdict must carry a non-empty ``error`` string or a non-empty ``file`` origin.
+#:    ``{"file": None}`` satisfied (2), passed a malformed check that only asked whether one
+#:    of the two KEYS was present, and was then skipped by (4) on ``origin is None``.
+#: 4. every clean verdict's origin must resolve INSIDE the container-shaped tree, whatever
+#:    the name's top-level spelling. (4) used to run only for names whose first segment is a
+#:    ``.pkgroot`` package, which left 291 of the 914 verdicts on a clean tree (``apps.*``
+#:    223, ``services.*`` 52, ``fixtures.*`` 16) never examined — and those are the SECOND
+#:    name of files that also have a first-party one, so fabricating an origin for them
+#:    alone hid four broken ``envelope/*`` modules behind their honest ``merchant_svc.*``
+#:    twins.
+#:
+#: What still defeats all four, said plainly so nobody reads this as a security boundary: a
+#: shipped module that writes a complete, set-equal report whose origins are real paths
+#: inside the tree, and then lets the probe exit 0. No in-process probe can be hardened
+#: against the code it imports. What the four buy is that forging a green now takes
+#: deliberate, legible work in a shipped module instead of one stray line.
 #:
 #: ``_emit`` is called twice on purpose. The first call, before any import, records that
 #: the probe reached its first statement; the second replaces it with the finished report.
-#: That keeps the three outcomes distinguishable — never started (no file), started and
+#: That keeps the outcomes distinguishable — never started (no file at all), started and
 #: died mid-import (file, but no report key), finished (both) — which a single write at
-#: the end would collapse into one silent "nothing to grade".
+#: the end would collapse into one silent "nothing to grade". A fourth state, the channel
+#: existing and EMPTY, is refused explicitly in :func:`run_in_image` rather than folded
+#: into "never started", because a module that does ``open(_CHANNEL, "w")`` and nothing
+#: else produces it.
 _PROBE_CHANNEL = """
 import json as _json, os as _os
 
@@ -964,10 +1017,19 @@ _IMPORT_PROBE = (
 class ProbeRun:
     """One probe subprocess, and the payload it wrote on its own private channel.
 
-    ``payload is None`` means the probe wrote NOTHING — it died before its first
-    statement. It never means "the probe found nothing", and no caller may read it that
-    way: a zero that is really an absence is the whole defect class this file exists to
-    find, and :data:`_PROBE_CHANNEL` records why it was also a defect IN this file.
+    ``payload is None`` means there was no channel file at all — the probe died before its
+    first statement. It never means "the probe found nothing", and no caller may read it
+    that way: a zero that is really an absence is the whole defect class this file exists to
+    find, and :data:`_PROBE_CHANNEL` records why it was also a defect IN this file. The
+    third reading of that ``None`` — a channel file that exists and is empty, which is what
+    a module doing ``open(_CHANNEL, "w")`` leaves behind — is ruled out inside
+    :func:`run_in_image` rather than left for a caller to notice.
+
+    ``process.returncode`` is checked in :func:`run_in_image` before any payload is
+    returned, so a ``ProbeRun`` that reaches a caller came from a subprocess that exited 0.
+    It used to be read in :meth:`diagnosis` alone, i.e. in assertion PROSE and never in a
+    branch, which is exactly how a forged report that outlived the process meant to write it
+    got graded as ``0 broken of 79``.
     """
 
     label: str
@@ -993,6 +1055,30 @@ class ProbeRun:
         return "\n".join(parts)
 
 
+def _describe_channel(written: str) -> str:
+    """What the private channel held, for an assertion message that has to be actionable.
+
+    Raw bytes are useless here: the report opens with the probe's ``sys_path``, so the first
+    300 characters of a 677-byte forgery are all path and the interesting half — how many
+    verdicts it carried, and for what — is off the end. A report that LOOKS complete is
+    exactly what the measured ``chmod 444`` attack leaves behind, so saying so is the whole
+    point of the message.
+    """
+    if not written:
+        return "0 bytes"
+    try:
+        parsed: object = json.loads(written)
+    except json.JSONDecodeError:
+        return f"{len(written)} bytes that are not JSON: {written[:200]!r}"
+    if not isinstance(parsed, dict):
+        return f"{len(written)} bytes holding {type(parsed).__name__}, not an object"
+    described = f"{len(written)} bytes, an object with keys {sorted(parsed)}"
+    verdicts = parsed.get("outcome")
+    if isinstance(verdicts, dict):
+        described += f" and {len(verdicts)} verdicts, e.g. {sorted(verdicts)[:5]}"
+    return described
+
+
 def run_in_image(label: str, code: str, *argv: str) -> ProbeRun:
     """Run ``code`` against the built tree with the image's ``PYTHONPATH`` and nothing else.
 
@@ -1009,10 +1095,27 @@ def run_in_image(label: str, code: str, *argv: str) -> ProbeRun:
     needs.
 
     The report comes back over :data:`_PROBE_CHANNEL` — a file this function creates the
-    NAME of, deletes before the run so only the probe can bring it into existence, and
-    removes afterwards. Nothing on the subprocess's stdout is parsed. See
-    :data:`_PROBE_CHANNEL` for the measured false-green that made a shared channel
+    NAME of, deletes before the run, and removes afterwards. Nothing on the subprocess's
+    stdout is parsed, at any precedence and as no kind of fallback: a reader re-added even
+    as a last resort is caught by
+    ``test_artifact_copyset_probe_channel.py::test_stdout_is_not_read_even_as_a_fallback_when_the_channel_has_no_outcome``.
+    See :data:`_PROBE_CHANNEL` for the measured false-green that made a shared channel
     unusable here.
+
+    **The deletion does not mean "only the probe can bring the channel into existence",
+    which is what this docstring used to say.** Every one of the shipped modules runs inside
+    the probe process, so any of them can create or overwrite that file; one of them
+    globbing it, writing a complete forged report and then ``chmod 444``-ing it was measured
+    on a scratch copy of this tree. What the deletion buys is narrower and still worth
+    having: a channel file that exists afterwards was created by SOMETHING in the probe
+    process, so "no file" and "an empty file" are distinguishable, and both are refused
+    here rather than handed to a caller as ``payload is None``.
+
+    Two things are therefore checked before anything on the channel is trusted, and both
+    are checked HERE rather than in the callers, because the hole they close was a caller
+    that did not think to look: the subprocess's exit status, and whether the channel exists
+    but is empty. ``apps/trust/tests/test_repro_open_tickets.py:492`` already asserts the
+    exit status of its own probe; that precedent had simply not been followed here.
     """
     app = materialised_image(label)
     spec = images()[label]
@@ -1044,8 +1147,46 @@ def run_in_image(label: str, code: str, *argv: str) -> ProbeRun:
             timeout=180,
             check=False,
         )
+        existed = os.path.exists(channel)
+        written = Path(channel).read_text() if existed else ""
+
+        # NOTHING the probe left behind may be read before its exit status is. `check=False`
+        # plus a `returncode` that was read in exactly one place — `ProbeRun.diagnosis()`,
+        # i.e. assertion PROSE and never a branch — was a hole with a four-line recipe,
+        # measured on a scratch copy of this tree at c5d2a15: a shipped module globbed this
+        # channel, wrote a complete report whose origins were `os.getcwd()`-relative (cwd IS
+        # the container-shaped tree, so they validate), and then `os.chmod(p, 0o444)`. The
+        # probe's own final `_emit` died with `PermissionError: [Errno 13] Permission
+        # denied`, the forged report survived on the channel, and the gate reported
+        # `0 broken of 79` at exit 0 with the deliberately poisoned module broken throughout.
+        # The sibling gate `apps/trust/tests/test_repro_open_tickets.py:492` already asserts
+        # this; the precedent was simply not followed here.
+        assert process.returncode == 0, (
+            f"{label}: the probe subprocess exited {process.returncode}, so NOTHING it left "
+            f"on the private channel may be graded — a non-zero exit means the report is at "
+            f"best partial and at worst a forgery that outlived the process meant to write "
+            f"it. A report that looks complete is exactly what that attack leaves behind, "
+            f"so what the channel held is stated rather than assumed: "
+            f"{_describe_channel(written)}\n{ProbeRun(label, process, None).diagnosis()}"
+        )
+
+        # An empty channel file is NOT "the probe never started". `os.unlink` above deletes
+        # the name specifically so those two are distinguishable, and `if written:` threw
+        # that signal away again: a module that does `open(_CHANNEL, "w")` and nothing else
+        # left a 0-byte file and a `payload is None` that every caller reads as "never
+        # reached its first statement". Both readings of that zero are named here and one is
+        # ruled out by the file's own existence.
+        if existed and not written:
+            raise AssertionError(
+                f"{label}: the probe's private channel EXISTS and is empty. This function "
+                f"deletes the channel before the run, so an empty file means something in "
+                f"the probe process created it and wrote nothing — not that the probe never "
+                f"started, which is the other reading of a zero here and the one `payload "
+                f"is None` would have handed to every caller.\n"
+                f"{ProbeRun(label, process, None).diagnosis()}"
+            )
+
         payload: dict[str, Any] | None = None
-        written = Path(channel).read_text() if os.path.exists(channel) else ""
         if written:
             try:
                 payload = json.loads(written)
@@ -1118,6 +1259,43 @@ class ImportReport:
         )
 
 
+def verdict_error(entry: object) -> str | None:
+    """The failure a probe verdict records, or ``None`` if it does not record one.
+
+    One place decides what an ``error`` verdict IS, because three separate places used to
+    decide it differently and the disagreements were exploitable. ``"error" in entry`` was
+    the broken-module loop's rule, ``{"error", "file"} & set(entry)`` was the malformed
+    check's, and ``entry.get("file") is None`` was the origin guard's — so ``{"error":
+    None}`` counted as a failure whose message was ``None``, and ``{"file": None}`` counted
+    as a clean import that the origin guard then declined to examine.
+
+    A verdict records a failure only when ``error`` is a NON-EMPTY string. Measured on a
+    clean tree across all nine images: 914 verdicts, zero of them with a null, empty or
+    non-string ``error``, so this costs nothing here and refuses a forgery.
+    """
+    if not isinstance(entry, dict):
+        return None
+    error = entry.get("error")
+    return error if isinstance(error, str) and error else None
+
+
+def verdict_origin(entry: object) -> str | None:
+    """The ``__file__`` a probe verdict claims the module was imported from.
+
+    ``None`` when the verdict does not claim one — which, paired with
+    :func:`verdict_error`, is what makes a verdict MALFORMED rather than clean.
+    ``{"file": None}`` is the exact shape of the historical stdout poison
+    (``print('RESULT {"_": {"file": null}}')``) and it used to pass every check in
+    :func:`image_import_report`. Measured on a clean tree across all nine images: 914
+    verdicts, zero with a null or empty ``file``, so requiring a non-empty string costs
+    nothing.
+    """
+    if not isinstance(entry, dict):
+        return None
+    origin = entry.get("file")
+    return origin if isinstance(origin, str) and origin else None
+
+
 @cache
 def image_import_report(label: str) -> ImportReport:
     """Check (b): import every shipped module inside the container-shaped tree."""
@@ -1187,33 +1365,75 @@ def image_import_report(label: str) -> ImportReport:
         f"    verdicts nobody asked for ({len(reported - asked)}): {sorted(reported - asked)[:20]}\n"
         f"{run.diagnosis()}"
     )
+    # A verdict has to GRADE something: a non-empty error string, or a non-empty origin.
+    # `{"error", "file"} & set(entry)` only asked whether one of the KEYS was present, so
+    # `{"file": None}` — byte-for-byte the historical stdout poison — passed here and was
+    # then skipped by the origin guard below on `origin is None`. Measured on a scratch
+    # copy of this tree at c5d2a15: a shipped module that rebinds `__main__._emit` and
+    # writes every verdict as `{"file": None}` took the merchant image from 10 broken of 79
+    # to `0 broken of 79` at exit 0, with the deliberately poisoned module still broken.
     malformed = sorted(
         name
         for name, entry in outcome.items()
-        if not isinstance(entry, dict) or not ({"error", "file"} & set(entry))
+        if verdict_error(entry) is None and verdict_origin(entry) is None
     )
     assert malformed == [], (
-        f"{label}: {len(malformed)} verdicts say neither 'error' nor 'file', so they grade "
-        f"nothing and would be read as clean by the loop below: {malformed[:20]}"
+        f"{label}: {len(malformed)} of {len(outcome)} verdicts grade nothing — a verdict "
+        f"must carry either a non-empty 'error' string or a non-empty 'file' origin, and "
+        f"these carry neither, so the loop below would read every one of them as a "
+        f"successful import. `{{'file': None}}` is the exact shape of the stdout poison "
+        f"this channel was rebuilt to defeat and it used to pass this check: "
+        f"{malformed[:20]}\n{run.diagnosis()}"
     )
 
-    packages = frozenset(first_party_packages()) | {"packages", "proxyshop_support"}
-    for name, entry in sorted(outcome.items()):
-        origin = entry.get("file")
-        if origin is None or name.split(".")[0] not in packages:
-            continue
-        if app.resolve() not in Path(origin).resolve().parents:
-            raise AssertionError(
-                f"{label}: the probe imported {name} from {origin}, which is OUTSIDE the "
-                f"container-shaped tree at {app.resolve()} — it graded the live checkout"
-            )
+    # EVERY clean verdict's origin must resolve inside the container-shaped tree, whatever
+    # the name's top-level spelling. This guard used to read
+    #
+    #     if origin is None or name.split(".")[0] not in packages: continue
+    #
+    # with `packages` the `.pkgroot` names plus `packages`/`proxyshop_support` — so it only
+    # ever inspected FIRST-PARTY top-levels. Measured on a clean tree: that skipped 291 of
+    # the 914 verdicts (`apps.*` 223, `services.*` 52, `fixtures.*` 16), and those are the
+    # SECOND dotted name of files that also have a first-party one. A file counts as broken
+    # only when every one of its names fails, so fabricating an origin for the unexamined
+    # spelling alone is enough to hide it behind its own honest twin: four lines appended to
+    # `apps/merchant/svc/src/http_limits.py` that rebind `__main__.outcome` to
+    # `{n: {"file": "/app/fake.py"} for n in json.loads(sys.argv[1])}` took the merchant
+    # image from 10 broken of 79 to 6 at exit 0, hiding all four `envelope/*` modules
+    # including the deliberately poisoned one. `apps` is not a `.pkgroot` name, so
+    # `apps.merchant.svc.src.envelope.digest` was never examined while
+    # `merchant_svc.envelope.digest` was.
+    #
+    # There is no legitimate exception to widen this back for: every name handed to the
+    # probe was derived from a `.py` file INSIDE the built tree by `_dotted_names`, so an
+    # origin anywhere else is a measurement error by construction. Measured on a clean tree:
+    # 914 verdicts, zero with an origin outside the tree.
+    outside = [
+        f"{name} <- {verdict_origin(entry)}"
+        for name, entry in sorted(outcome.items())
+        if verdict_error(entry) is None
+        and app.resolve() not in Path(verdict_origin(entry) or "").resolve().parents
+    ]
+    assert outside == [], (
+        f"{label}: {len(outside)} of {len(outcome)} verdicts name an origin OUTSIDE the "
+        f"container-shaped tree at {app.resolve()}, so they grade something that is not the "
+        f"artifact — the live checkout, or nothing at all. Every name handed to the probe "
+        f"came from a file inside that tree, so there is no honest way to be here:\n"
+        + "\n".join(f"    {line}" for line in outside[:20])
+        + f"\n{run.diagnosis()}"
+    )
 
     broken: dict[str, str] = {}
     for repo_relative, names in sorted(wanted.items()):
         # Direct indexing, never `.get(n, {})`: the set-equality assertion above has already
         # proved every name is present, and a KeyError here would be a loud bug in this file
-        # rather than a silent clean bill of health for the image.
-        errors = {n: outcome[n]["error"] for n in sorted(names) if "error" in outcome[n]}
+        # rather than a silent clean bill of health for the image. `verdict_error` rather
+        # than `"error" in ...` so this loop and the two assertions above cannot disagree
+        # about what a failure is — `{"error": None}` used to land here as a failure whose
+        # joined message was `None`.
+        errors = {
+            n: error for n in sorted(names) if (error := verdict_error(outcome[n])) is not None
+        }
         if len(errors) == len(names):
             broken[repo_relative] = "; ".join(sorted(set(errors.values())))
     return ImportReport(label, len(wanted), broken)
