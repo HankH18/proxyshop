@@ -33,16 +33,19 @@ from .bidding import (
     IN_STOCK_KEY,
     LIST_PRICE_KEY,
     PERCENTAGE,
+    VARIANT_REF_KEYS,
     bid,
     offer_id,
 )
 from .context import (
     INTRO_DISCOUNT_KEY,
     OFFER_EXPIRES_AT_KEY,
+    STORE_DOMAIN_KEYS,
     AuctionContext,
     HardConstraint,
     assemble_context,
     satisfies,
+    store_domain_host,
 )
 from .decline import Decline, DeclineReason, is_decline
 
@@ -94,6 +97,8 @@ __all__ = [
     "IN_STOCK_KEY",
     "LIST_PRICE_KEY",
     "PERCENTAGE",
+    "STORE_DOMAIN_KEYS",
+    "VARIANT_REF_KEYS",
     "AuctionContext",
     "Decline",
     "DeclineReason",
@@ -103,6 +108,7 @@ __all__ = [
     "is_decline",
     "offer_id",
     "satisfies",
+    "store_domain_host",
 ]
 
 # Last, deliberately: the module is fully built either way, so a caller that arrived through the

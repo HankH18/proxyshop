@@ -184,16 +184,12 @@ def test_the_served_versus_published_sweep_is_armed() -> None:
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-309: no <feature>/routes.py exists anywhere under packages/store-agent/src, so "
-        "create_app() mounts nothing and app.openapi()['paths'] is empty — the contract's "
-        "POST /v1/bid-requests, the door the exchange solicits stores through, is answered by "
-        "no server at all and receive_bid is reachable only as a library call; remove this "
-        "marker with the fix"
-    ),
-)
+# xfail marker removed with the T-309 fix: `packages/store-agent/src/solicitation/routes.py`
+# now exists, `create_app()` mounts it (`app.state.mounted_routers ==
+# ['store_agent.solicitation.routes']`), and the served set is exactly the published one —
+# `{('POST', '/v1/bid-requests')}`. The marker was `strict=True`, so leaving it in place would
+# turn the repair into an XPASS failure; the assertion below is unchanged and keeps grading the
+# property as either side grows.
 def test_t309_the_store_agent_serves_every_path_its_contract_publishes() -> None:
     """A fully built, fully tested door with no transport in front of it.
 
