@@ -127,8 +127,10 @@ EXPOSE 8083
 # The T-158 guard is a CLAIM IN A STORE, so it is exactly as wide as that store.
 # `accept/routes.py::_claims` derives the acceptance-claim table from the auction machine's own
 # store, and an exchange configured only by the deployment document never binds a machine:
-# `configure_exchange` (src/composition.py) reads `sellers`, `trust_snapshot` and
-# `checkout_mode` and nothing else. The machine therefore falls back to `AuctionStateMachine()`
+# `configure_exchange` (src/composition.py) binds eligibility, the bid solicitor, the trust
+# snapshot, both registered-domain sets and the checkout mode — but NO auction machine, and
+# the document has no key that could supply one. The machine therefore falls back to
+# `AuctionStateMachine()`
 # over `InMemoryAuctionStore` and the claim table is process-local. Two workers are two
 # processes, two stores and two claim tables: both accepts win their own copy of the guard and
 # both mint. An independent verifier reproduced that 6-of-6 across a real process boundary and
