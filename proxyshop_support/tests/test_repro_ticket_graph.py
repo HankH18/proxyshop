@@ -60,6 +60,36 @@ _NOT_OPERANDS = frozenset({"pytest", "npx", "vitest", "run", "make", "python", "
 _SHARED_GRADER_DIRS = ("swarm-loop/acceptance/",)
 _SHARED_GRADER_BASENAME = "test_repro_*.py"
 
+#: Ways of spelling "the repo root" that a shell expands to the same directory this gate
+#: reads paths relative to. Every one of them names the SAME FILE as a bare repo-relative
+#: operand while looking nothing like it to a string comparison, which is the whole reason
+#: they are here rather than in a style guide: ``pytest "$PWD/docs/tests/test_runbook.py"``
+#: runs the identical third-party-owned file, and before this was normalised it took
+#: ``scope_covers`` past every owner and the ownership set from [T-087, T-228] to [].
+_PWD_PREFIXES = ("$pwd/", "${pwd}/", "$(pwd)/", "`pwd`/")
+
+
+def _repo_relative(path: str) -> str:
+    """One spelling for a path, whatever the shell would have expanded it from.
+
+    Absolute and ``$PWD``-prefixed operands under this tree are rewritten to the
+    repo-relative form. A path that is absolute but genuinely OUTSIDE this tree is returned
+    unchanged rather than re-rooted into the repo, which would invent an owner for a file the
+    repo does not contain. (``_normalise``'s ``lstrip("./")`` still strips its leading slash
+    afterwards; that is ``swarmloop.py``'s own behaviour and is left alone here.)
+    """
+    text = path.strip().replace("\\", "/")
+    # Sliced comparison rather than `lowered.startswith(...)`: case-folding is not
+    # length-preserving in general, so an index taken from the folded string is not a valid
+    # index into the original.
+    for prefix in _PWD_PREFIXES:
+        if text[: len(prefix)].casefold() == prefix:
+            return text[len(prefix) :]
+    root = str(REPO_ROOT).replace("\\", "/") + "/"
+    if text[: len(root)].casefold() == root.casefold():
+        return text[len(root) :]
+    return text
+
 
 def _normalise(path: str) -> str:
     """``swarmloop.py:_scope_match``'s normalisation: backslashes, then strip leading ``./``.
@@ -68,8 +98,12 @@ def _normalise(path: str) -> str:
     ``.swarm-loop/acceptance/x.py`` normalises to ``swarm-loop/acceptance/x.py``. A naive
     ``startswith(".swarm-loop/")`` allowlist would therefore never fire; this is why the
     constant above is spelled without the dot.
+
+    ``_repo_relative`` runs FIRST and is not cosmetic: ``lstrip("./")`` on an absolute path
+    eats only the leading slash, so ``/abs/path/to/repo/docs/tests/x.py`` used to normalise
+    to ``users/…/docs/tests/x.py`` and match no owner at all.
     """
-    return path.strip().replace("\\", "/").lstrip("./").casefold()
+    return _repo_relative(path).lstrip("./").casefold()
 
 
 def graders_named_by(tickets: list[dict[str, Any]]) -> dict[str, set[str]]:
@@ -110,22 +144,81 @@ def is_shared_grader(path: str, named_by: dict[str, set[str]] | None = None) -> 
     return len((named_by or {}).get(normalised, set())) >= 2
 
 
+#: Shells whose ``-c`` argument is an entire command line packed into ONE word.
+_SHELL_NAMES = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+#: How deep a ``bash -c "bash -c ..."`` nest is opened before the expander stops. A cap
+#: rather than unbounded recursion because the input is a graph field, not a trusted string.
+_SHELL_DEPTH = 4
+
+
+def _split_words(segment: str) -> list[str]:
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
+
+
+def _shell_script(words: list[str]) -> str | None:
+    """The command line a ``bash -c <script>`` word list carries, or ``None``.
+
+    An environment prefix is allowed to precede the shell (``FOO=1 bash -c "…"``), and the
+    flag is matched as "a dash-word ending in ``c``" so the combined spellings ``-lc``,
+    ``-ec`` and ``-euxc`` are opened too rather than being a respelling of the same escape.
+    """
+    index = 0
+    while index < len(words) and "=" in words[index]:
+        index += 1
+    if index >= len(words):
+        return None
+    head = words[index]
+    if head not in _SHELL_NAMES and Path(head).name not in _SHELL_NAMES:
+        return None
+    for offset in range(index + 1, len(words) - 1):
+        word = words[offset]
+        if word.startswith("-") and word.endswith("c"):
+            return words[offset + 1]
+    return None
+
+
+def command_segments(verify: str, depth: int = _SHELL_DEPTH) -> list[list[str]]:
+    """Every command the verify actually runs, with ``bash -c``/``sh -c`` wrappers OPENED.
+
+    Not a nicety — it is the difference between two clauses looking at the command and both
+    of them looking at nothing. ``bash -c "./scripts/verify.sh check"`` shlex-splits to
+    ``["bash", "-c", "./scripts/verify.sh check"]``: no word ends in ``verify.sh``, so
+    ``runs_whole_suite`` misses it, and no word is ``pytest``, so ``pytest_segments``
+    returns empty and clause A has nothing to look at either. Measured on HEAD's graph, with
+    the commands byte-identical: wrapping T-130's and T-134's gates took the selector set
+    from [T-130, T-134] to [], and wrapping T-087's and T-228's took the ownership set from
+    [T-087, T-228] to [] — i.e. the whole gate green for four verify-field edits that change
+    what nothing executes.
+    """
+    segments: list[list[str]] = []
+    for raw in re.split(r"\s*(?:&&|\|\||;)\s*", verify):
+        words = _split_words(raw)
+        if not words:
+            continue
+        inner = _shell_script(words) if depth > 0 else None
+        if inner is not None:
+            segments.extend(command_segments(inner, depth - 1))
+            continue
+        segments.append(words)
+    return segments
+
+
 def pytest_segments(verify: str) -> list[list[str]]:
-    """The ``&&``/``||``/``;``-separated command segments that invoke pytest directly.
+    """The command segments that invoke pytest directly, ``bash -c`` wrappers opened up.
 
     ``./scripts/verify.sh check`` and ``make verify`` run pytest too, but they carry no
     pytest token and select nothing by path, so they are not selection commands and are
     deliberately absent here.
     """
-    segments: list[list[str]] = []
-    for segment in re.split(r"\s*(?:&&|\|\||;)\s*", verify):
-        try:
-            words = shlex.split(segment)
-        except ValueError:
-            words = segment.split()
-        if any(word == "pytest" or word.endswith("/pytest") for word in words):
-            segments.append(words)
-    return segments
+    return [
+        words
+        for words in command_segments(verify)
+        if any(word == "pytest" or word.endswith("/pytest") for word in words)
+    ]
 
 
 def selection_operands(words: list[str]) -> list[str]:
@@ -279,12 +372,11 @@ def ownership_violations(
 
 
 def runs_whole_suite(verify: str) -> bool:
-    """``verify.sh check``/``all`` or ``make verify`` — a gate that selects nothing in particular."""
-    for segment in re.split(r"\s*(?:&&|\|\||;)\s*", verify):
-        try:
-            words = shlex.split(segment)
-        except ValueError:
-            words = segment.split()
+    """``verify.sh check``/``all`` or ``make verify`` — a gate that selects nothing in particular.
+
+    Reads ``command_segments``, so a wrapper around the identical command cannot hide it.
+    """
+    for words in command_segments(verify):
         if any(w.endswith("verify.sh") for w in words) and {"check", "all"} & set(words):
             return True
         if "make" in words and "verify" in words:
@@ -339,6 +431,22 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     ``docs/tests/**`` vs bare ``docs/tests`` case is the load-bearing one: if the
     ``/**``-matches-the-directory branch ever stops working, the sweep still iterates and
     still reports a number, and the respelt-as-a-directory escape opens silently.
+
+    THE RESPELLING PROBES BELOW ARE NOT HYPOTHETICAL. Three escapes were measured open on
+    HEAD's graph and are pinned here, each having taken this gate fully GREEN with all four
+    violators' defects intact and with every command still running the same thing:
+
+    * ``bash -c "./scripts/verify.sh check"`` — one operand word, ending in neither
+      ``verify.sh`` nor ``pytest``, so clause C and clause A both looked at a command that
+      was not there. Selector set [T-130, T-134] -> [].
+    * ``pytest "$PWD/docs/tests/test_runbook.py"`` — the identical third-party-owned file,
+      invisible to every owner's glob. Ownership set [T-087, T-228] -> [].
+    * the population floor, which read 84 while the real population had grown to 94, so it
+      carried ten tickets of slack and both cheap population escapes passed it again.
+
+    All three were VERIFY-FIELD or STATUS-FIELD edits, i.e. the pre-approved amendment class,
+    while the sweep's own failure message told the reader a SCOPE change was required. A gate
+    that misreports what it takes to pass is worse than one that is merely weak.
     """
     tickets = _tickets()
     assert len(tickets) >= 250, f"the graph parsed {len(tickets)} tickets; it holds ~292"
@@ -347,12 +455,37 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     # RATCHET, and it is the only thing that catches two one-field escapes clause A cannot
     # see: downgrading the graded ticket's verify to the placeholder, and flipping its
     # status to "closed". Either removes it from the population rather than repairing it,
-    # and either drops this count. 84 at HEAD (42 open, 39 null, 3 "unknown"); it only ever
-    # rises as gateless tickets acquire gates.
-    assert len(population) >= 84, (
-        f"{len(population)} not-yet-closed tickets carry a real gate; 84 did at HEAD. A "
-        "graded ticket's gate was downgraded to the placeholder, or its status was flipped "
-        "to closed, which removes it from this sweep rather than repairing it."
+    # and either drops this count. 94 as re-measured here (45 open, 46 null, 3 "unknown").
+    #
+    # THE FLOOR IS EXACT, AND IT WENT SLACK ONCE ALREADY. It read 84 — the population on the
+    # day it was written — while commits since had taken the real population to 94, so it
+    # was carrying TEN tickets of slack and both escapes it exists to catch passed it again:
+    # closing the four violators, or placeholdering their verify fields, left 90 and 90,
+    # both comfortably above 84. A floor with slack is not a ratchet.
+    #
+    # The cost of exactness is that legitimately CLOSING a gated ticket also drops the count
+    # (a closed ticket leaves `graded_population` by design), so this number has to be
+    # re-baselined deliberately when that happens. An earlier comment here claimed the count
+    # "only ever rises"; that was wrong, and believing it is how the slack got in.
+    assert len(population) >= 94, (
+        f"{len(population)} not-yet-closed tickets carry a real gate; 94 did when this floor "
+        "was last measured. Either a graded ticket's gate was downgraded to the placeholder "
+        "or its status was flipped to closed — both remove it from this sweep rather than "
+        "repairing it — or a gated ticket was legitimately closed, in which case re-measure "
+        "and re-baseline this number rather than lowering it to leave headroom."
+    )
+
+    # A SECOND ratchet on the same escape, and it is here because it is monotone where the
+    # floor above is not: a ticket carrying a real gate keeps carrying one when it closes, so
+    # legitimate closes never move this count and it never needs re-baselining for them.
+    # Downgrading four verify fields to the placeholder takes it 153 -> 149. That means the
+    # placeholder escape stays caught even if the population floor above is later slackened
+    # to absorb a round of closures, which is exactly how it went slack the first time.
+    gated_any_status = [t for t in tickets if not str(t.get("verify", "")).startswith("false")]
+    assert len(gated_any_status) >= 153, (
+        f"{len(gated_any_status)} tickets carry a real gate at any status; 153 did when this "
+        "floor was last measured. A verify field was downgraded to the placeholder, which "
+        "deletes a gate rather than repairing it."
     )
 
     # A scope-degradation ceiling. Widening an owner's scope to `**` makes it own NOTHING
@@ -372,12 +505,13 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
         for seg in pytest_segments(str(t["verify"]))
         for op in selection_operands(seg)
     ]
-    # Measured at HEAD across the open population: 44 operand occurrences, 19 distinct. The
-    # distinct count is the one worth pinning low — a graph that started spelling gates as
-    # `-k` selections would drop it, and clause B is what turns that into a failure rather
-    # than a quiet shrink, so this floor only has to catch the extractor breaking outright.
+    # Re-measured across the not-yet-closed population: 94 operand occurrences, 31 distinct
+    # (44 and 19 when this was written). The distinct count is the one worth pinning low — a
+    # graph that started spelling gates as `-k` selections would drop it, and clause B is
+    # what turns that into a failure rather than a quiet shrink, so this floor only has to
+    # catch the extractor breaking outright.
     assert len(operands) >= 30, f"the sweep extracted {len(operands)} path operands to check"
-    assert len(set(operands)) >= 15, f"only {len(set(operands))} distinct operands; 19 at HEAD"
+    assert len(set(operands)) >= 15, f"only {len(set(operands))} distinct operands; 31 at HEAD"
 
     owning = [
         t for t in tickets if any(isinstance(e, str) and "/" in e for e in t.get("scope") or ())
@@ -417,7 +551,15 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     # all 130 gated tickets from a literal `PROXYSHOP_WORKER=15` to
     # `PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-N}` — a bulk edit to the exact field this
     # sweep grades, made for an unrelated and legitimate reason. Every clause has to see
-    # straight through it, and the whole word is skipped only because it contains `=`.
+    # straight through it.
+    #
+    # WHY IT IS SKIPPED, corrected: it is POSITION, not the `=` rule. `selection_operands`
+    # advances to the `pytest` token before it starts scanning, so the environment prefix is
+    # never examined at all, and the `"=" in word` clause it also carries would only matter
+    # for a word AFTER `pytest`. The `=` rule is genuinely load-bearing in the sibling file's
+    # `verify_operands`, which scans every word from index 0; the claim was copied across to
+    # this module, where it does not apply. It is written down because "it held for reason X"
+    # is only worth recording if X is the actual reason.
     _parameterised = (
         "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-12} uv run python -m pytest "
         "docs/tests/test_runbook.py -q"
@@ -429,6 +571,59 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     assert runs_whole_suite(
         "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} ./scripts/verify.sh check"
     )
+    # Position, demonstrated rather than asserted in prose: an env-prefix word placed AFTER
+    # `pytest` is discarded by the `=` clause, and one placed before it is never read.
+    assert selection_operands(
+        shlex.split("uv run python -m pytest PROXYSHOP_WORKER=15 docs/tests/x.py -q")
+    ) == ["docs/tests/x.py"]
+
+    # THE `bash -c` WRAPPER. Measured on HEAD's graph as four verify-field edits that change
+    # what nothing executes: wrapping T-130's and T-134's `verify.sh check` took the selector
+    # set to [], and wrapping T-087's and T-228's pytest commands took the ownership set to
+    # [] — the whole gate green with every command byte-identical.
+    assert runs_whole_suite('bash -c "./scripts/verify.sh check"'), (
+        "a `bash -c` wrapper hides a whole-suite gate from clause C again; shlex yields one "
+        "operand word that ends in neither `verify.sh` nor `pytest`, so no clause looks"
+    )
+    assert runs_whole_suite("sh -c './scripts/verify.sh all'")
+    assert runs_whole_suite('bash -lc "PROXYSHOP_WORKER=15 make verify"'), (
+        "the combined `-lc` spelling of the flag re-opens the wrapper escape"
+    )
+    assert runs_whole_suite('/bin/bash -c "make verify"'), (
+        "an absolute shell path re-opens the wrapper escape"
+    )
+    assert not runs_whole_suite('bash -c "uv run python -m pytest docs/tests/x.py -q"')
+    assert [
+        selection_operands(w)
+        for w in pytest_segments('bash -c "uv run python -m pytest docs/tests/x.py -q"')
+    ] == [["docs/tests/x.py"]], (
+        "a `bash -c` wrapper hides a pytest SELECTION from clause A, which is the bigger "
+        "half of the same escape: with no pytest token the ownership loop iterates nothing"
+    )
+
+    # THE RESPELT OPERAND. `$PWD/docs/tests/test_runbook.py` runs the identical file while
+    # matching no owner's glob; measured, it took T-087 and T-228 straight out of the
+    # ownership set. An absolute path did the same, and worse: `lstrip("./")` ate only the
+    # leading slash, so the operand normalised to a path under the user's home directory.
+    for respelling in (
+        "$PWD/docs/tests/test_runbook.py",
+        "${PWD}/docs/tests/test_runbook.py",
+        "$(pwd)/docs/tests/test_runbook.py",
+        f"{REPO_ROOT}/docs/tests/test_runbook.py",
+    ):
+        assert _normalise(respelling) == "docs/tests/test_runbook.py", (
+            f"`{respelling}` no longer normalises to its repo-relative form, so respelling "
+            "an operand takes it past every owner while running the same file"
+        )
+        assert scope_covers(respelling, ["docs/tests/**"]), (
+            f"`{respelling}` is invisible to the ownership lookup again"
+        )
+    # An absolute path OUTSIDE the tree is left alone by the rewrite rather than being
+    # re-rooted into this repo, which would invent an owner for a file the repo does not have.
+    assert (
+        _repo_relative("/somewhere/else/docs/tests/test_runbook.py")
+        == "/somewhere/else/docs/tests/test_runbook.py"
+    ), "an absolute path outside this tree is being rewritten as though it were a repo file"
 
     # The allowlists, in both directions.
     assert is_shared_grader(".swarm-loop/acceptance/test_e8_proofs.py")
@@ -472,9 +667,14 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
         "(`docs/demo/shopify-onboarding-extension.md`) forbids it to create, that sits "
         "inside open T-085's `docs/tests/**`, and that no other ticket is graded by — so "
         "T-087 cannot write its own grader and would inherit an unearned green from a test "
-        "another lane wrote. Measured at HEAD: four, namely T-087 and T-228 by ownership, "
-        "plus T-130 and T-134 whose gate is a whole-suite run that grades nothing they own. "
-        "Remove this marker with the scope amendment"
+        "another lane wrote. The violator set is MEASURED LIVE and the failure output is "
+        "the authority on it, deliberately rather than pinning a count here: it read four "
+        "on this branch's base — T-087 and T-228 by ownership, T-130 and T-134 by "
+        "whole-suite — and five on main a few commits later, freeze-log amendment 26 having "
+        "repointed T-158's gate off a `test_repro_*.py` path that the shared-grader "
+        "allowlist exempts and onto `apps/exchange/tests/test_t158_acceptance_claim.py`, "
+        "which closed T-030, T-031, T-033 and T-036 own. Remove this marker with the scope "
+        "amendment"
     ),
 )
 def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
@@ -493,13 +693,18 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
     ``docs/tests/test_runbook_executability.py`` already sits there — one rename from
     making the path exist, at which point T-087 leaves the violation set and this gate
     reports green at the exact moment the inversion completes. So the question asked here
-    is OWNERSHIP, never existence, and the three variants of the defect all stay red:
+    is OWNERSHIP, never existence, and every variant of the defect stays red:
 
     * the file gets created -> red (nothing here calls ``exists()``);
     * the verify is repointed at ``docs/tests/test_runbook_executability.py``, which does
       exist -> red, because it is inside the same foreign glob;
     * the verify is respelt ``pytest docs/tests -q`` -> red, because ``docs/tests/**``
-      matches the bare directory, and a ``-k``-only respelling is caught by clause B.
+      matches the bare directory, and a ``-k``-only respelling is caught by clause B;
+    * the operand is respelt ``"$PWD/docs/tests/test_runbook.py"``, ``"${PWD}/…"``,
+      ``"$(pwd)/…"`` or as this tree's absolute path -> red, because ``_repo_relative``
+      folds all four back to the repo-relative spelling before the ownership lookup;
+    * the whole command is wrapped in ``bash -c "…"`` (or ``sh``/``zsh``, or ``-lc``) -> red,
+      because ``command_segments`` opens the wrapper rather than seeing one opaque word.
 
     All three defensible repairs turn it green, and each was measured on an in-memory copy
     of the graph: narrow T-085's ``docs/tests/**``; widen T-087's scope to cover the file
@@ -555,7 +760,7 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
     Four one-field escapes WERE open in an earlier draft and are closed, each having been
     measured taking this test fully green with T-087's defect intact: closing the graded
     ticket, or downgrading its verify to the placeholder (both now caught by the
-    population ratchet, 84 -> 83); rewriting the owner's glob as ``docs/{tests}/**`` or as
+    population ratchet, 94 -> 90); rewriting the owner's glob as ``docs/{tests}/**`` or as
     ``docs/tests/** (runbook tests)``, neither of which changes ownership for the harness
     that enforces it; and replacing the gate with ``make verify`` or ``verify.sh check``,
     which left clause A nothing to look at.
@@ -569,11 +774,44 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
     sweep grades, by the orchestrator, for a good reason unrelated to this gate.
 
     Re-measured across that merge the violator set is UNCHANGED — T-087 and T-228 by
-    ownership, T-130 and T-134 by whole-suite — and the population ratchet still reads
-    exactly 84. It held for a narrow, nameable reason rather than by luck: every operand
-    word containing ``=`` is discarded before anything is parsed, so the entire
-    ``PROXYSHOP_WORKER=...`` token goes with it, and nothing here ever reads a worker
-    index. The arming test now pins that with the parameterised form spelled out.
+    ownership, T-130 and T-134 by whole-suite. It held for a narrow, nameable reason rather
+    than by luck, and the reason recorded here was the WRONG ONE: it said "every operand word
+    containing ``=`` is discarded before anything is parsed". Not in this module.
+    ``selection_operands`` starts scanning only AFTER the ``pytest`` token, so an environment
+    prefix is never examined at all — it is POSITION that discards it, and the ``=`` clause
+    would only bite a word placed after ``pytest``. The ``=`` rule is load-bearing in the
+    sibling file's ``verify_operands``, which scans every word from index 0; the sentence was
+    copied across to a file where it does not apply. "It held for reason X" is worth
+    recording only if X is the actual reason, so both spellings are now pinned in the arming
+    test rather than argued in prose.
+
+    THREE MORE ESCAPES WERE THEN MEASURED OPEN and are closed here, all three cheaper than
+    anything above because none of them changes what any command runs:
+
+    * ``bash -c "./scripts/verify.sh check"`` in place of the bare command. One shlex token,
+      ending in neither ``verify.sh`` nor ``pytest``, so clause C never recognised the
+      whole-suite run AND clause A found no pytest segment to inspect. Wrapping T-130's and
+      T-134's gates took the selector set to []; wrapping T-087's and T-228's took the
+      ownership set to []. ``command_segments`` now opens ``bash``/``sh``/``zsh`` ``-c``
+      arguments, including the combined ``-lc``/``-ec`` spellings and an absolute shell path.
+    * ``pytest "$PWD/docs/tests/test_runbook.py"`` in place of the repo-relative operand.
+      The same third-party-owned file, run by the same command, matching no owner's glob —
+      ownership set [T-087, T-228] -> []. An absolute path did it too, and normalised into
+      the user's home directory because ``lstrip("./")`` eats only the leading slash.
+      ``_repo_relative`` now folds ``$PWD``/``${PWD}``/``$(pwd)`` and this tree's absolute
+      prefix back to the repo-relative spelling before any ownership lookup.
+    * the population floor, which had gone SLACK. It read 84 — exactly the population on the
+      day it was written, which is why it caught both cheap population escapes then — while
+      commits since had taken the real population to 94. With ten tickets of headroom,
+      flipping the four violators to ``status: closed`` left 90 and flipping their verify
+      fields to the placeholder left 90, and both passed the floor and took the gate GREEN.
+      The floor is re-baselined to the measured 94, and a second ratchet on tickets carrying
+      a real gate AT ANY STATUS (153) now catches the placeholder escape independently,
+      because that count is monotone under legitimate closes where the population is not.
+
+    Taken together those three were the gate lying about what it takes to pass: the failure
+    message below says a SCOPE-field change is required and is not in the pre-approved
+    verify-field amendment class, while four verify-field edits satisfied it.
     """
     tickets = _tickets()
     ownership = ownership_violations(tickets)
@@ -590,6 +828,9 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
         "write, so their lane cannot create its own grader and a third party's test would "
         "decide whether they pass:\n" + "\n".join(report) + "\n\nRepair: narrow the owning "
         "ticket's scope, widen the graded ticket's scope to cover the file its gate runs, "
-        "or repoint the gate at a path no ticket owns. Note this is a SCOPE-field change "
-        "and is not in the pre-approved verify-field amendment class."
+        "or repoint the gate at a path no ticket owns. The first two are SCOPE-field "
+        "changes and are not in the pre-approved verify-field amendment class; the third is "
+        "a verify-field edit, and it is honest only when the new path genuinely grades the "
+        "ticket — respelling the SAME path as `$PWD/...` or wrapping the SAME command in "
+        "`bash -c` is not a repair and no longer reads as one."
     )
