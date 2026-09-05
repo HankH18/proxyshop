@@ -58,6 +58,17 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 # `No module named 'contracts.generated'` at import time — observed, not theorised.
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
 COPY proxyshop_support/             /app/proxyshop_support/
+# ESC-020. `exchange.ranking.verification` imports `claim_verification` at module scope: the
+# exchange now runs T-065's claim verifier itself on the auction path, because a hard
+# constraint may only be satisfied by a verdict THIS service produced, never by a `status`
+# the bidder wrote. Without these two lines `exchange.ranking.serving` — and therefore
+# `POST /auctions` — dies on `ModuleNotFoundError: No module named 'claim_verification'`.
+# The package copies its own directory shape for the same reason `contracts` does above:
+# `packages/verification/__init__.py` resolves `.pkgroot` relative to its own path. ZERO new
+# pip requirements — `verifier.py`, `comparators.py`, `normalize.py` and `statuses.py` import
+# nothing but hashlib, json, math, re, datetime, types and typing.
+COPY packages/verification/__init__.py /app/packages/verification/__init__.py
+COPY packages/verification/src/        /app/packages/verification/src/
 COPY apps/exchange/src/          /app/apps/exchange/src/
 # T-299. `ingest.graph` and `ingest.embeddings` are a SHARED LIBRARY that happens to live at
 # a service's path, and candidate retrieval is the exchange's own responsibility (DESIGN.md:34),
@@ -98,6 +109,7 @@ COPY services/ingest/src/embeddings/ /app/services/ingest/src/embeddings/
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
+ && ln -s ../packages/verification/src /app/.pkgroot/claim_verification \
  && ln -s ../apps/exchange/src /app/.pkgroot/exchange \
  && ln -s ../services/ingest/src /app/.pkgroot/ingest
 
