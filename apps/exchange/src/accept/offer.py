@@ -26,9 +26,10 @@ With no source wired the legacy behaviour still stands (the frozen contract pins
 and the ``checkout_redirect`` event both record that nothing external was consulted.
 
 **Exactly one accept per auction.** A second accept must issue no second code — a buyer holding
-two live single-use discounts for one purchase is a discount the seller never agreed to. The
-guard is read *before* the provider runs and the auction is stamped only *after* a code exists,
-so a failed accept leaves the auction acceptable and a successful one closes it.
+two live single-use discounts for one purchase is a discount the seller never agreed to. Since
+T-158 the guard is an atomic *claim* on the auction id (:mod:`.claims`), taken before the
+provider runs, so two concurrent accepts cannot both pass it; a failed accept gives the claim
+back and leaves the auction acceptable, and a successful one keeps it forever.
 
 **A failure is a re-offer, not a dead end (A5).** When the offer is refused or the merchant's
 code creation fails, the buyer is not left holding nothing: the result names
@@ -38,14 +39,29 @@ auction carries no shortlist — and the auction stays open so that accept can b
 Two limits of this layer, stated so the next caller does not assume otherwise
 -----------------------------------------------------------------------------
 
-**The one-accept guard is only as durable as the record you hand in.** :func:`accept` stamps
-the auction it is *given*. A route that loads an ``AuctionRecord`` from
-:class:`~apps.exchange.src.auction.state.RedisAuctionStore`, accepts against it and does not
-save it back has an unstamped record for the next request to read, and two concurrent requests
-reading the same unstamped record can both pass the guard. Whoever writes the accept route
-must persist the stamp — ideally through
-:class:`~apps.exchange.src.auction.state.AuctionStateMachine`, whose ``ACCEPTED`` transition is
-already the serialised one — because an in-memory check cannot make a cross-process guarantee.
+**The one-accept guard is exactly as durable as the claim table you wire (T-158).** The stamp
+:func:`accept` writes onto the auction object is now a *second* line of defence, not the guard.
+The guard is :mod:`.claims`: an atomic, at-most-once claim on the auction id, taken **before**
+the merchant is asked to mint. Wire :class:`~.claims.StoreAcceptanceClaims` over the store the
+auction actually lives in — :func:`~.routes.configure_accept` does, so every served accept has
+one — and the guarantee reaches across processes, because ``RedisAuctionStore``'s reservation
+is one ``SET … NX``.
+
+Wire nothing and there is deliberately **no** default table: the guard falls back to the
+object-scoped stamp alone, and :attr:`AcceptResult.claim_verified` is ``False`` so the result
+says which guard actually ran. A process-lifetime default is the obvious-looking alternative and
+it is the wrong one twice over — it is the in-memory ledger that makes an in-process test green
+while the second uvicorn worker mints the second code, and because a test suite reuses one
+auction id where production uses ``auction-{uuid4()}``, it refuses legitimate first accepts
+(measured: four tests of the frozen acceptance suite, each refused by a *previous test's*
+claim). :mod:`.claims` carries that measurement.
+
+The paragraph this replaces told the route to persist the stamp "through
+``AuctionStateMachine``, whose ``ACCEPTED`` transition is already the serialised one". Both
+halves were wrong. That transition was **not** serialised (``state.py``'s docstring carries the
+measurement), and persisting *after* the mint would not have helped if it were: the loser of
+the race discovers it has lost only once ``POST /codes`` has issued a live single-use discount,
+so the outcome is a correct 409 sitting on top of a real double spend.
 
 **A merchant client that answers off-domain has already minted.** The port checks the offer's
 ``checkout_url`` before the mint, but an offer with *no* URL (the R10 list-price fallback shape)
@@ -78,6 +94,7 @@ from ..checkout import (
     code_fingerprint,
     resolve_provider,
 )
+from .claims import platform_acceptance_claims
 from .reasons import (
     DENIAL_ALREADY_ACCEPTED,
     DENIAL_CHECKOUT_REFUSED,
@@ -168,6 +185,14 @@ class AcceptResult:
     #: the platform — the guard compared the store's word to the store's word. See the module
     #: docstring; this is the flag that stops a decorative pass looking like a real one.
     domain_verified: bool = False
+    #: True means the one-accept guard for this accept was an atomic claim in a real store
+    #: (:mod:`.claims`), so a concurrent second accept could not also have been told it won.
+    #: False means no claim table was in force and the only guard was the ``accepted_bid_ref``
+    #: stamp on the auction object this call was handed — which holds for exactly as long as
+    #: that object does. Same purpose as ``domain_verified`` one field up, and the same lesson:
+    #: T-158 was a guard that *looked* real, so "which guard actually ran" has to be a value
+    #: somebody can read rather than something inferred from the wiring.
+    claim_verified: bool = False
     denial_reason: str | None = None
     #: The next slot to offer the buyer when this one could not be completed (A5).
     reoffer_bid_ref: str | None = None
@@ -404,6 +429,7 @@ def accept(
     mode: str,
     *,
     registered_domains: Any = _UNSET,
+    claims: Any = _UNSET,
 ) -> AcceptResult:
     """Accept ``bid_id`` on ``auction`` and return the permalink the provider minted.
 
@@ -427,6 +453,12 @@ def accept(
             the process-wide source wired by :func:`use_registered_domains` is used; when
             nothing is wired at all the port falls back to the bid's own claim and the result
             says so via :attr:`AcceptResult.domain_verified`.
+        claims: the acceptance-claim table (:mod:`.claims`) — the durable one-accept guard,
+            taken before the merchant is asked to mint. Omitted, the source wired by
+            :func:`~.claims.use_acceptance_claims` is used, and failing that a process-local
+            table which is a floor rather than a guarantee. Pass ``None`` to run with no claim
+            at all: only the object-scoped stamp then applies, which is the pre-T-158
+            behaviour and is not safe on a money path.
 
     Returns:
         :class:`AcceptResult`. ``accepted`` is the outcome; a refusal carries
@@ -485,8 +517,57 @@ def accept(
         )
 
     # Resolved before the request is built: an unregistered mode must not reach the point of
-    # having a request to mint from.
+    # having a request to mint from. It is also resolved before the claim below, because
+    # `resolve_provider` RAISES and a claim taken in front of a raise is a claim nobody ever
+    # gives back — an auction wedged for its whole TTL by a deployment's own misconfiguration.
     provider = resolve_provider(mode)
+
+    # THE guard (T-158), and its position in this function is the fix. Everything above is a
+    # read; this is the first line that cannot be won twice, and it runs BEFORE the merchant
+    # is asked for a code. A claim taken after the mint refuses the second buyer a permalink
+    # and leaves the second live discount sitting in the seller's account.
+    auction_id = str(_read(auction, "auction_id") or "")
+    claim_table = platform_acceptance_claims() if claims is _UNSET else claims
+    claimed = False
+    if claim_table is not None and auction_id:
+        try:
+            outcome = claim_table.claim(auction_id, ref)
+        except Exception as exc:
+            # Fail CLOSED, and reuse the reason that already says why: an acceptance that
+            # cannot be recorded cannot refuse the second accept either, so refusing the
+            # first beats issuing a code that cannot be made single-use. A claim table that
+            # is unreachable is indistinguishable from one that would have said "taken".
+            return _refused(
+                auction,
+                ref,
+                mode,
+                denial_reason(
+                    DENIAL_UNRECORDABLE_ACCEPTANCE,
+                    # The exception's TYPE and nothing else. `{exc}` here would publish
+                    # whatever an injected claim table put in its message into a persisted,
+                    # client-visible `policy_event` payload — the T-264/T-326 shape, where a
+                    # default `__repr__` renders a memory address into the 409 body. The type
+                    # name is what an operator needs and is not attacker-authored prose.
+                    f"the acceptance claim for auction {auction_id!r} could not be taken "
+                    f"({type(exc).__name__}), so a second accept could not be refused; "
+                    f"refusing the first rather than issuing a code that cannot be made "
+                    f"single-use",
+                ),
+                store_id=store_id,
+            )
+        if not outcome.won:
+            return _refused(
+                auction,
+                ref,
+                mode,
+                denial_reason(
+                    DENIAL_ALREADY_ACCEPTED,
+                    f"this auction was already accepted on bid {str(outcome.holder or '')!r}; "
+                    f"a second accept issues no second discount code (R3/A5)",
+                ),
+                store_id=store_id,
+            )
+        claimed = True
 
     request = CheckoutRequest(
         auction_id=str(_read(auction, "auction_id") or ""),
@@ -527,6 +608,16 @@ def accept(
         # The port carries that code out on `OrphanedCheckoutCode.orphan`. Reading it is this
         # frame's entire job: dropping it here is the original defect, one frame higher up.
         orphan = exc.orphan if isinstance(exc, OrphanedCheckoutCode) else None
+        # A5: a refused accept re-offers the next slot, so the auction must be acceptable
+        # again — which means giving the claim back. `release` is a no-op unless this call
+        # still holds it, so a claim that changed hands is never handed to the wrong caller.
+        if claimed and claim_table is not None:
+            try:
+                claim_table.release(auction_id, ref)
+            except Exception:  # noqa: BLE001 - a claim we cannot release stays taken, which
+                # is the fail-closed direction: the auction is refusable rather than
+                # re-mintable, and the refusal below is what the buyer is told either way.
+                pass
         return _refused(
             auction,
             ref,
@@ -544,7 +635,10 @@ def accept(
             orphan=orphan,
         )
 
-    # Only now, with a code that actually exists, is the auction closed to further accepts.
+    # The claim above is what closed the auction to further accepts, and it is kept: a
+    # successful accept never releases it. This stamp is the SECOND line — it is what a
+    # caller holding the object (and a route that saves it back) reads, and what keeps the
+    # refusal correct for a caller that wired no claim table at all.
     _record_acceptance(auction, ref)
 
     return AcceptResult(
@@ -559,5 +653,6 @@ def accept(
         expires_at=checkout.expires_at,
         provider=checkout.provider,
         domain_verified=checkout.domain_verified,
+        claim_verified=claimed,
         events=tuple(checkout.events),
     )

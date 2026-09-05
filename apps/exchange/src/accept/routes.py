@@ -43,17 +43,35 @@ Wiring the collected bids into this port belongs to whoever owns ``auction/route
 one call to :meth:`InMemoryAuctionBids.record` and it is reported in this ticket's NEEDS
 rather than made here.
 
-**It persists the acceptance, and it is still not atomic (T-158).** ``accept()`` stamps the
-auction *object* it is handed; a route that did not write that back would leave the next
-request reading an unstamped record, so this one closes the auction through
-:meth:`~..auction.state.AuctionStateMachine.accept`, whose ``ACCEPTED`` transition is the
-serialised one and whose store is where the stamp survives the request. The legality of that
-transition is checked **before** anything is minted, for the same reason
+**It persists the acceptance, and since T-158 it is atomic.** ``accept()`` stamps the auction
+*object* it is handed; a route that did not write that back would leave the next request
+reading an unstamped record, so this one closes the auction through
+:meth:`~..auction.state.AuctionStateMachine.accept`, whose store is where the stamp survives
+the request.
+
+What used to stand here said the ``ACCEPTED`` transition was "the serialised one" and that the
+read-modify-write window between the legality check and the write was "a different ticket".
+Both statements were wrong, and the second one was wrong in the expensive direction. The
+transition was a bare ``get`` -> mutate -> ``save``, and the window was not a theoretical one:
+driven through *this* route on a store with a 2 ms round trip — which is what
+``RedisAuctionStore`` is, two separate network calls — two concurrent requests answered
+``HTTP 200`` twice and the merchant minted two live single-use discount codes for one purchase,
+3 runs out of 3. It reproduced with the **same** ``bid_ref`` in both requests too, so a
+double-clicked button was enough; it did not need two bids or an attacker.
+
+Two things closed it, and the ordering of the second is the whole repair:
+
+* :meth:`~..auction.state.AuctionStore.reserve` makes the state transition genuinely atomic —
+  one ``SET … NX`` against the store the auction lives in, so it holds across processes; and
+* :func:`configure_accept` wires :class:`~.claims.StoreAcceptanceClaims` over that same store,
+  and :func:`~.offer.accept` takes that claim **before** ``POST /codes``. An atomic transition
+  applied *after* the mint would have made the loser's 409 correct and left its live discount
+  code in the seller's account regardless.
+
+The legality of the transition is still checked before anything is minted, for the same reason
 ``_acceptance_is_recordable`` is: an auction that cannot record its acceptance cannot refuse
 the second accept either, and discovering that after ``POST /codes`` has issued a live
-single-use discount is discovering it too late. What remains open is the read-modify-write
-window between the check and the write — two concurrent requests can still both pass it. That
-is T-158 exactly, it is a different ticket, and this module does not claim to have closed it.
+single-use discount is discovering it too late.
 """
 
 from __future__ import annotations
@@ -78,6 +96,7 @@ from ..auction.state import (
 from ..checkout import DEFAULT_CHECKOUT_MODE, NoRegisteredDomains, UnknownCheckoutMode
 from ..eligibility import StaticSellerEligibility
 from ._spellings import bind_spellings
+from .claims import StoreAcceptanceClaims, acceptance_claims_scope
 from .gate import accept_offer
 from .offer import use_registered_domains
 from .reasons import (
@@ -183,6 +202,7 @@ def configure_accept(
     checkout_mode: str | None = None,
     bids: Any | None = None,
     machine: AuctionStateMachine | None = None,
+    claims: Any | None = None,
 ) -> None:
     """Wire the accept route's dependencies. Anything omitted keeps what is already there.
 
@@ -194,6 +214,20 @@ def configure_accept(
     ``eligibility`` and ``machine`` share ``app.state`` keys with
     :func:`~..auction.routes.configure_auctions`, so an exchange configured once is
     configured for both doors.
+
+    ``claims`` is the T-158 acceptance-claim table. Omitting it is the *normal* case and does
+    not leave the route on a process-local default: :func:`_claims` derives the table from the
+    machine's own store, because a claim that does not live where the auction lives is not a
+    claim on the auction — it is a claim on this process's memory, and the second uvicorn
+    worker mints the second code. Pass it explicitly only to substitute a different durable
+    constraint, such as a unique index in Postgres.
+
+    Unlike ``registered_domains`` this is **not** also written to a process-wide seam. That
+    seam exists for ``registered_domains`` because a call site that forgets it silently gets a
+    bidder-controlled value; a call site that forgets this one gets
+    :class:`~.claims.InMemoryAcceptanceClaims`, which is a floor rather than a hole, and a
+    per-process global holding a per-app store is a leak between two apps in one process
+    rather than a protection.
     """
     if registered_domains is not None:
         app.state.registered_domains = registered_domains
@@ -211,6 +245,12 @@ def configure_accept(
         app.state.auction_bids = bids
     if machine is not None:
         app.state.auction_machine = machine
+    if claims is not None:
+        app.state.acceptance_claims = claims
+    elif machine is not None:
+        # Re-derive whenever the machine changes: a claim table left pointing at the previous
+        # machine's store would guard an auction book this app no longer serves.
+        app.state.acceptance_claims = StoreAcceptanceClaims(machine.store)
 
 
 def _machine(request: Request) -> AuctionStateMachine:
@@ -219,6 +259,22 @@ def _machine(request: Request) -> AuctionStateMachine:
         machine = AuctionStateMachine()
         request.app.state.auction_machine = machine
     return machine
+
+
+def _claims(request: Request) -> Any:
+    """The acceptance-claim table for this app — the auction store's, unless one was wired.
+
+    Derived rather than defaulted, and that is the T-158 fix at the wiring level: the guard is
+    only as durable as where it is kept, so it is kept in the same store the auction record is
+    kept in. An app running on :class:`~..auction.state.RedisAuctionStore` gets a constraint
+    every process shares; one running on the in-memory default gets a constraint every thread
+    in *this* process shares, which is exactly as much as that store can honestly offer.
+    """
+    claims = getattr(request.app.state, "acceptance_claims", None)
+    if claims is None:
+        claims = StoreAcceptanceClaims(_machine(request).store)
+        request.app.state.acceptance_claims = claims
+    return claims
 
 
 def _eligibility(request: Request) -> Any:
@@ -339,14 +395,20 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     }
 
     try:
-        result = accept_offer(
-            auction=auction,
-            bid_ref=body.bid_ref,
-            code_creator=getattr(request.app.state, "code_creator", None),
-            mode=_checkout_mode(request),
-            eligibility=_eligibility(request),
-            registered_domains=_registered_domains(request),
-        )
+        # The atomic one-accept guard (T-158) is taken inside `accept()`, before `POST /codes`,
+        # against the store THIS app's auctions live in. It is bound for the duration of the
+        # call rather than passed down through `accept_offer`, whose parameter list is a
+        # published contract partitioned into data and hostile-input-swept collaborators; see
+        # `claims._request_claims` for why a module global would be worse than either.
+        with acceptance_claims_scope(_claims(request)):
+            result = accept_offer(
+                auction=auction,
+                bid_ref=body.bid_ref,
+                code_creator=getattr(request.app.state, "code_creator", None),
+                mode=_checkout_mode(request),
+                eligibility=_eligibility(request),
+                registered_domains=_registered_domains(request),
+            )
     except UnknownCheckoutMode as exc:
         # A deployment misconfiguration, not a decision about this buyer — and the registry's
         # contract is that it never falls back to the simulated path.
@@ -358,8 +420,11 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     try:
         machine.accept(auction_id, result.bid_ref, now=now)
     except IllegalAuctionTransition as exc:
-        # The auction moved between the legality check above and here — the T-158 window.
-        # A code may already exist for it; `accept()` has filed the events that name it.
+        # NOT the T-158 window any more: the acceptance claim inside `accept()` is what makes
+        # a second accept impossible, and it was taken before `POST /codes`. What is left here
+        # is the auction being EXPIRED concurrently — `expire` and `accept` race for the one
+        # move out of `closed` and exactly one wins. A code does exist in that case; `accept()`
+        # has filed the events that name it, and the buyer is given no permalink for it.
         return _denied(
             denial_reason(
                 DENIAL_AUCTION_NOT_ACCEPTABLE,
