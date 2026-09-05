@@ -123,12 +123,34 @@ def _field(record: Any, name: str, default: Any = None) -> Any:
     return getattr(record, name, default)
 
 
-def _pseudonymous_context(delta: Any, event: Any, redacted_fields: int) -> dict[str, Any]:
+#: The auditable statement of WHY a scrub happened, carried with every pushed event.
+DISCLOSURE_POLICY = "R13/R5: the affected store learns what moved and never who moved it."
+
+#: The eight fields ``contracts.LedgerEvent`` declares, and therefore the ONLY keys a pushed
+#: event may carry: the model sets ``extra="forbid"``, so anything else is a refusal at the
+#: intake rather than a field the receiver ignores. A stored ledger row also has ``seq`` and
+#: ``event_hash``; those are the ledger's own bookkeeping, the receiving agent has no use for
+#: them, and they are dropped here rather than smuggled through.
+_WIRE_EVENT_FIELDS = (
+    "event_id",
+    "ts",
+    "kind",
+    "auction_id",
+    "store_id",
+    "order_ref",
+    "prev_hash",
+    "payload",
+)
+
+
+def _pseudonymous_context(delta: Any, event: Any) -> dict[str, Any]:
     """What the store agent may know about the counterparty: a pseudonym, and nothing else.
 
-    The count of redacted fields is included and their NAMES are not — see
-    :func:`trust.feedback.scrub.scrub_report`. ``redacted_fields`` lets the receiving agent
-    (and an auditor) see that a scrub happened without learning what it removed.
+    EXACTLY the two fields ``contracts.PseudonymousContext`` declares, and no more. That
+    model sets ``extra="forbid"``, so the four extras this function used to return —
+    ``order_ref``, ``identity_disclosed``, ``redacted_fields``, ``policy`` — were not "extra
+    information the receiver ignores", they were a refusal of the whole payload at the
+    intake. See :func:`trust_event_payload` for where each of them lives now.
     """
     payload = _field(event, "payload")
     payload = payload if isinstance(payload, Mapping) else {}
@@ -138,13 +160,56 @@ def _pseudonymous_context(delta: Any, event: Any, redacted_fields: int) -> dict[
         or payload.get("buyer_pseudonym")
         or _field(event, "pseudonym")
     )
+    cluster_id = (
+        _field(delta, "cluster_id") or payload.get("cluster_id") or _field(event, "cluster_id")
+    )
     return {
+        "cluster_id": str(cluster_id) if cluster_id is not None else None,
         "pseudonym": str(pseudonym) if pseudonym is not None else None,
-        "order_ref": _field(event, "order_ref") or _field(delta, "order_ref"),
-        "identity_disclosed": False,
-        "redacted_fields": redacted_fields,
-        "policy": "R13/R5: the affected store learns what moved and never who moved it.",
     }
+
+
+def _wire_event(scrubbed: Any, *, delta: Any, redacted_fields: int, reason_code: Any) -> Any:
+    """The scrubbed event projected onto the published wire shape, carrying the audit report.
+
+    Two things happen here, and the ORDER of the second against the scrub is load-bearing.
+
+    First the event is projected onto :data:`_WIRE_EVENT_FIELDS`, because
+    ``contracts.LedgerEvent`` forbids extras and a storage column riding along would have the
+    intake refuse the event rather than ignore the column.
+
+    Then the audit report is parked in ``payload``. That is not an arbitrary address: it is
+    the one OPEN mapping anywhere in this chain — ``LedgerEvent.payload`` is typed
+    ``dict[str, Any]`` precisely because every kind carries a different body — while
+    ``TrustEventPayload`` and ``PseudonymousContext`` both forbid extras. ``order_ref`` goes
+    somewhere better still: it is a real ``LedgerEvent`` field, which is where the published
+    OpenAPI example puts it, and it is set unconditionally (``None`` included) so a reader
+    never has to distinguish "no order" from "this build forgot".
+
+    The report is added AFTER :func:`~trust.feedback.scrub.scrub_report` has run, never
+    before. Scrubbing first would let the redaction walk count and mangle the very fields
+    that describe it — ``policy`` is prose and would be rewritten, and ``redacted_fields``
+    would be counted as one of the things it is counting.
+    """
+    projected = (
+        {key: value for key, value in scrubbed.items() if key in _WIRE_EVENT_FIELDS}
+        if isinstance(scrubbed, Mapping)
+        else {}
+    )
+    payload = projected.get("payload")
+    payload = dict(payload) if isinstance(payload, Mapping) else {}
+    payload.update(
+        {
+            "schema_version": TRUST_EVENT_SCHEMA_VERSION,
+            "reason_code": reason_code,
+            "identity_disclosed": False,
+            "redacted_fields": redacted_fields,
+            "policy": DISCLOSURE_POLICY,
+        }
+    )
+    projected["payload"] = payload
+    projected["order_ref"] = _field(scrubbed, "order_ref") or _field(delta, "order_ref")
+    return projected
 
 
 def trust_event_payload(delta: Any) -> dict[str, Any]:
@@ -155,14 +220,33 @@ def trust_event_payload(delta: Any) -> dict[str, Any]:
             the originating ledger event.
 
     Returns:
-        A plain mapping carrying ``store_id``, ``dim``, ``delta``, the **full** scrubbed
-        ``event`` (``event_id`` and ``kind`` preserved: an unexplained score move is one a
-        store cannot act on and will not trust) and a non-``None``
-        ``pseudonymous_context``.
+        A plain mapping in the shape ``contracts.TrustEventPayload`` declares, and ONLY that
+        shape: ``store_id``, ``dim``, ``delta``, the scrubbed ``event`` (``event_id`` and
+        ``kind`` preserved: an unexplained score move is one a store cannot act on and will
+        not trust) and a non-``None`` ``pseudonymous_context``.
+
+        WHERE THE AUDIT REPORT LIVES, and why it moved (T-259). This function used to return
+        ``schema_version`` and ``reason_code`` as siblings of ``store_id``, and to hang
+        ``order_ref`` / ``identity_disclosed`` / ``redacted_fields`` / ``policy`` off
+        ``pseudonymous_context``. Both of those models set ``extra="forbid"``, so the store
+        agent's real intake — ``store_agent.modes.AgentRunner.ingest_trust_event``, which
+        validates with ``contracts.TrustEventPayload`` — refused **60 of 60** emitted events.
+        Nothing caught it because this side only ever pushed into a local recording sink and
+        the intake side only ever ingested its own hand-written dict, so both suites stayed
+        green across a seam neither of them crossed.
+
+        Nothing was dropped to make the intake stop refusing, which is the cheap fix and
+        would have silently retired the redaction report an auditor needs. Every carrier
+        still crosses, at an address the contract admits: ``order_ref`` is a real
+        ``LedgerEvent`` field, and the other five ride in ``event.payload``, the one open
+        mapping in the chain. See :func:`_wire_event`.
 
     Raises:
-        FeedbackRejected: the delta names no store. A trust event with no addressee has
-            nowhere to go, and broadcasting it would leak one store's movement to every other.
+        FeedbackRejected: the delta names no store, or names no originating event. A trust
+            event with no addressee has nowhere to go, and broadcasting it would leak one
+            store's movement to every other; one with no event is a score move the receiving
+            store cannot explain, and ``TrustEventPayload.event`` is required, so emitting it
+            would produce a payload the intake is bound to refuse.
     """
     store_id = _field(delta, "store_id")
     event = _field(delta, "event")
@@ -173,16 +257,26 @@ def trust_event_payload(delta: Any) -> dict[str, Any]:
             "a trust delta names no store_id, so there is no affected store to push it to. "
             "R13 addresses the affected store and only the affected store."
         )
+    if event is None:
+        raise FeedbackRejected(
+            f"the trust delta for store {store_id!r} carries no originating event, so the "
+            f"affected store would be told its score moved and never why. "
+            f"contracts.TrustEventPayload requires `event`, so this would be refused at the "
+            f"intake rather than delivered."
+        )
 
-    scrubbed_event, redacted = scrub_report(event) if event is not None else (None, 0)
+    scrubbed_event, redacted = scrub_report(event)
     return {
-        "schema_version": TRUST_EVENT_SCHEMA_VERSION,
         "store_id": str(store_id),
         "dim": _field(delta, "dim"),
         "delta": float(_field(delta, "delta", 0.0) or 0.0),
-        "event": scrubbed_event,
-        "pseudonymous_context": _pseudonymous_context(delta, event, redacted),
-        "reason_code": scrub(_field(delta, "reason_code")),
+        "event": _wire_event(
+            scrubbed_event,
+            delta=delta,
+            redacted_fields=redacted,
+            reason_code=scrub(_field(delta, "reason_code")),
+        ),
+        "pseudonymous_context": _pseudonymous_context(delta, event),
     }
 
 

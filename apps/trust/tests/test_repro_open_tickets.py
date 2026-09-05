@@ -1787,16 +1787,34 @@ def test_t259_the_trust_event_generator_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-259: trust.feedback.trust_event_payload emits `schema_version`, `reason_code` and a "
-        "pseudonymous_context carrying `order_ref`/`identity_disclosed`/`redacted_fields`/"
-        "`policy`, and contracts.TrustEventPayload forbids extras — so the store agent's real "
-        "intake rejects 60 of 60 emitted events while both suites stay green against their own "
-        "doubles; remove this marker with the fix"
-    ),
-)
+# JUSTIFY-TEST-EDIT (T-259) — xfail marker REMOVED because the defect it encoded is fixed.
+#
+# The marker read, verbatim:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-259: trust.feedback.trust_event_payload emits `schema_version`, `reason_code` and a "
+#         "pseudonymous_context carrying `order_ref`/`identity_disclosed`/`redacted_fields`/"
+#         "`policy`, and contracts.TrustEventPayload forbids extras — so the store agent's real "
+#         "intake rejects 60 of 60 emitted events while both suites stay green against their own "
+#         "doubles; remove this marker with the fix"))
+#
+# What it encoded: trust emitted six fields at addresses `contracts.TrustEventPayload` and
+# `contracts.PseudonymousContext` forbid extras at, so every event trust pushed was refused
+# by the store agent's real intake — and neither suite could see it, because trust only ever
+# pushed into a local _RecordingSink and the store agent only ever ingested its own dict.
+#
+# Would this test still be wrong if my change were reverted? YES, and that was MEASURED:
+# with apps/trust/src/feedback/engine.py restored to its HEAD content this gate goes
+# "1 failed"; with the fix restored it goes "2 passed". The pass is caused by this lane's
+# relocation of the six carriers to addresses the contract admits — `order_ref` onto the
+# LedgerEvent field of that name, the other five into `event.payload`, the one open mapping
+# in the chain — and by nothing else.
+#
+# Note which way the fix went, because the cheap one was available and was NOT taken: the
+# gate's second assertion block exists precisely to catch a "fix" that deletes the six
+# carriers to make the intake stop refusing, and it reads them off the dict TRUST EMITTED
+# rather than off the object the intake returned. Every carrier still crosses the seam; the
+# redaction report an auditor needs was not traded away for a green.
+# No assertion body in this gate was touched; only the marker above it was deleted.
 def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -> None:
     """The two ends of R13 must agree, and the agreement must be measured across the seam.
 
