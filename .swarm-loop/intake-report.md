@@ -52,7 +52,7 @@ Evidence: `EXECUTION.md:7-9` "A ticket is closed only by its Verify command pass
 
 **B10. T-000's own gate cannot go green on an empty tree without explicit flags.**
 Evidence: T-000 acc 1 = "`make verify` exits 0 on fresh clone with services up"; non_goals = "No feature code; no schemas". Measured behaviour: `pytest <empty dir>` exits **5**; `pytest <missing path>` exits **4**; `vitest run` with no test files exits **1**. D7 already rules `--passWithNoTests` for the root verify only.
-**Decision:** `scripts/verify.sh` passes `--passWithNoTests` **only** on the root vitest invocation (never in `vitest.config.ts`, which would let T-054's filtered verify pass vacuously), and maps pytest exit 5 → 0 **only** in the root verify, printing a loud WARNING naming the empty path. Ticket verifies get neither treatment: a ticket whose tests do not exist yet is correctly red (D7). T-000 additionally ships one smoke test per workspace so the empty-suite path is exercised, not relied upon.
+**Decision [SUPERSEDED 2026-09-05 by ESC-023, ruled by Hank — the flag is gone; `run_vitest` now FATALs on a zero collection, mirroring `run_pytest`. See D7 in decisions.md]:** `scripts/verify.sh` passes `--passWithNoTests` **only** on the root vitest invocation (never in `vitest.config.ts`, which would let T-054's filtered verify pass vacuously), and maps pytest exit 5 → 0 **only** in the root verify, printing a loud WARNING naming the empty path. Ticket verifies get neither treatment: a ticket whose tests do not exist yet is correctly red (D7). T-000 additionally ships one smoke test per workspace so the empty-suite path is exercised, not relied upon.
 
 ---
 

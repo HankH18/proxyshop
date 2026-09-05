@@ -96,7 +96,23 @@ rescales cosine as `(1 + cos) / 2`**. An exact match scores ≈ 1.0 and an ortho
 scores ≈ 0.5, *not* 0.0. Reading a raw 0.5 as "half similar" rather than "unrelated" would
 inflate every downstream retrieval score; convert before interpreting.
 
-## D7 — `npx vitest run <path>` is a path FILTER and isolates correctly; only the root verify passes with no tests **[verified]**
+## D7 — `npx vitest run <path>` is a path FILTER and isolates correctly; only the root verify passes with no tests **[SUPERSEDED 2026-09-05 by ESC-023, ruled by Hank]**
+
+> **The second half of this decision no longer describes the shipped behaviour.** `scripts/verify.sh` no longer
+> passes `--passWithNoTests`; `run_vitest` FATALs when vitest collects zero tests, mirroring `run_pytest`.
+>
+> Why it was reversed: the flag ASKED the runner to report success on an empty collection, so the TypeScript half
+> of the scored `build_succeeds` metric was fail-open. Measured before the change,
+> `vitest run --passWithNoTests 'no/such/pattern/**'` exited 0 — zero collected, `make verify` green, the metric
+> still 1. A glob change or a moved directory could have taken 864 tests to nothing without moving the number.
+>
+> The first half of D7 still holds and is unchanged: `npx vitest run <path>` really is a path filter and really
+> does isolate correctly. Only the no-tests clause is dead.
+>
+> `scripts/check_verify_contracts.py` cites D7 in three places (module docstring, `check_vitest_projects_have_tests`,
+> and a failure message a reader sees). Those citations are now false as to the flag. **The check itself stays** —
+> per-project coverage is finer-grained than "zero tests overall" and catches something the new FATAL does not.
+> That file is a FROZEN path, so correcting its prose is filed separately rather than folded in here.
 
 Verified: `vitest run pkgA` ran only pkgA's tests and exited 0 while a sibling package's
 failing test was ignored — so every ticket's `npx vitest run <path>` form works as written.
