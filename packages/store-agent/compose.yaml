@@ -4,16 +4,24 @@
 #
 # The store-agent runner.
 #
-# ⚠️ READ THIS BEFORE DEPLOYING IT. The container starts and stays healthy, and it serves NO
-# business routes. `packages/store-agent/src/main.py` is the frozen T-000 entrypoint and
-# mounts routers by globbing `*/routes.py`; there is no `routes.py` anywhere under that
-# tree, so `app.state.mounted_routers` is `[]` and the only endpoints are FastAPI's own
-# /openapi.json, /docs and /redoc. The store agent's real surface — the bidding runtime, the
-# provenance hooks, the learning grid, the external door — is a LIBRARY used in-process by
-# services/sim and by the exchange's solicitation path. This fragment exists because the
-# component is in the root stack's `include:` list and had no artifact at all (T-313); it
-# does not claim an HTTP service that has not been written. The healthcheck below is
-# deliberately honest about probing only that the app imports and uvicorn answers.
+# It serves the one operation its published contract declares — `POST /v1/bid-requests`, the
+# door the exchange solicits this store's bid through (`packages/store-agent/src/solicitation/
+# routes.py`, mounted by the frozen `main.py` glob). Until T-309 there was no `routes.py`
+# anywhere under that tree and this container was an HTTP server with an empty route table;
+# the warning that used to stand here said so.
+#
+# ⚠️ IT STILL NEEDS A STORE. A hosted agent process advocates for exactly one store, and the
+# `BidRequest` on the wire does not name one — the exchange chooses which agent to POST to.
+# So the store context is deployment configuration: set STORE_AGENT_CONTEXT to a JSON file
+# holding it (bind-mount the file in), and STORE_AGENT_STORE_DOMAIN to that store's
+# registered domain when the file does not state one. With neither set the agent answers
+# every solicitation `204 store_context_unconfigured`, which is fail-closed and correct — an
+# agent with no approved envelope has no authorization to offer anything, and `collect_bids`
+# represents a silent store at catalogue list price (R10) — but it is not a store bidding.
+#
+# The domain matters more than it looks: an offer with no `checkout_url` is dropped from every
+# shortlist by the exchange's C10 check, and the agent will not synthesise a host it was not
+# given.
 services:
   store-agent:
     build:
@@ -26,6 +34,10 @@ services:
     environment:
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
       LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+      # Unset by default, and deliberately: a default path would point at a store this
+      # deployment never approved. See the header for what happens with them unset.
+      STORE_AGENT_CONTEXT: "${STORE_AGENT_CONTEXT:-}"
+      STORE_AGENT_STORE_DOMAIN: "${STORE_AGENT_STORE_DOMAIN:-}"
     # No depends_on: the shipped closure opens no socket and touches no datastore. Adding a
     # postgres/redis dependency here would be decoration, and would make this container wait
     # on services it never speaks to.
