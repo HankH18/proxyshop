@@ -194,9 +194,7 @@ class InMemoryAuctionBids:
         while len(self._bids) > self.capacity:
             self._bids.popitem(last=False)
 
-    def bids_for(
-        self, auction_id: str, *, now: float | None = None
-    ) -> Sequence[Mapping[str, Any]]:
+    def bids_for(self, auction_id: str, *, now: float | None = None) -> Sequence[Mapping[str, Any]]:
         """One auction's bids, or nothing once its TTL has taken them away.
 
         ``>=`` rather than ``>``, for the reason ``ShortlistStore.get`` gives: at exactly

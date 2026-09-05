@@ -715,8 +715,9 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
 
     result = solicit_bids(
         roster=roster,
-        solicitor=_bound_solicitor(request, auction_id=auction_id, intent=intent,
-                                  profile=body.profile, respond_by=deadline),
+        solicitor=_bound_solicitor(
+            request, auction_id=auction_id, intent=intent, profile=body.profile, respond_by=deadline
+        ),
         eligibility=_eligibility(request),
         now=deadline,
         fan_out=parallel_fan_out,

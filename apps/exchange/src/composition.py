@@ -191,9 +191,7 @@ class Deployment:
     @property
     def registered_domains(self) -> dict[str, str]:
         return {
-            row.store_id: row.registered_domain
-            for row in self.sellers
-            if row.registered_domain
+            row.store_id: row.registered_domain for row in self.sellers if row.registered_domain
         }
 
     @property
@@ -288,9 +286,11 @@ def _trust_snapshot(raw: Any, source: str) -> Mapping[str, Any]:
     """
     document = _require_mapping(raw, "trust_snapshot", source)
     stores = document.get("stores")
-    rows = _require_mapping(stores, "trust_snapshot.stores", source) if isinstance(
-        stores, Mapping
-    ) else document
+    rows = (
+        _require_mapping(stores, "trust_snapshot.stores", source)
+        if isinstance(stores, Mapping)
+        else document
+    )
 
     snapshot: dict[str, Any] = {}
     for store_id, raw_row in rows.items():
@@ -303,7 +303,7 @@ def _trust_snapshot(raw: Any, source: str) -> Mapping[str, Any]:
             raise DeploymentConfigurationError(
                 f"{source}: trust_snapshot[{str(store_id)!r}] states blacklisted="
                 f"{flag!r}. The ranking reads this as a boolean and treats anything else — "
-                f"including 0 and \"false\" — as an unreadable blacklist, which DENIES the "
+                f'including 0 and "false" — as an unreadable blacklist, which DENIES the '
                 f"store; write true or false"
             )
         snapshot[str(store_id)] = dict(row)
@@ -331,8 +331,10 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
             f"registered domain and where its bids are solicited from"
         )
 
-    snapshot = None if body.get("trust_snapshot") is None else _trust_snapshot(
-        body["trust_snapshot"], source
+    snapshot = (
+        None
+        if body.get("trust_snapshot") is None
+        else _trust_snapshot(body["trust_snapshot"], source)
     )
 
     checkout_mode = body.get("checkout_mode")
@@ -432,9 +434,7 @@ class HttpBidSolicitor:
         respond_by: float | None = None,
     ) -> HttpBidSolicitor:
         """A view of this solicitor bound to one auction's ``BidRequest`` fields."""
-        bound = HttpBidSolicitor(
-            self._endpoints, timeout=self._timeout, client=self._http_client()
-        )
+        bound = HttpBidSolicitor(self._endpoints, timeout=self._timeout, client=self._http_client())
         bound._context = {
             "auction_id": str(auction_id),
             "intent": intent if isinstance(intent, Mapping) else {},
@@ -522,9 +522,7 @@ def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
         return getattr(app.state, name, None) is None
 
     if deployment.sellers and unset("seller_eligibility"):
-        configure_auctions(
-            app, eligibility=StaticSellerEligibility(deployment.eligibility_rows)
-        )
+        configure_auctions(app, eligibility=StaticSellerEligibility(deployment.eligibility_rows))
         bound.append("seller_eligibility")
 
     endpoints = deployment.bid_endpoints

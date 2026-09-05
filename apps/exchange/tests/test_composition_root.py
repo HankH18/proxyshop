@@ -27,10 +27,16 @@ separate file rather than three cases added to an existing one, is:
 
     **the only thing this module calls to build the app is ``create_app()``.**
 
-``grep -n "configure_" apps/exchange/tests/test_composition_root.py`` returns the two lines of
-this docstring and nothing else. Everything the app needs, it reads for itself out of the
-deployment document the composition root is pointed at — which is exactly what a person
-running the service does, and is the thing that was missing.
+No test here that drives a request calls a ``configure_*`` function. Everything the app needs,
+it reads for itself out of the deployment document the composition root is pointed at — which
+is exactly what a person running the service does, and is the thing that was missing.
+
+Stated exactly, because an overclaiming docstring is how the next reader stops looking:
+``configure_exchange`` — the composition root's OWN function, not one of the three route
+seams — is called directly by
+``test_the_composition_root_never_overwrites_wiring_a_deployment_already_chose``, which is a
+unit test of that function and issues no request. Every HTTP test in this file goes through
+the ``deployed`` fixture or :func:`served_exchange`, and neither wires anything.
 
 What is real here
 -----------------
@@ -269,8 +275,7 @@ def test_a_booted_exchange_ranks_the_bids_it_solicited(deployed: httpx.Client) -
     body = _open_an_auction(deployed)
 
     assert body["denied"] == [], (
-        "the R12 gate denied a rostered store, so no bid was ever solicited: "
-        f"{body['denied']}"
+        f"the R12 gate denied a rostered store, so no bid was ever solicited: {body['denied']}"
     )
     assert [entry["store_id"] for entry in body["entries"]] == [row["store_id"] for row in STORES]
     assert [entry["fallback"] for entry in body["entries"]] == [False, False], (
@@ -419,8 +424,14 @@ def test_the_reference_a_store_minted_for_its_own_bid_also_resolves(
         bid = {"bid_id": "bid-from-the-store-9f2c", "offer": {"unit_price": 88.0}}
 
     records = collected_bid_records(
-        [{"bid_id": "auction-x:s1", "store_id": "s1", "store_domain": "s1.example.com",
-          "offer": {"unit_price": 88.0}}],
+        [
+            {
+                "bid_id": "auction-x:s1",
+                "store_id": "s1",
+                "store_domain": "s1.example.com",
+                "offer": {"unit_price": 88.0},
+            }
+        ],
         [_Entry()],
     )
     refs = [record["bid_id"] for record in records]
