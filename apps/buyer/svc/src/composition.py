@@ -1,41 +1,55 @@
-"""The buyer service's composition root: the one place the buyer→exchange seam is joined.
+"""The composition root: the collaborators a *deployed* buyer service binds at start-up.
 
-``apps/buyer/svc/src/accept/routes.py`` states the defect this module closes, verbatim:
+Every exchange-facing part of this service is injected, and every default is fail-closed.
+That is the right shape for the components — and, until this module existed, it was also the
+reason the shopper's confirmation had nowhere to go. ``uvicorn buyer_svc.main:app`` boots a
+buyer service with
 
-    The exchange client is read from ``app.state.exchange_client`` and is **not**
-    constructed here [...] **Nothing in this repository sets that attribute yet** — the
-    buyer→exchange seam has no composition root on either side.
+* ``auction_client``   -> unset, so ``POST /buyer/intent/confirm`` refuses **503**;
+* ``exchange_client``  -> unset, so ``POST /buyer/shortlist/accept`` refuses **503**.
 
-Both halves of the buyer's HTTP surface are injected and both fail closed, which is the
-right shape for the components and was, until this file existed, also the reason nothing
-joined them. ``uvicorn buyer_svc.main:app`` boots a buyer service in which
+Measured against the real services over loopback, on the app exactly as ``create_app()``
+builds it, before this module existed::
 
-* ``app.state.auction_client``  is unset, so ``POST /buyer/intent/confirm`` answers **503**
-  (:class:`~buyer_svc.intent.errors.AuctionClientUnusable`, "confirm() was given no auction
-  client, so the confirmed intent has nowhere to go");
-* ``app.state.exchange_client`` is unset, so ``POST /buyer/shortlist/accept`` answers
-  **503** for the same reason.
+    >> POST http://127.0.0.1:60270/buyer/intent/confirm  -> 503
+    {"detail": "confirm() was given no auction client, so the confirmed intent has nowhere
+                to go. Pass the exchange client that owns POST /auctions."}
 
-A buyer service that boots and 503s every route that matters is a correct *deployment*
-posture and a dead *service*. So this module is where a **deployment** states the one
-collaborator this service has — the exchange — and it states it in configuration rather
-than in code, because a composition root that has to be edited to deploy is not a
-composition root:
+Two fail-closed defaults are a correct *deployment* posture and a dead *journey*: the buyer
+can be asked three questions, can be shown a structured intent, can press the confirm button
+— and the auction that the whole rest of the platform exists to run is never opened. Every
+green demonstration of ``confirm`` in this repository supplies the join whose absence is the
+defect, by handing ``confirm()`` a client the test itself wrote. A test that wires the app it
+is testing is measuring the wiring it wrote.
+
+So this module is the place a **deployment** states its collaborators, and it states them in
+configuration rather than in code, because a composition root that has to be edited to deploy
+is not a composition root. It is deliberately the same shape as
+``apps/exchange/src/composition.py``, down to the variable names, so an operator configuring
+both halves of the buyer↔exchange seam learns one convention:
 
 ``BUYER_DEPLOYMENT``
     Path to a JSON document (below).
 ``BUYER_DEPLOYMENT_JSON``
-    The same document, inline — for a container that would rather set a variable than mount
-    a file. ``BUYER_DEPLOYMENT`` wins if both are set.
-``BUYER_UI_DIST``
-    Optional. The directory of the built single-page UI, mounted at ``/`` **after** every
-    router so an API path can never be shadowed by a file. Unset, or naming a directory that
-    is not there, mounts nothing and never crashes the app.
+    The same document, inline — for a container that would rather set a variable than mount a
+    file. ``BUYER_DEPLOYMENT`` wins if both are set.
+``EXCHANGE_URL``
+    Just the exchange's origin, lowest precedence of the three, and it is here because the
+    repository's own deployment **already sets it**. ``apps/buyer/compose.yaml:47`` carries::
 
-Neither deployment variable set is **exactly today's behaviour**: nothing is wired, both
-routes keep answering 503 out of their own handlers, and this module invents no base URL to
-paper over it. That is the one property this file may not break — a buyer service nobody has
-configured must refuse to reach an exchange rather than quietly guess at one.
+        EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
+        # The exchange is reached by service name inside the network, never by localhost.
+
+    while ``grep -rn EXCHANGE_URL --include='*.py'`` over this repo returns **nothing**. The
+    deploy lane declared the address and said what it was for; no line of code had ever read
+    it. Reading it is the difference between a correct composition root and one the shipped
+    ``docker compose up`` cannot reach: with it, the stack in ``docs/deploy.md`` carries a
+    confirmed intent to the exchange with no operator action at all.
+
+None of the three set is **exactly today's behaviour**: nothing is bound, both defaults above stand, and
+both routes answer 503 with the message they answer today. That is deliberate and it is the
+one property this module may not break — a buyer service nobody has configured must not
+quietly invent an exchange to send a confirmed intent to.
 
 The document
 ------------
@@ -43,98 +57,96 @@ The document
 .. code-block:: json
 
     {
-      "exchange_base_url": "http://127.0.0.1:8123",
-      "roster": [
-        {"store_id": "s1", "tier": 1, "product_ref": "prod-1",
-         "list_price": 100.0, "max_discount_pct": 20.0}
-      ],
-      "request_timeout_seconds": 30.0
+      "exchange_url": "http://exchange:8083",
+      "request_timeout_seconds": 15.0
     }
 
-``exchange_base_url``
-    Required, and required to be an ``http(s)`` URL with a host. There is no default: a
-    defaulted exchange address is a buyer service that silently talks to the wrong exchange,
-    which is worse than one that refuses to talk to any.
-``roster``
-    The platform's candidate set — **deployment data**, not something a browser may author.
-    See :meth:`ExchangeHttpClient.create_auction`.
+``exchange_url``
+    The exchange's own origin — the service that owns ``POST /auctions`` and
+    ``POST /auctions/{auction_id}/accept``. **Required**, because a deployment document that
+    names no exchange binds nothing and is therefore indistinguishable from no document at
+    all, which is the exact silent failure this module exists to remove.
+
+    ONE url, feeding ONE client object, bound to BOTH seams. Two urls would be two opinions
+    about where the exchange is, and the buyer would then be able to open an auction on one
+    exchange and accept an offer on another — a shortlist whose auction the accepting process
+    has never heard of.
 ``request_timeout_seconds``
-    Optional; how long one call to the exchange may take.
+    Optional; how long one call to the exchange may take. Defaults to
+    :data:`DEFAULT_EXCHANGE_TIMEOUT_SECONDS`.
 
-A document that is present and unusable raises :class:`DeploymentConfigurationError` naming
-its source. It is never downgraded to "unconfigured": a missing file, a typo in the JSON, an
-absent ``exchange_base_url`` and an ``ftp://`` address are all misconfigurations, and the
-silent version of each produces a service that boots, answers 503, and looks like a policy
-decision.
+Validation is loud, and every rule below was chosen because the silent version of it produces
+a 503 or a 502 that looks like the exchange's fault:
 
-R3 — this module builds no checkout URL
----------------------------------------
-Not "does not currently build one": there is no template, no ``urljoin`` onto a store host,
-and no f-string with a merchant domain in it anywhere in this file. The only URLs constructed
-here are the **exchange's own API paths** (``/auctions``, ``/auctions/{id}/accept``,
-``/auctions/{id}/shortlist``) against the operator-supplied ``exchange_base_url``, which is
-the client owning the exchange's routing exactly as ``buyer_svc.accept.handoff`` says it must
-("constructing ``/auctions/{id}/accept`` here would be a second place that knows the
-exchange's routing"). Where the buyer *checks out* is the exchange's answer, byte for byte,
-and this module neither reads nor mints it.
+* a document naming no ``exchange_url`` is refused rather than binding nothing;
+* an ``exchange_url`` with no scheme is refused — ``urlsplit("exchange:8083").hostname`` is
+  ``None``, so the request would be built against a URL with no host in it. This is the mirror
+  image of the exchange's own ``registered_domain`` rule, which refuses a bare host that
+  *carries* a scheme, and for the same reason: one field, one shape, refused where the operator
+  can still see their typo;
+* a query string or a fragment is refused — this module appends ``/auctions`` to what it is
+  given, and ``http://exchange:8083/?x=1`` would silently become ``http://exchange:8083/?x=1/auctions``;
+* a ``request_timeout_seconds`` that is not a positive, finite number is refused, ``True``
+  included: ``isinstance(True, int)`` is ``True`` in Python, so ``{"request_timeout_seconds":
+  true}`` would otherwise configure a one-second exchange timeout out of a boolean;
+* an unrecognised key is refused, naming it. The exchange's document has five keys and a typo
+  in one still leaves four working; this document has **one meaningful key**, so
+  ``{"exchange_uri": ...}`` is a deployment that reads as configured and behaves as
+  unconfigured.
+
+A malformed document raises :class:`DeploymentConfigurationError`, which the two routes turn
+into a **503 naming the problem**, never a 500: a buyer service told to read a deployment it
+cannot read is misconfigured, and that is a different thing from a buyer service nobody has
+configured.
 
 When it runs
 ------------
-``apps/buyer/svc/src/main.py`` is orchestrator-frozen and its ``create_app`` globs
-``*/routes.py``, so this flat module is **not** auto-mounted and cannot be. :func:`create_app`
-here calls ``main.create_app()`` and then wires it, which is why the deployable entrypoint is
-``uvicorn buyer_svc.composition:app`` rather than ``buyer_svc.main:app``. Unlike the
-exchange's composition root — which had to bind from inside a request hook because *its*
-entrypoint was the frozen file — this one binds at app construction, so a broken document
-fails the process at start-up instead of once per buyer.
+``apps/buyer/svc/src/main.py`` is orchestrator-frozen (B6(iii)), so this module cannot be
+called from ``create_app``. :func:`ensure_configured` is called instead at the top of the two
+routes that need it, and binds **once per app** — a request-time start-up hook, in the same
+place and for the same reason ``apps/exchange/src/composition.py`` takes one.
 
-:func:`configure_buyer` never overwrites an attribute somebody already set, so a test or a
-devstack that wires its own client still wins and this module composes the published
-``app.state`` seams rather than reaching past them.
+It never overwrites anything already on ``app.state``, so a deployment (or a test) that sets
+``auction_client`` / ``exchange_client`` itself still wins, and ``POST /buyer/intent/clarify``
+and ``POST /buyer/shortlist/render`` do not take the hook at all — R1 and R2's "this handler
+cannot reach a client" property is a statement about scope, and a composition hook in those
+functions would be a client in their scope.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sys
-import threading
-from collections import OrderedDict
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.staticfiles import StaticFiles
-
-from .accept._spellings import bind_spellings
-from .accept.routes import EXCHANGE_CLIENT_ATTR
-from .intent.routes import AUCTION_CLIENT_ATTR
-from .main import create_app as create_base_app
+_log = logging.getLogger(__name__)
 
 __all__ = [
-    "AUCTION_VIEW_PATH",
-    "DEFAULT_REQUEST_TIMEOUT_SECONDS",
+    "AUCTION_CLIENT_ATTR",
+    "DEFAULT_EXCHANGE_TIMEOUT_SECONDS",
+    "DOCUMENT_KEYS",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
-    "ENV_UI_DIST",
+    "ENV_EXCHANGE_URL",
+    "EXCHANGE_CLIENT_ATTR",
     "MAX_DEPLOYMENT_BYTES",
-    "MAX_RECORDED_AUCTIONS",
-    "MAX_ROSTER_ENTRIES",
+    "MAX_EXCHANGE_RESPONSE_BYTES",
+    "MAX_EXCHANGE_WALL_CLOCK_SECONDS",
     "STATE_FLAG",
-    "BuyerDeployment",
+    "Deployment",
     "DeploymentConfigurationError",
     "ExchangeCallFailed",
-    "ExchangeHttpClient",
-    "app",
+    "HttpExchangeClient",
     "configure_buyer",
-    "create_app",
     "ensure_configured",
-    "mount_ui",
     "parse_deployment",
     "read_deployment",
 ]
@@ -143,81 +155,108 @@ __all__ = [
 ENV_DEPLOYMENT = "BUYER_DEPLOYMENT"
 #: The same document, inline. ``ENV_DEPLOYMENT`` outranks it.
 ENV_DEPLOYMENT_JSON = "BUYER_DEPLOYMENT_JSON"
-#: Directory of the built UI. Optional; absent means "serve the API only".
-ENV_UI_DIST = "BUYER_UI_DIST"
+#: Just the exchange's origin, with no document around it — the variable the compose fragment
+#: already sets and nothing has ever read. Lowest precedence of the three.
+ENV_EXCHANGE_URL = "EXCHANGE_URL"
 
 #: ``app.state`` flag saying this app has been through :func:`ensure_configured`.
 STATE_FLAG = "buyer_composition"
 
-#: The read-only view this module adds. Not a feature router: it exists to serve the
-#: diagnostics the exchange does not re-serve, which only the client wired here holds.
-AUCTION_VIEW_PATH = "/buyer/auctions/{auction_id}"
-
-#: How long one call to the exchange may take, end to end.
+#: Where the two exchange-facing clients live on the app.
 #:
-#: Generous on purpose: ``POST /auctions`` waits out the exchange's own R10 bid window
-#: (``DEFAULT_BID_TIMEOUT_SECONDS``, 3.0s) plus a fan-out to every rostered store agent, and a
-#: buyer whose confirmation times out at the buyer service has an auction running at the
-#: exchange that they can no longer name.
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+#: Spelled here rather than imported from the route modules, which import THIS module inside
+#: their request hook — importing them back at module scope would be a cycle, and importing
+#: them lazily just to read two string constants would drag FastAPI into every consumer of
+#: :func:`read_deployment`. ``tests/test_composition_wiring.py`` asserts these are the same
+#: strings the routes read, so the duplication is pinned rather than trusted.
+AUCTION_CLIENT_ATTR = "auction_client"
+EXCHANGE_CLIENT_ATTR = "exchange_client"
+
+#: Every key this document may carry. An unrecognised key is refused against this set.
+DOCUMENT_KEYS = frozenset({"exchange_url", "request_timeout_seconds"})
+
+#: How long one call to the exchange may take, when the document does not say.
+#:
+#: The exchange's ``POST /auctions`` holds the request open for R10's whole bid window while
+#: it fans out to stores (``DEFAULT_BID_TIMEOUT_SECONDS`` is 3.0s, and a caller may ask for
+#: more), so a buyer-side timeout tuned to a normal JSON round trip would abandon healthy
+#: auctions. This is deliberately longer than any window the buyer service itself asks for.
+DEFAULT_EXCHANGE_TIMEOUT_SECONDS = 15.0
+
+#: The most bytes the exchange's answer to one call may occupy.
+#:
+#: A memory bound on the *response* side, in the same house style as
+#: ``exchange.composition.MAX_BID_RESPONSE_BYTES``, and sized against a measured body rather
+#: than a feared one. Against a real ``uvicorn exchange.main:app`` over loopback on this
+#: branch::
+#:
+#:     POST /auctions, no roster        -> 201, 229 bytes
+#:     POST /auctions, one-store roster -> 201, 331 bytes
+#:
+#: The answer grows with the roster — the exchange caps its own at ``MAX_ROSTER_ENTRIES =
+#: 500`` — and with the exclusion reasons it quotes back per candidate, so the ceiling is set
+#: four orders of magnitude above what was observed and is still a ceiling.
+#:
+#: Refused rather than truncated: half a JSON document is not an auction receipt, and a buyer
+#: told "the exchange answered something too large to read" can retry, while one handed a
+#: truncated parse would be told the exchange returned no ``auction_id``.
+MAX_EXCHANGE_RESPONSE_BYTES = 4 * 1024 * 1024
+
+#: The wall-clock ceiling on ONE call to the exchange, from the request leaving to its last
+#: byte arriving.
+#:
+#: Separate from the httpx timeout, which is **per read** — it resets on every chunk, so it is
+#: not a deadline at all and an exchange (or anything answering on its port) dripping one byte
+#: per timeout-interval holds this worker open indefinitely. Same argument, same numbers and
+#: same shape as ``exchange.composition.MAX_SOLICIT_WALL_CLOCK_SECONDS``.
+MAX_EXCHANGE_WALL_CLOCK_SECONDS = 30.0
 
 #: The most bytes a deployment document may occupy.
 #:
-#: Operator-supplied rather than attacker-supplied, so this is a guard against a mistake — a
-#: log file or a tarball named where a config file was meant — rather than against an
-#: adversary, which is why the number is generous. The read itself is bounded (see
-#: :func:`read_deployment`); a cap applied after the bytes are in memory is not a cap.
-MAX_DEPLOYMENT_BYTES = 4 * 1024 * 1024
-
-#: The most roster rows a deployment may register.
-#:
-#: The same 500 as ``exchange.auction.routes.MAX_ROSTER_ENTRIES``, which is the ceiling the
-#: exchange's own ``CreateAuctionRequest`` enforces. Refused here, once, at start-up rather
-#: than as a 422 on every confirmation.
-MAX_ROSTER_ENTRIES = 500
-
-#: How many auctions' diagnostics one client keeps.
-#:
-#: Bounded because it is a per-process cache on a path a browser drives, and the ring is the
-#: reason it is bounded rather than a TTL: 64 auctions is far more than one shopper's session
-#: and the oldest is always the one nobody is looking at. See
-#: :meth:`ExchangeHttpClient.create_auction` for why the record exists at all.
-MAX_RECORDED_AUCTIONS = 64
+#: The document is parsed on the REQUEST path (``main.py`` is frozen, so the composition root
+#: runs as a request-time start-up hook), which makes its size time a buyer waits, and failures
+#: are deliberately not cached so a large malformed document re-parses on every request. This
+#: document carries one url and one number; 64 KiB is a guard against an operator's mistake —
+#: a mounted file that is not the file they meant — rather than against an adversary.
+MAX_DEPLOYMENT_BYTES = 64 * 1024
 
 
 class DeploymentConfigurationError(RuntimeError):
     """The deployment document is missing, unreadable, or says something unusable.
 
-    Raised rather than warned, and named after the exchange's error of the same name for the
-    same reason: a composition root that shrugs at a typo produces exactly the symptom this
-    module exists to remove — a buyer service that boots and 503s.
+    Raised rather than warned. A composition root that shrugs at a typo produces exactly the
+    symptom this module exists to remove: a buyer service that boots, answers every clarify,
+    and refuses every confirmation.
     """
 
 
 class ExchangeCallFailed(RuntimeError):
-    """The exchange could not be reached, or answered something this client cannot use.
+    """The exchange could not be reached, or answered something that is not an answer.
 
-    Distinct from a *refusal*. A 409 on the accept path is the exchange deciding, and
-    :meth:`ExchangeHttpClient.accept_offer` returns its body so
-    ``buyer_svc.accept.handoff`` can turn the ``denial_reason`` into a refusal the buyer is
-    shown. This exception is for the answers that carry no decision at all.
+    Deliberately **not** a :class:`~buyer_svc.intent.errors.IntentError` or an
+    :class:`~buyer_svc.accept.errors.AcceptError`: those trees are domain refusals — "the
+    buyer has not confirmed", "the exchange denied this bid" — and this is neither. It is the
+    upstream failing, which the routes answer ``502``. Folding it into a domain tree would
+    tell a buyer that their request was wrong when the request was fine.
     """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        #: The exchange's HTTP status, when there was one. ``None`` means the call never
+        #: completed — a refused connection, a timeout, a body that would not parse.
+        self.status_code = status_code
 
 
 # =====================================================================================
 # The document
 # =====================================================================================
 @dataclass(frozen=True)
-class BuyerDeployment:
+class Deployment:
     """A parsed, validated deployment document."""
 
-    exchange_base_url: str
-    roster: tuple[Mapping[str, Any], ...] = ()
-    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
-    #: Where this document came from, for the message a later failure prints. Last and
-    #: defaulted so ``BuyerDeployment("http://...")`` — the spelling every caller uses —
-    #: keeps working.
-    source: str = ""
+    source: str
+    exchange_url: str
+    request_timeout_seconds: float = DEFAULT_EXCHANGE_TIMEOUT_SECONDS
 
 
 def _require_mapping(value: Any, what: str, source: str) -> Mapping[str, Any]:
@@ -228,144 +267,158 @@ def _require_mapping(value: Any, what: str, source: str) -> Mapping[str, Any]:
     return value
 
 
-def _exchange_base_url(raw: Any, source: str) -> str:
-    """The exchange's address, or a refusal. Never a default."""
-    if raw is None or not str(raw).strip():
+def _exchange_url(raw: Any, source: str) -> str:
+    """The exchange origin, or a refusal naming what is wrong with it."""
+    if not isinstance(raw, str):
         raise DeploymentConfigurationError(
-            f"{source}: the deployment states no 'exchange_base_url'. There is no default "
-            f"for it: a buyer service that guesses at an exchange address either talks to "
-            f"nobody or talks to the wrong exchange, and both look like an empty shortlist"
+            f"{source}: exchange_url must be a string, got {type(raw).__name__} ({raw!r})"
         )
-    url = str(raw).strip().rstrip("/")
+    url = raw.strip()
+    if not url:
+        raise DeploymentConfigurationError(
+            f"{source}: exchange_url is empty. This is the origin of the service that owns "
+            f"POST /auctions; a buyer service with nowhere to send a confirmed intent is "
+            f"the state this document exists to leave."
+        )
+
     parts = urlsplit(url)
-    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+    if parts.scheme.lower() not in ("http", "https"):
         raise DeploymentConfigurationError(
-            f"{source}: exchange_base_url {str(raw)!r} is not an http(s) URL with a host. "
-            f"This is the base every exchange call is built onto — POST /auctions, "
-            f"POST /auctions/{{id}}/accept, GET /auctions/{{id}}/shortlist — so an address "
-            f"httpx cannot dial is a service that fails on the first confirmation instead "
-            f"of at start-up"
+            f"{source}: exchange_url {url!r} states scheme {parts.scheme!r}; it must be "
+            f"http or https. A value with no scheme has no host either — "
+            f"urlsplit({url!r}).hostname is {parts.hostname!r} — so every call to the "
+            f"exchange would be built against a URL naming no server at all."
         )
-    return url
-
-
-def _roster(raw: Any, source: str) -> tuple[Mapping[str, Any], ...]:
-    """The platform's candidate set, validated the way the exchange will read it."""
-    if raw is None:
-        return ()
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+    if not parts.hostname:
         raise DeploymentConfigurationError(
-            f"{source}: 'roster' must be a JSON array, got {type(raw).__name__}"
+            f"{source}: exchange_url {url!r} names no host; there is nothing to connect to."
         )
-    if len(raw) > MAX_ROSTER_ENTRIES:
+    if parts.query or parts.fragment:
         raise DeploymentConfigurationError(
-            f"{source}: 'roster' names {len(raw)} stores; the exchange's own "
-            f"CreateAuctionRequest accepts at most {MAX_ROSTER_ENTRIES}, so a longer one is "
-            f"a 422 on every confirmation. Refused here, once, instead"
+            f"{source}: exchange_url {url!r} carries a "
+            f"{'query string' if parts.query else 'fragment'}. This value has '/auctions' "
+            f"appended to it, so the query would end up in the middle of the path and the "
+            f"request would go somewhere nobody serves."
         )
-
-    rows: list[Mapping[str, Any]] = []
-    for index, entry in enumerate(raw):
-        row = _require_mapping(entry, f"roster[{index}]", source)
-        if not str(row.get("store_id") or "").strip():
-            raise DeploymentConfigurationError(
-                f"{source}: roster[{index}] names no store_id. The roster is the list of "
-                f"stores the exchange solicits, and a row naming no store solicits nobody "
-                f"while making the roster look one entry longer than it is"
-            )
-        rows.append(dict(row))
-    return tuple(rows)
+    # Trailing slash removed once, here, so `f"{base}/auctions"` is the only join anywhere in
+    # this module and it cannot produce `//auctions`.
+    return url.rstrip("/")
 
 
-def _request_timeout(raw: Any, source: str) -> float:
-    if raw is None:
-        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+def _timeout_seconds(raw: Any, source: str) -> float:
+    """A positive, finite call timeout, or a refusal."""
+    # `bool` FIRST: `isinstance(True, int)` is True, so `{"request_timeout_seconds": true}`
+    # would otherwise pass every numeric check below and configure a 1.0s timeout out of a
+    # value that is not a duration.
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise DeploymentConfigurationError(
-            f"{source}: request_timeout_seconds must be a number, got {raw!r}"
+            f"{source}: request_timeout_seconds must be a number of seconds, got "
+            f"{type(raw).__name__} ({raw!r})"
         )
-    timeout = float(raw)
-    if not math.isfinite(timeout) or timeout <= 0:
+    seconds = float(raw)
+    if not math.isfinite(seconds) or seconds <= 0:
         raise DeploymentConfigurationError(
             f"{source}: request_timeout_seconds is {raw!r}; it must be a positive, finite "
-            f"number of seconds. A zero or negative timeout is not 'wait forever', it is a "
-            f"call that fails before it is sent"
+            f"number of seconds. A zero or negative timeout abandons every call to the "
+            f"exchange before it is made, which reads to a buyer exactly like an exchange "
+            f"that is down."
         )
-    return timeout
+    return seconds
 
 
-def parse_deployment(document: Any, *, source: str) -> BuyerDeployment:
-    """Validate one deployment document. Raises rather than degrading.
-
-    ``source`` names the document in every message this raises — the path from
-    ``BUYER_DEPLOYMENT``, or the variable name ``BUYER_DEPLOYMENT_JSON`` — because the one
-    thing an operator needs from a configuration error is *which file*.
-    """
+def parse_deployment(document: Any, *, source: str) -> Deployment:
+    """Validate one deployment document. Raises rather than degrading."""
     body = _require_mapping(document, "the deployment document", source)
-    return BuyerDeployment(
-        exchange_base_url=_exchange_base_url(body.get("exchange_base_url"), source),
-        roster=_roster(body.get("roster"), source),
-        request_timeout_seconds=_request_timeout(body.get("request_timeout_seconds"), source),
+
+    unknown = sorted(str(key) for key in body if str(key) not in DOCUMENT_KEYS)
+    if unknown:
+        raise DeploymentConfigurationError(
+            f"{source}: the deployment document states {unknown}, which this buyer service "
+            f"does not read; it reads {sorted(DOCUMENT_KEYS)}. Refused rather than ignored: "
+            f"this document has one meaningful key, so a misspelt one is a deployment that "
+            f"looks configured and behaves exactly like an unconfigured one."
+        )
+
+    if "exchange_url" not in body:
+        raise DeploymentConfigurationError(
+            f"{source}: the deployment document names no 'exchange_url'. A buyer deployment "
+            f"that states nothing binds nothing, which is indistinguishable from having no "
+            f"document at all — and the symptom is a 503 on every confirmed intent."
+        )
+    exchange_url = _exchange_url(body["exchange_url"], source)
+
+    raw_timeout = body.get("request_timeout_seconds")
+    timeout = (
+        DEFAULT_EXCHANGE_TIMEOUT_SECONDS
+        if raw_timeout is None
+        else _timeout_seconds(raw_timeout, source)
+    )
+
+    return Deployment(
         source=source,
+        exchange_url=exchange_url,
+        request_timeout_seconds=timeout,
     )
 
 
-def read_deployment(env: Mapping[str, str] | None = None) -> BuyerDeployment | None:
-    """The configured deployment, or ``None`` when this buyer service was given none.
-
-    ``None`` is returned for exactly one situation — neither variable is set — and never for
-    a variable that is set to something unusable. A named-but-missing file is a
-    misconfiguration, not an unconfigured service, and answering it with ``None`` would wire
-    nothing and let the routes 503 with a message about a client nobody asked to be missing.
-    """
+def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
+    """The configured deployment, or ``None`` when this buyer service was given none."""
     environ = os.environ if env is None else env
 
     path = str(environ.get(ENV_DEPLOYMENT) or "").strip()
     if path:
         source = f"{ENV_DEPLOYMENT}={path}"
         try:
-            with Path(path).open("rb") as handle:
-                # Bounded READ, not a bounded check afterwards: `read_text()` on a file
-                # named by mistake (a log, a tarball) is already in memory by the time its
-                # length can be looked at. One byte over the cap is enough to know.
-                raw = handle.read(MAX_DEPLOYMENT_BYTES + 1)
+            text = Path(path).read_text(encoding="utf-8")
         except OSError as exc:
             raise DeploymentConfigurationError(
-                f"{source}: the deployment document could not be read "
-                f"({exc.__class__.__name__}: {exc}). A named-but-missing file is a "
-                f"misconfiguration, not an unconfigured buyer service, so it is refused "
-                f"rather than answered fail-closed"
-            ) from exc
-        if len(raw) > MAX_DEPLOYMENT_BYTES:
-            raise DeploymentConfigurationError(
-                f"{source}: the deployment document is larger than {MAX_DEPLOYMENT_BYTES} "
-                f"bytes. This is a small configuration file; something else is at that path"
-            )
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise DeploymentConfigurationError(
-                f"{source}: the deployment document is not UTF-8 text ({exc})"
+                f"{source}: the deployment document could not be read ({exc.__class__.__name__}"
+                f": {exc}). A named-but-missing file is a misconfiguration, not an unconfigured "
+                f"buyer service, so it is refused rather than answered fail-closed"
             ) from exc
     else:
         inline = str(environ.get(ENV_DEPLOYMENT_JSON) or "").strip()
         if not inline:
-            return None
-        source = ENV_DEPLOYMENT_JSON
-        if len(inline) > MAX_DEPLOYMENT_BYTES:
-            raise DeploymentConfigurationError(
-                f"{source}: the inline deployment document is {len(inline)} bytes; at most "
-                f"{MAX_DEPLOYMENT_BYTES} are read"
+            # LAST, and lowest precedence: the bare origin the compose fragment ALREADY hands
+            # this service. `apps/buyer/compose.yaml:47` sets
+            #
+            #     EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
+            #     # The exchange is reached by service name inside the network, never by localhost.
+            #
+            # and `grep -rn EXCHANGE_URL --include='*.py'` over this repo returns **nothing**:
+            # the deploy lane declared the address, said what it was for, and no line of code
+            # has ever read it. Reading it here is what makes the shipped `docker compose up`
+            # stack carry a confirmed intent with no operator action at all — the alternative
+            # is a correct composition root that the repository's own deployment cannot reach.
+            #
+            # It is a bare origin rather than a document, so it goes through the SAME
+            # `_exchange_url` validation: `EXCHANGE_URL=exchange:8083` is a 503 naming the
+            # problem here exactly as it is inside a document, not a request to a URL with no
+            # host in it.
+            origin = str(environ.get(ENV_EXCHANGE_URL) or "").strip()
+            if not origin:
+                return None
+            return Deployment(
+                source=f"{ENV_EXCHANGE_URL}={origin}",
+                exchange_url=_exchange_url(origin, f"{ENV_EXCHANGE_URL}={origin}"),
             )
+        source = ENV_DEPLOYMENT_JSON
         text = inline
+
+    if len(text) > MAX_DEPLOYMENT_BYTES:
+        raise DeploymentConfigurationError(
+            f"{source}: the deployment document is {len(text)} bytes; this buyer service reads "
+            f"at most {MAX_DEPLOYMENT_BYTES}. It is parsed on the request path, so its size is "
+            f"time a buyer waits"
+        )
 
     try:
         document = json.loads(text)
     except Exception as exc:
-        # NOT `except ValueError`, for the reason `exchange.composition.read_deployment`
-        # records: `json.loads` on deeply nested input raises RecursionError, which is not a
-        # ValueError and would escape this function as a 500 rather than as the named
-        # configuration error this module documents.
+        # NOT `except ValueError`. `json.loads` on deeply nested input raises RecursionError,
+        # which is not a ValueError and would escape this function entirely — an HTTP 500 on
+        # every confirm rather than the 503 this module documents. A document this service
+        # cannot parse is a misconfiguration whatever the parser raised on it.
         raise DeploymentConfigurationError(
             f"{source}: not valid JSON ({type(exc).__name__}: {exc})"
         ) from exc
@@ -373,394 +426,274 @@ def read_deployment(env: Mapping[str, str] | None = None) -> BuyerDeployment | N
 
 
 # =====================================================================================
-# The one outbound client
+# The outbound client — the exchange's `POST /auctions` and `POST /auctions/{id}/accept`
 # =====================================================================================
-@dataclass(frozen=True)
-class _AuctionRecord:
-    """One auction's ``POST /auctions`` answer, kept verbatim beside our own timestamp."""
+class HttpExchangeClient:
+    """The real outbound client: one object, both doors of the exchange.
 
-    auction_id: str
-    recorded_at: str
-    response: Mapping[str, Any] = field(default_factory=dict)
+    It satisfies both published client contracts at once, and that is why there is one object
+    rather than two:
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "auction_id": self.auction_id,
-            "recorded_at": self.recorded_at,
-            "response": dict(self.response),
-        }
+    * ``create_auction(payload)`` is the first name in
+      :data:`~buyer_svc.intent.confirmation.AUCTION_CLIENT_METHODS`, so
+      :func:`~buyer_svc.intent.confirm` picks it;
+    * ``accept_offer(payload)`` is the first name in
+      :data:`~buyer_svc.accept.handoff.EXCHANGE_ACCEPT_METHODS`, so
+      :func:`~buyer_svc.accept.accept` picks it.
 
+    Neither route may build a URL — R3 is a rule about *authority*, and
+    ``buyer_svc.accept.handoff`` states plainly that "nothing in this package builds a URL —
+    that is the whole rule, and it applies to the API URL as much as to the checkout one".
+    This class is the one place that knows the exchange's routing, it is outside that package,
+    and the only URL it produces is an API path under the operator's own configured origin. It
+    never touches, echoes or reconstructs a checkout URL.
 
-class ExchangeHttpClient:
-    """The buyer's ONE client onto the exchange — auctions, accepts and shortlists.
+    **Status handling is per door, because the exchange's two doors mean different things by
+    a non-2xx.**
 
-    One object behind both ``app.state`` attributes, and that is the point rather than an
-    economy: ``buyer_svc.intent.confirmation`` reads ``auction_client`` and
-    ``buyer_svc.accept.handoff`` reads ``exchange_client``, and two clients would be two
-    opinions about which exchange this service is talking to — with the diagnostics recorded
-    on one of them and looked up on the other.
+    ``POST /auctions`` -> anything but 2xx raises. A 422 body carries a ``detail``, not an
+    ``auction_id``, and returning it would take ``confirm()`` down the "the exchange accepted
+    the auction but returned no id" branch: HTTP 201 to the buyer, a receipt naming no
+    auction, and a WARNING in a log nobody is reading.
 
-    It exposes ``create_auction`` (first in
-    :data:`~buyer_svc.intent.confirmation.AUCTION_CLIENT_METHODS`) and ``accept_offer``
-    (first in :data:`~buyer_svc.accept.handoff.EXCHANGE_ACCEPT_METHODS`), so each package
-    resolves its entrypoint on the first name it looks for.
-
-    Nothing here builds a checkout URL (R3). See this module's docstring.
+    ``POST /auctions/{id}/accept`` -> a **409 is returned, parsed**, because it is a documented
+    answer rather than a failure. ``buyer_svc.accept.handoff._refuse_if_denied`` says so in as
+    many words — *"a client that returns the parsed body rather than raising for status hands
+    it straight here"* — and the exchange's own route returns
+    ``{"accepted": false, "denial_reason": ...}`` at 409 for every refusal that is about this
+    buyer's offer. Raising on it would turn "the store was blacklisted since it bid" into a
+    502 that blames the exchange for working correctly. Every other non-2xx (404 for an
+    auction that has expired, 503 for a misconfigured exchange) raises.
     """
+
+    #: The statuses every door reads as an answer. A door that also reads a specific refusal
+    #: — the accept's 409 — names it at the call site, so the exception is per door and
+    #: visible there rather than hidden in a shared set.
+    OK_STATUSES = range(200, 300)
 
     def __init__(
         self,
         base_url: str,
         *,
-        roster: Sequence[Mapping[str, Any]] = (),
-        timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        timeout: float = DEFAULT_EXCHANGE_TIMEOUT_SECONDS,
         client: Any | None = None,
     ) -> None:
-        self.base_url = str(base_url).rstrip("/")
-        self._roster: tuple[dict[str, Any], ...] = tuple(dict(row) for row in roster)
+        self._base_url = str(base_url).rstrip("/")
         self._timeout = float(timeout)
         self._client = client
-        self._records: OrderedDict[str, _AuctionRecord] = OrderedDict()
-        self._lock = threading.Lock()
 
-    # -- the two ports ---------------------------------------------------------------
-    def create_auction(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        """``POST {base}/auctions`` — R1's one side effect, and the only place diagnostics exist.
+    @property
+    def base_url(self) -> str:
+        return self._base_url
 
-        The deployment's roster is filled in **only when the caller's payload carries none**.
-        The platform's candidate set is deployment data: which stores are solicited is not a
-        question the browser gets to answer, and ``POST /buyer/intent/confirm`` accepts a
-        ``roster`` field straight off the wire. A payload that names its own roster is
-        honoured unchanged (that is how a test, or a devstack, drives a different candidate
-        set); a payload whose roster is absent, ``null`` **or empty** gets the deployment's,
-        because "solicit nobody" is not a statement a browser is entitled to make and an
-        empty roster is what an unconfigured client would send.
+    # -- the two doors ---------------------------------------------------------------
+    def create_auction(self, payload: Mapping[str, Any]) -> Any:
+        """``POST {exchange}/auctions`` — R1's one side effect, over the wire."""
+        return self._post("/auctions", payload, what="POST /auctions")
 
-        The whole answer is recorded under its ``auction_id``. That record is not a cache —
-        it is the **only** surviving copy of the exchange's ``entries`` / ``excluded`` /
-        ``denied`` / ``ranked`` diagnostics, because ``GET /auctions/{id}`` on the exchange
-        answers with auction *state* and ``GET /auctions/{id}/shortlist`` with the shortlist
-        alone. Without it, a buyer whose shortlist came back empty cannot be told which
-        stores were asked, which declined, and why — which is the failure this whole service
-        is about.
+    def accept_offer(self, payload: Mapping[str, Any]) -> Any:
+        """``POST {exchange}/auctions/{auction_id}/accept`` — R3's handoff, over the wire.
+
+        The auction id rides in the path AND stays in the body: ``handoff.accept`` calls this
+        with ``{"auction_id": ..., "bid_ref": ...}`` and states that it does so because "the
+        client owns the URL shape and this module must not". This is that client.
         """
-        body = dict(payload)
-        if not body.get("roster") and self._roster:
-            body["roster"] = [dict(row) for row in self._roster]
-
-        answer = self._json(
-            self._request("POST", "/auctions", json=body),
-            expected=(200, 201),
-            what="POST /auctions",
-        )
-        auction_id = str(answer.get("auction_id") or "").strip()
-        if auction_id:
-            self._record(auction_id, answer)
-        return answer
-
-    def accept_offer(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        """``POST {base}/auctions/{auction_id}/accept`` with a body of exactly ``{"bid_ref"}``.
-
-        ``handoff.accept`` calls this with one positional mapping carrying ``auction_id`` and
-        ``bid_ref``; the id rides in the body because that module must not know the
-        exchange's routing. This client does, so the id goes in the **path** and the body
-        carries the bid alone — the exchange's ``AcceptRequest`` is ``extra="forbid"`` and an
-        ``auction_id`` echoed into the body is a 422, not a redundancy.
-
-        A **409 is returned, not raised**: the exchange's denial body
-        ``{"accepted": false, "denial_reason": ...}`` is a decision, and
-        ``handoff._refuse_if_denied`` is the one place that turns it into a refusal the buyer
-        is shown. Every other non-200 raises :class:`ExchangeCallFailed`.
-        """
-        auction_id = str(payload.get("auction_id") or "").strip()
-        bid_ref = str(payload.get("bid_ref") or "").strip()
-        if not auction_id or not bid_ref:
+        body = payload if isinstance(payload, Mapping) else {}
+        auction_id = str(body.get("auction_id") or "").strip()
+        if not auction_id:
+            # `handoff.accept` already refuses a blank auction_id *before* the client is
+            # touched (MissingAuctionReference), so reaching here means a different caller.
+            # Refused rather than sent: `/auctions//accept` is a request to a route that does
+            # not exist, and its 404 would read as "your auction expired".
             raise ExchangeCallFailed(
-                f"accept_offer needs both an auction_id and a bid_ref; got "
-                f"{{'auction_id': {auction_id!r}, 'bid_ref': {bid_ref!r}}}"
+                "the accept names no auction_id, so there is no /auctions/{id}/accept to "
+                "call; nothing was sent to the exchange"
             )
-        response = self._request(
-            "POST",
+        return self._post(
             f"/auctions/{quote(auction_id, safe='')}/accept",
-            json={"bid_ref": bid_ref},
-        )
-        return self._json(
-            response,
-            expected=(200, status.HTTP_409_CONFLICT),
+            {"bid_ref": str(body.get("bid_ref") or ""), "auction_id": auction_id},
             what=f"POST /auctions/{auction_id}/accept",
+            also_accept=(409,),
         )
 
-    # -- the two reads ---------------------------------------------------------------
-    def outcome_for(self, auction_id: str) -> Mapping[str, Any] | None:
-        """This client's record of what the exchange answered when it opened the auction.
+    # -- plumbing -------------------------------------------------------------------
+    def _post(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        what: str,
+        also_accept: tuple[int, ...] = (),
+    ) -> Any:
+        """One bounded POST, returning the parsed body or raising :class:`ExchangeCallFailed`.
 
-        ``{"auction_id", "recorded_at", "response"}``, where ``response`` is the exchange's
-        body **verbatim**. The envelope keeps our timestamp out of the exchange's document:
-        a ``recorded_at`` merged into their answer would read as something the exchange said.
+        The body is read through a **bounded** stream rather than with ``response.json()``,
+        for the reason ``exchange.composition.HttpBidSolicitor.solicit`` measured on its own
+        side of this seam: a response read whole into memory is a memory bound set by the
+        peer, and ``apps/buyer/compose.yaml`` caps this container. Here the peer is a
+        first-party service rather than a third-party store agent, so this is a bound against
+        a runaway exchange rather than against an adversary — which is why the cap is 4 MiB
+        and not 256 KiB.
         """
-        with self._lock:
-            record = self._records.get(str(auction_id))
-        return None if record is None else record.to_dict()
-
-    def shortlist_for(self, auction_id: str) -> Mapping[str, Any] | None:
-        """``GET {base}/auctions/{id}/shortlist`` — live, or ``None`` if the exchange 404s.
-
-        ``None`` rather than an empty shortlist, because the exchange draws that distinction
-        deliberately: an auction whose every candidate was excluded has a real shortlist with
-        no slots, and it is not the same answer as an auction this exchange has forgotten
-        (its 15-minute TTL, or eviction after 512 more recent auctions).
-        """
-        response = self._request("GET", f"/auctions/{quote(str(auction_id), safe='')}/shortlist")
-        if response.status_code == status.HTTP_404_NOT_FOUND:
-            return None
-        return self._json(response, expected=(200,), what=f"GET /auctions/{auction_id}/shortlist")
-
-    # -- plumbing --------------------------------------------------------------------
-    def _record(self, auction_id: str, answer: Mapping[str, Any]) -> None:
-        """Keep this answer, evicting the oldest once the ring is full."""
-        record = _AuctionRecord(
-            auction_id=auction_id,
-            recorded_at=datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            response=dict(answer),
-        )
-        with self._lock:
-            self._records.pop(auction_id, None)
-            self._records[auction_id] = record
-            while len(self._records) > MAX_RECORDED_AUCTIONS:
-                self._records.popitem(last=False)
-
-    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        url = f"{self._base_url}{path}"
+        deadline = time.monotonic() + MAX_EXCHANGE_WALL_CLOCK_SECONDS
         try:
-            return self._http().request(method, f"{self.base_url}{path}", **kwargs)
+            with self._http_client().stream(
+                "POST", url, json=dict(payload), timeout=self._timeout
+            ) as response:
+                status = int(response.status_code)
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_EXCHANGE_RESPONSE_BYTES:
+                        # Stop READING, not merely stop using: a cap applied after the body is
+                        # in memory is not a cap. Leaving the block closes the connection.
+                        raise ExchangeCallFailed(
+                            f"the exchange's answer to {what} exceeded "
+                            f"{MAX_EXCHANGE_RESPONSE_BYTES} bytes and was not read",
+                            status_code=status,
+                        )
+                    if time.monotonic() >= deadline:
+                        # The byte cap alone does not bound TIME: httpx's timeout resets on
+                        # every chunk. See MAX_EXCHANGE_WALL_CLOCK_SECONDS.
+                        raise ExchangeCallFailed(
+                            f"the exchange took longer than "
+                            f"{MAX_EXCHANGE_WALL_CLOCK_SECONDS}s to finish answering {what}",
+                            status_code=status,
+                        )
         except ExchangeCallFailed:
             raise
         except Exception as exc:
+            # A refused connection, a DNS failure, a timeout, a TLS error. The buyer's request
+            # was fine; the upstream is not there.
             raise ExchangeCallFailed(
-                f"{method} {self.base_url}{path} could not be completed "
+                f"{what} to {self._base_url} failed before an answer arrived "
                 f"({type(exc).__name__}: {exc})"
             ) from exc
 
-    def _json(self, response: Any, *, expected: tuple[int, ...], what: str) -> Mapping[str, Any]:
-        status_code = int(response.status_code)
-        if status_code not in expected:
+        if status not in self.OK_STATUSES and status not in also_accept:
             raise ExchangeCallFailed(
-                f"the exchange answered {what} with HTTP {status_code} "
-                f"(expected {list(expected)}): {_excerpt(response)}"
+                f"the exchange answered {status} to {what}: {_excerpt(bytes(body))}",
+                status_code=status,
             )
+
         try:
-            body = response.json()
-        except Exception as exc:
+            answer = json.loads(bytes(body)) if body else None
+        except ValueError as exc:
             raise ExchangeCallFailed(
-                f"the exchange answered {what} with HTTP {status_code} and a body this "
-                f"client cannot parse ({type(exc).__name__}: {exc}): {_excerpt(response)}"
+                f"the exchange answered {status} to {what} with a body this service could "
+                f"not parse as JSON ({exc}): {_excerpt(bytes(body))}",
+                status_code=status,
             ) from exc
-        if not isinstance(body, Mapping):
+        if not isinstance(answer, Mapping):
             raise ExchangeCallFailed(
-                f"the exchange answered {what} with a JSON {type(body).__name__} rather "
-                f"than an object: {body!r}"
+                f"the exchange answered {status} to {what} with "
+                f"{type(answer).__name__}, not a JSON object: {_excerpt(bytes(body))}",
+                status_code=status,
             )
-        return body
+        return dict(answer)
 
-    def _http(self) -> Any:
-        """One pooled client for this object, built on first use.
+    def _http_client(self) -> Any:
+        """One pooled client for this process, built on first use.
 
-        Deferred rather than built in ``__init__`` so that constructing this class — which a
-        configuration check, or a test, may do — opens no sockets, and so ``httpx`` is
-        imported only by a deployment that actually reaches out.
+        Deferred rather than built in ``__init__`` so that constructing a client — which a
+        test or a config check may do — opens no sockets, and so that ``httpx`` is imported
+        only by a deployment that actually reaches out.
         """
         if self._client is None:
-            import httpx
+            import httpx  # noqa: PLC0415 — see the docstring
 
             self._client = httpx.Client(timeout=self._timeout)
         return self._client
 
 
-def _excerpt(response: Any, limit: int = 400) -> str:
-    """A short, safe rendering of a response body for an error message."""
-    try:
-        text = str(response.text)
-    except Exception:  # noqa: BLE001 - a body we cannot even render is still an error
-        return "<unreadable body>"
-    return text if len(text) <= limit else f"{text[:limit]}..."
+def _excerpt(body: bytes, limit: int = 400) -> str:
+    """A short, safe rendering of an error body, for a message a human will read."""
+    text = body[: limit + 1].decode("utf-8", errors="replace")
+    return text if len(text) <= limit else f"{text[:limit]}…"
 
 
 # =====================================================================================
 # Binding
 # =====================================================================================
-def configure_buyer(app: FastAPI, deployment: BuyerDeployment) -> tuple[str, ...]:
-    """Bind what ``deployment`` states, and nothing this app has already been given.
+def configure_buyer(app: Any, deployment: Deployment) -> tuple[str, ...]:
+    """Bind everything ``deployment`` states that this app has not already been given.
 
-    Returns the ``app.state`` attribute names it bound, so a caller can say what a deployment
-    actually turned on — and so an empty tuple is a visible answer rather than a silent one.
+    Returns the names it bound, so a caller can say what a deployment actually turned on.
 
-    It never overwrites: a devstack, an e2e harness or a test that set its own
-    ``auction_client`` still wins, exactly as ``exchange.composition.configure_exchange``
-    leaves wiring a deployment already chose.
+    ONE :class:`HttpExchangeClient` is bound to both attributes rather than two clients to
+    one attribute each. The two seams are two doors of one service: a buyer that opened an
+    auction on one exchange and accepted an offer on another would be accepting an offer in
+    an auction the accepting process has never heard of.
     """
-    client = ExchangeHttpClient(
-        deployment.exchange_base_url,
-        roster=deployment.roster,
-        timeout=deployment.request_timeout_seconds,
-    )
     bound: list[str] = []
-    for attribute in (AUCTION_CLIENT_ATTR, EXCHANGE_CLIENT_ATTR):
-        if getattr(app.state, attribute, None) is None:
-            setattr(app.state, attribute, client)
-            bound.append(attribute)
+
+    def unset(name: str) -> bool:
+        """Never SET, as opposed to set to ``None``. The difference is load-bearing.
+
+        ``getattr(app.state, name, None) is None`` cannot tell "nobody has wired a client" from
+        "somebody wired ``None`` on purpose", and the second is a real gesture in this tree:
+        ``tests/test_intent_routes.py::test_a_service_with_no_exchange_wired_says_so`` writes
+        ``app.state.auction_client = None`` to assert the 503. Now that an ambient
+        ``EXCHANGE_URL`` is enough to configure this service, reading that as "unset" would
+        bind a client over a test — and over a deployment — that had said no.
+
+        Starlette's ``State`` raises ``AttributeError`` for a name it does not hold, so
+        ``hasattr`` separates the two exactly.
+        """
+        return not hasattr(app.state, name)
+
+    client = HttpExchangeClient(deployment.exchange_url, timeout=deployment.request_timeout_seconds)
+    for attr in (AUCTION_CLIENT_ATTR, EXCHANGE_CLIENT_ATTR):
+        if unset(attr):
+            setattr(app.state, attr, client)
+            bound.append(attr)
+
+    if bound:
+        _log.info(
+            "buyer composition: bound %s against exchange %s (%s)",
+            ", ".join(bound),
+            deployment.exchange_url,
+            deployment.source,
+        )
     return tuple(bound)
 
 
-def ensure_configured(app: FastAPI, env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[str, ...]:
     """Bind this app's deployment once. Idempotent, and a no-op when none is configured.
 
-    The guard lives on ``app.state``, so two apps in one process — which is every test module
-    in this repository — are configured independently. Only a *successful* bind is
-    remembered: a malformed document raises every time it is asked for, so an operator who
-    fixes it is served by the next call rather than by the next process.
+    Called from the routes rather than from ``create_app`` because ``main.py`` is
+    orchestrator-frozen (B6(iii)). The guard is on ``app.state``, so two apps in one process
+    (which is every test module in this repository) are configured independently.
+
+    A failure is **not** cached: the flag is set only on success, so an operator who fixes a
+    malformed document is served by the next request without restarting the process.
     """
     already = getattr(app.state, STATE_FLAG, None)
     if already is not None:
-        return tuple(already)
+        return already
     deployment = read_deployment(env)
     if deployment is None:
-        # Fail closed, and say nothing else. Both routes answer 503 out of their own
-        # handlers with a message naming the client they were not given, which is a better
-        # error than anything this module could invent a base URL to avoid.
+        # Deliberately NOT cached. "No deployment configured" is two `os.environ` lookups to
+        # re-establish, and caching it would mean a document that appeared after the first
+        # request is ignored for the life of the process. Only a SUCCESSFUL bind is
+        # remembered; a failure is not cached either, so a fixed document is picked up by the
+        # next request.
         return ()
     bound = configure_buyer(app, deployment)
     setattr(app.state, STATE_FLAG, bound)
     return bound
 
 
-def configure_auction_view(app: FastAPI) -> None:
-    """Add ``GET /buyer/auctions/{auction_id}``: the live shortlist plus the recorded run.
+# LAST, and for the reason every `routes.py` in this tree ends the same way: this file is
+# reachable as `buyer_svc.composition` AND as `apps.buyer.svc.src.composition`, and no
+# package `__init__` imports it, so left alone Python executes it a SECOND time under the
+# second name. Two `ExchangeCallFailed` classes from one `class` statement is not a
+# curiosity — `except ExchangeCallFailed` written against one spelling does not catch the
+# one the other raises, and the route that maps it to a 502 would let it escape as a 500.
+# `buyer_svc.intent._spellings` is that mechanism; it is imported HERE, at the bottom, so
+# this module's own namespace is complete first, and it reaches nothing that imports this
+# module back. Asserted in `tests/test_composition_wiring.py`.
+from .intent._spellings import bind_spellings  # noqa: E402  (see above)
 
-    It lives here rather than in a feature router because it is the composition root's own
-    view: the diagnostics it serves exist only on the client this module wired, and a router
-    under ``intent/`` or ``accept/`` would either duplicate that record or reach for a client
-    it has no business owning.
-
-    The two halves are kept apart on purpose. ``shortlist`` is fetched from the exchange on
-    every request and is what the exchange says *now*; ``entries``/``excluded``/``denied``/
-    ``ranked``/``solicited`` come from the answer this service recorded when the auction was
-    opened, and ``recorded_at`` says when. Nothing is merged, nothing is derived from the
-    other, and a missing half is ``null`` rather than an empty list pretending to be an
-    answer.
-    """
-
-    @app.get(AUCTION_VIEW_PATH, tags=["buyer-auctions"])
-    async def read_auction(auction_id: str, request: Request) -> dict[str, Any]:
-        """One auction as this buyer service can honestly describe it."""
-        client = getattr(request.app.state, EXCHANGE_CLIENT_ATTR, None)
-        if client is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    f"this buyer service has no exchange client, so it cannot say anything "
-                    f"about auction {auction_id!r}. Point {ENV_DEPLOYMENT} at a deployment "
-                    f"document naming an exchange_base_url"
-                ),
-            )
-
-        recorded = client.outcome_for(auction_id) if hasattr(client, "outcome_for") else None
-        try:
-            shortlist = (
-                client.shortlist_for(auction_id) if hasattr(client, "shortlist_for") else None
-            )
-        except ExchangeCallFailed as exc:
-            # 502: this request was fine and the upstream's answer was not. A 500 would
-            # blame this service for the exchange's reply.
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-
-        if recorded is None and shortlist is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=(
-                    f"no auction {auction_id!r}: this buyer service holds no record of "
-                    f"opening it, and the exchange has no shortlist for it either"
-                ),
-            )
-
-        answer: Mapping[str, Any] = {}
-        if recorded is not None:
-            candidate = recorded.get("response")
-            if isinstance(candidate, Mapping):
-                answer = candidate
-        return {
-            "auction_id": auction_id,
-            "shortlist": dict(shortlist) if shortlist is not None else None,
-            "entries": _rows(answer.get("entries")),
-            "excluded": _rows(answer.get("excluded")),
-            "denied": _rows(answer.get("denied")),
-            "ranked": _rows(answer.get("ranked")),
-            "solicited": _rows(answer.get("solicited")),
-            "recorded_at": recorded.get("recorded_at") if recorded is not None else None,
-        }
-
-
-def _rows(value: Any) -> list[Any]:
-    """A JSON array off the recorded answer, or ``[]`` when it carried none."""
-    if isinstance(value, list):
-        return list(value)
-    return []
-
-
-def mount_ui(app: FastAPI, env: Mapping[str, str] | None = None) -> str | None:
-    """Mount the built UI at ``/`` when ``BUYER_UI_DIST`` names a real directory.
-
-    Returns the directory that was mounted, or ``None``. Called LAST, after every router, so
-    an API path can never be shadowed by a file that happens to share its name — Starlette
-    matches routes in registration order and a ``Mount`` at ``/`` matches everything.
-
-    A missing, blank or nonexistent ``BUYER_UI_DIST`` mounts nothing and is not an error: the
-    API is the service and the UI is a build artefact that may simply not have been built
-    yet. That is the one place in this module where silence is right, and it is why the check
-    is ``is_dir()`` rather than letting ``StaticFiles`` raise.
-    """
-    environ = os.environ if env is None else env
-    directory = str(environ.get(ENV_UI_DIST) or "").strip()
-    if not directory:
-        return None
-    try:
-        if not Path(directory).is_dir():
-            return None
-        app.mount("/", StaticFiles(directory=directory, html=True), name="buyer-ui")
-    except OSError:
-        # An unreadable path, a broken symlink, a permission error: the UI is not there. A
-        # buyer service that will not start because a static directory is odd is worse than
-        # one that serves its API.
-        return None
-    return directory
-
-
-def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
-    """The deployable buyer service: the frozen app, wired, plus the UI.
-
-    ``uvicorn buyer_svc.composition:app``. In order, and the order is load-bearing:
-
-    1. ``buyer_svc.main.create_app()`` — the frozen entrypoint, which globs and mounts every
-       ``<feature>/routes.py``. This module is flat, so it is not one of them and cannot
-       mount itself by accident;
-    2. :func:`ensure_configured` — the deployment's client, or nothing at all;
-    3. :func:`configure_auction_view` — the read-only view over what step 2 recorded;
-    4. :func:`mount_ui` — LAST, so every route above wins over the static mount.
-
-    A broken deployment document raises out of step 2, which fails the process at start-up.
-    That is deliberate: the alternative is a service that boots, answers 503 to every buyer,
-    and gives the operator no reason why.
-    """
-    app = create_base_app()
-    ensure_configured(app, env)
-    configure_auction_view(app)
-    mount_ui(app, env)
-    return app
-
-
-#: The module-level application ``uvicorn buyer_svc.composition:app`` serves.
-app = create_app()
-
-# This module is reachable under both dotted spellings of `apps/buyer/svc/src` (see
-# `accept/_spellings.py`). Left alone, Python executes it a SECOND time under the second
-# name, which builds a second `app` — a whole second FastAPI application, with its own
-# wiring and its own diagnostics ring, for a service that has exactly one.
 bind_spellings(sys.modules[__name__])
