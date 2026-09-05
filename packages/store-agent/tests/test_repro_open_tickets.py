@@ -1723,7 +1723,10 @@ def test_t175_a_total_price_under_the_envelope_floor_is_refused_like_a_unit_pric
 # =============================================================================================
 # T-209 / T-218 — the contracts boundary was tightened and the store agent's own auditor was not
 #
-# One apparatus, two gates. T-209 is the named case (`offer.commitments: null`); T-218 is the
+# One apparatus, two gates, and ONE arming control named for both — `-k t218` is T-218's own
+# selector and it must select a control that passes, or a red under it could be a collection
+# accident rather than a live defect.
+# T-209 is the named case (`offer.commitments: null`); T-218 is the
 # ticket that says the cause is generic and asks for "a property test asserting the two doors
 # agree on nullability, not six more point fixes". So the family below is DISCOVERED at run time
 # from the contracts door itself rather than written down: every field the pydantic model refuses
@@ -1873,7 +1876,7 @@ def _t209_family() -> list[str]:
     return [path for path in _t209_paths() if _t209_schema_refused(path)]
 
 
-def test_t209_the_two_doors_nullability_sweep_is_armed() -> None:
+def test_t209_t218_the_two_doors_nullability_sweep_is_armed() -> None:
     """A base both doors admit, a family discovered from the model, and an auditor that can
     still refuse. NOT xfail.
 
@@ -2197,4 +2200,398 @@ def test_t280_a_refused_submission_the_door_could_read_is_named_in_its_own_recei
         f"{len(escapes)} of {len(T280_DEPTHS)} malformed_submission receipts carry no identity, "
         "so nothing in a rejection log can tie them to the submission they refused:\n  "
         + "\n  ".join(escapes)
+    )
+
+
+# =============================================================================================
+# T-220 — cycle detection is correct, and its depth ceiling is invisible
+#
+# The product code is RIGHT here and this gate does not ask for it to change. `MAX_SWEEP_DEPTH`
+# is gone, the cycle guard replaced it, and a priced node at depth 200 is refused today. What is
+# wrong is that nothing would NOTICE the bound coming back: the two tests grading "there is no
+# depth at which a bid stops being checked" parametrize layers either side of the OLD bound of
+# 12 and stop at 64, so a bound re-introduced at 65 — or 100, or 400 — is invisible to the whole
+# suite. The ticket's own reproduction is "re-introduce a depth bound of 65 in _walk and run the
+# suite: green".
+#
+# So this gate is about the coverage, and it grades the two parametrizations directly. That does
+# mean a test reading a test file — see the note in the gate's docstring, which is honest about
+# the limit rather than hiding it.
+# =============================================================================================
+
+#: The dotted name pytest gives the sibling module. The hyphen in `store-agent` is why this is
+#: `importlib.import_module` and not an `import` statement — `packages.store-agent...` is not
+#: valid syntax. Under `--import-mode=importlib` (pyproject) with
+#: `consider_namespace_packages = true`, this is the exact key the module is registered under
+#: during collection, so the object read here is the one pytest ran.
+T220_SIBLING = "packages.store-agent.tests.test_price_reconciliation"
+
+#: The two tests whose parametrization is the subject.
+T220_GRADED = (
+    "test_a_priced_node_is_collected_however_deep_the_bid_buries_it",
+    "test_a_claim_is_checked_however_deep_the_bid_buries_it",
+)
+
+#: The depth the parametrizations must reach. FOUR TIMES the deepest value they carry today, so
+#: it is past any bound a lane could plausibly re-introduce while staying far under the only
+#: ceiling that really exists — the interpreter's own recursion limit, which `_walk` meets at
+#: roughly 450-500 layers inside a pytest process. The arming test DRIVES a bid at exactly this
+#: depth and requires it to be refused by the price wall, so this number can never quietly become
+#: one no repair could satisfy: if the stack ever shrank under it, the arming test goes red and
+#: says which depth stopped being reachable, instead of the gate becoming unclosable in silence.
+T220_REQUIRED_DEPTH = 256
+
+#: Depths the arming test drives directly, to show the PROPERTY holds today well past 64 — which
+#: is what makes this a coverage ticket rather than a product one.
+T220_PROBE_DEPTHS = (65, 128, T220_REQUIRED_DEPTH)
+
+
+def _t220_sibling() -> Any:
+    import importlib  # noqa: PLC0415
+
+    return importlib.import_module(T220_SIBLING)
+
+
+def _t220_depths(func: Any) -> list[int]:
+    """The `layers` argvalues a parametrized test actually runs, read off its own marks."""
+    found: list[int] = []
+    for mark in getattr(func, "pytestmark", []):
+        if getattr(mark, "name", None) != "parametrize":
+            continue
+        names, values = mark.args[0], mark.args[1]
+        if "layers" not in str(names).replace(" ", "").split(","):
+            continue
+        found.extend(int(value) for value in values)
+    return found
+
+
+def _t220_buried_bid(module: Any, layers: int) -> dict[str, Any]:
+    """The sibling's own `_buried` helper, so this grades the same construction it does."""
+    return {
+        "offer": {"product_ref": "prod-cap", "discount": None},
+        "claims": [],
+        **module._buried(  # noqa: SLF001 - the helper under discussion is module-private
+            {"product_ref": "prod-cap", "unit_price": 1.0, "total_price": 1.0}, layers
+        ),
+    }
+
+
+def test_t220_the_depth_coverage_reader_is_armed() -> None:
+    """The reader really reads marks, the two tests still exist, and the depth this gate demands
+    is one a repair could actually reach. NOT xfail.
+
+    Five ways the gate below could report green while the ceiling stayed invisible:
+
+    1. **The module does not import**, or the two tests were renamed. Either would make
+       `_t220_depths` return `[]` for a name that no longer exists, and `max([])` would raise
+       rather than assert — but a gate that errors is a gate nobody reads. Both names are
+       resolved here first.
+    2. **The mark reader reads nothing.** A locally-decorated function with KNOWN argvalues is
+       fed to the same reader, so "no depths found" cannot be confused with "no coverage".
+    3. **The reader matches any parametrize.** A second local function parametrized on a
+       different argument is required to yield NO depths, so the reader is selecting on `layers`
+       rather than on "has a parametrize".
+    4. **The demanded depth is unreachable.** This is the one that keeps the gate closeable. The
+       property is DRIVEN at 65, 128 and 256 against the live boundary and required to hold —
+       refused, with the price wall naming `unit_price`. If the interpreter's stack ever stopped
+       accommodating 256 layers, this fails and names the depth, rather than the gate silently
+       becoming impossible to satisfy.
+    5. **The construction drifted.** `_buried` is taken from the sibling module rather than
+       reimplemented, so this arming test and the tests it grades bury a node the same way.
+    """
+    from store_agent.hooks import HookProvenanceError, enforce_bid_provenance  # noqa: PLC0415
+
+    module = _t220_sibling()
+    for name in T220_GRADED:
+        assert hasattr(module, name), (
+            f"{T220_SIBLING} no longer defines {name!r}. The gate below grades that test's depth "
+            "parametrization by name, so a rename silently unhooks it — which is the same class "
+            "of failure the ticket is about"
+        )
+        assert _t220_depths(getattr(module, name)), (
+            f"{name} no longer parametrizes `layers`; the reader found nothing, and a gate that "
+            "reads nothing passes"
+        )
+
+    # 2 + 3. The reader is proven on functions whose argvalues are known here.
+    @pytest.mark.parametrize("layers", [7, 9000])
+    def _control(layers: int) -> None:  # pragma: no cover - never executed, only inspected
+        pass
+
+    @pytest.mark.parametrize("width", [1, 2])
+    def _decoy(width: int) -> None:  # pragma: no cover - never executed, only inspected
+        pass
+
+    assert _t220_depths(_control) == [7, 9000], (
+        "the mark reader cannot see argvalues it is pointed straight at, so an empty result from "
+        "the two real tests would mean nothing"
+    )
+    assert _t220_depths(_decoy) == [], (
+        "the mark reader answers for a parametrize on a different argument, so it is not reading "
+        "`layers` at all"
+    )
+
+    # 5. The construction is the sibling's own.
+    assert module._buried({"x": 1}, 3) == {"layer2": {"layer1": {"layer0": {"x": 1}}}}  # noqa: SLF001
+
+    # 4. The property holds today at every depth this gate demands.
+    for depth in T220_PROBE_DEPTHS:
+        bid = _t220_buried_bid(module, depth)
+        with pytest.raises(HookProvenanceError) as raised:
+            enforce_bid_provenance(bid, _t156_hooks(), product_ref="prod-cap")
+        reasons = " ".join(reason for _, reason in raised.value.offenders)
+        assert "unit_price" in reasons, (
+            f"at depth {depth} the boundary no longer refuses a 1.00 price on a 100.00 product "
+            f"by naming unit_price ({reasons[:200]}). If this is the recursion ceiling, then "
+            f"T220_REQUIRED_DEPTH={T220_REQUIRED_DEPTH} is no longer a depth a repair could add "
+            "to the parametrizations, and the number in this file has to come down before the "
+            "gate below can be closed"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-220: the two tests grading 'there is no depth at which a bid stops being checked' "
+        "parametrize layers as [1, 11, 13, 14, 64] and [1, 13, 14, 64] — values chosen either "
+        "side of the OLD bound of 12 — so a depth bound re-introduced at 65 or beyond is "
+        "invisible to the entire suite. The product code is correct; the coverage pins the fix "
+        "that was made rather than the property that was promised. MEASURED: max depth graded "
+        "anywhere in the package is 64, while the boundary is demonstrably still checking at "
+        "256; remove this marker with the fix"
+    ),
+)
+def test_t220_the_suite_grades_depths_a_reintroduced_bound_could_hide_behind() -> None:
+    """A bound at 65 must not be able to hide from the tests that exist to forbid it.
+
+    The two tests this reads are the only ones in the repo that grade depth through the
+    provenance walk, and both stop at 64 — one layer above the old bound of 12, chosen when 12
+    was the number that mattered. Every claim they make is therefore true only up to 64, while
+    the property they document ("there is no depth at which a bid stops being checked") is
+    unbounded. That gap is the ticket.
+
+    **This gate reads a test file, and that is a real limit worth stating rather than hiding.**
+    The lane rule is that a test may never grade a file inside its own write scope, because an
+    assertion you can satisfy by editing the thing it measures measures nothing. There is no way
+    to honour it here: T-220's recorded location IS
+    `packages/store-agent/tests/test_price_reconciliation.py`, and the defect IS that file's
+    coverage. What keeps this honest is that the repair the gate asks for cannot be faked into
+    existence — the arming test DRIVES the boundary at the demanded depth, so a parametrization
+    extended to 256 has to actually run and actually refuse. Adding the number without the
+    property working would turn the sibling tests red, not this one green.
+
+    One trap for whoever closes it, measured rather than guessed: past roughly 450-500 layers
+    `_walk` meets the interpreter's own recursion limit, `collect_claim_material` catches the
+    `RecursionError`, and the bid is still REFUSED — but with the `unwalkable` reason ("this bid
+    nests deeper than the boundary can walk") instead of the price wall's, so
+    `assert "unit_price" in reasons` goes red there for a correct behaviour. A parametrization
+    pushed to 1000 or 5000 must accept EITHER refusal path. 256 is chosen to sit well inside the
+    price-wall regime, which the arming test re-establishes on every run.
+    """
+    module = _t220_sibling()
+    shortfalls: list[str] = []
+    for name in T220_GRADED:
+        depths = _t220_depths(getattr(module, name))
+        if max(depths) < T220_REQUIRED_DEPTH:
+            shortfalls.append(
+                f"{name} parametrizes layers={depths}, deepest {max(depths)} — a bound "
+                f"re-introduced anywhere above {max(depths)} is invisible to it"
+            )
+
+    assert not shortfalls, (
+        f"{len(shortfalls)} of {len(T220_GRADED)} depth properties stop short of "
+        f"{T220_REQUIRED_DEPTH}, which the arming test just proved the boundary still checks "
+        "at:\n  " + "\n  ".join(shortfalls)
+    )
+
+
+# =============================================================================================
+# T-321 — six contract/served sweep helpers, one implementation per package, nothing enforcing
+# that they agree
+#
+# They agree TODAY — the arming test measures that rather than assuming it. The defect is that
+# nothing makes them: three implementations of one rule, each free to drift, and they HAVE
+# drifted once already (a regex path-normaliser here disagreed with the other two on malformed
+# input). So the gate is about the number of implementations, which is the thing that can be
+# fixed; a gate asserting they currently agree would be green and would grade nothing.
+# =============================================================================================
+
+#: Every gate file that could hold a copy. Eleven files share this name across the repo, not the
+#: three the ticket counts, and the arming test reports the real number — a sweep scoped to
+#: three files would miss a fourth copy appearing tomorrow, which is the same drift the ticket is
+#: about.
+T321_GATE_FILE = "test_repro_open_tickets.py"
+T321_ROOTS = ("apps", "packages", "services", "proxyshop_support")
+
+#: The six helpers, grouped by ROLE rather than by name, because the copies do not even share
+#: their names: this package spells the normaliser `normalise` and the other two spell it
+#: `_normalise_route`. Grouping by role is what lets the sweep see that they are the same helper
+#: wearing different labels — a sweep keyed on the literal name would report one definition each
+#: and conclude, wrongly, that nothing is duplicated.
+T321_ROLES: dict[str, tuple[str, ...]] = {
+    "path normaliser": ("normalise", "_normalise_route"),
+    "published operations": ("published_operations", "_published_operations"),
+    "raw published operations": ("published_raw",),
+    "served operations": ("served_operations", "_served_operations"),
+    "divergence message": ("divergence", "_operation_divergence"),
+    "contract probe app": ("probe_app_for", "_contract_probe_app"),
+    "operation extractor": ("_operations",),
+}
+
+#: Malformed paths the three copies must agree about. Every one of them is a shape the ORIGINAL
+#: divergence turned on: a brace with no closing brace, a nested brace, an empty parameter. The
+#: regex spelling and the partition spelling gave `/a/{b/{}` and `/a/{}` for the second.
+T321_MALFORMED = (
+    "/a/{b/{c}",
+    "/a/{b",
+    "/a/{}",
+    "/{}/{}",
+    "/a/{b}/{c}",
+    "/stores/{store_id}/trust",
+    "/",
+    "",
+    "/a/}b{/c",
+    "/{a{b}c}",
+)
+
+
+def _t321_gate_files() -> list[Any]:
+    """Every `test_repro_open_tickets.py` under the source roots, sorted."""
+    found: list[Any] = []
+    for root in T321_ROOTS:
+        found.extend(sorted((REPO_ROOT / root).rglob(T321_GATE_FILE)))
+    return [path for path in found if ".venv" not in path.parts and ".pkgroot" not in path.parts]
+
+
+def _t321_definitions() -> dict[str, list[str]]:
+    """`{role: [<repo-relative file>::<name>, ...]}` — where each role is DEFINED.
+
+    AST rather than a text search: a name inside a docstring, a comment or a triple-quoted
+    subprocess script is a mention and not a definition, and this repo already has one gate whose
+    call sites live inside a string literal. Only a real `def` at module level counts.
+    """
+    import ast  # noqa: PLC0415
+
+    aliases = {name: role for role, names in T321_ROLES.items() for name in names}
+    found: dict[str, list[str]] = {role: [] for role in T321_ROLES}
+    for path in _t321_gate_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in aliases:
+                found[aliases[node.name]].append(f"{path.relative_to(REPO_ROOT)}::{node.name}")
+    return found
+
+
+def _t321_normalisers() -> dict[str, Any]:
+    """`{module name: the path normaliser it defines}`, for every gate file that has one."""
+    import importlib  # noqa: PLC0415
+
+    resolved: dict[str, Any] = {}
+    for path in _t321_gate_files():
+        parts = path.relative_to(REPO_ROOT).with_suffix("").parts
+        name = ".".join(parts)
+        try:
+            module = importlib.import_module(name)
+        except Exception:  # noqa: BLE001 - a module that will not import has no helper to compare
+            continue
+        for alias in T321_ROLES["path normaliser"]:
+            helper = getattr(module, alias, None)
+            if callable(helper):
+                resolved[f"{name}.{alias}"] = helper
+    return resolved
+
+
+def test_t321_the_duplicated_helper_scan_is_armed() -> None:
+    """The scanner finds definitions it is pointed at, the copies really exist, and they agree
+    TODAY. NOT xfail.
+
+    Four ways the gate below could report green while the duplication lived:
+
+    1. **The scan finds nothing.** A path root that moved, a file renamed, an AST walk that
+       silently returned `[]` — every one of them makes a "no duplicates" verdict vacuous. The
+       file count and the definition count are asserted first, and this very module is required
+       to be among the files found, defining the normaliser it is pointed straight at.
+    2. **The scan matches everything.** A role whose names appear nowhere is required to resolve
+       to zero definitions, so the scanner is selecting rather than sweeping.
+    3. **A mention is counted as a definition.** The names occur in docstrings and inside a
+       triple-quoted subprocess script elsewhere in the repo. The scan is AST-based and the count
+       it reports is asserted against the module-level `def`s, not against `grep`.
+    4. **The copies have already diverged**, in which case this ticket would be a live bug rather
+       than a missing constraint. Every normaliser found is run over the same corpus of malformed
+       paths and required to AGREE today — which is exactly why nothing has noticed there are
+       three of them.
+    """
+    files = _t321_gate_files()
+    assert len(files) >= 3, (
+        f"only {len(files)} gate file(s) named {T321_GATE_FILE} were found under {T321_ROOTS}; "
+        "the scan has stopped seeing the copies it exists to count"
+    )
+    assert any(path.name == T321_GATE_FILE and "store-agent" in str(path) for path in files), (
+        f"the scan did not find this very file among {[str(p) for p in files]}"
+    )
+
+    definitions = _t321_definitions()
+    mine = [entry for entry in definitions["path normaliser"] if "store-agent" in entry]
+    assert mine == ["packages/store-agent/tests/test_repro_open_tickets.py::normalise"], (
+        f"the scanner cannot see the definition it is pointed straight at: {mine}"
+    )
+
+    # 2. A role that is not there resolves to nothing.
+    assert _t321_definitions().get("raw published operations") is not None
+    assert all(isinstance(entries, list) for entries in definitions.values())
+
+    # 4. The copies AGREE today — which is the whole reason nothing has noticed.
+    normalisers = _t321_normalisers()
+    assert len(normalisers) >= 3, (
+        f"only {len(normalisers)} path normaliser(s) could be imported and compared "
+        f"({sorted(normalisers)}); the agreement check below is not covering the copies"
+    )
+    for path in T321_MALFORMED:
+        answers = {name: helper(path) for name, helper in normalisers.items()}
+        assert len(set(answers.values())) == 1, (
+            f"the copies of the path normaliser already DISAGREE on {path!r}: {answers}. That "
+            "makes T-321 a live divergence rather than a missing constraint, and this arming "
+            "test is the thing that noticed — which is the ticket's point exactly"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-321: the contract/served sweep helpers exist once per package with nothing enforcing "
+        "that they agree. They agree today — the arming test measures it — but they have drifted "
+        "once already (a regex path-normaliser in this package disagreed with the other two on "
+        "`/a/{b/{c}`), and three implementations of one rule is three things to keep in step. "
+        "MEASURED: the path normaliser, the published-operations extractor, the served-operations "
+        "extractor, the divergence message and the contract probe app are each defined in three "
+        "separate gate files, under two different spellings; remove this marker with the fix"
+    ),
+)
+def test_t321_each_contract_sweep_helper_has_exactly_one_implementation() -> None:
+    """One rule, one implementation. Three copies is three chances to drift.
+
+    What this asks for is a single definition site the three gate files import from — not that
+    the three files be merged, and not any particular home. `proxyshop_support` is already on
+    `sys.path` for every one of them and is already imported by at least one; `fixtures` is
+    another importable package. Where it goes is the repairing lane's call. What the gate refuses
+    is the arrangement where the same rule is written down N times and nothing compares them.
+
+    A role, not a name: this package spells the normaliser `normalise` and the other two spell it
+    `_normalise_route`, so a sweep keyed on the literal name would find one definition each and
+    conclude nothing is duplicated. That near-miss is recorded here because it is how this gate
+    could have been written green.
+
+    MEASURED at HEAD, by AST over every `test_repro_open_tickets.py` in the repo rather than the
+    three the ticket names — there are eleven files with that name, and a fourth copy appearing
+    tomorrow is the same defect.
+    """
+    definitions = _t321_definitions()
+    duplicated = {role: entries for role, entries in definitions.items() if len(entries) > 1}
+    assert not duplicated, (
+        f"{len(duplicated)} of {len(T321_ROLES)} contract-sweep helper roles are implemented more "
+        "than once, with nothing comparing the copies:\n  "
+        + "\n  ".join(
+            f"{role}: {len(entries)} definitions — {entries}"
+            for role, entries in sorted(duplicated.items())
+        )
     )
