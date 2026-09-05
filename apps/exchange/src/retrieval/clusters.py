@@ -246,18 +246,30 @@ class ClusterRow:
         fields = _fields(raw)
         if not fields:
             raise ValueError(f"a catalogue cluster must be a JSON object, got {raw!r}")
-        terms = fields.get("terms") or ()
-        if isinstance(terms, (str, bytes)) or not isinstance(terms, Sequence):
-            raise ValueError(
-                f"cluster {fields.get('cluster_id')!r}: 'terms' must be an array of strings, "
-                f"got {type(terms).__name__}; a bare string is one term written as its letters"
-            )
-        attributes = fields.get("attributes") or {}
-        if not isinstance(attributes, Mapping):
-            raise ValueError(
-                f"cluster {fields.get('cluster_id')!r}: 'attributes' must be a JSON object of "
-                f"{{field: value}}, got {type(attributes).__name__}"
-            )
+        # `is None`, never truthiness. `fields.get("terms") or ()` reads `[]`, `0`, `""` and
+        # `{}` all as "the key is absent", so a document that states `"attributes": []` — a
+        # real typo, an array where an object belongs — would be silently degraded to "this
+        # cluster has no attributes" and simply stop matching. That is the exact failure mode
+        # this whole module refuses: a vocabulary that loads and finds nothing.
+        raw_terms = fields.get("terms")
+        terms: Sequence[Any] = ()
+        if raw_terms is not None:
+            if isinstance(raw_terms, (str, bytes)) or not isinstance(raw_terms, Sequence):
+                raise ValueError(
+                    f"cluster {fields.get('cluster_id')!r}: 'terms' must be an array of "
+                    f"strings, got {type(raw_terms).__name__}; a bare string is one term "
+                    f"written as its letters, not a list of them"
+                )
+            terms = raw_terms
+        raw_attributes = fields.get("attributes")
+        attributes: Mapping[str, Any] = {}
+        if raw_attributes is not None:
+            if not isinstance(raw_attributes, Mapping):
+                raise ValueError(
+                    f"cluster {fields.get('cluster_id')!r}: 'attributes' must be a JSON object "
+                    f"of {{field: value}}, got {type(raw_attributes).__name__}"
+                )
+            attributes = raw_attributes
         return cls(
             cluster_id=str(fields.get("cluster_id") or ""),
             label=str(fields.get("label") or ""),
@@ -329,9 +341,7 @@ class StaticIntentClusterCatalogue:
         if raw is None:
             return cls()
         if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
-            raise ValueError(
-                f"'intent_clusters' must be a JSON array, got {type(raw).__name__}"
-            )
+            raise ValueError(f"'intent_clusters' must be a JSON array, got {type(raw).__name__}")
         if len(raw) > MAX_CATALOGUE_CLUSTERS:
             raise ValueError(
                 f"'intent_clusters' names {len(raw)} clusters; this exchange reads at most "
