@@ -95,6 +95,7 @@ __all__ = [
     "CANDIDATE_FIELDS",
     "candidate_from_entry",
     "candidates_from_entries",
+    "fallback_checkout_url",
     "mint_bid_id",
 ]
 
@@ -137,6 +138,69 @@ def _registered_domain(source: Any, store_id: str) -> str | None:
     return None if domain is None else str(domain)
 
 
+def fallback_checkout_url(registered_domain: str) -> str:
+    """The D22 cart destination on a domain the PLATFORM registered, with no discount on it.
+
+    ``build_cart_permalink`` is not reused here and the difference is not cosmetic: that
+    function's whole output is ``…/cart/{variant}:{qty}?discount={code}``, and before an accept
+    there **is** no code. A fallback's pre-accept URL is a destination, not an entitlement, so it
+    names the cart and nothing else. The authoritative permalink — the one with a real
+    single-use code on it — is still built at accept time by
+    :func:`~apps.exchange.src.checkout.provider.default_permalink`, out of the same registry
+    lookup, so the two never name different hosts.
+
+    ``1:1`` because a manufactured list-price offer names neither variant nor quantity: it is
+    one unit of the rostered product at its catalogue price. ``default_permalink`` defaults to
+    exactly the same pair on exactly the same offer (``offer.get("variant_ref") or
+    offer.get("variant_id") or 1``, and ``offer_quantity`` -> 1).
+
+    The domain is interpolated **verbatim**, deliberately. A registry row spelled
+    ``https://shop.example.com`` produces ``https://https://shop.example.com/cart/1:1``, whose
+    host is ``https`` and which ``is_on_domain`` therefore refuses — the candidate is excluded
+    ``off_domain_checkout``, which is the direction to fail in. Normalising the value here would
+    be this module quietly repairing the platform's own record and then vouching for the repair.
+    """
+    return f"https://{registered_domain}/cart/1:1"
+
+
+def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
+    """A manufactured list-price offer, given the checkout URL the platform's registry implies.
+
+    **This is the other half of R10, and it is here rather than in ``collect_bids`` because this
+    is where the trusted answer lives.** ``auction/collect.py`` builds the fallback offer out of
+    catalogue data and cannot complete it: the only defensible source for a checkout host is the
+    platform's ``store_id -> domain`` registry, and handing that registry to a pure collector
+    would put the C10/D22 lookup in two places. So the offer arrives with no ``checkout_url``,
+    ``ranking.filters.domain_reason`` fails closed on it — "the offer carries no usable checkout
+    URL … failing closed (C10)" — and every fallback the exchange manufactured for itself was
+    excluded before it could be ranked. R10 says a silent store "can still reach the shortlist";
+    it did not.
+
+    Three properties, and each is a refusal to make this convenient:
+
+    * **Fallbacks only.** ``entry.fallback`` is ``collect_bids``' own verdict, set on the branch
+      that discards whatever arrived under that store's name and substitutes a catalogue offer
+      the exchange wrote. A HOSTED bid that omits its checkout URL is left exactly as it was and
+      is still excluded, because completing it would let a store post no URL and be handed a
+      platform-built one — the store choosing which check it faces.
+    * **Never over a URL that is already there.** A fallback carries none by construction; if one
+      is somehow present it is not overwritten, so this can only ever add a destination where
+      there was none, never redirect one.
+    * **No domain, no URL.** ``NoRegisteredDomains`` is the wired default and knows nobody, so an
+      exchange with no seller registry still shortlists no fallback. The absent lookup is a
+      denial here exactly as it is everywhere else on this path.
+
+    Nothing read here came from the silent store. It could not have: the store never answered.
+    """
+    if not isinstance(offer, Mapping):
+        return offer
+    if read(offer, "checkout_url", None):
+        return offer
+    if not registered_domain or not str(registered_domain).strip():
+        return offer
+    return {**offer, "checkout_url": fallback_checkout_url(str(registered_domain))}
+
+
 def candidate_from_entry(
     entry: Any,
     *,
@@ -158,7 +222,13 @@ def candidate_from_entry(
     # `entry.store_id` and never `bid["store_id"]`: whose bid a reply is, is the exchange's
     # attribution — `collect_bids` already stamps it over whatever the payload claimed.
     store_id = str(getattr(entry, "store_id", "") or "")
+    store_domain = _registered_domain(registered_domains, store_id)
     offer = read(bid, "offer", None)
+    if getattr(entry, "fallback", False):
+        # R10's second half. A COPY, never a mutation: the same offer dict is still inside the
+        # `BidEntry` the route renders as `entries`, and a projection that edited its input
+        # would be rewriting what the auction reports it collected.
+        offer = _completed_fallback_offer(offer, store_domain)
     claims = getattr(entry, "claims", None)
     if claims is None:
         claims = read(bid, "claims", None)
@@ -166,7 +236,7 @@ def candidate_from_entry(
     return {
         "bid_id": mint_bid_id(auction_id, store_id),
         "store_id": store_id,
-        "store_domain": _registered_domain(registered_domains, store_id),
+        "store_domain": store_domain,
         "offer": offer,
         "claims": list(claims or ()),
     }
