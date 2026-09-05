@@ -61,17 +61,21 @@ reader stops looking
 ``offer`` and ``claims`` are copied from the store's document, because they are what the store
 is answering WITH. Two consequences, both measured through the HTTP door:
 
-* **A store satisfies any hard constraint by writing ``"status": "verified"`` onto its own
-  claim.** ``ranking/filters.py:237`` reads that field, and no ``status`` field exists on the
-  published ``Claim`` at all (``additionalProperties: false``), so nothing validates it and
-  nothing produces it but the bidder. Two identical stores, one adding the string: the liar is
-  ranked and the honest one is excluded ``hard_constraint_unsatisfied``. It also sets
-  ``verified_hard_fit_count``, the FIRST published tie-break. This is not new — ``rank()`` has
-  always read ``status`` off its candidates — but wiring the ranker onto a served path is what
-  turned it from latent into reachable, and closing it needs a claim-verification producer
-  (``packages/verification``) the auction path does not have. It is NOT closed here, because
-  ignoring the field instead would make every hard-constrained auction return an empty
-  shortlist, and that is a product decision rather than a projection detail.
+* **A store no longer satisfies a hard constraint by writing ``"status": "verified"`` onto its
+  own claim (ESC-020 — closed).** It used to: ``ranking/filters.py`` read that field, no
+  ``status`` exists on the published ``Claim`` at all (``additionalProperties: false``), so
+  nothing validated it and nothing produced it but the bidder — two identical stores, one
+  adding the string, and the liar was ranked while the honest one was excluded
+  ``hard_constraint_unsatisfied``, with ``verified_hard_fit_count`` (the FIRST published
+  tie-break) moved to match. What closed it is a claim-verification producer plus an
+  attestation, not a strip: ``ranking/verification.py`` runs ``claim_verification.verify``
+  over each store's claims against the catalog snapshot THIS EXCHANGE holds, and stamps the
+  verdict with an HMAC the bidder cannot compute (``ranking/attestation.py``);
+  ``ranking/filters.py`` reads only that. This projection still copies ``claims`` verbatim, and that is now safe rather
+  than merely admitted: whatever a store writes under ``status`` or under
+  ``exchange_verification`` is dropped before verification and read by nothing after it. The
+  cost is a real operational requirement — an exchange with no catalog wired verifies nothing
+  and shortlists nobody on a hard-constrained intent.
 * **The ``price`` tie-break is the store's own ``total_price``.** The T-177 price wall in
   ``auction/collect.py`` is what stands between that and a 0.01 bid; the ranker does not know
   the wall exists.

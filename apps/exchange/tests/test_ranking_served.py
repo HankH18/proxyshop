@@ -31,11 +31,15 @@ app**:
    its five named fields (which closes the class, including the key nobody listed).
 
 **What §4 does not claim.** "A bidder cannot score itself" is true of the five published
-FEATURES and false of the eligibility gate: a store writes ``"status": "verified"`` onto its own
-claim and satisfies any hard constraint, because ``ranking/filters.py:237`` reads a field the
-published ``Claim`` does not have and nothing on the auction path validates. See
-``exchange.ranking.candidates``' module docstring. The builders below use that field because
-every producer in this repo does; that is the defect, not this file's convention.
+FEATURES, and it used to be false of the eligibility gate: a store wrote ``"status":
+"verified"`` onto its own claim and satisfied any hard constraint, because
+``ranking/filters.py`` read a field the published ``Claim`` does not have and nothing on the
+auction path validated it. ESC-020 closed that — the verdict now comes from
+``ranking/verification.py`` running the claim verifier against the exchange's own catalogue,
+attested by ``ranking/attestation.py`` — so the builders below emit the contract's shape and
+carry no ``status`` at all. The forgery itself is driven in
+``apps/exchange/tests/test_ranking_claim_forgery.py``, which is where it belongs: this file
+is about the ranker being ON the served path, that one is about what the served path trusts.
 """
 
 from __future__ import annotations
@@ -84,13 +88,46 @@ def _domain(store_id: str) -> str:
     return f"{store_id}.example.com"
 
 
-def _claim(key: str, value: Any, *, status: str = "verified") -> dict[str, Any]:
+def _claim(key: str, value: Any) -> dict[str, Any]:
+    """One claim exactly as a BIDDER can write it — with no verdict on it (ESC-020).
+
+    There is no ``status`` here any more, and its absence is the point. The published
+    ``Claim`` never had the field, and while the ranker read it a store satisfied any hard
+    constraint by writing it. What decides the constraint now is the verdict the exchange
+    reaches itself, against the catalogue :func:`_catalog` wires in — so these builders can
+    go back to emitting exactly the shape the contract declares.
+    """
     return {
         "key": key,
         "value": value,
-        "status": status,
         "provenance": {"source": "owner_statement", "ref": f"ref:{key}", "authority_rank": 1},
     }
+
+
+def _catalog(stores: tuple[str, ...], *, capacity_l: int = 35) -> Any:
+    """The catalogue the exchange grades these stores' claims against.
+
+    It agrees with the default bid (``capacity_l = 35``), so an honest bid verifies and is
+    ranked; a store bidding something else is judged against this, not against itself.
+    """
+    from exchange.ranking.verification import StaticCatalogSnapshots
+
+    return StaticCatalogSnapshots(
+        {
+            store: {
+                "snapshot_id": f"snap-{store}",
+                "products": [
+                    {
+                        "product_ref": "product-1",
+                        "canonical_name": "product-1",
+                        "evidence_ref": f"snap-{store}#product-1",
+                        "attributes": {"capacity_l": {"value": capacity_l}},
+                    }
+                ],
+            }
+            for store in stores
+        }
+    )
 
 
 def _rostered(store_id: str, list_price: float) -> dict[str, Any]:
@@ -122,11 +159,12 @@ def _offer(price: float, store_id: str, *, expires_in: float = LIVE_FOR_AN_HOUR)
 class Bidders:
     """The outbound bid client, answering from a table.
 
-    A reply is ``Bid``-SHAPED, not a valid ``Bid``: ``_claim`` writes a ``status`` field that
-    the published ``Claim`` forbids (``additionalProperties: false``). It is written that way
-    because that is what the ranker reads and what every other producer in this repo emits —
-    and because saying "every reply is a protocol Bid" here, as the first draft did, would hide
-    the fact that the field deciding eligibility is one the contract does not have.
+    A reply is ``Bid``-SHAPED and, since ESC-020, its claims are also ``Claim``-shaped: the
+    ``status`` field the published ``Claim`` forbids (``additionalProperties: false``) is
+    gone, because nothing reads it. The first draft of this docstring recorded the opposite —
+    that the field deciding eligibility was one the contract did not have — which was true and
+    is the defect ESC-020 closed. ``test_ranking_claim_forgery.py`` is where a reply that
+    still writes it is driven, and it buys nothing there.
     """
 
     def __init__(self, bids: dict[str, dict[str, Any]]) -> None:
@@ -189,6 +227,12 @@ def _wired_app(
         registered_domains=StaticRegisteredDomains(
             {store: _domain(store) for store in stores} if domains is None else domains
         ),
+        # ESC-020: an exchange with no catalogue verifies no claim, so it satisfies no hard
+        # constraint and shortlists nobody. That is the right direction to fail in, and it is
+        # asserted as such by `test_an_unwired_exchange_ranks_nothing_rather_than_ranking_
+        # everything`; every OTHER test in this file is about something else and needs the
+        # collaborator wired, exactly as it needs the trust snapshot wired.
+        catalog=_catalog(stores),
     )
     return app
 
@@ -457,7 +501,14 @@ def test_the_ranking_reads_the_platform_registry_the_accept_path_was_already_wir
         eligibility=StaticSellerEligibility({STORE_A: ELIGIBLE}),
     )
     # Deliberately does NOT pass registered_domains — the fallback is what is under test.
-    configure_ranking(app, trust_snapshot={STORE_A: {"blacklisted": False, "score": 0.6}})
+    # The catalogue IS passed: it is a different collaborator with no fallback of its own, and
+    # leaving it out would make this test fail on the hard constraint rather than on the
+    # registry it is about (ESC-020).
+    configure_ranking(
+        app,
+        trust_snapshot={STORE_A: {"blacklisted": False, "score": 0.6}},
+        catalog=_catalog((STORE_A,)),
+    )
 
     body = _post(app, [_rostered(STORE_A, 100.0)])
 
@@ -763,6 +814,9 @@ def _score_of(extra: dict[str, Any] | None = None) -> dict[str, Any]:
         trust_snapshot={STORE_A: {"blacklisted": False, "score": 0.6}},
         registered_domains=StaticRegisteredDomains({STORE_A: _domain(STORE_A)}),
         weights=DEFAULT_RANKING_WEIGHTS,
+        # The route passes its catalogue too (ESC-020). Without it the baseline candidate is
+        # excluded on the hard constraint and every probe below compares two exclusions.
+        catalog=_catalog((STORE_A,)),
     )
     assert result["ranked"], f"the baseline candidate was excluded: {result['candidates']}"
     return result["ranked"][0]

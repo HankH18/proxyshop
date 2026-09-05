@@ -57,6 +57,7 @@ from pydantic import BaseModel, Field
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
 from ..ranking.serving import (
+    catalog_of,
     rank_auction,
     registered_domains_of,
     shortlist_store,
@@ -564,6 +565,15 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         trust_snapshot=trust_snapshot_of(request.app),
         registered_domains=registered_domains_of(request.app),
         weights=weights_of(request.app),
+        catalog=catalog_of(request.app),
+        # Which product each store is bidding on is the ROSTER's answer, never the reply's:
+        # a store that named a different product on its bid would otherwise choose which of
+        # its own catalogue entries its claims are graded against (ESC-020).
+        product_refs={
+            str(entry.get("store_id") or ""): entry.get("product_ref")
+            for entry in roster
+            if entry.get("product_ref") is not None
+        },
     )
     shortlist = ranking["shortlist"]
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)

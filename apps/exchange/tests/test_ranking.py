@@ -20,17 +20,27 @@ T_FUTURE = 2_000_000_000.0
 
 
 def _claim(key, value, *, source="owner_statement", status="verified"):
-    return {
-        "key": key,
-        "value": value,
-        "provenance": {
-            "source": source,
-            "ref": f"ref:{key}",
-            "observed_at": T_PAST,
-            "authority_rank": 1,
+    """One supporting fact, carrying the exchange's attested verdict on it (ESC-020).
+
+    `status` names the verdict this fixture is asking the exchange to have reached; it is
+    handed to the attester rather than written onto the claim, because a `status` written onto
+    a claim is a field the bidder can write and R19 may not read.
+    """
+    from exchange.ranking.attestation import attest_claim
+
+    return attest_claim(
+        {
+            "key": key,
+            "value": value,
+            "provenance": {
+                "source": source,
+                "ref": f"ref:{key}",
+                "observed_at": T_PAST,
+                "authority_rank": 1,
+            },
         },
-        "status": status,
-    }
+        status=status,
+    )
 
 
 def _candidate(
