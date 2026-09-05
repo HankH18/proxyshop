@@ -112,12 +112,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .accept.routes import InMemoryAuctionBids, configure_accept
-from .auction.routes import configure_auctions
 from .checkout.registry import registered_modes
 from .checkout.sellers import StaticRegisteredDomains
 from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
-from .ranking.serving import configure_ranking
+
+# NOTE ON THIS MODULE'S IMPORTS. The three `configure_*` seams and `InMemoryAuctionBids` live
+# in route modules that import THIS module (deferred, inside their request hook), so importing
+# them here at module scope would be a cycle waiting for the first caller to enter from the
+# other side. They are imported inside :func:`configure_exchange` instead, which also keeps
+# the hook cheap for the case that matters most: an exchange with no deployment configured
+# reaches `read_deployment`, gets `None`, and imports nothing at all.
 
 __all__ = [
     "DEFAULT_SOLICIT_TIMEOUT_SECONDS",
@@ -508,6 +512,10 @@ def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
 
     Returns the names it bound, so a caller can say what a deployment actually turned on.
     """
+    from .accept.routes import InMemoryAuctionBids, configure_accept  # noqa: PLC0415
+    from .auction.routes import configure_auctions  # noqa: PLC0415
+    from .ranking.serving import configure_ranking  # noqa: PLC0415
+
     bound: list[str] = []
 
     def unset(name: str) -> bool:

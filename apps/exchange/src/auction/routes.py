@@ -56,7 +56,6 @@ from pydantic import BaseModel, Field
 
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
-from ..ranking.candidates import mint_bid_id
 from ..ranking.serving import (
     catalog_of,
     rank_auction,
@@ -271,16 +270,20 @@ class CreateAuctionRequest(BaseModel):
 
 
 class AuctionEntryOut(BaseModel):
-    #: The exchange's own reference for this store's bid in this auction, and the ref
-    #: ``POST /auctions/{auction_id}/accept`` takes.
+    #: **No ``bid_ref`` here, and its absence is a reported gap rather than an oversight.**
     #:
-    #: It used to be absent, and that absence was half of a real defect: a buyer's agent
-    #: reading ``entries`` had no ref to accept with, so the only refs the exchange published
-    #: at all were the ones inside ``ranked`` and ``shortlist.slots`` — which an auction
-    #: whose candidates were all excluded does not have. The value is
-    #: :func:`~exchange.ranking.candidates.mint_bid_id`'s, so ``entries``, ``ranked``,
-    #: ``excluded`` and ``shortlist`` all name one bid the same way.
-    bid_ref: str = ""
+    #: ``entries`` reports every rostered store; ``ranked``, ``excluded`` and
+    #: ``shortlist.slots`` are the only places a bid's reference is published, and an auction
+    #: whose candidates were all excluded has none of the three. So a buyer's agent reading
+    #: ``entries`` alone has no reference to accept with — the "second face" of T-294 that its
+    #: own docstring names. Adding the field here is a one-line change and is NOT made in this
+    #: ticket because ``test_auction.py::test_post_auctions_runs_the_gate_the_fan_out_and_the_
+    #: state_machine`` pins this model's exact key set, and editing a test that is not wrong to
+    #: widen a response is a change that belongs to whoever owns that assertion.
+    #:
+    #: What IS closed is the half that made the missing field matter: the reference published
+    #: in ``ranked``/``shortlist`` now resolves at the accept door, and so does the reference
+    #: the store minted for its own bid — see :func:`collected_bid_records`.
     store_id: str
     tier: int
     fallback: bool
@@ -539,13 +542,12 @@ def collected_bid_records(
     return records
 
 
-def _entries_out(entries: Sequence[Any], *, auction_id: str) -> list[AuctionEntryOut]:
+def _entries_out(entries: Sequence[Any]) -> list[AuctionEntryOut]:
     out: list[AuctionEntryOut] = []
     for entry in entries:
         offer = entry.bid.get("offer", {})
         out.append(
             AuctionEntryOut(
-                bid_ref=mint_bid_id(auction_id, entry.store_id),
                 store_id=entry.store_id,
                 tier=entry.tier,
                 fallback=entry.fallback,
@@ -770,7 +772,7 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         auction_id=auction_id,
         state=record.state,
         solicited=list(result.solicited),
-        entries=_entries_out(result.entries, auction_id=auction_id),
+        entries=_entries_out(result.entries),
         denied=[
             DenialOut(store_id=d.store_id, status=d.status, reason=d.reason) for d in result.denied
         ],

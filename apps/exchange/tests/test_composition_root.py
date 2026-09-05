@@ -50,18 +50,24 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from exchange.accept.offer import use_registered_domains
 from exchange.composition import ENV_DEPLOYMENT, ENV_DEPLOYMENT_JSON
 from exchange.main import create_app
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
 
 from proxyshop_support.asgi_server import serve
+
+#: How long a request to the served exchange may take. Generous against the auction's own
+#: 3-second bid window plus two loopback hops, and finite so a wedged server fails the test
+#: instead of hanging the suite.
+REQUEST_TIMEOUT_SECONDS = 30.0
 
 #: The two sellers this deployment registers. The domains are the PLATFORM's statement about
 #: which host each store checks out on; the bid endpoints are where its agent answers.
@@ -185,25 +191,45 @@ def agent_url() -> Iterator[str]:
         yield url
 
 
+@contextmanager
+def served_exchange() -> Iterator[httpx.Client]:
+    """The exchange as a **served process**, reached over a real TCP socket.
+
+    ``TestClient`` would satisfy the letter of this file: it drives the same ASGI callable and
+    would exercise the same composition root. It is not what is used, because in-process ASGI
+    transport is exactly the boundary at which this class of defect hides — the app object is
+    handed to the test rather than started, so nothing between ``create_app()`` and a served
+    request is ever executed. ``proxyshop_support.asgi_server.serve`` starts a real
+    ``uvicorn.Server`` on an OS-assigned port (D40), which is what ``apps/merchant`` already
+    does for its own deployable and what the exchange had no test doing at all.
+
+    The environment is read at request time by the composition root, so a caller sets it
+    before entering this block and the served app picks it up.
+    """
+    with serve(create_app()) as url:
+        with httpx.Client(base_url=url, timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            yield client
+
+
 @pytest.fixture
 def deployed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
-) -> Iterator[TestClient]:
-    """A client onto the real app, configured the way a deployment configures it.
+) -> Iterator[httpx.Client]:
+    """A client onto the real served app, configured the way a deployment configures it.
 
     The ONLY things this fixture does are: write the deployment document, point the
-    environment at it, and call ``create_app()``.
+    environment at it, and start ``create_app()``.
     """
     document = tmp_path / "deployment.json"
     document.write_text(json.dumps(_deployment_document(agent_url), indent=2), encoding="utf-8")
     monkeypatch.setenv(ENV_DEPLOYMENT, str(document))
     monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
 
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
+    with served_exchange() as client:
         yield client
 
 
-def _open_an_auction(client: TestClient) -> dict[str, Any]:
+def _open_an_auction(client: httpx.Client) -> dict[str, Any]:
     response = client.post(
         "/auctions",
         json={
@@ -228,7 +254,7 @@ def _open_an_auction(client: TestClient) -> dict[str, Any]:
 # =====================================================================================
 # The acceptance criteria
 # =====================================================================================
-def test_a_booted_exchange_ranks_the_bids_it_solicited(deployed: TestClient) -> None:
+def test_a_booted_exchange_ranks_the_bids_it_solicited(deployed: httpx.Client) -> None:
     """``POST /auctions`` answers with a non-empty ``ranked`` AND a non-empty shortlist.
 
     Both, because they fail independently. ``ranked`` is empty when a candidate is excluded by
@@ -267,7 +293,7 @@ def test_a_booted_exchange_ranks_the_bids_it_solicited(deployed: TestClient) -> 
     assert body["ranked"][0]["store_id"] == "s1"
 
 
-def test_a_booted_exchange_accepts_its_own_shortlists_top_bid(deployed: TestClient) -> None:
+def test_a_booted_exchange_accepts_its_own_shortlists_top_bid(deployed: httpx.Client) -> None:
     """The shortlist's own top ``bid_ref`` is accepted, and answers with a real code.
 
     This is the half that ``POST /auctions`` used to drop on the floor: it collected a
@@ -306,7 +332,7 @@ def test_a_booted_exchange_accepts_its_own_shortlists_top_bid(deployed: TestClie
     assert state["accepted_bid_ref"] == top["bid_ref"]
 
 
-def test_a_booted_exchange_refuses_a_bid_it_never_published(deployed: TestClient) -> None:
+def test_a_booted_exchange_refuses_a_bid_it_never_published(deployed: httpx.Client) -> None:
     """A recorded bid book must be able to say no, or it is a rubber stamp.
 
     Without this, "the exchange records its bids" and "the exchange accepts any reference it
@@ -328,7 +354,7 @@ def test_a_booted_exchange_refuses_a_bid_it_never_published(deployed: TestClient
     assert accepted.status_code == 200, accepted.text
 
 
-def test_one_auction_yields_one_discount_code(deployed: TestClient) -> None:
+def test_one_auction_yields_one_discount_code(deployed: httpx.Client) -> None:
     """A second accept on the same auction mints no second code (R3/A5)."""
     body = _open_an_auction(deployed)
     slots = body["shortlist"]["slots"]
@@ -345,32 +371,88 @@ def test_one_auction_yields_one_discount_code(deployed: TestClient) -> None:
     assert "code" not in second.json(), second.json()
 
 
-def test_every_bid_the_auction_published_is_one_it_can_be_asked_to_accept(
-    deployed: TestClient,
+def test_every_ranked_bid_is_one_the_auction_can_be_asked_to_accept(
+    deployed: httpx.Client,
 ) -> None:
-    """``entries`` now names a ``bid_ref``, and every one of them resolves.
+    """Not only the top slot: every reference this auction published resolves.
 
-    An auction whose candidates were all excluded has no ``ranked`` row and no shortlist slot,
-    so before ``entries`` carried a ref the exchange published no acceptable reference at all
-    for such an auction. Each ref is tried on its OWN auction — one accept per auction —
-    because a second accept is refused for reasons that have nothing to do with the bid book.
+    The single-slot assertion above is satisfied by a book holding exactly one row, which is
+    indistinguishable from a book that happens to key on whatever the shortlist put first.
+    Each ref is tried on its OWN auction — one accept per auction — because a second accept is
+    refused ``already_accepted`` for reasons that have nothing to do with the bid book.
     """
-    refs = [entry["bid_ref"] for entry in _open_an_auction(deployed)["entries"]]
-    assert refs and all(refs), "entries published no bid refs"
+    refs = [row["bid_ref"] for row in _open_an_auction(deployed)["ranked"]]
+    assert len(refs) == len(STORES), f"the auction published {len(refs)} refs"
 
     for ref in refs:
+        store_id = ref.split(":", 1)[1]
         body = _open_an_auction(deployed)
-        matching = [entry["bid_ref"] for entry in body["entries"] if entry["bid_ref"].endswith(
-            ":" + ref.split(":", 1)[1]
-        )]
-        assert matching, f"{ref} names a store this auction did not carry"
+        matching = [row["bid_ref"] for row in body["ranked"] if row["store_id"] == store_id]
+        assert matching, f"{ref} names a store this auction did not rank"
         response = deployed.post(
             f"/auctions/{body['auction_id']}/accept", json={"bid_ref": matching[0]}
         )
         assert response.status_code == 200, (
-            f"a bid the exchange published in its own `entries` was refused "
+            f"a bid the exchange published in its own `ranked` list was refused "
             f"{response.status_code}: {response.text}"
         )
+
+
+def test_the_reference_a_store_minted_for_its_own_bid_also_resolves(
+    deployed: httpx.Client,
+) -> None:
+    """A buyer's agent is told a bid's reference by the store that made it.
+
+    ``BidEntry.bid['bid_id']`` carries that reference through ``collect_bids``, and the
+    exchange publishes only its OWN minted spelling — so an accept presenting the store's
+    reference was refused ``unknown_bid`` for a bid the auction really did collect. Both
+    spellings now resolve, and a colliding one is dropped rather than honoured.
+
+    The store agents in this file mint no reference of their own, so this drives the recording
+    function directly against an entry that does. It is the one assertion here that is not an
+    HTTP round trip, and it is worth having as itself rather than folded into one.
+    """
+    from exchange.auction.routes import collected_bid_records
+
+    class _Entry:
+        store_id = "s1"
+        bid = {"bid_id": "bid-from-the-store-9f2c", "offer": {"unit_price": 88.0}}
+
+    records = collected_bid_records(
+        [{"bid_id": "auction-x:s1", "store_id": "s1", "store_domain": "s1.example.com",
+          "offer": {"unit_price": 88.0}}],
+        [_Entry()],
+    )
+    refs = [record["bid_id"] for record in records]
+    assert refs == ["auction-x:s1", "bid-from-the-store-9f2c"]
+    # The alias carries the PLATFORM's domain, never the bid's own claim about itself (T-169).
+    assert {record["store_domain"] for record in records} == {"s1.example.com"}
+
+
+def test_a_reference_two_stores_both_claim_is_honoured_for_neither(
+    deployed: httpx.Client,
+) -> None:
+    """``_find_bid`` returns the FIRST match, so a colliding alias is a lever.
+
+    Two stores in one auction both minting ``bid-collide`` would otherwise let whichever was
+    rostered first decide which offer the other's reference accepts. Neither is recorded; both
+    stores keep the exchange's own minted reference, which no bidder can choose.
+    """
+    from exchange.auction.routes import collected_bid_records
+
+    class _Entry:
+        def __init__(self, store_id: str) -> None:
+            self.store_id = store_id
+            self.bid = {"bid_id": "bid-collide", "offer": {}}
+
+    records = collected_bid_records(
+        [
+            {"bid_id": "auction-x:s1", "store_id": "s1", "offer": {}},
+            {"bid_id": "auction-x:s2", "store_id": "s2", "offer": {}},
+        ],
+        [_Entry("s1"), _Entry("s2")],
+    )
+    assert [record["bid_id"] for record in records] == ["auction-x:s1", "auction-x:s2"]
 
 
 # =====================================================================================
@@ -390,7 +472,7 @@ def test_an_unconfigured_exchange_still_refuses_everything(
     monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
     monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
 
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
+    with served_exchange() as client:
         body = _open_an_auction(client)
 
     assert [denial["status"] for denial in body["denied"]] == ["unavailable"] * len(STORES)
@@ -405,7 +487,7 @@ def test_an_inline_deployment_document_configures_the_same_exchange(
     """A container may set the document instead of mounting it."""
     monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
     monkeypatch.setenv(ENV_DEPLOYMENT_JSON, json.dumps(_deployment_document(agent_url)))
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
+    with served_exchange() as client:
         body = _open_an_auction(client)
 
     assert body["ranked"], body["excluded"]
@@ -473,7 +555,7 @@ def test_a_misconfigured_deployment_is_a_503_that_names_the_problem(
     monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
     monkeypatch.setenv(ENV_DEPLOYMENT_JSON, json.dumps(document))
 
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
+    with served_exchange() as client:
         response = client.post("/auctions", json={"intent": INTENT, "roster": []})
 
     assert response.status_code == 503, f"{response.status_code}: {response.text}"
@@ -492,7 +574,7 @@ def test_a_deployment_file_that_does_not_exist_is_refused_rather_than_ignored(
     monkeypatch.setenv(ENV_DEPLOYMENT, str(tmp_path / "not-here.json"))
     monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
 
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
+    with served_exchange() as client:
         response = client.post("/auctions", json={"intent": INTENT, "roster": []})
 
     assert response.status_code == 503, response.text
