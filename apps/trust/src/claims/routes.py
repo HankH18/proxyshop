@@ -27,10 +27,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from contracts.ledger import validate_ledger_payload
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-from contracts.ledger import validate_ledger_payload
 
 from ..events.errors import EventServiceError, StoreUnavailable
 from ..events.store import append
@@ -291,7 +290,17 @@ def post_claim_verification(request: Request, body: ClaimVerificationIn) -> Any:
     # committed them, and then hit a 409 appending an event id it had already used — leaving
     # rows in the tables that the ledger does not corroborate, which is exactly the
     # divergence the persist-then-announce order exists to prevent, in the mirror direction.
-    event = {
+    event_payload: dict[str, Any] = {
+        "store_id": body.store_id,
+        "claim_ref": body.claim_ref,
+        "claim_type": body.claim_type,
+        "status": body.status,
+        "dim": outcome.dim,
+        "confidence": body.confidence,
+        "verifier_version": body.verifier_version,
+        "catalog_snapshot_id": body.catalog_snapshot_id,
+    }
+    event: dict[str, Any] = {
         "event_id": (
             f"{CLAIM_VERIFIED_KIND}:{body.store_id}:{body.claim_ref}"
             f":{body.catalog_snapshot_id}:{body.verifier_version}"
@@ -299,16 +308,7 @@ def post_claim_verification(request: Request, body: ClaimVerificationIn) -> Any:
         "ts": body.observed_at,
         "kind": CLAIM_VERIFIED_KIND,
         "store_id": body.store_id,
-        "payload": {
-            "store_id": body.store_id,
-            "claim_ref": body.claim_ref,
-            "claim_type": body.claim_type,
-            "status": body.status,
-            "dim": outcome.dim,
-            "confidence": body.confidence,
-            "verifier_version": body.verifier_version,
-            "catalog_snapshot_id": body.catalog_snapshot_id,
-        },
+        "payload": event_payload,
     }
     # NOTE the absence of `verification_id` from that payload, which is deliberate and was
     # measured. It is `gen_random_uuid()`-derived, so it differs per write; D16 makes
@@ -323,7 +323,7 @@ def post_claim_verification(request: Request, body: ClaimVerificationIn) -> Any:
     # that skips this is how a malformed payload reaches a written row — see T-332/T-333,
     # which measure exactly that for the one trust producer that does not validate. This
     # route is not going to be the second one.
-    problems = validate_ledger_payload(CLAIM_VERIFIED_KIND, event["payload"])
+    problems = validate_ledger_payload(CLAIM_VERIFIED_KIND, event_payload)
     if problems:
         raise HTTPException(
             422,

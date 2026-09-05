@@ -3931,8 +3931,6 @@ def test_t289_reordering_the_dsn_precedence_tuple_turns_some_grader_red() -> Non
     The fix is to give that test an expectation from an authority OUTSIDE the tuple — D5's
     grant, or the live layer with both variables set (which is T-181's half).
     """
-    import trust.events.pg as pg
-
     reordered = _t289_reordered()
     reds = _t289_reds_under(reordered)
     subject = "test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one"
