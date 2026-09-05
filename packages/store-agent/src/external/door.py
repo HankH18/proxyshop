@@ -310,6 +310,42 @@ def _freshness_window(value: Any) -> float | None:
     return window
 
 
+def _readable_eligibility(trust_snapshot: Any, store_id: Any) -> Mapping[str, Any]:
+    """The eligibility snapshot to judge this store against — or `{}` when it cannot be read.
+
+    T-233 settled that an ABSENT snapshot is an empty one rather than a permissive one: the
+    boundary reads a store with no row as an unavailable eligibility read and denies it (R12),
+    which is the right answer for a caller who supplied no eligibility read at all. This extends
+    that decision one step, to the case the same argument covers and the code did not:
+    **a snapshot that raises when it is read is an unavailable eligibility read too.**
+
+    It is not a hypothetical shape. The snapshot arrives from a trust service, and a mapping over
+    a feed that is half-decoded, a cache whose connection has gone, or a shard that is missing
+    all answer a lookup by raising. `contracts.boundary._eligibility_reasons` guards only
+    `TypeError` — the unhashable-`store_id` hazard it was written for — so anything else escaped
+    it, escaped `_receive_bid` entirely, and came back from the outer wrapper as
+    `door_failed_closed`: a refusal that says "the door broke" where the readable equivalent says
+    `trust_snapshot_unavailable:<store_id>` (T-279). The wrapper is the right belt, but it must
+    not be the braces — with it holding this case up, every by-name eligibility gate inside this
+    function could regress and a test asserting only "not accepted" would stay green.
+
+    Returning `{}` rather than refusing here on the spot is deliberate: it routes the answer back
+    through the one function that owns R12, so this door and the exchange keep agreeing about
+    what an unavailable read means, and a submission that is ALSO wrong in some other way still
+    collects that door's other reasons instead of being short-circuited by ours.
+
+    The probe reads the row this submission's verdict actually depends on, so a snapshot that can
+    answer for this store is passed through untouched — including its rows for every other store.
+    """
+    if trust_snapshot is None:
+        return {}
+    try:
+        trust_snapshot.get(store_id)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 - a row that cannot be read is a row that is not there
+        return {}
+    return trust_snapshot
+
+
 def _work_item(
     submission: dict[str, Any],
     signature: str,
@@ -530,7 +566,26 @@ def _receive_bid(
         return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=submitted)
 
     # 3. Key SELECTION, never key trial.
-    secret = keyring_secret(keyring, signer_id, key_id)
+    #
+    #    The lookup is guarded HERE as well as inside `keyring_secret`, and the two guards are
+    #    not redundant: `contracts.signing.keyring_secret` catches `TypeError` only — the
+    #    unhashable-id hazard it was written for — so a keyring backed by anything that can fail
+    #    (a lazy mapping over a key store, a cache that raises when the connection is gone, a
+    #    half-decoded JSON view) escapes it by raising anything else. Measured: a `Mapping` whose
+    #    `.get` raises `RuntimeError`/`ValueError`/`OverflowError` came back `door_failed_closed`
+    #    from the wrapper, where an EMPTY keyring is answered `unknown_signing_key` (T-279).
+    #
+    #    A keyring that cannot be searched has not selected a key, and "no key was selected" is
+    #    exactly what `unknown_signing_key` says. It is the fail-closed answer and it is the same
+    #    answer the readable equivalent gets, so a rejection log cannot tell a broken key store
+    #    from an unknown signer — which is the point: neither one authenticates this submission.
+    #    The keyring is the caller's object, so this is a hazard the door owns, not the shared
+    #    contracts module: broadening the catch there would change a function two other doors
+    #    call.
+    try:
+        secret = keyring_secret(keyring, signer_id, key_id)
+    except Exception:  # noqa: BLE001 - a keyring that cannot be searched selects no key
+        secret = None
     if secret is None:
         return _refuse(REASON_UNKNOWN_SIGNING_KEY, payload=submitted)
     if not verify_signature(submitted, signature, secret):
@@ -580,10 +635,9 @@ def _receive_bid(
     submission["signature"] = signature
     verdict = validate_external_submission(
         submission,
-        # An absent snapshot is an EMPTY snapshot, not a permissive one (T-233). The boundary
-        # reads a store with no row as an unavailable eligibility read and denies it (R12), and
-        # that is the right answer for a caller who supplied no eligibility read at all.
-        trust_snapshot=trust_snapshot if trust_snapshot is not None else {},
+        # An absent snapshot is an EMPTY snapshot, not a permissive one (T-233), and so is one
+        # that cannot be READ — see `_readable_eligibility`.
+        trust_snapshot=_readable_eligibility(trust_snapshot, submitted.get("store_id")),
         now=evaluated_at,
         list_prices=list_prices,
         max_discount_pct=max_discount_pct,

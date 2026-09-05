@@ -1299,19 +1299,41 @@ def test_t279_the_hostile_input_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-279: the total `except Exception` at door.py:404 is the only thing holding "
-        "`receive_bid` never-raises up for two whole hazard families. A trust_snapshot whose "
-        "`.get` raises anything but TypeError escapes contracts/boundary.py:958-964, and a "
-        "keyring whose `.get` does the same escapes contracts/signing.py:399-406; both come "
-        "back `door_failed_closed` where the readable equivalent is answered "
-        "`trust_snapshot_unavailable:<store_id>` and `unknown_signing_key`. Every by-name gate "
-        "inside _receive_bid could regress and the suite would stay green; remove this marker "
-        "with the fix"
-    ),
-)
+# ---------------------------------------------------------------------------------------------
+# TEST EDIT, JUSTIFIED — the `xfail(strict=True)` marker that stood here was REMOVED. No
+# assertion below was touched; the marker's own `reason` said "remove this marker with the fix",
+# and this is that removal.
+#
+# MARKER REMOVED, verbatim: `@pytest.mark.xfail(strict=True, reason="T-279: the total `except
+# Exception` at door.py:404 is the only thing holding `receive_bid` never-raises up for two whole
+# hazard families. A trust_snapshot whose `.get` raises anything but TypeError escapes
+# contracts/boundary.py:958-964, and a keyring whose `.get` does the same escapes
+# contracts/signing.py:399-406; both come back `door_failed_closed` where the readable equivalent
+# is answered `trust_snapshot_unavailable:<store_id>` and `unknown_signing_key`. Every by-name
+# gate inside _receive_bid could regress and the suite would stay green; remove this marker with
+# the fix")`
+#
+# WHAT IT CLAIMED: that the assertion below MUST fail — 52 of the sweep's checks were answered by
+# the outer catch-all rather than by name. Under `strict=True` the marker is itself an assertion,
+# and leaving it in place once the defect is fixed turns the repair into an XPASS *failure* that
+# reds `make verify`.
+#
+# REQUIREMENT IT ENCODES: T-279, tickets.json — "the three inner fixes need assertions that see
+# BELOW the wrapper". The gate is the ticket's recorded `verify`.
+#
+# REVERT CHECK — would the assertion below still pass if I reverted my change? **NO**, and that is
+# the whole proof. MEASURED in this lane, three runs, one file swapped and nothing else:
+#   * `git show HEAD:packages/store-agent/src/external/door.py` in place, `--runxfail`:
+#     1 failed — "52 hazard(s) are answered by the total wrapper rather than by name".
+#   * the same tree, plain run: 1 xfailed, with this marker's reason printed.
+#   * my `_readable_eligibility` + guarded `keyring_secret` restored, `--runxfail`: 2 passed.
+# So the XPASS is caused by THIS lane's fix to `door.py` and not by an unrelated drift — the
+# failure mode a sibling lane hit an hour ago, where three of five XPASSing markers had nothing to
+# do with the lane's own change and removing them would have false-closed three open tickets.
+#
+# VERDICT: the marker, not the code, was the thing that had become false. Removed. The assertions
+# it wrapped are unchanged and now grade the repair, which is what they were written to do.
+# ---------------------------------------------------------------------------------------------
 def test_t279_every_hostile_input_is_refused_by_name_not_by_the_catch_all() -> None:
     """The door must answer an input it cannot READ the way it answers one it can.
 
