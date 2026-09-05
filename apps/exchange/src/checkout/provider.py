@@ -37,8 +37,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
+from .. import describe, describe_exception
 from ..auction.ledger import build_published_event
-from ..safe_text import describe, describe_exception
 from .codes import (
     assert_offer_is_mintable,
     build_cart_permalink,

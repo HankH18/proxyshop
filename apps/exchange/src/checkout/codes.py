@@ -31,7 +31,7 @@ from urllib.parse import quote
 
 from contracts.boundary import parse_timestamp
 
-from ..safe_text import describe
+from .. import describe
 
 __all__ = [
     "CODE_ALPHABET",

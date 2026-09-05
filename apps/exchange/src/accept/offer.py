@@ -119,6 +119,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .. import describe_exception
 from ..auction.ledger import build_published_event
 from ..checkout import (
     CheckoutRequest,
@@ -130,7 +131,6 @@ from ..checkout import (
     registered_domain_for,
     resolve_provider,
 )
-from ..safe_text import describe_exception
 from .claims import platform_acceptance_claims
 from .reasons import (
     DENIAL_ALREADY_ACCEPTED,

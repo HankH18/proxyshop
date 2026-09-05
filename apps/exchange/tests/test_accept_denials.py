@@ -711,7 +711,8 @@ def test_the_injected_collaborator_leak_sweep_is_armed() -> None:
 # CAUSATION PROVED, not assumed, because a sibling lane found five markers XPASSing for
 # three unrelated reasons and removing those would have false-closed three open tickets.
 # Measured in this worktree on 2026-09-05, worker index 7: with
-# `apps/exchange/src/safe_text.py` deleted and the nine touched source files rewritten
+# the redaction helpers stripped from `apps/exchange/src/__init__.py` and the touched
+# source files rewritten
 # from `git show HEAD:<path>`, this node reported XFAIL (the defect reproduces); with the
 # fix restored and no test file touched, XPASS(strict). The fix is the cause.
 #
@@ -739,7 +740,8 @@ def test_t264_an_unusable_registered_domains_source_leaks_no_memory_address(
 # CAUSATION PROVED, not assumed, because a sibling lane found five markers XPASSing for
 # three unrelated reasons and removing those would have false-closed three open tickets.
 # Measured in this worktree on 2026-09-05, worker index 7: with
-# `apps/exchange/src/safe_text.py` deleted and the nine touched source files rewritten
+# the redaction helpers stripped from `apps/exchange/src/__init__.py` and the touched
+# source files rewritten
 # from `git show HEAD:<path>`, this node reported XFAIL (the defect reproduces); with the
 # fix restored and no test file touched, XPASS(strict). The fix is the cause.
 #
@@ -762,7 +764,8 @@ def test_t326_an_unusable_code_creator_leaks_no_memory_address(unwired: None) ->
 # CAUSATION PROVED, not assumed, because a sibling lane found five markers XPASSing for
 # three unrelated reasons and removing those would have false-closed three open tickets.
 # Measured in this worktree on 2026-09-05, worker index 7: with
-# `apps/exchange/src/safe_text.py` deleted and the nine touched source files rewritten
+# the redaction helpers stripped from `apps/exchange/src/__init__.py` and the touched
+# source files rewritten
 # from `git show HEAD:<path>`, this node reported XFAIL (the defect reproduces); with the
 # fix restored and no test file touched, XPASS(strict). The fix is the cause.
 #

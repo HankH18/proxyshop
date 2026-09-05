@@ -45,8 +45,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import describe, redact_addresses
 from ..eligibility import BLACKLISTED, UNAVAILABLE
-from ..safe_text import describe, redact_addresses
 
 __all__ = [
     "DENIAL_ALREADY_ACCEPTED",
@@ -123,7 +123,8 @@ DENIAL_REASONS: tuple[str, ...] = (
 # from `eligibility`, so `eligibility` importing back would be a cycle, and `checkout` has no
 # business importing `accept` at all. Moving the definitions down to a leaf module — and
 # leaving this name bound — is what let T-326's site in `checkout/providers.py` be repaired at
-# the site rather than only at the boundary. See `exchange/safe_text.py` for both bodies.
+# the site rather than only at the boundary. See `exchange/__init__.py` for both bodies, and
+# for why the package ROOT is the only place in this package they can live.
 
 
 def denial_reason(code: str, detail: str = "") -> str:

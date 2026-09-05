@@ -44,7 +44,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ..safe_text import describe
+from .. import describe
 from .codes import UnusableOffer
 
 __all__ = [

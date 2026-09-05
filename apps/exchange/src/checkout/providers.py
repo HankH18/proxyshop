@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..safe_text import describe
+from .. import describe
 from .codes import code_expiry, mint_code, record_minted_code
 from .provider import (
     CheckoutProvider,

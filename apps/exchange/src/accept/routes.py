@@ -88,6 +88,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from .. import describe_exception
 from ..auction.state import (
     ACCEPTED,
     AUCTION_TTL_SECONDS,
@@ -98,7 +99,6 @@ from ..auction.state import (
 )
 from ..checkout import DEFAULT_CHECKOUT_MODE, NoRegisteredDomains, UnknownCheckoutMode
 from ..eligibility import StaticSellerEligibility
-from ..safe_text import describe_exception
 from ._spellings import bind_spellings
 from .claims import StoreAcceptanceClaims, acceptance_claims_scope
 from .gate import accept_offer
