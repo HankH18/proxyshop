@@ -249,6 +249,7 @@ def rank_auction(
     registered_domains: Any = None,
     weights: RankingWeights | None = None,
     catalog: Any = None,
+    product_refs: Any = None,
 ) -> dict[str, Any]:
     """Rank one closed auction's collected bids and build its shortlist.
 
@@ -267,17 +268,22 @@ def rank_auction(
     The CATALOG is passed through, and it is what makes the claims on these candidates
     evidence rather than assertions (ESC-020). Between the projection and the ranking, each
     store's claims are checked by :func:`claim_verification.verify` against the snapshot this
-    exchange holds for that store, and the verdict is sealed with a key the bidder does not
+    exchange holds for that store, and the verdict is attested with a key the bidder does not
     have. Whatever the store wrote under ``status`` is dropped on the way through and is read
     by nothing. A catalog of ``None`` verifies nothing, which is a denial rather than an
     admission: see :func:`catalog_of`.
+
+    ``product_refs`` is ``{store_id: product_ref}`` off the auction's ROSTER, so which
+    catalogue entry a store's claims are graded against is the auction's fact rather than the
+    bidder's. Without it a store bidding one product could have its claims verified against
+    another product in its own catalogue — a real verdict about the wrong thing.
     """
     candidates = candidates_from_entries(
         entries,
         auction_id=auction_id,
         registered_domains=registered_domains,
     )
-    candidates = attest_candidates(candidates, catalog=catalog)
+    candidates = attest_candidates(candidates, catalog=catalog, product_refs=product_refs)
     return rank(
         candidates,
         intent,

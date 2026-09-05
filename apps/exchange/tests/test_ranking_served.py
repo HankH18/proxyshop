@@ -36,7 +36,7 @@ FEATURES, and it used to be false of the eligibility gate: a store wrote ``"stat
 ``ranking/filters.py`` read a field the published ``Claim`` does not have and nothing on the
 auction path validated it. ESC-020 closed that — the verdict now comes from
 ``ranking/verification.py`` running the claim verifier against the exchange's own catalogue,
-sealed by ``ranking/attestation.py`` — so the builders below emit the contract's shape and
+attested by ``ranking/attestation.py`` — so the builders below emit the contract's shape and
 carry no ``status`` at all. The forgery itself is driven in
 ``apps/exchange/tests/test_ranking_claim_forgery.py``, which is where it belongs: this file
 is about the ranker being ON the served path, that one is about what the served path trusts.

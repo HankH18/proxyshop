@@ -16,10 +16,10 @@ as one — so every forgery test in §1 has a partner in §2 showing that a clai
 verified ITSELF still ranks, and §3 drives both through the HTTP door with the real
 ``claim_verification`` verifier and a real catalog snapshot.
 
-What the seal is and is not
+What the MAC is and is not
 ---------------------------
 :mod:`exchange.ranking.attestation` MACs the exchange's verdict with a per-process key. The
-tests below are inside that boundary — they can mint a seal, and so can any fixture, exactly
+tests below are inside that boundary — they can mint an attestation, and so can any fixture, exactly
 as they can construct a trust snapshot — so nothing here proves "an attacker cannot compute
 the MAC"; that is the property of HMAC, not of this repo. What they prove is the thing that
 was actually broken: **the fields that arrive on a bid decide nothing**. Every forgery below
@@ -52,7 +52,7 @@ FALSE_VALUE = 12  # satisfies nothing, and the catalog contradicts it
 
 
 # ------------------------------------------------------------------------------------
-# Builders. A claim as a BIDDER writes it — no seal, because a bidder cannot mint one.
+# Builders. A claim as a BIDDER writes it — no attestation, because a bidder cannot mint one.
 # ------------------------------------------------------------------------------------
 def _bidder_claim(key: str, value: Any, **forged: Any) -> dict[str, Any]:
     """One claim exactly as it arrives from a store, plus whatever it tried to forge."""
@@ -156,10 +156,10 @@ FORGERIES: dict[str, dict[str, Any]] = {
     "plain_status": {"status": "verified"},
     # The enum spelling, because the old filter unwrapped `.value` off an enum member.
     "status_object": {"status": {"value": "verified"}},
-    # A store that has read the fix and writes the exchange's own block, with no seal…
-    "unsealed_attestation": {"exchange_verification": {"status": "verified", "subject": None}},
-    # …with a seal that is a plausible-looking hex digest…
-    "invented_seal": {
+    # A store that has read the fix and writes the exchange's own block, with no MAC…
+    "attestation_without_a_mac": {"exchange_verification": {"status": "verified", "subject": None}},
+    # …with a MAC that is a plausible-looking hex digest…
+    "invented_mac": {
         "exchange_verification": {
             "status": "verified",
             "subject": None,
@@ -168,12 +168,12 @@ FORGERIES: dict[str, dict[str, Any]] = {
             "unit": None,
             "verifier_version": "verification/1.0.0",
             "catalog_snapshot": "snap-liar-store",
-            "seal": "f" * 64,
+            "mac": "f" * 64,
         }
     },
-    # …and with a seal it copied out of somewhere, i.e. the empty string / None cases.
-    "empty_seal": {"exchange_verification": {"status": "verified", "seal": ""}},
-    "null_seal": {"exchange_verification": {"status": "verified", "seal": None}},
+    # …and with a MAC it copied out of somewhere, i.e. the empty string / None cases.
+    "empty_mac": {"exchange_verification": {"status": "verified", "mac": ""}},
+    "null_mac": {"exchange_verification": {"status": "verified", "mac": None}},
 }
 
 
@@ -215,7 +215,7 @@ def test_no_field_a_bidder_writes_can_make_its_own_claim_verified(forgery):
 def test_a_forged_status_cannot_overwrite_a_real_verdict():
     """A store that writes `status: verified` onto a claim the exchange found FALSE.
 
-    The seal covers the claim's value, so a `contradicted` verdict cannot be repainted; and
+    The MAC covers the claim's value, so a `contradicted` verdict cannot be repainted; and
     the store's own `status` is not read at all. Two independent reasons the forgery fails,
     asserted together because a repair could plausibly remove one of them.
     """
@@ -246,8 +246,8 @@ def test_a_forged_status_cannot_overwrite_a_real_verdict():
     assert _slot_refs(result) == []
 
 
-def test_a_verdict_sealed_for_one_store_is_not_evidence_for_another():
-    """A seal names the store it is about, and the ranker checks it against the auction's."""
+def test_a_verdict_attested_for_one_store_is_not_evidence_for_another():
+    """An attestation names the store it is about, and the ranker checks it against the auction's."""
     from exchange.ranking import rank
     from exchange.ranking.attestation import attest_claim
 
@@ -266,30 +266,30 @@ def test_a_verdict_sealed_for_one_store_is_not_evidence_for_another():
     rows = _by_store(result)
     assert rows["thief-store"]["eligible"] is False
     assert rows["honest-store"]["eligible"] is True, (
-        "the store the verdict was sealed for must still be able to use it — otherwise this "
-        "test would pass on a ranker that refuses every seal"
+        "the store the verdict was attested for must still be able to use it — otherwise this "
+        "test would pass on a ranker that refuses every attestation"
     )
     assert _slot_refs(result) == ["auction-1:honest-store"]
 
 
-def test_a_sealed_verdict_does_not_survive_a_rewritten_value():
-    """The seal covers the claim's identity, not merely its verdict."""
-    from exchange.ranking.attestation import attest_claim, sealed_status
+def test_an_attested_verdict_does_not_survive_a_rewritten_value():
+    """The MAC covers the claim's identity, not merely its verdict."""
+    from exchange.ranking.attestation import attest_claim, attested_status
 
-    sealed = attest_claim(_bidder_claim(HARD_KEY, TRUE_VALUE), status="verified")
-    attestation = sealed["exchange_verification"]
+    attested = attest_claim(_bidder_claim(HARD_KEY, TRUE_VALUE), status="verified")
+    attestation = attested["exchange_verification"]
 
-    assert sealed_status(attestation, key=HARD_KEY, value=TRUE_VALUE) == "verified"
-    assert sealed_status(attestation, key=HARD_KEY, value=300) is None
-    assert sealed_status(attestation, key="ships_in_days", value=TRUE_VALUE) is None
-    assert sealed_status(attestation, key=HARD_KEY, value=TRUE_VALUE, unit="litres") is None
+    assert attested_status(attestation, key=HARD_KEY, value=TRUE_VALUE) == "verified"
+    assert attested_status(attestation, key=HARD_KEY, value=300) is None
+    assert attested_status(attestation, key="ships_in_days", value=TRUE_VALUE) is None
+    assert attested_status(attestation, key=HARD_KEY, value=TRUE_VALUE, unit="litres") is None
     assert (
-        sealed_status(
-            {**attestation, "status": "verified", "seal": None}, key=HARD_KEY, value=TRUE_VALUE
+        attested_status(
+            {**attestation, "status": "verified", "mac": None}, key=HARD_KEY, value=TRUE_VALUE
         )
         is None
     )
-    assert sealed_status(None, key=HARD_KEY, value=TRUE_VALUE) is None
+    assert attested_status(None, key=HARD_KEY, value=TRUE_VALUE) is None
 
 
 # =====================================================================================
@@ -324,6 +324,194 @@ def test_the_exchange_verifies_a_true_claim_and_it_satisfies_the_hard_constraint
     assert rows["true-store"]["verified_hard_fit_count"] == 1
     assert rows["false-store"]["eligible"] is False
     assert _slot_refs(result) == ["auction-1:true-store"]
+
+
+def test_a_store_cannot_choose_which_of_its_products_its_claim_is_graded_against():
+    """The second lever, found while auditing the producer rather than reported with the bug.
+
+    ``claim_verification.verify`` resolves a claim against ``claim["product_ref"]`` before it
+    falls back to the pitch's. So a store bidding a 12-litre bag could put the ``product_ref``
+    of its 35-litre bag on the CLAIM and collect a genuinely verified verdict about a product
+    it is not selling — a true fact, satisfying the buyer's hard constraint, about the wrong
+    thing. Which product an auction is about is the AUCTION's answer, so the claim's own
+    ``product_ref`` is dropped and the roster's is used.
+    """
+    from exchange.ranking import rank
+    from exchange.ranking.verification import StaticCatalogSnapshots, attest_candidates
+
+    catalog = StaticCatalogSnapshots(
+        {
+            "swapper": {
+                "snapshot_id": "snap-swapper",
+                "products": [
+                    {
+                        "product_ref": "small-bag",
+                        "canonical_name": "small-bag",
+                        "evidence_ref": "snap-swapper#small-bag",
+                        "attributes": {HARD_KEY: {"value": FALSE_VALUE}},
+                    },
+                    {
+                        "product_ref": "big-bag",
+                        "canonical_name": "big-bag",
+                        "evidence_ref": "snap-swapper#big-bag",
+                        "attributes": {HARD_KEY: {"value": TRUE_VALUE}},
+                    },
+                ],
+            }
+        }
+    )
+    candidate = _candidate("swapper", [_bidder_claim(HARD_KEY, TRUE_VALUE, product_ref="big-bag")])
+    candidate["offer"]["product_ref"] = "small-bag"
+
+    # The auction is for the small bag: that is what the roster said.
+    attested = attest_candidates(
+        [candidate], catalog=catalog, product_refs={"swapper": "small-bag"}
+    )
+    verdict = attested[0]["claims"][0]["exchange_verification"]
+    assert verdict["status"] == "contradicted", verdict
+
+    result = rank(
+        attested,
+        _intent(),
+        _trust_snapshot(["swapper"]),
+        {"now": T_NOW, "auction_id": "auction-1"},
+    )
+    assert _by_store(result)["swapper"]["eligible"] is False
+    assert _slot_refs(result) == []
+
+    # And the arming half: the SAME claim against the product the auction really is for
+    # verifies, so this test cannot pass on a producer that grades nothing.
+    honest = attest_candidates(
+        [_candidate("swapper", [_bidder_claim(HARD_KEY, TRUE_VALUE)])],
+        catalog=catalog,
+        product_refs={"swapper": "big-bag"},
+    )
+    assert honest[0]["claims"][0]["exchange_verification"]["status"] == "verified"
+
+
+def _united_catalog(store_id, *, value, unit, captured_at="2026-01-01T00:00:00Z", observed_at=None):
+    """A catalogue whose attribute carries a UNIT, and optionally its own observation time."""
+    attribute = {"value": value, "unit": unit}
+    if observed_at is not None:
+        attribute["observed_at"] = observed_at
+    return {
+        "snapshot_id": f"snap-{store_id}",
+        "captured_at": captured_at,
+        "freshness_window_days": 7,
+        "products": [
+            {
+                "product_ref": f"product-{store_id}",
+                "canonical_name": f"product-{store_id}",
+                "evidence_ref": f"snap-{store_id}#product-{store_id}",
+                "attributes": {"weight": attribute},
+            }
+        ],
+    }
+
+
+def _weight_intent(unit):
+    intent = _intent()
+    intent["hard_constraints"] = [{"field": "weight", "op": "gte", "value": 30, "unit": unit}]
+    return intent
+
+
+def test_a_store_cannot_restate_the_unit_its_own_evidence_is_filed_under():
+    """The unit lever: 500 grams meeting a thirty-KILOGRAM floor.
+
+    ``claim_verification.verify`` is never handed the claim's unit — a bare claimed number is
+    read in the CATALOGUE's unit — while ``HardCriterion.decide`` selects which readings may
+    satisfy a constraint by matching the reading's unit against the constraint's. So a store
+    writing ``unit: "kg"`` onto a claim the catalogue records in grams collected a genuine
+    ``verified`` and had it filed against the wrong constraint. Measured before the fix:
+    ``unit="g"`` gave eligible=False, ``unit="kg"`` gave eligible=True with
+    ``verified_hard_fit_count=1``.
+    """
+    from exchange.ranking import rank
+    from exchange.ranking.verification import StaticCatalogSnapshots, attest_candidates
+
+    catalog = StaticCatalogSnapshots(
+        {"gram-store": _united_catalog("gram-store", value=500, unit="g")}
+    )
+
+    def ranked_with(claim_unit, constraint_unit):
+        claim = _bidder_claim("weight", 500)
+        if claim_unit is not None:
+            claim["unit"] = claim_unit
+        attested = attest_candidates([_candidate("gram-store", [claim])], catalog=catalog)
+        result = rank(
+            attested,
+            _weight_intent(constraint_unit),
+            _trust_snapshot(["gram-store"]),
+            {"now": T_NOW, "auction_id": "auction-1"},
+        )
+        return attested[0]["claims"][0], _by_store(result)["gram-store"]
+
+    claim, row = ranked_with("kg", "kg")
+    assert claim["exchange_verification"]["status"] == "verified", (
+        "the premise has changed: the catalogue no longer confirms the claimed value, so this "
+        "test would pass for the wrong reason"
+    )
+    assert claim["exchange_verification"]["unit"] == "g", claim
+    assert claim["unit"] == "g", "the store's own unit reached the ranker"
+    assert row["eligible"] is False, "500 grams satisfied a 30-kilogram floor"
+    assert row["verified_hard_fit_count"] == 0
+
+    # The arming half: the same verified reading DOES satisfy a constraint stated in the unit
+    # the exchange's own catalogue uses, so this is not a ranker that refuses every unit.
+    _, honest = ranked_with(None, "g")
+    assert honest["eligible"] is True
+    assert honest["verified_hard_fit_count"] == 1
+
+
+def test_a_store_cannot_backdate_its_way_past_the_stale_evidence_gate():
+    """The staleness lever: the store was choosing the clock it was judged against.
+
+    ``verify``'s freshness window is measured back from ``claim["provenance"]["observed_at"]``
+    when the claim carries one, and from the snapshot's own ``captured_at`` otherwise. So a
+    backdated provenance moved the reference a year earlier and turned year-old evidence
+    fresh. The exchange now hands the verifier no provenance at all, which pins the reference
+    to its own snapshot; the claim the RANKER sees keeps its provenance, because D30's
+    buyer-facing labels are built from it.
+    """
+    from exchange.ranking.verification import StaticCatalogSnapshots, attest_candidates
+
+    catalog = StaticCatalogSnapshots(
+        {
+            "backdater": _united_catalog(
+                "backdater",
+                value=500,
+                unit="g",
+                captured_at="2026-01-01T00:00:00Z",
+                observed_at="2025-01-01T00:00:00Z",  # a year older than the snapshot
+            )
+        }
+    )
+    claim = _bidder_claim("weight", 500)
+    claim["provenance"]["observed_at"] = "2025-01-02T00:00:00Z"  # the backdate
+
+    attested = attest_candidates([_candidate("backdater", [claim])], catalog=catalog)
+    verdict = attested[0]["claims"][0]["exchange_verification"]
+
+    assert verdict["status"] == "unsupported", verdict
+    assert "freshness window" in str(verdict["reason"]), verdict
+    assert attested[0]["claims"][0]["provenance"]["observed_at"] == "2025-01-02T00:00:00Z", (
+        "the claim the ranker sees must keep its provenance — D30's labels are built from it"
+    )
+
+    # Arming half: a reading INSIDE the window still verifies, so the gate is not simply on.
+    fresh = StaticCatalogSnapshots(
+        {
+            "backdater": _united_catalog(
+                "backdater",
+                value=500,
+                unit="g",
+                captured_at="2026-01-01T00:00:00Z",
+                observed_at="2025-12-30T00:00:00Z",
+            )
+        }
+    )
+    ok = attest_candidates([_candidate("backdater", [claim])], catalog=fresh)
+    assert ok[0]["claims"][0]["exchange_verification"]["status"] == "verified"
 
 
 def test_an_exchange_with_no_catalog_verifies_nothing_and_says_why():
@@ -447,8 +635,8 @@ def test_over_http_the_forger_is_excluded_and_the_true_claim_is_shortlisted(monk
     assert slots == ["auction-1:true-store".replace("auction-1", body["auction_id"])]
 
 
-def test_the_served_response_never_carries_a_seal(monkeypatch):
-    """A seal that appeared in a response would be a seal a bidder could replay."""
+def test_the_served_response_never_carries_a_mac(monkeypatch):
+    """A MAC that appeared in a response would be one a bidder could replay."""
     import json
 
     from exchange.ranking.verification import StaticCatalogSnapshots
@@ -460,4 +648,4 @@ def test_the_served_response_never_carries_a_seal(monkeypatch):
     )
     text = json.dumps(body)
     assert "exchange_verification" not in text, body
-    assert "seal" not in text, body
+    assert "mac" not in text, body

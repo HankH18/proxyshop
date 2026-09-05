@@ -17,7 +17,7 @@ Hard-constraint evidence is the one shape that CHANGED (ESC-020). It used to be 
 ``claims[i]["status"]`` string, which is a field the published ``Claim`` does not declare and
 which nothing but the bidder ever wrote — so a store satisfied any hard constraint by
 asserting that it had. :func:`make_claim` therefore mints the verdict through
-:func:`exchange.ranking.attestation.attest_claim`, which seals it with this process's key.
+:func:`exchange.ranking.attestation.attest_claim`, which attests it with this process's key.
 The fixture is standing in for the exchange here, which is exactly what it is entitled to do:
 it is inside the trust boundary, and a bid arriving over HTTP is not. A test that wants to
 drive the FORGERY writes ``status`` on the claim by hand and asserts it buys nothing — see
@@ -47,10 +47,10 @@ TRUST_DIMENSIONS = (
 def make_claim(
     key: str, value: Any, *, source: str = "owner_statement", status: str = "verified"
 ) -> dict[str, Any]:
-    """One supporting fact, carrying the exchange's sealed verdict on it.
+    """One supporting fact, carrying the exchange's attested verdict on it.
 
     `status` is the verdict the fixture is asking the exchange to have reached — it is passed
-    to the sealer, never written onto the claim, because a `status` on the claim is the one
+    to the attester, never written onto the claim, because a `status` on the claim is the one
     thing R19 may not read (ESC-020).
     """
     return attest_claim(

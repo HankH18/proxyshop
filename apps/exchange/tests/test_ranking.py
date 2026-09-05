@@ -20,10 +20,10 @@ T_FUTURE = 2_000_000_000.0
 
 
 def _claim(key, value, *, source="owner_statement", status="verified"):
-    """One supporting fact, carrying the exchange's SEALED verdict on it (ESC-020).
+    """One supporting fact, carrying the exchange's attested verdict on it (ESC-020).
 
     `status` names the verdict this fixture is asking the exchange to have reached; it is
-    handed to the sealer rather than written onto the claim, because a `status` written onto
+    handed to the attester rather than written onto the claim, because a `status` written onto
     a claim is a field the bidder can write and R19 may not read.
     """
     from exchange.ranking.attestation import attest_claim

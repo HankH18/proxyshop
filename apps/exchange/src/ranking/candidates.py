@@ -67,11 +67,11 @@ is answering WITH. Two consequences, both measured through the HTTP door:
   nothing validated it and nothing produced it but the bidder — two identical stores, one
   adding the string, and the liar was ranked while the honest one was excluded
   ``hard_constraint_unsatisfied``, with ``verified_hard_fit_count`` (the FIRST published
-  tie-break) moved to match. What closed it is a claim-verification producer plus a seal, not
-  a strip: ``ranking/verification.py`` runs ``claim_verification.verify`` over each store's
-  claims against the catalog snapshot THIS EXCHANGE holds, and stamps the verdict with an
-  HMAC the bidder cannot compute (``ranking/attestation.py``); ``ranking/filters.py`` reads
-  only that. This projection still copies ``claims`` verbatim, and that is now safe rather
+  tie-break) moved to match. What closed it is a claim-verification producer plus an
+  attestation, not a strip: ``ranking/verification.py`` runs ``claim_verification.verify``
+  over each store's claims against the catalog snapshot THIS EXCHANGE holds, and stamps the
+  verdict with an HMAC the bidder cannot compute (``ranking/attestation.py``);
+  ``ranking/filters.py`` reads only that. This projection still copies ``claims`` verbatim, and that is now safe rather
   than merely admitted: whatever a store writes under ``status`` or under
   ``exchange_verification`` is dropped before verification and read by nothing after it. The
   cost is a real operational requirement — an exchange with no catalog wired verifies nothing

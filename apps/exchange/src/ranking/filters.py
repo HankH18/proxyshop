@@ -37,7 +37,7 @@ hard constraint it liked; two identical stores, one adding it, and the liar took
 shortlist while the honest one was excluded `hard_constraint_unsatisfied`. It moved
 `verified_hard_fit_count` too, which is the first published tie-break (D13).
 
-So the status is now read through :func:`~exchange.ranking.attestation.sealed_status`, which
+So the status is now read through :func:`~exchange.ranking.attestation.attested_status`, which
 returns a verdict only when this exchange's own MAC over the claim holds. A store-supplied
 `status`, and a store-supplied `exchange_verification` block, are both read by nothing. The
 producer of real verdicts is :mod:`exchange.ranking.verification`, which runs
@@ -54,7 +54,7 @@ from typing import Any
 
 from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
-from .attestation import ATTESTATION_FIELD, sealed_status
+from .attestation import ATTESTATION_FIELD, attested_status
 from .reasons import (
     REASON_BLACKLIST_UNREADABLE,
     REASON_BLACKLISTED,
@@ -250,14 +250,14 @@ def verified_attributes(claims: Any, *, store_id: Any = None) -> list[dict[str, 
     constraint, it is no support at all, and a constraint with no support is undecidable —
     which :class:`HardCriterion` already refuses to count as satisfied.
 
-    "Verified" means THIS EXCHANGE said so. The verdict is read out of the claim's sealed
+    "Verified" means THIS EXCHANGE said so. The verdict is read out of the claim's attested
     :data:`~exchange.ranking.attestation.ATTESTATION_FIELD` block and never out of a `status`
     the claim's author wrote, so a bidder gains nothing by writing either one (ESC-020). A
     claim carrying no readable exchange verdict is unverified — which is not a claim about
     the seller's honesty, it is the plain fact that nothing checked it.
 
     `store_id` is the candidate's EXCHANGE-ATTRIBUTED store — `collect_bids` stamps it over
-    whatever the payload claimed — so a verdict sealed for one store cannot be presented on
+    whatever the payload claimed — so a verdict attested for one store cannot be presented on
     behalf of another.
     """
     attributes: list[dict[str, Any]] = []
@@ -267,7 +267,7 @@ def verified_attributes(claims: Any, *, store_id: Any = None) -> list[dict[str, 
             continue
         value = read(claim, "value", None)
         unit = read(claim, "unit", None)
-        status = sealed_status(
+        status = attested_status(
             read(claim, ATTESTATION_FIELD, None),
             key=key,
             value=value,
