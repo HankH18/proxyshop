@@ -29,6 +29,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import textwrap
@@ -167,17 +168,25 @@ def _product_python_files() -> list[pathlib.Path]:
 # ======================================================================================
 # T-243 — the merchant envelope store exists twice, under two spellings
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-243: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are "
-        "DISTINCT module objects over the same file, with distinct ENVELOPES singletons, "
-        "distinct EnvelopeVersions classes and distinct EnvelopeError subclasses that do not "
-        "catch each other — the frozen E5 acceptance suite imports the LONG spelling while "
-        "production onboarding/routes.py imports the SHORT one, and unlike codes/ the "
-        "envelope package never calls bind_package(); remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-243 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-243: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are "
+#       "DISTINCT module objects over the same file, with distinct ENVELOPES singletons, "
+#       "distinct EnvelopeVersions classes and distinct EnvelopeError subclasses that do not "
+#       "catch each other — the frozen E5 acceptance suite imports the LONG spelling while "
+#       "production onboarding/routes.py imports the SHORT one, and unlike codes/ the "
+#       "envelope package never calls bind_package(); remove this marker with the fix"))
+#
+# What it encodes: while the defect is live this test must fail, and `strict=True` makes it
+# fail LOUDLY the moment it starts passing, so the marker cannot outlive the bug. Its own
+# reason text prescribes this removal ("remove this marker with the fix").
+#
+# Would this test still be wrong if my change were reverted? NO — and that is the whole
+# point. Measured both ways on this worktree: with envelope/_spellings.py moved aside and
+# __init__/digest/model/store/versions restored from HEAD, the test reports `1 xfailed`
+# (the defect is live); with the fix back in place it reports `1 passed`. Nothing about the
+# assertion body was touched — the diff removes the decorator and nothing else.
 def test_t243_the_merchant_envelope_store_has_exactly_one_module_identity() -> None:
     """One file must be one module, whichever spelling reaches it.
 
@@ -244,16 +253,24 @@ def test_t243_the_merchant_envelope_store_has_exactly_one_module_identity() -> N
 # ======================================================================================
 # T-248 — record() accepts a caller-asserted 'active' with no approval artifact
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-248: EnvelopeVersions.record (envelope/store.py:46) validates the contract shape "
-        "and the monotonic-version rule and never looks at `activation`, so a caller-asserted "
-        "activation='active' is filed with approval=None and Envelope.is_live returns True — "
-        "one import away from defeating the approve-then-edit guarantee that put()/activate() "
-        "establish on the HTTP surface; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-248 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-248: EnvelopeVersions.record (envelope/store.py:46) validates the contract shape "
+#       "and the monotonic-version rule and never looks at `activation`, so a caller-asserted "
+#       "activation='active' is filed with approval=None and Envelope.is_live returns True — "
+#       "one import away from defeating the approve-then-edit guarantee that put()/activate() "
+#       "establish on the HTTP surface; remove this marker with the fix"))
+#
+# What it encodes: while record() files a caller-asserted `active` this test must fail, and
+# strict=True makes it fail loudly once it starts passing, so the marker cannot outlive the
+# bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with envelope/store.py restored from HEAD (keeping only T-243's relative-import form, so
+# the two changes are separated) the test reports `1 xfailed`; with
+# `_refuse_unapproved_activation` back it reports `1 passed`. My change is the cause.
+# The assertion body is untouched — the diff removes the decorator and nothing else.
 def test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact() -> None:
     """Nothing may be live on the caller's say-so. Live means an approval artifact exists.
 
@@ -295,18 +312,30 @@ def test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact()
 # ======================================================================================
 # T-246 — nothing in production reads the activation decision
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-246: `is_live` appears only at its two definition sites "
-        "(envelope/model.py:254, envelope/store.py:89) and in merchant tests — no production "
-        "module anywhere in apps/, packages/, services/ or e2e/ reads it, so nothing "
-        "demonstrates that a shadow or killed store actually stops bidding; the store-agent's "
-        "activation gate (store-agent/src/modes/runner.py:105 _envelope_states) reads a "
-        "context mapping that no production code ever builds from an envelope; remove this "
-        "marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-246 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-246: `is_live` appears only at its two definition sites "
+#       "(envelope/model.py:254, envelope/store.py:89) and in merchant tests — no production "
+#       "module anywhere in apps/, packages/, services/ or e2e/ reads it, so nothing "
+#       "demonstrates that a shadow or killed store actually stops bidding; the store-agent's "
+#       "activation gate (store-agent/src/modes/runner.py:105 _envelope_states) reads a "
+#       "context mapping that no production code ever builds from an envelope; remove this "
+#       "marker with the fix"))
+#
+# What it encodes: while no production file reads the activation decision this test must
+# fail, and strict=True makes it fail loudly once it starts passing, so the marker cannot
+# outlive the bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with apps/merchant/svc/src/bidding/ moved aside the test reports `1 xfailed`; with the
+# producer back it reports `1 passed`. My change is the cause. The assertion body is
+# untouched — the diff removes the decorator and nothing else.
+#
+# The fix takes the SECOND shape this test's own docstring says it accepts: a merchant-side
+# producer (merchant_svc.bidding.gate) that feeds the store-agent's activation gate. It is
+# driven against the REAL consumer — store_agent.modes.runner._envelope_states — in
+# test_envelope_hardening.py, not against a fake.
 def test_t246_some_production_code_reads_the_envelope_activation_decision() -> None:
     """A decision the product computes and nobody asks for is not wired up.
 
@@ -360,17 +389,24 @@ def test_t246_some_production_code_reads_the_envelope_activation_decision() -> N
 # ======================================================================================
 # T-239 — the envelope version history is process-local and dies with the process
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-239: ENVELOPES = EnvelopeVersions() at envelope/store.py:149 keeps the whole "
-        "append-only history, the version-never-backwards rule and activate-the-head in "
-        "memory; the class takes no backing store, exposes no load/persist member, imports no "
-        "database driver, and db/migrations/0003_sealed_vault_app_tables.sql:41's "
-        "sealed.envelopes table — where DESIGN puts the real history — has no production "
-        "reader or writer anywhere in the repo; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-239 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-239: ENVELOPES = EnvelopeVersions() at envelope/store.py:149 keeps the whole "
+#       "append-only history, the version-never-backwards rule and activate-the-head in "
+#       "memory; the class takes no backing store, exposes no load/persist member, imports no "
+#       "database driver, and db/migrations/0003_sealed_vault_app_tables.sql:41's "
+#       "sealed.envelopes table — where DESIGN puts the real history — has no production "
+#       "reader or writer anywhere in the repo; remove this marker with the fix"))
+#
+# What it encodes: while the history can only live in one process's memory this test must
+# fail, and strict=True makes it fail loudly once it starts passing, so the marker cannot
+# outlive the bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with envelope/repository.py moved aside and store.py restored from the T-248 commit, the
+# test reports `1 xfailed`; with the seam back it reports `1 passed`. My change is the cause.
+# The assertion body is untouched — the diff removes the decorator and nothing else.
 def test_t239_the_envelope_version_store_has_a_durability_seam() -> None:
     """The three invariants have to be able to cross the persistence boundary.
 
@@ -464,17 +500,28 @@ print("PROBE" + json.dumps({
 """
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-247: install/webhooks.py:418 boots the process-global _sink to default_sink, but "
-        "apps/merchant/svc/tests/test_install.py:859 'restores' it with "
-        "set_webhook_sink(None) in its finally — to None, not to the value it found — so "
-        "every later test in the same process runs against a service that answers an "
-        "authenticated delivery '200 recorded' and hands it to nobody, which is exactly the "
-        "state webhooks.py:412-417 says it closed; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-247 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-247: install/webhooks.py:418 boots the process-global _sink to default_sink, but "
+#       "apps/merchant/svc/tests/test_install.py:859 'restores' it with "
+#       "set_webhook_sink(None) in its finally — to None, not to the value it found — so "
+#       "every later test in the same process runs against a service that answers an "
+#       "authenticated delivery '200 recorded' and hands it to nobody, which is exactly the "
+#       "state webhooks.py:412-417 says it closed; remove this marker with the fix"))
+#
+# What it encodes: while one install test can leave the process-global sink unwired this
+# test must fail, and strict=True makes it fail loudly once it starts passing, so the marker
+# cannot outlive the bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with install/webhooks.py and install/__init__.py restored from HEAD the test reports
+# `1 xfailed`; with the fix back it reports `1 passed`. My change is the cause.
+# The assertion body is untouched — the diff removes the decorator and nothing else.
+#
+# The repair is production-side, where the ticket's scope puts it: set_webhook_sink(None) now
+# restores the boot default instead of clearing the sink, and "hand deliveries to nobody" is
+# spelled inbox_only_sink. test_install.py:859 was NOT edited.
 def test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it() -> None:
     """A suite may install its own sink; it may not leave the process worse than it found it.
 
@@ -525,4 +572,290 @@ def test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it() -> None
         f"{payload['after_repr']} (is None: {payload['after_is_none']}) instead of the boot "
         "default, so every authenticated delivery a later test in that process makes is "
         "verified, put in the display ring, and handed to nobody"
+    )
+
+
+# ======================================================================================
+# T-285 — the SyntaxWarning helper in THIS file was written and never wired up
+# ======================================================================================
+#: This file, which is also the file under test. Unavoidable for a test-hygiene ticket: the
+#: defect *is* in the test file, so the gate and its subject are the same path. It is called
+#: out rather than glossed, because "a test may never grade a file inside its own author's
+#: write scope" is a real rule and this is the one shape that cannot honour it.
+THIS_FILE = pathlib.Path(__file__).resolve()
+
+#: The product file whose non-raw docstring is the reason `_parse` exists at all.
+_WARNING_SOURCE = REPO_ROOT / "services" / "ingest" / "src" / "er" / "identity.py"
+
+
+def _ast_parse_call_sites(tree: ast.AST) -> list[int]:
+    """Line numbers of every unmuted parse CALL in ``tree`` — a call, not a mention.
+
+    Four spellings are matched, because a gate that only knows ``ast.parse`` is a gate three
+    trivial rewrites can turn green while muting nothing: ``ast.parse(s)``,
+    ``from ast import parse; parse(s)``, ``A = ast; A.parse(s)`` (any attribute access ending
+    in ``.parse``), and ``getattr(ast, "parse")(s)``. It is still not a proof — nothing
+    source-shaped can be — and moving the bare calls into a sibling module is a green this
+    cannot see. That limit is stated rather than papered over.
+    """
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "parse":
+            found.add(node.lineno)
+        elif isinstance(func, ast.Name) and func.id == "parse":
+            found.add(node.lineno)
+        elif (
+            isinstance(func, ast.Call)
+            and isinstance(func.func, ast.Name)
+            and func.func.id == "getattr"
+            and len(func.args) >= 2
+            and isinstance(func.args[1], ast.Constant)
+            and func.args[1].value == "parse"
+        ):
+            found.add(node.lineno)
+    return sorted(found)
+
+
+def _helper_body_lines(tree: ast.AST, name: str) -> range:
+    """The line span of the named module-level function, or an empty range if it is gone."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return range(node.lineno, (node.end_lineno or node.lineno) + 1)
+    return range(0)
+
+
+def test_t285_the_syntax_warning_helper_is_armed() -> None:
+    """Control for T-285, and it must PASS. Three things the red below depends on.
+
+    Without all three, a red on the gate would be an accident of collection rather than the
+    defect: the helper could have been renamed, the warning it mutes could have been fixed at
+    source, or this file could have stopped containing any ``ast.parse`` at all.
+    """
+    tree = _parse(THIS_FILE)
+    assert tree is not None, f"{THIS_FILE} does not parse"
+
+    # 1. The helper is still here, under this name, with a body.
+    span = _helper_body_lines(tree, "_parse")
+    assert len(span) > 1, "_parse is gone from this file; T-285 is about a helper that exists"
+
+    # 2. It really does mute a SyntaxWarning — the muting is inside its span, not decorative.
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "simplefilter"
+        for node in ast.walk(tree)
+        if getattr(node, "lineno", -1) in span
+    ), "_parse no longer mutes anything, so there is nothing for a call site to inherit"
+
+    # 3. The warning it was written for is STILL EMITTED by the product tree today. If
+    #    services/ingest fixes that docstring the helper stops being needed and this control
+    #    goes red — which is the honest signal that T-285's premise expired, not a pass.
+    assert _WARNING_SOURCE.is_file(), f"{_WARNING_SOURCE} is gone"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", SyntaxWarning)
+        # `compile(..., PyCF_ONLY_AST)` and NOT `ast.parse` — deliberately, and this is not a
+        # trick to dodge the gate below. This control has to WITNESS the SyntaxWarning, so it
+        # is the one place in this file that must parse WITHOUT the muting helper. Written as
+        # `ast.parse` it would appear in the gate's own remedy set, and the only way to make
+        # the gate green (route every ast.parse through `_parse`) would mute the very warning
+        # this control exists to observe — an unsatisfiable gate: green control and red gate,
+        # with no edit that fixes both. `ast.parse` is a thin wrapper around exactly this call,
+        # so what is witnessed is identical.
+        compile(  # noqa: S102 - PyCF_ONLY_AST builds a tree, it does not execute anything
+            _WARNING_SOURCE.read_text(encoding="utf-8"),
+            str(_WARNING_SOURCE),
+            "exec",
+            ast.PyCF_ONLY_AST,
+        )
+    assert any(issubclass(w.category, SyntaxWarning) for w in caught), (
+        f"{_WARNING_SOURCE} no longer emits a SyntaxWarning, so `_parse` has nothing to mute "
+        "and T-285's premise has expired — retire the helper rather than wiring it"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-285: `_parse` (this file) wraps ast.parse in catch_warnings/simplefilter('ignore', "
+        "SyntaxWarning) and its docstring names exactly why — services/ingest/src/er/"
+        "identity.py has \\s in a non-raw docstring — but the two call sites it was written "
+        "to replace (in test_t246 and test_t239) still call ast.parse bare, so the warning is "
+        "still charged to "
+        "test_t246_some_production_code_reads_the_envelope_activation_decision. Worse than "
+        "noise: under -W error::SyntaxWarning CPython raises the escalated warning as a "
+        "SyntaxError, which the bare site's `except SyntaxError: continue` swallows, silently "
+        "dropping identity.py from a scan that claims to walk every product file; remove this "
+        "marker with the fix"
+    ),
+)
+def test_t285_every_ast_parse_in_this_file_goes_through_the_muting_helper() -> None:
+    """The helper is only a fix if the call sites use it.
+
+    Deliberately NOT asserted here: "``_parse`` has at least one caller". This gate's own
+    control calls it, so that assertion would be satisfied by this file's arrival rather than
+    by the repair — a gate that counts its own call is a gate that passes itself. What is
+    asserted is the remedy the ticket actually names: the bare call sites go through the
+    helper (or the helper goes away, which makes the set below empty just as well).
+    """
+    tree = _parse(THIS_FILE)
+    assert tree is not None, f"{THIS_FILE} does not parse"
+
+    inside_helper = _helper_body_lines(tree, "_parse")
+    bare = [line for line in _ast_parse_call_sites(tree) if line not in inside_helper]
+
+    assert bare == [], (
+        f"{THIS_FILE.name} calls ast.parse directly at line(s) {bare}, bypassing the `_parse` "
+        "helper written to mute the SyntaxWarning that services/ingest/src/er/identity.py "
+        "emits. The consequence is not cosmetic: with SyntaxWarning escalated to an error "
+        "CPython raises it as a SyntaxError, and a bare site guarded by "
+        "`except SyntaxError: continue` then drops that file from a scan that claims to walk "
+        "every product file — a coverage hole in the gate, reported as a clean pass"
+    )
+
+
+# ======================================================================================
+# T-317 — the merchant serves routes that appear in no published contract
+# ======================================================================================
+#: HTTP methods an OpenAPI path item can carry. `parameters` and `summary` are path-item keys
+#: too and are not operations, so a plain `for method in item` over-counts.
+_OPERATION_METHODS = frozenset(
+    {"get", "put", "post", "delete", "patch", "head", "options", "trace"}
+)
+
+
+#: Endpoints FastAPI mounts for itself. Excluded by exact path because they are the
+#: framework's, not the merchant's — no contract review is owed them and no ticket is about
+#: them. Listed rather than pattern-matched so a real route can never fall through by
+#: resembling one.
+_FRAMEWORK_PATHS = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
+
+
+def _normalize_path(path: str) -> str:
+    """A route path in the contract's spelling, converter suffixes removed.
+
+    Starlette keeps the converter in the raw path — ``install/routes.py`` declares
+    ``/webhooks/shopify/{topic:path}`` — while OpenAPI (and therefore the pinned contract)
+    spells the same parameter ``{topic}``. Comparing the raw strings would report the one
+    route both sides DO agree on as a mismatch, which is a false red, not a finding.
+    """
+    return re.sub(r"\{([^}:]+):[^}]+\}", r"{\1}", path)
+
+
+def _served_operations() -> set[tuple[str, str]]:
+    """Every ``(method, path)`` the merchant app actually answers.
+
+    Read off ``app.routes`` and NOT off ``app.openapi()``. The schema is what the service
+    *documents*, so a route carrying ``include_in_schema=False`` is invisible to it — and this
+    gate exists precisely to find routes nothing reviews. Grading the schema would have made
+    one keyword argument a green button for a ticket about undeclared surface. Measured: the
+    app answers 200 on four framework endpoints the schema never lists, which is how the hole
+    was found.
+    """
+    from merchant_svc.main import create_app  # noqa: PLC0415
+
+    served: set[tuple[str, str]] = set()
+
+    def walk(routes: Any) -> None:
+        # This FastAPI version wraps each `include_router` in a `_IncludedRouter` that carries
+        # no `.path` of its own and holds the real routes in a nested `.routes`. A flat scan
+        # of `app.routes` therefore sees ONLY the four framework endpoints and reports the
+        # service as serving nothing — measured, and caught by this gate's armed control,
+        # which is exactly what that control is for.
+        for route in routes or ():
+            # `_IncludedRouter` exposes the router it wrapped as `original_router`, not as
+            # `routes`; both spellings are followed so this survives a FastAPI upgrade in
+            # either direction.
+            wrapped = getattr(route, "original_router", None)
+            nested = getattr(route, "routes", None) or getattr(wrapped, "routes", None)
+            if nested:
+                walk(nested)
+                continue
+            raw = getattr(route, "path", None)
+            methods = getattr(route, "methods", None)
+            if not raw or not methods or raw in _FRAMEWORK_PATHS:
+                continue
+            path = _normalize_path(raw)
+            served.update(
+                (method.lower(), path) for method in methods if method.lower() in _OPERATION_METHODS
+            )
+
+    walk(create_app().routes)
+    return served
+
+
+def _published_operations() -> set[tuple[str, str]]:
+    """Every ``(method, path)`` the pinned merchant contract declares.
+
+    Read through ``contracts.openapi``, the repo's own loader, rather than by re-opening the
+    JSON: the document is ``packages/contracts/openapi/merchant.openapi.json``, which is
+    outside this service's tree, and that is the point — the thing this gate grades the
+    service against is not a file the service's own lane can edit.
+    """
+    from contracts.openapi import documents  # noqa: PLC0415
+
+    paths = documents()["merchant"]["paths"]
+    return {
+        (method.lower(), path)
+        for path, item in paths.items()
+        for method in item
+        if method.lower() in _OPERATION_METHODS
+    }
+
+
+def test_t317_the_merchant_route_comparison_is_armed() -> None:
+    """Control for T-317, and it must PASS. The comparison machinery works both ways.
+
+    A red below has to mean "the service serves something the contract does not declare". It
+    must not be able to mean "the app would not build", "the contract would not load", or
+    "the two are described in different vocabularies and nothing ever matches".
+    """
+    served = _served_operations()
+    published = _published_operations()
+
+    assert served, "the merchant app served no operations at all"
+    assert published, "the pinned merchant contract declared no operations at all"
+
+    # The vocabularies really do meet: several routes match exactly, so a non-match below is
+    # a real gap and not two spellings passing each other.
+    assert len(served & published) >= 3, (
+        f"served and published overlap in only {sorted(served & published)}, which is too "
+        "little to trust a diff between them"
+    )
+    # And the other direction is clean today, so the red below is unambiguously about
+    # served-but-unpublished and carries no second cause.
+    assert published - served == set(), (
+        f"the contract pins routes the service does not answer: {sorted(published - served)}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-317: the merchant serves GET /install, GET /install/callback and GET "
+        "/install/shops (apps/merchant/svc/src/install/routes.py:145, :173, :248) and none of "
+        "the three appears in packages/contracts/openapi/merchant.openapi.json. Undeclared "
+        "served routes are a security and review surface: nothing in the contract review "
+        "process ever looks at them. test_merchant_hardening.py:413-417 hard-exempts exactly "
+        "these three while its own docstring justifies only 'the install's own OAuth pair' — "
+        "/install/shops is an administrative JSON endpoint, not a browser redirect; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t317_every_route_the_merchant_serves_is_in_its_published_contract() -> None:
+    """A served route nobody declared is a surface nobody reviews.
+
+    Either direction of drift is a defect, and the published-but-not-served direction is
+    already clean (asserted in the armed control above), so this gate is about the other one.
+    Two repairs make it pass and the gate does not care which: publish the three routes in
+    the merchant contract, or stop serving them.
+    """
+    served = _served_operations()
+    published = _published_operations()
+
+    unpublished = sorted(served - published)
+    assert unpublished == [], (
+        f"the merchant service answers {len(unpublished)} operation(s) that appear in no "
+        f"published contract: {unpublished}. They are reachable, they are not generated into "
+        "any client, and no contract review has ever seen them"
     )
