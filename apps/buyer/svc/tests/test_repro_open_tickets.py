@@ -1190,7 +1190,12 @@ def test_t142_the_published_row_sweep_is_armed(monkeypatch: Any) -> None:
     2. **The production path does not run.** If the forty logins never completed — a refused
        magic link, a 500 on the profile route — the gate would find no statement naming
        ``app.buyer_accounts`` for a reason that has nothing to do with ``publish_profile``.
-       The same forty logins are driven here and required to succeed.
+       The same forty logins are driven here, in the SAME configuration (``psycopg.connect``
+       doubled and ``PROXYSHOP_PG_DSN_APP`` set to the sentinel), and required to succeed.
+       Matching the configuration is load-bearing rather than tidy: an earlier version of
+       this test cleared that DSN while the gate set it, so a login-path failure conditional
+       on the one variable the gate introduces was invisible here and read as ``xfailed``
+       there. See the comment at the loop.
     3. **The observation apparatus is dead.** This is the load-bearing one. The gate does not
        double ``publish_profile``; it doubles the *connection* and then asserts row-shaped
        facts. If ``_RecordingCursor`` stopped recording, or ``_published_buckets`` stopped
@@ -1279,6 +1284,31 @@ def test_t142_the_published_row_sweep_is_armed(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(psycopg, "connect", _connect)
     monkeypatch.setattr(psycopg.Connection, "connect", staticmethod(_connect), raising=False)
+
+    # THE CONFIGURATION MUST MATCH THE GATE'S, or this test arms a path the gate never runs.
+    # The gate SETS PROXYSHOP_PG_DSN_APP to the sentinel DSN and drives the login loop with
+    # it set — that variable is the whole point of the ticket. An arming test that drove the
+    # same loop with the variable CLEARED could not see a login-path failure conditional on
+    # it, which is the one configuration the gate introduces. MEASURED, with `profile_for`
+    # made to raise only when the DSN is set: this test reported `2 passed` and the whole file
+    # `2 passed, 10 xfailed` — byte-identical to a clean baseline — while the gate's own loop
+    # 500'd on its first profile read and, being inside xfail(strict=True), was reported as
+    # `xfailed`. That is exactly the two-readings failure this test exists to close.
+    #
+    # Set AFTER psycopg.connect and psycopg.Connection.connect are already doubled, so the
+    # DSN is never visible to an un-doubled connect. The sentinel points at 127.0.0.1:1 and
+    # names a database that does not exist, so no live datastore is reachable either way; the
+    # ordering makes that structural rather than incidental.
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", _T142_APP_DSN)
+    survivors = sorted(
+        name
+        for name in os.environ
+        if name.startswith(_PG_DSN_PREFIX) and name != "PROXYSHOP_PG_DSN_APP"
+    )
+    assert not survivors, (
+        f"{survivors} are set alongside the sentinel app DSN; only the app DSN may be set "
+        "here, or this test could open a real connection to a live database"
+    )
 
     tokens: dict[str, str] = {}
 
