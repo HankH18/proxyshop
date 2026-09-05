@@ -98,6 +98,7 @@ from ..auction.state import (
 )
 from ..checkout import DEFAULT_CHECKOUT_MODE, NoRegisteredDomains, UnknownCheckoutMode
 from ..eligibility import StaticSellerEligibility
+from ..safe_text import describe_exception
 from ._spellings import bind_spellings
 from .claims import StoreAcceptanceClaims, acceptance_claims_scope
 from .gate import accept_offer
@@ -107,6 +108,7 @@ from .reasons import (
     DENIAL_UNSPECIFIED,
     denial_code,
     denial_reason,
+    redact_addresses,
 )
 
 __all__ = [
@@ -505,7 +507,12 @@ def _denied(reason: str) -> JSONResponse:
     parsing ``denial_reason`` never has to handle a token outside
     :data:`~.reasons.DENIAL_REASONS`, and no diagnosis is thrown away to achieve that.
     """
-    text = str(reason).strip()
+    # Redacted here as well as at the two places a reason is BUILT, because this function is
+    # the published surface's last frame and it is reachable with a string neither of them
+    # produced — `_denied` is called directly with `str(result.denial_reason or "")` and with
+    # a locally formatted transition message. A 409 body is the one sink a client reads, so
+    # the invariant is asserted where it is published, not only where it is composed.
+    text = redact_addresses(reason).strip()
     if denial_code(text) is None:
         text = denial_reason(
             DENIAL_UNSPECIFIED, text or "the accept was refused and named no reason"
@@ -617,7 +624,8 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
         return _denied(
             denial_reason(
                 DENIAL_AUCTION_NOT_ACCEPTABLE,
-                f"auction {auction_id!r} could not be stamped as accepted ({exc}); the "
+                f"auction {auction_id!r} could not be stamped as accepted "
+                f"({describe_exception(exc)}); the "
                 f"acceptance is not recorded, so no permalink is returned",
             )
         )

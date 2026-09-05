@@ -130,6 +130,7 @@ from ..checkout import (
     registered_domain_for,
     resolve_provider,
 )
+from ..safe_text import describe_exception
 from .claims import platform_acceptance_claims
 from .reasons import (
     DENIAL_ALREADY_ACCEPTED,
@@ -785,7 +786,7 @@ def accept(
                     f"bid {ref!r} is this exchange's own list-price fallback for {store_id!r} "
                     f"(R10), so the buyer is sent to that store's own checkout rather than "
                     f"handed a discount — but no usable destination could be established for "
-                    f"it ({type(exc).__name__}: {exc})",
+                    f"it ({describe_exception(exc)})",
                 ),
                 store_id=store_id,
                 reoffer_bid_ref=next_slot(auction, ref),
@@ -965,7 +966,11 @@ def accept(
             # lands in a `policy_event` payload the published API types as a bare string;
             # the code itself goes to the `code_created` event `_refused` emits alongside,
             # which is the only place it is written down.
-            denial_reason(DENIAL_CHECKOUT_REFUSED, f"{type(exc).__name__}: {exc}"),
+            # THE AMPLIFIER. Every exception `checkout/*` raises funnels through this one
+            # line into `denial_reason`, so an address quoted anywhere under that package
+            # reaches the persisted event and the 409 from here. `describe_exception`
+            # keeps the class name and the message and drops only the address.
+            denial_reason(DENIAL_CHECKOUT_REFUSED, describe_exception(exc)),
             store_id=store_id,
             reoffer_bid_ref=next_slot(auction, ref),
             orphan=orphan,

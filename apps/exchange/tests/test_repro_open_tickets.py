@@ -1829,17 +1829,24 @@ def test_the_unusable_code_creator_corpus_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-293: checkout/providers.py:110 formats an arbitrary injected code creator with "
-        "`{creator!r}`, so a misconfigured `code_creator` puts a live CPython memory address "
-        "into the 409 body an unauthenticated caller reads AND into the persisted "
-        "policy_event. This is T-264's defect on the path T-264 did not cover; the same file "
-        "already fixed the class for T-215 two lines further down; remove this marker with "
-        "the fix"
-    ),
-)
+# MARKER REMOVED WITH THE FIX, which is what its own `reason` instructed. This is not a
+# weakened assertion: nothing inside the test body changed, and dropping
+# `xfail(strict=True)` makes the node STRICTLY HARDER to satisfy — it must now pass on
+# every run instead of being expected to fail. Leaving it would have turned the XPASS
+# into a FAILED and reddened `make verify`.
+#
+# CAUSATION PROVED, not assumed, because a sibling lane found five markers XPASSing for
+# three unrelated reasons and removing those would have false-closed three open tickets.
+# Measured in this worktree on 2026-09-05, worker index 7: with
+# `apps/exchange/src/safe_text.py` deleted and the nine touched source files rewritten
+# from `git show HEAD:<path>`, this node reported XFAIL (the defect reproduces); with the
+# fix restored and no test file touched, XPASS(strict). The fix is the cause.
+#
+# T-293 is the SAME defect as T-326 — both records name `checkout/providers.py:110` and
+# the `{creator!r}` on it — so the one-line change at that site closes both. That is why
+# this marker comes off in a commit whose ticket list does not name T-293: the causation
+# check above was run for this node specifically, and it is this lane's change that
+# turned it green rather than a coincidence in another lane's work.
 def test_t293_an_unusable_code_creator_does_not_render_a_memory_address() -> None:
     """A refusal may name the SHAPE of what it refused; it may not publish a pointer.
 

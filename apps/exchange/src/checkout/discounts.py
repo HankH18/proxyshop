@@ -44,6 +44,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ..safe_text import describe
 from .codes import UnusableOffer
 
 __all__ = [
@@ -109,18 +110,23 @@ def discount_percent(discount: Any) -> float | None:
         return None
     if kind not in PERCENTAGE_DISCOUNT_TYPES:
         raise UnusableDiscount(
-            f"discount type {raw_type!r} is neither a percentage "
+            # `describe`: the discount is the BIDDING STORE's own JSON, and
+            # `UnusableDiscount` subclasses `UnusableOffer`, so this message reaches the
+            # same `checkout_refused` denial reason every other offer defect does.
+            f"discount type {describe(raw_type)} is neither a percentage "
             f"({sorted(PERCENTAGE_DISCOUNT_TYPES)}) nor a fixed amount "
             f"({sorted(FIXED_AMOUNT_DISCOUNT_TYPES)}), so its unit cannot be established"
         )
 
     raw_value = _read(discount, "value")
     if isinstance(raw_value, bool) or raw_value is None:
-        raise UnusableDiscount(f"discount value {raw_value!r} is not a number of percent")
+        raise UnusableDiscount(f"discount value {describe(raw_value)} is not a number of percent")
     try:
         percent = float(raw_value)
     except (TypeError, ValueError) as exc:
-        raise UnusableDiscount(f"discount value {raw_value!r} is not a number of percent") from exc
+        raise UnusableDiscount(
+            f"discount value {describe(raw_value)} is not a number of percent"
+        ) from exc
 
     if not 0.0 <= percent <= MAX_DISCOUNT_PERCENT:
         raise UnusableDiscount(

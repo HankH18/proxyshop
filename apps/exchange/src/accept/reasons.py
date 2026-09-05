@@ -46,6 +46,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..eligibility import BLACKLISTED, UNAVAILABLE
+from ..safe_text import describe, redact_addresses
 
 __all__ = [
     "DENIAL_ALREADY_ACCEPTED",
@@ -61,6 +62,7 @@ __all__ = [
     "denial_code",
     "denial_reason",
     "describe",
+    "redact_addresses",
 ]
 
 #: The separator between the declared code and the prose. One colon and one space, which is
@@ -115,27 +117,13 @@ DENIAL_REASONS: tuple[str, ...] = (
     DENIAL_UNSPECIFIED,
 )
 
-#: Values whose ``repr`` is information rather than an address. Everything else is described
-#: by its type — see :func:`describe`.
-_REPR_IS_SAFE: tuple[type, ...] = (str, bytes, bool, int, float, complex, type(None))
-
-
-def describe(value: Any) -> str:
-    """A rendering of ``value`` that is safe to persist and to publish (T-264).
-
-    ``f"{value!r}"`` on an object with the default ``__repr__`` produces
-    ``<object object at 0x104e0a170>`` — the object's address in this process. In a field
-    that is written to a durable event and returned to an unauthenticated caller that is a
-    memory-layout leak, and it also makes the reason unstable: the same refusal renders
-    differently on every run, so nothing downstream can group two of them.
-
-    Values whose ``repr`` carries meaning keep it; anything else is named by its type, which
-    is the part an operator actually needs ("you passed a ``StaticSellerEligibility`` where a
-    version string belongs").
-    """
-    if isinstance(value, _REPR_IS_SAFE):
-        return repr(value)
-    return f"<{type(value).__name__}>"
+# `describe` and `redact_addresses` are IMPORTED from `exchange.safe_text` and re-exported
+# here, where every caller already looks for them. They used to be defined in this module,
+# which put them out of reach of the two packages that leak hardest: `accept.reasons` imports
+# from `eligibility`, so `eligibility` importing back would be a cycle, and `checkout` has no
+# business importing `accept` at all. Moving the definitions down to a leaf module — and
+# leaving this name bound — is what let T-326's site in `checkout/providers.py` be repaired at
+# the site rather than only at the boundary. See `exchange/safe_text.py` for both bodies.
 
 
 def denial_reason(code: str, detail: str = "") -> str:
@@ -152,7 +140,12 @@ def denial_reason(code: str, detail: str = "") -> str:
             f"policy_event and published on the 409, so its vocabulary is "
             f"{list(DENIAL_REASONS)}"
         )
-    text = str(detail).strip()
+    # The detail is swept for process addresses on the way in (T-264/T-326/T-327). Every
+    # caller builds it out of values a client or an injected collaborator supplied, and the
+    # result is persisted into a `policy_event` and returned in the 409 body, so this is the
+    # narrowest place the invariant "no denial reason renders an object's default repr" can
+    # be made total rather than a property of the f-strings someone has audited so far.
+    text = redact_addresses(detail).strip()
     return f"{code}{DENIAL_SEPARATOR}{text}" if text else code
 
 

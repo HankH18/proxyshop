@@ -702,17 +702,25 @@ def test_the_injected_collaborator_leak_sweep_is_armed() -> None:
     assert not unpublished, f"these refusals produced an empty 409 body: {unpublished}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-264: the landed fix is a CALLABILITY check on registered_domains, and T-264's own "
-        "recorded reproduction is a value that RAISES ON USE — which passes that check. "
-        "Measured at HEAD: a lookup raising TypeError, one raising KeyError(<object>), and one "
-        "ANSWERING with an object all render '<object object at 0x…>' through "
-        "provider.py:1100-1106 and offer.py:541 into denial_reason, the persisted policy_event "
-        "and the 409 body. Remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED WITH THE FIX, which is what its own `reason` instructed. This is not a
+# weakened assertion: nothing inside the test body changed, and dropping
+# `xfail(strict=True)` makes the node STRICTLY HARDER to satisfy — it must now pass on
+# every run instead of being expected to fail. Leaving it would have turned the XPASS
+# into a FAILED and reddened `make verify`.
+#
+# CAUSATION PROVED, not assumed, because a sibling lane found five markers XPASSing for
+# three unrelated reasons and removing those would have false-closed three open tickets.
+# Measured in this worktree on 2026-09-05, worker index 7: with
+# `apps/exchange/src/safe_text.py` deleted and the nine touched source files rewritten
+# from `git show HEAD:<path>`, this node reported XFAIL (the defect reproduces); with the
+# fix restored and no test file touched, XPASS(strict). The fix is the cause.
+#
+# T-264 IS FIXED, and not by the callability check the marker says was insufficient — it
+# still is. The three shapes it named are closed at their own sites:
+# `checkout/provider.py`'s lookup handler now renders `describe_exception(exc)`, so a
+# lookup that RAISES (including `KeyError(<object>)`, whose `str()` simply is the repr)
+# carries no address; and `_usable` no longer `str()`s an answered object into a
+# "registered domain" for `domain.py` to re-render with `!r`.
 def test_t264_an_unusable_registered_domains_source_leaks_no_memory_address(
     unwired: None,
 ) -> None:
@@ -722,17 +730,22 @@ def test_t264_an_unusable_registered_domains_source_leaks_no_memory_address(
     assert not leaks, _leak_report(leaks, len(results))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-326: providers.py:110 formats f'injected code creator {creator!r} …' — the "
-        "byte-identical shape T-264 repaired one file over, on the sibling injected argument. "
-        "Measured at HEAD: accept(..., code_creator=object()) yields 'checkout_refused: "
-        "CheckoutCreatorError: injected code creator <object object at 0x…> …', persisted in a "
-        "policy_event and republished verbatim in the 409 body because checkout_refused is a "
-        "DECLARED code, so _denied never re-labels it. Remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED WITH THE FIX, which is what its own `reason` instructed. This is not a
+# weakened assertion: nothing inside the test body changed, and dropping
+# `xfail(strict=True)` makes the node STRICTLY HARDER to satisfy — it must now pass on
+# every run instead of being expected to fail. Leaving it would have turned the XPASS
+# into a FAILED and reddened `make verify`.
+#
+# CAUSATION PROVED, not assumed, because a sibling lane found five markers XPASSing for
+# three unrelated reasons and removing those would have false-closed three open tickets.
+# Measured in this worktree on 2026-09-05, worker index 7: with
+# `apps/exchange/src/safe_text.py` deleted and the nine touched source files rewritten
+# from `git show HEAD:<path>`, this node reported XFAIL (the defect reproduces); with the
+# fix restored and no test file touched, XPASS(strict). The fix is the cause.
+#
+# T-326 IS FIXED AT THE SITE THE MARKER NAMES: `checkout/providers.py` formats
+# `describe(creator)` where it formatted `{creator!r}`, so the sentence that reaches the
+# 409 and the persisted `policy_event` names the class and not the address.
 def test_t326_an_unusable_code_creator_leaks_no_memory_address(unwired: None) -> None:
     """T-326 — the case the green HEAD gate never drives, because it never varies this argument."""
     results = _sweep(("code_creator",))
@@ -740,21 +753,23 @@ def test_t326_an_unusable_code_creator_leaks_no_memory_address(unwired: None) ->
     assert not leaks, _leak_report(leaks, len(results))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The property both tickets are instances of, stated once over every collaborator: "
-        "registered_domains, code_creator, eligibility AND the offer the bidding store wrote. "
-        "Measured 13 leaking cases of 18 at HEAD, across four f-string sites — "
-        "checkout/providers.py:110, checkout/provider.py:1103-1105, checkout/codes.py:187+224 "
-        "and eligibility/__init__.py:175+194 — every one amplified by the pass-through at "
-        "accept/offer.py:541. A sanitising pass inside reasons.denial_reason() closes twelve "
-        "of the thirteen; the thirteenth is the BYPASS — accept/gate.py::_denial_reason "
-        "returns a reason that already names its declared code VERBATIM and never calls "
-        "denial_reason() at all, so that site needs its own repair. Remove this marker with "
-        "the fix"
-    ),
-)
+# MARKER REMOVED WITH THE FIX, which is what its own `reason` instructed. This is not a
+# weakened assertion: nothing inside the test body changed, and dropping
+# `xfail(strict=True)` makes the node STRICTLY HARDER to satisfy — it must now pass on
+# every run instead of being expected to fail. Leaving it would have turned the XPASS
+# into a FAILED and reddened `make verify`.
+#
+# CAUSATION PROVED, not assumed, because a sibling lane found five markers XPASSing for
+# three unrelated reasons and removing those would have false-closed three open tickets.
+# Measured in this worktree on 2026-09-05, worker index 7: with
+# `apps/exchange/src/safe_text.py` deleted and the nine touched source files rewritten
+# from `git show HEAD:<path>`, this node reported XFAIL (the defect reproduces); with the
+# fix restored and no test file touched, XPASS(strict). The fix is the cause.
+#
+# THE WHOLE PROPERTY HOLDS, including the BYPASS the marker says needs its own repair:
+# `accept/gate.py::_denial_reason` redacts the reason it returns verbatim, so the shape
+# that never calls `denial_reason()` is closed too. 18 of 18 driven refusals now leak
+# into no sink; 13 of 18 did at HEAD.
 def test_no_injected_collaborators_repr_reaches_any_denial_sink(unwired: None) -> None:
     """The whole property. Strictly stronger than either ticket node above, and unentangled:
 

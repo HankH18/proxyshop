@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..safe_text import describe
 from .codes import code_expiry, mint_code, record_minted_code
 from .provider import (
     CheckoutProvider,
@@ -106,9 +107,16 @@ class ShopifyCheckoutProvider(CheckoutProvider):
         create = getattr(creator, "create_code", None)
         if not callable(create):
             if not callable(creator):
+                # T-326: `describe`, not `{creator!r}`. `creator` is an object the CALLER
+                # injected, this message becomes `denial_reason` through
+                # `accept/offer.py`'s checkout handler, and `checkout_refused` is a
+                # DECLARED code — so `_denied` republishes the sentence verbatim in the 409
+                # and `_refusal_event` persists it. A default `__repr__` here put this
+                # process's memory layout in both. The class name is the half an operator
+                # can act on and it is kept.
                 raise CheckoutCreatorError(
-                    f"injected code creator {creator!r} exposes neither create_code(...) "
-                    f"nor __call__(...)"
+                    f"injected code creator {describe(creator)} exposes neither "
+                    f"create_code(...) nor __call__(...)"
                 )
             create = creator
 

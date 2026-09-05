@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
 from ..auction.ledger import build_published_event
+from ..safe_text import describe, describe_exception
 from .codes import (
     assert_offer_is_mintable,
     build_cart_permalink,
@@ -1080,7 +1081,10 @@ def _usable(domain: Any, request: CheckoutRequest) -> str:
             f"no registered domain is on file for {request.store_id!r}, so there is no host "
             f"a checkout for it could be on (C10/D22)"
         )
-    return str(domain)
+    # `describe`, not `str(...)`. A lookup that ANSWERS with an object rather than a
+    # domain used to have `str(<object>)` — its address — carried onward as a "registered
+    # domain" and re-rendered with `!r` in the off-domain message `domain.py` builds.
+    return describe(domain) if not isinstance(domain, str) else domain
 
 
 def domain_is_platform_verified(request: CheckoutRequest) -> bool:
@@ -1137,8 +1141,12 @@ def registered_domain_for(request: CheckoutRequest) -> str:
         domain = lookup(request.store_id)
     except Exception as exc:
         raise OffDomainCheckout(
+            # T-264's own recorded reproduction lands HERE, not on the callability check
+            # above: a `registered_domains` value that is callable and RAISES ON USE
+            # passes that check, and its exception message — or its exception ARGUMENT,
+            # for `KeyError(<object>)` — carries the address the whole way to the 409.
             f"registered domain lookup for {request.store_id!r} failed "
-            f"({type(exc).__name__}: {exc}); refusing to check out against the bid's own "
+            f"({describe_exception(exc)}); refusing to check out against the bid's own "
             f"claim {request.store_domain!r}"
         ) from exc
 
