@@ -2463,17 +2463,23 @@ def _t321_gate_files() -> list[Any]:
     return [path for path in found if ".venv" not in path.parts and ".pkgroot" not in path.parts]
 
 
-def _t321_definitions() -> dict[str, list[str]]:
+def _t321_definitions(roles: dict[str, tuple[str, ...]] | None = None) -> dict[str, list[str]]:
     """`{role: [<repo-relative file>::<name>, ...]}` — where each role is DEFINED.
 
     AST rather than a text search: a name inside a docstring, a comment or a triple-quoted
     subprocess script is a mention and not a definition, and this repo already has one gate whose
     call sites live inside a string literal. Only a real `def` at module level counts.
+
+    `roles` is a parameter solely so the arming test can point the same scanner at a name that
+    exists nowhere and require it to come back empty. Every key is pre-seeded with `[]`, so
+    "the role is present in the result" is true whatever the scan found — asserting THAT would
+    be an assertion that cannot fail, which is the shape this parameter exists to avoid.
     """
     import ast  # noqa: PLC0415
 
-    aliases = {name: role for role, names in T321_ROLES.items() for name in names}
-    found: dict[str, list[str]] = {role: [] for role in T321_ROLES}
+    roles = T321_ROLES if roles is None else roles
+    aliases = {name: role for role, names in roles.items() for name in names}
+    found: dict[str, list[str]] = {role: [] for role in roles}
     for path in _t321_gate_files():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in tree.body:
@@ -2536,9 +2542,19 @@ def test_t321_the_duplicated_helper_scan_is_armed() -> None:
         f"the scanner cannot see the definition it is pointed straight at: {mine}"
     )
 
-    # 2. A role that is not there resolves to nothing.
-    assert _t321_definitions().get("raw published operations") is not None
-    assert all(isinstance(entries, list) for entries in definitions.values())
+    # 2. The scan SELECTS rather than matches. A role whose name exists nowhere in the repo must
+    #    come back empty, or a "nothing is duplicated" verdict could just be a scanner finding
+    #    nothing at all. This replaced an assertion that could not fail — `_t321_definitions`
+    #    pre-seeds every role with `[]`, so `.get(role) is not None` is true whatever it scanned.
+    decoy = _t321_definitions({"a helper nobody wrote": ("_t321_no_such_helper_anywhere",)})
+    assert decoy == {"a helper nobody wrote": []}, (
+        f"the scanner reported definitions for a name that exists nowhere in the repo: {decoy}. "
+        "It is matching rather than selecting, so the counts the gate below reads are noise"
+    )
+    assert sum(len(entries) for entries in definitions.values()) >= 6, (
+        f"the scan found only {sum(len(e) for e in definitions.values())} helper definitions in "
+        f"{len(files)} gate file(s); it has stopped seeing the copies it exists to count"
+    )
 
     # 4. The copies AGREE today — which is the whole reason nothing has noticed.
     normalisers = _t321_normalisers()
