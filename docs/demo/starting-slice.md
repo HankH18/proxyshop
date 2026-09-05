@@ -121,8 +121,56 @@ store" would be the engine grading its own homework.
 
 ## 3. The live-auction demo beat
 
-This is the beat to run in front of an audience. Each step names the component that does the
-work, so a question about "what actually happened there" has an answer in the code.
+This is the beat to run in front of an audience. **This is the command:**
+
+```bash
+./.venv/bin/python -m proxyshop_demo
+```
+
+It takes about eight seconds and prints the whole journey as a narrative — the shopper's
+words, the questions asked back, the store that is denied and why, each store's bid as it
+arrives, the ranked shortlist with the reason each slot placed where it did, the real
+single-use code, the permalink, the order the merchant closed, the pixel beacon and the
+HMAC-signed webhook. Every arrow it prints is a real HTTP round trip.
+
+**Everything above this section except `make bootstrap` is optional for this command.** The
+driver starts what it needs on loopback ports of its own — the buyer service, one store agent
+per hosted store, the exchange, the merchant stub, a pixel collector and a webhook receiver —
+and touches no datastore, so `make deps-up`, the migration, the seeded catalogue and the
+long-running stub are for the rest of this page, not for this beat. Nothing it does reaches
+the public network.
+
+Nothing is wired by the driver, which is the property that makes it worth watching: the
+exchange reads its collaborators out of a deployment document it is pointed at with
+`EXCHANGE_DEPLOYMENT`, and each store agent reads its approved envelope and catalogue out of
+the file named in `STORE_AGENT_CONTEXT`. That is what a person deploying these containers
+does, and it is the hop that a test which configures the app it is testing never exercises.
+
+The roster, the prices and the four store roles come from the same S1 run fixture the scripted
+proof in section 4 uses, so the demo and the proof are about one purchase rather than two that
+resemble each other.
+
+### What it will tell you it cannot do
+
+**Four beats on this page do not run yet, and the driver prints each one as a `DOES NOT RUN
+YET` block instead of skipping it.** Read them out loud rather than scrolling past: a demo that
+quietly omitted them would be the same claim as a green board over a broken system. Each is
+*measured* by the run — the driver makes the call and prints the answer it got — rather than
+asserted from having read the source:
+
+1. **The shopper's "yes" cannot reach the exchange.** `POST /buyer/intent/confirm` answers 503,
+   in its own words: *"confirm() was given no auction client, so the confirmed intent has
+   nowhere to go."* The buyer service has no composition root binding one. The driver opens the
+   auction by posting to the exchange directly and says so.
+2. **The clarifier's cluster names nothing a store pursues.** Handed the clarified intent
+   unedited, a store agent answers `204` with the reason `cluster_not_pursued`. The clarifier
+   derives `cluster_id` by hashing the query; envelopes authorise bidding inside *named*
+   catalogue clusters; nothing maps one namespace onto the other.
+3. **The silent store's fallback never reaches the shortlist** — see 3.4 below.
+4. **Reconciliation and the trust projection cannot run from anything served** — see 3.6/3.7.
+
+Each step below names the component that does the work, so a question about "what actually
+happened there" has an answer in the code.
 
 ### 3.1 Intent and the clarifying questions
 
@@ -167,8 +215,22 @@ formula, and builds the shortlist. The ranking is fee-blind and tier-blind: payi
 network more cannot buy a better position. The blacklist filter reads the served trust
 snapshot and, again, fails closed — a store with no row is excluded rather than defaulted in.
 
-Show the shortlist carrying both a real hosted bid and the silent store's list-price
-fallback. Each filled slot is written to the ledger as `shown`.
+**This subsection used to say "show the shortlist carrying both a real hosted bid and the
+silent store's list-price fallback". Over the real composed exchange it does not, and the
+driver measures it every run.** The fallback the exchange manufactures for a silent store
+carries no `expires_at` and no `checkout_url`; both filters fail closed; so the entry is
+excluded `expired_offer` and `off_domain_checkout` before it can be ranked, and the driver
+prints those two reasons verbatim. R10's first half holds — the store *is* represented, at its
+catalogue list price, and the entry says why it fell back. R10's second half, that it can still
+reach the shortlist, does not hold on this path today. `e2e/support/s1` reaches three slots by
+building the fallback's checkout URL itself, which is the join whose absence is the defect.
+
+What the shortlist *does* carry is worth pointing at: each slot names why it placed there. The
+driver prints the weighted terms, and they sum to the score — in a normal run the two hosted
+stores differ on the `trust` term alone, because the approved manifest calls one of them its
+honest control store and the other its scripted dishonest one, and the served snapshot says so.
+
+Each filled slot is written to the ledger as `shown`.
 
 ### 3.5 Acceptance, the single-use code and the simulated redirect
 
@@ -197,6 +259,26 @@ asymmetry is the point:
 `reconciled` verdict: was the promised price honoured, was the promised discount honoured,
 was the pixel missing. The webhook is the truth; the pixel is corroboration.
 
+**Everything up to that join runs live, and the join itself does not.** The driver really
+completes the checkout, really receives the beacon at a collector, really receives the signed
+delivery and really verifies it with the merchant app's own code — order `#1001` for `$389.00`,
+`200 recorded`, ledger kind `order_paid`. It also offers the spent code a second time, and
+prints the outcome carefully, because two different things look alike there: the second
+checkout is *not* refused, it completes carrying no discount. Single use means "the second
+order redeemed nothing", not "the second attempt errored".
+
+Then it stops, for two reasons it prints:
+
+- `reconcile` reads a page of ledger events. The exchange's ledger is an in-process sink that
+  no HTTP route serves, and this repository's pixel source directory is empty, so nothing
+  deployed emits `checkout_pixel` at all. A driver that manufactured those events would be
+  supplying the join whose absence is the defect.
+- Even given the page, the join key is missing. The checkout provider invents its
+  `checkout_token` and never transmits it — the permalink carries the discount code and
+  nothing else — while the merchant mints its own, unrelated token when the cart is visited.
+  `reconcile` joins on exactly that key. `e2e/support/s1` closes the gap by deriving the
+  binding from the single-use code and says so in its own docstring; nothing deployed does.
+
 ### 3.7 The trust projection
 
 The reconciliation outcome and the verification verdicts become observations against the six
@@ -204,6 +286,13 @@ trust dimensions — five transaction dimensions plus `catalog_claim_accuracy`, 
 a product-fact claim lands. `trust.scoring.score` and `trust.snapshot.build_snapshot` fold
 them in and serve an updated snapshot, which is the same snapshot the ranker filters on. That
 closes the loop: what a store did last time changes what it can win next time.
+
+**The loop does not close from anything the live beat serves**, for the reason 3.6 gives: with
+no `reconciled` verdict there are no observations to fold in. The live demo shows the snapshot
+being *read* — the driver's deployment document states one, the ranker filters on it, and the
+`trust` term is what separates the two hosted stores' scores — and it does not show the
+snapshot being *written*. Section 4's scripted proof is where the whole loop is exercised
+today, and the driver says so at the point it stops.
 
 ## 4. Run the whole beat as one scripted proof
 
