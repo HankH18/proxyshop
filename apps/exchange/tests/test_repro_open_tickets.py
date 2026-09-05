@@ -938,6 +938,60 @@ def test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publi
 
 
 # =====================================================================================
+# T-266 — the same exchange property, under a node that names T-266
+# =====================================================================================
+#
+# WHY THIS NODE EXISTS AT ALL, since its body is the exchange half above restated. T-325
+# records that three tickets share two gate nodes: freeze-log amendment 19 repointed T-266's
+# and T-296's `verify` at `test_t312_the_exchange_serves_…` and `test_t312_the_trust_service_
+# serves_…`, which are T-312's OWN tests, and amendment 18 gave T-312 the selector
+# `-k test_t312`, which selects both. The consequence is measured, not hypothetical: fixing
+# T-312 turns T-266's and T-296's gates green while neither ticket has been worked, and a
+# T-266 lane cannot demonstrate its own work through a node bearing another ticket's number.
+#
+# `tickets.json` is FROZEN, so a lane cannot repoint a selector; only a freeze-log amendment
+# can. What a lane CAN do is make sure the amendment has somewhere sound to point. This node
+# is that target for T-266, and three properties of it are deliberate:
+#
+#   * its name contains no `test_t312` substring, so T-312's own `-k test_t312` selector does
+#     NOT pick it up and T-312's gate is unchanged by its existence;
+#   * the T-312 node above is left EXACTLY as it was, so what grades T-296 today — a selector
+#     naming the trust node — is also unchanged. Nothing here is a rename;
+#   * it is a FAITHFUL gate rather than a partial one. T-266's own text is precisely the
+#     exchange's served-versus-published divergence, so a lane doing T-266's work turns this
+#     green by doing it. That is not true of the trust node for T-296, whose ticket names
+#     eight operations across store-agent, ingest and trust of which that node covers three —
+#     which is why no `test_t296_…` alias is minted here. Manufacturing a second partial gate
+#     while closing the ticket that exists because of partial gates would be a poor joke.
+#
+# Both nodes read the same corpus through the same helpers, so they cannot disagree, and the
+# armed test above covers this one for free.
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-266: measured on 2026-09-05 — the exchange serves 4 operations while "
+        "packages/contracts/openapi/exchange.openapi.json publishes 5. Published but NOT "
+        "served: POST /internal/outcomes and POST /v1/auctions/{auction_id}/bids. Served but "
+        "NOT published: GET /auctions/{auction_id}. A published path a service does not "
+        "answer is a promise the platform is already making to clients; remove this marker "
+        "with the fix"
+    ),
+)
+def test_t266_the_exchange_serves_exactly_the_operations_its_contract_publishes() -> None:
+    """T-266's own node for T-266's own property: served surface == published contract."""
+    served = _served_operations(_build("exchange.main"))
+    published = _published_operations(EXCHANGE_OPENAPI)
+
+    assert published, "the exchange contract declares nothing; the sweep is unarmed"
+    assert served == published, (
+        f"the exchange's served surface diverges from its published contract — "
+        f"{_operation_divergence(served, published)}"
+    )
+
+
+# =====================================================================================
 # T-310 — the published ranking is on no served path
 # =====================================================================================
 
