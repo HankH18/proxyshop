@@ -1316,6 +1316,12 @@ def _t172_module_evidence(path: str, cache: dict[str, set[str]]) -> set[str]:
     """
     if path not in cache:
         source = (REPO_ROOT / path).read_text(encoding="utf-8")
+        # The marker line is SOURCE, so an annotation manufactures its own evidence. Measured:
+        # stamping @pytest.mark.docker("postgres", "neo4j-bolt", "redis") on the offenders put
+        # the literal "neo4j-bolt" into test_schema_grants.py, its surplus went empty, and this
+        # gate went green (2 passed) while the defect ran live -- the same three Postgres-only
+        # role-password tests skipped at exit 0 under a Redis-only outage.
+        source = re.sub(r"@pytest\.mark\.docker\s*\([^)]*\)", "", source)
         cache[path] = {
             service
             for service, pattern in _T172_SERVICE_EVIDENCE.items()
@@ -1426,7 +1432,10 @@ def test_t172_an_undeclared_docker_test_is_widened_to_the_whole_stack(tmp_path: 
       be gated on Redis. This is what makes the gate survive its own fix — it cannot be
       satisfied by teaching ``FIXTURE_SERVICES`` a new fixture, nor by stamping
       ``@pytest.mark.docker("postgres", "neo4j-bolt", "redis")`` on the offenders, both of
-      which close the first assertion while leaving every named test just as skippable.
+      which close the first assertion while leaving every named test just as skippable. The
+      second of those had to be EARNED rather than assumed: the marker line is itself source,
+      so until it was stripped the annotation supplied the very evidence it needed, and the
+      three-service stamp passed all three layers with the defect running live.
     """
     from proxyshop_support import reachability, service_markers
 
@@ -2759,17 +2768,24 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
     payload = {key: value for key, value in dict(replay_case).items() if key in parameters}
     seam(**dict(payload, connection=once))
     seam(**dict(payload, connection=twice))
+    after_first_call = {table: len(_t256_inserts(twice, table)) for table in _T256_TABLES}
     # Re-import the seam before the replay. An idempotency check that lives in a process-local
     # `set()` is not idempotency — it forgets on every restart and never applies across
     # processes — but an in-process double cannot tell it from durable state. Reloading clears
     # module-level memory while leaving this connection's state intact, so only a writer that
     # asks the DATABASE still refuses the second write.
+    # Reload the module the seam is DEFINED in, not the package it is exported from.
+    # Measured: reloading `trust.verification` re-executes its `__init__` but leaves
+    # `trust.verification.persistence` untouched in sys.modules, so a module-level `set()`
+    # memo living in the submodule survived and a writer that never asks the database still
+    # passed. `seam.__module__` is where the state actually lives.
     replay_seam = seam
-    try:
-        reloaded = importlib.reload(importlib.import_module(module_name))
-        replay_seam = getattr(reloaded, name, seam)
-    except Exception:  # a package that will not reload is graded on the seam we already hold
-        replay_seam = seam
+    for target in dict.fromkeys((getattr(seam, "__module__", "") or module_name, module_name)):
+        try:
+            reloaded = importlib.reload(sys.modules.get(target) or importlib.import_module(target))
+        except Exception:  # a module that will not reload is graded on the seam we hold
+            continue
+        replay_seam = getattr(reloaded, name, replay_seam)
     replay_seam(**dict(payload, connection=twice))
 
     baseline = {table: len(_t256_inserts(once, table)) for table in _T256_TABLES}
@@ -2779,6 +2795,35 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
         f"{silent}. 'zero INSERTs and zero INSERTs' is not idempotence, it is a writer that "
         f"has stopped writing — the same defanged-by-its-own-fixture shape as un-insertable "
         f"fixture data, one level up"
+        "\n\nWHAT THIS DOUBLE CAN SEE, so you do not debug the wrong thing: it models "
+        "`on conflict ... do nothing ... returning`, which answers a row the first time "
+        "and nothing on a replay; gating your write on that is the design this grades. "
+        "It does NOT model a select-then-skip, a count(*) gate or "
+        "`insert ... select ... where not exists` -- those are correct against a real "
+        "database and will still fail here. That is a limit of this double, not a "
+        "verdict on your code, and it exists because ledger.trust_observations has no "
+        "UNIQUE for the database to arbitrate with."
+    )
+
+    # A second CONNECTION must see at least what the first one did. Measured: an
+    # implementation whose idempotency is a process-local `set()` has its key populated by the
+    # baseline call, so the replay connection received NOTHING and "0 INSERTs against 1" read
+    # as idempotent. That is not idempotence, it is amnesia about which database it is talking
+    # to — the same writer against a fresh database would write nothing at all.
+    amnesiac = sorted(
+        f"{table}: {after_first_call[table]} INSERT(s) on a second connection's FIRST call, "
+        f"{baseline[table]} on the first connection's"
+        for table in _T256_TABLES
+        if after_first_call[table] != baseline[table]
+    )
+    assert amnesiac == [], (
+        f"the first write to a second connection did not match the first write to the first "
+        f"one: {amnesiac}. That is the signature of a writer refusing a connection it has "
+        f"never written to -- idempotence held in process memory rather than by the database. "
+        f"A memo forgets on every restart and never applies across processes, and against a "
+        f"fresh database this writer would produce no rows at all. It is invisible to the "
+        f"replay comparison below, because a key the baseline call already retired keeps the "
+        f"two-call total no larger than the one-call total"
     )
 
     doubled: list[str] = []
@@ -2813,6 +2858,14 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
         f"server-generated observation_id, so the clause there is decoration and measurably "
         f"still wrote three rows for three identical calls. Not emitting the second INSERT at "
         f"all is always a defence"
+        "\n\nWHAT THIS DOUBLE CAN SEE, so you do not debug the wrong thing: it models "
+        "`on conflict ... do nothing ... returning`, which answers a row the first time "
+        "and nothing on a replay; gating your write on that is the design this grades. "
+        "It does NOT model a select-then-skip, a count(*) gate or "
+        "`insert ... select ... where not exists` -- those are correct against a real "
+        "database and will still fail here. That is a limit of this double, not a "
+        "verdict on your code, and it exists because ledger.trust_observations has no "
+        "UNIQUE for the database to arbitrate with."
     )
 
 
