@@ -575,17 +575,44 @@ def test_t156_the_dishonest_total_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-156: offer.total_price is reconciled against nothing at the store agent's own "
-        "door. packages/store-agent/src/hooks/provenance.py never reads the field at all — the "
-        "string appears once in the whole module, in a docstring at :895, because PRICE_FIELD "
-        "is 'unit_price' — so an offer whose unit_price is the honest price for a genuinely "
-        "granted depth is admitted with ANY total below it. Measured: 60 of 60 admitted; "
-        "remove this marker with the fix"
-    ),
-)
+# ---------------------------------------------------------------------------------------------
+# TEST EDIT, JUSTIFIED — the `xfail(strict=True)` marker that stood here was REMOVED. No
+# assertion below was touched, and no case was dropped from the sweep: it still generates and
+# grades all 60.
+#
+# MARKER REMOVED, verbatim: `@pytest.mark.xfail(strict=True, reason="T-156: offer.total_price is
+# reconciled against nothing at the store agent's own door. packages/store-agent/src/hooks/
+# provenance.py never reads the field at all — the string appears once in the whole module, in a
+# docstring at :895, because PRICE_FIELD is 'unit_price' — so an offer whose unit_price is the
+# honest price for a genuinely granted depth is admitted with ANY total below it. Measured: 60 of
+# 60 admitted; remove this marker with the fix")`
+#
+# WHAT IT CLAIMED: that the assertion below MUST fail — 60 of 60 bids stating a total under one
+# already-discounted unit were admitted. Under `strict=True` the marker is itself an assertion,
+# so leaving it in place once the defect is fixed turns the repair into an XPASS *failure* that
+# reds `make verify`.
+#
+# REQUIREMENT IT ENCODES: T-156, tickets.json. This node is the ticket's recorded `verify`.
+#
+# REVERT CHECK — would the assertion below still pass if I reverted my change? **NO**. MEASURED in
+# this lane, three runs, ONE file swapped (packages/store-agent/src/hooks/provenance.py) and
+# nothing else:
+#   * `git show HEAD:...provenance.py` in place, `--runxfail`: 1 failed — "60 of 60 bids stating
+#     a total_price below one already-discounted unit_price were ADMITTED".
+#   * the same tree, plain run: 1 xfailed, with this marker's reason printed.
+#   * my `_total_price_refusal` + `ClaimMaterial.totals` restored, `--runxfail`: 2 passed.
+# So the XPASS is caused by THIS lane's fix and not by unrelated drift — the failure mode a
+# sibling lane hit, where three of five XPASSing markers had nothing to do with the lane's own
+# change and removing them would have false-closed three open tickets.
+#
+# WHAT IS *NOT* CLOSED, and is deliberately left red elsewhere in this file: the companion
+# finding T-175 — that neither the floor wall nor the depth reconciliation READS `total_price`,
+# so a node stating a total with no unit price beside it is still collected by nothing. The fix
+# below reconciles a total against the unit standing next to it and claims no more than that.
+# See `test_t175_...` below, which is xfail(strict=True) and RED against this same tree.
+#
+# VERDICT: the marker, not the code, was the thing that had become false. Removed.
+# ---------------------------------------------------------------------------------------------
 def test_t156_a_total_price_below_one_unit_price_is_refused_at_the_store_agents_own_door() -> None:
     """An offer cannot cost less in total than one of the units it is pricing.
 
@@ -1415,4 +1442,275 @@ def test_t279_every_hostile_input_is_refused_by_name_not_by_the_catch_all() -> N
         f"{len(escapes)} hazard(s) are answered by the total wrapper rather than by name:\n  "
         + "\n  ".join(escapes[:24])
         + (f"\n  ... and {len(escapes) - 24} more" if len(escapes) > 24 else "")
+    )
+
+
+# =============================================================================================
+# T-175 — `PRICE_FIELD == 'unit_price'`, so NEITHER price wall ever looks at `total_price`
+#
+# The companion to T-156 with the design citation attached, and it is a DIFFERENT hole. T-156 is
+# about a relation the boundary never checked between two numbers it could both see; this is
+# about a number the boundary never SEES. `_walk` records a priced node only when it reads BOTH
+# `product_ref` and `unit_price` off it, so a node naming a product and stating only a
+# `total_price` is collected by nothing — outside the floor wall and outside the depth
+# reconciliation alike, in a module whose own comments say a dict-built bid may put a priced node
+# under any key it likes.
+#
+# Function-local imports again, for the reason stated at the T-156 header.
+# =============================================================================================
+
+#: MEASURED on `fixtures/envelopes/store-alpha.approved.json`: `ToolHooks.price_floor` answers
+#: 10.00 for `prod-cap` and 95.00 for `prod-floor`, both listing at 100.00. Restated here rather
+#: than probed so a fixture that changes under the sweep turns it RED instead of shrinking it —
+#: the arming test asserts every one of these against the live facade.
+T175_FLOORS: dict[str, float] = {"prod-cap": 10.0, "prod-floor": 95.0}
+
+#: Where in a dict-built bid the priced node sits. Both are reached by `_walk`, by different
+#: routes, and the ticket is about a field being unread rather than a node being unreachable — so
+#: a fix that taught only the `offer` branch to read a total would still leave the sweep's second
+#: half admitted. `offer` is `NESTED_OBJECT_FIELDS`; `quotes.alternate` is the unrecognized-key
+#: path `_sweep` exists to walk.
+T175_PLACEMENTS: tuple[str, ...] = ("offer", "quotes.alternate")
+
+T175_PINNED_SEED = 20260904
+T175_DRAWS_PER_SHAPE = 4
+#: 2 products x 2 placements x 4 drawn prices.
+T175_CASE_COUNT = 16
+
+
+def _t175_cases() -> list[dict[str, Any]]:
+    """Prices strictly under the envelope's own approved floor, drawn per product.
+
+    Under the FLOOR, deliberately, and not merely under the list price: the floor is the wall
+    whose subject a bare price unambiguously is, and `_price_refusal` refuses a unit price there
+    with no grant, no discount and no depth arithmetic involved. That makes the control below —
+    the identical node with the number spelled `unit_price` — refused for a reason that cannot be
+    confused with anything this gate is asking for.
+
+    Half of every draw is pinned (so a failure is reproducible) and half comes from
+    `SystemRandom` (so the sweep cannot be fitted to a constant table), exactly as the T-156 and
+    T-279 sweeps in this file draw.
+    """
+    import random  # noqa: PLC0415
+
+    pinned = random.Random(T175_PINNED_SEED)
+    system = random.SystemRandom()
+    cases: list[dict[str, Any]] = []
+    for product in sorted(T175_FLOORS):
+        floor = T175_FLOORS[product]
+        for placement in T175_PLACEMENTS:
+            for cent in _t156_draw(1, int(round(floor * 100.0)) - 1, pinned, system,
+                                   T175_DRAWS_PER_SHAPE):
+                cases.append(
+                    {
+                        "product": product,
+                        "placement": placement,
+                        "floor": floor,
+                        "price": cent / 100.0,
+                    }
+                )
+    return cases
+
+
+def _t175_label(case: dict[str, Any], field: str) -> str:
+    return (
+        f"{case['product']} floor={case['floor']} at .{case['placement']}.{field}"
+        f"={case['price']}"
+    )
+
+
+def _t175_bid(case: dict[str, Any], field: str) -> dict[str, Any]:
+    """A dict-shaped bid stating `case['price']` for `case['product']`, spelled `field`.
+
+    Dict-shaped rather than a `contracts.Bid`, and that is the threat model this module already
+    documents rather than a convenience: `Offer` forbids extra fields and requires its own, so a
+    model-built bid cannot express "a product and a total and no unit at all". A Tier-2 store
+    submits a mapping, and `provenance.py`'s own comment says it "can put
+    ``{"product_ref": ..., "unit_price": ...}`` under any key it likes, where nothing collected
+    it and therefore neither price wall ever saw it".
+
+    `field` is the ONLY difference between the gate's bid and its control. Everything else — the
+    product, the number, the placement, the empty claims and commitments — is byte-identical, so
+    a difference in verdict can only be about which field name the walls read.
+    """
+    priced: dict[str, Any] = {"product_ref": case["product"], field: case["price"]}
+    body: dict[str, Any] = {
+        "auction_id": "auction-t175",
+        "store_id": _t156_fixture()["envelope"]["store_id"],
+        "claims": [],
+        "agent_version": "store-agent/t175-gate",
+        "schema_version": "1.0.0",
+    }
+    if case["placement"] == "offer":
+        priced.update({"currency": "USD", "discount": None, "commitments": []})
+        body["offer"] = priced
+    else:
+        outer, inner = case["placement"].split(".")
+        body["offer"] = {
+            "product_ref": case["product"],
+            "unit_price": float(_t156_fixture()["catalog"][case["product"]]["list_price"]),
+            "currency": "USD",
+            "discount": None,
+            "commitments": [],
+        }
+        body[outer] = {inner: priced}
+    return body
+
+
+def _t175_refusal(bid: dict[str, Any]) -> list[str]:
+    """Every reason `enforce_bid_provenance` gives for `bid`, or `[]` when it admits it."""
+    from store_agent.hooks import HookProvenanceError, enforce_bid_provenance  # noqa: PLC0415
+
+    try:
+        enforce_bid_provenance(bid, _t156_hooks())
+    except HookProvenanceError as exc:
+        return [reason for _, reason in exc.offenders]
+    return []
+
+
+def test_t175_the_unread_total_price_sweep_is_armed() -> None:
+    """Sixteen real cases, sixteen controls that are refused TODAY, and an honest bid still gets
+    in. NOT xfail.
+
+    Five ways the gate below could report green while the defect lived, each closed here:
+
+    1. **The sweep goes quiet.** A loop over zero cases passes. Three sweeps in this repo were
+       found doing exactly that (6->0 of 8, 70->0 of 79, 48->0 of 66). Counted and de-duplicated
+       before anything is concluded.
+    2. **The drawn prices stop being the floor wall's subject.** Every one is asserted to be
+       strictly under the product's floor as the LIVE facade reports it, so a fixture whose
+       floors moved turns this red instead of quietly making the gate about nothing.
+    3. **The refusal machinery is dead.** This is the load-bearing one, and it is what makes the
+       gate's red a measurement rather than an assertion about an absent apparatus: the SAME
+       node, at the SAME placement, with the SAME number spelled `unit_price` instead of
+       `total_price`, must be REFUSED today, naming `unit_price`. Sixteen controls, all sixteen
+       red at HEAD. If the walls ever stopped refusing under-floor prices at all, these fail
+       first and the gate below stops being evidence.
+    4. **The walls refuse everything.** A fix that refused every dict-built bid would satisfy a
+       gate that only ever looks at dishonest ones. An honest bid at each placement — the list
+       price itself, which clears both floors — is required to be ADMITTED.
+    5. **The two spellings differ in something other than the field name.** The control bid and
+       the gate bid are asserted to be identical dicts once the one key is renamed.
+    """
+    from store_agent.hooks import ToolHooks  # noqa: PLC0415
+
+    hooks: ToolHooks = _t156_hooks()
+    for product, floor in T175_FLOORS.items():
+        live = hooks.price_floor(product)
+        assert live == floor, (
+            f"the approved envelope now floors {product!r} at {live}, not {floor}; the prices "
+            "this sweep draws are written against the recorded floor and are no longer under it"
+        )
+
+    cases = _t175_cases()
+    assert len(cases) == T175_CASE_COUNT, (
+        f"the sweep generated {len(cases)} cases, not {T175_CASE_COUNT} — it has shrunk, and a "
+        "shrunken sweep proves nothing"
+    )
+    keys = {(case["product"], case["placement"], case["price"]) for case in cases}
+    assert len(keys) == T175_CASE_COUNT, (
+        f"only {len(keys)} of {len(cases)} generated cases are DISTINCT"
+    )
+    assert {case["placement"] for case in cases} == set(T175_PLACEMENTS)
+
+    for case in cases:
+        assert 0.0 < case["price"] < case["floor"], (
+            f"{_t175_label(case, 'unit_price')}: the drawn price is not strictly under the "
+            "product's floor, so the floor wall is not its subject and the control below would "
+            "not be refused for the reason this gate compares against"
+        )
+
+        # 5. One key renamed, and nothing else.
+        gate_bid = _t175_bid(case, "total_price")
+        control_bid = _t175_bid(case, "unit_price")
+        assert json.dumps(gate_bid, sort_keys=True).replace(
+            '"total_price"', '"unit_price"'
+        ) == json.dumps(control_bid, sort_keys=True), (
+            f"{_t175_label(case, 'total_price')}: the gate's bid and its control differ in more "
+            f"than the priced field's name:\n  gate:    {gate_bid}\n  control: {control_bid}"
+        )
+
+        # 3. The control is refused TODAY, by name.
+        reasons = _t175_refusal(control_bid)
+        assert reasons, (
+            f"{_t175_label(case, 'unit_price')}: the identical node spelled `unit_price` was "
+            "ADMITTED. Both price walls have stopped refusing an under-floor price, so the gate "
+            "below can no longer tell 'total_price is unread' from 'nothing is read'"
+        )
+        assert any("unit_price" in reason for reason in reasons), (
+            f"{_t175_label(case, 'unit_price')}: refused, but no reason names unit_price "
+            f"({reasons}); the gate below reads offender text the same way"
+        )
+
+    # 4. An honest bid at each placement still gets in.
+    for placement in T175_PLACEMENTS:
+        for product in sorted(T175_FLOORS):
+            listed = float(_t156_fixture()["catalog"][product]["list_price"])
+            honest = _t175_bid(
+                {"product": product, "placement": placement, "floor": T175_FLOORS[product],
+                 "price": listed},
+                "unit_price",
+            )
+            assert _t175_refusal(honest) == [], (
+                f"{product} at .{placement}: an HONEST bid stating the list price {listed} was "
+                f"refused {_t175_refusal(honest)}; a wall that refuses honest bids would satisfy "
+                "the gate below without reading anything"
+            )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-175: `PRICE_FIELD = 'unit_price'` at provenance.py:142, so `_walk` records a priced "
+        "node only where it reads BOTH `product_ref` and `unit_price`. A dict-built node naming "
+        "a product and stating only a `total_price` is collected by nothing — `prices` comes "
+        "back `[]` — so neither the floor wall nor the depth reconciliation ever sees the "
+        "number, and DESIGN.md:127 publishes `price_value` as a function of exactly that field "
+        "while the C11 accepted-event payload records it verbatim. Measured: 16 of 16 admitted, "
+        "against 16 of 16 refused for the identical node with the number spelled `unit_price`; "
+        "remove this marker with the fix"
+    ),
+)
+def test_t175_a_total_price_under_the_envelope_floor_is_refused_like_a_unit_price_is() -> None:
+    """A price the store agent's own walls never read is a price the merchant never approved.
+
+    The relation asserted is the FLOOR's, not a quantity's, and that is what keeps this gate
+    closeable without answering T-156's open design question. Nothing here says what a total
+    ought to be relative to a unit, or how many units a total is for. It says that a number
+    stating what a buyer pays for a catalogued product must be inside the envelope the merchant
+    approved, exactly as the number one field over already is — `apps/exchange/src/ranking`
+    reads `("total_price", "unit_price", "price")` in that order, `total_price` FIRST, so the
+    unread field is the one the published rank formula prefers.
+
+    **Distinct from T-156, and left red on purpose by the lane that fixed T-156.** That repair
+    added `_total_price_refusal`, which reconciles a total against the unit price standing
+    beside it on the same node. It is silent here by construction: these nodes state no unit
+    price at all, so there is nothing for that relation to compare against and
+    `ClaimMaterial.totals` comes back empty. Closing this one means teaching `_walk` that a
+    product plus a total is offer material — the `PRICE_FIELD` the ticket names.
+
+    MEASURED at HEAD (and again after the T-156 repair, unchanged): `collect_claim_material`
+    returns `prices=[]` and `totals=[]` for the `.offer` shape, `enforce_bid_provenance` admits
+    it, and the identical node with `unit_price` in place of `total_price` is refused by BOTH
+    walls — "under the envelope's approved floor of 10.0" and "99.95% off its list price".
+    """
+    cases = _t175_cases()
+    assert len(cases) == T175_CASE_COUNT, (
+        f"the sweep generated {len(cases)} cases, not {T175_CASE_COUNT}; see the arming test"
+    )
+
+    escapes: list[str] = []
+    for case in cases:
+        label = _t175_label(case, "total_price")
+        reasons = _t175_refusal(_t175_bid(case, "total_price"))
+        if not reasons:
+            escapes.append(f"{label}: enforce_bid_provenance ADMITTED it")
+        elif not any("total_price" in reason for reason in reasons):
+            escapes.append(f"{label}: refused, but not about total_price — {reasons}")
+
+    assert not escapes, (
+        f"{len(escapes)} of {len(cases)} bids stating a total_price under the envelope's own "
+        "approved floor for a catalogued product were admitted by the store agent's auditor, "
+        "where the identical node spelling the same number `unit_price` is refused by both "
+        "walls:\n  " + "\n  ".join(escapes)
     )
