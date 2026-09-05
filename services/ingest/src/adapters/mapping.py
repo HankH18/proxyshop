@@ -48,6 +48,7 @@ __all__ = [
     "composite_hash",
     "native_key",
     "native_product_key",
+    "price_is_stated",
     "product_id_for",
     "safe_host",
     "safe_split",
@@ -117,6 +118,27 @@ def coerce_price(value: Any) -> float | None:
     if price < 0:
         return None
     return price
+
+
+def price_is_stated(value: Any) -> bool:
+    """Whether the store said anything at all in this price field.
+
+    :func:`coerce_price` answers ``None`` for two situations a consumer must not confuse:
+    *"there is no price here"* and *"there is a price here and it is unusable"*. A merge that
+    reads both as "not stated" lets a store choose which of its surfaces prices a product by
+    making the other one unusable — write ``-5.00`` in ``products.json`` and the theme's
+    JSON-LD wins, which is the opposite of the documented precedence.
+
+    Stated means the field carries something. Absent, JSON ``null`` and whitespace are the
+    three ways a store says nothing; a hostile number, a boolean and unparseable text are all
+    *statements*, and a statement we refuse costs the offer rather than promoting another
+    surface's number in its place.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
 
 
 def safe_split(url: Any) -> SplitResult | None:
@@ -199,8 +221,25 @@ def product_id_for(store_id: str, entry: Mapping[str, Any]) -> str:
     Derived from the store and the store's own identifier for the product, so the same product
     keeps the same node across crawls (a re-crawl of unchanged content cannot churn the graph
     through ID drift) **and** across adapters (C6: one seam, one node).
+
+    An entry that names *no* identifier is refused rather than hashed. The empty key is one
+    value, so hashing it gives every unidentifiable entry from a store the **same** ``prod_``
+    id: two different products merge into one graph node, and a store's whole unnamed catalog
+    collapses into a single product, silently, on the first real write. Both adapters skip such
+    an entry with a warning before reaching here; this raise is what stops a third one from
+    reintroducing the collision by forgetting to.
+
+    Raises:
+        ValueError: ``entry`` names no ``id``, ``product_id`` or ``handle``.
     """
-    return f"prod_{stable_id(store_id, native_product_key(entry))}"
+    native = native_product_key(entry)
+    if not native:
+        raise ValueError(
+            "product_id_for needs the store's own identifier: an entry naming no id, "
+            "product_id or handle would hash the empty key, and every such entry from this "
+            "store would land on that one product node"
+        )
+    return f"prod_{stable_id(store_id, native)}"
 
 
 def variant_id_for(store_id: str, native_product: str, native_variant: str) -> str:

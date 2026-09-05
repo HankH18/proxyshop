@@ -351,15 +351,28 @@ def test_a_malformed_redirect_location_is_refused_rather_than_raised(storefront:
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-245: catalog_mcp skips an entry whose native_product_key is empty while "
-        "signed_fetch mints prod_<hash('')> for every such entry, so two unidentifiable "
-        "products from one store collapse onto ONE graph node — a divergence the "
-        "inspect.signature acceptance check cannot see; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-245 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-245: catalog_mcp skips an entry whose native_product_key is empty while "
+#         "signed_fetch mints prod_<hash('')> for every such entry, so two unidentifiable "
+#         "products from one store collapse onto ONE graph node — a divergence the "
+#         "inspect.signature acceptance check cannot see; remove this marker with the fix"))
+#
+# What it encodes: the two adapters that are supposed to share one mapping disagree on what
+# reaches the graph, and the disagreement merges a store's whole unidentified catalog onto a
+# single product node on the first real write.
+#
+# Would this test still be wrong if my change were reverted? YES, and it was isolated from the
+# lane's OTHER mapping change rather than proved jointly: with the T-245 hunks removed and
+# T-249's kept, this test returns to `xfailed` while T-249's stays fixed; with T-249's removed
+# and T-245's kept, the reverse. So this test's pass is caused by the T-245 repair
+# specifically — `signed_fetch._read_catalog` skipping an entry whose `native_product_key` is
+# empty (the warning `catalog_mcp` already emits), and `mapping.product_id_for` refusing to
+# hash the empty key at all.
+#
+# No assertion below is touched, including the positive control that asserts these fixture
+# entries are the ones naming no identifier.
 def test_catalog_entries_with_no_identifier_do_not_collapse_onto_one_product_node(
     storefront_factory: Any,
 ) -> None:
@@ -413,15 +426,28 @@ def test_catalog_entries_with_no_identifier_do_not_collapse_onto_one_product_nod
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-249: coerce_price returns None for a negative/NaN/inf entry price, and "
-        "signed_fetch reads None as 'not stated' and falls through to the JSON-LD offer "
-        "price — so an entry price of '-5.00' beside a JSON-LD price of '12.00' puts 12.0 in "
-        "the graph where the pre-T-023 code put -5.0; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-249 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-249: coerce_price returns None for a negative/NaN/inf entry price, and "
+#         "signed_fetch reads None as 'not stated' and falls through to the JSON-LD offer "
+#         "price — so an entry price of '-5.00' beside a JSON-LD price of '12.00' puts 12.0 in "
+#         "the graph where the pre-T-023 code put -5.0; remove this marker with the fix"))
+#
+# What it encodes: "the store stated a hostile price" and "the store stated no price" are the
+# same signal to the merge, so a store picks which of its two surfaces prices a product by
+# making the first one unusable.
+#
+# Would this test still be wrong if my change were reverted? YES, and it was isolated from the
+# lane's OTHER mapping change rather than proved jointly: with the T-249 hunk reverted to
+# `price = coerce_price(item.get("price")); if price is None: price = coerce_price(
+# matched.get("price"))` and T-245's kept, this test returns to `xfailed` while T-245's stays
+# fixed; with T-245's removed and T-249's kept, the reverse. So this test's pass is caused by
+# the T-249 repair specifically — `mapping.price_is_stated`, which makes the JSON-LD offer
+# fill a GAP only, so a refused statement costs the offer instead of promoting the other
+# surface's number.
+#
+# No assertion below is touched.
 def test_a_refused_entry_price_does_not_promote_the_other_surfaces_price() -> None:
     """``None`` means two different things to the price merge, and a store picks which.
 
