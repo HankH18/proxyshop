@@ -481,6 +481,85 @@ def test_accepting_a_fallback_closes_the_auction_to_a_second_accept(unwired: Non
     assert creator.calls == [], f"a second accept reached the merchant: {creator.calls}"
 
 
+@pytest.mark.parametrize(
+    "first_is_fallback", [True, False], ids=["handoff-then-real", "real-then-handoff"]
+)
+def test_a_handoff_and_a_real_accept_cannot_both_happen_on_one_auction(
+    unwired: None, first_is_fallback: bool
+) -> None:
+    """The crossing case, which the same-kind test above cannot reach.
+
+    Every other second-accept test in this repo takes the same KIND of bid twice. The
+    dangerous pair is the mixed one: take the free handoff, then come back for a real
+    discount code on the same auction — one auction, two acceptances, one of them minted.
+    Both orders are driven, because the guard could plausibly hold in one direction and not
+    the other: the handoff and the minting path stamp the auction from different places.
+    """
+    board = _auction(fallback=True)
+    board["bids"][1]["fallback"] = not first_is_fallback
+    board["bids"][0]["fallback"] = first_is_fallback
+
+    first_creator, second_creator = RecordingCreator(), RecordingCreator()
+    first = accept(board, "bid-a", first_creator, "shopify", registered_domains=_registry())
+    assert first.accepted is True, first.denial_reason
+
+    second = accept(board, "bid-b", second_creator, "shopify", registered_domains=_registry())
+    assert second.accepted is False, (
+        f"one auction produced two acceptances: {first.bid_ref} then {second.bid_ref}"
+    )
+    assert denial_code(second.denial_reason) == DENIAL_ALREADY_ACCEPTED, second.denial_reason
+
+    codes = [c for c in (first.code, second.code) if c]
+    assert len(codes) <= 1, f"one auction minted more than one code: {codes}"
+    assert second.code is None, second
+    assert second_creator.calls == [], f"the second accept reached the merchant: {second_creator}"
+
+
+def test_a_bid_whose_offer_is_not_a_mapping_refuses_instead_of_burning_the_auction(
+    unwired: None,
+) -> None:
+    """A malformed bid record must cost this accept, not the whole auction.
+
+    ``accept()`` reads the offer as ``_read(bid, "offer") or {}``, which is not a mapping
+    check, so a truthy non-mapping reaches the handoff intact. Building the ledger events
+    from it used to raise AFTER the auction had been stamped and the claim taken: HTTP 500,
+    no code, no destination, no re-offer, and every later accept on that auction answering
+    ``already_accepted``. The minting path treats the same input as an ordinary refusal, so
+    the handoff was the weaker of the two doors.
+    """
+    board = _auction(fallback=True)
+    board["bids"][0]["offer"] = [("product_ref", "p1")]
+
+    # Before the fix this line RAISED — `ValueError: dictionary update sequence element #0
+    # has length 1; 2 is required`, straight out of `accept()`, i.e. an HTTP 500 — with the
+    # auction already stamped and its claim already taken.
+    result = accept(board, "bid-a", RecordingCreator(), "shopify", registered_domains=_registry())
+
+    assert result.code is None, result
+
+    # The property is NOT "it must refuse". An empty offer body is a fine thing to record for
+    # an entry the exchange manufactured. The property is that the auction is spent if and
+    # only if the buyer got an answer — so there is never a stamped auction with nothing to
+    # show for it, which is exactly what the crash left behind.
+    stamped = bool(board.get("accepted_bid_ref"))
+    assert stamped == bool(result.accepted), (
+        f"stamped={stamped} but accepted={result.accepted}: the auction was spent without "
+        f"producing an answer, or produced one without being spent"
+    )
+    if result.accepted:
+        assert result.permalink_url == f"https://{SELLER_DOMAIN}/cart/1:1", result
+        assert result.discount_notice, result
+    else:
+        assert result.reoffer_bid_ref, "the buyer was left with no next slot"
+        # ...and the auction is still usable, which is what "not burned" means.
+        follow_up = accept(
+            board, "bid-b", RecordingCreator(), "shopify", registered_domains=_registry()
+        )
+        assert follow_up.accepted, (
+            f"the malformed bid burned the auction: {follow_up.denial_reason}"
+        )
+
+
 def test_the_handoff_records_the_two_events_that_happened_and_not_the_third(
     unwired: None,
 ) -> None:
@@ -498,6 +577,90 @@ def test_the_handoff_records_the_two_events_that_happened_and_not_the_third(
     assert redirect["payload"]["permalink_url"] == f"https://{SELLER_DOMAIN}/cart/1:1"
     assert redirect["payload"]["discount_applied"] is False, redirect
     assert redirect["payload"]["fallback"] is True, redirect
+    # The module docstring promises this field is on the redirect event; the handoff's used
+    # to omit it, which made that sentence true of only one of the two paths it describes.
+    assert redirect["payload"]["domain_verified"] is True, redirect
     # ...and the promise the reconciler would grade a webhook against is still written down.
     opened = [e for e in result.events if e["kind"] == "accepted"][0]
     assert opened["payload"]["offer"]["total_price"] == 100.0, opened
+
+
+def test_a_successful_handoff_reports_that_the_platform_vouched_for_the_host(
+    unwired: None,
+) -> None:
+    """``domain_verified`` must be earned, not hardcoded optimism.
+
+    It is the flag that stops a decorative host check from looking like a real one, so it
+    needs a test that would notice it becoming a lie. The pair below is what makes it a
+    measurement rather than a constant: it is ``True`` exactly when a platform registry
+    answered, and the case where none does produces no result to read it off at all.
+    """
+    verified = accept(
+        _auction(fallback=True),
+        "bid-a",
+        RecordingCreator(),
+        "shopify",
+        registered_domains=_registry(),
+    )
+    assert verified.accepted is True, verified.denial_reason
+    assert verified.domain_verified is True, (
+        "the platform registry answered and the handoff did not record that it had"
+    )
+
+    unverifiable = accept(
+        _auction(fallback=True), "bid-a", RecordingCreator(), "shopify", registered_domains=None
+    )
+    assert unverifiable.accepted is False, (
+        "with no platform registry there is nothing to vouch for the host, so there must be "
+        "no successful handoff carrying domain_verified at all"
+    )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "good.tld:8080@evil.tld",
+        "https://x.com",
+        "  spaced.tld  ",
+        "evil.tld/../good.tld",
+    ],
+)
+def test_a_malformed_registry_row_cannot_become_a_destination(unwired: None, row: str) -> None:
+    """S8 on the handoff: no checkout URL is returned off the seller's registered domain.
+
+    ``fallback_checkout_url`` interpolates the registry value VERBATIM — deliberately, so
+    that this layer never quietly repairs the platform's own record — and its docstring says
+    the malformed result is caught downstream by ``is_on_domain``. That was true of its
+    original consumer in the ranking filters and NOT true of this one, so the handoff
+    returned 200 with URLs like ``https://good.tld:8080@evil.tld/cart/1:1``, whose effective
+    host is ``evil.tld``. The minting path refused the identical rows.
+
+    A store cannot write a registry row, so this is the platform's own data integrity rather
+    than a spoof anyone can mount — which is a reason to fail closed cheaply, not a reason to
+    skip the check.
+    """
+    result = accept(
+        _auction(fallback=True),
+        "bid-a",
+        RecordingCreator(),
+        "shopify",
+        registered_domains=StaticRegisteredDomains({"store-a": row}),
+    )
+    assert result.accepted is False, (
+        f"registry row {row!r} produced a handoff to {result.permalink_url!r}"
+    )
+    assert denial_code(result.denial_reason) == DENIAL_UNROUTABLE_FALLBACK, result.denial_reason
+    assert result.permalink_url is None, result
+
+
+def test_a_well_formed_registry_row_still_produces_a_destination(unwired: None) -> None:
+    """The control for the four rows above: the check refuses malformed rows, not all rows."""
+    result = accept(
+        _auction(fallback=True),
+        "bid-a",
+        RecordingCreator(),
+        "shopify",
+        registered_domains=_registry(),
+    )
+    assert result.accepted is True, result.denial_reason
+    assert result.permalink_url == f"https://{SELLER_DOMAIN}/cart/1:1", result

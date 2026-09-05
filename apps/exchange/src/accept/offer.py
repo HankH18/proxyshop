@@ -125,6 +125,7 @@ from ..checkout import (
     CheckoutResult,
     OrphanedCheckoutCode,
     OrphanedCode,
+    assert_on_domain,
     code_fingerprint,
     registered_domain_for,
     resolve_provider,
@@ -422,23 +423,52 @@ def _fallback_destination(request: CheckoutRequest) -> str:
     (``from ..accept.offer import platform_registered_domains``), and two module-level
     imports across that seam would be a cycle. The convention is this tree's own.
 
+    **The built URL is then checked against the domain it was built from, and that third line
+    is not ceremony.** ``fallback_checkout_url`` interpolates the registry value **verbatim**
+    — deliberately, its docstring explains, because normalising would be that function
+    quietly repairing the platform's own record. It then says the malformed result is caught
+    downstream: *"the candidate is excluded ``off_domain_checkout``, which is the direction to
+    fail in."* That is true of its ORIGINAL consumer, where ``ranking.filters.domain_reason``
+    runs ``is_on_domain`` over the completed offer. It was **not** true here, and adding an
+    unguarded second consumer of a deliberately-unnormalising builder is how that sentence
+    became a lie. Measured on this function before the check was added, with the platform
+    registry holding a malformed row::
+
+        row 'good.tld:8080@evil.tld'  ->  200  https://good.tld:8080@evil.tld/cart/1:1
+        row 'https://x.com'           ->  200  https://https://x.com/cart/1:1
+
+    The first URL's effective host — the one a browser connects to — is ``evil.tld``, by the
+    userinfo trick ``checkout/domain.py`` exists to defeat. The same rows are refused on the
+    minting path (``checkout_refused: OrphanedOffDomainCheckout``), so the handoff was the
+    weaker door of the two. A store cannot write a registry row, so this is the platform's own
+    data integrity rather than a spoof anyone can mount — but "only the platform can trigger
+    it" is a reason to fail closed cheaply, not a reason to skip the check. S8's rule is that
+    no checkout URL is ever returned off the seller's registered domain, and a handoff URL is
+    one the buyer's browser follows exactly like a minted permalink.
+
     Raises:
         Exception: whatever the registry lookup raises — typically ``OffDomainCheckout`` for
-            a store the platform holds no domain for. There is no fall back to the bid's own
-            claim, because on a fallback the store never made one; see
-            :attr:`CheckoutRequest.store_domain` at the call site, which is emptied for
+            a store the platform holds no domain for — or ``OffDomainCheckout`` from the
+            check above when the row is malformed enough to move the URL's host. There is no
+            fall back to the bid's own claim, because on a fallback the store never made one;
+            see :attr:`CheckoutRequest.store_domain` at the call site, which is emptied for
             exactly this reason.
     """
     from ..ranking.candidates import fallback_checkout_url  # noqa: PLC0415
 
-    return fallback_checkout_url(registered_domain_for(request))
+    domain = registered_domain_for(request)
+    destination = fallback_checkout_url(domain)
+    # `secret=""` because nothing has been minted and there is nothing to keep out of the
+    # message — the same reason the port passes it empty on its own pre-mint call.
+    assert_on_domain(destination, domain, what="fallback destination")
+    return destination
 
 
 def _handoff_events(
     auction_id: str,
     bid_ref: str,
     store_id: str,
-    offer: Mapping[str, Any],
+    offer: Any,
     destination: str,
 ) -> tuple[Mapping[str, Any], ...]:
     """C11 for a handoff: the two events that happened, and pointedly not the third.
@@ -455,7 +485,21 @@ def _handoff_events(
     ``trust.reconcile.engine`` joins an ``order_paid`` webhook back to. This exchange is not
     party to what the shopper does at the store's own till, so inventing a token would
     promise a join that can never be made.
+
+    **This function cannot raise on a hostile ``offer``, and that is a fix rather than
+    caution.** ``accept()`` reads the offer as ``_read(bid, "offer") or {}``, which is not a
+    mapping check — a bid whose ``offer`` is a truthy non-mapping (a list, say) reaches here
+    intact, and ``dict(offer)`` on it raised ``ValueError`` straight out of ``accept()``.
+    Measured before the guard: the auction was already stamped and its claim already taken by
+    then, so the buyer got a 500, no code, no destination and no re-offer, and every later
+    accept on that auction answered ``already_accepted`` — one malformed bid record burning
+    an auction permanently. The minting path handles the identical input as an ordinary
+    refusal, so this was the handoff being *worse*, not the tree being uniformly fragile.
+    Both halves are closed: the shape is coerced here, and the call site now builds these
+    events BEFORE the stamp so that anything else that surprises us is a refusal rather than
+    a lockout.
     """
+    body = dict(offer) if isinstance(offer, Mapping) else {}
     return (
         build_published_event(
             "accepted",
@@ -465,7 +509,7 @@ def _handoff_events(
                 # The published `accepted` body (D24).
                 "bid_ref": bid_ref,
                 "checkout_token": None,
-                "offer": dict(offer),
+                "offer": body,
                 # ...and what makes it readable as the handoff it is.
                 "fallback": True,
                 "discount_applied": False,
@@ -483,6 +527,14 @@ def _handoff_events(
                 # still tell a handoff from a checkout.
                 "fallback": True,
                 "discount_applied": False,
+                # Carried because the module docstring above promises it is: "the
+                # `checkout_redirect` event ... records that nothing external was consulted".
+                # The minting path's redirect event carries this field and the handoff's did
+                # not, which made that sentence false for exactly one of the two paths it
+                # describes. Always `True` here — `_fallback_destination` refuses unless the
+                # platform registry answered — but written rather than implied, because a
+                # reader of one event should not have to know which path produced it.
+                "domain_verified": True,
             },
         ),
     )
@@ -652,7 +704,8 @@ def accept(
             store_id=store_id,
         )
 
-    # R10's list-price fallback is a HANDOFF, not a checkout — see :func:`_fallback_handoff`.
+    # R10's list-price fallback is a HANDOFF, not a checkout — see `_fallback_destination`
+    # and `_handoff_events`, and the branch further down that returns without minting.
     # Read here, once, off the flag `auction/routes.py::collected_bid_records` stamps from the
     # `BidEntry` (`collect_bids`' own verdict) and never off the store's document, so a store
     # cannot clear it by writing `fallback: false` into its reply.
@@ -708,9 +761,17 @@ def accept(
     # lookup can. A destination that cannot be established is a refusal that has cost
     # nothing: no claim taken, no auction stamped, and the next slot offered instead.
     destination = ""
+    handoff: tuple[Mapping[str, Any], ...] = ()
     if fallback:
         try:
             destination = _fallback_destination(request)
+            # Built HERE, beside the lookup, and not after the stamp further down. Both are
+            # the same kind of work — turning this bid into the answer the buyer gets — and
+            # a failure in either must land in the same place: a refusal, with no claim
+            # taken and no auction stamped. Building the events after `_record_acceptance`
+            # is what let one malformed bid record burn an auction permanently; see
+            # `_handoff_events`.
+            handoff = _handoff_events(auction_id, ref, store_id, request.offer, destination)
         except Exception as exc:
             return _refused(
                 auction,
@@ -723,8 +784,8 @@ def accept(
                     # out of type names for exactly this reason.
                     f"bid {ref!r} is this exchange's own list-price fallback for {store_id!r} "
                     f"(R10), so the buyer is sent to that store's own checkout rather than "
-                    f"handed a discount — but the platform holds no usable registered domain "
-                    f"to send them to ({type(exc).__name__}: {exc})",
+                    f"handed a discount — but no usable destination could be established for "
+                    f"it ({type(exc).__name__}: {exc})",
                 ),
                 store_id=store_id,
                 reoffer_bid_ref=next_slot(auction, ref),
@@ -831,7 +892,7 @@ def accept(
             domain_verified=True,
             claim_verified=claimed,
             discount_notice=NO_DISCOUNT_ON_A_FALLBACK,
-            events=_handoff_events(auction_id, ref, store_id, request.offer, destination),
+            events=handoff,
         )
 
     try:
