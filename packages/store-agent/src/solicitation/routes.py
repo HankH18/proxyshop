@@ -66,8 +66,18 @@ UNCONFIGURED_REASON = "store_context_unconfigured"
         },
     },
 )
-async def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:
+def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:
     """Bid for this store, or decline and say why.
+
+    **`def`, not `async def`, and that is the whole reason this line is commented.**
+    :func:`~store_agent.runtime.bid` is synchronous and CPU-bound — it walks the catalogue,
+    fingerprints every claim and runs the provenance boundary — and an `async def` endpoint runs
+    on the event loop itself. The shipped container is ``uvicorn … --workers 1``, so one bid
+    would hold the whole process: the exchange's next solicitation, and the compose healthcheck's
+    ``/openapi.json``, would both queue behind it, and an agent that stops answering its
+    healthcheck gets restarted. A plain `def` hands the call to FastAPI's threadpool instead. It
+    is safe there: `bid()` builds its own `ToolHooks` per call, reads no clock and no RNG, and
+    this package holds no mutable module-level state for two calls to race on.
 
     The model is passed to :func:`~store_agent.runtime.bid` **as the model**, not as a dump: the
     runtime is shape-tolerant by design and the two spellings are asserted byte-identical in

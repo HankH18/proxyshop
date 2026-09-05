@@ -502,6 +502,39 @@ def test_an_unset_context_variable_is_a_decision_and_not_an_error(
     assert load_context_from_env() is None
 
 
+def test_an_unreadable_context_path_answers_500_and_never_a_204(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shipped image resolves the context on the first request, so this is where it lands.
+
+    The number that matters is *not* 500, it is **not 204**. A typo'd path must never be
+    indistinguishable from a store that chose not to bid — that is the whole reason
+    :class:`StoreContextError` exists, and asserting only that the exception type is right would
+    leave the door's actual answer ungraded.
+    """
+    monkeypatch.setenv(CONTEXT_ENV, str(tmp_path / "does-not-exist.json"))
+    client = TestClient(create_app(), raise_server_exceptions=False)
+
+    response = client.post("/v1/bid-requests", json=request_body())
+
+    assert response.status_code == 500
+    assert response.status_code != 204
+
+
+def test_the_bid_route_is_not_a_coroutine_so_it_cannot_block_the_event_loop() -> None:
+    """`bid()` is synchronous and CPU-bound; on the event loop it would stall the whole worker.
+
+    The container is ``uvicorn … --workers 1``, so an `async def` here would queue the next
+    solicitation AND the compose healthcheck behind one bid — and an agent that stops answering
+    its healthcheck gets restarted. FastAPI runs a plain `def` endpoint in its threadpool.
+    """
+    import inspect  # noqa: PLC0415 - a property of the shipped function, checked where it is used
+
+    from store_agent.solicitation.routes import answer_bid_request  # noqa: PLC0415
+
+    assert not inspect.iscoroutinefunction(answer_bid_request)
+
+
 # =============================================================================================
 # 6. The product property the whole lane exists for: a bid this agent serves is one the
 #    exchange can actually shortlist.

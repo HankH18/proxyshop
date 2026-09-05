@@ -63,11 +63,21 @@ STATE_ATTR = "store_context"
 
 
 class StoreContextError(RuntimeError):
-    """The configured store context cannot be read. Raised at configuration time, never per-bid.
+    """The configured store context cannot be read.
 
-    Deliberately loud, and deliberately at *startup*: a container told to load a context file
-    that does not parse must fail to boot rather than answer every solicitation with a decline
-    that looks exactly like "this store chose not to bid".
+    Raised where the context is first RESOLVED, which is one of two places. A composition root
+    that calls :func:`load_context_from_env` at startup gets it at startup, which is the right
+    place and the reason the function is public. The shipped image calls nothing, so there it
+    surfaces on the first solicitation and the door answers **HTTP 500** — measured::
+
+        STORE_AGENT_CONTEXT=/nonexistent/store-context.json
+        POST /v1/bid-requests  ->  500 Internal Server Error
+
+    500 is the outcome this exception exists to produce, and the property is that it is not a
+    204: a path the operator typo'd must never be indistinguishable from a store that chose not
+    to bid. It is deliberately NOT resolved at import time — an import-time filesystem read
+    would make the whole package un-importable from a shell that happens to have the variable
+    set wrong, which is a worse failure than a loud 500 on a door nobody could use anyway.
     """
 
 
