@@ -167,17 +167,25 @@ def _product_python_files() -> list[pathlib.Path]:
 # ======================================================================================
 # T-243 — the merchant envelope store exists twice, under two spellings
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-243: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are "
-        "DISTINCT module objects over the same file, with distinct ENVELOPES singletons, "
-        "distinct EnvelopeVersions classes and distinct EnvelopeError subclasses that do not "
-        "catch each other — the frozen E5 acceptance suite imports the LONG spelling while "
-        "production onboarding/routes.py imports the SHORT one, and unlike codes/ the "
-        "envelope package never calls bind_package(); remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-243 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-243: merchant_svc.envelope.store and apps.merchant.svc.src.envelope.store are "
+#       "DISTINCT module objects over the same file, with distinct ENVELOPES singletons, "
+#       "distinct EnvelopeVersions classes and distinct EnvelopeError subclasses that do not "
+#       "catch each other — the frozen E5 acceptance suite imports the LONG spelling while "
+#       "production onboarding/routes.py imports the SHORT one, and unlike codes/ the "
+#       "envelope package never calls bind_package(); remove this marker with the fix"))
+#
+# What it encodes: while the defect is live this test must fail, and `strict=True` makes it
+# fail LOUDLY the moment it starts passing, so the marker cannot outlive the bug. Its own
+# reason text prescribes this removal ("remove this marker with the fix").
+#
+# Would this test still be wrong if my change were reverted? NO — and that is the whole
+# point. Measured both ways on this worktree: with envelope/_spellings.py moved aside and
+# __init__/digest/model/store/versions restored from HEAD, the test reports `1 xfailed`
+# (the defect is live); with the fix back in place it reports `1 passed`. Nothing about the
+# assertion body was touched — the diff removes the decorator and nothing else.
 def test_t243_the_merchant_envelope_store_has_exactly_one_module_identity() -> None:
     """One file must be one module, whichever spelling reaches it.
 

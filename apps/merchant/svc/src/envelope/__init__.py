@@ -9,15 +9,16 @@ this package is what an envelope *is*.
 
 from __future__ import annotations
 
-from merchant_svc.envelope.digest import (
+from ._spellings import bind_package
+from .digest import (
     DIGEST_ALGORITHM,
     approval_covers,
     approval_digest,
     approved_terms,
     canonical_text,
 )
-from merchant_svc.envelope.frozen import FrozenDict, freeze, thaw
-from merchant_svc.envelope.model import (
+from .frozen import FrozenDict, freeze, thaw
+from .model import (
     ACTIVE,
     EDITABLE_FIELDS,
     ENVELOPE_FIELDS,
@@ -34,14 +35,14 @@ from merchant_svc.envelope.model import (
     EnvelopeInvalid,
     as_document,
 )
-from merchant_svc.envelope.store import (
+from .store import (
     ENVELOPES,
     EnvelopeVersions,
     StoreMismatch,
     UnknownStore,
     VersionWentBackwards,
 )
-from merchant_svc.envelope.versions import activate_envelope, edit_envelope, kill_envelope
+from .versions import activate_envelope, edit_envelope, kill_envelope
 
 __all__ = [
     "ACTIVE",
@@ -76,3 +77,14 @@ __all__ = [
     "kill_envelope",
     "thaw",
 ]
+
+# LAST, and it is not decoration: this tree is importable as `merchant_svc.envelope` and as
+# `apps.merchant.svc.src.envelope`, and without this Python executes every file here TWICE —
+# once per spelling — leaving TWO `ENVELOPES` histories, so "this store has been killed" would
+# hold only per spelling, and `except UnknownStore` imported through one spelling would not
+# catch the class the other raises. A pytest session running the frozen E5 acceptance suite
+# (`apps.merchant.svc.src.envelope`) beside the FastAPI app (`merchant_svc.envelope`) is
+# exactly such a process. Measured on this worktree before this existed:
+# `apps.merchant.svc.src.envelope.store is merchant_svc.envelope.store` was False, and so was
+# `... .ENVELOPES is ... .ENVELOPES`. See `_spellings.py`; T-052 does the same for `codes/`.
+bind_package(__name__)

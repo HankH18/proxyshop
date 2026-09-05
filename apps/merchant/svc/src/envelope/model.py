@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar, Final
 
 import contracts
-from merchant_svc.envelope.frozen import FrozenDict, freeze, thaw
+from .frozen import FrozenDict, freeze, thaw
 from pydantic import ValidationError
 
 #: The seven fields a merchant actually agrees to when they approve an envelope.

@@ -20,8 +20,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from merchant_svc.envelope.digest import approval_covers, approval_digest
-from merchant_svc.envelope.model import (
+from .digest import approval_covers, approval_digest
+from .model import (
     ACTIVE,
     EDITABLE_FIELDS,
     KILLED,

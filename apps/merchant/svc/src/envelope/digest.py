@@ -28,7 +28,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from merchant_svc.envelope.model import TERM_FIELDS, EnvelopeInvalid, as_document
+from .model import TERM_FIELDS, EnvelopeInvalid, as_document
 
 #: The prefix every digest carries, so a stored hash says what produced it.
 DIGEST_ALGORITHM = "sha256"

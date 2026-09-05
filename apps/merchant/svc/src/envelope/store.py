@@ -18,8 +18,8 @@ import threading
 from collections.abc import Mapping
 from typing import Any
 
-from merchant_svc.envelope.model import ACTIVE, SHADOW, Envelope, EnvelopeError
-from merchant_svc.envelope.versions import activate_envelope, edit_envelope, kill_envelope
+from .model import ACTIVE, SHADOW, Envelope, EnvelopeError
+from .versions import activate_envelope, edit_envelope, kill_envelope
 
 
 class UnknownStore(EnvelopeError, KeyError):
