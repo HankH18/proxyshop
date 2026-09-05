@@ -522,21 +522,63 @@ def accept(
         )
 
     # Resolved before the request is built: an unregistered mode must not reach the point of
-    # having a request to mint from. It is also resolved before the claim below, because
-    # `resolve_provider` RAISES and a claim taken in front of a raise is a claim nobody ever
-    # gives back — an auction wedged for its whole TTL by a deployment's own misconfiguration.
+    # having a request to mint from.
     provider = resolve_provider(mode)
 
-    # THE guard (T-158), and its position in this function is the fix. Everything above is a
-    # read; this is the first line that cannot be won twice, and it runs BEFORE the merchant
-    # is asked for a code. A claim taken after the mint refuses the second buyer a permalink
-    # and leaves the second live discount sitting in the seller's account.
     auction_id = str(_read(auction, "auction_id") or "")
+    request = CheckoutRequest(
+        auction_id=auction_id,
+        bid_ref=ref,
+        store_id=store_id,
+        # The bid's CLAIM about its own domain. Kept because the frozen contract pins it and
+        # because it is what the refusal message needs to quote — but overridden outright
+        # whenever `registered_domains` below answers.
+        store_domain=str(_read(bid, "store_domain") or ""),
+        offer=_read(bid, "offer") or {},
+        mode=str(mode),
+        code_creator=code_creator,
+        now=float(_read(auction, "now") or 0.0),
+        # The one line this whole ticket turns on. Without it `registered_domain_for` returns
+        # the bid's own claim and the host guard compares a store's word to that same store's
+        # word — see the module docstring, and `unbound_checkout_requests`, which fails the
+        # build for any call site that leaves it out.
+        registered_domains=sellers,
+    )
+
+    # THE guard (T-158), and its position in this function is the fix. Everything above is a
+    # read or a pure construction; this is the first line that cannot be won twice, and it
+    # runs BEFORE the merchant is asked for a code. A claim taken after the mint refuses the
+    # second buyer a permalink and leaves the second live discount in the seller's account.
+    #
+    # It sits AFTER `resolve_provider` and after the request is built, and that ordering is
+    # deliberate in both directions: everything above this line can raise (an unregistered
+    # mode, an offer whose `now` will not parse) and a claim taken in front of a raise is a
+    # claim nobody ever gives back — an auction wedged for a whole TTL by a deployment's own
+    # misconfiguration. Nothing between here and the `try` below can raise.
     claim_table = platform_acceptance_claims() if claims is _UNSET else claims
     claimed = False
-    if claim_table is not None and auction_id:
+    if claim_table is not None:
         try:
+            # `outcome.won` is INSIDE this try, not after it. `claims.py` invites a deployment
+            # to inject its own table — "a unique index on (auction_id) in Postgres is the
+            # same constraint by another name" — the port is a `Protocol` and so is not
+            # runtime-checked, and a table answering a bare `True` used to raise
+            # `AttributeError: 'bool' object has no attribute 'won'` straight out of the ASGI
+            # app: an HTTP 500 with the claim taken and never released. Guarding the call but
+            # not the shape of its answer was guarding half of it.
+            #
+            # An auction with no id is refused here rather than waved through. There is
+            # nothing to key a claim on, so a second accept could not be refused — the same
+            # condition `_acceptance_is_recordable` refuses above, and refusing it is what
+            # keeps "a claim table is in force" from silently meaning "for auctions that
+            # happen to have an id". Not reachable through the route (Starlette's path
+            # convertor rejects an empty segment and `POST /auctions` mints
+            # `auction-{uuid4()}`), which is why this is fail-closed rather than a 503.
+            if not auction_id:
+                raise ValueError("the auction carries no auction_id to claim")
             outcome = claim_table.claim(auction_id, ref)
+            won = bool(outcome.won)
+            holder = str(outcome.holder or "")
         except Exception as exc:
             # Fail CLOSED, and reuse the reason that already says why: an acceptance that
             # cannot be recorded cannot refuse the second accept either, so refusing the
@@ -560,38 +602,19 @@ def accept(
                 ),
                 store_id=store_id,
             )
-        if not outcome.won:
+        if not won:
             return _refused(
                 auction,
                 ref,
                 mode,
                 denial_reason(
                     DENIAL_ALREADY_ACCEPTED,
-                    f"this auction was already accepted on bid {str(outcome.holder or '')!r}; "
-                    f"a second accept issues no second discount code (R3/A5)",
+                    f"this auction was already accepted on bid {holder!r}; a second accept "
+                    f"issues no second discount code (R3/A5)",
                 ),
                 store_id=store_id,
             )
         claimed = True
-
-    request = CheckoutRequest(
-        auction_id=str(_read(auction, "auction_id") or ""),
-        bid_ref=ref,
-        store_id=store_id,
-        # The bid's CLAIM about its own domain. Kept because the frozen contract pins it and
-        # because it is what the refusal message needs to quote — but overridden outright
-        # whenever `registered_domains` below answers.
-        store_domain=str(_read(bid, "store_domain") or ""),
-        offer=_read(bid, "offer") or {},
-        mode=str(mode),
-        code_creator=code_creator,
-        now=float(_read(auction, "now") or 0.0),
-        # The one line this whole ticket turns on. Without it `registered_domain_for` returns
-        # the bid's own claim and the host guard compares a store's word to that same store's
-        # word — see the module docstring, and `unbound_checkout_requests`, which fails the
-        # build for any call site that leaves it out.
-        registered_domains=sellers,
-    )
 
     try:
         checkout: CheckoutResult = provider.checkout(request)
@@ -616,7 +639,7 @@ def accept(
         # A5: a refused accept re-offers the next slot, so the auction must be acceptable
         # again — which means giving the claim back. `release` is a no-op unless this call
         # still holds it, so a claim that changed hands is never handed to the wrong caller.
-        if claimed and claim_table is not None:
+        if claimed and claim_table is not None and orphan is None:
             try:
                 claim_table.release(auction_id, ref)
             except Exception:  # noqa: BLE001 - a claim we cannot release stays taken, which

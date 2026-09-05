@@ -135,10 +135,19 @@ _TRANSITION_KIND: Mapping[str, str] = {
 AUCTION_KEY_TEMPLATE = "auction:{auction_id}"
 AUCTION_TTL_SECONDS = 15 * 60
 
-#: Where a reservation lives, beside the record it constrains and under the same TTL. A
-#: reservation that outlived its auction would refuse a legitimate accept on a *later*
-#: auction that reused the id; one that expired first would let the constraint lapse while
-#: the auction it protects is still live. Same key prefix, same TTL, same lifetime.
+#: Where a reservation lives: beside the record it constrains, under the same key prefix and
+#: the same TTL *budget*. It must not outlive its auction — a stale reservation would refuse a
+#: legitimate move on a later auction that reused the id.
+#:
+#: It does expire EARLIER than the record, and that is measured rather than assumed: `save`
+#: refreshes the record's TTL on every transition while `SET … NX EX` sets a reservation's
+#: once, so with a 20-second TTL and an auction 3 seconds old the record read 20 and the
+#: `create` reservation read 17. Harmless in the direction that matters — an expired
+#: reservation degrades to the checks that were there before it (`load() is not None` for
+#: `create`, the legality check plus the state re-read for a transition), so it can lose a
+#: refusal's *precision* but cannot produce a second accept, because a second accept also
+#: needs a record still sitting in `closed`. It is stated here so nobody reads "same TTL" as
+#: "same expiry".
 RESERVATION_KEY_TEMPLATE = "auction:{auction_id}:reserved:{name}"
 
 
@@ -230,6 +239,11 @@ class InMemoryAuctionStore:
 
     def __init__(self) -> None:
         self._records: dict[str, str] = {}
+        # Unbounded, exactly as `_records` above is: this store is the process-local default
+        # and forgets nothing. Four reservations per auction (`create` plus one exit per
+        # state), so it multiplies an existing leak rather than introducing one — measured at
+        # 200 records / 800 reservations after 200 auctions. A deployment that cares runs
+        # `RedisAuctionStore`, where the 15-minute TTL evicts both.
         self._reservations: dict[tuple[str, str], str] = {}
         # Guards the reservation table only. The record dict is left alone: CPython's own
         # lock already makes a single dict assignment atomic, and pretending a lock here
@@ -371,18 +385,29 @@ class AuctionStateMachine:
         # only caller today mints `auction-{uuid4()}` so it is not reachable over HTTP, but
         # the primitive that closes it is one line away and a client-supplied id would make
         # it live.
-        if self.store.reserve(auction_id, creation_reservation(), auction_id) is not None:
+        name = creation_reservation()
+        if self.store.reserve(auction_id, name, auction_id) is not None:
             raise IllegalAuctionTransition(f"auction {auction_id!r} already exists")
-        if self.store.load(auction_id) is not None:
-            raise IllegalAuctionTransition(f"auction {auction_id!r} already exists")
-        record = AuctionRecord(
-            auction_id=auction_id,
-            intent_id=intent_id,
-            cluster_id=cluster_id,
-            roster=[dict(entry) for entry in (roster or [])],
-            deadline=deadline,
-        )
-        self.store.save(record)
+        # Everything from here to a landed `save` is inside the reservation, so it has to be
+        # inside a release too. Without it one `ConnectionError` out of `save` left the
+        # reservation held with no record behind it, and every retry then answered "already
+        # exists" for an auction whose `store.load(...)` was `None` — for 15 minutes against
+        # Redis and FOREVER against the in-memory store, which has no TTL. An availability
+        # regression, and one whose message blames a collision that never happened.
+        try:
+            if self.store.load(auction_id) is not None:
+                raise IllegalAuctionTransition(f"auction {auction_id!r} already exists")
+            record = AuctionRecord(
+                auction_id=auction_id,
+                intent_id=intent_id,
+                cluster_id=cluster_id,
+                roster=[dict(entry) for entry in (roster or [])],
+                deadline=deadline,
+            )
+            self.store.save(record)
+        except BaseException:
+            self.store.release(auction_id, name, auction_id)
+            raise
         return record
 
     def open(self, auction_id: str, *, now: float | None = None) -> AuctionRecord:
@@ -426,32 +451,45 @@ class AuctionStateMachine:
         # `closed`, instead of both being told they succeeded and the later `save` silently
         # discarding the earlier one.
         source = record.state
-        taken = self.store.reserve(auction_id, exit_reservation(source), target)
+        name = exit_reservation(source)
+        taken = self.store.reserve(auction_id, name, target)
         if taken is not None:
             raise IllegalAuctionTransition(
                 f"auction {auction_id!r} has already left {source!r} for {taken!r}; a "
                 f"concurrent request won that move, so {target!r} is not applied"
             )
 
-        # Re-read behind the reservation. Nothing else can be leaving `source` now, so this
-        # is the freshest record that can exist, and a stale copy read before the reservation
-        # was won would write back fields a concurrent writer had already changed.
-        record = self.get(auction_id)
-        if record.state != source:
-            raise IllegalAuctionTransition(
-                f"auction {auction_id!r} moved from {source!r} to {record.state!r} while "
-                f"{target!r} was being applied; it is not applied"
-            )
+        # The reservation is given back on ANY failure before the write lands, and that is
+        # not defensive padding — without it a single `ConnectionError` out of `save` turned
+        # a retryable `close` into a permanent `IllegalAuctionTransition: … already left
+        # 'open' for 'closed'; a concurrent request won that move` on the in-memory store,
+        # and a 15-minute one against Redis. A reservation is a uniqueness constraint on a
+        # move that HAPPENED; a move that raised did not happen and must not hold one.
+        # `BaseException`, not `Exception`: a `KeyboardInterrupt` or a cancelled task between
+        # the reserve and the save wedges the auction exactly as an I/O error does.
+        try:
+            # Re-read behind the reservation. Nothing else can be leaving `source` now, so
+            # this is the freshest record that can exist, and a stale copy read before the
+            # reservation was won would write back fields a concurrent writer had changed.
+            record = self.get(auction_id)
+            if record.state != source:
+                raise IllegalAuctionTransition(
+                    f"auction {auction_id!r} moved from {source!r} to {record.state!r} while "
+                    f"{target!r} was being applied; it is not applied"
+                )
 
-        record.state = target
-        if target == OPEN:
-            record.opened_at = now
-        elif target in (CLOSED, EXPIRED):
-            record.closed_at = now
-        elif target == ACCEPTED:
-            record.accepted_bid_ref = bid_ref
-        record.history.append({"state": target, "at": now})
-        self.store.save(record)
+            record.state = target
+            if target == OPEN:
+                record.opened_at = now
+            elif target in (CLOSED, EXPIRED):
+                record.closed_at = now
+            elif target == ACCEPTED:
+                record.accepted_bid_ref = bid_ref
+            record.history.append({"state": target, "at": now})
+            self.store.save(record)
+        except BaseException:
+            self.store.release(auction_id, name, target)
+            raise
 
         self.ledger.record(
             _TRANSITION_KIND[target],

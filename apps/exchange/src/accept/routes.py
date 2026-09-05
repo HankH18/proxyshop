@@ -224,10 +224,17 @@ def configure_accept(
 
     Unlike ``registered_domains`` this is **not** also written to a process-wide seam. That
     seam exists for ``registered_domains`` because a call site that forgets it silently gets a
-    bidder-controlled value; a call site that forgets this one gets
-    :class:`~.claims.InMemoryAcceptanceClaims`, which is a floor rather than a hole, and a
-    per-process global holding a per-app store is a leak between two apps in one process
-    rather than a protection.
+    bidder-controlled value; a call site that forgets this one gets the table :func:`_claims`
+    derives from its own store, and a per-process global holding a per-app store would be a
+    leak between two apps in one process rather than a protection. The route reaches
+    :func:`~.offer.accept` through a request-scoped :func:`~.claims.acceptance_claims_scope`
+    instead.
+
+    A table passed here is **remembered as injected**, so a later
+    ``configure_accept(app, machine=...)`` does not quietly throw it away and re-derive one
+    from the new machine's store. "Anything omitted keeps what is already there" has to hold
+    for the money guard too, and a deployment that wired its own Postgres unique index and
+    then re-wired its machine used to end up back on the store-derived table with no signal.
     """
     if registered_domains is not None:
         app.state.registered_domains = registered_domains
@@ -247,9 +254,12 @@ def configure_accept(
         app.state.auction_machine = machine
     if claims is not None:
         app.state.acceptance_claims = claims
-    elif machine is not None:
-        # Re-derive whenever the machine changes: a claim table left pointing at the previous
-        # machine's store would guard an auction book this app no longer serves.
+        app.state.acceptance_claims_injected = True
+    elif machine is not None and not getattr(app.state, "acceptance_claims_injected", False):
+        # Re-derive whenever the machine changes, but never over a table the deployment chose:
+        # a derived table left pointing at the previous machine's store would guard an auction
+        # book this app no longer serves, while an injected one is the deployment's decision
+        # and outranks the derivation.
         app.state.acceptance_claims = StoreAcceptanceClaims(machine.store)
 
 
@@ -269,6 +279,10 @@ def _claims(request: Request) -> Any:
     kept in. An app running on :class:`~..auction.state.RedisAuctionStore` gets a constraint
     every process shares; one running on the in-memory default gets a constraint every thread
     in *this* process shares, which is exactly as much as that store can honestly offer.
+
+    Derived from ``machine.store`` at first use and cached, so replacing ``machine.store``
+    after a request has been served leaves this table pointing at the old store. Re-wire
+    through :func:`configure_accept` rather than by assigning to ``machine.store``.
     """
     claims = getattr(request.app.state, "acceptance_claims", None)
     if claims is None:
