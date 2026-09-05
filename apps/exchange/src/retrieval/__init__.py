@@ -2,8 +2,17 @@
 
 What this package is for
 ------------------------
-The exchange's job list in DESIGN §Architecture opens with "candidate retrieval (Neo4j vector
-+ attributes)". This package is that step, plus the fit score the ranker consumes:
+The exchange's job list in DESIGN §Architecture opens with "intent-cluster assignment,
+candidate retrieval (Neo4j vector + attributes)". This package is both of those steps, plus
+the fit score the ranker consumes.
+
+:mod:`~exchange.retrieval.clusters` is the first one — the join between the ``cluster_id`` a
+buyer's clarifier mints by hashing the query and the NAMED catalogue clusters a merchant's
+envelope authorises. Without it every store answered ``204 cluster_not_pursued`` and every
+shortlist was empty; read that module's docstring for what it resolves against and what
+nothing in this repository populates.
+
+The rest of this package is the second one:
 
     intent  →  RetrievalQuery  →  CandidateSource  →  R19 hard filter  →  features  →
     Reranker (port)  →  FitAssessment  →  ledger
@@ -52,6 +61,23 @@ which is the point of the seam.
 
 from __future__ import annotations
 
+from .clusters import (
+    CATEGORY_WEIGHT,
+    CONSTRAINT_WEIGHT,
+    MAX_CATALOGUE_CLUSTERS,
+    SOURCE_ASSIGNED,
+    SOURCE_STATED,
+    SOURCE_UNASSIGNED,
+    TERM_WEIGHT,
+    ClusterAssignment,
+    ClusterRow,
+    IntentClusterCatalogue,
+    NoIntentClusters,
+    StaticIntentClusterCatalogue,
+    assign_cluster,
+    configure_clusters,
+    intent_clusters_of,
+)
 from .criteria import (
     CONSTRAINT_OPS,
     DEFAULT_CANDIDATE_LIMIT,
@@ -101,19 +127,28 @@ from .sources import (
 )
 
 __all__ = [
+    "CATEGORY_WEIGHT",
     "CONSTRAINT_OPS",
+    "CONSTRAINT_WEIGHT",
     "DEFAULT_CANDIDATE_LIMIT",
     "DETERMINISTIC_RERANKER_SIMILARITY_SHARE",
     "FIT_LEDGER_KIND",
     "LOCAL_FILTER_OVERSAMPLE",
     "MAX_CANDIDATE_LIMIT",
+    "MAX_CATALOGUE_CLUSTERS",
     "NEUTRAL_ALIGNMENT",
     "NEUTRAL_SIMILARITY",
     "PREFERENCE_DIRECTIONS",
     "RERANKER_INTERFACE_VERSION",
     "RETRIEVAL_LATENCY_BUDGET_MS",
+    "SOURCE_ASSIGNED",
+    "SOURCE_STATED",
+    "SOURCE_UNASSIGNED",
+    "TERM_WEIGHT",
     "CandidateRetrieval",
     "CandidateSource",
+    "ClusterAssignment",
+    "ClusterRow",
     "CriterionVerdict",
     "DeterministicReranker",
     "ExcludedCandidate",
@@ -123,17 +158,23 @@ __all__ = [
     "GraphCandidateSource",
     "HardCriterion",
     "InMemoryCandidateSource",
+    "IntentClusterCatalogue",
     "MalformedIntent",
+    "NoIntentClusters",
     "RerankItem",
     "Reranker",
     "RerankerContractError",
     "RetrievalQuery",
     "RetrievalResult",
     "SoftPreference",
+    "StaticIntentClusterCatalogue",
     "UndecidableCriterion",
     "annotate_bid_payload",
+    "assign_cluster",
     "attribute_rows",
     "build_query",
+    "configure_clusters",
+    "intent_clusters_of",
     "intent_match_by_bid",
     "make_candidate",
     "read_rerank",
