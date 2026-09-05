@@ -1301,6 +1301,47 @@ def test_the_corpus_still_covers_every_case_the_hand_copied_table_pinned() -> No
     } <= set(PRICE_PARITY_BY_NAME)
 
 
+def test_the_corpus_keeps_the_two_rows_that_grade_the_third_and_fourth_sites() -> None:
+    """The T-306 repair has FOUR sites, and two of them are graded by ONE corpus row each.
+
+    `_authorized_depth` and `_roster_list_price` are caught by many tests. The other two — the
+    `authorized` fallback for a declared depth, and the cap read in the zero-depth `else` — are
+    caught by exactly the two rows named below, in both languages, and by nothing else. Both were
+    added only after a per-site mutation sweep found them ungraded: reverting either site alone
+    left the whole suite green in one or both languages, so the fix could have been undone with
+    no test noticing.
+
+    Every other guard in this file survives deleting them. Measured on a corpus with both rows
+    removed: 40 cases, 11 ok, 29 not-ok — `len >= 20`, `ok >= 5`, `not_ok >= 12`, the eight
+    hand-copied names and `floor_rows >= 5` ALL still pass. So this assertion is the only thing
+    standing between those two rows and a silent deletion that reopens both fail-opens, which is
+    the same job the hand-copied-names test above does for its own eight.
+
+    Names, not counts, and deliberately: a count is satisfied by any replacement row, and the
+    property here is that these SPECIFIC witnesses survive. Each charges 85.00, which is above
+    one bound and below the other depending on which site is broken — that is what makes them
+    discriminating, and a row that merely restored the count would not be.
+    """
+    graders = {
+        # site 3 — `authorized` must not fall back to the offer's own declared depth.
+        "a_carried_claim_is_measured_against_the_full_list_price_with_no_roster",
+        # site 4 — the call-wide ceiling must be read at a declared zero depth too.
+        "a_call_wide_ceiling_is_read_at_a_zero_declared_depth_with_no_roster",
+    }
+    missing = graders - set(PRICE_PARITY_BY_NAME)
+    assert not missing, (
+        f"the corpus rows that grade the price wall's third and fourth sites are gone: {missing}. "
+        "Deleting them re-opens T-306's fail-open with the suite green; see this test's docstring."
+    )
+    for name in graders:
+        case = PRICE_PARITY_BY_NAME[name]
+        assert case["list_prices"] is None, (name, "must judge a caller that passed NO roster")
+        assert case["bid"]["offer"]["unit_price"] == 85.0, (
+            name,
+            "85.00 is the price the two bounds disagree about; another price cannot discriminate",
+        )
+
+
 def test_the_corpus_pins_the_price_floor_in_both_directions() -> None:
     """T-278 — the gate for T-250's fix, and the reason it is IN the shared corpus.
 

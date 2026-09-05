@@ -1030,7 +1030,8 @@ describe("T-177 — a bid may not charge more off than the depth it declares", (
       //   behaviour; they pass now. Neither was authored here and neither compares against
       //   anything this file controls.
       // * BLAST RADIUS. The same contract was asserted by the Python peer
-      //   (`test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price`), by
+      //   (`test_the_wall_answers_one_identical_refusal_to_every_spelling_of_no_roster`, which
+      //   carried the old name `test_the_wall_abstains_deliberately_...` when this was written), by
       //   `price_parity_corpus.json`'s `no_list_price_carried` row (in both languages at once),
       //   and by three assertions in `test_boundary_price_roster.py`. All are changed with this
       //   one; none is deleted.
@@ -1152,6 +1153,25 @@ describe("T-177 price parity — the SHARED corpus `test_boundary_dual_path.py` 
       "no_list_price_carried",
     ]) {
       expect(byName.has(name), name).toBe(true);
+    }
+  });
+
+  it("keeps the two rows that grade the third and fourth sites", () => {
+    // The T-306 repair has FOUR sites. `authorizedDepth` and `rosterListPrice` are caught by many
+    // tests; the `authorized` fallback and the cap read in the zero-depth `else` are caught by
+    // exactly one corpus row each, in both languages, and by nothing else. Both were added only
+    // after a per-site mutation sweep found them ungraded — reverting either alone left all 174
+    // tests here green. Every other guard survives deleting them (40 cases, 11 ok, 29 not-ok
+    // still clears every threshold), so this assertion is the only thing between those rows and a
+    // silent deletion that reopens the fail-open. The Python peer asserts the same two names.
+    for (const name of [
+      "a_carried_claim_is_measured_against_the_full_list_price_with_no_roster",
+      "a_call_wide_ceiling_is_read_at_a_zero_declared_depth_with_no_roster",
+    ]) {
+      expect(byName.has(name), `${name} grades a source site nothing else grades`).toBe(true);
+      const row = byName.get(name)!;
+      expect(row.list_prices, name).toBe(null);
+      expect((row.bid as {offer: {unit_price: number}}).offer.unit_price, name).toBe(85.0);
     }
   });
 

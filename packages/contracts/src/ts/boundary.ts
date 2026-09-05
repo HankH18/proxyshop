@@ -536,8 +536,10 @@ function rosterRow(offer: Record<string, unknown>, listPrices: PriceRosterMap | 
   // THIS PARTICULAR EDIT CHANGED NO BEHAVIOUR and the comment here used to claim otherwise. The
   // arm that sat in front — `listPrices === undefined ? undefined : readRecord(listPrices)` —
   // was REDUNDANT, not wrong: `readRecord(undefined)` is already `undefined`. Measured by
-  // reverting this line alone, the whole vitest suite stays green, which is the honest signal
-  // that it is a readability change. T-336's actual divergence lived in the two `if (listPrices
+  // reverting this line alone, the whole vitest suite stays green — and that is the CORRECT
+  // result, not a coverage gap: `typeof undefined` is `"undefined"`, never `"object"`, so
+  // `readRecord(undefined)` is already `undefined` and the removed ternary was a tautology on
+  // every input. A red here would have meant a test asserting something false. T-336's actual divergence lived in the two `if (listPrices
   // === undefined) return <abstain>` guards in `rosterListPrice` and `authorizedDepth`: those
   // fired for `undefined` and NOT for `null`, so an explicit `null` was an empty roster on this
   // door and an absent one on the Python peer, which tested `is None`. Removing those closed it.
