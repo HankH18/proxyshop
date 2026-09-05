@@ -35,7 +35,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
 
 from ..adapters.base import UpsertOp
 from ..adapters.budgets import BudgetExceeded, CrawlBudget, CrawlLedger
@@ -286,6 +286,7 @@ class PolicyPageFetcher:
         policy: FetchPolicy | None = None,
         budget: CrawlBudget | None = None,
         warnings: list[str] | None = None,
+        storefront_password: str | None = None,
     ) -> tuple[PolicyDocument, ...]:
         """Read every policy page the store publishes and robots.txt permits.
 
@@ -297,6 +298,11 @@ class PolicyPageFetcher:
             policy: the SSRF/fetch policy. Defaults to the transport's own.
             budget: the crawl ceilings.
             warnings: a list to append non-fatal problems to.
+            storefront_password: the dev-store password (SPEC A1). A password-protected
+                store redirects every page to ``/password``, so without this the policy
+                crawl reads **nothing** and reports six ``redirect-loop`` refusals — which
+                is exactly what it did: the catalog half of one refresh unlocked the store
+                and read it while the policy half silently read zero of six pages.
 
         Returns:
             One :class:`PolicyDocument` per page successfully read. Pages that 404, that
@@ -319,6 +325,8 @@ class PolicyPageFetcher:
         hosts = tuple({h for h in (*allowed_hosts, host) if h})
 
         robots_text = self._robots(client, base_url, hosts, ledger, notes)
+        if storefront_password:
+            self._unlock(client, base_url, storefront_password, hosts, ledger, robots_text, notes)
         documents: list[PolicyDocument] = []
         for path in self.paths:
             url = urljoin(base_url if base_url.endswith("/") else base_url + "/", path.lstrip("/"))
@@ -329,6 +337,46 @@ class PolicyPageFetcher:
             if document is not None:
                 documents.append(document)
         return tuple(documents)
+
+    def _unlock(
+        self,
+        client: SafeHTTPClient,
+        base_url: str,
+        password: str,
+        hosts: Sequence[str],
+        ledger: CrawlLedger,
+        robots_text: str,
+        notes: list[str],
+    ) -> None:
+        """Establish a storefront-password session, as T-020's catalog fetcher does (A1).
+
+        Posts the same form a browser posts. The session cookie the store sets is kept by the
+        transport's jar, bound to the host that issued it, so it rides on the policy-page
+        requests that follow and on nothing else. A failure is a note, never an exception:
+        the pages are then simply unreadable, which is the ordinary outcome this fetcher
+        already reports for a page it cannot get.
+        """
+        url = urljoin(base_url if base_url.endswith("/") else base_url + "/", "password")
+        if not may_fetch(robots_text, url, self.user_agent):
+            notes.append(f"robots.txt disallows {url}; the storefront stays locked")
+            return
+        payload = urlencode(
+            {"form_type": "storefront_password", "utf8": "\u2713", "password": password}
+        ).encode("utf-8")
+        try:
+            result = client.fetch(
+                url,
+                method="POST",
+                body=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                allowed_hosts=hosts,
+                ledger=ledger,
+            )
+        except (FetchRefused, TransportError, BudgetExceeded) as exc:
+            notes.append(f"storefront password POST failed: {exc}")
+            return
+        if result.status >= 400:
+            notes.append(f"storefront password rejected with HTTP {result.status}")
 
     def _robots(
         self,
@@ -519,6 +567,7 @@ class PolicyPageIngestor:
         allowed_hosts: Sequence[str] = (),
         policy: FetchPolicy | None = None,
         budget: CrawlBudget | None = None,
+        storefront_password: str | None = None,
     ) -> PolicyIngestReport:
         """Ingest every policy page this store publishes.
 
@@ -534,6 +583,7 @@ class PolicyPageIngestor:
             policy=policy,
             budget=budget,
             warnings=warnings,
+            storefront_password=storefront_password,
         )
         results = tuple(
             extract_policy_page(

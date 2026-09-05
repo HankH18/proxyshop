@@ -211,6 +211,11 @@ def refresh_store_catalog(store_id: str, payload: RefreshRequest | None = None) 
                 allowed_hosts=target.allowed_hosts,
                 policy=runner.policy,
                 budget=runner.budget,
+                # A1: a password-protected dev store redirects every page to /password.
+                # Without this the catalog half of one refresh unlocked the store and read
+                # both products while the policy half read ZERO of six pages and reported six
+                # `redirect-loop` refusals — and the 202 looked identical either way.
+                storefront_password=target.storefront_password,
             )
             # Through the runner rather than a second copy of the session handling: a policy
             # page's writes and a product's writes are the same `UpsertOp` shape and must

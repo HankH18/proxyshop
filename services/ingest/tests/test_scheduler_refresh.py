@@ -124,6 +124,19 @@ def _target(base_url: str, store_id: str = "store-1", **kwargs: Any) -> StoreTar
     return StoreTarget(store_id=store_id, base_url=base_url, **kwargs)
 
 
+def _forget_store(routes: Any, store_id: str) -> None:
+    """Undo every piece of router module state one store can create.
+
+    A single helper on purpose. The fixture and the newer tests each grew their own teardown
+    and they DISAGREED — the fixture forgot ``_ingestors`` while a later test remembered it,
+    so ``store-1`` leaked out of the file through the one piece neither guard checked. Three
+    kinds of module state, one place that lists them.
+    """
+    routes.registry.unregister(store_id)
+    routes.runner.forget(store_id)
+    routes._ingestors.pop(store_id, None)
+
+
 def _runner(base_url: str, **kwargs: Any) -> CatalogRefreshRunner:
     kwargs.setdefault("session_factory", None)
     return CatalogRefreshRunner(
@@ -364,8 +377,7 @@ def refresh_client(storefront: Any) -> Any:
         # back, including the registration itself: a store left registered would make the
         # unknown-store 404 test next door pass or fail depending on ordering.
         routes.runner.registry, routes.runner.policy, routes.runner.session_factory = saved
-        routes.registry.unregister("store-1")
-        routes.runner.forget("store-1")
+        _forget_store(routes, "store-1")
 
 
 def test_the_published_refresh_route_is_served_by_the_running_app() -> None:
@@ -522,29 +534,6 @@ def test_the_refresh_404_comes_from_the_handler_and_not_from_an_unmounted_route(
     )
 
 
-def test_the_routers_module_state_does_not_leak_out_of_the_fixture() -> None:
-    """LAST in this file on purpose, and takes no fixture, so it sees what was left behind.
-
-    pytest runs a module's tests in definition order, so by the time this runs every
-    ``refresh_client`` user above has torn down. The router's registry and runner are module
-    state — deliberately, because the differential guarantee is about two requests — and that
-    is exactly what leaks between tests if a fixture forgets to undo its registration. This is
-    the only way a leak of this kind is caught: a leaked registration makes other tests PASS,
-    never fail, so nothing else in the suite would notice.
-    """
-    from ingest.scheduler import routes  # noqa: PLC0415
-
-    assert "store-1" not in routes.registry, (
-        f"the refresh fixture left store-1 registered: {routes.registry.store_ids}"
-    )
-    assert routes.runner.registry is routes.registry, (
-        "the runner is pointing at a registry the fixture built, not the module's own"
-    )
-    assert routes.runner.session_factory is not None, (
-        "the fixture left the runner's session factory swapped out for its capture double"
-    )
-
-
 # ---------------------------------------------------------------------------------------
 # regressions an adversarial verifier found after the first pass
 # ---------------------------------------------------------------------------------------
@@ -618,9 +607,7 @@ def test_forcing_one_store_does_not_discard_another_stores_extraction_ledger(
     finally:
         routes.runner.policy, routes.runner.session_factory = saved
         for store in ("store-a", "store-b"):
-            routes.registry.unregister(store)
-            routes.runner.forget(store)
-            routes._ingestors.pop(store, None)
+            _forget_store(routes, store)
 
 
 def test_two_concurrent_refreshes_of_one_store_do_the_work_once(storefront: Any) -> None:
@@ -677,5 +664,112 @@ def test_two_concurrent_refreshes_of_one_store_do_the_work_once(storefront: Any)
         )
     finally:
         routes.runner.policy, routes.runner.session_factory = saved
-        routes.registry.unregister("store-1")
-        routes.runner.forget("store-1")
+        _forget_store(routes, "store-1")
+
+
+def test_a_locked_dev_store_yields_its_policy_pages_too(locked_storefront: Any) -> None:
+    """SPEC A1, both halves of one refresh — the half that was silently reading nothing.
+
+    A password-protected dev store redirects EVERY page to ``/password``. The catalog half of
+    a refresh posts the password form and reads the store; the policy half did not, so it read
+    zero of six pages and reported six ``redirect-loop`` refusals — while the 202 looked
+    exactly the same as a successful run and the warnings never reached the response body.
+    A1 is the entire reason ``signed_fetch`` exists, so a refresh that unlocks the store for
+    one surface and not the other is half a feature.
+
+    The control is the same store crawled WITHOUT the password: it must still read nothing, or
+    this test would pass on a store that was never locked.
+    """
+    from ingest.extraction.pipeline import PolicyPageIngestor  # noqa: PLC0415
+
+    base_url, stub = locked_storefront
+
+    locked = PolicyPageIngestor().run(store_id="store-1", base_url=base_url, policy=LOOPBACK)
+    assert locked.documents == (), (
+        "control: without the password this store must yield nothing, or the test below "
+        f"proves nothing; it yielded {[d.url for d in locked.documents]}"
+    )
+
+    unlocked = PolicyPageIngestor().run(
+        store_id="store-1",
+        base_url=base_url,
+        policy=LOOPBACK,
+        storefront_password=stub.password,
+    )
+
+    assert unlocked.documents, (
+        f"the policy crawl still read nothing from an unlocked store: {unlocked.warnings}"
+    )
+    assert not any("redirect-loop" in w for w in unlocked.warnings), unlocked.warnings
+
+
+def test_the_refresh_route_unlocks_the_store_for_the_policy_half(
+    locked_storefront: Any,
+) -> None:
+    """The same property through the published door, which is where it was broken."""
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from ingest.main import create_app  # noqa: PLC0415
+    from ingest.scheduler import routes  # noqa: PLC0415
+
+    base_url, stub = locked_storefront
+    saved = (routes.runner.policy, routes.runner.session_factory)
+    routes.runner.policy = LOOPBACK
+    routes.runner.session_factory = _SessionFactory()
+    routes.registry.register(_target(base_url, storefront_password=stub.password))
+    try:
+        response = TestClient(create_app()).post(
+            "/refresh/store-1", json={"sections": ["policies"]}
+        )
+        assert response.status_code == 202, response.text
+        assert routes.ingestor_for("store-1").ledger.hashes, (
+            "the refresh reported 202 having extracted no policy page from the locked store"
+        )
+        assert any(path == "/password" for _m, path, _h in stub.requests), (
+            f"the policy half never posted the storefront password: {stub.paths_fetched()}"
+        )
+    finally:
+        routes.runner.policy, routes.runner.session_factory = saved
+        _forget_store(routes, "store-1")
+
+
+# ---------------------------------------------------------------------------------------
+# the module-state guard. Keep this LAST in the file.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_routers_module_state_does_not_leak_out_of_this_file() -> None:
+    """Takes no fixture, so it sees exactly what the tests above left behind.
+
+    pytest runs a module's tests in definition order, so this only works while it is last —
+    and it did NOT stay last: three tests were appended after it and its own docstring went on
+    claiming otherwise, which an adversarial verifier caught. That is the failure mode of a
+    positional guard, so the comment above is a rule and this assertion set is deliberately
+    exhaustive rather than relying on position alone.
+
+    Why a guard at all: the router's registry, runner and per-store ingestors are module
+    state — deliberately, because the differential guarantee is a statement about two
+    requests. A leak of that state makes other tests PASS, never fail, so nothing else in the
+    suite would notice. The ingestor half is not hypothetical: ``refresh_client``'s teardown
+    and a later test's teardown disagreed about whether ``_ingestors`` needed clearing, and
+    ``store-1`` leaked out of this file through exactly that gap.
+    """
+    from ingest.scheduler import routes  # noqa: PLC0415
+
+    leaked = [
+        name
+        for name, present in (
+            (f"registry:{sid}", sid in routes.registry) for sid in ("store-1", "store-a", "store-b")
+        )
+        if present
+    ]
+    leaked += [f"hashes:{sid}" for sid in routes.runner.hashes]
+    leaked += [f"ingestor:{sid}" for sid in routes._ingestors]
+
+    assert not leaked, f"this file leaked router module state out of itself: {leaked}"
+    assert routes.runner.registry is routes.registry, (
+        "the runner is pointing at a registry a fixture built, not the module's own"
+    )
+    assert routes.runner.session_factory is not None, (
+        "a fixture left the runner's session factory swapped out for its capture double"
+    )
+    assert routes.runner.policy is None, "a fixture left its SSRF posture on the runner"
