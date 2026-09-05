@@ -422,9 +422,41 @@ class AuctionStateMachine:
     def expire(self, auction_id: str, *, now: float | None = None) -> AuctionRecord:
         return self._transition(auction_id, EXPIRED, now=now, payload={"reason": "expired"})
 
-    def accept(self, auction_id: str, bid_ref: str, *, now: float | None = None) -> AuctionRecord:
+    def accept(
+        self,
+        auction_id: str,
+        bid_ref: str,
+        *,
+        now: float | None = None,
+        checkout_token: str | None = None,
+        offer: Mapping[str, Any] | None = None,
+    ) -> AuctionRecord:
+        """Stamp the auction accepted and record the ``accepted`` event (D24's body).
+
+        ``checkout_token`` and ``offer`` are the other two thirds of that published body, and
+        they are not decoration. ``apps/trust/src/reconcile/engine.py`` builds its join keys
+        from ``payload['checkout_token']`` first and drops any event that carries none, so an
+        ``accepted`` event without it never lands in the same group as the ``order_paid``
+        webhook and the order silently never reconciles — there is nothing to grade the
+        promise against. ``offer`` is that promise: ``_promised()`` reads ``product_ref``,
+        ``unit_price``, ``total_price`` and ``discount`` straight off it, and with no offer
+        every comparison reads ``incomparable``.
+
+        Both default to ``None`` because a caller that has neither — the simulator, a test
+        driving the machine directly — must still be able to accept an auction. The keys are
+        written either way, so the body is the published one and its emptiness is visible in
+        the record rather than inferred from a key that is not there.
+        """
         return self._transition(
-            auction_id, ACCEPTED, now=now, payload={"bid_ref": bid_ref}, bid_ref=bid_ref
+            auction_id,
+            ACCEPTED,
+            now=now,
+            payload={
+                "bid_ref": bid_ref,
+                "checkout_token": checkout_token,
+                "offer": dict(offer) if offer is not None else None,
+            },
+            bid_ref=bid_ref,
         )
 
     def _transition(

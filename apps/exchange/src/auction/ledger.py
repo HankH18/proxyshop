@@ -132,11 +132,18 @@ def build_published_event(kind: str, **fields: Any) -> dict[str, Any]:
     key is refused.
 
     This is a **separate entry point** rather than a check folded into :func:`build_event`
-    on purpose. Three of the state machine's own transitions do not carry their published
-    bodies either (``auction_opened`` omits ``roster_size``, ``auction_closed`` omits
-    ``shortlist_size``, ``accepted`` omits ``checkout_token`` and ``offer``), and turning
-    those into exceptions would fail live auctions for an audit-record defect that is
-    nobody's ticket here. They are reported, not silently swept in.
+    on purpose. Two of the state machine's own transitions still do not carry their published
+    bodies (``auction_opened`` omits ``roster_size``, ``auction_closed`` omits
+    ``shortlist_size``), and turning those into exceptions would fail live auctions for an
+    audit-record defect that is nobody's ticket here. They are reported, not silently swept in.
+
+    ``accepted`` used to be listed beside them and was the one that did **not** belong there,
+    because its two missing keys are not an audit blemish. ``apps/trust/src/reconcile/engine.py``
+    builds a checkout's join keys from ``payload['checkout_token']`` first and drops any event
+    carrying none, so an ``accepted`` event without it can never share a group with its
+    ``order_paid`` webhook: the order reconciles to nothing at all, and ``offer`` is the
+    promise the webhook would have been graded against. Both keys are now written by
+    :meth:`AuctionStateMachine.accept`. The other two remain what this paragraph says they are.
 
     Raises:
         UnknownLedgerEventKind: the kind is not in the frozen vocabulary.
