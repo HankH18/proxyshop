@@ -471,14 +471,58 @@ def run(*, open_browser: bool, port: int) -> int:
             webbrowser.open(buyer_url)
 
         stop = threading.Event()
+        restore = _install_stop_handlers(stop)
         try:
             while not stop.wait(0.5):
                 pass
         except KeyboardInterrupt:
-            print("\n  shutting down...", file=sys.stdout)
+            # Only reachable when no handler could be installed (`signal.signal` raises off
+            # the main thread). Kept so the fallback path still shuts down rather than
+            # printing a traceback.
+            pass
+        print("\n  shutting down...", file=sys.stdout)
 
+    restore()
     print("  stopped.", file=sys.stdout)
     return 0
+
+
+def _install_stop_handlers(stop: threading.Event):
+    """Ask for a clean shutdown on SIGINT/SIGTERM, and IGNORE every later one.
+
+    One Ctrl-C reaches this process more than once, which is the whole reason this exists
+    rather than a bare ``except KeyboardInterrupt``. A terminal delivers SIGINT to the entire
+    foreground process GROUP, and ``npm run`` forwards it to its child as well — so under
+    ``npm run demo`` the second copy landed while the ExitStack was already tearing the
+    servers down, interrupted ``thread.join`` inside a ``finally``, and printed a
+    KeyboardInterrupt traceback over an otherwise clean shutdown (measured; npm reported
+    exit status -2). Re-arming the signal as ``SIG_IGN`` inside the handler makes the first
+    one the only one that is acted on, so teardown always runs to completion.
+
+    Returns a callable that puts the previous handlers back.
+    """
+    import signal  # noqa: PLC0415
+
+    previous: dict[int, Any] = {}
+
+    def requested_stop(signum: int, _frame: Any) -> None:
+        signal.signal(signum, signal.SIG_IGN)
+        stop.set()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[signum] = signal.signal(signum, requested_stop)
+        except (ValueError, OSError):
+            # Not the main thread, or a platform that will not take this signal. The
+            # KeyboardInterrupt fallback above covers it.
+            continue
+
+    def restore() -> None:
+        for signum, handler in previous.items():
+            with contextlib.suppress(ValueError, OSError):
+                signal.signal(signum, handler)
+
+    return restore
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
