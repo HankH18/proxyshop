@@ -383,7 +383,9 @@ def test_a_malformed_catalog_is_a_503_that_names_the_offending_row(
         assert "'s1'" in detail, detail
 
 
-def test_a_document_that_states_no_catalog_leaves_the_seam_exactly_as_it_was() -> None:
+def test_a_document_that_states_no_catalog_leaves_the_seam_exactly_as_it_was(
+    unwired: None,
+) -> None:
     """The property the new key may not break: nothing configured is today's behaviour."""
     from exchange.ranking.serving import catalog_of
     from exchange.ranking.verification import NoCatalogSnapshots
@@ -399,7 +401,7 @@ def test_a_document_that_states_no_catalog_leaves_the_seam_exactly_as_it_was() -
     assert isinstance(catalog_of(app), NoCatalogSnapshots)
 
 
-def test_an_explicitly_empty_catalog_is_a_statement_and_is_bound() -> None:
+def test_an_explicitly_empty_catalog_is_a_statement_and_is_bound(unwired: None) -> None:
     """``"catalog": {}`` and no ``catalog`` key are the same behaviour, different statements.
 
     The same distinction ``intent_clusters`` draws. Binding the empty source records that a
@@ -423,7 +425,9 @@ def test_an_explicitly_empty_catalog_is_a_statement_and_is_bound() -> None:
     assert len(catalog) == 0
 
 
-def test_the_composition_root_never_overwrites_a_catalog_a_deployment_chose() -> None:
+def test_the_composition_root_never_overwrites_a_catalog_a_deployment_chose(
+    unwired: None,
+) -> None:
     """A deployment that wired its own catalog keeps it — the rule for all seven keys."""
     from exchange.composition import configure_exchange  # noqa: PLC0415
     from exchange.ranking.serving import configure_ranking  # noqa: PLC0415
