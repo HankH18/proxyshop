@@ -30,6 +30,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from contracts.ledger import validate_ledger_payload
+
 from ..events.errors import EventServiceError, StoreUnavailable
 from ..events.store import append
 from ..verification import persist_claim_verification
@@ -315,6 +317,25 @@ def post_claim_verification(request: Request, body: ClaimVerificationIn) -> Any:
     # irreproducible and any second append of it a 409 rather than a no-op. Everything in
     # this payload is a pure function of the request, which is what makes the announcement
     # replayable. The verification_id is returned to the caller below instead.
+    # Validate before appending, the way apps/exchange/src/auction/ledger.py,
+    # apps/merchant/svc/src/codes/ledger.py, apps/buyer/svc/src/feedback/submission.py and
+    # apps/exchange/src/retrieval/fit.py all do at their own producing boundaries. A producer
+    # that skips this is how a malformed payload reaches a written row — see T-332/T-333,
+    # which measure exactly that for the one trust producer that does not validate. This
+    # route is not going to be the second one.
+    problems = validate_ledger_payload(CLAIM_VERIFIED_KIND, event["payload"])
+    if problems:
+        raise HTTPException(
+            422,
+            {
+                "error": "invalid_event_payload",
+                "message": (
+                    f"the claim_verified payload this route built does not satisfy the "
+                    f"published shape: {problems}"
+                ),
+            },
+        )
+
     try:
         appended = append(store_for(request), event)
     except EventServiceError as exc:

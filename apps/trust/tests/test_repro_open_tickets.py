@@ -3424,8 +3424,17 @@ def test_t332_a_delisting_event_never_names_a_store_that_is_not_a_store() -> Non
     is returned by none of them: the store it happened to cannot find it, and neither can an
     appeal.
 
-    The expectation is read off the PUBLISHED SCHEMA's sibling store_id fields — see the
-    armed control — rather than off ``delisting.py``, which this lane can edit.
+    A second consequence the ticket does not name: ``event_id`` is
+    ``f"{kind}:{store_id}:{moment}"``, so every blank-store delisting at one instant collapses
+    onto ONE idempotency key and the ledger keeps at most one of them.
+
+    On the AUTHORITY, stated honestly rather than overclaimed. The assertion below is "a
+    delisting names a non-blank store", written here. The armed control reads
+    ``protocol.schema.json`` to show that every SIBLING model in the published contract
+    constrains ``store_id`` to a non-empty string — that is the RATIONALE for the rule and a
+    check that the rationale still holds, not a value this test derives its expectation from.
+    ``LedgerEvent.store_id`` itself carries no ``minLength``, which is the schema half of
+    T-332 and lives in ``packages/contracts``, outside this lane's write scope.
     """
     from trust.scoring import Blacklist
     from trust.snapshot.delisting import delisting_events
@@ -3444,7 +3453,17 @@ def test_t332_a_delisting_event_never_names_a_store_that_is_not_a_store() -> Non
             blacklist=Blacklist(),
             as_of=AS_OF,
         )
-        named = [event for event in emitted if not str(event["payload"]["store_id"]).strip()]
+        # BOTH addresses, because the harm is about the TOP-LEVEL one. `store.read(store_id=)`,
+        # `read_events(store_id=)` and `GET /events?store_id=` all filter on
+        # `LedgerEvent.store_id` / the ledger column, which `_event` sets separately from the
+        # payload copy. They agree today because both come from one local; asserting only on
+        # the payload would point this gate at the field the described readers do not use.
+        named = [
+            event
+            for event in emitted
+            if not str(event["payload"]["store_id"]).strip()
+            or not str(event.get("store_id") or "").strip()
+        ]
         if named:
             slipped.append(f"{label}: {[event['event_id'] for event in named]}")
 
@@ -3493,19 +3512,30 @@ def test_t333_the_producer_validation_sweep_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-333: apps/trust/src/snapshot/delisting.py is the only ledger-event producer in the "
-        "repo that never calls validate_ledger_payload — the other four boundaries all do — so "
-        "its events are the only ones that reach the ledger unvalidated, which is how T-332's "
-        "blank store_id gets there; remove this marker with the fix"
+        "T-333: apps/trust/src/snapshot/delisting.py builds blacklisted / blacklist_expired "
+        "ledger events and never calls validate_ledger_payload, while four sibling producing "
+        "boundaries do — so nothing checks its payloads on the production path, which is how "
+        "T-332's blank store_id reaches a written row; remove this marker with the fix"
     ),
 )
 def test_t333_the_delisting_producer_validates_what_it_produces() -> None:
-    """Every producing boundary validates. This one does not, and it is the one that leaks.
+    """The producing boundary that leaks is the one that does not validate.
 
-    Four boundaries construct ledger events and hand them to the writer, and four of them
-    call ``validate_ledger_payload`` on the way. ``delisting.py`` is the fifth and it does
-    not, so the only validation its events ever receive lives in a TEST — applied to events
-    the test itself constructs, which is a different object from the one production emits.
+    Four boundaries construct ledger events, hand them to the writer, and call
+    ``validate_ledger_payload`` on the way: ``apps/exchange/src/auction/ledger.py``,
+    ``apps/merchant/svc/src/codes/ledger.py``, ``apps/buyer/svc/src/feedback/submission.py``
+    and ``apps/exchange/src/retrieval/fit.py``. ``delisting.py`` does not, so the only
+    validation its events ever receive lives in a TEST — applied to events the test itself
+    constructs, which is a different object from the one production emits.
+
+    CORRECTION TO THE TICKET, which says delisting.py is "the ONLY ledger-event producer that
+    never calls validate_ledger_payload". Measured, that is false: at least
+    ``apps/trust/src/reconcile/engine.py`` (``reconciled``), ``apps/exchange/src/accept/
+    offer.py`` (``code_created``) and ``services/shopify-stub/src/orders.py`` (``refund``)
+    also build events without validating. So the class is wider than one file, and this gate
+    is deliberately scoped to the file the ticket owns rather than being widened into a
+    repo-wide demand no single lane could satisfy. The wider gap is a finding, not this
+    gate's business — and it is why the assertion below names only this file.
 
     Read as an AST call site rather than as a text match, so a mention in a docstring or a
     commented-out line cannot satisfy it (see the armed control).
@@ -3517,9 +3547,10 @@ def test_t333_the_delisting_producer_validates_what_it_produces() -> None:
         "apps/trust/src/snapshot/delisting.py constructs blacklisted / blacklist_expired "
         "ledger events and never calls validate_ledger_payload, while apps/exchange/src/"
         "auction/ledger.py, apps/merchant/svc/src/codes/ledger.py, apps/buyer/svc/src/"
-        "feedback/submission.py and apps/exchange/src/retrieval/fit.py all do. That makes "
-        "this the one production path whose events reach the ledger unvalidated — and it is "
-        "why the blank store_id T-332 measures gets all the way to a written row."
+        "feedback/submission.py and apps/exchange/src/retrieval/fit.py all do. Nothing checks "
+        "these payloads on the production path — the only validation they receive is in a "
+        "test, against events that test built — and it is how the blank store_id T-332 "
+        "measures gets all the way to a written row."
     )
 
 
@@ -3583,8 +3614,18 @@ def test_t320_the_expiry_path_is_armed() -> None:
         "the expiry no longer carries the reason the listing was OPENED with, so this "
         "scenario has stopped being the one T-320 describes"
     )
+    # Well-formed in BOTH directions: the double cannot be iterated (so the repro exercises
+    # the path it claims) and it CAN still answer a lookup (so the fallback a fix would add
+    # has something to fall back to). The second half is what makes this control capable of
+    # failing at all — it breaks if Blacklist.lookup changes shape.
+    lookup_only = _T320LookupOnlyRegistry(_t320_registry())
     with pytest.raises(TypeError):
-        list(_T320LookupOnlyRegistry(_t320_registry()))
+        list(lookup_only)
+    answered = lookup_only.lookup("bad-co")
+    assert answered is not None and str(getattr(answered, "status", "")) == "active", (
+        f"the lookup-only double can no longer answer a lookup ({answered!r}), so a fix that "
+        f"falls back to lookup(identity) would fail here for a reason unrelated to T-320"
+    )
 
 
 @pytest.mark.xfail(
@@ -3606,8 +3647,20 @@ def test_t320_a_lapsed_listing_expires_even_when_the_registry_only_answers_looku
     path and not a security hole, and why the lane that found it downgraded it.
 
     It is still a defect: a store whose listing has expired is never re-listed, and the only
-    signal is silence. The remedy the ticket names is to iterate the BLACKLIST for lapsed
-    listings rather than to require the registry be iterable.
+    signal is silence, because the ``TypeError`` from ``list()`` is swallowed by a bare
+    ``except``.
+
+    TWO THINGS A FIXER SHOULD KNOW, because the obvious fix collides with a pinned invariant.
+    The ticket's own remedy ("iterate the blacklist rather than the registry") is a no-op as
+    written — in ``delisting_events(entries, *, blacklist=...)`` the blacklist IS the
+    registry, and ``_lapsed_reasons`` already iterates it. The real remedy is a FALLBACK: when
+    iteration is unavailable, ask ``lookup(identity)`` for the identities this snapshot
+    carries. And that path is exactly what ``delisting.py``'s own docstring says was avoided
+    on purpose, because it doubles the reads against a Postgres-backed registry — a cost
+    ``apps/trust/tests/test_snapshot.py`` PINS with ``assert blacklist.calls == 3``. So a fix
+    that unconditionally calls ``lookup`` per store turns that assertion red and needs the
+    justify-test-edit ritual; a fix that falls back only when iteration is unavailable does
+    not.
     """
     from trust.snapshot.delisting import BLACKLIST_EXPIRED_KIND, delisting_events
 
@@ -3636,7 +3689,6 @@ _T319_EVASIONS = {
     "bound as a helper's parameter": (
         "def _arm(c):\n    if c == 503:\n        pass\n_arm(response.status_code)\n"
     ),
-    "bound by a comprehension": ("codes = [c for c in (response.status_code,) if c == 503]\n"),
     "bound by a with-statement target": (
         "with opened(response.status_code) as code:\n    if code == 503:\n        pass\n"
     ),
@@ -3675,22 +3727,29 @@ def test_t319_the_taint_evasion_sweep_is_armed() -> None:
     strict=True,
     reason=(
         "T-319: _names_holding_a_status_code propagates taint only through Assign/AnnAssign/"
-        "AugAssign/NamedExpr, so a for-loop target, a helper parameter, a comprehension target "
-        "and a with-statement target all keep the dead 503 arm while the gate goes green — and "
-        "under xfail(strict=True) that XPASS RETIRES T-166 with its defect live; remove this "
-        "marker with the fix"
+        "AugAssign/NamedExpr, so a for-loop target, a helper parameter and a with-statement "
+        "target all keep the dead 503 arm while T-166's gate reports it gone — a live "
+        "regression guard that passes on the defect it exists to catch; remove this marker "
+        "with the fix"
     ),
 )
 def test_t319_the_status_code_analysis_follows_every_binding_that_carries_the_value() -> None:
     """A gate that fails open under ``strict=True`` retires its own ticket. That is the harm.
 
     T-288 replaced a substring walk with a taint analysis, and the analysis follows the value
-    through assignment only. Four other binding forms carry a value just as well, and each
+    through assignment only. Three other binding forms carry a value just as well, and each
     leaves the unreachable 503 branch exactly where it was while making it invisible here.
 
     This is not a hypothetical evasion someone must choose to write: a reviewer refactoring
-    that test into a loop or a helper would trip it by accident, the gate would XPASS, and
-    ``strict=True`` would then force T-166's marker off with the dead branch still in place.
+    that test into a loop or a helper would trip it by accident.
+
+    On the HARM, stated precisely rather than inherited from the ticket text. T-319 was filed
+    while T-166's gate still carried ``xfail(strict=True)``, and says an evasion would XPASS
+    and force that marker off, retiring T-166 with its defect live. That marker is GONE — the
+    T-166 defect was fixed and the marker removed on this branch — so the harm is now the
+    quieter one: that gate is a live, non-xfail regression guard, and an evaded shape makes it
+    report the dead branch as absent. A guard that passes on the defect it exists to catch is
+    worse than no guard, because it is believed.
     """
     slipped = [
         label
@@ -3700,8 +3759,8 @@ def test_t319_the_status_code_analysis_follows_every_binding_that_carries_the_va
     assert slipped == [], (
         f"these rewrites keep the unreachable 503 branch and the analysis does not see it: "
         f"{slipped}. Each binds the status code by a form the taint walk does not follow, so "
-        f"the gate for T-166 would go GREEN — and an XPASS under strict=True forces that "
-        f"marker off, closing T-166 while its defect is still shipped."
+        f"T-166's live regression guard reports the dead branch as gone while it is still "
+        f"there — a guard that passes on the defect it exists to catch."
     )
 
 
@@ -3747,6 +3806,52 @@ def _t289_reordered() -> tuple[str, ...]:
     return (*rest, app, per_role)
 
 
+def _t289_graders() -> dict[str, Any]:
+    """Every discoverable pure-Python test that grades DSN resolution order.
+
+    Discovered rather than named, so an assertion added to CLOSE this ticket is one this gate
+    actually runs. A hardcoded roster would make the gate unsatisfiable by any new test, which
+    is the failure mode a gate can least afford: red forever, with no reachable green.
+
+    Restricted to tests taking exactly one ``monkeypatch``-shaped parameter, because anything
+    requesting a datastore fixture cannot be driven by hand here.
+    """
+    from apps.trust.tests import test_events_hardening
+
+    found: dict[str, Any] = {}
+    for module in (sys.modules[__name__], test_events_hardening):
+        for name, function in vars(module).items():
+            if not name.startswith("test_") or not callable(function):
+                continue
+            if not re.search(r"dsn|precedence|outrank", name, re.IGNORECASE):
+                continue
+            parameters = list(inspect.signature(function).parameters)
+            if parameters != ["monkeypatch"]:
+                continue
+            found[f"{module.__name__}.{name}"] = function
+    return found
+
+
+def _t289_reds_under(order: tuple[str, ...]) -> list[str]:
+    """Which discoverable DSN graders go red when ``DEFAULT_DSN_ENV`` is that order."""
+    import trust.events.pg as pg
+
+    reds: list[str] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pg, "DEFAULT_DSN_ENV", order)
+        for name, grader in _t289_graders().items():
+            inner = pytest.MonkeyPatch()
+            try:
+                grader(inner)
+            except AssertionError:
+                reds.append(name)
+            except Exception:  # noqa: BLE001 - an error is not a graded refusal
+                pass
+            finally:
+                inner.undo()
+    return reds
+
+
 def test_t289_the_dsn_reordering_sabotage_is_armed() -> None:
     """The sabotage is real: with the tuple reordered, the writer resolves the app principal.
 
@@ -3759,6 +3864,21 @@ def test_t289_the_dsn_reordering_sabotage_is_armed() -> None:
 
     reordered = _t289_reordered()
     assert reordered.index("PROXYSHOP_PG_DSN_APP") < reordered.index("PROXYSHOP_PG_DSN_TRUST_RW")
+
+    discovered = _t289_graders()
+    assert discovered, "the grader discovery found nothing, so the repro below runs nothing"
+    assert any("resolves_to_the_earlier_one" in name for name in discovered), (
+        f"the known pairwise precedence grader is not discoverable: {sorted(discovered)}"
+    )
+    # The sabotage is CAUGHT by something — measured, and it is why the repro below asks a
+    # narrower question than "does anything go red". If this ever reads empty, S3a has become
+    # entirely undefended and the repro's framing is no longer the right one.
+    assert _t289_reds_under(reordered), (
+        "no discovered grader catches the S3a reorder at all any more. The repro below is "
+        "written on the measured fact that exactly one does (the behavioural assertion in "
+        "test_the_per_role_ledger_dsn_outranks_the_generic_app_dsn); with that gone, the "
+        "order is undefended and this ticket understates the problem"
+    )
 
     with pytest.MonkeyPatch.context() as patch:
         for name in (*pg.DEFAULT_DSN_ENV, *reordered):
@@ -3777,10 +3897,10 @@ def test_t289_the_dsn_reordering_sabotage_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-289/T-181: every grader of DSN precedence derives its expectation from "
-        "DEFAULT_DSN_ENV itself, so reordering the tuple reorders the expectation with it and "
-        "the S3a sabotage — which re-ships the T-151 defect and resolves the app principal — "
-        "leaves the whole suite GREEN; remove this marker with the fix"
+        "T-289: test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one derives "
+        "its expectation from DEFAULT_DSN_ENV itself, so reordering the tuple reorders the "
+        "expectation with it and the derived grader that presents itself as the comprehensive "
+        "precedence defence catches ZERO of sabotage S3a; remove this marker with the fix"
     ),
 )
 def test_t289_reordering_the_dsn_precedence_tuple_turns_some_grader_red() -> None:
@@ -3795,31 +3915,36 @@ def test_t289_reordering_the_dsn_precedence_tuple_turns_some_grader_red() -> Non
     The live connected-principal test cannot help either — it clears every DSN variable and
     sets exactly one, so precedence never arises there.
 
-    This runs the existing grader against a reordered tuple and asks whether ANYTHING goes
-    red. Today nothing does. A fix is one assertion that pins the order against an authority
-    outside the tuple — D5's grant, or the live layer with both variables set.
+    PREMISE CORRECTED BY MEASUREMENT, and the correction is recorded here rather than
+    quietly assumed. This gate was first written to assert that NOTHING in the suite goes red
+    under S3a. That is false: ``test_events_hardening.test_the_per_role_ledger_dsn_outranks_
+    the_generic_app_dsn`` catches it behaviourally, which T-181's own text also says ("both
+    produce exactly 1 red"). Written the first way the gate XPASSed immediately — a gate
+    asserting a false premise, which under ``strict=True`` would have retired a live ticket.
+
+    What T-289 actually claims, and what is asserted instead: the DERIVED grader — the one
+    that iterates every pair and therefore presents itself as the comprehensive precedence
+    defence — catches none of S3a, because its expectation moves with the tuple. So the order
+    rests on a single assertion in a single test, exactly as T-181 filed it, and this
+    derived test looks like a second defence while being none.
+
+    The fix is to give that test an expectation from an authority OUTSIDE the tuple — D5's
+    grant, or the live layer with both variables set (which is T-181's half).
     """
     import trust.events.pg as pg
 
     reordered = _t289_reordered()
-    reds: list[str] = []
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(pg, "DEFAULT_DSN_ENV", reordered)
-        for grader in (test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one,):
-            inner = pytest.MonkeyPatch()
-            try:
-                grader(inner)
-            except AssertionError:
-                reds.append(grader.__name__)
-            finally:
-                inner.undo()
+    reds = _t289_reds_under(reordered)
+    subject = "test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one"
 
-    assert reds, (
-        "DEFAULT_DSN_ENV was reordered to put PROXYSHOP_PG_DSN_APP ahead of "
-        "PROXYSHOP_PG_DSN_TRUST_RW — the exact T-151 defect, and the armed control above "
-        "measures that the writer then really does resolve the app principal — and NOT ONE "
-        "grader went red. Every one of them reads its expectation off the tuple it is "
-        "defending, so the order is pinned by nothing at all."
+    assert any(subject in name for name in reds), (
+        f"DEFAULT_DSN_ENV was reordered to put PROXYSHOP_PG_DSN_APP ahead of "
+        f"PROXYSHOP_PG_DSN_TRUST_RW — the exact T-151 defect, and the armed control above "
+        f"measures that the writer then really does resolve the app principal — and "
+        f"{subject} stayed GREEN. It iterates DEFAULT_DSN_ENV and asserts the earlier member "
+        f"wins, so reordering the tuple reorders its expectation with it: it grades the WALK "
+        f"(sabotage S3b, for every pair, which is real value) and none of the ORDER (S3a). "
+        f"What did go red: {sorted(reds) or 'nothing at all'}."
     )
 
 
@@ -3839,6 +3964,22 @@ def test_t181_the_live_dsn_layer_scan_is_armed() -> None:
     ), f"the live connected-principal test is not in the scan's view: {sorted(live)}"
 
 
+def _t181_asserts_on_the_principal(name: str) -> bool:
+    """Whether that test asks the DATABASE which role it connected as.
+
+    Setting two variables proves nothing on its own — the question T-151 was reported as is
+    "which principal did it connect as", and only a test that reads ``current_user`` (or the
+    role it resolved) back can answer it.
+    """
+    from apps.trust.tests import test_events_hardening as module
+
+    function = getattr(module, name, None)
+    if function is None:
+        return False
+    source = inspect.getsource(function)
+    return bool(re.search(r"current_user|connected_as|current_role", source, re.IGNORECASE))
+
+
 def _t181_live_dsn_tests() -> dict[str, set[str]]:
     """Docker-marked DB-backed tests in test_events_hardening.py -> the DSN vars each SETS.
 
@@ -3853,7 +3994,11 @@ def _t181_live_dsn_tests() -> dict[str, set[str]]:
             continue
         marks = {mark.name for mark in getattr(function, "pytestmark", ())}
         requested = set(inspect.signature(function).parameters)
-        if "docker" not in marks or not (requested & _DATASTORE_FIXTURES):
+        # The DERIVED roster, not T-212's hand-typed one. Wiring this gate's satisfiability
+        # through a frozenset T-291 measures as incomplete would make a correct fix written
+        # against, say, `events_dsn` invisible here — and this gate would then stay red on it.
+        datastore = set(_t291_datastore_fixtures()) | set(_DATASTORE_FIXTURES)
+        if "docker" not in marks or not (requested & datastore):
             continue
         targets: set[str] = set()
         for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(function)))):
@@ -3888,9 +4033,17 @@ def test_t181_some_live_test_opens_a_connection_with_both_dsn_variables_set() ->
     never exercised against a real connection.
     """
     live = _t181_live_dsn_tests()
-    with_both = {name: targets for name, targets in live.items() if len(targets) >= 2}
+    # BOTH conditions, because either alone is satisfiable without adding coverage: a test
+    # could set two variables and never look at what it connected as, or assert on the
+    # principal while still isolating down to one variable — which is what today's does.
+    with_both = {
+        name: targets
+        for name, targets in live.items()
+        if len(targets) >= 2 and _t181_asserts_on_the_principal(name)
+    }
     assert with_both, (
-        f"no live database test sets more than one ledger DSN variable before connecting: "
+        f"no live database test both sets more than one ledger DSN variable AND asserts on "
+        f"the principal it connected as: "
         f"{ {name: sorted(targets) for name, targets in live.items()} }. Precedence is "
         f"therefore graded only by string-level tests that read their expectation off "
         f"DEFAULT_DSN_ENV (see T-289), and the one arrangement a deployment actually presents "
@@ -3950,11 +4103,18 @@ def test_t290_the_binding_shim_gate_asserts_on_the_bodies_it_reads() -> None:
     expressions = _t290_assert_expressions(
         test_the_elected_primary_binding_shim_has_exactly_one_home
     )
-    assert any("bodies" in text for text in expressions), (
+    # `len(bodies)`, not merely the NAME `bodies`. A substring test would be satisfied by
+    # `assert bodies is not None` — decoration demanded in order to remove decoration. The
+    # ungraded half of T-167 is "do the copies AGREE", and agreement is a statement about how
+    # many DISTINCT bodies there are.
+    counted = [text for text in expressions if re.search(r"len\s*\(\s*bodies\s*\)", text)]
+    assert counted, (
         f"test_the_elected_primary_binding_shim_has_exactly_one_home computes `bodies` and "
         f"asserts only on {expressions}. Nothing grades whether the shim copies AGREE, which "
         f"is the half of T-167 that says 'a fix applied to one copy and not the others "
-        f"silently reintroduces the module-identity bug'."
+        f"silently reintroduces the module-identity bug'. The assertion is VACUOUS while one "
+        f"real file exists, which is the state today — and that is the point: it has to be "
+        f"there before a future fourth copy can be caught by it."
     )
 
 
@@ -3995,6 +4155,37 @@ def _t291_fixture_graph() -> tuple[dict[str, list[str]], set[str], dict[str, str
             if "_require_services" in body or "_require(" in body:
                 seeds.add(name)
     return params, seeds, homes
+
+
+def _t291_roster_is_a_literal() -> bool:
+    """Whether ``_DATASTORE_FIXTURES`` is assigned a hand-typed collection of string constants.
+
+    Read from this module's own AST. The ticket is about DERIVATION, so a gate that only
+    compared contents could be closed by typing the missing names in — which is the defect,
+    performed.
+    """
+    tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "_DATASTORE_FIXTURES"
+            for target in node.targets
+        ):
+            continue
+        literals = [
+            item
+            for item in ast.walk(node.value)
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        ]
+        calls = [
+            item
+            for item in ast.walk(node.value)
+            if isinstance(item, ast.Call)
+            and not (isinstance(item.func, ast.Name) and item.func.id == "frozenset")
+        ]
+        return bool(literals) and not calls
+    return False
 
 
 def _t291_datastore_fixtures() -> dict[str, str]:
@@ -4067,10 +4258,37 @@ def test_t291_the_datastore_fixture_roster_is_derived_and_not_typed() -> None:
         f"instead of typing it."
     )
 
+    # And the roster must be DERIVED, not merely correct today. Without this the cheapest
+    # green is to type the six escapees into the frozenset — which leaves the hand-typed
+    # roster hand-typed and the "a fixture added later escapes" defect completely intact,
+    # i.e. it closes the ticket by doing the thing the ticket is about.
+    assert not _t291_roster_is_a_literal(), (
+        "_DATASTORE_FIXTURES is still a hand-typed frozenset of string constants. Its "
+        "CONTENTS may agree with the conftest today, and the assertion above says they do — "
+        "but the ticket is about how the roster is OBTAINED, not what it currently holds. A "
+        "datastore fixture added next week escapes a literal exactly as before. Compute it "
+        "from the fixture graph, the way _t291_datastore_fixtures does."
+    )
+
 
 # --------------------------------------------------------------------------------------
 # T-275 — T-237's kind detector misses the house style and greens on prose
 # --------------------------------------------------------------------------------------
+def _t275_detects(text: str) -> bool:
+    """Ask the T-237 kind detector about ``text``, WITHOUT pinning how it is implemented.
+
+    The remedy this gate prescribes is "read emissions from the AST". The natural shape of
+    that is a function, not a compiled pattern — so a gate that called ``_KIND_EMISSION.search``
+    directly would raise ``AttributeError`` against its own fix, and a raising test under
+    ``xfail(strict=True)`` is still XFAIL, never XPASS. The ticket could then never be observed
+    as closed. This accepts either shape.
+    """
+    detector = _KIND_EMISSION
+    if hasattr(detector, "search"):
+        return bool(detector.search(text))
+    return bool(detector(text))
+
+
 def test_t275_the_kind_detector_sweep_is_armed() -> None:
     """The detector still matches the two quoted forms, so the repro grades the GAP.
 
@@ -4078,11 +4296,11 @@ def test_t275_the_kind_detector_sweep_is_armed() -> None:
     be red for the same uninteresting reason and a "fix" that deleted the pattern would
     close them.
     """
-    assert _KIND_EMISSION.search('{"kind": "blacklisted"}'), "the quoted-dict form is not matched"
-    assert _KIND_EMISSION.search('append(store, kind="blacklist_expired")'), (
+    assert _t275_detects('{"kind": "blacklisted"}'), "the quoted-dict form is not matched"
+    assert _t275_detects('append(store, kind="blacklist_expired")'), (
         "the keyword-literal form is not matched"
     )
-    assert not _KIND_EMISSION.search('{"kind": "reconciled"}'), (
+    assert not _t275_detects('{"kind": "reconciled"}'), (
         "the detector matches a kind it was never about, so it grades nothing specific"
     )
 
@@ -4116,7 +4334,7 @@ def test_t275_the_kind_detector_reads_emissions_and_not_prose() -> None:
             "the ledger-writer house style": "append(store, kind=LedgerEventKind.blacklisted)",
             "the expiry in the same style": "append(store, kind=LedgerEventKind.blacklist_expired)",
         }.items()
-        if not _KIND_EMISSION.search(text)
+        if not _t275_detects(text)
     ]
     prose = [
         label
@@ -4125,7 +4343,7 @@ def test_t275_the_kind_detector_reads_emissions_and_not_prose() -> None:
             "a docstring": '"""Explains why kind="blacklisted" matters."""\n',
             "a string literal": "MESSAGE = 'set kind=\"blacklist_expired\" to delist'\n",
         }.items()
-        if _KIND_EMISSION.search(text)
+        if _t275_detects(text)
     ]
     assert (unseen, prose) == ([], []), (
         f"the kind detector misses real emissions {unseen} and accepts prose {prose}. The "
@@ -4138,27 +4356,69 @@ def test_t275_the_kind_detector_reads_emissions_and_not_prose() -> None:
 # --------------------------------------------------------------------------------------
 # T-302 — frozen ledger kinds nothing produces
 # --------------------------------------------------------------------------------------
-def _t302_emitters(kind: str) -> list[str]:
-    """Product files that plausibly EMIT ``kind``, by any spelling this repo writes.
+def _t302_kinds_named_in(source: str) -> set[str]:
+    """Ledger kinds this module names AS A VALUE, read from the AST and never from text.
 
-    Deliberately GENEROUS — a quoted dict entry, a keyword literal, a ``*_KIND`` constant, or
-    the enum attribute all count. Being generous makes this under-report unemitted kinds, so
-    a kind this finds nothing for really is produced by nothing; the cost is that a constant
-    a module merely CONSUMES reads as an emission, which is why the repro names the kinds it
-    found rather than trusting a count.
+    Four spellings, because the repo writes all four: a ``{"kind": "x"}`` dict entry, a
+    ``kind="x"`` keyword, a ``*_KIND = "x"`` module constant, and ``LedgerEventKind.x``.
+
+    AST rather than regex, and that is not a refinement — it is the difference between a gate
+    and a formality. A whole-file regex for a ``kind = "shown"`` spelling matches a COMMENT, a
+    docstring and a string literal, so the ticket could be closed by writing a sentence.
+    T-275, ninety lines below, declares that exact property fatal in another gate; filing both
+    would have been incoherent. Measured: comment, docstring and string-literal samples all
+    return the empty set here.
+
+    Still deliberately GENEROUS about what counts as producing: a module that declares a kind
+    constant counts even if it only ever CONSUMES that kind. Generosity makes this
+    under-report absence, so anything it reports as unproduced really is — which is the
+    direction a gate must err in.
     """
-    patterns = (
-        re.compile(rf'["\']kind["\']\s*:\s*["\']{re.escape(kind)}["\']'),
-        re.compile(rf'\bkind\s*=\s*["\']{re.escape(kind)}["\']'),
-        re.compile(rf'_KIND\s*(?::[^=\n]+)?=\s*["\']{re.escape(kind)}["\']'),
-        re.compile(rf"\bLedgerEventKind\.{re.escape(kind)}\b"),
-    )
-    found: list[str] = []
-    for path in _t_lane_product_python_files():
-        source = path.read_text(encoding="utf-8", errors="ignore")
-        if any(pattern.search(source) for pattern in patterns):
-            found.append(str(path.relative_to(REPO_ROOT)))
-    return found
+    import warnings
+
+    try:
+        with warnings.catch_warnings():
+            # Product sources carry regexes written as plain strings; parsing them here
+            # re-emits their SyntaxWarnings against `<unknown>`, which is noise this sweep
+            # adds to every run. Same suppression `_t256_calls` already makes.
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    named: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "kind"
+                    and isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                ):
+                    named.add(value.value)
+        elif isinstance(node, ast.keyword) and node.arg == "kind":
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                named.add(node.value.value)
+        elif isinstance(node, ast.Assign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            constant = node.value
+            if isinstance(constant, ast.Constant) and isinstance(constant.value, str):
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id.endswith("_KIND"):
+                        named.add(constant.value)
+        elif isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name) and node.value.id == "LedgerEventKind":
+                named.add(node.attr)
+    return named
+
+
+def _t302_emitters(kind: str) -> list[str]:
+    """Product files that produce ``kind``. See :func:`_t302_kinds_named_in` for the rule."""
+    return [
+        str(path.relative_to(REPO_ROOT))
+        for path in _t_lane_product_python_files()
+        if kind in _t302_kinds_named_in(path.read_text(encoding="utf-8", errors="ignore"))
+    ]
 
 
 def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
@@ -4166,36 +4426,62 @@ def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
 
     Not xfail. A sweep that found nothing for every kind would make the repro red for the
     wrong reason; a sweep that found something for every kind would make it green while the
-    unemitted kinds stayed unemitted. Both control kinds below are produced outside
-    ``apps/trust``, so this control is not grading a file this lane can edit.
+    unemitted kinds stayed unemitted.
+
+    Every control kind below is produced OUTSIDE ``apps/trust`` — ``feedback`` in
+    ``apps/buyer``, ``code_created`` in ``apps/exchange``, ``refund`` in
+    ``services/shopify-stub`` — so this control is not grading a file this lane can edit.
+    ``reconciled`` was here and was removed for exactly that reason: its only producer is
+    ``apps/trust/src/reconcile/engine.py``.
     """
-    for kind in ("feedback", "reconciled", "code_created"):
-        assert _t302_emitters(kind), f"the sweep finds no producer for {kind!r}, which has one"
+    for kind in ("feedback", "code_created", "refund"):
+        producers = _t302_emitters(kind)
+        assert producers, f"the sweep finds no producer for {kind!r}, which has one"
+        assert not any(path.startswith("apps/trust/") for path in producers), (
+            f"{kind!r} is now produced inside apps/trust ({producers}), so this control has "
+            f"started grading a file this lane can edit and is no longer a control"
+        )
     assert not _t302_emitters("definitely_not_a_ledger_kind"), (
         "the sweep matches a kind that does not exist, so it cannot report an absence"
     )
+    # The property T-275 declares fatal in another gate, asserted here rather than assumed.
+    for prose in ('# kind = "shown"\n', '"""kind = \'shown\' here"""\n', "M = 'kind=\"shown\"'\n"):
+        assert "shown" not in _t302_kinds_named_in(prose), (
+            f"prose satisfies the emitter sweep ({prose!r}), so T-302 could be closed by "
+            f"writing a sentence — which is the disqualification T-275 states below"
+        )
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-302: 'shown' and 'checkout_pixel' are reserved in every frozen vocabulary and "
-        "emitted by no product code — checkout_pixel compounds it, since reconcile/engine.py "
-        "is a three-way reconciler permanently missing one of its three inputs and pixel/src/ "
-        "holds only a .gitkeep; remove this marker with the fix"
+        "T-302: SIX frozen ledger kinds are reserved in every vocabulary and produced by no "
+        "product code — auction_closed, auction_opened, checkout_redirect, order_fulfilled, "
+        "policy_event and shown. The auction lifecycle accounts for three of them, so the "
+        "ledger cannot reconstruct an auction it ran; remove this marker with the fix"
     ),
 )
 def test_t302_every_frozen_ledger_kind_has_something_that_produces_it() -> None:
     """A vocabulary entry nothing can produce is a promise the system cannot keep.
 
-    The published contract is worse than silent about it: ``trust.openapi.json`` uses
-    ``claim_verified`` as its example body, so the document advertises events the system had
-    no producer for. ``checkout_pixel`` is the sharpest of the three — ``reconcile/engine.py``
-    reconciles three inputs and one of them can never arrive, because ``pixel/src/`` contains
-    nothing but a ``.gitkeep``.
+    SIX of the eighteen frozen kinds have no producer: ``auction_closed``,
+    ``auction_opened``, ``checkout_redirect``, ``order_fulfilled``, ``policy_event`` and
+    ``shown``. Three of those are the auction lifecycle, so the ledger cannot reconstruct an
+    auction the exchange actually ran — it can only see the bids.
 
-    The sweep is generous on purpose (see :func:`_t302_emitters`), so anything it reports as
-    unproduced really is.
+    The published contract is worse than silent about this class: ``trust.openapi.json`` uses
+    ``claim_verified`` as its example body, and until this branch nothing produced that one
+    either.
+
+    NOT among the six, and the ticket is wrong about it: ``checkout_pixel`` IS named as a
+    value, by ``apps/trust/src/reconcile/engine.py``'s ``PIXEL_KIND`` constant. The
+    reconciler's third input is still unbuilt (``pixel/src/`` holds only a ``.gitkeep``), so
+    the ticket's underlying concern is real — but it is a different defect from "no product
+    code names this kind", and this gate measures the latter. The measurement is the
+    authority here, not the ticket text.
+
+    The sweep is generous on purpose (see :func:`_t302_kinds_named_in`), so anything it
+    reports as unproduced really is.
     """
     from trust.events import LEDGER_EVENT_KINDS
 
@@ -4267,10 +4553,14 @@ def test_t261_the_trust_snapshot_it_publishes_is_actually_served() -> None:
     in ``apps/exchange`` and are that lane's to build; a served route is the precondition for
     all three.
     """
-    missing = sorted(_t261_published_trust_paths() - _t261_served_trust_paths())
+    served = _t261_served_trust_paths()
+    missing = sorted(_t261_published_trust_paths() - served)
     assert "/snapshot" not in missing, (
-        f"trust publishes {missing} and serves none of them. /snapshot in particular is the "
-        f"server half of T-064's acceptance 3: apps/trust/src/main.py discovers routers by "
-        f"globbing <feature>/routes.py and there is no snapshot/routes.py, so the snapshot "
-        f"the exchange is specified to cache cannot be requested at all."
+        f"/snapshot is published in trust.openapi.json and the booted app serves "
+        f"{sorted(served)} — it is not among them. That is the server half of T-064's "
+        f"acceptance 3: apps/trust/src/main.py discovers routers by globbing "
+        f"<feature>/routes.py and there is no snapshot/routes.py, so the snapshot the "
+        f"exchange is specified to cache and refresh on a version bump cannot be requested "
+        f"at all. Also published and unserved, and not this ticket's: "
+        f"{[path for path in missing if path != '/snapshot']}."
     )
