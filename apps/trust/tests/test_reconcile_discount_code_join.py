@@ -1003,3 +1003,240 @@ def test_the_merchant_still_chooses_which_of_its_own_promises_it_is_graded_again
         "the order was graded against the promise whose code it named — if this changes, the "
         "redemption oracle this docstring asks for has landed and this test should say so"
     )
+
+
+# =====================================================================================
+# an order must never silently disappear — the worst outcome this module has, because a
+# wrong verdict is visible in the output and a missing order is not
+# =====================================================================================
+def test_a_bridge_names_its_checkout_and_nothing_else() -> None:
+    """A ``code_created`` carrying an ``order_id`` must not merge two unrelated orders.
+
+    ``apps/exchange/src/auction/ledger.py`` says "extra keys are welcome" at the producing
+    boundary, so an enriched bridge payload is a sanctioned shape rather than an attack — and
+    the bridge below carries NO discount code at all, so this is not about codes. Measured
+    when a bridge contributed its full key set::
+
+        with the bridge admitted   1 -> R1  100.0  honored
+        with it ignored            2 -> R1  100.0  honored
+                                        R2  500.0  NOT honored   <- lost
+    """
+    other_token = "8" * 32
+    enriched_bridge = code_created()
+    enriched_bridge["payload"].pop("code")
+    enriched_bridge["payload"].pop("discount_code")
+    enriched_bridge["payload"]["order_id"] = "gid://shopify/Order/5500000000002"
+    assert discount_codes_of(enriched_bridge) == (), "this bridge names no code at all"
+
+    emitted = reconcile(
+        [
+            accepted(),
+            accepted(token=other_token),
+            order_paid(token=AUTHORIZED_TOKEN),
+            order_paid(
+                token=other_token,
+                code=None,
+                order_ref="gid://shopify/Order/5500000000002",
+                total_price=3890.0,
+            ),
+            enriched_bridge,
+        ]
+    )
+    by_ref = {event["payload"]["order_ref"]: event["payload"] for event in emitted}
+    assert len(emitted) == 2, f"a bridge merged two orders and one was lost: {sorted(by_ref)}"
+    assert by_ref["gid://shopify/Order/5500000000002"]["price_honored"] is False
+
+
+def test_one_site_wide_promo_code_does_not_delete_every_orders_reconciliation() -> None:
+    """The measured cost of refusing a whole component instead of one edge.
+
+    Shopify puts EVERY applied code in ``discount_codes``, so a store running one standing
+    promo alongside the exchange's single-use codes puts that promo on every order. Under a
+    component-wide refusal those orders are all one component, and measured, forty orders
+    with forty valid single-use bridges reconciled to ZERO — the feature deleted by an
+    ordinary marketing decision, silently.
+
+    The per-code step drops the promo alone; every genuine bridge survives.
+    """
+    page: list[dict[str, Any]] = []
+    for index in range(8):
+        token = f"{index:032d}"
+        code = f"PSX-HOUSE{index:03d}"
+        page.append(accepted(token=token))
+        page.append(code_created(token=token, code=code))
+        paid = order_paid(
+            token=f"P{index:031d}",
+            order_ref=f"gid://shopify/Order/55000000000{index:02d}",
+            total_price=389.0 if index % 2 == 0 else 3890.0,
+        )
+        paid["payload"]["discount_codes"] = [{"code": code}, {"code": "WELCOME10"}]
+        page.append(paid)
+
+    emitted = reconcile(page)
+    assert len(emitted) == 8, (
+        f"one site-wide promo code cost {8 - len(emitted)} of 8 orders their reconciliation"
+    )
+    assert sum(event["payload"]["price_honored"] for event in emitted) == 4
+
+
+def test_a_bridge_does_not_vote_on_which_store_an_event_belongs_to() -> None:
+    """One shop's ``checkout_redirect`` must not make another shop's webhook unattributable.
+
+    A real ``orders/paid`` names its shop in a header, so an ingested webhook can arrive with
+    no ``store_id`` and adopt one from the checkout token it shares with the offer. Measured
+    when bridges voted: shop B emitting a redirect that named shop A's token took the vote
+    from one candidate to two, and A's 3890-against-389 overcharge stopped being graded.
+    """
+    unattributed = order_paid(token=AUTHORIZED_TOKEN, code=None, total_price=3890.0)
+    unattributed["store_id"] = None
+    poacher = {
+        "event_id": "checkout_redirect:poacher",
+        "ts": "2026-01-01T00:00:01+00:00",
+        "kind": "checkout_redirect",
+        "store_id": "store-brightbean",
+        "payload": {"checkout_token": AUTHORIZED_TOKEN, "discount_code": "PSX-POACHER1"},
+    }
+
+    (event,) = reconcile([accepted(), unattributed, poacher])
+    assert event["store_id"] == STORE
+    assert event["payload"]["price_honored"] is False
+
+
+def test_a_code_link_does_not_hand_an_order_a_foreign_checkouts_pixel() -> None:
+    """``pixel_price`` / ``pixel_agrees`` are published, so a wrong pixel is a wrong finding.
+
+    The module records a persistently disagreeing pixel as a finding about the integration. A
+    code edge that pulled in a bridge group holding a DIFFERENT checkout's beacon fabricated
+    exactly that finding — measured, ``pixel_missing: true`` became a foreign beacon's
+    ``pixel_price: 7.0, pixel_agrees: false``.
+    """
+    foreign = checkout_pixel(token=AUTHORIZED_TOKEN, store=STORE)
+    foreign["payload"]["total_price"] = 7.0
+
+    (event,) = reconcile([accepted(), code_created(), order_paid(), foreign])
+    payload = event["payload"]
+    assert payload["pixel_missing"] is True, (
+        f"a foreign checkout's beacon was published as this order's: {payload['pixel_price']}"
+    )
+    assert payload["pixel_price"] is None and payload["pixel_agrees"] is False
+
+
+# =====================================================================================
+# the money readers, on the shapes a real merchant actually sends
+# =====================================================================================
+@pytest.mark.parametrize(
+    ("label", "application", "expected"),
+    [
+        (
+            "order-wide 20% is the promise kept",
+            {
+                "type": "discount_code",
+                "value": "20.0",
+                "value_type": "percentage",
+                "target_selection": "all",
+            },
+            (20.0, True, True),
+        ),
+        (
+            "20% off ONE line is not 20% off the order",
+            {
+                "type": "discount_code",
+                "value": "20.0",
+                "value_type": "percentage",
+                "target_selection": "entitled",
+            },
+            (None, False, False),
+        ),
+        (
+            "a fixed amount cannot be compared to a percentage",
+            {
+                "type": "discount_code",
+                "value": "20.0",
+                "value_type": "fixed_amount",
+                "target_selection": "all",
+            },
+            (None, False, False),
+        ),
+        (
+            "value_type junk must not hijack an explicit percentage type",
+            {"type": "percentage", "value": 20.0, "value_type": 0},
+            (20.0, True, True),
+        ),
+        (
+            "the stub's own no-discount shape is a complete statement",
+            {
+                "type": "discount_code",
+                "value": "0.0",
+                "value_type": "percentage",
+                "target_selection": "all",
+            },
+            (0.0, True, False),
+        ),
+    ],
+)
+def test_the_discount_reader_on_the_shapes_a_real_webhook_carries(
+    label: str, application: dict[str, Any], expected: tuple[Any, bool, bool]
+) -> None:
+    """Each row is a wrong answer that was measured, not a shape imagined for the test.
+
+    ``None`` means *unknown* and translates to ``unsupported`` (0.5); ``0.0`` means "nothing
+    was applied" and, against a promise, to ``contradicted`` (2.0). Confusing the two either
+    penalises a store for the SHAPE of its discount or lets a broken promise off with a
+    third of the penalty.
+    """
+    webhook = real_order_paid(percentage=0.0)
+    webhook["payload"]["discount_applications"] = [application]
+    (event,) = reconcile([promised_twenty_percent(), code_created(), webhook])
+    payload = event["payload"]
+    assert (
+        payload["observed_discount_percentage"],
+        payload["discount_comparable"],
+        payload["discount_honored"],
+    ) == expected, label
+
+
+def test_both_application_spellings_are_read_not_the_first_one_present() -> None:
+    """An empty camelCase list beside a populated snake_case one is not "no discount".
+
+    Taking the first alias that happened to be a list made a normaliser that defensively
+    writes ``discountApplications: []`` grade every honest store ``contradicted``.
+    """
+    webhook = real_order_paid(percentage=20.0)
+    webhook["payload"]["discountApplications"] = []
+    (event,) = reconcile([promised_twenty_percent(), code_created(), webhook])
+    assert event["payload"]["observed_discount_percentage"] == 20.0
+    assert event["payload"]["discount_honored"] is True
+
+
+@pytest.mark.parametrize(
+    ("total", "expected"),
+    [
+        ("389.00", (389.0, True, True)),
+        ("1,234", (1234.0, True, False)),
+        ("1.234,56", (None, False, False)),  # a locale this function cannot read
+        ("nan", (None, False, False)),
+        ("inf", (None, False, False)),
+        ("-inf", (None, False, False)),
+    ],
+)
+def test_a_price_that_cannot_be_read_is_unknown_and_not_a_verdict(
+    total: str, expected: tuple[Any, bool, bool]
+) -> None:
+    """``price_comparable`` exists so a malformed webhook cannot manufacture a contradiction.
+
+    Three shapes walked straight past it. ``"nan"`` parsed and came back
+    ``price_comparable: True, price_honored: False`` — a 2.0 ``contradicted`` invented out of
+    a malformed body, and a ``NaN`` in the emitted payload is not valid JSON either.
+    ``"-inf"`` came back honored, minting the store a 1.0 ``fulfilled``. And stripping commas
+    turned the European ``"1.234,56"`` into ``1.23456``, so €1 234,56 against a €100 promise
+    read as a kept promise — a 12x overcharge graded green.
+    """
+    webhook = order_paid()
+    webhook["payload"]["total_price"] = total
+    (event,) = reconcile([accepted(), code_created(), webhook])
+    payload = event["payload"]
+    assert (
+        payload["observed_price"],
+        payload["price_comparable"],
+        payload["price_honored"],
+    ) == expected
