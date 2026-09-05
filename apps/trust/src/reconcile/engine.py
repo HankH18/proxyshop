@@ -200,9 +200,37 @@ def _promised(accepted: Any) -> dict[str, Any]:
     }
 
 
-#: Separator between a store scope and a join key. A control character, so it cannot occur
-#: inside a checkout token or an order reference and collapse two keys into one.
+#: Separator between a store scope and a join key. A control character, so it does not occur
+#: inside a checkout token or an order reference by accident and collapse two keys into one.
+#:
+#: "By accident" is doing real work in that sentence, which is why :func:`_key_component`
+#: exists. A composed key is now ``{store}\x1f[discount_code\x1f]{value}``, and every one of
+#: those components is a string somebody else chose. Unescaped, a store calling itself
+#: ``s\x1fdiscount_code`` and reporting an order whose checkout token is ``PSX-ABCD1234``
+#: composes ``s\x1fdiscount_code\x1fPSX-ABCD1234`` — byte-for-byte the key store ``s``'s
+#: single-use code composes. It would join another shop's authorized checkout and be graded
+#: against that shop's promise. Escaping the separator out of every component closes it, and
+#: closes the same forgery through ``store_id`` alone, which pre-dates the code namespace.
 _SCOPE_SEPARATOR = "\x1f"
+
+#: ``%`` first, so the escape sequence cannot be forged by a value that legitimately contains
+#: ``%1F``. Same construction as :data:`_ID_ESCAPES`, applied to a different separator.
+_KEY_ESCAPES = (("%", "%25"), (_SCOPE_SEPARATOR, "%1F"))
+
+
+def _key_component(value: str) -> str:
+    """One component of a composed join key, with the separator escaped out of it."""
+    for raw, escaped in _KEY_ESCAPES:
+        value = value.replace(raw, escaped)
+    return value
+
+
+def _key_component_decoded(value: str) -> str:
+    """:func:`_key_component` undone — the original value, for publishing back out."""
+    for raw, escaped in reversed(_KEY_ESCAPES):
+        value = value.replace(escaped, raw)
+    return value
+
 
 #: The scope events whose store could not be determined are filed under. They join each other
 #: and nothing else, which is the pre-existing behaviour — not an improvement, just not a
@@ -256,7 +284,7 @@ def _join_keys(event: Any) -> tuple[str, ...]:
         payload.get("order_id"),
     ):
         if candidate is not None and str(candidate).strip():
-            keys.append(str(candidate).strip())
+            keys.append(_key_component(str(candidate).strip()))
     return tuple(dict.fromkeys(keys))
 
 
@@ -341,7 +369,7 @@ _CODE_NAMESPACE = "discount_code"
 
 def _code_key(code: str) -> str:
     """One discount code as a join key that only other discount codes can match."""
-    return f"{_CODE_NAMESPACE}{_SCOPE_SEPARATOR}{code}"
+    return f"{_CODE_NAMESPACE}{_SCOPE_SEPARATOR}{_key_component(code)}"
 
 
 #: Which half of the checkout each code-bearing kind speaks for. The two halves are counted
@@ -377,7 +405,7 @@ def _scoped_keys(keys: tuple[str, ...], scope: str) -> tuple[str, ...]:
     simply disappeared. That is the reconciliation escape hatch :class:`ReconciliationInputError`
     exists to close, reached through a field a store does not even have to omit.
     """
-    return tuple(f"{scope}{_SCOPE_SEPARATOR}{key}" for key in keys)
+    return tuple(f"{_key_component(scope)}{_SCOPE_SEPARATOR}{key}" for key in keys)
 
 
 class _Groups:
@@ -681,7 +709,7 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         # happens to be a discount code carries a second namespace on top of the store's. A
         # control character has no business appearing in an emitted order reference, and
         # splitting on only the FIRST separator would have leaked one.
-        fallback = root.split(_SCOPE_SEPARATOR)[-1]
+        fallback = _key_component_decoded(root.split(_SCOPE_SEPARATOR)[-1])
         emitted.append(
             reconciled_event(
                 order_ref=str(order_ref) if order_ref is not None else fallback,

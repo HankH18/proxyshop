@@ -236,9 +236,16 @@ def test_control_without_the_orders_code_the_same_three_events_reconcile_to_noth
 
 
 def test_control_without_the_bridges_code_the_join_collapses() -> None:
-    """``code_created`` keeps its token but loses the code — the bridge stops bridging."""
+    """``code_created`` keeps its token but loses the code — the bridge stops bridging.
+
+    ``permalink_url`` is left in place on purpose, and it still spells the code:
+    ``…/cart/1:1?discount=PSX-XRN6JSN9``. The join must not be recoverable from it. Mining a
+    key out of a URL would mean reading a *rendered* field rather than a declared one, and a
+    permalink is a string a store can put anything into.
+    """
     bridge = without(without(code_created(), "code"), "discount_code")
-    bridge["payload"].pop("permalink_url")  # the code also appears inside the URL
+    assert CODE in bridge["payload"]["permalink_url"]
+
     assert reconcile([accepted(), bridge, order_paid()]) == []
 
 
@@ -529,3 +536,102 @@ def test_reconcile_is_deterministic_across_two_runs_over_one_stream() -> None:
     """The emitted event is the ledger's, so a second pass must produce the same bytes."""
     stream = [accepted(), code_created(), checkout_pixel(), order_paid()]
     assert reconcile(copy.deepcopy(stream)) == reconcile(copy.deepcopy(stream))
+
+
+# =====================================================================================
+# the separator, which three different components now share
+# =====================================================================================
+SEP = "\x1f"
+
+
+def test_a_store_id_cannot_be_spelled_to_forge_another_shops_code_key() -> None:
+    """The composed key is ``{store}\\x1f[discount_code\\x1f]{value}``, and all three parts
+    are strings somebody else chose.
+
+    The discount-code namespace made this reachable, which is why the escaping arrived with
+    it: a store calling itself ``store-northroast\\x1fdiscount_code`` and reporting an order
+    whose *checkout token* is the literal string ``PSX-XRN6JSN9`` composes exactly the key the
+    honest shop's *discount code* composes. Measured with the escape removed, on this page::
+
+        1 reconciled event
+        store_id='store-northroast\\x1fdiscount_code'
+        order_ref='gid://shopify/Order/9900000000001'   <- the forged shop's order
+        product_ref='prod-northroast-hx'  promised_price=389.0   <- the honest shop's promise
+        observed_price=999.0  price_honored=False
+
+    Two frauds in one: the forged order is graded against a promise it never made, and
+    ``store-northroast``'s own honest order disappears from the output entirely — the group
+    already held a webhook, so ``setdefault`` kept the forged one. Note the count is 1 either
+    way, so ``len(emitted) == 1`` is not the assertion that catches this.
+    """
+    forged = order_paid(
+        token=CODE,  # a "checkout token" that is really another shop's code
+        code=None,
+        order_ref="gid://shopify/Order/9900000000001",
+        total_price=999.0,
+        store=f"{STORE}{SEP}discount_code",
+    )
+    # The forged webhook arrives FIRST, which is the ordering that steals rather than merely
+    # self-destructs: whichever webhook reaches the group first is the one that gets graded.
+    emitted = reconcile([forged, accepted(), code_created(), order_paid()])
+
+    assert [event["store_id"] for event in emitted] == [STORE], (
+        "a forged store_id reached another shop's checkout: "
+        f"{[(e['store_id'], e['payload']['order_ref']) for e in emitted]}"
+    )
+    assert emitted[0]["payload"]["order_ref"] == ORDER_REF, (
+        "the honest shop's own order was displaced by the forged one"
+    )
+    assert emitted[0]["payload"]["observed_price"] == 389.0
+    assert emitted[0]["payload"]["price_honored"] is True
+
+
+def test_the_separator_and_its_escape_survive_a_round_trip_into_a_published_field() -> None:
+    """A value carrying the separator, or its escape sequence, still names its own order.
+
+    ``%`` is escaped first so a code that legitimately contains ``%1F`` cannot spell the
+    escape of a real separator — the same construction ``event_id`` already uses for ``:``.
+    """
+    for hostile in (f"PSX{SEP}HOSTILE", "PSX%1FHOSTILE", "PSX%25HOSTILE"):
+        emitted = reconcile(
+            [
+                accepted(),
+                code_created(code=hostile),
+                order_paid(code=hostile),
+            ]
+        )
+        assert len(emitted) == 1, f"{hostile!r} lost its order"
+        assert emitted[0]["payload"]["order_ref"] == ORDER_REF
+
+        # …and it does not collide with the honest code, which is a different string.
+        both = reconcile(
+            [
+                accepted(),
+                code_created(code=hostile),
+                order_paid(code=hostile),
+                accepted(token="7" * 32),
+                code_created(token="7" * 32, code=CODE),
+                order_paid(
+                    token="8" * 32,
+                    code=CODE,
+                    order_ref="gid://shopify/Order/5500000000002",
+                    total_price=999.0,
+                ),
+            ]
+        )
+        assert len(both) == 2, f"{hostile!r} merged with {CODE!r}"
+
+
+def test_no_published_field_leaks_the_internal_separator() -> None:
+    """Whatever the input spells, the emitted event stays free of control characters."""
+    emitted = reconcile(
+        [
+            accepted(store=f"{STORE}{SEP}x"),
+            code_created(store=f"{STORE}{SEP}x"),
+            order_paid(store=f"{STORE}{SEP}x"),
+        ]
+    )
+    assert len(emitted) == 1
+    payload = emitted[0]["payload"]
+    assert SEP not in str(payload["order_ref"])
+    assert SEP not in str(payload["checkout_token"])
