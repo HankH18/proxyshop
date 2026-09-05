@@ -310,8 +310,15 @@ def test_a_code_redeemed_by_two_different_orders_joins_neither_of_them() -> None
 
     A merchant that applies one code to two orders would, without the ambiguity guard, merge
     both into one group; ``members.setdefault`` keeps the FIRST webhook and the second
-    order's overcharge is never graded and never raised. Emitting one verdict here would be
-    strictly worse than emitting none, because the missing order leaves no trace.
+    order's overcharge is never graded and never raised. Measured on exactly this page, with
+    the guard neutralised::
+
+        1 reconciled event
+        order_ref='gid://shopify/Order/5500000000001'  observed_price=389.0  honored=True
+
+    — the honest first order, and order 5500000000002 at 999.00 simply gone. Emitting that
+    one verdict is strictly worse than emitting none, because the missing order leaves no
+    trace, while two paid orders naming one code and no verdict at all is legible.
 
     Note what the assertion is: **zero**, not one. A reconciler that "handles" the collision
     by grading whichever order it saw first passes a ``len(...) == 1`` test and loses money.
