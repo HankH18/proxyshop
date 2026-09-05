@@ -930,3 +930,38 @@ the part. The runbook split that came out of the same review needed **no** amend
 S6 test globs every markdown file under `docs/demo/` and concatenates them before checking
 headings), so it is recorded where it belongs — `SPEC.md` §Success criteria and `tickets.json`
 T-085/T-087 — and carries no D number._
+
+## D-ESC-027 — `pending_remeasure: [7]` stays, and the final report must say why
+
+**Ruled by Hank, 2026-09-05, in session:** *"I'll go with your suggestion for esc-027"* — Option A
+plus Option C, the pair recommended.
+
+**The decision.** `pending_remeasure: [7]` is NOT cleared. No `measure --cycle 7` is run and no
+value is hand-recorded. **The final report must state that the run's terminal signal is withheld
+by a flag no honest action can clear**, and must treat *"all 12 metrics at target plus the demo's
+own measured gap list"* as the real completion signal.
+
+**Why, preserved so nobody re-opens it on a worse basis.** `analyze` makes `not pending` an
+absolute veto on `all_done`, with no override flag (the neighbouring `manual_metrics` conjunct has
+one; this does not). The flag is CORRECT — amendment 3 moved a target at `2026-09-02T14:42:49` and
+cycle 7's measurement is stamped `2026-09-02T13:19:45`, 83 minutes earlier, so cycle 7's baseline
+was genuinely invalidated. The problem is not that it fired; it is that nothing can honestly
+discharge it:
+
+* cycle 7's HEAD **is** recorded (`dd6027bb` in `state.json` head_history), so an honest re-measure
+  is conceivable in principle;
+* but `measure` has **no** `--at` / `--ref` / `--worktree` flag — it measures the current checkout,
+  so `measure --cycle 7` would stamp TODAY's values into cycle 7's row;
+* and `.swarm-loop/state.json` lookup does not walk up from a linked worktree (measured 2026-09-05
+  via the `slot` allocator), so running `measure` from a tree checked out at `dd6027bb` cannot
+  write the primary checkout's history either;
+* and the skill states explicitly that a hand-entered `record` does not satisfy the flag.
+
+So the only mechanically available action corrupts the only record of what the trajectory actually
+was, in order to satisfy a flag whose entire purpose is protecting that record. Leaving it standing
+costs nothing and destroys nothing, and the flag keeps telling the truth.
+
+**Filed against the harness too** (Option C), because it is a defect in the instrument rather than
+a fact about this project: a mechanism that demands a re-measure it provides no way to perform for
+a past cycle. See `W09040017-06` and `B09040017-04` in the machine-level harness document, which
+already carry it from the watchdog's side.

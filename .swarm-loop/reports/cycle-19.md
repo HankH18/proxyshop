@@ -74,3 +74,14 @@ right, and the fix I proposed would have consumed a lane editing correct fields.
 EVIDENCE, so an infrastructure red and a real red leave identical artifacts. T-210 already says
 this probe cannot tell the two apart; this epoch is its first concrete instance, and it resolved
 correctly only because the log survived in a scratchpad.
+
+## Terminal signal — ruled, not deferred
+
+`all_done` is False for exactly one reason: `pending_remeasure: [7]`. Hank ruled on 2026-09-05
+that it STAYS, and that this report and the final report must say so rather than clear it. The
+flag is correct and no honest action discharges it — `measure` cannot be pointed at a past ref,
+and the only available command would write today's values into cycle 7's row. See
+`.swarm-loop/decisions.md` D-ESC-027 for the full record and ESC-027 for the ask it answers.
+
+**So the completion signal for this run is: all 12 metrics at target, plus the demo's own measured
+`Did NOT run, and why` list — which stands at 1.**
