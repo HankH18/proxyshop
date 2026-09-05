@@ -6,14 +6,31 @@
  * to render anything else, and a test that reached a real service could not tell the two
  * apart when the service was down.
  *
- * The bodies below are not shaped like the measured ones, they ARE the measured ones. Every
- * store id is one of the three in `apps/buyer/devstack/demo-market.json`; every exclusion
- * reason begins with a prefix from `apps/exchange/src/ranking/reasons.py` and carries the
- * detail that filter actually formats after it; every `components` key is one of
- * `contracts.ranking.RANK_FEATURES`; the denial reason is what `exchange.eligibility` writes
- * and `orchestration.solicitation._denial` prefixes. A fixture that invents the shape of the
- * thing it tests tests nothing — the assertions here are that the shell surfaces these
- * fields verbatim, and a made-up field cannot be surfaced verbatim.
+ * MEASURED, and said precisely rather than sweepingly, because "these are the measured ones"
+ * is itself a claim a fixture can get wrong:
+ *
+ *   * `INTENT` is what `buyer_svc.intent.clarifier.clarify` really returns for the opening
+ *     utterance below — query, budget band, both hard constraints, no preferences — so
+ *     `cluster_id` is genuinely the hash of THIS intent. The page prints that id and calls it
+ *     "a hash of the use case, the budget band and the constraints above", and an earlier
+ *     fixture asserted a cluster id belonging to a different intent, which made that sentence
+ *     false on the page while the suite stayed green.
+ *   * The three store ids are the only three in `apps/buyer/devstack/demo-market.json`, and
+ *     the default auction body is that market as written: all three are `"eligible"`, so all
+ *     three are solicited and all three really bid, and demo-fastfleece is then thrown out by
+ *     the ranking's blacklist filter. The market file states exactly this.
+ *   * Every exclusion prefix comes from `apps/exchange/src/ranking/reasons.py` and every
+ *     detail after it was produced by running that filter, not composed here. The denial
+ *     string is `exchange.eligibility`'s as re-prefixed by `solicitation._denial`.
+ *   * Every `components` key is one of `contracts.ranking.RANK_FEATURES` and the five values
+ *     sum to the stated `rank_score`.
+ *
+ * CONSTRUCTED, and labelled where it appears: `CLARIFY_ANSWER`'s question and `unresolved`
+ * (the real clarifier asks nothing for that one utterance, and a test of the clarify loop
+ * needs a question), the denial in `DENIED_VARIANT`, and the silent store in `SILENT_ENTRY`.
+ * Those three are states this market does not currently produce. Each uses only real
+ * vocabulary and each is reached through a fixture named for what it is, so no test claims
+ * the demo market produces them.
  *
  * Interaction is driven with `fireEvent` rather than `user-event`, which this workspace does
  * not carry — same as `intent/intent-confirm.test.tsx` and `shortlist/shortlist.test.tsx`.
@@ -63,16 +80,26 @@ const PERMALINK = 'https://demo-woolworks.example.com/cart/1:1?discount=PSX-MC4D
 const CREATED_AT = '2026-09-05T00:00:00Z'
 const RECORDED_AT = '2026-09-05T00:00:01Z'
 
+// MEASURED. `clarify(['I want a warm merino wool beanie for winter, under $100'])` on this
+// tree returns exactly this — the whole utterance as `query`, `budget_band` '100-250', those
+// two hard constraints with no `unit`, and NO preferences. It matters that the fields match
+// rather than merely look plausible: `_cluster_id` hashes the query, the budget band, the
+// constraints and the preferences, so any other combination makes `cl-4d3c3e4edadaa5e7` the
+// hash of something else — and the page renders that id as "a hash of the use case, the
+// budget band and the constraints above". `intent_id` is per-session by design and is the one
+// field here that is not reproducible.
+const UTTERANCE = 'I want a warm merino wool beanie for winter, under $100'
+
 const INTENT: Intent = {
   intent_id: 'int-demo-1',
   cluster_id: 'cl-4d3c3e4edadaa5e7',
-  query: 'warm merino wool beanie for winter',
+  query: UTTERANCE,
   budget_band: '100-250',
   hard_constraints: [
     { field: 'material', op: 'eq', value: 'merino-wool' },
-    { field: 'price_usd', op: 'lte', value: 100, unit: 'USD' },
+    { field: 'price_usd', op: 'lte', value: 100 },
   ],
-  preferences: [{ field: 'warmth', direction: 'maximize', weight: 0.6 }],
+  preferences: [],
 }
 
 const RAW_SLOT = {
@@ -102,10 +129,12 @@ const RENDERED_SLOT = {
   store_domain: '',
 }
 
-// The two stores that were solicited, with the prices `apps/buyer/devstack/demo-market.json`
-// gives them. demo-woolworks bids its catalogue price; demo-fastfleece's agent does not
-// answer, so the exchange represents it at its own list price and says `no_response` — which
-// is the one `fallback_reason` `wire.ts` recognises by name.
+// MEASURED against `apps/buyer/devstack/demo-market.json`. All three stores carry
+// `"eligibility": "eligible"`, so all three are solicited and all three really bid — the
+// market file's own note on demo-fastfleece says so: "it is solicited, it really bids, and it
+// is then thrown out by the ranking's blacklist filter". Prices are the catalogue prices in
+// that file. An earlier fixture made demo-fastfleece a silent `no_response` fallback, which
+// contradicted both the market file and its own exclusion reason below.
 const ENTRIES = [
   {
     store_id: 'demo-woolworks',
@@ -116,22 +145,34 @@ const ENTRIES = [
     fallback_reason: null,
   },
   {
+    store_id: 'demo-alpine-supply',
+    tier: 1,
+    fallback: false,
+    unit_price: 72.0,
+    total_price: 72.0,
+    fallback_reason: null,
+  },
+  {
     store_id: 'demo-fastfleece',
     tier: 1,
-    fallback: true,
+    fallback: false,
     unit_price: 45.0,
     total_price: 45.0,
-    fallback_reason: 'no_response',
+    fallback_reason: null,
   },
 ]
 
-// demo-fastfleece earns both, and both are real. `blacklisted_store` is
-// `ranking/filters.py`'s own f-string for a store the trust snapshot blacklists (R12) — the
-// market file marks this one `"blacklisted": true`. `hard_constraint_unsatisfied` is
-// `hard_constraint_reasons` wrapped around `HardCriterion.decide`'s verdict, measured by
-// running that criterion against a fleece attribute. There is no `price_over_budget` prefix
-// on this exchange; `EXCLUSION_REASON_PREFIXES` names the eight that exist and that is not
-// one of them.
+const SOLICITED = ['demo-woolworks', 'demo-alpine-supply', 'demo-fastfleece']
+
+// demo-fastfleece earns both, and both are real. `blacklisted_store` is `ranking/filters.py`'s
+// f-string for a store the trust snapshot blacklists (R12) — the market file marks this one
+// `"blacklisted": true`. The `hard_constraint_unsatisfied` detail is `HardCriterion.decide`'s
+// verdict, measured by running that criterion against a verified `fleece` reading, which is
+// the reading a store that BID with claims produces. (A fallback carries `claims: []` and
+// yields the "carries no such attribute" verdict instead — see `SILENT_EXCLUSION` below. The
+// two are not interchangeable, and pairing a fallback entry with this string described an
+// auction that cannot have happened.) There is no `price_over_budget` prefix on this
+// exchange; `EXCLUSION_REASON_PREFIXES` names the eight that exist and that is not one.
 const EXCLUDED = [
   {
     bid_ref: FASTFLEECE_BID_REF,
@@ -144,21 +185,52 @@ const EXCLUDED = [
   },
 ]
 
-// A denial is not an exclusion: a denied store is never solicited, so it has no bid to
-// exclude. demo-alpine-supply is the market's third store, and this is the reason string
-// `exchange.eligibility.StaticSellerEligibility.check` writes for `unavailable` once
-// `orchestration.solicitation._denial` has put the status word in front of it.
-const DENIED = [
+// Nothing is denied in this market: a denial happens before solicitation, and all three
+// stores are eligible. The default body therefore carries an EMPTY `denied[]`, which is the
+// honest reading of the market file rather than a row added so a panel has something to show.
+const DENIED: readonly { store_id: string; status: string; reason: string }[] = []
+
+// CONSTRUCTED, from the market file's own note: "Change `eligibility` to 'blacklisted' and it
+// lands in `denied[]` instead, which is a different (also real) story." Produced by running
+// `StaticSellerEligibility({'demo-fastfleece': BLACKLISTED}).check(...)` through `_denial`.
+// In this state demo-fastfleece is never solicited, so it has no entry and no exclusion.
+const DENIED_VARIANT = [
   {
-    store_id: 'demo-alpine-supply',
-    status: 'unavailable',
-    reason: 'unavailable: static-eligibility: demo-alpine-supply is unavailable',
+    store_id: 'demo-fastfleece',
+    status: 'blacklisted',
+    reason: 'blacklisted: static-eligibility: demo-fastfleece is blacklisted',
   },
 ]
 
-// MEASURED. The five keys are `contracts.ranking.RANK_FEATURES` — there is no `fit` or bare
-// `trust`-plus-`fit` pair anywhere in the formula — and the five values sum to `rank_score`,
-// which is what makes them components rather than decoration.
+// CONSTRUCTED: a store whose agent did not answer with a usable bid. `no_response` is the one
+// `fallback_reason` `wire.ts` recognises by name, and the exchange then represents the store
+// at the list price its roster row carried. Paired with the exclusion reason a fallback
+// really produces — `claims: []` makes every hard constraint undecidable, measured by running
+// `hard_constraint_reasons([], [material eq merino-wool])`.
+const SILENT_ENTRY = {
+  store_id: 'demo-alpine-supply',
+  tier: 1,
+  fallback: true,
+  unit_price: 72.0,
+  total_price: 72.0,
+  fallback_reason: 'no_response',
+}
+
+const SILENT_EXCLUSION = {
+  bid_ref: `${AUCTION_ID}:demo-alpine-supply`,
+  store_id: 'demo-alpine-supply',
+  exclusion_reasons: [
+    "hard_constraint_unsatisfied: 'material': the candidate carries no such attribute, so " +
+      'the constraint is undecidable and does not count as satisfied (R19) — only a verified ' +
+      'supporting claim satisfies a hard constraint (R19)',
+  ],
+}
+
+// MEASURED. The five keys are `contracts.ranking.RANK_FEATURES` — there is no `fit` key and
+// no bare `fit`/`trust` pair anywhere in the formula — and the five values sum to exactly the
+// stated `rank_score` of 0.564, which is what makes them components rather than decoration.
+// The `trust` term is 0.164 = 0.82 x 0.20, and 0.82 is demo-woolworks' own `trust.score` in
+// the market file.
 const RANKED = [
   {
     bid_ref: BID_REF,
@@ -174,18 +246,24 @@ const RANKED = [
   },
 ]
 
-function auctionBody(
-  slots: readonly unknown[],
-  overrides: Partial<Record<'recorded_at', string>> = {},
-) {
+interface BodyOverrides {
+  readonly recorded_at?: string
+  readonly entries?: readonly unknown[]
+  readonly excluded?: readonly unknown[]
+  readonly denied?: readonly unknown[]
+  readonly ranked?: readonly unknown[]
+  readonly solicited?: readonly string[]
+}
+
+function auctionBody(slots: readonly unknown[], overrides: BodyOverrides = {}) {
   return {
     auction_id: AUCTION_ID,
     shortlist: { auction_id: AUCTION_ID, slots },
-    entries: ENTRIES,
-    excluded: EXCLUDED,
-    denied: DENIED,
-    ranked: RANKED,
-    solicited: ['demo-woolworks', 'demo-fastfleece'],
+    entries: overrides.entries ?? ENTRIES,
+    excluded: overrides.excluded ?? EXCLUDED,
+    denied: overrides.denied ?? DENIED,
+    ranked: overrides.ranked ?? RANKED,
+    solicited: overrides.solicited ?? SOLICITED,
     recorded_at: overrides.recorded_at ?? RECORDED_AT,
   }
 }
@@ -239,6 +317,8 @@ function demoService(
     readonly createdAt?: string
     /** `''` is a real answer too: the buyer service types `recorded_at` as nullable. */
     readonly recordedAt?: string
+    /** Swap any diagnostic array — used by the constructed-state tests. */
+    readonly body?: BodyOverrides
   } = {},
 ) {
   const rawSlots = options.slots ?? [RAW_SLOT]
@@ -255,7 +335,7 @@ function demoService(
           201,
         )
       case auctionPath(AUCTION_ID): {
-        const body = auctionBody(rawSlots, { recorded_at: recordedAt })
+        const body = auctionBody(rawSlots, { ...options.body, recorded_at: recordedAt })
         return json(options.forgotten === true ? { ...body, shortlist: null } : body)
       }
       case RENDER_PATH:
@@ -295,11 +375,13 @@ describe('the wire the journey owns', () => {
     expect(calls.map((call) => call.path)).toEqual([`/buyer/auctions/${AUCTION_ID}`])
     expect(calls[0]?.init?.method).toBe('GET')
     expect(record.auction_id).toBe(AUCTION_ID)
-    expect(record.solicited).toEqual(['demo-woolworks', 'demo-fastfleece'])
-    expect(record.entries.map((entry) => entry.fallback_reason)).toEqual([null, 'no_response'])
+    expect(record.solicited).toEqual(SOLICITED)
+    expect(record.entries.map((entry) => entry.fallback_reason)).toEqual([null, null, null])
     expect(record.excluded[0]?.exclusion_reasons).toHaveLength(2)
     expect(record.excluded[0]?.exclusion_reasons[0]).toContain('blacklisted_store:')
-    expect(record.denied[0]?.store_id).toBe('demo-alpine-supply')
+    // Nothing is denied in this market — all three stores are eligible — and the fixture
+    // says so rather than adding a row so the panel has something to show.
+    expect(record.denied).toEqual([])
     // The exchange's own five, not two this test made up.
     expect(record.ranked[0]?.components).toEqual({
       intent_match: 0.175,
@@ -328,9 +410,11 @@ describe('the wire the journey owns', () => {
     expect(entryForSlot(record, BID_REF)?.unit_price).toBe(78)
     expect(entryForSlot(record, BID_REF)?.total_price).toBe(78)
     expect(entryForSlot(record, BID_REF)?.fallback).toBe(false)
-    expect(entryForSlot(record, FASTFLEECE_BID_REF)?.fallback).toBe(true)
-    // No entry for this store: `undefined`, so the page can say so instead of showing a zero.
-    expect(entryForSlot(record, `${AUCTION_ID}:demo-alpine-supply`)).toBeUndefined()
+    expect(entryForSlot(record, FASTFLEECE_BID_REF)?.unit_price).toBe(45)
+    expect(entryForSlot(record, FASTFLEECE_BID_REF)?.fallback).toBe(false)
+    // A store this auction's report never mentions: `undefined`, so the page can say so
+    // instead of showing a zero.
+    expect(entryForSlot(record, `${AUCTION_ID}:demo-nobody`)).toBeUndefined()
 
     expect(rankedForSlot(record, BID_REF)?.rank_score).toBe(0.564)
     expect(rankedForSlot(record, FASTFLEECE_BID_REF)).toBeUndefined()
@@ -351,6 +435,24 @@ describe('the wire the journey owns', () => {
     expect(record.ranked[0]?.rank_score).not.toBe(0)
     // The components the exchange DID publish are still all there.
     expect(record.ranked[0]?.components).toEqual(RANKED[0]!.components)
+  })
+
+  it('leaves an unreadable fit_score undefined rather than defaulting it to a zero', async () => {
+    // The same rule as rank_score above, and it was NOT held here until it was fixed: "fit 0"
+    // reads as the exchange ranking this candidate last, which is a different claim from
+    // "no fit score arrived". `ShortlistSlot.fit_score` was a required `number`, so every
+    // client of it had to invent one.
+    const { fetcher } = recorder(() =>
+      json({ slots: [{ ...RENDERED_SLOT, fit_score: 'not-a-number' }] }),
+    )
+
+    const slots = await renderShortlist({ slots: [] }, fetcher)
+
+    expect(slots[0]?.fit_score).toBeUndefined()
+    expect(slots[0]?.fit_score).not.toBe(0)
+    // Everything the service DID send survives.
+    expect(slots[0]?.bid_ref).toBe(RENDERED_SLOT.bid_ref)
+    expect(slots[0]?.provenance_labels).toEqual(RENDERED_SLOT.provenance_labels)
   })
 
   it('spells the exchange own ranking components and never a formula of its own', () => {
@@ -395,7 +497,7 @@ describe('the wire the journey owns', () => {
     expect(forgotten.shortlist).toBeNull()
     // Not a shortlist with no slots — and the diagnostics are still all there.
     expect(forgotten.entries).toHaveLength(ENTRIES.length)
-    expect(forgotten.solicited).toEqual(['demo-woolworks', 'demo-fastfleece'])
+    expect(forgotten.solicited).toEqual(SOLICITED)
 
     // 2. A shortlist with no slots. A fact about the market, not about the exchange.
     const barren = recorder(() => json(auctionBody([])))
@@ -592,6 +694,19 @@ describe('the four beats', () => {
     // No currency symbol anywhere: the exchange named none, so this page names none.
     expect(screen.getByTestId('slot-prices').textContent).not.toContain('$')
 
+    // The service's whole answer is one click away on the slots-present page too, not only
+    // on the empty-shortlist panel — which is what makes "these prices came from entries[]"
+    // checkable rather than a claim the reader has to take.
+    const verbatim = screen.getByTestId('verbatim-auction').textContent ?? ''
+    expect(verbatim).toContain('The service\u2019s answer, verbatim')
+    expect(verbatim).toContain('"recorded_at": "2026-09-05T00:00:01Z"')
+    expect(verbatim).toContain('"rank_score": 0.564')
+    expect(verbatim).toContain('"unit_price": 78')
+
+    // The exchange sent one slot and one slot survived labelling, so the fault notice that
+    // exists for the other case is correctly absent.
+    expect(screen.queryByTestId('labels-dropped')).toBeNull()
+
     // The whole transcript is on the page, oldest first, as the buyer said it.
     expect(screen.getByTestId('transcript').textContent).toContain(
       'I want a warm merino wool beanie for winter, under $100',
@@ -637,39 +752,38 @@ describe('the four beats', () => {
 
     expect(screen.getByTestId('solicited').textContent).toContain('demo-fastfleece')
 
-    const silent = screen.getByTestId('entry-demo-fastfleece')
-    expect(silent.textContent).toContain('fallback: true')
-    expect(silent.textContent).toContain('fallback_reason: no_response')
-    expect(silent.textContent).toContain('unit 45, total 45')
+    // All three bid, which is what this market really does. demo-fastfleece is not silent —
+    // it is solicited, it bids at 45.00, and the ranking then throws it out.
+    const blacklisted = screen.getByTestId('entry-demo-fastfleece')
+    expect(blacklisted.textContent).toContain('fallback: false')
+    expect(blacklisted.textContent).toContain('fallback_reason: null')
+    expect(blacklisted.textContent).toContain('unit 45, total 45')
     const answered = screen.getByTestId('entry-demo-woolworks')
     expect(answered.textContent).toContain('fallback: false')
     expect(answered.textContent).toContain('fallback_reason: null')
-
-    expect(screen.getByTestId('no-response-gloss').textContent).toContain(
-      'did not answer with a usable bid',
-    )
+    // Nothing fell back, so the gloss that explains `no_response` is correctly absent.
+    expect(screen.queryByTestId('no-response-gloss')).toBeNull()
 
     const excluded = screen.getByTestId('excluded-demo-fastfleece')
     for (const reason of EXCLUDED[0]!.exclusion_reasons) {
       expect(excluded.textContent).toContain(reason)
     }
 
-    expect(screen.getByTestId('denied-demo-alpine-supply').textContent).toContain(
-      DENIED[0]!.reason,
-    )
+    // Nobody was denied, and the panel says that rather than showing an empty list.
+    expect(screen.getByTestId('denied-empty').textContent).toContain('Every rostered store')
 
-    // The three lists exist as lists, each carrying exactly the rows the service sent and no
-    // row this page padded them out with.
+    // The two lists that DO have rows carry exactly the rows the service sent, with no row
+    // this page padded them out with.
     expect(screen.getByTestId('entries').querySelectorAll(':scope > li')).toHaveLength(
       ENTRIES.length,
     )
     expect(screen.getByTestId('excluded').querySelectorAll(':scope > li')).toHaveLength(
       EXCLUDED.length,
     )
-    expect(screen.getByTestId('denied').querySelectorAll(':scope > li')).toHaveLength(
-      DENIED.length,
-    )
     expect(screen.getByTestId('verbatim-auction').textContent).toContain('recorded_at')
+    // The exchange's own shortlist really had no slots, so this IS a fact about the market
+    // and the labelling-failure notice must not appear beside it.
+    expect(screen.queryByTestId('labels-dropped')).toBeNull()
     // No fabricated row stood in for the missing options.
     expect(screen.queryByTestId(`slot-${BID_REF}`)).toBeNull()
     expect(screen.getByLabelText('Shortlist').textContent).toContain('No store was eligible')
@@ -814,15 +928,19 @@ describe('the four beats', () => {
     const line = screen.getByTestId('auction-id').textContent ?? ''
     expect(line).toContain(AUCTION_ID)
     expect(line).not.toContain('just now')
-    expect(line).not.toContain('opened')
+    // The sentence says "when the auction opened" in every case — that is the page naming
+    // the moment the exchange asked, not a clock. What must be absent is a TIMESTAMP: the
+    // `, opened {created_at}` clause the page adds only when the service sent one.
+    expect(line).not.toMatch(/opened 20\d\d-/)
     expect(line).not.toContain('recorded that answer')
   })
 
   it('says a slot has no reported price rather than showing a blank or a zero', async () => {
-    // A rendered slot for demo-alpine-supply, which this auction DENIED and therefore never
-    // solicited — so it is in no `entries[]` row and there is no price to join to it.
+    // The record EXISTS — `recorded_at` is set — and simply carries no entry for this slot's
+    // store. That is the case the page must distinguish from "no record was kept at all",
+    // which gets a different sentence, and from a zero, which is a price.
     const orphan = { ...RENDERED_SLOT, bid_ref: `${AUCTION_ID}:demo-alpine-supply` }
-    const { fetcher } = demoService({ rendered: [orphan] })
+    const { fetcher } = demoService({ rendered: [orphan], body: { entries: [] } })
     render(<Journey fetcher={fetcher} />)
 
     await walkToConfirm()
@@ -831,12 +949,60 @@ describe('the four beats', () => {
 
     const cell = screen.getByTestId(`price-${orphan.bid_ref}`)
     expect(cell.textContent).toBe('price not reported for this slot')
-    expect(cell.textContent).not.toBe('')
-    expect(cell.textContent).not.toContain('0')
     // The ranking published no row for it either, and that is said rather than left blank.
     expect(screen.getByTestId(`labels-source-${orphan.bid_ref}`).textContent).toContain(
       'rank_score not published for this slot',
     )
+    // The store id still names the store, so `?? slot.bid_ref` is not silently standing in.
+    expect(screen.getByTestId('slot-prices').textContent).toContain('demo-alpine-supply')
+  })
+
+  it('says a slot has no reported fit score rather than printing a manufactured zero', async () => {
+    // `ShortlistView` prints `fit {slot.fit_score}`. While `fit_score` was a required
+    // `number`, an unreadable one arrived here as `0` and the buyer read "fit 0" — the
+    // exchange ranking this store last. It had not.
+    const scoreless = { ...RENDERED_SLOT, fit_score: undefined }
+    const { fetcher } = demoService({ rendered: [scoreless] })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const cell = screen.getByTestId(`fit-${scoreless.bid_ref}`)
+    expect(cell.textContent).toBe('fit not reported')
+    expect(cell.textContent).not.toContain('fit 0')
+    // The slot is still offerable: a missing score is not a missing option.
+    expect(screen.getByRole('button', { name: /accept this one/i })).toBeInTheDocument()
+  })
+
+  it('blames this service, not the exchange, when no record was kept to read a price from', async () => {
+    // `_recorded_rows` answers `[]` both for an empty list and for "no record at all", and
+    // `outcome_for` reads a per-process ring of 64 — a restart or a busy run empties every
+    // diagnostic while the live shortlist is fine. `recorded_at` is what tells them apart, and
+    // saying "the exchange did not report a price" here would misfile this service's own
+    // bookkeeping as a fact about the market.
+    const { fetcher } = demoService({
+      recordedAt: '',
+      // `ranked` too, and for the same reason as the other four: with no record kept there
+      // is no ranking row to read either, and leaving RANKED in place would have
+      // `rankedForSlot` find a row and `rankLine` print the exchange's score off a record
+      // this test says was never kept.
+      body: { entries: [], excluded: [], denied: [], ranked: [], solicited: [] },
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const cell = screen.getByTestId(`price-${BID_REF}`).textContent ?? ''
+    expect(cell).toContain('this service kept no record of the auction')
+    expect(cell).not.toContain('price not reported for this slot')
+
+    const rank = screen.getByTestId(`labels-source-${BID_REF}`).textContent ?? ''
+    expect(rank).toContain('this service kept no record of the auction')
+    expect(rank).not.toContain('rank_score not published for this slot')
   })
 
   it('prints a zero price and says what a zero there can also mean', async () => {
@@ -884,11 +1050,16 @@ describe('the four beats', () => {
     await screen.findByTestId('shortlist-forgotten')
 
     const notice = screen.getByTestId('shortlist-forgotten').textContent ?? ''
-    expect(notice).toContain('no longer holds this auction')
-    expect(notice).toContain('fifteen minutes')
-    // The distinction the whole outcome exists for: this is the shortlist expiring, NOT the
-    // market coming back empty, and the page says which.
-    expect(notice).toContain('not an empty market')
+    expect(notice).toContain('has no shortlist for this auction')
+    // It must NOT pick a cause. The exchange's own 404 names four and chooses none, and its
+    // docstring says filing eviction under the TTL "sends the reader to the wrong knob".
+    expect(notice).toContain('without saying why')
+    expect(notice).toContain('has not closed yet')
+    expect(notice).toContain('never existed')
+    expect(notice).toContain('fifteen-minute lifetime')
+    expect(notice).toContain('pushed it out')
+    // The distinction the whole outcome exists for: this is not the market coming back empty.
+    expect(notice).toContain('not the market coming back empty')
 
     // No shortlist section at all, so no Accept button a buyer could press into a refusal.
     expect(screen.queryByLabelText('Shortlist')).toBeNull()
@@ -898,7 +1069,12 @@ describe('the four beats', () => {
     await screen.findByLabelText('What the exchange reported when this auction ran')
     expect(screen.getByTestId('recorded-not-live').textContent).toContain('None of this is live')
     expect(screen.getByTestId('entry-demo-woolworks').textContent).toContain('fallback: false')
-    expect(screen.getByTestId('denied-demo-alpine-supply')).toBeInTheDocument()
+    // Nothing was denied in this market — `DENIED` is empty by design — so the recorded
+    // rows that prove the panel is the RECORD rather than a live read are the entries and
+    // the exclusions the exchange really did report.
+    expect(screen.getByTestId('excluded-demo-fastfleece').textContent).toContain(
+      'blacklisted_store:',
+    )
     // ...and NOT under the empty-market heading, which would be a different claim.
     expect(screen.queryByLabelText('Why the shortlist is empty')).toBeNull()
 
@@ -906,6 +1082,7 @@ describe('the four beats', () => {
     const line = screen.getByTestId('auction-id').textContent ?? ''
     expect(line).toContain('no longer holds the shortlist it answered with')
     expect(line).not.toContain('0 options')
+    expect(line).not.toContain('just now')
 
     // `/render` labels a shortlist; there is none, so it was never called.
     expect(calls.map((call) => call.path)).not.toContain(RENDER_PATH)
@@ -949,6 +1126,54 @@ describe('the four beats', () => {
     expect(screen.queryByTestId('shortlist-forgotten')).toBeNull()
     expect(screen.queryByLabelText('Shortlist')).toBeNull()
     expect(screen.queryByLabelText('Why the shortlist is empty')).toBeNull()
+  })
+
+  it('says the lists are empty because nothing was recorded, not because nobody was asked', async () => {
+    // `_recorded_rows` answers `[]` both for a list the exchange really sent empty and for
+    // "this service holds no record of the auction", and `outcome_for` reads a per-process
+    // ring of 64 — a restart or a busy run empties all five while the live shortlist is
+    // fine. `recorded_at` is the only field that tells the two apart. Without this test the
+    // panel could go back to reading a gap in its own bookkeeping as a verdict on the market
+    // and nothing would notice.
+    const { fetcher } = demoService({
+      slots: [],
+      recordedAt: '',
+      body: { entries: [], excluded: [], denied: [], solicited: [], ranked: [] },
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+
+    expect(screen.getByTestId('no-record').textContent).toContain('holds no record of this auction')
+    expect(screen.getByTestId('no-record').textContent).toContain('recorded_at')
+
+    // Each of the four says "not recorded", and none of them makes the market claim.
+    expect(screen.getByTestId('solicited-empty').textContent).toBe(
+      'Not recorded here, so this page cannot say which stores were asked.',
+    )
+    expect(screen.getByTestId('entries-empty').textContent).toBe(
+      'Not recorded here, so this page cannot say what any store answered.',
+    )
+    expect(screen.getByTestId('excluded-empty').textContent).toBe(
+      'Not recorded here, so this page cannot say what the filters refused.',
+    )
+    expect(screen.getByTestId('denied-empty').textContent).toBe(
+      'Not recorded here, so this page cannot say who was allowed to bid.',
+    )
+
+    // The four sentences that would be claims about the exchange are absent, every one.
+    const page = document.body.textContent ?? ''
+    expect(page).not.toContain('It asked no store at all')
+    expect(page).not.toContain('No store answered')
+    expect(page).not.toContain('The eligibility filters refused nothing')
+    expect(page).not.toContain('Every rostered store was allowed to answer')
+    expect(page).not.toContain('The auction ran.')
+
+    // And the price and ranking absences beside the slots blame this service too, not the
+    // exchange — the same fact, said the same way, wherever it shows up.
+    expect(page).not.toContain('price not reported for this slot')
   })
 
   it('says each diagnostic list was empty rather than padding it with a row', async () => {
@@ -995,5 +1220,227 @@ describe('the four beats', () => {
     expect(screen.queryByTestId('excluded')).toBeNull()
     expect(screen.queryByTestId('denied')).toBeNull()
     expect(screen.queryByTestId('no-response-gloss')).toBeNull()
+  })
+
+  it('says the store did not bid rather than crediting it with a price it never bid', async () => {
+    // CONSTRUCTED, and `SILENT_ENTRY`'s own comment says so: in this market all three stores
+    // really bid. A `fallback: true` row is the exchange standing in for a store, and the
+    // number on it came off the caller-supplied roster row, so the sentence for it may not be
+    // the one used for a bid. The store id here is the one `SILENT_ENTRY` names, joined to
+    // the slot through the bid ref the exchange would have minted for it.
+    const silent = { ...RENDERED_SLOT, bid_ref: `${AUCTION_ID}:demo-alpine-supply` }
+    const { fetcher } = demoService({
+      rendered: [silent],
+      body: { entries: [ENTRIES[0]!, SILENT_ENTRY, ENTRIES[2]!] },
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    // The numbers are still printed — the stand-in price is a real number the service sent —
+    // and the roster row is named as where it came from, because `RosterEntry.list_price` is
+    // an assertion the caller made, not a price this store quoted.
+    const cell = screen.getByTestId(`price-${silent.bid_ref}`).textContent ?? ''
+    expect(cell).toBe(
+      'unit 72, total 72 — the store did not bid, so the exchange stood in for it at the ' +
+        'list price its roster row carried, as the exchange reported this auction.',
+    )
+    expect(cell).not.toContain('the price this store bid')
+  })
+
+  it('says an entry that carried neither price reported none, and not that it has no row', async () => {
+    // Defensive rather than observed: `AuctionEntryOut` declares `unit_price` and
+    // `total_price` as REQUIRED floats, so an entry the exchange built always carries both.
+    // `readEntries` reads an `unknown` body and answers `undefined` for anything that is not
+    // a number, and this is the page's half of that. The row EXISTS here — the verbatim
+    // block below shows it — so this is a statement about the prices, not about a store the
+    // report never mentioned.
+    const priceless = {
+      store_id: 'demo-alpine-supply',
+      tier: 1,
+      fallback: false,
+      fallback_reason: null,
+    }
+    const slot = { ...RENDERED_SLOT, bid_ref: `${AUCTION_ID}:demo-alpine-supply` }
+    const { fetcher } = demoService({
+      rendered: [slot],
+      body: { entries: [ENTRIES[0]!, priceless, ENTRIES[2]!] },
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    expect(screen.getByTestId(`price-${slot.bid_ref}`).textContent).toBe(
+      'price not reported for this slot',
+    )
+    // The record really does carry a row for this store — so the sentence above came from
+    // the "entry present, neither price" path and not from "no entry at all".
+    expect(screen.getByTestId('verbatim-auction').textContent).toContain(
+      '"store_id": "demo-alpine-supply"',
+    )
+  })
+
+  it('says a rank_score it could not read is unreadable, and never prints it as a zero', async () => {
+    // The wire-level test above proves `readRanked` leaves it `undefined`; this one proves
+    // the page then says so. A zero would read as the exchange having scored this candidate
+    // at the bottom, which it did not — this client just found no number.
+    const scoreless = {
+      bid_ref: BID_REF,
+      store_id: 'demo-woolworks',
+      components: RANKED[0]!.components,
+    }
+    const { fetcher } = demoService({ body: { ranked: [scoreless] } })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const rank = screen.getByTestId(`labels-source-${BID_REF}`).textContent ?? ''
+    // Pinned with the join that follows it, so a mutation that merely prepends words to the
+    // sentence still shows up here rather than sliding past a substring match.
+    expect(rank).toContain(
+      'rank_score not a readable number in the exchange row — intent_match=0.175',
+    )
+    expect(rank).not.toContain('rank_score 0')
+    // The row IS published — this is not the "no row for this slot" absence.
+    expect(rank).not.toContain('rank_score not published for this slot')
+    // ...and the components the exchange did publish are still printed beside it.
+    expect(rank).toContain('intent_match=0.175')
+    expect(rank).toContain('delivery_fit=0.05')
+  })
+
+  it('says an entry row carried no price rather than leaving a blank beside the store', async () => {
+    // Same defensive shape as above, one panel further in: `WhyEmpty` renders `entries[]`
+    // itself, and `''` there would render an empty span, which beside a store's name reads
+    // as a price of nothing rather than as no price reported.
+    const priceless = {
+      store_id: 'demo-alpine-supply',
+      tier: 1,
+      fallback: false,
+      fallback_reason: null,
+    }
+    const { fetcher } = demoService({ slots: [], body: { entries: [priceless] } })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+
+    // The WHOLE row, not a substring of it: `toContain('no price reported')` would also pass
+    // against a row that said something else and happened to end with those words.
+    expect(screen.getByTestId('entry-demo-alpine-supply').textContent).toBe(
+      'demo-alpine-supply tier 1 fallback: false fallback_reason: null no price reported',
+    )
+  })
+
+  it('glosses the one fallback_reason it recognises, beside the raw string and not over it', async () => {
+    // CONSTRUCTED, exactly as `SILENT_ENTRY` and `SILENT_EXCLUSION` say: this market's three
+    // stores all answer, so nothing here is a state it produces. Both rows use the exchange's
+    // own vocabulary — `no_response` is its value for a store whose agent sent no usable bid,
+    // and the exclusion is the verdict a claim-less fallback really earns.
+    const { fetcher } = demoService({
+      slots: [],
+      body: {
+        entries: [ENTRIES[0]!, SILENT_ENTRY, ENTRIES[2]!],
+        excluded: [EXCLUDED[0]!, SILENT_EXCLUSION],
+      },
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+
+    // The raw value is printed as the exchange spelled it...
+    const row = screen.getByTestId('entry-demo-alpine-supply').textContent ?? ''
+    expect(row).toContain('fallback: true')
+    expect(row).toContain('fallback_reason: no_response')
+    expect(row).toContain('unit 72, total 72')
+
+    // ...and the plain-English gloss sits beside it rather than replacing it.
+    const gloss = screen.getByTestId('no-response-gloss').textContent ?? ''
+    expect(gloss).toContain('fallback_reason: "no_response"')
+    expect(gloss).toContain('did not answer with a usable bid')
+    expect(gloss).toContain('represented it at its list price instead of dropping it')
+
+    // The exclusion a claim-less fallback earns, printed as the filter spelled it.
+    expect(screen.getByTestId('excluded-demo-alpine-supply').textContent).toContain(
+      SILENT_EXCLUSION.exclusion_reasons[0]!,
+    )
+    // The two stores that did answer are untouched, so the gloss is attached to the one row
+    // it is about rather than to the panel.
+    expect(screen.getByTestId('entry-demo-woolworks').textContent).toContain('fallback: false')
+    expect(screen.getByTestId('entry-demo-fastfleece').textContent).toContain('fallback: false')
+  })
+
+  it('prints a denial as the exchange spelled it, in place of the nobody-was-denied line', async () => {
+    // CONSTRUCTED, from `DENIED_VARIANT`'s own comment and the market file's note: mark
+    // demo-fastfleece `blacklisted` instead of `eligible` and it is refused BEFORE
+    // solicitation. So in this state it is not in `solicited`, has no entry and has no
+    // exclusion — the other three lists are the two stores that were allowed to answer.
+    const { fetcher } = demoService({
+      slots: [],
+      body: {
+        denied: DENIED_VARIANT,
+        entries: [ENTRIES[0]!, ENTRIES[1]!],
+        excluded: [],
+        solicited: ['demo-woolworks', 'demo-alpine-supply'],
+      },
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+
+    const denied = screen.getByTestId('denied-demo-fastfleece').textContent ?? ''
+    expect(denied).toContain('demo-fastfleece')
+    expect(denied).toContain(DENIED_VARIANT[0]!.status)
+    expect(denied).toContain(DENIED_VARIANT[0]!.reason)
+    // The list has a row, so the sentence that stands in for an empty list is gone.
+    expect(screen.queryByTestId('denied-empty')).toBeNull()
+    // ...and a store that was never asked appears in none of the other three lists.
+    expect(screen.queryByTestId('entry-demo-fastfleece')).toBeNull()
+    expect(screen.queryByTestId('excluded-demo-fastfleece')).toBeNull()
+    expect(screen.getByTestId('solicited').textContent).not.toContain('demo-fastfleece')
+    expect(screen.getByTestId('excluded-empty').textContent).toContain('refused nothing')
+  })
+
+  it('blames the labelling step, not the market, when options were sent and none survived', async () => {
+    // The exchange's shortlist carried a slot and `POST /buyer/shortlist/render` answered
+    // with none. `stage.slots` is that step's output, not the exchange's, so running the
+    // empty-market panel here would report a fault on this page's side of the wire to the
+    // buyer as a verdict about the market.
+    const { fetcher } = demoService({ slots: [RAW_SLOT], rendered: [] })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+
+    const dropped = (await screen.findByTestId('labels-dropped')).textContent ?? ''
+    // The count is the exchange's own, taken before the labelling step ran.
+    expect(dropped).toContain('The exchange sent 1 option')
+    expect(dropped).toContain('the step that labels them for display returned none')
+    expect(dropped).toContain('not an answer about the market')
+    // The panel that would say the market was empty must not run.
+    expect(screen.queryByLabelText('Why the shortlist is empty')).toBeNull()
+    // The exchange's own answer is still one click away, so the count above is checkable.
+    expect(screen.getByTestId('verbatim-auction').textContent).toContain(`"${BID_REF}"`)
+    // The sentence this whole branch exists to prevent. `ShortlistView` prints "No store was
+    // eligible for what you asked for" whenever it is handed zero slots, so an earlier
+    // version of this branch — which rendered the notice UNDERNEATH `ShortlistView` — put
+    // both on the page at once, contradicting each other. `Journey.tsx` now hoists this case
+    // into a branch of its own that renders no `ShortlistView` at all, and these two
+    // assertions are what stop that regressing.
+    expect(document.body.textContent).not.toContain('No store was eligible')
+    expect(screen.queryByLabelText('Shortlist')).toBeNull()
+    // And with no shortlist section there is no Accept button: a labelling failure is not an
+    // offer, and a control that cannot produce one must not be on the page.
+    expect(screen.queryByRole('button', { name: /accept this one/i })).toBeNull()
   })
 })

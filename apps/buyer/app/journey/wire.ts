@@ -184,6 +184,18 @@ export interface AuctionRecord {
   readonly shortlist: unknown
   /** Whether the shortlist above is a live answer or the absence of one. */
   readonly liveness: ShortlistLiveness
+  /**
+   * How many slots the LIVE shortlist carried, counted BEFORE `/render` labelled them, and
+   * `0` when there is no shortlist at all.
+   *
+   * It exists to keep two failures from wearing each other's clothes. The page decides
+   * whether to show "no store was eligible" from how many slots it ended up with, and that
+   * number is `/render`'s output, not the exchange's. If the labelling step ever returned
+   * fewer rows than it was given, a labelling failure would render as a verdict about the
+   * market. Comparing this count with the rendered one is what lets the page tell a buyer
+   * which of the two actually happened.
+   */
+  readonly shortlist_slot_count: number
   readonly entries: readonly AuctionEntry[]
   readonly excluded: readonly ExcludedBid[]
   readonly denied: readonly Denial[]
@@ -200,7 +212,8 @@ export interface RenderedSlot extends ShortlistSlot {
   readonly bid_ref: string
   /** Pushed down from the shortlist by the service, so `acceptSlot` can name the auction. */
   readonly auction_id: string
-  readonly fit_score: number
+  /** Absent when no finite score arrived — never a defaulted `0`. See `readRenderedSlots`. */
+  readonly fit_score?: number
   readonly provenance_labels: readonly string[]
   /** `exchange` | `derived` | `absent` — how the labels got there, not guessed at after. */
   readonly labels_source: string
@@ -281,6 +294,15 @@ function asString(value: unknown): string {
 
 function asFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/**
+ * The finite number `value` is, or `undefined`. The difference from
+ * {@link asFiniteNumber} is the whole point: a caller that has no honest fallback must be
+ * able to say "nothing arrived" rather than pick a number the service never sent.
+ */
+function finiteNumberOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function asArray(value: unknown): readonly unknown[] {
@@ -445,10 +467,13 @@ export function readRanked(value: unknown): readonly RankedBid[] {
  * is ever built. So the store id is exactly what follows this auction's id and its colon.
  *
  * Matched as a PREFIX against the auction id the page is showing rather than split on the
- * first `:`, because a split is a guess and a prefix match is a fact: nothing forbids a
- * colon inside an auction id, and a ref this auction did not mint has no store id this page
- * may attribute. Such a ref answers `undefined`, and the caller says so on the page instead
- * of pinning someone else's number to a slot.
+ * first `:`: nothing forbids a colon inside an auction id, so a split is a guess where a
+ * prefix match is at least a check. Not a proof, and this says so rather than overstating
+ * it — `AuctionView.auction_id` is set from the request's own path parameter, so the prefix
+ * is an echo of what this page asked for, not something read back off the exchange. What it
+ * does buy is real: a ref carrying some OTHER auction's id fails the match and answers
+ * `undefined`, and the caller then says the price is not reported rather than pinning
+ * someone else's number to a slot.
  */
 export function storeIdFromBidRef(bidRef: unknown, auctionId: string): string | undefined {
   if (!isNonEmptyString(bidRef) || !isNonEmptyString(auctionId)) return undefined
@@ -465,6 +490,17 @@ export function storeIdFromBidRef(bidRef: unknown, auctionId: string): string | 
  * is in the same `GET /buyer/auctions/{auction_id}` body, one level up, in `entries[]` keyed
  * by `store_id`. This is that join and nothing more: no arithmetic, no currency, no default.
  * A slot whose store is in no entry answers `undefined`.
+ *
+ * TWO THINGS THE CALLER MUST NOT FORGET, because this function cannot say them itself:
+ *
+ * 1. The two halves come from different clocks. `shortlist` is LIVE — the buyer service
+ *    fetches it from the exchange on this request — while `entries` is RECORDED, read out of
+ *    the `POST /auctions` answer it kept when the auction opened. `buyer_svc/auctions/
+ *    routes.py` keeps them apart on purpose. Joining them is the only way to put a price
+ *    beside a slot, so this page does it and then SAYS it did, rather than letting a buyer
+ *    read a recorded number as a live one.
+ * 2. `.find` is first-wins. `entries` is one row per rostered store, so a duplicate
+ *    `store_id` cannot come from `collect_bids` — but nothing here enforces that.
  */
 export function entryForSlot(
   record: Pick<AuctionRecord, 'auction_id' | 'entries'>,
@@ -572,9 +608,11 @@ export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<
     throw new MalformedResponseError('load auction', 'the body was not an object')
   }
   const shortlist = payload.shortlist
-  // `null` only — not `undefined`. `'shortlist' in payload` is what tells an answer that
-  // said "there is none" from an answer that failed to mention it at all.
-  const forgotten = shortlist === null && 'shortlist' in payload
+  // `null` only — never `undefined`. That single comparison is the whole discriminator: a
+  // body with no `shortlist` key reads `undefined`, and `JSON.parse` output inherits from
+  // `Object.prototype`, which has no `shortlist` of its own for the read to find. An earlier
+  // version also tested `'shortlist' in payload`, which can never change the answer.
+  const forgotten = shortlist === null
   if (!forgotten && (!isRecord(shortlist) || !Array.isArray(shortlist.slots))) {
     throw new MalformedResponseError(
       'load auction',
@@ -585,6 +623,10 @@ export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<
     auction_id: isNonEmptyString(payload.auction_id) ? payload.auction_id : wanted,
     shortlist,
     liveness: forgotten ? 'forgotten' : 'live',
+    shortlist_slot_count:
+      !forgotten && isRecord(shortlist) && Array.isArray(shortlist.slots)
+        ? shortlist.slots.length
+        : 0,
     entries: readEntries(payload.entries),
     excluded: readExcluded(payload.excluded),
     denied: readDenied(payload.denied),
@@ -619,7 +661,14 @@ export async function renderShortlist(
       slot: asString(row.slot),
       bid_ref: asString(row.bid_ref),
       auction_id: asString(row.auction_id),
-      fit_score: asFiniteNumber(row.fit_score, 0),
+      // `undefined`, never a defaulted `0` — the same rule `readRanked` applies to
+      // `rank_score` twelve lines up. "fit 0" is the exchange ranking this candidate last;
+      // "no fit score arrived" is this client failing to read one. `ShortlistSlot.fit_score`
+      // is optional so the renderer can tell a reader which of the two happened.
+      // NOTE the service manufactures its own: `buyer_svc/accept/labels.py` falls back to
+      // `0.0`, so a slot that reaches here already carrying a real zero is indistinguishable
+      // from one whose score the service could not read. That half is not this file's to fix.
+      fit_score: finiteNumberOrUndefined(row.fit_score),
       provenance_labels: asArray(row.provenance_labels).filter(isNonEmptyString),
       labels_source: asString(row.labels_source),
       trust_summary: asNumberMap(row.trust_summary),

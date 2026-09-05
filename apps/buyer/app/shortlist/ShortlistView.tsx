@@ -95,7 +95,9 @@ export function ShortlistView({
         {shortlist.slots.map((slot) => (
           <li key={slot.bid_ref} data-testid={`slot-${slot.bid_ref}`}>
             <h3>{slot.slot}</h3>
-            <p data-testid={`fit-${slot.bid_ref}`}>fit {slot.fit_score}</p>
+            <p data-testid={`fit-${slot.bid_ref}`}>
+              {slot.fit_score === undefined ? 'fit not reported' : `fit ${slot.fit_score}`}
+            </p>
             <p data-testid={`trust-${slot.bid_ref}`}>{trustLine(slot)}</p>
 
             <ul aria-label={`Where this came from: ${slot.bid_ref}`}>

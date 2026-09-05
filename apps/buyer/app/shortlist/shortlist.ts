@@ -45,7 +45,15 @@ export type TrustSummary = Readonly<Record<string, number>>
 export interface ShortlistSlot {
   readonly slot: ShortlistSlotName | string
   readonly bid_ref: string
-  readonly fit_score: number
+  /**
+   * OPTIONAL, and that is the point. A JSON body is `unknown` at runtime, so a client that
+   * types this `number` has to invent one when the field is missing or unreadable — and the
+   * value it invents is `0`, which renders as "fit 0": the exchange ranking this candidate
+   * last. That is a different claim from "the exchange sent no score", and it is the same
+   * manufactured zero that `rank_score` was corrected for. `undefined` here lets a renderer
+   * say which of the two happened.
+   */
+  readonly fit_score?: number
   readonly trust_summary?: TrustSummary
   /** OPEN list of strings, produced by the exchange (D30). Rendered, never re-derived. */
   readonly provenance_labels: readonly string[]

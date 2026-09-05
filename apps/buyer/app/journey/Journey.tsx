@@ -42,9 +42,16 @@
  *    failure banner at the top of the page — `"R3: refusing to follow this checkout
  *    permalink — …"` — with step 4 never rendered at all. `journey.test.tsx` asserts exactly
  *    that. The `permalinkRefusal` call below therefore re-checks a URL that has already
- *    passed the identical check against the identical expected domain, and cannot fire. It
- *    stays anyway: a last-line guard that never fires is still the guard, and `acceptSlot`
- *    is the wire layer a future refactor most easily loosens.
+ *    passed the identical check against the identical expected domain, and cannot fire.
+ *
+ *    "Identical" is load-bearing and is why `acceptedSlot` holds the slot OBJECT rather than
+ *    re-finding it by the `bid_ref` the service echoed back. `acceptSlot` checks against the
+ *    clicked slot's `store_domain`; a lookup keyed on the echo would return `undefined` for
+ *    an echo naming no rendered slot, fall back to `''`, and make this guard strictly WEAKER
+ *    than the check it claims to mirror — while a matching-but-different slot would make it
+ *    stricter, and it would fire on a URL nothing had actually refused. Holding the same
+ *    object removes both cases. The guard stays: one that never fires is still the guard,
+ *    and `acceptSlot` is the wire layer a future refactor most easily loosens.
  * 3. **A failure shows the status and the service's own words.** `instrumentFetcher` keeps
  *    the refused body so a bare `HTTP 503` from a reused module can be printed with the
  *    reason the service gave for it. Nothing is swallowed.
@@ -60,8 +67,10 @@
  *    `shortlist: null` once the exchange's 15-minute TTL has taken the auction away, while
  *    the recorded diagnostics survive. `wire.ts` keeps them apart as `liveness`, and this
  *    file renders the third with no `ShortlistView` and therefore no Accept: accepting an
- *    auction the exchange has forgotten cannot succeed, and a control that cannot work is
- *    worse than the sentence saying why it is not there.
+ *    auction the exchange no longer holds cannot succeed, and a control that cannot work is
+ *    worse than the sentence saying why it is not there. That sentence names no single
+ *    cause — the exchange's own 404 lists four and picks none, and the buyer service passes
+ *    on a bare `null` with no reason attached.
  */
 import { Fragment, useCallback, useId, useMemo, useState, type FormEvent } from 'react'
 
@@ -109,15 +118,20 @@ const browserFetch: Fetcher = (input, init) => fetch(input, init)
  * What the exchange reported this slot's store bid — the whole of what this page says about
  * price, and none of it arithmetic.
  *
- * The numbers are printed as they arrived. No `toFixed`, no `Intl.NumberFormat`, no currency
+ * The VALUES are printed unaltered — no `toFixed`, no `Intl.NumberFormat`, no currency
  * symbol: `entries[].unit_price` and `total_price` are bare numbers and the report names no
  * currency anywhere, so a page that added a `$` would be telling a buyer something the
- * service did not say. A slot whose store is in no entry, or an entry carrying neither
+ * service did not say. Not the same as byte-fidelity, and worth stating exactly: the wire
+ * spells these `78.0`, JSON parses that to the IEEE double 78, and JavaScript renders that
+ * as `78`. Nothing was rounded or converted — 78.0 and 78 are one number — but the digits on
+ * the page are JavaScript's spelling of it rather than the exchange's. A slot whose store is in no entry, or an entry carrying neither
  * price, says so — never a blank cell and never a zero, because a zero is a price.
  *
- * `fallback` is why the sentence has two forms. The exchange sets it when it represented a
- * store at its own list price instead of quoting a bid that store made, and calling that
- * "the price this store bid" would be this page inventing a bid nobody placed.
+ * `fallback` is why the sentence has two forms. The exchange sets it when it stood in for a
+ * store instead of quoting a bid that store made, and calling that "the price this store
+ * bid" would be this page inventing a bid nobody placed. The stand-in number comes off the
+ * caller-supplied `RosterEntry.list_price`, not from the store, so it is not called the
+ * store's own price either.
  *
  * A zero gets a sentence of its own, and it is the reason this function is not a one-liner.
  * MEASURED in `apps/exchange/src/auction/routes.py::_entries_out`, which builds this very
@@ -127,18 +141,35 @@ const browserFetch: Fetcher = (input, init) => fetch(input, init)
  * sent and says what a zero there can also mean, because a bare "unit 0" reads to a buyer
  * as free.
  */
-function bidPrice(entry: AuctionEntry | undefined): string {
-  if (entry === undefined) return 'price not reported for this slot'
+function bidPrice(entry: AuctionEntry | undefined, noRecord: boolean): string {
+  // Two different absences. With no record kept, `entries` is empty because this service
+  // has nothing to read — blaming that on the exchange would be this page misfiling its
+  // own bookkeeping as a fact about the market.
+  if (entry === undefined) {
+    return noRecord
+      ? 'no price here: this service kept no record of the auction to read one from'
+      : 'price not reported for this slot'
+  }
   const parts: string[] = []
   if (entry.unit_price !== undefined) parts.push(`unit ${entry.unit_price}`)
   if (entry.total_price !== undefined) parts.push(`total ${entry.total_price}`)
   if (parts.length === 0) return 'price not reported for this slot'
+  // NOT "its own list price". `RosterEntry.list_price` is caller-supplied — the exchange's
+  // own docstring says these "are not facts the exchange holds about a catalog, they are
+  // assertions the caller makes about one" — so attributing it to the store would be this
+  // page vouching for a number nobody authenticated.
   const provenance = entry.fallback
-    ? 'the exchange represented this store at its own list price'
+    ? 'the store did not bid, so the exchange stood in for it at the list price its roster ' +
+      'row carried'
     : 'the price this store bid'
+  // The zero means different things on the two paths, so it is not one sentence. A bid that
+  // named no price and a roster row that carried no readable list price are both reported
+  // as `0.0` here, and neither is "free".
   const zeroed =
     entry.unit_price === 0 || entry.total_price === 0
-      ? ' A zero is also what the exchange reports for an offer that named no price.'
+      ? entry.fallback
+        ? ' A zero is also what gets reported when that roster row carried no readable list price.'
+        : ' A zero is also what the exchange reports for an offer that named no price.'
       : ''
   return `${parts.join(', ')} — ${provenance}, as the exchange reported this auction.${zeroed}`
 }
@@ -146,13 +177,18 @@ function bidPrice(entry: AuctionEntry | undefined): string {
 /**
  * The exchange's published ranking for one slot, or the plain fact that it published none.
  *
- * Two absences, kept apart, because they are two different things a buyer might want to
- * know: the ranking published no row for this slot at all, and it published a row whose
- * score this client could not read as a number. Neither prints as a zero — a zero here would
- * read as the exchange having scored the candidate at the bottom.
+ * Three absences, kept apart, because they are three different things a buyer might want to
+ * know: this service kept no record to read a ranking out of; the ranking published no row
+ * for this slot; and it published a row whose score this client could not read as a number.
+ * None prints as a zero — a zero here would read as the exchange having scored the candidate
+ * at the bottom.
  */
-function rankLine(row: RankedBid | undefined): string {
-  if (row === undefined) return 'rank_score not published for this slot'
+function rankLine(row: RankedBid | undefined, noRecord: boolean): string {
+  if (row === undefined) {
+    return noRecord
+      ? 'no ranking here: this service kept no record of the auction to read one from'
+      : 'rank_score not published for this slot'
+  }
   const score =
     row.rank_score === undefined
       ? 'rank_score not a readable number in the exchange row'
@@ -184,6 +220,11 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   const [outcome, setOutcome] = useState<ClarifyOutcome | undefined>(undefined)
   const [stage, setStage] = useState<AuctionStage | undefined>(undefined)
   const [accepted, setAccepted] = useState<AcceptOutcome | undefined>(undefined)
+  // The slot object `acceptSlot` was actually handed, kept so the re-check below can use the
+  // SAME `store_domain` it checked against. Looking the slot up again by the `bid_ref` the
+  // service echoed back would not be the same thing: an echo naming no rendered slot would
+  // silently fall back to `''` and make the last-line guard weaker than the check it mirrors.
+  const [acceptedSlot, setAcceptedSlot] = useState<ShortlistSlot | undefined>(undefined)
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
   // Bumped only by an explicit "try that again". `IntentConfirm` and `ShortlistView` each
@@ -263,6 +304,7 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         const outcomeOfAccept = await acceptSlot(slot, wire.fetcher, {
           auctionId: stage.record.auction_id,
         })
+        setAcceptedSlot(slot)
         setAccepted(outcomeOfAccept)
       })
     },
@@ -271,10 +313,6 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
 
   const answers = turns.slice(1)
   const permalink = accepted?.permalink_url
-  // The slot the buyer accepted, found by the bid ref the service echoed back. It carries
-  // the `store_domain` that `acceptSlot` checked the permalink against, so the re-check
-  // below is that same check rather than a strictly weaker one done with `''`.
-  const acceptedSlot = stage?.slots.find((slot) => slot.bid_ref === accepted?.bid_ref)
   const refusal =
     permalink === undefined
       ? undefined
@@ -288,9 +326,11 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         <h1>Proxyshop</h1>
         <p className="lede">
           Say what you need. Your agent asks the exchange, the exchange asks the stores, and
-          the stores answer for themselves. Every value below arrived in an HTTP response
-          from the service on this origin during this session — there are no examples on this
-          page.
+          the stores answer for themselves. Every value below arrived in an HTTP response from
+          the service on this origin during this session, with exactly two exceptions, both
+          named where they appear and both listed under &ldquo;What is not wired yet&rdquo;:
+          your pseudonym is minted in this browser, and the grey text inside the box is a hint
+          rather than an answer.
         </p>
       </header>
 
@@ -385,10 +425,10 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             Auction {stage.record.auction_id}
             {stage.created.created_at ? `, opened ${stage.created.created_at}` : ''}. The
             exchange asked {stage.record.solicited.length}{' '}
-            {stage.record.solicited.length === 1 ? 'store' : 'stores'}
+            {stage.record.solicited.length === 1 ? 'store' : 'stores'} when the auction opened.
             {stage.record.liveness === 'forgotten'
-              ? ', and no longer holds the shortlist it answered with.'
-              : ` and came back with ${stage.slots.length} ${
+              ? ' It no longer holds the shortlist it answered with.'
+              : ` Its shortlist, re-fetched for this page, came back with ${stage.slots.length} ${
                   stage.slots.length === 1 ? 'option' : 'options'
                 }.`}
             {stage.record.recorded_at
@@ -402,14 +442,48 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                   the exchange has forgotten cannot succeed — the accept route would answer
                   `unknown_bid` — and a control that cannot work is worse than the sentence
                   explaining why it is absent. */}
+              {/* This page may not name WHICH cause. `GET /auctions/{id}/shortlist` 404s
+                  for four of them and says so itself, and its docstring is explicit that
+                  filing eviction under "the TTL took it away" is "a diagnosis that sends the
+                  reader to the wrong knob". The buyer service turns that 404 into a plain
+                  `shortlist: null` with no reason attached, so the reason is not on the wire
+                  and this page does not invent one. */}
               <p role="status" data-testid="shortlist-forgotten">
-                <strong>The exchange no longer holds this auction.</strong> Its shortlist
-                lives for fifteen minutes and that window has closed, so there is nothing live
-                to choose from here and nothing to accept. This is not a store saying no and
-                it is not an empty market &mdash; it is the shortlist having expired. What
-                follows is the report the buyer service kept from when the auction ran.
+                <strong>The exchange has no shortlist for this auction.</strong> It says so
+                without saying why. Its own answer names four possibilities and does not
+                choose between them: the auction has not closed yet, it never existed, its
+                fifteen-minute lifetime has taken it away, or a burst of newer auctions
+                pushed it out of the exchange&rsquo;s store. There is nothing live to choose
+                from here and nothing to accept. This is not the market coming back empty
+                &mdash; that would be a shortlist with no slots in it, which is a different
+                answer. What follows is the report the buyer service kept from when the
+                auction ran.
               </p>
               <WhyEmpty record={stage.record} recorded />
+            </>
+          ) : stage.record.shortlist_slot_count > 0 && stage.slots.length === 0 ? (
+            // The exchange DID send slots and the labelling step returned none of them. That
+            // is a failure in `POST /buyer/shortlist/render`, not a verdict about the market.
+            //
+            // `ShortlistView` is deliberately NOT rendered here, and that is the whole point
+            // of hoisting this out into its own branch: handed zero slots it prints "No store
+            // was eligible for what you asked for", which is exactly the claim this branch
+            // exists to stop the page making. Rendering the explanation underneath that
+            // sentence would have left both on the page, contradicting each other.
+            <>
+              <p role="alert" data-testid="labels-dropped">
+                The exchange sent {stage.record.shortlist_slot_count}{' '}
+                {stage.record.shortlist_slot_count === 1 ? 'option' : 'options'} for this
+                auction, and the step that labels them for display returned none. That is a
+                fault on this page&rsquo;s side of the wire, not an answer about the market
+                &mdash; so the options are not shown rather than being reported to you as
+                though no store was eligible. Nothing has been ordered. The exchange&rsquo;s
+                own answer is printed below, verbatim.
+              </p>
+              <details data-testid="verbatim-auction">
+                <summary>The service&rsquo;s answer, verbatim</summary>
+                <pre className="mono">{JSON.stringify(stage.record.raw, null, 2)}</pre>
+              </details>
             </>
           ) : (
             <>
@@ -434,17 +508,29 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                           {storeIdFromBidRef(slot.bid_ref, stage.record.auction_id) ?? slot.bid_ref}
                         </dt>
                         <dd data-testid={`price-${slot.bid_ref}`}>
-                          {bidPrice(entryForSlot(stage.record, slot.bid_ref))}
+                          {bidPrice(
+                            entryForSlot(stage.record, slot.bid_ref),
+                            stage.record.recorded_at === '',
+                          )}
                         </dd>
                       </Fragment>
                     ))}
                   </dl>
                   <p className="gloss" data-testid="price-provenance">
-                    The exchange&rsquo;s shortlist slot carries no price, so these came out of{' '}
-                    <code>entries[]</code> in the very same answer &mdash; printed below, verbatim
-                    &mdash; joined to each slot by the store id inside its own{' '}
-                    <code>bid_ref</code>. They are the numbers the service sent, unrounded and
-                    unconverted; it names no currency, so this page names none either.
+                    <strong>
+                      These prices are from when the auction opened, not from now.
+                    </strong>{' '}
+                    The exchange&rsquo;s shortlist slot carries no price at all, so they come
+                    from <code>entries[]</code> &mdash; the same HTTP answer, printed below
+                    verbatim, but its <em>recorded</em> half: the buyer service kept it when
+                    it opened the auction, while the slots above were re-fetched from the
+                    exchange for this page. This page joins the two halves by the store id in
+                    each slot&rsquo;s <code>bid_ref</code>; the service itself never joins
+                    them. A price that has moved since would still read here as it did then.
+                    The numbers are the ones the service sent, unrounded and unconverted, and
+                    it names no currency so this page names none &mdash; though where a total
+                    merely equals the unit price, that may be the exchange copying one into
+                    the other rather than the store quoting both.
                   </p>
 
                   <ul className="mono provenance-source" aria-label="Where each label came from">
@@ -454,7 +540,10 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                         <br />
                         trust_summary {describeTrust(slot.trust_fields)}
                         <br />
-                        {rankLine(rankedForSlot(stage.record, slot.bid_ref))}
+                        {rankLine(
+                          rankedForSlot(stage.record, slot.bid_ref),
+                          stage.record.recorded_at === '',
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -550,8 +639,11 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             in step 3 come from <code>entries[]</code> in the same{' '}
             <code>GET /buyer/auctions/{'{auction_id}'}</code> answer, joined to each slot by
             the store id inside its <code>bid_ref</code> &mdash; which the exchange mints as{' '}
-            <code>{'{auction_id}:{store_id}'}</code>. A slot whose store is in no entry is
-            shown as having no reported price rather than being quietly given one.
+            <code>{'{auction_id}:{store_id}'}</code>. That answer has a live half and a
+            recorded half, and the buyer service deliberately never mixes them; this page
+            does, because it is the only way to put a price beside a slot, so it labels every
+            price as recorded rather than current. A slot whose store is in no entry is shown
+            as having no reported price rather than being quietly given one.
           </li>
           <li data-testid="gap-model">
             <strong>The questions came from no live model</strong> — the buyer service
