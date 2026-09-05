@@ -218,6 +218,12 @@ def catalog_of(app: Any) -> Any:
     denies rather than admits — and, like the trust snapshot, it is a wiring the operator has
     to do rather than one this module can invent, because the alternative to "no catalog" is
     "the bidder's own catalog", which is no check at all.
+
+    The operator does it in the deployment document's ``catalog`` key
+    (:mod:`~exchange.composition`), which binds through :func:`configure_ranking` here. Until
+    that key existed the default below was not a posture but a dead end: no document could
+    say anything else, so **every** deployed exchange verified nothing and shortlisted nobody
+    the moment a shopper stated a must-have.
     """
     catalog = getattr(app.state, "ranking_catalog", None)
     if catalog is None:
