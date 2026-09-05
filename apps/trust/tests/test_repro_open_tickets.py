@@ -1965,6 +1965,7 @@ def test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer(
     assert delistings, "no delisting computed; see the armed guard above"
 
     sealed_ids = {str(event.get("event_id")) for event in sealed}
+    elsewhere = {str(event.get("event_id")) for store, event in appends if store != principal}
     dropped = [
         f"{event['kind']} for {event['payload']['store_id']} ({event['event_id']})"
         for event in delistings
@@ -1974,10 +1975,18 @@ def test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer(
         f"{len(dropped)} of {len(delistings)} delisting decisions the run computed never "
         f"reached the store that seals the run's chain — {len(sealed)} events went into it "
         f"(of {len(appends)} appends across {len(per_store)} store(s)) and none of them was "
-        f"one of these: {dropped}. They are computed and dropped. The "
-        f"exchange, an auditor and an appeal all read the ledger, and none of them can see a "
-        f"decision that was only ever a dict on a dataclass; SimulationRun.to_json() does not "
-        f"even carry the snapshot, so replay determinism never compares it either"
+        f"one of these: {dropped}. They are computed and dropped."
+        + (
+            " NOTE: they DID reach some other event store — appending them to a store whose "
+            "chain the run does not seal is not sealing them, which is the throwaway-store "
+            "shape this instance grouping exists to refuse."
+            if any(str(event.get("event_id")) in elsewhere for event in delistings)
+            else ""
+        )
+        + " The "
+        "exchange, an auditor and an appeal all read the ledger, and none of them can see a "
+        "decision that was only ever a dict on a dataclass; SimulationRun.to_json() does not "
+        "even carry the snapshot, so replay determinism never compares it either"
     )
 
     delisted = {str(event["payload"]["store_id"]) for event in delistings}
