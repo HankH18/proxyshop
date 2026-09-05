@@ -137,6 +137,7 @@ def app_factory(monkeypatch):
     # service is unconfigured" depend on the shell the suite was started from.
     monkeypatch.delenv("BUYER_DEPLOYMENT", raising=False)
     monkeypatch.delenv("BUYER_DEPLOYMENT_JSON", raising=False)
+    monkeypatch.delenv("EXCHANGE_URL", raising=False)
 
     def build():
         return importlib.import_module("buyer_svc.main").create_app()
@@ -199,6 +200,78 @@ def test_the_document_may_be_a_file_as_well_as_an_inline_variable(
 
     assert response.status_code == 201, response.text
     assert exchange.paths == ["/auctions"]
+
+
+def test_the_bare_exchange_url_the_compose_fragment_already_sets_is_enough(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """``apps/buyer/compose.yaml:47`` sets ``EXCHANGE_URL`` and nothing had ever read it.
+
+    That is the variable the shipped ``docker compose up`` stack hands this service, with a
+    comment saying what it is for. If only ``BUYER_DEPLOYMENT*`` were read, the composition
+    root would be correct and the repository's own deployment still could not reach it.
+    """
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+
+    with TestClient(app_factory()) as client:
+        response = client.post(CONFIRM, json=confirm_body())
+
+    assert response.status_code == 201, response.text
+    assert exchange.paths == ["/auctions"]
+
+
+def test_a_malformed_bare_exchange_url_is_the_same_503_as_one_inside_a_document(
+    app_factory, monkeypatch
+) -> None:
+    """The bare origin takes the SAME validation, so a typo is loud wherever it was written."""
+    monkeypatch.setenv("EXCHANGE_URL", "exchange:8083")
+
+    with TestClient(app_factory(), raise_server_exceptions=False) as client:
+        response = client.post(CONFIRM, json=confirm_body())
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert "EXCHANGE_URL=exchange:8083" in detail
+    assert "must be http or https" in detail
+
+
+def test_a_document_outranks_the_bare_url_so_two_sources_are_not_a_coin_toss(
+    exchange, monkeypatch
+) -> None:
+    from apps.buyer.svc.src.composition import read_deployment
+
+    deployment = read_deployment(
+        {
+            "BUYER_DEPLOYMENT_JSON": json.dumps({"exchange_url": "http://from-the-document:1"}),
+            "EXCHANGE_URL": exchange.url,
+        }
+    )
+    assert deployment is not None
+    assert deployment.exchange_url == "http://from-the-document:1"
+
+
+def test_a_client_explicitly_set_to_none_is_a_refusal_not_an_empty_slot(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """``app.state.auction_client = None`` means "no client", and configuration may not undo it.
+
+    ``test_intent_routes.py::test_a_service_with_no_exchange_wired_says_so`` makes exactly this
+    gesture to assert the 503. With an ambient ``EXCHANGE_URL`` now enough to configure this
+    service, reading an explicit ``None`` as "unset" would bind a client over a caller that had
+    said no — and would turn that existing test's answer into a 201 depending on the shell the
+    suite was started from.
+    """
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+
+    app = app_factory()
+    app.state.auction_client = None
+    with TestClient(app) as client:
+        response = client.post(CONFIRM, json=confirm_body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == UNCONFIGURED_DETAIL
+    assert exchange.requests == []
+    assert app.state.auction_client is None
 
 
 def test_the_configured_service_also_accepts_through_the_same_exchange(

@@ -136,6 +136,82 @@ Same population — 5600 + 133 + 2 = 5735 — with 135 tests diverted onto dead 
 If you relocate ports to run a second stack, remove `.env` before running `make verify`, or
 expect the gate to grade a different cluster than you think.
 
+## Where each service is told about the others
+
+Nothing in this stack discovers a peer. Each service is *told*, out of its own environment,
+and this is the record of what each one reads:
+
+| service       | reads                                                                        | how the fragment leaves it |
+|---------------|------------------------------------------------------------------------------|----------------------------|
+| `exchange`    | `EXCHANGE_DEPLOYMENT` (path) / `EXCHANGE_DEPLOYMENT_JSON` (inline)            | declared and **empty** — `apps/exchange/compose.yaml:83-84` |
+| `buyer-svc`   | `BUYER_DEPLOYMENT` (path) / `BUYER_DEPLOYMENT_JSON` (inline), else `EXCHANGE_URL` | `EXCHANGE_URL` is already **populated** — `apps/buyer/compose.yaml:47` |
+| `store-agent` | `STORE_AGENT_CONTEXT` (path)                                                  | declared and **empty** — `packages/store-agent/compose.yaml:56` |
+
+Every one of those roots is fail-closed and none of them defaults to anything: a service given
+no document binds no collaborators and refuses, rather than inventing a peer. A malformed
+document is a `503` naming the offending key on the *next request* — not a `500`, and not a
+crash at boot — and the failure is not cached, so fixing the file serves the next request
+without a restart.
+
+### The buyer service's exchange address
+
+`POST /buyer/intent/confirm` is the shopper saying yes, and it is the request that opens an
+auction. It reads its client off `app.state.auction_client`, and until this branch nothing in
+the tree set it — so on a deployed stack the shopper's confirmation had nowhere to go.
+Measured against real `uvicorn` processes on loopback, one for the exchange and one for the
+buyer service, with no deployment configured:
+
+```
+$ curl -X POST :50277/buyer/intent/confirm -d '{"intent":{...},"confirmed":true}'
+{"detail":"confirm() was given no auction client, so the confirmed intent has nowhere to
+ go. Pass the exchange client that owns POST /auctions."}                          503
+```
+
+That is still the answer for a buyer service nobody has configured, deliberately. What
+changed is that there is now something to configure. **The compose stack needs no change**:
+`apps/buyer/compose.yaml:47` already carries
+
+```yaml
+      # The exchange is reached by service name inside the network, never by localhost.
+      EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
+```
+
+and until this branch `grep -rn EXCHANGE_URL --include='*.py'` over the repo returned
+**nothing** — the address was declared, commented, and read by no line of code. It is read
+now, as the lowest-precedence of the three sources. Same two processes, the buyer service
+started with nothing but that variable:
+
+```
+$ EXCHANGE_URL=http://127.0.0.1:57026 uvicorn buyer_svc.main:app --port 57028 --workers 1
+$ curl -X POST :57028/buyer/intent/confirm -d '{"intent":{...},"confirmed":true}'
+{"auction_id":"auction-ee74abd0-3d71-499f-a2a1-c438d29ada65",
+ "intent_id":"int-envurl-1","created_at":"2026-09-05T09:18:01.833627Z"}            201
+
+# and in the exchange's own log, a different process:
+INFO:     127.0.0.1:57038 - "POST /auctions HTTP/1.1" 201 Created
+```
+
+For anything beyond the address — a longer call timeout — write a document instead, and mount
+it or inline it:
+
+```bash
+BUYER_DEPLOYMENT_JSON='{"exchange_url":"http://exchange:8083","request_timeout_seconds":20}'
+```
+
+The document outranks `EXCHANGE_URL`, and `BUYER_DEPLOYMENT` (a path) outranks the inline one.
+Every source takes the same validation, so a typo is loud wherever it was written:
+`EXCHANGE_URL=exchange:8083` — no scheme, therefore no host — is a `503` saying so, not a
+request to a URL naming no server.
+
+**Not run here, and the ports say so:** none of the above was measured inside a container. It
+was measured with `uvicorn` over loopback, one process per service, on ephemeral ports across
+two separate runs — which is why the numbers above do not match each other or the `8081/8083`
+of the compose stack. That exercises the same code the image runs, and not the image, the
+network alias, or the healthcheck. `buyer-svc`'s readiness probe does not check the exchange
+either: see the rule in the next section about probing only what a service uses, and note that
+this is a peer service rather than a datastore, so an unreachable exchange is a `502` on the
+confirm rather than an unhealthy container.
+
 ## Readiness, and why the health signal can be trusted now
 
 Each service's healthcheck runs `proxyshop_support.service_launch ready`, which keeps the
@@ -248,6 +324,74 @@ While `trust` was unhealthy under control 1, `GET /events/head` answered
 `503 store_unavailable`. The health signal and the route agree in both directions now, which
 is the whole property. Restarting postgres returned every affected service to `healthy`
 within 10s, unassisted.
+
+## Scaling the exchange: `--workers 1` is a correctness pin, not tuning
+
+Read this before you raise the uvicorn worker count, add `deploy.replicas`, or reach for
+`docker compose up --scale exchange=N`. Nothing in the shipped configuration is broken — the
+pin holds and the money path is safe today. The section exists because the pin is the *only*
+thing holding it, and because the comment that used to guard it read like a caching note.
+
+Two files carry the pin, and a test holds them to each other:
+
+| file                         | where      | tokens                                                              |
+|------------------------------|------------|---------------------------------------------------------------------|
+| `apps/exchange/Dockerfile`   | `CMD`      | `uvicorn exchange.main:app --host 0.0.0.0 --port 8083 --workers 1`  |
+| `apps/exchange/compose.yaml` | `command:` | the same tokens, after `python -m proxyshop_support.service_launch serve --` |
+
+Compose clears the image's `CMD` whenever a fragment sets `command:`, so that uvicorn line is
+one command written twice, and
+`test_deploy_readiness.py::test_the_compose_command_mirrors_the_image_cmd` pins the copies
+together. What that test does not know is *why* the number is `1`.
+
+**What a second worker costs.** The T-158 guard — one accept per auction, one discount code
+per purchase — is a claim held in a store, so it is exactly as wide as that store.
+`apps/exchange/src/accept/routes.py::_claims` derives the acceptance-claim table from the
+auction machine's own store, and an exchange configured only by the deployment document never
+binds a machine: `configure_exchange` in `apps/exchange/src/composition.py` reads `sellers`,
+`trust_snapshot` and `checkout_mode`, and the document exposes **no key for `auction_machine`
+and none for `acceptance_claims`**. The machine therefore falls back to
+`AuctionStateMachine()` over `InMemoryAuctionStore` and the claim table is process-local. Two
+workers are two processes, two stores, two claim tables — both accepts win their own copy of
+the guard, both mint, and one purchase leaves **two live discount codes** in the merchant's
+account.
+
+That last part is a *reported* measurement and not this lane's: an independent verifier
+reproduced the double mint 6-of-6 across a real process boundary and reported it dead only
+once the single-worker pin was in place. It was **not** re-run here, and nothing in this
+repository reaches a second uvicorn worker — the same blind spot the last bullet of "Still not
+done" records for running containers generally.
+
+**Replicas are the same hazard by another route.** `deploy.replicas`, a second `exchange`
+service, or `docker compose up --scale exchange=N` gives you the same two processes holding
+the same two claim tables; the worker flag inside one container is only the cheapest way to
+get there. What partly hides that today is the fragment's fixed host-port publish
+(`"${EXCHANGE_PORT:-8083}:8083"`): a naive second replica collides on the host bind rather
+than quietly serving. That is an accident of the port line, not a guard, and it goes away the
+moment the publish is dropped, ranged, or moved behind a proxy — read off the fragment, and
+the collision itself was not run here. What *was* run is that compose plans both containers
+without complaint:
+
+```
+$ PROXYSHOP_WORKER=8 COMPOSE_PROJECT_NAME=proxyshop-scaleprobe \
+    docker compose up --dry-run --no-build --scale exchange=2 exchange
+ Container proxyshop-scaleprobe-exchange-2 Creating
+ Container proxyshop-scaleprobe-exchange-1 Creating
+ Container proxyshop-scaleprobe-exchange-2 Created
+ Container proxyshop-scaleprobe-exchange-1 Created
+end of 'compose up' output, interactive run is not supported in dry-run mode
+```
+
+**What would have to be true before either could be raised.** A shared, durable
+acceptance-claim store, bound **in code** — `StoreAcceptanceClaims` over `RedisAuctionStore`
+(redis is already this service's declared dependency and already probed by its healthcheck),
+or any table with a unique constraint on `(auction_id)` handed to
+`configure_accept(claims=...)`. No configuration can supply it: the deployment document has no
+key for either collaborator, so there is no variable, no `.env` line and no
+`EXCHANGE_DEPLOYMENT` document that turns it on. Nor is one wired today —
+`git grep -n "RedisAuctionStore(" -- "*.py"` returns four call sites and all four are under
+`apps/exchange/tests/`. Until that wiring exists, `--workers 1` is the guard, and raising it
+is a code change with a review, not a capacity decision.
 
 ## Two things that bit, recorded so they do not bite twice
 

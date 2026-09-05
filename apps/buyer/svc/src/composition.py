@@ -33,8 +33,20 @@ both halves of the buyer↔exchange seam learns one convention:
 ``BUYER_DEPLOYMENT_JSON``
     The same document, inline — for a container that would rather set a variable than mount a
     file. ``BUYER_DEPLOYMENT`` wins if both are set.
+``EXCHANGE_URL``
+    Just the exchange's origin, lowest precedence of the three, and it is here because the
+    repository's own deployment **already sets it**. ``apps/buyer/compose.yaml:47`` carries::
 
-Neither set is **exactly today's behaviour**: nothing is bound, both defaults above stand, and
+        EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
+        # The exchange is reached by service name inside the network, never by localhost.
+
+    while ``grep -rn EXCHANGE_URL --include='*.py'`` over this repo returns **nothing**. The
+    deploy lane declared the address and said what it was for; no line of code had ever read
+    it. Reading it is the difference between a correct composition root and one the shipped
+    ``docker compose up`` cannot reach: with it, the stack in ``docs/deploy.md`` carries a
+    confirmed intent to the exchange with no operator action at all.
+
+None of the three set is **exactly today's behaviour**: nothing is bound, both defaults above stand, and
 both routes answer 503 with the message they answer today. That is deliberate and it is the
 one property this module may not break — a buyer service nobody has configured must not
 quietly invent an exchange to send a confirmed intent to.
@@ -123,6 +135,7 @@ __all__ = [
     "DOCUMENT_KEYS",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
+    "ENV_EXCHANGE_URL",
     "EXCHANGE_CLIENT_ATTR",
     "MAX_DEPLOYMENT_BYTES",
     "MAX_EXCHANGE_RESPONSE_BYTES",
@@ -142,6 +155,9 @@ __all__ = [
 ENV_DEPLOYMENT = "BUYER_DEPLOYMENT"
 #: The same document, inline. ``ENV_DEPLOYMENT`` outranks it.
 ENV_DEPLOYMENT_JSON = "BUYER_DEPLOYMENT_JSON"
+#: Just the exchange's origin, with no document around it — the variable the compose fragment
+#: already sets and nothing has ever read. Lowest precedence of the three.
+ENV_EXCHANGE_URL = "EXCHANGE_URL"
 
 #: ``app.state`` flag saying this app has been through :func:`ensure_configured`.
 STATE_FLAG = "buyer_composition"
@@ -363,7 +379,29 @@ def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
     else:
         inline = str(environ.get(ENV_DEPLOYMENT_JSON) or "").strip()
         if not inline:
-            return None
+            # LAST, and lowest precedence: the bare origin the compose fragment ALREADY hands
+            # this service. `apps/buyer/compose.yaml:47` sets
+            #
+            #     EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
+            #     # The exchange is reached by service name inside the network, never by localhost.
+            #
+            # and `grep -rn EXCHANGE_URL --include='*.py'` over this repo returns **nothing**:
+            # the deploy lane declared the address, said what it was for, and no line of code
+            # has ever read it. Reading it here is what makes the shipped `docker compose up`
+            # stack carry a confirmed intent with no operator action at all — the alternative
+            # is a correct composition root that the repository's own deployment cannot reach.
+            #
+            # It is a bare origin rather than a document, so it goes through the SAME
+            # `_exchange_url` validation: `EXCHANGE_URL=exchange:8083` is a 503 naming the
+            # problem here exactly as it is inside a document, not a request to a URL with no
+            # host in it.
+            origin = str(environ.get(ENV_EXCHANGE_URL) or "").strip()
+            if not origin:
+                return None
+            return Deployment(
+                source=f"{ENV_EXCHANGE_URL}={origin}",
+                exchange_url=_exchange_url(origin, f"{ENV_EXCHANGE_URL}={origin}"),
+            )
         source = ENV_DEPLOYMENT_JSON
         text = inline
 
@@ -591,7 +629,19 @@ def configure_buyer(app: Any, deployment: Deployment) -> tuple[str, ...]:
     bound: list[str] = []
 
     def unset(name: str) -> bool:
-        return getattr(app.state, name, None) is None
+        """Never SET, as opposed to set to ``None``. The difference is load-bearing.
+
+        ``getattr(app.state, name, None) is None`` cannot tell "nobody has wired a client" from
+        "somebody wired ``None`` on purpose", and the second is a real gesture in this tree:
+        ``tests/test_intent_routes.py::test_a_service_with_no_exchange_wired_says_so`` writes
+        ``app.state.auction_client = None`` to assert the 503. Now that an ambient
+        ``EXCHANGE_URL`` is enough to configure this service, reading that as "unset" would
+        bind a client over a test — and over a deployment — that had said no.
+
+        Starlette's ``State`` raises ``AttributeError`` for a name it does not hold, so
+        ``hasattr`` separates the two exactly.
+        """
+        return not hasattr(app.state, name)
 
     client = HttpExchangeClient(deployment.exchange_url, timeout=deployment.request_timeout_seconds)
     for attr in (AUCTION_CLIENT_ATTR, EXCHANGE_CLIENT_ATTR):
