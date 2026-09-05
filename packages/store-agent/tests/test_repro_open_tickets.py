@@ -652,8 +652,18 @@ def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> N
     What binds all three is `packages/contracts/tests/price_parity_corpus.json`: 37 wire
     payloads asserting EXACT reason lists, loaded both by
     `test_the_price_verdicts_match_the_typescript_peer` and by
-    `packages/contracts/tests/boundary.test.ts` — so a reason added on the Python side is red
-    on the TypeScript side too.
+    `packages/contracts/tests/boundary.test.ts`, whose assertion at :962 is
+    `expect(priced).toEqual(expected.reasons)` — deep, order-sensitive, exact-length. So a
+    reason added on the Python side is red on the TypeScript side too, and MEASURED: the
+    additive variant applied to `boundary.ts` alone turns 11 corpus rows red plus the
+    standalone `priceReasons` test at boundary.test.ts:1065, twelve on each side, symmetric.
+    `tsc -b` and `eslint` stay clean. The coupling only bites on behaviour the corpus reaches
+    — 26 of the 37 rows stayed green — so it is a tripwire, not a proof of equivalence.
+
+    One implementation trap, measured rather than guessed: a bid can satisfy BOTH relations at
+    once (`a_zero_total_behind_a_list_price_unit` — unit 100.00, total 0.00, roster cap 20), so
+    the additive version must not push the reason twice. Exact-list equality makes a duplicated
+    reason a failure exactly like a missing one.
 
     Fixing only the store agent's door — the location this ticket names — breaks NOTHING:
     1202 passed, 0 new failures, re-measured on two independent copies.
