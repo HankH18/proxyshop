@@ -36,6 +36,8 @@ import {
   REASON_TRUST_SNAPSHOT_UNAVAILABLE,
   REASON_UNKNOWN_PATH,
   REASON_UNVERIFIABLE_CLAIM_SITE,
+  ROSTER_LIST_PRICE_UNAVAILABLE,
+  ROSTER_MAX_DISCOUNT_UNAVAILABLE,
   ROSTER_PRICE_BELOW_FLOOR,
   parseTimestamp,
   priceFloor,
@@ -61,8 +63,53 @@ import corpus from "./price_parity_corpus.json" with {type: "json"};
 
 const BOTH_PATHS = [HOSTED_PATH, EXTERNAL_PATH] as const;
 
-function check(bid: unknown, path: string, snapshot = makeSnapshotTable()) {
-  return validateBid(bid, {path, trustSnapshot: snapshot, now: NOW});
+/**
+ * What the exchange's OWN catalog says about `makeOffer()`'s product: `prod-1` lists at 49.00 —
+ * exactly the price the shared fixture offer charges — and the merchant approved discounts up to
+ * 25% on it, deeper than any depth a fixture bid in this file declares through `check()`.
+ *
+ * WHY THE HELPER PASSES A ROSTER AT ALL, since it never used to (T-306/T-336). `check()` called
+ * `validateBid` with no `listPrices`, and an absent roster USED TO MEAN "abstain": the price wall
+ * reported nothing at all, so every test in this file measured only the thing it was written
+ * about. An absent roster is now the EMPTY roster and refuses every offer with
+ * `price_unreconcilable:offer.unit_price:list_price_unavailable`, so a helper that goes on passing
+ * nothing turns a file about provenance, expiry and trust into a file about the price wall — 55
+ * tests failing on a reason none of them names. Handing the door the catalog restores each test's
+ * SUBJECT rather than relaxing anything: the roster prices the fixture product truthfully and
+ * authorizes more depth than the fixtures declare, so no price reason can fire unless the test is
+ * about prices, and every price test below supplies its own roster explicitly. The Python peer's
+ * `FIXTURE_ROSTER`, same numbers.
+ */
+const FIXTURE_ROSTER: PriceRosterMap = {"prod-1": {list_price: 49.0, max_discount_pct: 25.0}};
+
+/**
+ * The catalog the T-177 price tests are written against: `prod-1` lists at 100.00 with 20%
+ * approved. It AGREES with the 100.00 those same bids carry as a `list_price` claim, so the roster
+ * is not a second, contradicting wall — the reconciliation those tests assert is the one they
+ * always asserted. The Python peer's `LIST_100_ROSTER`.
+ */
+const LIST_100_ROSTER: PriceRosterMap = {"prod-1": {list_price: 100.0, max_discount_pct: 20.0}};
+
+/**
+ * A sentinel, not `undefined`: since T-306 an absent roster is itself a case under test, and a
+ * helper where "no argument" silently meant `FIXTURE_ROSTER` with no way to say "no roster" would
+ * turn those tests into the happy path. Mirrors `_DEFAULT` in `test_boundary_dual_path.py`.
+ */
+const DEFAULT_ROSTER = Symbol("default price roster");
+
+function check(
+  bid: unknown,
+  path: string,
+  snapshot = makeSnapshotTable(),
+  listPrices: PriceRosterMap | null | typeof DEFAULT_ROSTER = DEFAULT_ROSTER,
+) {
+  const roster = listPrices === DEFAULT_ROSTER ? FIXTURE_ROSTER : listPrices;
+  return validateBid(bid, {
+    path,
+    trustSnapshot: snapshot,
+    now: NOW,
+    listPrices: (roster ?? undefined) as PriceRosterMap | undefined,
+  });
 }
 
 describe("R8 / R18 — the path-sensitive half", () => {
@@ -336,7 +383,14 @@ describe("D52 — the signing envelope at the external door", () => {
   }
 
   const door = (submission: unknown) =>
-    validateExternalSubmission(submission, {trustSnapshot: makeSnapshotTable(), now: NOW});
+    validateExternalSubmission(submission, {
+      trustSnapshot: makeSnapshotTable(),
+      now: NOW,
+      // The catalog for the fixture product, for the same reason `check` passes it: these tests
+      // are about the SIGNING ENVELOPE, and an unpriced offer would refuse every one of the
+      // admission controls below on a price reason none of them names.
+      listPrices: FIXTURE_ROSTER,
+    });
 
   it("validateBid alone does not judge the envelope — the documented gap, pinned", () => {
     // `validateBid` checks the R8/R18/S5 table against `Bid`, which carries no envelope.
@@ -423,6 +477,7 @@ describe("F4 — a stated UTC offset is part of the instant, not decoration", ()
         path: EXTERNAL_PATH,
         trustSnapshot: makeSnapshotTable(),
         now,
+        listPrices: FIXTURE_ROSTER,
       });
     expect(at("2026-01-01T04:00:00Z").ok, "a live Pacific offer was rejected as expired").toBe(true);
     expect(at("2026-01-01T09:00:00Z").ok).toBe(false);
@@ -806,7 +861,7 @@ describe("T-177 — a bid may not charge more off than the depth it declares", (
       claims: [listPriceClaim(100.0), makeClaim("authorized_discount_pct", 20.0)],
       offer: pricedOffer(15.0, 15.0),
     });
-    const result = check(bid, path);
+    const result = check(bid, path, undefined, LIST_100_ROSTER);
     expect(result.ok, "a 20% grant licensed an 85% discount").toBe(false);
     expect(result.reasons).toContain("price_under_declared_depth:offer.unit_price");
 
@@ -815,7 +870,8 @@ describe("T-177 — a bid may not charge more off than the depth it declares", (
       claims: [listPriceClaim(100.0), makeClaim("authorized_discount_pct", 20.0)],
       offer: pricedOffer(80.0, 80.0),
     });
-    expect(check(honest, path).ok, check(honest, path).reasons.join(", ")).toBe(true);
+    const admitted = check(honest, path, undefined, LIST_100_ROSTER);
+    expect(admitted.ok, admitted.reasons.join(", ")).toBe(true);
   });
 
   it.each(BOTH_PATHS)("reads the list price out of offer.commitments too on %s", (path) => {
@@ -827,35 +883,42 @@ describe("T-177 — a bid may not charge more off than the depth it declares", (
         discount: {type: "percentage", value: 20.0, provenance: structuredClone(HOOK_PROVENANCE)},
       }),
     });
-    expect(check(bid, path).ok, "relocating the list price defeated the price wall").toBe(false);
-    expect(check(bid, path).reasons).toContain("price_under_declared_depth:offer.unit_price");
+    const result = check(bid, path, undefined, LIST_100_ROSTER);
+    expect(result.ok, "relocating the list price defeated the price wall").toBe(false);
+    expect(result.reasons).toContain("price_under_declared_depth:offer.unit_price");
   });
 
   it.each(BOTH_PATHS)("refuses a total that undercuts the declared depth on %s", (path) => {
-    const result = check(makeBid({offer: pricedOffer(100.0, 15.0)}), path);
+    const result = check(makeBid({offer: pricedOffer(100.0, 15.0)}), path, undefined, LIST_100_ROSTER);
     expect(result.ok).toBe(false);
     expect(result.reasons).toContain("price_under_declared_depth:offer.total_price");
 
     // Controls: the honest total, and a total for a larger quantity.
     for (const total of [80.0, 240.0]) {
-      expect(check(makeBid({offer: pricedOffer(100.0, total)}), path).ok).toBe(true);
+      const ok = check(makeBid({offer: pricedOffer(100.0, total)}), path, undefined, LIST_100_ROSTER);
+      expect(ok.ok, ok.reasons.join(", ")).toBe(true);
     }
   });
 
   it.each(BOTH_PATHS)("is one-sided — a shallower discount than declared admits on %s", (path) => {
     const generous = makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(95.0, 95.0)});
-    expect(check(generous, path).ok, check(generous, path).reasons.join(", ")).toBe(true);
+    const verdict = check(generous, path, undefined, LIST_100_ROSTER);
+    expect(verdict.ok, verdict.reasons.join(", ")).toBe(true);
   });
 
   it.each(BOTH_PATHS)("leaves a cent of slack for a rounded price on %s", (path) => {
+    // The roster AGREES with the carried claim at 19.99 and authorizes the 15% declared, so the
+    // only thing left deciding these two verdicts is the cent of tolerance this test is named for.
+    const roster = {"prod-1": {list_price: 19.99, max_discount_pct: 15.0}};
     const rounded = makeBid({
       claims: [listPriceClaim(19.99)],
       offer: pricedOffer(16.99, 16.99, 15.0),
     });
-    expect(check(rounded, path).ok, check(rounded, path).reasons.join(", ")).toBe(true);
+    const verdict = check(rounded, path, undefined, roster);
+    expect(verdict.ok, verdict.reasons.join(", ")).toBe(true);
 
     const under = makeBid({claims: [listPriceClaim(19.99)], offer: pricedOffer(15.99, 15.99, 15.0)});
-    expect(check(under, path).ok).toBe(false);
+    expect(check(under, path, undefined, roster).ok).toBe(false);
   });
 
   it.each(BOTH_PATHS)("refuses a depth it cannot read rather than skipping it on %s", (path) => {
@@ -867,55 +930,145 @@ describe("T-177 — a bid may not charge more off than the depth it declares", (
       [pricedOffer(15.0, 15.0, true), "offer.discount:depth_not_a_number"],
     ];
     for (const [offer, needle] of cases) {
-      const result = check(makeBid({claims: [listPriceClaim(100.0)], offer}), path);
+      const result = check(
+        makeBid({claims: [listPriceClaim(100.0)], offer}),
+        path,
+        undefined,
+        LIST_100_ROSTER,
+      );
       expect(result.ok, `${needle} was admitted`).toBe(false);
       expect(result.reasons.join(" ")).toContain(needle);
     }
+
+    // Control: the same offer with a depth the door CAN read, priced honestly, is admitted — so
+    // this is not "refuse every offer carrying a discount". The Python peer asserts it too.
+    const legible = check(
+      makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(80.0, 80.0)}),
+      path,
+      undefined,
+      LIST_100_ROSTER,
+    );
+    expect(legible.ok, legible.reasons.join(", ")).toBe(true);
   });
 
   it.each(BOTH_PATHS)("answers to the carried list price even at a zero depth on %s", (path) => {
+    // A roster that PRICES the product and authorizes nothing on it, which is what makes
+    // "answers to the LIST price" the literal bound here: with a cap on the row, a zero-depth
+    // offer would be measured against the cap instead and 60.00 would admit.
+    const unauthorizing100 = {"prod-1": 100.0};
     const under = makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(60.0, 60.0, 0.0)});
-    expect(check(under, path).ok).toBe(false);
-    expect(check(under, path).reasons).toContain("price_under_declared_depth:offer.unit_price");
+    const refused = check(under, path, undefined, unauthorizing100);
+    expect(refused.ok).toBe(false);
+    expect(refused.reasons).toContain("price_under_declared_depth:offer.unit_price");
 
     const atList = makeBid({
       claims: [listPriceClaim(100.0)],
       offer: pricedOffer(100.0, 100.0, 0.0),
     });
-    expect(check(atList, path).ok, check(atList, path).reasons.join(", ")).toBe(true);
+    const admitted = check(atList, path, undefined, unauthorizing100);
+    expect(admitted.ok, admitted.reasons.join(", ")).toBe(true);
   });
 
   it.each(BOTH_PATHS)("refuses an illegible or contradictory list price on %s", (path) => {
     const unreadable = makeBid({claims: [listPriceClaim("n/a")], offer: pricedOffer(15.0, 15.0)});
-    expect(check(unreadable, path).ok).toBe(false);
-    expect(check(unreadable, path).reasons.join(" ")).toContain("unreadable_list_price");
+    const illegible = check(unreadable, path, undefined, LIST_100_ROSTER);
+    expect(illegible.ok).toBe(false);
+    expect(illegible.reasons.join(" ")).toContain("unreadable_list_price");
 
     const ambiguous = makeBid({
       claims: [listPriceClaim(100.0), listPriceClaim(120.0)],
       offer: pricedOffer(80.0, 80.0),
     });
-    expect(check(ambiguous, path).ok).toBe(false);
-    expect(check(ambiguous, path).reasons.join(" ")).toContain("ambiguous_list_price");
+    const contradictory = check(ambiguous, path, undefined, LIST_100_ROSTER);
+    expect(contradictory.ok).toBe(false);
+    expect(contradictory.reasons.join(" ")).toContain("ambiguous_list_price");
 
     // Control: the same list price stated twice is not a contradiction.
     const twice = makeBid({
       claims: [listPriceClaim(100.0), listPriceClaim(100.0)],
       offer: pricedOffer(80.0, 80.0),
     });
-    expect(check(twice, path).ok, check(twice, path).reasons.join(", ")).toBe(true);
+    const admitted = check(twice, path, undefined, LIST_100_ROSTER);
+    expect(admitted.ok, admitted.reasons.join(", ")).toBe(true);
   });
 
-  it.each(BOTH_PATHS)("abstains deliberately with no list price carried on %s", (path) => {
-    // THE DOCUMENTED GAP, pinned so it cannot be mistaken for coverage — and pinned identically
-    // on both doors, because a seller would otherwise submit at whichever one is blinder.
-    const silent = makeBid({offer: pricedOffer(15.0, 15.0)});
-    const result = check(silent, path);
-    expect(result.ok, result.reasons.join(", ")).toBe(true);
-    expect(result.reasons.filter((r) => r.startsWith("price_"))).toEqual([]);
+  it.each(BOTH_PATHS)(
+    "answers one identical refusal to every spelling of no roster on %s",
+    (path) => {
+      // THE DOCUMENTED GAP — CLOSED BY T-306/T-336, and this test is the record of that.
+      //
+      // JUSTIFY-TEST-EDIT. Two assertions here were REPLACED, not relaxed. They were:
+      //
+      //     const silent = makeBid({offer: pricedOffer(15.0, 15.0)});
+      //     const result = check(silent, path);            // `check` passed NO roster
+      //     expect(result.ok, result.reasons.join(", ")).toBe(true);
+      //     expect(result.reasons.filter((r) => r.startsWith("price_"))).toEqual([]);
+      //
+      // * WHAT THEY CLAIMED ABOUT THE PRODUCT. A bid declaring a 20% discount, charging 15.00,
+      //   carrying no `list_price` claim and reaching a door that was handed no roster is
+      //   ADMITTED, and the price wall says nothing at all about it.
+      // * THE REQUIREMENT THEY ENCODED, AND WHERE IT CAME FROM. `e1a66b5` ("put the price wall on
+      //   the validating door") introduced them as the deliberate boundary of that wall: the door
+      //   holds no catalog, so with no list price from anywhere the first relation had no number
+      //   to be a percentage OF. The abstention was called the opt-in property the parameter
+      //   rested on.
+      // * WOULD THIS TEST STILL BE WRONG IF THE SOURCE CHANGE WERE REVERTED? YES. Revert
+      //   `boundary.ts` to the abstention and the assertion goes green again — and it is still
+      //   false, because it was never a statement about a MISSING list price.
+      //   `priceReasons(bid, {listPrices: {}})` refused the identical bid the whole time it was in
+      //   the tree. The assertion pinned "the caller said nothing" as strictly MORE permissive
+      //   than "the caller said it holds no catalog", which is a claim about which ARGUMENTS were
+      //   supplied, not about the bid. That is T-306: an omission is the call a caller makes by
+      //   forgetting, so the accident was the one that paid, on the money path.
+      // * INDEPENDENT PROOF THE CODE IS RIGHT. `test_repro_open_tickets.py::test_t306_...` and
+      //   `::test_t307_...` were written as reproductions (`fbc4636`) and failed against the old
+      //   behaviour; they pass now. Neither was authored here and neither compares against
+      //   anything this file controls.
+      // * BLAST RADIUS. The same contract was asserted by the Python peer
+      //   (`test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price`), by
+      //   `price_parity_corpus.json`'s `no_list_price_carried` row (in both languages at once),
+      //   and by three assertions in `test_boundary_price_roster.py`. All are changed with this
+      //   one; none is deleted.
+      //
+      // What is asserted instead is the contract T-306 requires, and it is STRICTLY STRONGER: the
+      // door answers a bid the same way whether the roster is omitted, spelled `null`, or spelled
+      // `{}` — and that answer is a refusal that NAMES the missing input.
+      const silent = makeBid({offer: pricedOffer(15.0, 15.0)});
+      const table = makeSnapshotTable();
 
-    const named = makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(15.0, 15.0)});
-    expect(check(named, path).ok).toBe(false);
-  });
+      // Byte-identical across all three spellings of "no roster" — the option OMITTED, the option
+      // spelled `null`, the option spelled `{}`. Asserted BEFORE the verdict itself, so a future
+      // change cannot satisfy it by making all three permissive again without also flipping the
+      // refusal below.
+      const verdicts = [
+        validateBid(silent, {path, trustSnapshot: table, now: NOW}),
+        check(silent, path, table, null),
+        check(silent, path, table, {}),
+      ];
+      const distinct = new Set(verdicts.map((v) => JSON.stringify([v.ok, v.reasons])));
+      expect(distinct.size, JSON.stringify(verdicts.map((v) => v.reasons))).toBe(1);
+
+      const result = verdicts[0]!;
+      expect(result.ok, "an omitted roster was more permissive than an empty one").toBe(false);
+      expect(result.reasons).toEqual([
+        `${REASON_PRICE_UNRECONCILABLE}:${OFFER_DISCOUNT_SITE}:${ROSTER_MAX_DISCOUNT_UNAVAILABLE}`,
+        `${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:${ROSTER_LIST_PRICE_UNAVAILABLE}`,
+      ]);
+
+      // ...and the abstention is GONE rather than moved: a caller that CAN price the product
+      // still gets the ordinary arithmetic, and the same silent bid is refused by the wall it
+      // underprices rather than by the missing roster.
+      const priced = check(silent, path, table, LIST_100_ROSTER);
+      expect(priced.ok).toBe(false);
+      expect(priced.reasons).toEqual([
+        `${REASON_PRICE_UNDER_DECLARED_DEPTH}:${OFFER_UNIT_PRICE_SITE}`,
+      ]);
+
+      // And the moment the bid DOES say what it is discounting from, the same offer refuses.
+      const named = makeBid({claims: [listPriceClaim(100.0)], offer: pricedOffer(15.0, 15.0)});
+      expect(check(named, path, table, LIST_100_ROSTER).ok).toBe(false);
+    },
+  );
 
   it("never throws on a hostile offer", () => {
     for (const offer of [null, "an offer", 42, [1, 2], true, {}, {unit_price: NaN}]) {
@@ -1061,7 +1214,26 @@ describe("T-177 price parity — the SHARED corpus `test_boundary_dual_path.py` 
     // The peer of `contracts.boundary.price_reasons`. Same arithmetic, no eligibility gate.
     const roster = {"prod-1": {list_price: 100.0, max_discount_pct: 20.0}};
     const deep = makeBid({offer: pricedOffer(15.0, 15.0, 85.0)});
-    expect(priceReasons(deep)).toEqual([]);
+
+    // JUSTIFY-TEST-EDIT (T-306/T-336). This line used to read `expect(priceReasons(deep))
+    // .toEqual([])` — the standalone walk's copy of the same defect the door carried: the roster
+    // NOBODY PASSED was silent while the roster passed EMPTY refused, so forgetting the argument
+    // was more permissive than passing it empty, on the money path. It would go green again the
+    // moment the abstention were restored, which is what makes it a defect and not a
+    // requirement. Replaced by the STRONGER property: every spelling of "no roster" is one
+    // answer, and that answer NAMES the inputs it is missing.
+    for (const reasons of [
+      priceReasons(deep),
+      priceReasons(deep, {}),
+      priceReasons(deep, {listPrices: null as unknown as PriceRosterMap}),
+      priceReasons(deep, {listPrices: {}}),
+    ]) {
+      expect(reasons).toEqual([
+        `${REASON_PRICE_UNRECONCILABLE}:${OFFER_DISCOUNT_SITE}:${ROSTER_MAX_DISCOUNT_UNAVAILABLE}`,
+        `${REASON_PRICE_UNRECONCILABLE}:${OFFER_UNIT_PRICE_SITE}:${ROSTER_LIST_PRICE_UNAVAILABLE}`,
+      ]);
+    }
+
     expect(priceReasons(deep, {listPrices: roster})).toEqual([
       `${REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH}:${OFFER_DISCOUNT_SITE}`,
       `${REASON_PRICE_UNDER_DECLARED_DEPTH}:${OFFER_UNIT_PRICE_SITE}`,
