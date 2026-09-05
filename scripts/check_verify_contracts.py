@@ -16,8 +16,10 @@ Fatal checks
 3. **D1 — the old schema package name is gone.** The schema package is
    ``packages/contracts``; the superseded name must not appear in the source tree.
 4. **No test directory is empty.** ``pytest`` exits 0 when *one* directory's tests are
-   deleted while others remain, and the root ``vitest`` run carries ``--passWithNoTests``
-   (D7), so a ticket can be merged with its tests removed and the gate stays green. Every
+   deleted while others remain. ``run_vitest`` now FATALs when vitest collects zero tests
+   overall (ESC-023 removed the ``--passWithNoTests`` D7 recorded), but a single project
+   losing its tests while others still report is finer-grained than that and stays invisible
+   to it — which is what this check catches. Every
    directory named ``tests/`` (and ``e2e/``) must contain at least one test file, and every
    vitest project root declared in ``vitest.config.ts`` must contain at least one
    ``*.test.ts``/``*.test.tsx``.
@@ -245,9 +247,11 @@ VITEST_ROOT_RE = re.compile(r"""root:\s*["']\./([^"']+)["']""")
 def check_vitest_projects_have_tests(failures: list[str]) -> None:
     """Every vitest project root declared in ``vitest.config.ts`` has a test file.
 
-    The root vitest run carries ``--passWithNoTests`` per D7, so vitest itself reports
-    success on a project with nothing to run. ``tsc`` only accidentally covers the case
-    where the *last* ``.ts`` file in a project disappears.
+    ``verify.sh``'s ``run_vitest`` FATALs on a zero TOTAL collection, so the whole-suite
+    case is covered there; ESC-023 removed the ``--passWithNoTests`` that D7 recorded. What
+    that FATAL cannot see is ONE project going empty while the others still report a nonzero
+    total, which is why this check remains. ``tsc`` only accidentally covers the case where
+    the *last* ``.ts`` file in a project disappears.
     """
     config = ROOT / "vitest.config.ts"
     if not config.is_file():
@@ -264,8 +268,10 @@ def check_vitest_projects_have_tests(failures: list[str]) -> None:
             path.startswith(prefix) and TS_TEST_RE.search(Path(path).name) for path in tracked
         ):
             failures.append(
-                f"vitest project root {project_root} contains no *.test.ts/tsx file. With "
-                f"--passWithNoTests (D7) that project would silently contribute zero tests."
+                f"vitest project root {project_root} contains no *.test.ts/tsx file. The "
+                f"suite-wide zero-collection FATAL in verify.sh cannot see this: the other "
+                f"projects still report, so the total stays nonzero and this one silently "
+                f"contributes nothing."
             )
 
 
