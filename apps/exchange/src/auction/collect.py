@@ -168,11 +168,18 @@ __all__ = [
     "FALLBACK_REASONS",
     "ILLEGIBLE_OFFER_REASON",
     "MALFORMED_RESPONSE_REASONS",
+    "MAX_REFUSAL_DETAIL_LENGTH",
     "MINIMUM_PAYABLE_AMOUNT",
     "PRICE_BELOW_FLOOR_REASON",
     "PRICE_FLOOR_FRACTION",
+    "REFUSAL_FIELD",
+    "STORE_DECLINED_REASON",
+    "STORE_REFUSED_REASON",
+    "UNDISCLOSED_REFUSAL_DETAIL",
     "UNRECONCILABLE_PRICE_REASON",
     "collect_bids",
+    "fallback_reason_family",
+    "refusal_reason",
 ]
 
 #: Why an entry ended up at list price. Recorded on the entry so a downstream reader (the
@@ -222,6 +229,93 @@ MINIMUM_PAYABLE_AMOUNT = _MINIMUM_PAYABLE_AMOUNT
 PRICE_FLOOR_FRACTION = _PRICE_FLOOR_FRACTION
 PRICE_BELOW_FLOOR_REASON = ROSTER_PRICE_BELOW_FLOOR
 
+#: The store ANSWERED, and its answer was a refusal. Two words, because the store agent
+#: contract makes them two different acts and an operator has to tell them apart:
+#:
+#: ``store_declined``
+#:     the published ``204`` — the contract's own word for "I choose not to bid" — carrying
+#:     its ``x-proxyshop-decline-reason`` as the detail when the agent stated one.
+#: ``store_refused``
+#:     any other status the exchange cannot read a bid out of, carrying that status as the
+#:     detail. A ``422`` here means the SOLICITATION was rejected, which is the exchange's own
+#:     fault and not the store's, and is precisely the case that used to be invisible.
+#:
+#: Before these existed the solicitor mapped every non-200 to ``None`` and ``collect_bids``
+#: labelled the store ``no_response``, so a store that declined, a store that rejected a
+#: malformed request and a store that was switched off were one indistinguishable fact.
+#: Measured on this tree, one real store agent, ``POST /auctions`` with no ``profile``::
+#:
+#:     agent, profile={} -> 422 {"detail":[{"type":"missing","loc":["body","profile",
+#:                               "pseudonym"],"msg":"Field required","input":{}}, ...]}
+#:     entries -> [{"store_id": "store-alpha", "fallback": true,
+#:                  "fallback_reason": "no_response"}]
+#:
+#: A refusal the buyer cannot see is worse than an error.
+STORE_DECLINED_REASON = "store_declined"
+STORE_REFUSED_REASON = "store_refused"
+
+#: Where the exchange's own solicitor writes that refusal on the response it hands back.
+#:
+#: The EXCHANGE writes this field, never a store: the solicitor puts the store's reply under
+#: ``bid`` and everything beside it is the exchange's own record, the same rule ``received_at``
+#: and ``store_id`` are stamped under (:func:`~.fanout._stamped`). :func:`_unusable_because`
+#: re-normalises whatever it finds here anyway, so a solicitor that wrote something else — or a
+#: store that reached the field through one — still cannot put unbounded text in the answer.
+REFUSAL_FIELD = "exchange_refusal"
+
+#: The most characters of refusal DETAIL that reach the response, and what replaces one that
+#: cannot be rendered.
+#:
+#: The detail on a decline is a header the STORE chose, on an unauthenticated path, and it is
+#: echoed once per rostered store in a ``201`` body — the same shape of lever
+#: :data:`~exchange.auction.routes.MAX_IDENTIFIER_LENGTH` and
+#: :data:`~exchange.auction.routes.MAX_EXCLUSION_REASONS_PER_BID` already bound. An allowlist
+#: rather than an encodability check, for the reason ``store-agent``'s own header guard records:
+#: screening for what raises lets through exactly the characters that make the value illegal.
+MAX_REFUSAL_DETAIL_LENGTH = 64
+UNDISCLOSED_REFUSAL_DETAIL = "undisclosed"
+
+_REFUSAL_DETAIL_CHARACTERS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+)
+
+
+def refusal_reason(family: str, detail: Any = None) -> str:
+    """One bounded fallback reason in the ``family:detail`` spelling, or the bare family.
+
+    ``family`` is a word out of :data:`FALLBACK_REASONS` and is what a reader groups on;
+    ``detail`` is the specific thing that happened and is what a reader acts on. They are one
+    string because ``AuctionEntryOut.fallback_reason`` is the only per-store channel the
+    published response has, and widening that model is pinned by a test that is not wrong.
+
+    A detail that is empty, over-long, or spells anything outside the allowlist becomes
+    :data:`UNDISCLOSED_REFUSAL_DETAIL` rather than being dropped: an absent detail and an
+    unrenderable one are different facts, and neither is a reason to lose the family.
+    """
+    token = str(family).strip()
+    if detail is None:
+        return token
+    rendered = str(detail).strip()
+    if not rendered:
+        return token
+    if len(rendered) > MAX_REFUSAL_DETAIL_LENGTH or set(rendered) - _REFUSAL_DETAIL_CHARACTERS:
+        rendered = UNDISCLOSED_REFUSAL_DETAIL
+    return f"{token}:{rendered}"
+
+
+def fallback_reason_family(reason: Any) -> str | None:
+    """The :data:`FALLBACK_REASONS` word a recorded reason belongs to, or ``None``.
+
+    Every reason this module records is either a bare vocabulary word or one of those words
+    followed by ``:`` and a detail, so this is what a reader groups on — a loss report counting
+    ``store_refused:422`` and ``store_refused:503`` separately is counting HTTP statuses, not
+    store behaviours.
+    """
+    if reason is None:
+        return None
+    return str(reason).split(":", 1)[0] or None
+
+
 FALLBACK_REASONS: tuple[str, ...] = (
     "tier_0_no_agent",
     "no_response",
@@ -230,6 +324,8 @@ FALLBACK_REASONS: tuple[str, ...] = (
     "response_not_stamped",
     "arrival_stamp_unparseable",
     UNRECONCILABLE_PRICE_REASON,
+    STORE_DECLINED_REASON,
+    STORE_REFUSED_REASON,
 )
 
 #: The subset of :data:`FALLBACK_REASONS` that means "a reply arrived, and we could not use
@@ -578,15 +674,35 @@ def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | Non
     so one malformed reply took down an auction every other store was bidding in. (``nan``
     already fails the comparison; this makes the string and ``None``-ish cases agree.)
 
-    The four conditions are kept apart because they are four different faults:
+    The five conditions are kept apart because they are five different faults:
 
-    ``response_carried_no_bid``      a reply with no ``bid`` mapping — the store answered,
+    the solicitor's refusal        the store ANSWERED and said no — a ``204`` decline or a
+                                   status the exchange cannot read a bid out of. Read FIRST,
+                                   because every other label below would describe it as an
+                                   absence: a refusal carries no ``bid``, so without this it
+                                   is ``response_carried_no_bid`` at best and, when the
+                                   solicitor answered ``None``, ``no_response`` — a store
+                                   that refused reported as a store that was switched off
+    ``response_carried_no_bid``     a reply with no ``bid`` mapping — the store answered,
                                     but with nothing to rank
-    ``response_not_stamped``         no ``received_at`` at all, so the exchange's own stamp
+    ``response_not_stamped``        no ``received_at`` at all, so the exchange's own stamp
                                     never got applied; a fan-out bug, not a store's latency
-    ``arrival_stamp_unparseable``    a stamp that is not a number
-    ``response_after_deadline``      the only one of the four that is actually about time
+    ``arrival_stamp_unparseable``   a stamp that is not a number
+    ``response_after_deadline``     the only one of the five that is actually about time
+
+    The refusal is re-normalised through :func:`refusal_reason` rather than trusted verbatim.
+    :data:`REFUSAL_FIELD` is written by the exchange's own solicitor, but this is the public
+    boundary and it bounds what reaches an answer, exactly as it bounds a store's prices and
+    its arrival stamp: a solicitor that wrote 64 KiB there cannot spend it in a ``201`` body.
     """
+    refusal = response.get(REFUSAL_FIELD)
+    if refusal is not None and str(refusal).strip():
+        family, _, detail = str(refusal).strip().partition(":")
+        return refusal_reason(
+            family if family in FALLBACK_REASONS else STORE_REFUSED_REASON,
+            detail or None,
+        )
+
     bid = response.get("bid")
     if not isinstance(bid, Mapping):
         return "response_carried_no_bid"

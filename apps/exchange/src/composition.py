@@ -175,6 +175,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .auction.collect import (
+    REFUSAL_FIELD,
+    STORE_DECLINED_REASON,
+    STORE_REFUSED_REASON,
+    refusal_reason,
+)
 from .checkout.registry import registered_modes
 from .checkout.sellers import StaticRegisteredDomains
 from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
@@ -185,8 +191,15 @@ from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
 # other side. They are imported inside :func:`configure_exchange` instead, which also keeps
 # the hook cheap for the case that matters most: an exchange with no deployment configured
 # reaches `read_deployment`, gets `None`, and imports nothing at all.
+#
+# `auction.collect` is the exception and is imported at module scope, because it is not a
+# route module and imports nothing from here: it is the pure collector whose vocabulary this
+# module's solicitor writes into. One spelling of a fallback reason, in the module that
+# publishes the list of them.
 
 __all__ = [
+    "ANONYMOUS_PSEUDONYM_PREFIX",
+    "DECLINE_REASON_HEADER",
     "DEFAULT_SOLICIT_TIMEOUT_SECONDS",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
@@ -201,7 +214,18 @@ __all__ = [
     "configure_exchange",
     "ensure_configured",
     "read_deployment",
+    "solicitation_profile",
 ]
+
+#: The header a store agent's ``204`` decline states its reason in.
+#:
+#: Published on the 204 response of ``POST /v1/bid-requests`` in
+#: ``packages/contracts/openapi/store-agent.openapi.json``: a 204 carries no body, so the
+#: reason has nowhere else to travel. Restated here rather than imported from ``store_agent``
+#: — the exchange does not depend on the seller's package, and the image it ships does not
+#: contain it — which is the same arrangement every other cross-service constant in this
+#: module has.
+DECLINE_REASON_HEADER = "x-proxyshop-decline-reason"
 
 #: Path to the deployment document.
 ENV_DEPLOYMENT = "EXCHANGE_DEPLOYMENT"
@@ -581,6 +605,59 @@ def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
 # =====================================================================================
 # The outbound bid client — R10's `POST /v1/bid-requests`
 # =====================================================================================
+#: What the exchange calls a buyer who named no profile.
+#:
+#: A pseudonym is an opaque, rotating handle carrying no identity (R13) — it is the ONE thing
+#: a ``BuyerProfile`` requires, and the exchange has to write something in it or the request is
+#: not a ``BidRequest``. This mints one per auction, which rotates at least as often as the
+#: published contract asks, and reveals nothing the solicitation did not already carry: the
+#: ``auction_id`` is a field of the very same body.
+ANONYMOUS_PSEUDONYM_PREFIX = "anon"
+
+
+def solicitation_profile(profile: Any, *, auction_id: str) -> dict[str, Any]:
+    """The ``BuyerProfile`` this solicitation carries — always a valid one.
+
+    ``CreateAuctionRequest.profile`` is ``dict | None``: the buyer service may omit it, and
+    the published ``BidRequest`` may not. This used to be written as ``profile if
+    isinstance(profile, Mapping) else {}``, and ``{}`` is not a ``BuyerProfile`` — it states
+    neither ``pseudonym`` nor ``buckets``, both required. Measured against the real store
+    agent, which validates the body against the pinned model::
+
+        POST /v1/bid-requests, profile={} -> 422
+          {"detail":[{"type":"missing","loc":["body","profile","pseudonym"],
+                      "msg":"Field required","input":{}},
+                     {"type":"missing","loc":["body","profile","buckets"], ...}]}
+
+    Every store on the roster answered that 422, and the exchange reported all of them as
+    ``fallback_reason: "no_response"`` — a schema violation the exchange itself committed,
+    reported as the stores' silence.
+
+    Nothing about the BUYER is invented here. The buckets stay exactly as the caller wrote
+    them, and empty when there were none: an empty bucket set says "this exchange knows
+    nothing about this shopper", which is true, and it is what a store's learning grid reads
+    as "no segment". Only the handle is minted, because a handle is a name and not a fact.
+    """
+    source: Mapping[str, Any] = profile if isinstance(profile, Mapping) else {}
+    out = dict(source)
+
+    pseudonym = out.get("pseudonym")
+    if not isinstance(pseudonym, str) or not pseudonym.strip():
+        out["pseudonym"] = (
+            f"{ANONYMOUS_PSEUDONYM_PREFIX}-{auction_id}"
+            if auction_id
+            else (ANONYMOUS_PSEUDONYM_PREFIX)
+        )
+
+    if not isinstance(out.get("buckets"), Mapping):
+        # Repaired rather than passed through, for the same reason the pseudonym is: a
+        # `buckets` the contract cannot read costs the auction every bid, and the exchange
+        # knows the difference between "the buyer stated no buckets" and "the buyer stated
+        # buckets this exchange dropped" — it is the first one.
+        out["buckets"] = {}
+    return out
+
+
 class HttpBidSolicitor:
     """The real outbound solicitor: one ``POST /v1/bid-requests`` per rostered store.
 
@@ -604,6 +681,22 @@ class HttpBidSolicitor:
     is R10's own degradation, and it is why this returns ``None`` rather than raising — the
     fan-out discards a raising solicitor's future anyway, which would lose the distinction
     between "declined" and "crashed" for every store at once.
+
+    **"Loud in the entry" was not true of the status code, and that is what
+    :meth:`_refusal` fixes.** This method used to map every non-200 to ``None``, which
+    ``collect_bids`` labels ``no_response`` — so a store that DECLINED with the contract's own
+    ``204``, a store that rejected the request body, and a store that was switched off were
+    one indistinguishable fact in the answer. Measured on this tree, one real store agent,
+    ``POST /auctions`` carrying no ``profile``::
+
+        agent, profile={} -> 422 {"detail":[{"type":"missing",
+                                  "loc":["body","profile","pseudonym"], ...}]}
+        entries -> [{"store_id": "store-alpha", "fallback": true,
+                     "fallback_reason": "no_response"}]
+
+    The 422 there was the exchange's OWN doing (see :meth:`for_auction`), and it was reported
+    as the store's silence. Both halves are closed: the request is valid now, and a refusal
+    that still happens is named.
     """
 
     def __init__(
@@ -627,12 +720,17 @@ class HttpBidSolicitor:
         profile: Any = None,
         respond_by: float | None = None,
     ) -> HttpBidSolicitor:
-        """A view of this solicitor bound to one auction's ``BidRequest`` fields."""
+        """A view of this solicitor bound to one auction's ``BidRequest`` fields.
+
+        ``profile`` is passed through :func:`solicitation_profile`, which is the difference
+        between a solicitation a store can answer and one it must refuse: this used to write
+        ``{}`` whenever the buyer named no profile, and ``{}`` is not a ``BuyerProfile``.
+        """
         bound = HttpBidSolicitor(self._endpoints, timeout=self._timeout, client=self._http_client())
         bound._context = {
             "auction_id": str(auction_id),
             "intent": intent if isinstance(intent, Mapping) else {},
-            "profile": profile if isinstance(profile, Mapping) else {},
+            "profile": solicitation_profile(profile, auction_id=str(auction_id)),
             "respond_by": _rfc3339(respond_by),
         }
         return bound
@@ -675,7 +773,7 @@ class HttpBidSolicitor:
                 "POST", endpoint, json=payload, timeout=self._timeout
             ) as response:
                 if response.status_code != 200:
-                    return None
+                    return self._refusal(store_id, response)
                 body = bytearray()
                 for chunk in response.iter_bytes():
                     body.extend(chunk)
@@ -702,6 +800,42 @@ class HttpBidSolicitor:
         return {"store_id": store_id, "bid": dict(bid)}
 
     __call__ = solicit
+
+    @staticmethod
+    def _refusal(store_id: str, response: Any) -> dict[str, Any]:
+        """A store's refusal, in the shape ``collect_bids`` can name it by.
+
+        A record rather than ``None``, and that is the whole repair: ``None`` means "nothing
+        arrived", and something did arrive — the store answered, and its answer was no. It
+        carries no ``bid``, so every downstream rule that decides on a bid decides exactly as
+        it did before; the only thing that changes is the sentence the operator reads.
+
+        ``204`` is read as the store agent contract's DECLINE and its reason is taken from the
+        header that contract publishes for it (a 204 has no body to carry one in). Any other
+        status is a refusal of the SOLICITATION, and the status is the detail because that is
+        the one fact the exchange actually holds: a 422 means this exchange sent something the
+        store could not read, which is a defect on this side, and a 503 means the agent is
+        down, which is a defect on that one. Reported as ``no_response``, they were the same
+        sentence and neither operator could act on it.
+
+        The header name is restated here rather than imported from ``store_agent``: it is a
+        published contract detail (``store-agent.openapi.json`` documents it on the 204), and
+        the exchange does not import the seller's package — the image it ships does not even
+        contain it.
+        """
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status == 204:
+            headers = getattr(response, "headers", None)
+            stated = None
+            if headers is not None:
+                try:
+                    stated = headers.get(DECLINE_REASON_HEADER)
+                except Exception:
+                    stated = None
+            reason = refusal_reason(STORE_DECLINED_REASON, stated)
+        else:
+            reason = refusal_reason(STORE_REFUSED_REASON, status)
+        return {"store_id": store_id, REFUSAL_FIELD: reason}
 
     # -- plumbing -------------------------------------------------------------------
     def _http_client(self) -> Any:
