@@ -476,3 +476,123 @@ def test_an_unset_context_variable_is_a_decision_and_not_an_error(
 ) -> None:
     monkeypatch.delenv(CONTEXT_ENV, raising=False)
     assert load_context_from_env() is None
+
+
+# =============================================================================================
+# 6. The product property the whole lane exists for: a bid this agent serves is one the
+#    exchange can actually shortlist.
+#
+#    Every assertion above is about a FIELD. This one is about the CONSEQUENCE, and it is the
+#    one that was measured broken: an exchange wired by hand with real eligibility, a real trust
+#    snapshot and a real domain registry answered `ranked: []`, every store excluded
+#    `off_domain_checkout … failing closed (C10)`. A field-level test would have gone green the
+#    moment the agent wrote *any* string into `checkout_url`; this one goes green only when the
+#    string is one the platform's ranker accepts.
+#
+#    It drives the exchange's own `attest_candidates` + `rank` rather than a local imitation. If
+#    those move, this test fails loudly, which is the correct outcome: the property the agent
+#    owes is defined by that code and by nothing this package could restate.
+# =============================================================================================
+
+PRODUCT_REF = "prod-cap"
+AS_OF = "2026-01-01T00:00:00Z"
+#: `config["now"]` for `rank()`: 2026-01-01T00:00:00Z as epoch seconds. The offer expires in
+#: 2999, so nothing here is near an expiry boundary.
+RANK_NOW = 1767225600.0
+
+
+def catalog_snapshot(ctx: dict[str, Any]) -> dict[str, Any]:
+    """The catalogue the exchange grades this store's claims against — the PLATFORM's copy.
+
+    Built the same way ``e2e/support/s1/flow.py`` builds it, from the same rows the agent read.
+    That is the whole security argument restated: the store supplies the claim, the exchange
+    supplies the evidence, and a divergence is a contradiction rather than a matter of opinion.
+    """
+    listing = ctx["catalog"][PRODUCT_REF]
+    attributes = {
+        key: {"value": value}
+        for key, value in listing.items()
+        if key not in ("product_ref", "variant_ref")
+    }
+    attributes.update({k: {"value": v} for k, v in ctx["live_state"][PRODUCT_REF].items()})
+    return {
+        "snapshot_id": f"snap-{STORE_ID}",
+        "captured_at": AS_OF,
+        "store_id": STORE_ID,
+        "products": [
+            {
+                "product_ref": PRODUCT_REF,
+                "canonical_name": PRODUCT_REF,
+                "evidence_ref": f"snap-{STORE_ID}#{PRODUCT_REF}",
+                "observed_at": AS_OF,
+                "attributes": attributes,
+                "offer": {
+                    "unit_price": listing["list_price"],
+                    "currency": "USD",
+                    "availability": "in_stock",
+                },
+            }
+        ],
+    }
+
+
+def ranked_by_the_exchange(offer: dict[str, Any], bid_body: dict[str, Any], ctx: dict) -> dict:
+    """One auction, one candidate, through the exchange's real attestation and ranker."""
+    from exchange.ranking import rank  # noqa: PLC0415 - the exchange is a sibling package
+    from exchange.ranking.verification import (  # noqa: PLC0415
+        StaticCatalogSnapshots,
+        attest_candidates,
+    )
+
+    candidate = {
+        "bid_id": f"{bid_body['auction_id']}-{STORE_ID}",
+        "store_id": STORE_ID,
+        # The PLATFORM's registered domain, not the bid's word for it. The agent was configured
+        # with the same value, which is what a deployment populated from one seller record looks
+        # like — and what makes the host comparison mean something.
+        "store_domain": STORE_DOMAIN,
+        "tier": 1,
+        "network_fee": 0.0,
+        "fee_rate": 0.0,
+        "envelope_max_discount_pct": 0.0,
+        "envelope_budget_cap": 0.0,
+        "offer": offer,
+        "claims": bid_body["claims"],
+    }
+    attested = attest_candidates(
+        [candidate],
+        catalog=StaticCatalogSnapshots({STORE_ID: catalog_snapshot(ctx)}),
+        product_refs={STORE_ID: PRODUCT_REF},
+    )
+    return rank(
+        attested,
+        request_body()["intent"],
+        {STORE_ID: {"store_id": STORE_ID, "score": 0.8, "blacklisted": False}},
+        {"now": RANK_NOW, "auction_id": bid_body["auction_id"]},
+    )
+
+
+def test_a_bid_this_agent_serves_is_one_the_exchange_shortlists() -> None:
+    """The consequence, end to end: HTTP 200 -> attested -> ranked -> a slot in the shortlist.
+
+    And the control in the same test, because "1 slot" only means something next to the 0 it
+    replaced: the same bid with **only** ``checkout_url`` removed is excluded by name.
+    """
+    ctx = context(variant=True)
+    response = client_for(ctx).post("/v1/bid-requests", json=request_body())
+    assert response.status_code == 200, response.text
+    served = response.json()
+
+    result = ranked_by_the_exchange(served["offer"], served, ctx)
+    excluded_for = result["candidates"][0]["exclusion_reasons"]
+    assert len(result["ranked"]) == 1, f"the agent's own bid was not rankable: {excluded_for}"
+    assert len(result["shortlist"]["slots"]) == 1
+    assert result["shortlist"]["slots"][0]["bid_ref"] == f"auc-0001-{STORE_ID}"
+
+    without = ranked_by_the_exchange(
+        {**copy.deepcopy(served["offer"]), "checkout_url": None}, served, ctx
+    )
+    assert without["ranked"] == []
+    assert without["shortlist"]["slots"] == []
+    reasons = without["candidates"][0]["exclusion_reasons"]
+    assert any(reason.startswith("off_domain_checkout") for reason in reasons), reasons
