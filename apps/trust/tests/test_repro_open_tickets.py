@@ -3362,8 +3362,14 @@ def test_t332_the_blank_store_id_sweep_is_armed() -> None:
     from trust.snapshot.delisting import BLACKLISTED_KIND, delisting_events
 
     emitted = delisting_events(
-        [{"store_id": "store-real", "business_identity": "bad-co", "score": 0.01,
-          "blacklisted": False}],
+        [
+            {
+                "store_id": "store-real",
+                "business_identity": "bad-co",
+                "score": 0.01,
+                "blacklisted": False,
+            }
+        ],
         blacklist=Blacklist(),
         as_of=AS_OF,
     )
@@ -3427,8 +3433,14 @@ def test_t332_a_delisting_event_never_names_a_store_that_is_not_a_store() -> Non
     slipped: list[str] = []
     for label, store_id in (("empty string", ""), ("whitespace only", "   "), ("a tab", "\t")):
         emitted = delisting_events(
-            [{"store_id": store_id, "business_identity": "bad-co", "score": 0.01,
-              "blacklisted": False}],
+            [
+                {
+                    "store_id": store_id,
+                    "business_identity": "bad-co",
+                    "score": 0.01,
+                    "blacklisted": False,
+                }
+            ],
             blacklist=Blacklist(),
             as_of=AS_OF,
         )
@@ -3470,7 +3482,9 @@ def test_t333_the_producer_validation_sweep_is_armed() -> None:
         f"They are the authority the repro below compares delisting.py against, and all four "
         f"are outside this lane's write scope on purpose"
     )
-    assert not _t_lane_calls("# validate_ledger_payload(kind, body)\n", "validate_ledger_payload"), (
+    assert not _t_lane_calls(
+        "# validate_ledger_payload(kind, body)\n", "validate_ledger_payload"
+    ), (
         "the call detector counts a comment as a call, so an unvalidated producer would read "
         "as validated"
     )
@@ -3622,9 +3636,7 @@ _T319_EVASIONS = {
     "bound as a helper's parameter": (
         "def _arm(c):\n    if c == 503:\n        pass\n_arm(response.status_code)\n"
     ),
-    "bound by a comprehension": (
-        "codes = [c for c in (response.status_code,) if c == 503]\n"
-    ),
+    "bound by a comprehension": ("codes = [c for c in (response.status_code,) if c == 503]\n"),
     "bound by a with-statement target": (
         "with opened(response.status_code) as code:\n    if code == 503:\n        pass\n"
     ),
@@ -3822,9 +3834,9 @@ def test_t181_the_live_dsn_layer_scan_is_armed() -> None:
         "no docker-marked, database-backed test was found in test_events_hardening.py, so "
         "the repro below cannot be measuring the live layer"
     )
-    assert "test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_var" in live, (
-        f"the live connected-principal test is not in the scan's view: {sorted(live)}"
-    )
+    assert (
+        "test_the_writer_connects_to_the_real_database_as_trust_rw_from_the_per_role_var" in live
+    ), f"the live connected-principal test is not in the scan's view: {sorted(live)}"
 
 
 def _t181_live_dsn_tests() -> dict[str, set[str]]:
@@ -3902,6 +3914,7 @@ def test_t290_the_unused_binding_detector_is_armed() -> None:
     reason, and one that matched everything would make it green while the binding stayed
     decorative.
     """
+
     def _sample() -> None:
         used = 1
         unused = 2  # noqa: F841 - the point of the sample
@@ -4110,7 +4123,7 @@ def test_t275_the_kind_detector_reads_emissions_and_not_prose() -> None:
         for label, text in {
             "a comment": '# kind="blacklisted" used to be emitted here\n',
             "a docstring": '"""Explains why kind="blacklisted" matters."""\n',
-            "a string literal": 'MESSAGE = \'set kind="blacklist_expired" to delist\'\n',
+            "a string literal": "MESSAGE = 'set kind=\"blacklist_expired\" to delist'\n",
         }.items()
         if _KIND_EMISSION.search(text)
     ]

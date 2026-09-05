@@ -42,20 +42,31 @@ not to emit the second INSERT at all, which is the only defence that actually ho
 instead; until one exists this writer's discipline is what stands between a redelivered
 queue message and a silently double-counted trust observation.
 
+Who owns the transaction
+------------------------
+The CALLER owns the connection's lifetime; this function owns the transaction on it. It
+commits when the write succeeds and **rolls back** when anything raises, then re-raises.
+That rollback is load-bearing rather than tidy: without it a single failing statement leaves
+the connection in ``InFailedSqlTransaction``, and a caller that keeps the connection — the
+shipped route did — finds every subsequent request dies on a transaction it cannot see.
+
 What this module does NOT do, stated rather than hidden
 --------------------------------------------------------
-It does not re-read a store's observation history. ``score`` is computed over the
-observations the CALLER hands it (``history``) plus the one this call just recorded, so a
-caller that passes no history gets the score implied by this verification alone. That is the
-honest shape for a seam with one verification in hand; the whole-history recomputation is
-:func:`trust.snapshot.build_snapshot`'s job, and it writes ``low_data`` and ``blacklisted``,
-which is why this module names neither column and leaves both to their DDL defaults on
-insert and to the snapshot builder on update.
+It does not decide ``low_data`` or ``blacklisted``. Neither is derivable from a verification:
+``low_data`` counts clean episodes and ``blacklisted`` is the registry's answer. This module
+names neither column, so a fresh row takes the DDL's conservative defaults and an existing
+one keeps whatever last set them. Note that nothing else writes ``ledger.trust_scores``
+today, so those two columns currently have no author at all — a real gap, recorded here
+rather than papered over with a guess this seam is not entitled to make.
+
+It also does not set ``computed_through_event``. That is a foreign key onto
+``ledger.commerce_events (idempotency_key)`` and the caller appends the announcing event only
+after this returns, so there is no row for it to reference yet.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -93,6 +104,12 @@ class PersistedVerification:
     confidence: float | None = None
 
 
+# The `where` is not decoration and was MEASURED. Without it this upsert overwrites
+# unconditionally, and because it runs BEFORE the replay check below, a replayed rank-0
+# `seller_asserted` call silently destroyed a rank-9 `scraped` claim — value, provenance and
+# observed_at all rewritten — while still reporting `written=False` to its caller. That is
+# the opposite of "a replay writes nothing". `authority_rank` is the column the schema
+# already reserves for deciding which of two claims about the same key wins, so it decides.
 _CLAIM_UPSERT = """
 insert into ledger.claims (
     store_id, claim_ref, claim_type, key, value,
@@ -107,7 +124,14 @@ do update set claim_type = excluded.claim_type,
               provenance_ref = excluded.provenance_ref,
               authority_rank = excluded.authority_rank,
               observed_at = excluded.observed_at
+where excluded.authority_rank >= claims.authority_rank
 returning claim_id
+"""
+
+#: What to read back when the upsert above declines to update — a `DO UPDATE ... WHERE` whose
+#: predicate is false returns NO row, and the claim still has to be identified.
+_CLAIM_ID = """
+select claim_id from ledger.claims where store_id = %s and claim_ref = %s
 """
 
 # DO NOTHING rather than DO UPDATE, and RETURNING is load-bearing: the empty answer on a
@@ -140,11 +164,26 @@ insert into ledger.trust_observations (
 values (%s, %s, %s, %s, %s, %s)
 """
 
+#: Every observation this store has, read back so the score folds ALL of them rather than
+#: the one this call happened to add. Without it the row is pinned at the single-observation
+#: value forever and ``effective_sample_size`` stays at 1.0 however many rows exist —
+#: measured over five verifications for one store.
+_OBSERVATION_HISTORY = """
+select dim, observation_type, weight, observed_at
+from ledger.trust_observations
+where store_id = %s
+"""
+
 # `low_data` and `blacklisted` are deliberately absent from both the column list and the
-# update set: they are the snapshot builder's answers, derived from clean-episode counts and
-# the blacklist registry, neither of which a single verification can see. On insert they take
+# update set. Neither is derivable from a verification: `low_data` counts clean EPISODES and
+# `blacklisted` is the registry's answer, and this seam sees neither. On insert they take
 # their DDL defaults (true / false), which is the conservative reading for a store this seam
-# has just met; on update they keep whatever the builder last wrote.
+# has just met; on update they are left exactly as they were.
+#
+# `computed_through_event` is likewise left NULL, and that is forced rather than chosen: it
+# is a foreign key onto `ledger.commerce_events (idempotency_key)`, and the caller appends
+# the announcing event only AFTER this returns, so writing it here would reference a row that
+# does not exist yet.
 _SCORE_UPSERT = """
 insert into ledger.trust_scores (
     store_id, snapshot_version, score, confidence,
@@ -174,6 +213,54 @@ def _one(cursor: Any) -> Any:
     return row
 
 
+def _jsonb(value: Any) -> Any:
+    """A jsonb parameter, preserving the difference between SQL NULL and the json value null.
+
+    ``json.dumps(None)`` is the four characters ``null``, which Postgres stores as a jsonb
+    scalar — so ``WHERE value IS NULL`` matches nothing and a column that is nullable on
+    purpose can never actually be null. Measured: ``value is null`` False,
+    ``jsonb_typeof(value)`` ``'null'``.
+    """
+    import json
+
+    return None if value is None else json.dumps(value)
+
+
+def _observation_history(cursor: Any, store_id: str) -> list[dict[str, Any]]:
+    """Every observation the ledger holds for this store, as :func:`trust.scoring.score` eats.
+
+    Read back rather than accumulated in the caller, because the score this seam writes is
+    the STORE's score and not this verification's. Without it the row is pinned at the
+    one-observation value for good: measured across five verifications for one store, the
+    ``trust_scores`` row never moved off 0.5166 and ``effective_sample_size`` never moved off
+    1.0, while ``trust_observations`` held five rows whose true fold is 0.5463.
+
+    Returns ``[]`` rather than raising when the answer is not a projection of four columns.
+    An in-process double cannot model a ``select`` — the T-256 gate's recording cursor answers
+    every statement with one opaque value — and the caller falls back to the observation it
+    just wrote, which is the honest reading of "the ledger told me nothing".
+    """
+    try:
+        cursor.execute(_OBSERVATION_HISTORY, (str(store_id),))
+        rows = cursor.fetchall()
+    except Exception:  # noqa: BLE001 - a history we cannot read must not fail the write
+        return []
+    history: list[dict[str, Any]] = []
+    for row in rows or ():
+        if not isinstance(row, (list, tuple)) or len(row) < 4:
+            continue
+        observation: dict[str, Any] = {
+            "store_id": str(store_id),
+            "dim": row[0],
+            "type": row[1],
+            "observed_at": row[3],
+        }
+        if row[2] is not None:
+            observation["weight"] = float(row[2])
+        history.append(observation)
+    return history
+
+
 def persist_claim_verification(
     *,
     connection: Any,
@@ -194,14 +281,14 @@ def persist_claim_verification(
     authority_rank: int = 0,
     weight: float | None = None,
     source_class: str | None = None,
-    history: Iterable[Mapping[str, Any]] = (),
     snapshot_version: int = DEFAULT_SNAPSHOT_VERSION,
 ) -> PersistedVerification:
     """Persist one verification outcome across the five tables it was specified for.
 
     Args:
-        connection: a DB-API connection — anything with ``cursor()`` and ``commit()``.
-            Injected rather than resolved here so the caller owns the transaction boundary.
+        connection: a DB-API connection — anything with ``cursor()``, ``commit()`` and
+            ``rollback()``. Injected rather than resolved here so the caller owns its
+            LIFETIME; this function owns the transaction on it and always leaves it clean.
         store_id: the store the claim was made by.
         claim_ref: the claim's identity within that store. ``(store_id, claim_ref)`` is what
             ``claims_store_claim_ref_key`` upserts on.
@@ -226,9 +313,6 @@ def persist_claim_verification(
         authority_rank: how much this provenance outranks another for the same key.
         weight: the per-observation weight in ``[0, 1]`` (R14). None means exactly 1.0.
         source_class: the provenance class of the evidence rows.
-        history: observations already known for this store, folded in alongside the new one
-            before the score is written. Empty means "score this verification alone" — see
-            the module docstring on what that does and does not claim.
         snapshot_version: which ``ledger.trust_scores`` row this updates.
 
     Returns:
@@ -238,9 +322,11 @@ def persist_claim_verification(
     Raises:
         UnmappedClaimType: ``claim_type`` is absent from the approved table. Loud on purpose
             — a silent default would score the store on a dimension no human approved.
+        Exception: anything the database raises, AFTER this rolls the transaction back. The
+            rollback is not tidiness: without it the connection is left in
+            ``InFailedSqlTransaction`` and every later call on it dies too, which measurably
+            turned one bad request into a permanently dead endpoint.
     """
-    import json
-
     from ..scoring import SCORE_VERSION, claim_dimension, score
 
     dim = claim_dimension(claim_type)
@@ -253,83 +339,103 @@ def persist_claim_verification(
     if weight is not None:
         observation["weight"] = float(weight)
 
-    with connection.cursor() as cursor:
-        cursor.execute(
-            _CLAIM_UPSERT,
-            (
-                str(store_id),
-                str(claim_ref),
-                str(claim_type),
-                str(key),
-                json.dumps(value),
-                str(provenance_source),
-                provenance_ref,
-                int(authority_rank),
-                observed_at,
-            ),
-        )
-        claim_id = _one(cursor)
-
-        cursor.execute(
-            _VERIFICATION_INSERT,
-            (
-                claim_id,
-                str(catalog_snapshot_id),
-                str(verifier_version),
-                str(status),
-                json.dumps(observed_value),
-                float(confidence),
-                dim,
-                observed_at,
-            ),
-        )
-        verification_id = _one(cursor)
-        if verification_id is None:
-            # The database refused it: this exact (claim, snapshot, verifier version) is
-            # already recorded. T-065 acceptance 2 is about ROWS, so we write no more.
-            connection.commit()
-            return PersistedVerification(
-                claim_id=claim_id,
-                verification_id=None,
-                dim=dim,
-                observation_type=str(status),
-                written=False,
-            )
-
-        for evidence_ref in evidence_refs or ():
+    try:
+        with connection.cursor() as cursor:
             cursor.execute(
-                _EVIDENCE_INSERT,
-                (verification_id, str(evidence_ref), source_class, observed_at),
+                _CLAIM_UPSERT,
+                (
+                    str(store_id),
+                    str(claim_ref),
+                    str(claim_type),
+                    str(key),
+                    _jsonb(value),
+                    str(provenance_source),
+                    provenance_ref,
+                    int(authority_rank),
+                    observed_at,
+                ),
+            )
+            claim_id = _one(cursor)
+            if claim_id is None:
+                # The upsert declined: a claim of at least this authority is already on
+                # record, so it stands and this call defers to it. The row still has to be
+                # identified for the verification's foreign key.
+                cursor.execute(_CLAIM_ID, (str(store_id), str(claim_ref)))
+                claim_id = _one(cursor)
+
+            cursor.execute(
+                _VERIFICATION_INSERT,
+                (
+                    claim_id,
+                    str(catalog_snapshot_id),
+                    str(verifier_version),
+                    str(status),
+                    _jsonb(observed_value),
+                    float(confidence),
+                    dim,
+                    observed_at,
+                ),
+            )
+            verification_id = _one(cursor)
+            if verification_id is None:
+                # The database refused it: this exact (claim, snapshot, verifier version) is
+                # already recorded. T-065 acceptance 2 is about ROWS, so we write no more.
+                connection.commit()
+                return PersistedVerification(
+                    claim_id=claim_id,
+                    verification_id=None,
+                    dim=dim,
+                    observation_type=str(status),
+                    written=False,
+                )
+
+            for evidence_ref in evidence_refs or ():
+                cursor.execute(
+                    _EVIDENCE_INSERT,
+                    (verification_id, str(evidence_ref), source_class, observed_at),
+                )
+
+            cursor.execute(
+                _OBSERVATION_INSERT,
+                (
+                    verification_id,
+                    str(store_id),
+                    dim,
+                    str(status),
+                    None if weight is None else float(weight),
+                    observed_at,
+                ),
             )
 
-        cursor.execute(
-            _OBSERVATION_INSERT,
-            (
-                verification_id,
-                str(store_id),
-                dim,
-                str(status),
-                None if weight is None else float(weight),
-                observed_at,
-            ),
-        )
+            # Read the store's observations back — INCLUDING the one just written — so the
+            # score is the store's and not this verification's. Falls back to the new
+            # observation alone when the connection cannot answer a projection.
+            history = _observation_history(cursor, str(store_id)) or [observation]
+            folded = score(history, as_of=observed_at)
+            cursor.execute(
+                _SCORE_UPSERT,
+                (
+                    str(store_id),
+                    int(snapshot_version),
+                    float(folded["score"]),
+                    float(folded["confidence"]),
+                    float(folded.get("effective_evidence") or 0.0),
+                    str(folded.get("score_version") or SCORE_VERSION),
+                    _jsonb(folded["dims"]),
+                    observed_at,
+                ),
+            )
 
-        folded = score([*history, observation], as_of=observed_at)
-        cursor.execute(
-            _SCORE_UPSERT,
-            (
-                str(store_id),
-                int(snapshot_version),
-                float(folded["score"]),
-                float(folded["confidence"]),
-                float(folded.get("effective_evidence") or 0.0),
-                str(folded.get("score_version") or SCORE_VERSION),
-                json.dumps(folded["dims"]),
-                observed_at,
-            ),
-        )
+        connection.commit()
+    except Exception:
+        # Leave the connection usable. A caller that reuses it — and the shipped route does —
+        # otherwise inherits a poisoned transaction it has no way to see.
+        try:
+            connection.rollback()
+        except Exception:  # noqa: BLE001 - the original failure is the one worth reporting
+            pass
+        raise
 
-    connection.commit()
     return PersistedVerification(
         claim_id=claim_id,
         verification_id=verification_id,

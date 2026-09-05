@@ -22,10 +22,13 @@ route is the producer that had been missing.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..events.errors import EventServiceError, StoreUnavailable
 from ..events.store import append
@@ -35,17 +38,68 @@ __all__ = ["ClaimVerificationIn", "connection_for", "router", "store_for"]
 
 router = APIRouter(prefix="/claims", tags=["trust"])
 
+#: The migration that owns the CHECK vocabularies this route validates against.
+_MIGRATION = Path(__file__).resolve().parents[4] / "db" / "migrations" / "0002_ledger_tables.sql"
+
 #: The ledger kind a recorded verification announces. Frozen vocabulary — see
 #: ``trust.events.LEDGER_EVENT_KINDS`` and ``commerce_events_kind_check``.
 CLAIM_VERIFIED_KIND = "claim_verified"
 
 
+#: The provenance vocabulary ``claims_provenance_source_check`` pins. Duplicated here ONLY as
+#: a fallback: :func:`_vocabularies` reads the migration itself, and this is what a deployment
+#: that ships without ``db/migrations`` falls back to so the route still refuses a value
+#: Postgres would reject with a 500 instead of a 422.
+_FALLBACK_PROVENANCE = (
+    "scraped",
+    "pixel_feed",
+    "owner_statement",
+    "envelope_rule",
+    "learned_policy",
+    "network",
+    "seller_asserted",
+)
+
+
+def _vocabularies() -> tuple[frozenset[str], frozenset[str]]:
+    """``(verification statuses, provenance sources)``, read from the authorities that own them.
+
+    The statuses come from the verifier package, the provenance sources from the migration's
+    own CHECK constraint. Both are read rather than typed, because a second copy of a
+    vocabulary is a second thing to drift — and where a copy is unavoidable (see
+    :data:`_FALLBACK_PROVENANCE`) it is a fallback, never the first answer.
+    """
+    import re
+
+    statuses: frozenset[str] = frozenset()
+    try:
+        from claim_verification import VERIFICATION_STATUSES
+
+        statuses = frozenset(VERIFICATION_STATUSES)
+    except Exception:  # noqa: BLE001 - the verifier is not on every deployment's path
+        statuses = frozenset()
+
+    provenance = frozenset(_FALLBACK_PROVENANCE)
+    migration = _MIGRATION
+    if migration.is_file():
+        found = re.search(
+            r"provenance_source\s+in\s*\(([^)]*)\)", migration.read_text(encoding="utf-8"), re.I
+        )
+        if found:
+            parsed = frozenset(re.findall(r"'([^']+)'", found.group(1)))
+            if parsed:
+                provenance = parsed
+    return statuses, provenance
+
+
 class ClaimVerificationIn(BaseModel):
     """One verification outcome, as the verifier decided it.
 
-    Every field the migration marks NOT NULL without a DEFAULT is required here too, so a
-    payload this model accepts is a payload Postgres can hold. The optional ones carry the
-    same defaults the seam does.
+    Every field the migration marks NOT NULL without a DEFAULT is required here too, and the
+    two fields the migration additionally constrains by CHECK — ``status`` and
+    ``provenance_source`` — are validated against the vocabularies that own them. Without
+    that, a value only Postgres refuses arrives as a 500 from deep inside the writer instead
+    of a 422 naming the field, which is what a caller can act on.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -68,6 +122,28 @@ class ClaimVerificationIn(BaseModel):
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_class: str | None = None
 
+    @field_validator("status")
+    @classmethod
+    def _status_is_published(cls, value: str) -> str:
+        statuses, _ = _vocabularies()
+        if statuses and value not in statuses:
+            raise ValueError(
+                f"status {value!r} is not a published verification status "
+                f"({sorted(statuses)}); claim_verifications_status_check would refuse it"
+            )
+        return value
+
+    @field_validator("provenance_source")
+    @classmethod
+    def _provenance_is_published(cls, value: str | None) -> str | None:
+        _, provenance = _vocabularies()
+        if value is not None and value not in provenance:
+            raise ValueError(
+                f"provenance_source {value!r} is not in the approved vocabulary "
+                f"({sorted(provenance)}); claims_provenance_source_check would refuse it"
+            )
+        return value
+
 
 def store_for(request: Request) -> Any:
     """The event store this application appends the ``claim_verified`` event to.
@@ -80,19 +156,37 @@ def store_for(request: Request) -> Any:
     return events_store_for(request)
 
 
-def connection_for(request: Request) -> Any:
-    """The database connection the verification rows are written on.
+@contextmanager
+def connection_for(request: Request) -> Iterator[Any]:
+    """The database connection the verification rows are written on. ONE PER REQUEST.
 
     Resolution order: whatever was injected on ``app.state.ledger_connection``, otherwise one
-    opened against the DSN the ledger writer itself resolved. The DSN comes from
-    :class:`~..events.pg.PostgresEventStore` rather than from a second walk of the
-    environment on purpose — ``DEFAULT_DSN_ENV``'s ORDER is the thing T-151 got wrong and
-    T-181/T-289 are still trying to defend, and a second resolver here would be a second
-    place for that order to drift.
+    opened against the DSN the ledger writer itself resolved — and closed again when this
+    request is done. The DSN comes from :class:`~..events.pg.PostgresEventStore` rather than
+    from a second walk of the environment on purpose: ``DEFAULT_DSN_ENV``'s ORDER is the
+    thing T-151 got wrong and T-181/T-289 are still trying to defend, and a second resolver
+    here would be a second place for that order to drift.
+
+    PER-REQUEST, and this is the correction of a measured defect rather than a preference.
+    An earlier version cached one ``autocommit=False`` connection on ``app.state`` forever.
+    Two things followed, both measured against a live database:
+
+    * one failing statement left it in ``InFailedSqlTransaction``, and since nothing rolled
+      it back, EVERY later request died on it — one bad request permanently bricked the
+      endpoint; and
+    * this handler is a plain ``def``, so FastAPI runs it in a threadpool and concurrent
+      requests shared a single transaction: one request's commit committed another's
+      half-written rows.
+
+    The sibling writer in this same service already does it this way —
+    ``PostgresEventStore._connection()`` takes a connection per operation — so this is the
+    house pattern, not an invention. An injected connection is handed back untouched and
+    NOT closed: whoever injected it owns its lifetime.
     """
-    connection = getattr(request.app.state, "ledger_connection", None)
-    if connection is not None:
-        return connection
+    injected = getattr(request.app.state, "ledger_connection", None)
+    if injected is not None:
+        yield injected
+        return
 
     import psycopg
 
@@ -112,8 +206,10 @@ def connection_for(request: Request) -> Any:
                 "message": f"the verification writer could not reach the ledger database: {exc}",
             },
         ) from exc
-    request.app.state.ledger_connection = connection
-    return connection
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 @router.post(
@@ -130,16 +226,17 @@ def post_claim_verification(request: Request, body: ClaimVerificationIn) -> Any:
     payload.pop("store_id", None)
 
     try:
-        outcome = persist_claim_verification(
-            connection=connection_for(request),
-            store_id=body.store_id,
-            **payload,
-        )
+        with connection_for(request) as connection:
+            outcome = persist_claim_verification(
+                connection=connection,
+                store_id=body.store_id,
+                **payload,
+            )
     except HTTPException:
         raise
     except (LookupError, ValueError) as exc:
-        # An unmapped claim_type, a status outside the vocabulary, a malformed uuid: all of
-        # them are the caller's payload being wrong, not this service being broken.
+        # An unmapped claim_type or a weight out of range: the caller's payload being wrong,
+        # not this service being broken.
         #
         # LookupError is not decoration and was not guessed: `trust.scoring`'s vocabulary
         # refusals — UnmappedClaimType, UnknownObservationType, UnknownTrustDimension — all
@@ -148,6 +245,25 @@ def post_claim_verification(request: Request, body: ClaimVerificationIn) -> Any:
         # request naming an unapproved claim_type escaped the handler and became a 500, i.e.
         # this service reporting the caller's bad payload as its own outage.
         raise HTTPException(422, {"error": "unverifiable_claim", "message": str(exc)}) from exc
+    except Exception as exc:
+        # And the ones the clause above CANNOT see, which is most of them: `psycopg.Error`
+        # derives directly from `Exception`, so a CHECK violation, an unknown
+        # catalog_snapshot_id (a real FK onto ledger.catalog_snapshots), a malformed uuid and
+        # a bad provenance value ALL escaped as 500s. Measured — four of five bad payloads
+        # became "this service is broken" when they were "your request is wrong".
+        from ..events.pg import classify_connection_error
+
+        unavailable = classify_connection_error(exc)
+        if unavailable is not None:
+            raise HTTPException(
+                503, {"error": "store_unavailable", "message": str(unavailable)}
+            ) from exc
+
+        import psycopg
+
+        if isinstance(exc, psycopg.Error):
+            raise HTTPException(422, {"error": "unverifiable_claim", "message": str(exc)}) from exc
+        raise
 
     recorded = {
         "claim_id": str(outcome.claim_id) if outcome.claim_id is not None else None,
@@ -165,8 +281,19 @@ def post_claim_verification(request: Request, body: ClaimVerificationIn) -> Any:
         # carries the announcement this call would have duplicated.
         return JSONResponse(status_code=200, content={"replayed": True, "verification": recorded})
 
+    # The event id carries EVERY component of the database's own idempotency key —
+    # `claim_verifications_idempotency_key UNIQUE (claim_id, catalog_snapshot_id,
+    # verifier_version)`. Omitting catalog_snapshot_id was a measured defect: the migration
+    # says in as many words that "a snapshot bump is a different row and therefore
+    # re-verifies", so a legitimate re-verification against a new snapshot wrote its rows,
+    # committed them, and then hit a 409 appending an event id it had already used — leaving
+    # rows in the tables that the ledger does not corroborate, which is exactly the
+    # divergence the persist-then-announce order exists to prevent, in the mirror direction.
     event = {
-        "event_id": f"{CLAIM_VERIFIED_KIND}:{body.store_id}:{body.claim_ref}:{body.verifier_version}",
+        "event_id": (
+            f"{CLAIM_VERIFIED_KIND}:{body.store_id}:{body.claim_ref}"
+            f":{body.catalog_snapshot_id}:{body.verifier_version}"
+        ),
         "ts": body.observed_at,
         "kind": CLAIM_VERIFIED_KIND,
         "store_id": body.store_id,
