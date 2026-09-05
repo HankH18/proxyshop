@@ -633,10 +633,30 @@ def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> N
 
     Two doors reading one field two ways is what the ticket means by "the relation is not
     decidable from a bid alone", and reconciling them is the design decision it says closing
-    this requires. MEASURED, so it is a finding and not a guess: correcting that door to
-    `total >= unit` breaks 56 tests; correcting it to the list-price form breaks 14, including
-    the pinning test itself and six cross-language parity cases. Fixing only the store agent's
-    door — the location this ticket names — breaks NOTHING: 1202 passed, 0 new failures.
+    this requires. MEASURED, so it is a finding and not a guess — three ways to correct that
+    door, and what each one costs:
+
+    * `total >= unit` there: **56** tests fail. The shared `make_offer` fixture alone
+      (`unit 49.0 / total 44.1 / 10%`) sits inside the band it would refuse.
+    * the list-price form, `total >= list * (100 - depth) / 100`: **15** fail, and three of
+      them are genuine verdict flips rather than stale expectations — both params of the
+      no-catalog pinning test above stop refusing `priced_offer(100.0, 15.0)` at all (with no
+      roster and no list-price claim `listed is None`, so the relation abstains and nothing
+      else objects to a total of 15.00 under a stated unit of 100.00), and one corpus row goes
+      from refused to admitted.
+    * **additive** — keep the existing unit relation and ADD the list-price one: **12** fail,
+      every one of them a stale exact-reason list on a bid that was already refused, and ZERO
+      verdicts flip. The pinning test stays green. This is the cheapest correct version, and
+      it still needs those 12 expectations updated.
+
+    What binds all three is `packages/contracts/tests/price_parity_corpus.json`: 37 wire
+    payloads asserting EXACT reason lists, loaded both by
+    `test_the_price_verdicts_match_the_typescript_peer` and by
+    `packages/contracts/tests/boundary.test.ts` — so a reason added on the Python side is red
+    on the TypeScript side too.
+
+    Fixing only the store agent's door — the location this ticket names — breaks NOTHING:
+    1202 passed, 0 new failures, re-measured on two independent copies.
 
     So the second door's silence is printed in the failure message and graded nowhere. A gate
     that demanded an existing test be rewritten would be a gate no repair lane could close.
