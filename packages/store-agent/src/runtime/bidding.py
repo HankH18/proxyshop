@@ -31,7 +31,7 @@ and leaves the lifecycle to the caller that owns it.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,6 +58,15 @@ LIST_PRICE_KEY = "list_price"
 
 #: The pixel-feed key that says a product cannot be sold right now.
 IN_STOCK_KEY = "in_stock"
+
+#: The catalog keys that may carry a product's variant id, in priority order.
+#:
+#: Read **structurally**, off the catalog entry, and not through `get_product_fact` — for the
+#: same reason `product_ref` is read off the catalog's own keys rather than asked for as a fact.
+#: A variant id identifies the listing a permalink points at; it asserts nothing about the
+#: product, so it is not a claim, and minting one for it would put a `Claim` in the hook log and
+#: in the bid that no acceptance criterion asked for.
+VARIANT_REF_KEYS: tuple[str, ...] = ("variant_ref", "variant_id")
 
 #: `Discount.type` for a percentage depth — the only form a tool hook can authorize.
 PERCENTAGE = "percentage"
@@ -98,6 +107,11 @@ class _Candidate:
     list_price: float
     facts: tuple[Claim, ...]
     live: tuple[Claim, ...]
+    #: The catalog's own variant id for this product, when it names one. Carried because a cart
+    #: permalink is variant-scoped (D25) and because `contracts.Offer.variant_ref` is what the
+    #: checkout path reads before it can mint one. `None` when the catalog names none, which is
+    #: the fixture case and stays `None` on the offer.
+    variant_ref: str | None = None
 
     @property
     def order(self) -> tuple[float, str]:
@@ -192,10 +206,33 @@ def _gather(ctx: AuctionContext, hooks: Any) -> tuple[list[_Candidate], dict[str
                 list_price=price,
                 facts=tuple(facts),
                 live=tuple(live),
+                variant_ref=_variant_ref(ctx.catalog.get(product_ref)),
             )
         )
     candidates.sort(key=lambda candidate: candidate.order)
     return candidates, rejected
+
+
+def _variant_ref(listing: Any) -> str | None:
+    """The catalog entry's variant id as a string, or `None` when it names none.
+
+    Defensive about the shape for the same reason the rest of this module is: the catalog is
+    whatever the merchant service handed over. A value that is not a scalar — a list of variants,
+    a nested mapping — is `None` here rather than a `str(...)` of a container, because a
+    permalink built on ``"['a', 'b']"`` points at nothing.
+    """
+    if not isinstance(listing, Mapping):
+        return None
+    for key in VARIANT_REF_KEYS:
+        value = listing.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        if not isinstance(value, (str, int, float)):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
 
 
 def _no_candidate_reason(
@@ -450,6 +487,7 @@ def _assemble(request: Any, context: Any, hooks: Any | None) -> Bid | Decline:
     offer = Offer(
         bid_offer_id=offer_id(ctx.auction_id, ctx.store_id, chosen.product_ref),
         product_ref=chosen.product_ref,
+        variant_ref=chosen.variant_ref,
         unit_price=unit_price,
         currency=ctx.currency,
         discount=_discount(grant, depth),
@@ -460,6 +498,16 @@ def _assemble(request: Any, context: Any, hooks: Any | None) -> Bid | Decline:
         # comes off the context (or, failing that, off the auction's own `respond_by`) rather
         # than out of a `now() + ttl`, which would be the one clock read on this path.
         expires_at=expires_at,
+        # The other field an offer is unusable without, and it was written by nothing in this
+        # package until T-309/T-311. `apps/exchange/src/ranking` drops from the shortlist every
+        # candidate whose offer states no `checkout_url` — measured with the exchange wired by
+        # hand against real eligibility, a real trust snapshot and a real domain registry:
+        # `POST /auctions` answered `ranked: []`, every store excluded `off_domain_checkout`,
+        # and injecting only this field turned that into 2 ranked and 2 shortlist slots. It is
+        # `None` exactly when the merchant's context states no registered domain, which is the
+        # legal R10 fallback shape rather than a spoof — `checkout/domain.py` refuses an
+        # off-domain URL, never an absent one.
+        checkout_url=ctx.checkout_url_for(chosen.product_ref, chosen.variant_ref),
     )
     assembled = Bid(
         auction_id=ctx.auction_id,
@@ -493,6 +541,7 @@ __all__ = [
     "IN_STOCK_KEY",
     "LIST_PRICE_KEY",
     "PERCENTAGE",
+    "VARIANT_REF_KEYS",
     "bid",
     "citable_as_a_grant",
     "offer_id",
