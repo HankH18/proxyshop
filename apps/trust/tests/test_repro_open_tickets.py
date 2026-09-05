@@ -1230,49 +1230,73 @@ def _t172_collect_docker_corpus(tmp_path: Any) -> list[dict[str, Any]]:
     plugin_dir = tmp_path / "t172_plugin"
     plugin_dir.mkdir(parents=True, exist_ok=True)
     (plugin_dir / "t172_corpus.py").write_text(_T172_COLLECTOR, encoding="utf-8")
-    out = tmp_path / "t172_corpus.json"
 
     env = dict(os.environ)
-    env["T172_CORPUS_OUT"] = str(out)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(plugin_dir), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
     )
-    try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "--collect-only",
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                "-p",
-                "t172_corpus",
-            ],
-            cwd=REPO_ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=240,
-        )
-    except subprocess.TimeoutExpired as expiry:  # pragma: no cover - a hang is a third outcome
-        raise AssertionError(
-            "collecting the docker corpus did not finish in 240s. A gate that hangs prints "
-            "no red at all, so this is a failure and not a slow pass."
-        ) from expiry
 
-    records: list[dict[str, Any]] = (
-        json.loads(out.read_text(encoding="utf-8")) if out.is_file() else []
-    )
+    # TWO passes. The default `python_files` glob is `test_*.py`, so a docker-marked item in a
+    # file named otherwise is invisible to a normal collection — and one exists:
+    # `proxyshop_support/tests/_service_skip_probe.py::test_probe_whole_stack` carries a bare
+    # marker and would sit outside all three layers below. The second pass widens the glob to
+    # underscore files; the lint fixtures are deliberately un-importable and are skipped.
+    passes: list[tuple[str, list[str]]] = [
+        ("default", []),
+        (
+            "underscore",
+            ["-o", "python_files=_*.py", "--ignore-glob=*/lint_fixtures/*"],
+        ),
+    ]
+    merged: dict[str, dict[str, Any]] = {}
+    codes: list[int] = []
+    tails: list[str] = []
+    for name, extra in passes:
+        pass_out = tmp_path / f"t172_corpus_{name}.json"
+        env["T172_CORPUS_OUT"] = str(pass_out)
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "--collect-only",
+                    "-q",
+                    "-p",
+                    "no:cacheprovider",
+                    "-p",
+                    "t172_corpus",
+                    *extra,
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=240,
+            )
+        except subprocess.TimeoutExpired as expiry:  # pragma: no cover - a hang is an outcome
+            raise AssertionError(
+                f"collecting the docker corpus ({name} pass) did not finish in 240s. A gate "
+                f"that hangs prints no red at all, so this is a failure and not a slow pass."
+            ) from expiry
+        codes.append(completed.returncode)
+        tails.append(
+            f"[{name}] rc={completed.returncode}\n{completed.stdout[-1200:]}\n"
+            f"{completed.stderr[-1200:]}"
+        )
+        if pass_out.is_file():
+            for record in json.loads(pass_out.read_text(encoding="utf-8")):
+                merged.setdefault(record["nodeid"], record)
+    completed_returncode = codes
+
+    records: list[dict[str, Any]] = [merged[nodeid] for nodeid in sorted(merged)]
     # A non-zero return code is TOLERATED when the corpus was still built. Once the fallback
     # is loud, collecting an undeclared item is *supposed* to fail the session — refusing to
     # reason about that run would hand the diagnosis back as "rc=4" and name one offender of
     # eight, instead of letting the assertions below name all of them.
     assert records, (
-        f"the collection subprocess (rc={completed.returncode}) produced no docker corpus at "
-        f"all, so every count below would be silently zero.\nstdout tail:\n"
-        f"{completed.stdout[-2000:]}\nstderr tail:\n{completed.stderr[-2000:]}"
+        f"the collection subprocesses (rc={completed_returncode}) produced no docker corpus "
+        f"at all, so every count below would be silently zero.\n" + "\n".join(tails)
     )
     _T172_CORPUS_CACHE = records
     return records
@@ -1323,6 +1347,18 @@ def test_t172_the_docker_corpus_sweep_is_armed(tmp_path: Any) -> None:
     )
 
     records = _t172_collect_docker_corpus(tmp_path)
+    outside_default_glob = [
+        record
+        for record in records
+        if not pathlib.Path(record["nodeid"].split("::")[0]).name.startswith("test_")
+    ]
+    assert outside_default_glob, (
+        "the widened collection pass contributed nothing. pytest's default `python_files` "
+        "glob is `test_*.py`, so a docker-marked item in a file named otherwise is invisible "
+        "to a normal collection; the second pass exists to see those, and at least one lives "
+        "in proxyshop_support/tests/_service_skip_probe.py. Contributing zero means the "
+        "widening silently stopped working and this gate is back to a partial corpus"
+    )
     assert len(records) >= _T172_MIN_DOCKER_ITEMS, (
         f"only {len(records)} `-m docker` items collected, below the {_T172_MIN_DOCKER_ITEMS} "
         f"floor (264 at the time this was written). The gate below walks this list, so a "
