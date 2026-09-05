@@ -35,12 +35,12 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 from ..adapters.base import UpsertOp
 from ..adapters.budgets import BudgetExceeded, CrawlBudget, CrawlLedger
 from ..adapters.hashing import content_hash, has_changed, snapshot_ref
-from ..adapters.netguard import FetchPolicy, FetchRefused
+from ..adapters.netguard import FetchPolicy, FetchRefused, safe_split
 from ..adapters.robots import USER_AGENT, may_fetch, robots_url, robots_verdict_for_status
 from ..adapters.transport import SafeHTTPClient, TransportError
 from ..graph.model import PolicyPage
@@ -306,7 +306,16 @@ class PolicyPageFetcher:
         seen = dict(known_hashes or {})
         client = self._client or SafeHTTPClient(policy=policy, user_agent=self.user_agent)
         ledger = CrawlLedger(budget or CrawlBudget())
-        host = (urlsplit(base_url).hostname or "").lower()
+        split = safe_split(base_url)
+        if split is None:
+            # `urlsplit("http://[")` raises, and `base_url` is caller-supplied: it arrives in
+            # the body of `POST /extraction/stores/{store_id}`, a mounted route. Measured
+            # before this guard was added: HTTP 500 out of that door. Same class as T-238, one
+            # layer up, and answered the way every other unreadable input here is — a note and
+            # an empty read, never an exception.
+            notes.append(f"base_url {base_url!r} does not parse; no policy page was read")
+            return ()
+        host = (split.hostname or "").lower()
         hosts = tuple({h for h in (*allowed_hosts, host) if h})
 
         robots_text = self._robots(client, base_url, hosts, ledger, notes)

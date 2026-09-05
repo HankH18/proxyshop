@@ -175,10 +175,16 @@ def refresh_store_catalog(store_id: str, payload: RefreshRequest | None = None) 
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         if force:
             ingestor.ledger.hashes.clear()
+        # The runner's posture, not the transport default: an operator crawling a dev store
+        # on a private address configures ONE policy for the process, and a refresh whose two
+        # halves obeyed different SSRF postures would read the catalog and silently refuse
+        # every policy page on the same host.
         policy_report = ingestor.run(
             store_id=target.store_id,
             base_url=target.base_url,
             allowed_hosts=target.allowed_hosts,
+            policy=runner.policy,
+            budget=runner.budget,
         )
         # Through the runner rather than a second copy of the session handling: a policy
         # page's writes and a product's writes are the same `UpsertOp` shape and must reach

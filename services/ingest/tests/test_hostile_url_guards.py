@@ -195,3 +195,38 @@ def test_a_redirect_into_blocked_space_is_still_refused_for_the_network_reason(
         _client().fetch(f"{base_url}/redirect/custom")
 
     assert raised.value.reason.startswith("blocked-network:169.254.169.254"), raised.value.reason
+
+
+def test_a_base_url_that_will_not_parse_is_a_warning_and_not_a_500() -> None:
+    """The same defect class as T-238, one layer up, at a location no ticket recorded.
+
+    ``PolicyPageFetcher.fetch`` derived its allow-list host with a bare ``urlsplit`` on a
+    ``base_url`` the CALLER supplies — and one caller is the body of
+    ``POST /extraction/stores/{store_id}``, a route ``main.create_app()`` mounts. Measured
+    before the guard: HTTP 500 out of that door for a four-character body field. The contract
+    of everything else in this module is that an unreadable input is a note and an empty read,
+    so that is what it answers now.
+    """
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from ingest.main import create_app  # noqa: PLC0415
+
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    response = client.post(
+        "/extraction/stores/store-1", json={"store_id": "store-1", "base_url": MALFORMED}
+    )
+
+    assert response.status_code == 200, response.text
+    assert any("does not parse" in warning for warning in response.json()["warnings"]), (
+        f"the unreadable base_url was not reported: {response.json()['warnings']}"
+    )
+    assert response.json()["pages"] == []
+
+
+def test_the_policy_fetcher_itself_does_not_raise_on_an_unparseable_base_url() -> None:
+    """Asserted below the route too, so a future caller inherits the guarantee."""
+    from ingest.extraction.pipeline import PolicyPageIngestor  # noqa: PLC0415
+
+    report = PolicyPageIngestor().run(store_id="store-1", base_url=MALFORMED)
+
+    assert report.documents == ()
+    assert any("does not parse" in warning for warning in report.warnings), report.warnings

@@ -402,6 +402,46 @@ def test_posting_a_refresh_runs_the_pipeline_and_answers_the_contracts_body(
     assert stub.requests, "the request did not reach the storefront"
 
 
+def test_the_policies_section_actually_crawls_the_store(refresh_client: Any) -> None:
+    """The other half of the published door, which nothing else here exercises.
+
+    The contract's summary is "re-crawl and re-extract one store's catalog AND policy pages",
+    and the request body publishes a ``sections`` array to select between them. A route whose
+    ``policies`` branch was never run by a test would be exactly the stub-shaped green this
+    file exists to avoid: it would import, it would return 202, and it would touch no store.
+
+    The crawl must also obey the runner's configured SSRF posture rather than the transport
+    default — a policy fetcher that built its own public-only client would refuse this
+    loopback store while the catalog half read it happily, and the 202 would look identical.
+    """
+    client, stub, _sessions = refresh_client
+
+    response = client.post("/refresh/store-1", json={"sections": ["policies"]})
+
+    assert response.status_code == 202, response.text
+    assert set(response.json()) == {"store_id", "job_id", "provenance"}
+    attempted = {path for _method, path, _headers in stub.requests}
+    assert any(path.startswith(("/policies/", "/pages/")) for path in attempted), (
+        "the policies section returned 202 without asking the store for a single policy "
+        f"page; the store was asked for {sorted(attempted)}"
+    )
+
+
+def test_the_default_refresh_does_both_sections(refresh_client: Any) -> None:
+    """An omitted ``sections`` means everything, so a caller cannot silently get half a run."""
+    client, stub, sessions = refresh_client
+
+    response = client.post("/refresh/store-1", json={})
+
+    assert response.status_code == 202, response.text
+    attempted = {path for _method, path, _headers in stub.requests}
+    assert "/products.json" in attempted, f"the catalog was not read: {sorted(attempted)}"
+    assert any(path.startswith(("/policies/", "/pages/")) for path in attempted), (
+        f"the policy pages were not read: {sorted(attempted)}"
+    )
+    assert sessions.opened >= 1, "neither half reached the graph write path"
+
+
 def test_a_refresh_for_a_store_nobody_registered_is_a_404(refresh_client: Any) -> None:
     """A caller cannot name a URL, so an unknown store is the end of the road."""
     client, _stub, _sessions = refresh_client
