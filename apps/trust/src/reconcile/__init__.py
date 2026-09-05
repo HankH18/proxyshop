@@ -49,6 +49,7 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .engine import (  # noqa: E402
     ACCEPTED_KIND,
+    CODE_BRIDGE_KINDS,
     DISCOUNT_TOLERANCE,
     DISHONORED_OBSERVATION_TYPE,
     HONORED_OBSERVATION_TYPE,
@@ -60,6 +61,7 @@ from .engine import (  # noqa: E402
     RECONCILED_KIND,
     WEBHOOK_KIND,
     ReconciliationInputError,
+    discount_codes_of,
     observation_events,
     reconcile,
     reconciled_event,
@@ -68,6 +70,7 @@ from .engine import (  # noqa: E402
 
 __all__ = [
     "ACCEPTED_KIND",
+    "CODE_BRIDGE_KINDS",
     "DISCOUNT_TOLERANCE",
     "DISHONORED_OBSERVATION_TYPE",
     "HONORED_OBSERVATION_TYPE",
@@ -79,6 +82,7 @@ __all__ = [
     "RECONCILED_KIND",
     "WEBHOOK_KIND",
     "ReconciliationInputError",
+    "discount_codes_of",
     "observation_events",
     "reconcile",
     "reconciled_event",

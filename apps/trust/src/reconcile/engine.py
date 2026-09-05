@@ -50,6 +50,7 @@ from typing import Any
 
 __all__ = [
     "ACCEPTED_KIND",
+    "CODE_BRIDGE_KINDS",
     "DISCOUNT_TOLERANCE",
     "DISHONORED_OBSERVATION_TYPE",
     "HONORED_OBSERVATION_TYPE",
@@ -61,6 +62,7 @@ __all__ = [
     "RECONCILED_KIND",
     "WEBHOOK_KIND",
     "ReconciliationInputError",
+    "discount_codes_of",
     "observation_events",
     "reconcile",
     "reconciled_event",
@@ -75,6 +77,16 @@ ACCEPTED_KIND = "accepted"
 PIXEL_KIND = "checkout_pixel"
 WEBHOOK_KIND = "order_paid"
 RECONCILED_KIND = "reconciled"
+
+#: The kinds that are read for a join key and then thrown away: they are never graded, never
+#: emitted, and contribute nothing to a verdict. They exist here for one reason — they are the
+#: only events that carry BOTH the exchange's ``checkout_token`` and the single-use discount
+#: code, and without that pairing the two halves of a real checkout never meet. See
+#: :func:`discount_codes_of` for why the code is the handle and what it is worth as one.
+#:
+#: Both are already in the frozen 18-kind vocabulary, so admitting them is not a vocabulary
+#: edit; ``reconcile`` simply stopped ignoring two records the ledger was already keeping.
+CODE_BRIDGE_KINDS: tuple[str, ...] = ("code_created", "checkout_redirect")
 
 #: Money comparison tolerance, absolute, in the offer's currency unit. Half a cent: enough to
 #: absorb the float round-trip a JSON payload takes, far too small to hide a real overcharge.
@@ -225,12 +237,15 @@ def _id_component(value: Any) -> str:
 
 
 def _join_keys(event: Any) -> tuple[str, ...]:
-    """Every identifier an event can be joined on.
+    """Every *identifier* an event can be joined on. The discount code is not one of these.
 
     ``checkout_token`` and ``order_ref`` are network-issued and globally unique. ``order_id``
     is NOT: it is the platform's own order number, and Shopify numbers orders **per shop**, so
     two unrelated stores both legitimately have order ``1001``. That is why the caller scopes
     every one of these by store before joining — see :func:`_scoped_keys`.
+
+    The single-use discount code is a weaker handle than either and is read separately, by
+    :func:`discount_codes_of`, so that the difference stays visible at the call site.
     """
     payload = _payload(event)
     keys = []
@@ -243,6 +258,105 @@ def _join_keys(event: Any) -> tuple[str, ...]:
         if candidate is not None and str(candidate).strip():
             keys.append(str(candidate).strip())
     return tuple(dict.fromkeys(keys))
+
+
+#: The scalar spellings the discount code legitimately arrives under. Exactly the tuple
+#: ``contracts.ledger`` publishes for this join key (``packages/contracts/src/ledger.py``:
+#: ``"discount_code": ("discount_code", "discountCode", "code")``), restated rather than
+#: imported so this module keeps its zero-import surface — a reconciler that cannot be loaded
+#: without the contracts package is a reconciler that stops running when contracts moves.
+_CODE_SCALAR_ALIASES: tuple[str, ...] = ("discount_code", "discountCode", "code")
+
+#: The *list* spellings, which the published alias tuple cannot reach and which are the only
+#: place a real ``orders/paid`` body puts the code. Measured on the recorded webhook the
+#: shopify-stub signs and sends: the body carries ``discount_codes: [{"code": "PSX-…"}]`` and
+#: ``discount_applications: [{…, "code": "PSX-…"}]`` and no scalar ``discount_code`` at all,
+#: so ``contracts.join_key_view()`` reads ``discount_code: None`` off it. A reader that
+#: honoured only the published aliases would therefore find the code on the exchange's half of
+#: the checkout and never on the merchant's — which is indistinguishable from no join at all.
+_CODE_LIST_ALIASES: tuple[str, ...] = (
+    "discount_codes",
+    "discountCodes",
+    "discountApplications",
+    "discount_applications",
+)
+
+
+def discount_codes_of(event: Any) -> tuple[str, ...]:
+    """The single-use discount codes one event names, upper-cased, in first-seen order.
+
+    **What this key is, and what it is not.** ``checkout_token`` and ``order_ref`` are
+    network-issued and globally unique; a discount code is neither. It is 12 characters —
+    ``PSX-`` plus 8 Crockford base32 draws from :mod:`secrets`
+    (``apps/exchange/src/checkout/codes.py``), so 2^40 of entropy and no mint-time registry —
+    and its uniqueness is probabilistic rather than enforced. Worse, the *exchange* issues it
+    but the *merchant* decides which order redeems it, so unlike a token neither party alone
+    can guarantee it names one checkout. Three consequences, all of them implemented:
+
+    * it is scoped by store like every other key (:func:`_scoped_keys`), so two shops using
+      the same code string never merge;
+    * it is namespaced into its own key space by :func:`_code_key`, so a code can only ever
+      join against another code and never against a token or an order reference that happens
+      to spell the same characters;
+    * a code claimed by two different checkouts, or by two different orders, joins **nothing**
+      — see the ambiguity pass in :func:`reconcile`. A false join on a money path is worse
+      than no join: it would merge two orders into one group, and ``setdefault`` would keep
+      the first webhook and silently drop the second store's overcharge.
+
+    Codes are compared case-insensitively because the platform redeems them that way (the
+    stub matches ``order.discount_code.upper() == value.upper()``), so a merchant that echoes
+    back ``psx-hd13pb0c`` is naming the same single-use code and must still join.
+    """
+    payload = _payload(event)
+    found: list[str] = []
+
+    def keep(value: Any) -> None:
+        if value is None or isinstance(value, bool):
+            return
+        text = str(value).strip().upper()
+        if text:
+            found.append(text)
+
+    for name in _CODE_SCALAR_ALIASES:
+        keep(payload.get(name))
+    for name in _CODE_LIST_ALIASES:
+        entries = payload.get(name)
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            continue
+        for entry in entries:
+            if isinstance(entry, Mapping):
+                for inner in _CODE_SCALAR_ALIASES:
+                    keep(entry.get(inner))
+            else:
+                keep(entry)
+    return tuple(dict.fromkeys(found))
+
+
+#: The key space discount codes live in, kept apart from tokens and order references. The
+#: separator is the same control character :data:`_SCOPE_SEPARATOR` uses and for the same
+#: reason: it cannot occur inside a code, a token or an order reference, so no value in one
+#: space can be spelled to collide with a value in the other.
+_CODE_NAMESPACE = "discount_code"
+
+
+def _code_key(code: str) -> str:
+    """One discount code as a join key that only other discount codes can match."""
+    return f"{_CODE_NAMESPACE}{_SCOPE_SEPARATOR}{code}"
+
+
+#: Which half of the checkout each code-bearing kind speaks for. The two halves are counted
+#: separately in :func:`reconcile`'s ambiguity pass, because "one code, two authorized
+#: checkouts" and "one code, two paid orders" are different faults with the same remedy, and
+#: a rule that pooled them would call a perfectly ordinary offer/order pair ambiguous.
+#:
+#: ``checkout_pixel`` is absent on purpose — see the comment at its use.
+_CODE_SIDES: Mapping[str, str] = MappingProxyType(
+    {
+        ACCEPTED_KIND: "offer",
+        **{kind: "offer" for kind in CODE_BRIDGE_KINDS},
+        WEBHOOK_KIND: "order",
+    }
+)
 
 
 def _store_of(event: Any) -> str | None:
@@ -425,8 +539,28 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
 
     Args:
         events: ``accepted`` / ``checkout_pixel`` / ``order_paid`` records in any order,
-            joined on ``checkout_token`` and ``order_ref``. Other kinds are ignored — this
-            function is handed whole ledger pages, not a curated triple.
+            joined on ``checkout_token`` and ``order_ref``, plus the ``code_created`` /
+            ``checkout_redirect`` records that bridge those two by the single-use discount
+            code. Other kinds are ignored — this function is handed whole ledger pages, not a
+            curated triple.
+
+    **Why the discount code is here at all.** The two checkout tokens in a real Shopify
+    checkout are not the same value and never were. ``CheckoutProvider.checkout`` mints its
+    ``checkout_token`` with ``secrets.token_hex(16)`` *after* the merchant has been called,
+    and transmits it nowhere: the cart permalink it builds carries ``?discount=<code>`` and
+    nothing else. The store mints its own ``uuid4().hex`` when the cart is visited, and THAT
+    is the token that rides onto ``orders/paid``. Measured on the S1 run, the two are
+    ``fac073c91fb5bcadf8e214c47a2166a4`` and ``91a1ed79fdb24f61b3e64c91e030b6e9`` — so a join
+    on tokens alone finds no shared key, and reconciliation emits nothing while every other
+    stage of the flow reports green.
+
+    The single-use discount code is the one value that genuinely crossed the wire: the
+    exchange minted it, put it in the permalink, and the order came back carrying it. It is
+    not on the ``accepted`` event — the published body there is ``(bid_ref, checkout_token,
+    offer)`` — but it IS on ``code_created`` and ``checkout_redirect`` alongside the
+    exchange's token, which is why those two kinds are read for keys and for nothing else.
+    :func:`discount_codes_of` documents what that key is worth and the three guards that keep
+    a weaker key from producing a wrong pair.
 
     Returns:
         The events to emit, in the order their webhooks arrived: exactly one ``reconciled``
@@ -440,23 +574,77 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         ReconciliationInputError: a webhook carrying no join key at all, which cannot be
             attributed to an order and must not be silently dropped.
     """
-    # THREE passes, and each split is load-bearing.
+    # FIVE passes, and each split is load-bearing.
     #
-    # 1. Collect, and record which store claims which raw join key. Join keys are namespaced
-    #    by store because `order_id` is a PER-SHOP number: two shops both have order 1001, and
-    #    joining on it unscoped merges their orders into one group.
-    # 2. Union. Two keys only become known to be the same order when some event carries both,
+    # 0. Read. Each event's identifier keys and its discount codes, kept apart, because a
+    #    code cannot become a join key until every event has been seen (pass 2).
+    # 1. Attribute. Which store claims which raw key, and therefore which store an event that
+    #    names none of its own belongs to. Join keys are namespaced by store because
+    #    `order_id` is a PER-SHOP number: two shops both have order 1001, and joining on it
+    #    unscoped merges their orders into one group.
+    # 2. Decide which codes are usable, WITHIN a store. Two shops handing out the same code
+    #    string is not a collision — the store scope already separates them — so a global
+    #    rule here would refuse a perfectly ordinary pair of orders.
+    # 3. Union. Two keys only become known to be the same order when some event carries both,
     #    which may be the LAST event in the stream — so nothing may be filed into a group
     #    while the groups are still merging, or a webhook and its offer end up in different
     #    buckets and the order silently never reconciles.
-    # 3. File and emit.
-    collected: list[tuple[str, Any, tuple[str, ...], str | None]] = []
+    # 4. File and emit.
+    read: list[tuple[str, Any, tuple[str, ...], tuple[str, ...], str | None]] = []
     key_stores: dict[str, set[str]] = {}
     for event in events:
         kind = str(_field(event, "kind", ""))
-        if kind not in (ACCEPTED_KIND, PIXEL_KIND, WEBHOOK_KIND):
+        side = _CODE_SIDES.get(kind)
+        if kind not in (ACCEPTED_KIND, PIXEL_KIND, WEBHOOK_KIND) and side is None:
             continue
-        keys = _join_keys(event)
+        identifiers = _join_keys(event)
+        # The pixel is deliberately NOT a code side. It is a lossy client-side observation
+        # (R4), and a key it contributes can MERGE two groups — so honouring a code off the
+        # pixel would hand a client-side beacon the power to decide which order gets graded.
+        # It costs nothing: the pixel and the webhook already share the platform's own
+        # checkout token, and a pixel that joins nothing is `pixel_missing`, which by design
+        # is not a blocker.
+        codes = discount_codes_of(event) if side is not None else ()
+        store = _store_of(event)
+        if store is not None:
+            for key in identifiers + tuple(_code_key(code) for code in codes):
+                key_stores.setdefault(key, set()).add(store)
+        read.append((kind, event, identifiers, codes, store))
+
+    # A discount code is only allowed to join if, inside one store, it names ONE checkout on
+    # the offer side and ONE order on the webhook side. `claims` is what that is measured
+    # from: per store and side, the distinct identifier-key sets of the events that named the
+    # code. Two entries on either side means the code is not a handle on a single checkout,
+    # and a code like that must join nothing at all — merging two orders would let
+    # `setdefault` below keep the first webhook and drop the second one's overcharge without
+    # a trace, which is exactly the escape hatch `_scoped_keys` exists to close, reached
+    # through a different field.
+    claims: dict[tuple[str, str, str], set[tuple[str, ...]]] = {}
+    scopes: list[str] = []
+    for kind, _event, identifiers, codes, store in read:
+        if store is None:
+            # A client-side pixel often knows the checkout token and not the shop. Adopt the
+            # store only when exactly one store claims one of its keys; two candidates is
+            # precisely the collision this scoping exists to catch, so it stays unattributed
+            # rather than being guessed into somebody's order.
+            candidates: set[str] = set()
+            for key in identifiers + tuple(_code_key(code) for code in codes):
+                candidates |= key_stores.get(key, set())
+            store = next(iter(candidates)) if len(candidates) == 1 else None
+        scope = store if store is not None else _UNATTRIBUTED_SCOPE
+        scopes.append(scope)
+        side = _CODE_SIDES.get(kind, "")
+        for code in codes:
+            claims.setdefault((scope, side, code), set()).add(identifiers)
+
+    ambiguous = {(scope, code) for (scope, _, code), named in claims.items() if len(named) > 1}
+
+    groups = _Groups()
+    relevant: list[tuple[str, Any, tuple[str, ...]]] = []
+    for (kind, event, identifiers, codes, _), scope in zip(read, scopes, strict=True):
+        keys = identifiers + tuple(
+            _code_key(code) for code in codes if (scope, code) not in ambiguous
+        )
         if not keys:
             if kind == WEBHOOK_KIND:
                 raise ReconciliationInputError(
@@ -465,25 +653,7 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
                     "would let a store escape reconciliation by omitting a field."
                 )
             continue
-        store = _store_of(event)
-        if store is not None:
-            for key in keys:
-                key_stores.setdefault(key, set()).add(store)
-        collected.append((kind, event, keys, store))
-
-    groups = _Groups()
-    relevant: list[tuple[str, Any, tuple[str, ...]]] = []
-    for kind, event, keys, store in collected:
-        if store is None:
-            # A client-side pixel often knows the checkout token and not the shop. Adopt the
-            # store only when exactly one store claims one of its keys; two candidates is
-            # precisely the collision this scoping exists to catch, so it stays unattributed
-            # rather than being guessed into somebody's order.
-            candidates: set[str] = set()
-            for key in keys:
-                candidates |= key_stores.get(key, set())
-            store = next(iter(candidates)) if len(candidates) == 1 else None
-        scoped = _scoped_keys(keys, store if store is not None else _UNATTRIBUTED_SCOPE)
+        scoped = _scoped_keys(keys, scope)
         groups.union(scoped)
         relevant.append((kind, event, scoped))
 
@@ -491,6 +661,10 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
     order: list[str] = []
     for kind, event, keys in relevant:
         root = groups.find(keys[0])
+        # A bridge event is filed under its own kind, which nothing below reads. It has done
+        # its whole job already — its keys are in the union — and it must not be able to
+        # become a promise or a piece of evidence: only `accepted`, `order_paid` and
+        # `checkout_pixel` are ever taken back out of a bucket.
         members.setdefault(root, {}).setdefault(kind, event)
         if kind == WEBHOOK_KIND and root not in order:
             order.append(root)
@@ -503,9 +677,11 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         if webhook is None or accepted is None:
             continue
         order_ref = _field(webhook, "order_ref") or _payload(webhook).get("order_id")
-        # The fallback strips the store scope back off: `root` is a namespaced key, and a
-        # control character has no business appearing in an emitted order reference.
-        fallback = root.split(_SCOPE_SEPARATOR, 1)[-1]
+        # The fallback strips every namespace back off: `root` is a scoped key, and one that
+        # happens to be a discount code carries a second namespace on top of the store's. A
+        # control character has no business appearing in an emitted order reference, and
+        # splitting on only the FIRST separator would have leaked one.
+        fallback = root.split(_SCOPE_SEPARATOR)[-1]
         emitted.append(
             reconciled_event(
                 order_ref=str(order_ref) if order_ref is not None else fallback,

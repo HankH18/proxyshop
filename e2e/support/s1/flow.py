@@ -847,6 +847,14 @@ def _merchant_events(
             "platform_checkout_token": record["checkout_token"],
             "order_ref": str(record["order_ref"]),
             "total_price": total_price,
+            # D24 pins `discount_code` as one of the four join keys, and the signed
+            # `orders/paid` body is where it lives — spelled `discount_codes: [{"code": …}]`,
+            # Shopify's own shape. `ledger_record` keeps the whole vendor body but lifts only
+            # `order_ref` and `checkout_token` out of it, so a driver that rebuilds the
+            # payload by hand, as this one does, was silently throwing the code away. It is
+            # forwarded verbatim rather than lifted: the ledger should record what the
+            # merchant actually said, and `trust.reconcile` already reads this spelling.
+            "discount_codes": record["payload"].get("discount_codes") or [],
         },
     )
     return pixel_event, order_paid_event, observation, decision
