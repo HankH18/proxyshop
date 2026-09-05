@@ -3095,16 +3095,13 @@ def test_t257_the_grader_discovery_is_armed_and_ignores_prose() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-257: T-112's recorded verify is `pytest apps/trust/tests/test_schema_grants.py -q`, "
-        "which collects every test in a module whose docstring declares T-011, and none from "
-        "proxyshop_support/tests/test_role_password_end_to_end.py, whose docstring declares "
-        "T-112 and holds its 14 graders — so the gate would stay green with every T-112 "
-        "behaviour deleted; remove this marker with the fix"
-    ),
-)
+# T-257 FIXED by amendment 25 (freeze-log seq 55). The strict xfail that stood here said
+# T-112's recorded verify was `pytest apps/trust/tests/test_schema_grants.py -q`, which
+# collects a module whose docstring declares T-011 and none of T-112's own graders, so the
+# gate would stay green with every T-112 behaviour deleted. Amendment 25 repointed T-112
+# onto proxyshop_support/tests/test_role_password_end_to_end.py -- the very file this gate's
+# own remedy text named -- and the marker flipped to XPASS(strict) on the next full run.
+# Removing it is that instruction being followed, not the gate being loosened.
 def test_t257_the_recorded_gate_for_t112_collects_at_least_one_of_its_own_graders() -> None:
     """A ticket's recorded gate has to be able to see the tests written to grade it.
 
