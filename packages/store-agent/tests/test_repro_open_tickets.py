@@ -590,8 +590,17 @@ def test_t156_the_dishonest_total_sweep_is_armed() -> None:
         "remove this marker with the fix"
     ),
 )
-def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> None:
+def test_t156_a_total_price_below_one_unit_price_is_refused_at_the_store_agents_own_door() -> None:
     """An offer cannot cost less in total than one of the units it is pricing.
+
+    **The name grades what it says.** This node used to be called
+    ``..._is_refused_by_both_doors`` while only one door was asserted — the shared
+    ``contracts.boundary`` half moved from ``escapes`` to ``contracts_silent`` (reported, not
+    graded) for the reason argued at length below, and the name did not move with it. A
+    reviewer selecting this node by name would have believed both doors were being graded.
+    The prefix ``test_t156_`` is load-bearing and must survive any further rename: the
+    ticket's recorded verify selects with ``-k t156``, and a name past that selector silently
+    unhooks the gate.
 
     The bid this sweeps is honest in every other respect: the product is on the approved
     envelope's catalog, the declared depth is backed by a real `hooks.authorize_discount` grant,

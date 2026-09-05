@@ -543,6 +543,206 @@ _T140_SHAPE_SEED = 20260904
 _T140_BUYERS = 60
 
 
+def _draw_buyers(count: int, seed: int) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Draw ``count`` synthetic buyers. Shared by T-140, T-142 and both arming tests.
+
+    Lifted out of the graded bodies deliberately. While the draw and its canaries lived
+    *inside* a ``xfail(strict=True)`` test, a generator that collapsed — one address repeated,
+    one order shape, every buyer coarsening to the same profile — raised inside the marker and
+    was reported as ``xfailed``: the same word the live defect produces. The gate could not
+    tell "the defect is present" from "my fixture is broken". The canaries now live in
+    :func:`test_t140_the_generated_buyer_sweep_is_armed` and
+    :func:`test_t142_the_published_row_sweep_is_armed`, neither of which carries a marker.
+
+    The SHAPE draw is seeded and reproducible; the ADDRESSES are drawn from
+    :class:`random.SystemRandom` and deliberately are not, so no repair can key on a fixed
+    sixty addresses. The arming tests assert both halves of that rather than trusting it.
+    """
+    import random  # noqa: PLC0415
+    import string  # noqa: PLC0415
+
+    shapes = random.Random(seed)
+    identities = random.SystemRandom()
+
+    emails: list[str] = []
+    accounts: dict[str, dict[str, Any]] = {}
+    for _ in range(count):
+        local = "".join(identities.choice(string.ascii_lowercase) for _ in range(10))
+        domain = "d" + "".join(identities.choice(string.ascii_lowercase) for _ in range(10))
+        email = f"{local}@{domain}.example"
+        categories = shapes.sample(_T140_CATEGORIES, shapes.randint(1, 3))
+        orders = [
+            {
+                "order_ref": f"ord-{index}",
+                "total": shapes.choice(_T140_TOTALS),
+                "category": categories[index % len(categories)],
+            }
+            for index in range(shapes.randint(1, 7))
+        ]
+        emails.append(email)
+        accounts[email] = {
+            "email": email,
+            "region": shapes.choice(_T140_REGIONS),
+            "orders": orders,
+        }
+    return emails, accounts
+
+
+def _coarsened(accounts: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """Each drawn account's published buckets, canonicalised, keyed by address.
+
+    ``build_profile`` is called directly rather than over HTTP: this is the *target* a served
+    profile has to match, so it must be read from the record and not from the path under test.
+    """
+    import json  # noqa: PLC0415
+
+    from buyer_svc.profile import build_profile  # noqa: PLC0415
+
+    return {
+        email: json.dumps(build_profile(account, PSN_A).model_dump()["buckets"], sort_keys=True)
+        for email, account in accounts.items()
+    }
+
+
+def _informationless_profile() -> str:
+    """What a buyer the coarsener knows nothing about publishes."""
+    import json  # noqa: PLC0415
+
+    from buyer_svc.profile import build_profile  # noqa: PLC0415
+
+    return json.dumps(
+        build_profile({"email": "probe@nowhere.example", "orders": []}, PSN_A).model_dump()[
+            "buckets"
+        ],
+        sort_keys=True,
+    )
+
+
+def _assert_draw_is_wide(
+    emails: list[str],
+    accounts: dict[str, dict[str, Any]],
+    *,
+    count: int,
+    min_order_shapes: int,
+    min_regions: int,
+    min_affinities: int,
+) -> None:
+    """The generator's own spread. Every clause here is a way a sweep can report nothing.
+
+    A generator that yields one address ``count`` times still reports ``count`` completed
+    iterations, so DISTINCT inputs are counted, not loop trips.
+    """
+    assert len(emails) == count, (
+        f"the generator returned {len(emails)} draws, not {count}; the sweep has shrunk"
+    )
+    assert len(set(emails)) == count, (
+        f"the generator produced {len(set(emails))} distinct addresses across {count} draws; "
+        "a sweep over a repeated address measures one buyer while reporting many"
+    )
+    assert len(accounts) == count, f"{count} addresses collapsed to {len(accounts)} account records"
+    order_shapes = {len(account["orders"]) for account in accounts.values()}
+    region_shapes = {account["region"] for account in accounts.values()}
+    affinity_shapes = {
+        tuple(sorted({order["category"] for order in account["orders"]}))
+        for account in accounts.values()
+    }
+    assert len(order_shapes) >= min_order_shapes, (
+        f"order-count shapes drawn: {sorted(order_shapes)}; fewer than {min_order_shapes} "
+        "distinct histories means the buyers differ in name only"
+    )
+    assert len(region_shapes) >= min_regions, (
+        f"regions drawn: {sorted(region_shapes)}; fewer than {min_regions}"
+    )
+    assert len(affinity_shapes) >= min_affinities, (
+        f"category shapes drawn: {len(affinity_shapes)}; fewer than {min_affinities}"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# ARMING — NOT xfail. The T-140 gate below is worthless without this, and this must stay
+# green. Every assertion here is one the gate used to make inside its own strict-xfail body,
+# where a failure was indistinguishable from the defect it was built to catch.
+# --------------------------------------------------------------------------------------
+def test_t140_the_generated_buyer_sweep_is_armed(monkeypatch: Any) -> None:
+    """Six ways T-140's sweep could measure nothing and still report ``xfailed``.
+
+    1. **The draw collapses.** Sixty iterations over one address, or sixty buyers with one
+       order shape, satisfy every count the gate takes. Distinctness is asserted, not counted.
+    2. **The buyers are indistinguishable after coarsening.** The gate's teeth compare a
+       served profile against ``build_profile`` of the record written for that buyer. If the
+       sixty records coarsen to one or two profiles, a service that invented a constant would
+       match most of them. Twelve distinct profiles is the floor the ticket recorded.
+    3. **A generated buyer coarsens to the informationless profile.** For that buyer "the
+       served profile changed after a history was written" is unobservable, so the gate's
+       anti-hash clause (1b) would be vacuous for it.
+    4. **The addresses are pinned.** The gate's whole reason for using ``SystemRandom`` for
+       identity bytes is that a repair must not be able to key on a fixed corpus. Two draws
+       are taken and required to be disjoint — the one way a "random" generator can be a
+       parametrized probe in a costume.
+    5. **The identity backstop refuses a generated buyer.** ``_T140_CATEGORIES`` and
+       ``_T140_REGIONS`` are fixed English words chosen to be disjoint from the random local
+       parts and domains precisely so no draw trips ``IdentityLeak``. If one did,
+       ``build_profile`` would raise inside the gate and read as ``xfailed``. Calling it here,
+       outside the marker, turns that into a red.
+    6. **The reading depends on the runner's shell.** ``PROXYSHOP_BUYER_K_ANONYMITY`` changes
+       what ``build_profile`` publishes, so the spread measured here is only the spread the
+       gate will see if the environment is cleared the same way.
+    """
+    import os  # noqa: PLC0415
+
+    from buyer_svc import profile as profile_mod  # noqa: PLC0415
+    from buyer_svc.auth.routes import WORKER_COUNT_ENVS  # noqa: PLC0415
+
+    _assert_in_tree(profile_mod)
+    _clear_datastore_environment(
+        monkeypatch, extra=(*WORKER_COUNT_ENVS, "PROXYSHOP_BUYER_K_ANONYMITY")
+    )
+    leftover = sorted(name for name in os.environ if name.startswith(_PG_DSN_PREFIX))
+    assert not leftover, (
+        f"{leftover} survived the environment clear, so the spread measured here is not the "
+        "spread the gate will see"
+    )
+
+    # 1. the draw itself
+    emails, accounts = _draw_buyers(_T140_BUYERS, _T140_SHAPE_SEED)
+    _assert_draw_is_wide(
+        emails,
+        accounts,
+        count=_T140_BUYERS,
+        min_order_shapes=5,
+        min_regions=4,
+        min_affinities=6,
+    )
+
+    # 2 + 5. what those buyers publish, through the coarsener the gate compares against
+    targets = _coarsened(accounts)
+    assert len(set(targets.values())) >= 12, (
+        f"the generated buyers coarsen to only {len(set(targets.values()))} distinct "
+        "profiles; the draw is too narrow to distinguish a real populator from a constant"
+    )
+
+    # 3. no buyer is invisible to the anti-hash clause
+    informationless = _informationless_profile()
+    assert informationless not in set(targets.values()), (
+        "fixture error: a generated buyer coarsens to the empty profile, so 'the served "
+        "profile changed' would be unobservable for that buyer"
+    )
+
+    # 4. the identity bytes are genuinely redrawn
+    second_emails, _second_accounts = _draw_buyers(_T140_BUYERS, _T140_SHAPE_SEED)
+    shared = set(emails) & set(second_emails)
+    assert not shared, (
+        f"two draws of {_T140_BUYERS} buyers share {len(shared)} address(es) ({sorted(shared)[:3]}); "
+        "the addresses are effectively pinned, and a repair could key on the corpus it is "
+        "always shown while the gate reported a randomized sweep"
+    )
+    # ...while the SHAPES must be reproducible, or the thresholds above measure a lottery.
+    _, third_accounts = _draw_buyers(_T140_BUYERS, _T140_SHAPE_SEED)
+    assert [len(a["orders"]) for a in accounts.values()] == [
+        len(a["orders"]) for a in third_accounts.values()
+    ], "the seeded shape draw is not reproducible; the spread floors above are a coin flip"
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -586,8 +786,6 @@ def test_t140_the_production_login_path_serves_a_profile_that_reflects_the_buyer
     """
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
-    import random  # noqa: PLC0415
-    import string  # noqa: PLC0415
 
     from buyer_svc import profile as profile_mod  # noqa: PLC0415
     from buyer_svc.auth import magic_link as magic_link_mod  # noqa: PLC0415
@@ -614,67 +812,14 @@ def test_t140_the_production_login_path_serves_a_profile_that_reflects_the_buyer
     )
 
     # -- generate the buyers -----------------------------------------------------------
-    shapes = random.Random(_T140_SHAPE_SEED)
-    identities = random.SystemRandom()
-
-    emails: list[str] = []
-    accounts: dict[str, dict[str, Any]] = {}
-    for _ in range(_T140_BUYERS):
-        local = "".join(identities.choice(string.ascii_lowercase) for _ in range(10))
-        domain = "d" + "".join(identities.choice(string.ascii_lowercase) for _ in range(10))
-        email = f"{local}@{domain}.example"
-        categories = shapes.sample(_T140_CATEGORIES, shapes.randint(1, 3))
-        orders = [
-            {
-                "order_ref": f"ord-{index}",
-                "total": shapes.choice(_T140_TOTALS),
-                "category": categories[index % len(categories)],
-            }
-            for index in range(shapes.randint(1, 7))
-        ]
-        emails.append(email)
-        accounts[email] = {
-            "email": email,
-            "region": shapes.choice(_T140_REGIONS),
-            "orders": orders,
-        }
-
-    # -- canaries on the generator itself ----------------------------------------------
-    # A generator that yields one address sixty times still reports sixty completed
-    # iterations, so DISTINCT inputs are counted, not loop trips.
-    assert len(set(emails)) == _T140_BUYERS, (
-        f"the generator produced {len(set(emails))} distinct addresses across "
-        f"{_T140_BUYERS} draws; a sweep over a repeated address measures one buyer while "
-        "reporting sixty"
-    )
-    order_shapes = {len(account["orders"]) for account in accounts.values()}
-    region_shapes = {account["region"] for account in accounts.values()}
-    affinity_shapes = {
-        tuple(sorted({order["category"] for order in account["orders"]}))
-        for account in accounts.values()
-    }
-    assert len(order_shapes) >= 5, f"order-count shapes drawn: {sorted(order_shapes)}"
-    assert len(region_shapes) >= 4, f"regions drawn: {sorted(region_shapes)}"
-    assert len(affinity_shapes) >= 6, f"category shapes drawn: {len(affinity_shapes)}"
-
-    targets = {
-        email: json.dumps(build_profile(account, PSN_A).model_dump()["buckets"], sort_keys=True)
-        for email, account in accounts.items()
-    }
-    assert len(set(targets.values())) >= 12, (
-        f"the generated buyers coarsen to only {len(set(targets.values()))} distinct "
-        "profiles; the draw is too narrow to distinguish a real populator from a constant"
-    )
-    informationless = json.dumps(
-        build_profile({"email": "probe@nowhere.example", "orders": []}, PSN_A).model_dump()[
-            "buckets"
-        ],
-        sort_keys=True,
-    )
-    assert informationless not in set(targets.values()), (
-        "fixture error: a generated buyer coarsens to the empty profile, so 'the served "
-        "profile changed' would be unobservable for that buyer"
-    )
+    # The draw's SPREAD is not judged here, on purpose. Under xfail(strict=True) a collapsed
+    # generator raises inside this body and is reported as `xfailed` — the same word the live
+    # defect produces — so a canary asserted here could never distinguish a broken fixture
+    # from the finding. Every one of them now lives, unmarked and therefore observable, in
+    # test_t140_the_generated_buyer_sweep_is_armed. `targets` is still computed because the
+    # failure message below reports how many distinct histories were actually swept.
+    emails, accounts = _draw_buyers(_T140_BUYERS, _T140_SHAPE_SEED)
+    targets = _coarsened(accounts)
 
     # -- drive the production path ------------------------------------------------------
     tokens: dict[str, str] = {}
@@ -828,31 +973,60 @@ def test_t140_the_production_login_path_serves_a_profile_that_reflects_the_buyer
         # behavioural teeth are the better diagnostic. This exists to close one loophole the
         # behavioural clauses alone leave open: giving InMemoryAccountDirectory a CLASS-level
         # store would make every instance share state and satisfy (1) through (4) while
-        # build_auth_service still decided nothing, which is the finding verbatim — the word
-        # "accounts" does not occur anywhere in auth/routes.py today, so this module cannot
-        # wire an account source at all. Parsed, so a docstring or an __all__ string cannot
-        # satisfy it; a symbol SET rather than one name, so the gate does not dictate whether
-        # the repair is a process-wide default, a DSN-backed directory, or an importer.
-        wiring = {"accounts", "AccountDirectory", "InMemoryAccountDirectory", "account_directory"}
-        routes_tree = ast.parse(pathlib.Path(routes_mod.__file__ or "").read_text(encoding="utf-8"))
+        # build_auth_service still decided nothing, which is the finding verbatim.
+        #
+        # SCOPED to build_auth_service's own body. The previous form accepted any of
+        # {accounts, AccountDirectory, InMemoryAccountDirectory, account_directory} appearing
+        # anywhere in the module, as a Name, Attribute, alias, keyword or def. It was argued
+        # that a symbol SET keeps the gate from dictating whether the repair is a process-wide
+        # default, a DSN-backed directory or an importer — and that goal is right; the gate
+        # has no business choosing the repair's shape. But the implementation bought that
+        # freedom with a clause a reference that decides NOTHING could satisfy: the audit's
+        # sabotage (a class-level backing dict on InMemoryAccountDirectory, routes.py
+        # otherwise untouched) plus one unused
+        # `from .magic_link import InMemoryAccountDirectory` import is enough, because an
+        # ast.alias anywhere in the module counted. The ticket's own finding is narrower than
+        # "the module mentions accounts": it is that THE PRODUCTION CONSTRUCTOR decides the
+        # vault and nothing else. So that is what is read — a real `accounts=` handed to
+        # something inside build_auth_service, or a real assignment to an `.accounts`
+        # attribute there. Both require editing the builder; neither says where the directory
+        # comes from, so the design freedom the wider form was reaching for is untouched.
+        # Parsed, never grepped: a docstring, a comment or an __all__ string is not a wiring.
+        routes_path = pathlib.Path(routes_mod.__file__ or "")
+        routes_tree = ast.parse(routes_path.read_text(encoding="utf-8"))
+        builder = next(
+            (
+                node
+                for node in ast.walk(routes_tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "build_auth_service"
+            ),
+            None,
+        )
+        # An absence has two readings — "the builder wires nothing" and "there is no builder
+        # to read" — and only the first is this ticket. Rule the second one out loudly rather
+        # than letting a renamed function read as a wiring that is missing.
+        assert builder is not None, (
+            f"no build_auth_service() is defined in {routes_path.name}, so this clause has "
+            "nothing to read; that is an unreadable gate, not a failing wiring"
+        )
         wired: set[str] = set()
-        for node in ast.walk(routes_tree):
-            if isinstance(node, ast.Name) and node.id in wiring:
-                wired.add(node.id)
-            elif isinstance(node, ast.Attribute) and node.attr in wiring:
-                wired.add(node.attr)
-            elif isinstance(node, ast.alias) and (node.asname or node.name) in wiring:
-                wired.add(node.asname or node.name)
-            elif isinstance(node, ast.keyword) and node.arg in wiring:
-                wired.add(node.arg)
-            elif isinstance(node, ast.FunctionDef) and node.name in wiring:
-                wired.add(node.name)
+        for node in ast.walk(builder):
+            if isinstance(node, ast.keyword) and node.arg == "accounts":
+                wired.add(f"accounts= at {routes_path.name}:{node.value.lineno}")
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr == "accounts"
+                and isinstance(node.ctx, ast.Store)
+            ):
+                wired.add(f".accounts assigned at {routes_path.name}:{node.lineno}")
         assert wired, (
-            f"none of {sorted(wiring)} appears as a real reference anywhere in "
-            f"{pathlib.Path(routes_mod.__file__ or '').name} — the ONLY production constructor "
-            "of the login service. It decides the vault (_vault_from_env) and the worker count "
-            "and nothing else, so no deployment can configure where buyer records come from, "
-            "whatever a shared in-memory directory might make the served profiles look like"
+            f"build_auth_service() ({routes_path.name}:{builder.lineno}) hands no `accounts=` "
+            "to anything and assigns no `.accounts`: it decides the vault (_vault_from_env) "
+            "and the worker count and nothing else, so every service this deployment builds "
+            "gets the empty default InMemoryAccountDirectory and no deployment can configure "
+            "where buyer records come from — whatever a shared in-memory directory might make "
+            "the served profiles above look like"
         )
     finally:
         routes_mod.set_auth_service(None)
@@ -957,6 +1131,228 @@ def _published_buckets(params: Any) -> list[dict[str, Any]]:
     return found
 
 
+def _t142_publish_scan() -> tuple[list[pathlib.Path], str, list[str], list[str]]:
+    """The production-module sweep both the gate and its arming test read.
+
+    Returns every non-test module the product ships, ``publish_profile``'s own definition
+    site, its call sites, and the modules that mention ``buyer_accounts`` at all. Parsed,
+    never grepped: ``"publish_profile"`` is already a string in ``__all__``
+    (profile/__init__.py:125) and appears in docstrings, and neither is a call.
+    """
+    import ast as ast_mod  # noqa: PLC0415
+
+    modules = _production_modules()
+    definition = ""
+    callers: list[str] = []
+    referencing_buyer_accounts: list[str] = []
+    for path in modules:
+        source = path.read_text(encoding="utf-8")
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if "buyer_accounts" in source:
+            referencing_buyer_accounts.append(relative)
+        try:
+            tree = ast_mod.parse(source)
+        except SyntaxError:  # pragma: no cover - a module that will not parse is not a caller
+            continue
+        for node in ast_mod.walk(tree):
+            if isinstance(node, ast_mod.FunctionDef) and node.name == "publish_profile":
+                definition = f"{relative}:{node.lineno}"
+            if not isinstance(node, ast_mod.Call):
+                continue
+            func = node.func
+            name = (
+                func.id
+                if isinstance(func, ast_mod.Name)
+                else func.attr
+                if isinstance(func, ast_mod.Attribute)
+                else None
+            )
+            if name == "publish_profile":
+                callers.append(f"{relative}:{node.lineno}")
+    return modules, definition, callers, referencing_buyer_accounts
+
+
+# --------------------------------------------------------------------------------------
+# ARMING — NOT xfail. Four independent apparatus this gate depends on, each of which can
+# fail silently inside a strict-xfail body and be reported as the defect.
+# --------------------------------------------------------------------------------------
+def test_t142_the_published_row_sweep_is_armed(monkeypatch: Any) -> None:
+    """The gate below concludes from ABSENCES — no connection, no statement, no caller.
+
+    An absence has two readings every time, and only one of them is the ticket. These are
+    the four ways to get the wrong one, and each is closed by an assertion rather than by
+    inspection:
+
+    1. **The draw collapses.** Forty logins over one address, or forty buyers coarsening to
+       one profile, would let a publisher that wrote a single constant row look correct. The
+       distinctness and the spread are asserted here, where a failure is a red rather than an
+       ``xfailed``.
+    2. **The production path does not run.** If the forty logins never completed — a refused
+       magic link, a 500 on the profile route — the gate would find no statement naming
+       ``app.buyer_accounts`` for a reason that has nothing to do with ``publish_profile``.
+       The same forty logins are driven here and required to succeed.
+    3. **The observation apparatus is dead.** This is the load-bearing one. The gate does not
+       double ``publish_profile``; it doubles the *connection* and then asserts row-shaped
+       facts. If ``_RecordingCursor`` stopped recording, or ``_published_buckets`` stopped
+       recovering a bucket dict out of a parameter, then a repair that genuinely wrote the
+       row would still be reported as "not one statement reached a connection". So a
+       synthetic write is pushed through the recorder in both parameter shapes a psycopg
+       caller plausibly uses — a JSON string and a live dict — and the gate's own matching
+       predicate is required to find it.
+    4. **The module sweep is blind.** ``callers == []`` is the ticket only if the sweep can
+       see call sites at all. It is required to reach the tree (>= 150 modules), to find
+       ``publish_profile``'s own ``def``, and to find ``buyer_accounts`` mentioned somewhere.
+    """
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    import psycopg  # noqa: PLC0415
+    from buyer_svc import profile as profile_mod  # noqa: PLC0415
+    from buyer_svc.auth import routes as routes_mod  # noqa: PLC0415
+    from buyer_svc.auth.routes import WORKER_COUNT_ENVS  # noqa: PLC0415
+    from buyer_svc.main import create_app  # noqa: PLC0415
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    _assert_in_tree(routes_mod)
+    _assert_in_tree(profile_mod)
+    _clear_datastore_environment(
+        monkeypatch, extra=(*WORKER_COUNT_ENVS, "PROXYSHOP_BUYER_K_ANONYMITY")
+    )
+    leftover = sorted(name for name in os.environ if name.startswith(_PG_DSN_PREFIX))
+    assert not leftover, (
+        f"{leftover} survived the environment clear; this test drives the login path and "
+        "must not be able to reach a live database"
+    )
+
+    # -- 1. the draw ---------------------------------------------------------------------
+    emails, accounts = _draw_buyers(_T142_BUYERS, _T142_SHAPE_SEED)
+    _assert_draw_is_wide(
+        emails,
+        accounts,
+        count=_T142_BUYERS,
+        min_order_shapes=5,
+        min_regions=4,
+        min_affinities=6,
+    )
+    targets = _coarsened(accounts)
+    assert len(set(targets.values())) >= 8, (
+        f"the {_T142_BUYERS} generated buyers coarsen to only {len(set(targets.values()))} "
+        "distinct profiles; a publisher that wrote one constant row would be "
+        "indistinguishable from a correct one"
+    )
+
+    # -- 3. the observation apparatus, before anything is concluded from its silence ------
+    # Note this block runs against a hand-built recorder, not against the product: it asks
+    # only "if a row WERE written, would this gate see it?".
+    log: list[tuple[str, Any]] = []
+    dsns: list[Any] = []
+    connection = _RecordingConnection(log, dsns, _T142_APP_DSN)
+    probe_buckets = {"region": "US-OR", "spend_band": "mid", "category_affinity": ["desk-lamps"]}
+    statement = "INSERT INTO app.buyer_accounts (pseudonym, buckets) VALUES (%s, %s)"
+    with connection.cursor() as cursor:
+        cursor.execute(statement, (PSN_A, json.dumps(probe_buckets)))
+    connection.cursor().executemany(statement, [(PSN_B, probe_buckets)])
+    assert dsns == [_T142_APP_DSN], (
+        f"the recorder did not record the DSN it was opened with ({dsns!r}); the gate reads "
+        "this list to decide whether PROXYSHOP_PG_DSN_APP was ever honoured"
+    )
+    probe_writes = [(text, params) for text, params in log if "buyer_accounts" in text.lower()]
+    assert len(probe_writes) == 2, (
+        f"two statements naming app.buyer_accounts were executed against the recorder and "
+        f"{len(probe_writes)} were recorded; the gate's `writes` filter cannot see a real "
+        "INSERT, so its emptiness below would prove nothing"
+    )
+    for pseudonym in (PSN_A, PSN_B):
+        assert any(
+            pseudonym in repr(params) and probe_buckets in _published_buckets(params)
+            for _text, params in probe_writes
+        ), (
+            f"the gate's own match predicate could not find {pseudonym} carrying its own "
+            "buckets in a row that plainly contains both; _published_buckets no longer "
+            "recovers a bucket dict from a parameter (JSON string or live dict), so every "
+            "served profile would read as unpublished however the repair wrote it"
+        )
+
+    # -- 2. the production path completes -------------------------------------------------
+    def _connect(*args: Any, **kwargs: Any) -> _RecordingConnection:
+        return _RecordingConnection([], [], f"args={args!r} kwargs={kwargs!r}")
+
+    monkeypatch.setattr(psycopg, "connect", _connect)
+    monkeypatch.setattr(psycopg.Connection, "connect", staticmethod(_connect), raising=False)
+
+    tokens: dict[str, str] = {}
+
+    def _capture(email: str, token: str, expires_at: Any) -> None:
+        tokens[email] = token
+
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    served: dict[str, dict[str, Any]] = {}
+    try:
+        routes_mod.set_auth_service(None)
+        service = routes_mod.build_auth_service()
+        routes_mod.set_auth_service(service)
+        service.deliver = _capture
+        for email in emails:
+            service.accounts.upsert(email, accounts[email])
+        for email in emails:
+            posted = client.post("/buyer/auth/magic-link", json={"email": email})
+            assert posted.status_code == 202, f"magic-link refused: {posted.status_code}"
+            redeemed = client.post("/buyer/auth/session", json={"token": tokens[email]})
+            assert redeemed.status_code == 201, f"redeem refused: {redeemed.status_code}"
+            session = redeemed.json()
+            read = client.get("/buyer/profile", headers={"X-Buyer-Session": session["session_id"]})
+            assert read.status_code == 200, f"profile refused: {read.status_code}"
+            served[email] = read.json()["buckets"]
+    finally:
+        routes_mod.set_auth_service(None)
+
+    assert len(served) == _T142_BUYERS, (
+        f"only {len(served)} of {_T142_BUYERS} buyers completed the production login path; "
+        "the gate below would find no published row for a reason that is not the ticket"
+    )
+    payloads = {json.dumps(buckets, sort_keys=True) for buckets in served.values()}
+    assert len(payloads) >= 8, (
+        f"the {_T142_BUYERS} buyers were SERVED only {len(payloads)} distinct bucket sets"
+    )
+
+    # -- 4. the module sweep can see what it is looking for -------------------------------
+    modules, definition, callers, referencing = _t142_publish_scan()
+    assert len(modules) >= 150, (
+        f"the module sweep found only {len(modules)} non-test modules under {REPO_ROOT}; the "
+        "scan is broken, not the tree"
+    )
+    assert definition, (
+        f"the sweep parsed {len(modules)} modules and did not find publish_profile's own "
+        "definition, so a zero-caller result would mean nothing"
+    )
+    assert referencing, (
+        f"the sweep found no reference to buyer_accounts in any of {len(modules)} modules, "
+        "not even inside publish_profile; the scan is broken, not the tree"
+    )
+    # The scan must also be able to RECOGNISE a call, or `callers == []` below is vacuous for
+    # a structural reason rather than a factual one. `_production_modules` is called by this
+    # very file's helpers, but the scan only ever looks for `publish_profile`; so the call
+    # recogniser is exercised directly, on source that plainly contains one.
+    import ast as ast_mod  # noqa: PLC0415
+
+    probe_tree = ast_mod.parse("def publish_profile(c, p):\n    ...\nmod.publish_profile(c, p)\n")
+    recognised = [
+        node
+        for node in ast_mod.walk(probe_tree)
+        if isinstance(node, ast_mod.Call)
+        and isinstance(node.func, ast_mod.Attribute)
+        and node.func.attr == "publish_profile"
+    ]
+    assert recognised, (
+        "the AST shape the gate matches call sites with does not match an obvious "
+        "`mod.publish_profile(...)`; a zero-caller reading would be a bug in the scanner"
+    )
+    # `callers` itself is NOT judged here. Whether publish_profile has a production caller is
+    # the ticket, and the ticket is graded by the strict-xfail node below; an arming test that
+    # asserted the defect's presence would turn red the day it was fixed.
+    assert isinstance(callers, list)
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -993,11 +1389,8 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
     which is the one observation a substituted connection cannot fake, since a connection
     that was never opened records nothing. No datastore is touched, per the module rule.
     """
-    import ast as ast_mod  # noqa: PLC0415
     import json  # noqa: PLC0415
     import os  # noqa: PLC0415
-    import random  # noqa: PLC0415
-    import string  # noqa: PLC0415
 
     import psycopg  # noqa: PLC0415
     from buyer_svc import profile as profile_mod  # noqa: PLC0415
@@ -1036,34 +1429,10 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
     monkeypatch.setattr(psycopg, "connect", _connect)
     monkeypatch.setattr(psycopg.Connection, "connect", staticmethod(_connect), raising=False)
 
-    shapes = random.Random(_T142_SHAPE_SEED)
-    identities = random.SystemRandom()
-    emails: list[str] = []
-    accounts: dict[str, dict[str, Any]] = {}
-    for _ in range(_T142_BUYERS):
-        local = "".join(identities.choice(string.ascii_lowercase) for _ in range(10))
-        domain = "d" + "".join(identities.choice(string.ascii_lowercase) for _ in range(10))
-        email = f"{local}@{domain}.example"
-        categories = shapes.sample(_T140_CATEGORIES, shapes.randint(1, 3))
-        orders = [
-            {
-                "order_ref": f"ord-{index}",
-                "total": shapes.choice(_T140_TOTALS),
-                "category": categories[index % len(categories)],
-            }
-            for index in range(shapes.randint(1, 7))
-        ]
-        emails.append(email)
-        accounts[email] = {
-            "email": email,
-            "region": shapes.choice(_T140_REGIONS),
-            "orders": orders,
-        }
-
-    assert len(set(emails)) == _T142_BUYERS, (
-        f"the generator produced {len(set(emails))} distinct addresses across "
-        f"{_T142_BUYERS} draws; a publisher wired for one address would pass unnoticed"
-    )
+    # The draw's spread is asserted by test_t142_the_published_row_sweep_is_armed, outside
+    # this marker, for the reason recorded on T-140's gate: a collapsed generator raising in
+    # here is reported as `xfailed` and reads exactly like the defect.
+    emails, accounts = _draw_buyers(_T142_BUYERS, _T142_SHAPE_SEED)
 
     tokens: dict[str, str] = {}
 
@@ -1094,17 +1463,14 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
             assert read.status_code == 200, f"profile refused: {read.status_code}"
             served[email] = (opened_session["pseudonym"], read.json()["buckets"])
 
-        # ARM: distinct completed logins, and a spread of published payloads, before any
-        # conclusion is drawn about what was or was not published.
+        # Re-stated, not armed here: an arm inside a strict-xfail body cannot be observed.
+        # test_t142_the_published_row_sweep_is_armed drives these same forty logins without
+        # the marker and asserts both the completion and the spread.
         assert len(served) == _T142_BUYERS, (
-            f"only {len(served)} of {_T142_BUYERS} buyers completed the production path"
+            f"only {len(served)} of {_T142_BUYERS} buyers completed the production path; see "
+            "the arming test"
         )
         payloads = {json.dumps(buckets, sort_keys=True) for _psn, buckets in served.values()}
-        assert len(payloads) >= 8, (
-            f"the {_T142_BUYERS} buyers served only {len(payloads)} distinct bucket sets; a "
-            "publisher that wrote one constant row would be indistinguishable from a correct "
-            "one"
-        )
 
         writes = [
             (statement, params)
@@ -1147,45 +1513,14 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
         routes_mod.set_auth_service(None)
 
     # -- (B) the writer must have a production caller ------------------------------------
-    # Parsed, never grepped: `"publish_profile"` is already a string in `__all__`
-    # (profile/__init__.py:125) and appears in docstrings, and neither is a call.
-    modules = _production_modules()
-    assert len(modules) >= 150, (
-        f"the module sweep found only {len(modules)} non-test modules under {REPO_ROOT}; the "
-        "scan is broken, not the tree"
-    )
-    definition = ""
-    callers: list[str] = []
-    referencing_buyer_accounts: list[str] = []
-    for path in modules:
-        source = path.read_text(encoding="utf-8")
-        relative = path.relative_to(REPO_ROOT).as_posix()
-        if "buyer_accounts" in source:
-            referencing_buyer_accounts.append(relative)
-        try:
-            tree = ast_mod.parse(source)
-        except SyntaxError:  # pragma: no cover - a module that will not parse is not a caller
-            continue
-        for node in ast_mod.walk(tree):
-            if isinstance(node, ast_mod.FunctionDef) and node.name == "publish_profile":
-                definition = f"{relative}:{node.lineno}"
-            if not isinstance(node, ast_mod.Call):
-                continue
-            func = node.func
-            name = (
-                func.id
-                if isinstance(func, ast_mod.Name)
-                else func.attr
-                if isinstance(func, ast_mod.Attribute)
-                else None
-            )
-            if name == "publish_profile":
-                callers.append(f"{relative}:{node.lineno}")
-
-    # ARM the sweep: it must be able to see the symbol it is looking for.
+    # The sweep's own arming — enough modules reached, publish_profile's def found, the call
+    # recogniser able to recognise a call — is asserted by
+    # test_t142_the_published_row_sweep_is_armed. Inside this marker a blind sweep would be
+    # reported as `xfailed`, which is the word the live defect already produces.
+    modules, definition, callers, referencing_buyer_accounts = _t142_publish_scan()
     assert definition, (
         f"the sweep parsed {len(modules)} modules and did not find publish_profile's own "
-        "definition, so a zero-caller result would mean nothing"
+        "definition, so a zero-caller result would mean nothing; see the arming test"
     )
     assert callers, (
         f"publish_profile is defined at {definition} and called from nowhere in the "
