@@ -1,0 +1,9 @@
+{
+  "esc-028-verify-fields": {
+    "path": "tickets.json",
+    "kind": "json-field-whitelist",
+    "fields": ["verify"],
+    "grant": "ESC-028",
+    "reason": "Granted by Hank 2026-09-05 ('Approved. Go for it.') on ESC-028. Repoint a ticket's verify field at a grader that ALREADY EXISTS, is merged, and has been measured. Never to invent a gate, never to point a gate at a test chosen because it passes, and never any other field of the ticket graph. The narrowness is the grant: 143 of 296 tickets carry the NO-GATE placeholder while real graders exist for some of them, which leaves done work unbankable and ready work undispatchable for the same one-line reason. NOTE, because INSIDE must not be read as harmless here: `verify` is not an inert value, it IS the gate red-check executes, so a structurally-INSIDE delta can still be a substantively bad one. INSIDE means only that the delta touched no other field. Every use of this class states the grader it points at and the measurement that shows the grader exists and runs."
+  }
+}

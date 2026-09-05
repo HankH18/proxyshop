@@ -158,7 +158,8 @@
     "Makefile",
     "scripts/verify.sh",
     "scripts/check_verify_contracts.py",
-    "tickets.json"
+    "tickets.json",
+    ".swarm-loop/amend-classes.json"
   ],
   "pending_remeasure": [
     7

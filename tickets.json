@@ -3120,7 +3120,7 @@
     {
       "id": "T-172",
       "title": "T-109's per-service inference has an 8-item hole and every item in it is a Postgres-only test that a Redis-only outage still silently skips at exit 0 \u2014 i.e. the pre-T-109 defect survives for exactly these. services_for reads a marker argument first, else the fixture closure against a fixed 7-entry FIXTURE_SERVICES map; a test with a bare @pytest.mark.docker that requests none of those 7 fixtures falls back to the whole stack. The tests that spin their OWN fresh-volume Postgres container use no shared fixture and so land in the fallback. FIVE of the eight are the schema-grants/role-password security tests in apps/trust/tests/test_schema_grants.py and proxyshop_support/tests/test_role_password_end_to_end.py \u2014 the same class of security check whose silent skipping the ticket was written to stop. One instance was reintroduced by this very merge: apps/trust/tests/test_events_hardening.py:146 (T-151's own new test) points at a CLOSED loopback port and needs no datastore at all, yet is classified whole-stack.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-6} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k test_t172",
       "scope": [
         "proxyshop_support/service_markers.py:78-85 (whole-stack fallback)"
       ],
@@ -4478,7 +4478,7 @@
     {
       "id": "T-256",
       "title": "T-065's PERSISTENCE HALF IS ENTIRELY UNIMPLEMENTED. Its objective requires verification results to persist to ledger tables and emit trust_observations and claim_verified events. The tables ledger.claims, ledger.claim_verifications, ledger.verification_evidence_refs, ledger.trust_observations and ledger.trust_scores all exist in db/migrations/0002_ledger_tables.sql:436,473,494 and NOTHING in the repo writes any of them. So T-065's acceptance item 2 ('writes nothing') is graded only as pure-function idempotency, which it satisfies trivially. Two independent auditors reached this by grep. Compounding it: apps/trust/src/verification/__init__.py is a 99-line lazy-import shim and is that package's ENTIRE contents -- its __getattr__ defers the import specifically so the missing Dockerfile COPY fails at first call rather than at startup, which is the code being shaped around the T-193 defect rather than the defect being fixed.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k test_t256",
       "scope": [
         "apps/trust/src/verification/__init__.py"
       ],
@@ -4493,7 +4493,7 @@
     {
       "id": "T-257",
       "title": "T-112's RECORDED GATE COLLECTS NONE OF ITS OWN GRADING TESTS. The gate is 'pytest apps/trust/tests/test_schema_grants.py -q', and that file contains no occurrence of the string T-112. Every actual T-112 grader lives in proxyshop_support/tests/test_role_password_end_to_end.py, which that gate never collects. This is stronger than the known T-110/T-112 non-discrimination: the gate is not merely unable to tell the two tickets apart, it cannot see T-112 at all, so the gate would stay green if every T-112 behaviour were deleted.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-8} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k test_t257",
       "scope": [
         "tickets.json:T-112"
       ],
@@ -4523,7 +4523,7 @@
     {
       "id": "T-259",
       "title": "T-063's acceptance 1 grades a FIXTURE, not the system. Every push_trust_event call in this file and in the frozen .swarm-loop/acceptance/test_e6_trust.py:1154 uses a local _RecordingSink defined at line 80. Nothing anywhere joins trust's emitted payload to packages/store-agent/src/modes/runner.py:471 ingest_trust_event, and apps/trust never validates its payload against contracts.TrustEventPayload -- the model the intake side DOES validate with at runner.py:458. A field-name drift on either side is invisible to both suites while both stay green.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-9} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k test_t259",
       "scope": [
         "apps/trust/tests/test_feedback_push.py"
       ],
@@ -5183,7 +5183,7 @@
     {
       "id": "T-303",
       "title": "T-237 IS HALF-CLOSED AND THE REMAINING HALVES ARE IN OTHER LANES' SCOPES. The new delisting module correctly turns a sub-threshold score into blacklisted/blacklist_expired events and publishes them as snapshot['delistings'], but (a) NOTHING APPENDS those events into the ledger writer, so they are computed and dropped, and (b) configure_auctions(app, eligibility=...) still has no production caller supplying a trust-backed SellerEligibility -- apps/exchange/src/auction/routes.py:239 always builds an empty StaticSellerEligibility. So the S2 chain still has no end-to-end path: the exchange does not in fact stop asking a dishonest store. The gate that closed T-237 grades the computation, not the chain.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-10} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k test_t303",
       "scope": [
         "apps/trust/src/snapshot/delisting.py"
       ],
