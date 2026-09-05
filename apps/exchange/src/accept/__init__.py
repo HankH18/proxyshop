@@ -50,6 +50,15 @@ deployment call site that wires the platform's seller registry, through
 from __future__ import annotations
 
 from ._spellings import bind_package
+from .claims import (
+    AcceptanceClaims,
+    ClaimOutcome,
+    InMemoryAcceptanceClaims,
+    StoreAcceptanceClaims,
+    acceptance_claims_scope,
+    platform_acceptance_claims,
+    use_acceptance_claims,
+)
 from .gate import accept_offer
 from .offer import (
     ACCEPT_REFUSED,
@@ -85,12 +94,19 @@ __all__ = [
     "DENIAL_UNRECORDABLE_ACCEPTANCE",
     "DENIAL_UNSPECIFIED",
     "AcceptResult",
+    "AcceptanceClaims",
+    "ClaimOutcome",
+    "InMemoryAcceptanceClaims",
+    "StoreAcceptanceClaims",
     "accept",
     "accept_offer",
+    "acceptance_claims_scope",
     "denial_code",
     "denial_reason",
     "next_slot",
+    "platform_acceptance_claims",
     "platform_registered_domains",
+    "use_acceptance_claims",
     "use_registered_domains",
 ]
 
