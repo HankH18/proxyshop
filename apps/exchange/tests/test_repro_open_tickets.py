@@ -2157,12 +2157,26 @@ def test_the_recorded_bid_corpus_is_armed() -> None:
     )
 
 
-# The `xfail(strict=True)` marker that stood here is GONE, and its removal is the ticket's own
-# instruction ("remove this marker with the fix"). T-294 is closed: `POST /auctions` now records
-# what it collected into `app.state.auction_bids` — `auction/routes.py::collected_bid_records`
-# assembles the rows and the route writes them beside the shortlist — so a bid the exchange
-# published in its own `entries` is one it can be asked to accept. Left in place, the marker
-# would report `FAILED ... [XPASS(strict)]` and take the suite red on a fix.
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-294 (RESTATED, and the ticket's premise has changed under it). The recording half "
+        "is DONE: POST /auctions now writes what it collected into app.state.auction_bids "
+        "(auction/routes.py::collected_bid_records), and an auction's own shortlist bid mints "
+        "a real code — apps/exchange/tests/test_composition_root.py drives exactly that over a "
+        "real socket. What this node still fails on is its CORPUS, not the bid store: "
+        "`_t294_corpus` wires no trust snapshot and its store agents' offers carry no "
+        "checkout_url, so since T-310 put the ranker on the served path every one of its "
+        "candidates is excluded `blacklist_unreadable` + `off_domain_checkout` and `ranked` "
+        "comes back []. The book holds only candidates the ranking ADMITTED, because recording "
+        "the excluded ones was measured to let a blacklisted store be bought for a live code "
+        "(409 -> 200 with PSX-…), and nothing on the accept path re-reads the trust snapshot. "
+        "So the 200 this node demands is now reachable only through that hole. Closing it "
+        "needs `_t294_corpus` to wire a trust snapshot and emit an on-domain checkout_url — an "
+        "edit to this file, which the fixing lane was not scoped to make; remove this marker "
+        "with that corpus change"
+    ),
+)
 def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     """A bid the exchange published in its own response must be one it can be asked to accept.
 

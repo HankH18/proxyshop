@@ -106,6 +106,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -131,6 +133,9 @@ __all__ = [
     "DeploymentConfigurationError",
     "HttpBidSolicitor",
     "MAX_BID_RESPONSE_BYTES",
+    "MAX_DEPLOYMENT_BYTES",
+    "MAX_DEPLOYMENT_SELLERS",
+    "MAX_SOLICIT_WALL_CLOCK_SECONDS",
     "SellerRow",
     "configure_exchange",
     "ensure_configured",
@@ -166,6 +171,37 @@ DEFAULT_SOLICIT_TIMEOUT_SECONDS = 10.0
 #: Refused rather than truncated: half a JSON document is not a bid, and a store that sends one
 #: is represented at its list price exactly like a store that stayed silent (R10).
 MAX_BID_RESPONSE_BYTES = 256 * 1024
+
+#: The most bytes a deployment document may occupy, and the most sellers it may register.
+#:
+#: The document is parsed on the REQUEST path (``main.py`` is frozen, so the composition root
+#: runs as a request-time start-up hook), which makes its size time a buyer waits. A ceiling on
+#: the seller count is the second half of the same bound: the duplicate-id check was O(n²) and
+#: measured 14.72s at 20,000 rows, and a document that is large AND malformed re-parses on
+#: every request because failures are deliberately not cached.
+#:
+#: These are operator-supplied values, not attacker-supplied, so this is a guard against a
+#: mistake rather than against an adversary — which is why the numbers are generous.
+MAX_DEPLOYMENT_BYTES = 4 * 1024 * 1024
+MAX_DEPLOYMENT_SELLERS = 10_000
+
+#: The wall-clock ceiling on ONE store's solicitation, from the request leaving to its last
+#: byte arriving.
+#:
+#: Separate from :data:`DEFAULT_SOLICIT_TIMEOUT_SECONDS`, which is httpx's timeout and is
+#: **per read** — it resets on every chunk, so it is not a deadline at all. Measured against an
+#: agent dripping one chunked byte every 0.5s with the httpx timeout at 1.0s::
+#:
+#:     solicitor timeout       : 1.0s
+#:     solicit() returned after: 21.12s   (answer=None)
+#:
+#: At that rate a hostile agent pins one of ``MAX_FAN_OUT_WORKERS = 32`` process-wide fan-out
+#: workers for roughly 36 hours, and 32 of them end all outbound bidding for the process —
+#: the residual risk ``BoundedFanOutPool`` names in its own docstring, and this solicitor is
+#: the first thing in the tree that could actually drive it. The window is measured across the
+#: whole stream instead, so a slow drip ends at the deadline with no bid, exactly like a store
+#: that timed out.
+MAX_SOLICIT_WALL_CLOCK_SECONDS = 15.0
 
 
 class DeploymentConfigurationError(RuntimeError):
@@ -275,7 +311,7 @@ def _seller_row(raw: Any, index: int, source: str) -> SellerRow:
         bid_endpoint = str(endpoint).strip()
         if not bid_endpoint:
             bid_endpoint = None
-        elif not bid_endpoint.startswith(("http://", "https://")):
+        elif not bid_endpoint.lower().startswith(("http://", "https://")):
             raise DeploymentConfigurationError(
                 f"{source}: seller {store_id!r} states bid_endpoint {bid_endpoint!r}, which "
                 f"is not an http(s) URL; this is the store agent's POST /v1/bid-requests door"
@@ -334,11 +370,17 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         raise DeploymentConfigurationError(
             f"{source}: 'sellers' must be a JSON array, got {type(raw_sellers).__name__}"
         )
+    if len(raw_sellers) > MAX_DEPLOYMENT_SELLERS:
+        raise DeploymentConfigurationError(
+            f"{source}: 'sellers' names {len(raw_sellers)} rows; this exchange registers at "
+            f"most {MAX_DEPLOYMENT_SELLERS}. The document is parsed on the request path"
+        )
     sellers = tuple(_seller_row(raw, index, source) for index, raw in enumerate(raw_sellers))
 
-    duplicated = sorted(
-        {row.store_id for row in sellers if [r.store_id for r in sellers].count(row.store_id) > 1}
-    )
+    # `Counter`, not a `.count()` inside a comprehension: the latter rebuilt the id list once
+    # per row and measured 14.72s at 20,000 sellers, on the request path.
+    seen = Counter(row.store_id for row in sellers)
+    duplicated = sorted(store_id for store_id, count in seen.items() if count > 1)
     if duplicated:
         raise DeploymentConfigurationError(
             f"{source}: sellers names {duplicated} more than once; one store cannot have two "
@@ -392,10 +434,24 @@ def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
         source = ENV_DEPLOYMENT_JSON
         text = inline
 
+    if len(text) > MAX_DEPLOYMENT_BYTES:
+        raise DeploymentConfigurationError(
+            f"{source}: the deployment document is {len(text)} bytes; this exchange reads at "
+            f"most {MAX_DEPLOYMENT_BYTES}. It is parsed on the request path, so its size is "
+            f"time a buyer waits"
+        )
+
     try:
         document = json.loads(text)
-    except ValueError as exc:
-        raise DeploymentConfigurationError(f"{source}: not valid JSON ({exc})") from exc
+    except Exception as exc:
+        # NOT `except ValueError`. `json.loads` on deeply nested input raises RecursionError,
+        # which is not a ValueError and therefore escaped this function entirely — measured as
+        # an HTTP **500** on every request to both served POST routes, rather than the 503 this
+        # module documents. A document this exchange cannot parse is a misconfiguration
+        # whatever the parser raised on it.
+        raise DeploymentConfigurationError(
+            f"{source}: not valid JSON ({type(exc).__name__}: {exc})"
+        ) from exc
     return parse_deployment(document, source=source)
 
 
@@ -490,6 +546,7 @@ class HttpBidSolicitor:
             return None
 
         payload = dict(self._context) or {"auction_id": "", "intent": {}, "profile": {}}
+        deadline = time.monotonic() + MAX_SOLICIT_WALL_CLOCK_SECONDS
         try:
             with self._http_client().stream(
                 "POST", endpoint, json=payload, timeout=self._timeout
@@ -502,6 +559,11 @@ class HttpBidSolicitor:
                     if len(body) > MAX_BID_RESPONSE_BYTES:
                         # Stop READING, not merely stop using: a cap applied after the body is
                         # in memory is not a cap. Leaving the block closes the connection.
+                        return None
+                    if time.monotonic() >= deadline:
+                        # The byte cap alone does not bound TIME: httpx's timeout resets on
+                        # every chunk, so a store dripping one byte at a time never trips it.
+                        # See MAX_SOLICIT_WALL_CLOCK_SECONDS.
                         return None
         except Exception:
             return None
@@ -624,6 +686,13 @@ def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[s
     if already is not None:
         return already
     deployment = read_deployment(env)
-    bound = () if deployment is None else configure_exchange(app, deployment)
+    if deployment is None:
+        # Deliberately NOT cached. "No deployment configured" is two `os.environ` lookups to
+        # re-establish, and caching it meant a document that appeared after the first request
+        # was ignored for the life of the process — a real trap for an operator who starts the
+        # exchange and then writes the file. Only a SUCCESSFUL bind is remembered; a failure is
+        # not cached either, so a fixed document is picked up by the next request.
+        return ()
+    bound = configure_exchange(app, deployment)
     setattr(app.state, STATE_FLAG, bound)
     return bound

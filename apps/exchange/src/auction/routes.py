@@ -489,11 +489,30 @@ def collected_bid_records(
     minted ``bid_id`` and the platform's domain, and are the same rows ``ranked``, ``excluded``
     and ``shortlist.slots`` name.
 
-    **Every collected candidate is recorded, not only the shortlisted ones.** This is the
-    auction's record of what it collected, and the accept path re-runs R12, the domain check
-    and the offer's mintability itself — so an excluded candidate is refused there, by name,
-    instead of being refused ``unknown_bid`` as though the exchange had never heard of a store
-    it published in its own ``entries``.
+    **Only the candidates the ranking found ELIGIBLE are recorded**, and the first draft of
+    this function got that wrong in the expensive direction. It recorded every collected
+    candidate and justified it by claiming "the accept path re-runs R12, the domain check and
+    the offer's mintability itself". **That is false**, and an adversarial pass measured it:
+    :func:`~..accept.gate.accept_offer` re-reads the injected ``SellerEligibility`` source and
+    nothing else. Nothing on the accept path reads ``trust_snapshot`` — ``composition.py`` says
+    in as many words that R12's eligibility and the trust snapshot are two independent reads —
+    so a store the ranking refused was buyable. Driven over HTTP against a deployment whose
+    trust snapshot carries ``"blacklisted": true`` for ``s1``::
+
+        ranked  : [('s2', 'auction-2d54…:s2')]
+        excluded: [{"bid_ref": "auction-2d54…:s1", "store_id": "s1", "exclusion_reasons":
+                    ["blacklisted_store: 's1' is blacklisted and may not participate (R12)"]}]
+        accept 'auction-2d54…:s1' -> 200 {"code": "PSX-FPWZHVZD", "permalink_url": ...}
+
+    and the same 200 for an offer that had already expired and for one that failed a hard
+    constraint. The excluded ``bid_ref`` is published in the 201 body, so the buyer's agent is
+    handed exactly the reference it needs. The book therefore holds what the ranking admitted,
+    and nothing else: **an auction can only be asked to accept a bid it was prepared to show.**
+
+    The cost is named rather than hidden: a candidate the exchange collected and published in
+    ``entries`` but the ranking excluded is refused ``unknown_bid`` — a true statement about
+    the bid *book* and a vague one about the auction. Naming the exclusion at the accept door
+    would be better and needs the reasons carried alongside; refusing it is what matters.
 
     A **second** record is written for a store that minted its own reference, and only when
     that reference is unambiguous. A buyer's agent is told a bid's ref by the store that made
@@ -506,6 +525,10 @@ def collected_bid_records(
     records: list[dict[str, Any]] = []
     minted: set[str] = set()
     for candidate in candidates:
+        # THE line this function turns on. `eligible` is the ranking's own verdict, the same
+        # field `_excluded_out` reads to decide what to report as refused.
+        if not candidate.get("eligible"):
+            continue
         bid_id = str(candidate.get("bid_id") or "")
         if not bid_id:
             continue
@@ -529,7 +552,11 @@ def collected_bid_records(
         if not isinstance(bid, Mapping):
             continue
         claimed = str(bid.get("bid_id") or bid.get("bid_ref") or "").strip()
-        if not claimed or claimed in minted:
+        # Bounded for the reason `MAX_IDENTIFIER_LENGTH` exists: this key is chosen by the
+        # bidding store, it is kept for the auction's whole TTL, and a reference is a name.
+        # Without the cap a store could park up to `MAX_BID_RESPONSE_BYTES` of its own text in
+        # the exchange's memory per auction by spelling its bid id at length.
+        if not claimed or len(claimed) > MAX_IDENTIFIER_LENGTH or claimed in minted:
             continue
         if claimed in aliases:
             collided.add(claimed)

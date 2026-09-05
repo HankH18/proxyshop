@@ -113,6 +113,8 @@ __all__ = [
     "AcceptBidRequest",
     "AcceptDeniedResponse",
     "AcceptedOfferResponse",
+    "DEFAULT_BID_BOOK_CAPACITY",
+    "DEFAULT_BID_BOOK_RECORDS",
     "InMemoryAuctionBids",
     "NoRecordedBids",
     "configure_accept",
@@ -155,6 +157,20 @@ class NoRecordedBids:
 #: cap evicts the oldest auction first when a burst arrives inside one window.
 DEFAULT_BID_BOOK_CAPACITY = 512
 
+#: The most bid records the book holds in total, across every auction in it.
+#:
+#: **A cap on auctions is not a cap on memory, and this is the second half of the same bound.**
+#: An auction may carry up to ``MAX_ROSTER_ENTRIES`` (500) candidates, so 512 auctions at the
+#: cap is 256,000 records — measured with ``tracemalloc`` at exactly that shape::
+#:
+#:     write 512 x 500  ->  26.89s, peak 173.8 MB
+#:
+#: of a 256 MiB container, for the container structure alone and before the sibling
+#: ``ShortlistStore`` (also 512) and the auction store. 20,000 records is roughly 14 MB at the
+#: same measurement, and is still 40 concurrent auctions at the roster ceiling or 4,000 at the
+#: size an auction actually has. Oldest auction first, same as the count cap.
+DEFAULT_BID_BOOK_RECORDS = 20_000
+
 
 class InMemoryAuctionBids:
     """A process-local ``auction_id -> bids`` book, written by ``POST /auctions``.
@@ -173,9 +189,11 @@ class InMemoryAuctionBids:
         self,
         *,
         capacity: int = DEFAULT_BID_BOOK_CAPACITY,
+        max_records: int = DEFAULT_BID_BOOK_RECORDS,
         ttl_seconds: float = AUCTION_TTL_SECONDS,
     ) -> None:
         self.capacity = max(1, int(capacity))
+        self.max_records = max(1, int(max_records))
         self.ttl_seconds = float(ttl_seconds)
         self._bids: OrderedDict[str, tuple[float, list[Mapping[str, Any]]]] = OrderedDict()
 
@@ -186,13 +204,39 @@ class InMemoryAuctionBids:
         *,
         now: float | None = None,
     ) -> None:
-        """Keep one auction's collected bids, evicting the oldest when the cap is reached."""
+        """Keep one auction's collected bids, evicting the oldest when either cap is reached.
+
+        Expired rows are swept HERE as well as on read. Read-only expiry bounds staleness and
+        not memory — measured, 512 long-expired auctions sat in the book indefinitely because
+        nobody asked for them — and an auction nobody accepts is the common case, not the
+        exception.
+        """
         key = str(auction_id)
         self._bids.pop(key, None)
         moment = time.time() if now is None else float(now)
+        self._sweep(moment)
         self._bids[key] = (moment, [deepcopy(dict(bid)) for bid in bids])
         while len(self._bids) > self.capacity:
             self._bids.popitem(last=False)
+        # The record cap is checked after the count cap and never evicts the row just written:
+        # an auction whose own bid list exceeds the total budget still gets to be acceptable,
+        # because a book that silently forgot the auction it was just handed would answer
+        # `unknown_bid` for the bid the very same request published.
+        while len(self._bids) > 1 and self._record_count() > self.max_records:
+            self._bids.popitem(last=False)
+
+    def _record_count(self) -> int:
+        return sum(len(records) for _written_at, records in self._bids.values())
+
+    def _sweep(self, now: float) -> None:
+        """Drop every auction whose TTL has passed, so memory follows the TTL too."""
+        expired = [
+            key
+            for key, (written_at, _records) in self._bids.items()
+            if now - written_at >= self.ttl_seconds
+        ]
+        for key in expired:
+            self._bids.pop(key, None)
 
     def bids_for(self, auction_id: str, *, now: float | None = None) -> Sequence[Mapping[str, Any]]:
         """One auction's bids, or nothing once its TTL has taken them away.

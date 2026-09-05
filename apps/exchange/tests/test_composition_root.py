@@ -430,6 +430,9 @@ def test_the_reference_a_store_minted_for_its_own_bid_also_resolves(
                 "store_id": "s1",
                 "store_domain": "s1.example.com",
                 "offer": {"unit_price": 88.0},
+                # The ranking's own verdict. Only an ELIGIBLE candidate is recorded — a
+                # candidate the filters refused must not be buyable. See the sibling test.
+                "eligible": True,
             }
         ],
         [_Entry()],
@@ -458,8 +461,8 @@ def test_a_reference_two_stores_both_claim_is_honoured_for_neither(
 
     records = collected_bid_records(
         [
-            {"bid_id": "auction-x:s1", "store_id": "s1", "offer": {}},
-            {"bid_id": "auction-x:s2", "store_id": "s2", "offer": {}},
+            {"bid_id": "auction-x:s1", "store_id": "s1", "offer": {}, "eligible": True},
+            {"bid_id": "auction-x:s2", "store_id": "s2", "offer": {}, "eligible": True},
         ],
         [_Entry("s1"), _Entry("s2")],
     )
@@ -670,3 +673,123 @@ def test_a_store_agent_cannot_spend_the_exchanges_memory_on_one_reply() -> None:
         # The control: the same client, the same auction, a reply inside the bound. Without
         # this the assertion above is satisfied by a solicitor that answers None to everything.
         assert bound.solicit({"store_id": "polite"}) is not None
+
+
+@pytest.mark.parametrize("blacklisted", [True, False], ids=["blacklisted", "honest"])
+def test_a_store_the_ranking_excluded_cannot_be_bought(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unwired: None,
+    agent_url: str,
+    blacklisted: bool,
+) -> None:
+    """The bid book holds what the ranking admitted, and an excluded store is not buyable.
+
+    This is the assertion whose absence let a real hole through. The first version of the bid
+    recording wrote EVERY collected candidate and justified it by claiming the accept path
+    re-runs the checks that excluded them. It does not: ``accept/gate.py::accept_offer``
+    re-reads the injected ``SellerEligibility`` source and nothing else, and the trust snapshot
+    is a separate read by design. Measured over HTTP against this exact deployment before the
+    fix — s1 marked ``"blacklisted": true``, excluded ``blacklisted_store … (R12)``::
+
+        accept 'auction-2d54…:s1' -> 200 {"code": "PSX-FPWZHVZD",
+                                          "permalink_url": "https://s1.example.com/cart/1:1?…"}
+
+    Parametrized against the honest case on purpose: without it, "the blacklisted store is
+    refused" is satisfied by an exchange that refuses everybody, which is what the code did
+    before any of this work and is not the property being asserted.
+    """
+    document = _deployment_document(agent_url)
+    for row in document["trust_snapshot"]["stores"].values():
+        if row["store_id"] == "s1":
+            row["blacklisted"] = blacklisted
+    path = tmp_path / "deployment.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    with served_exchange() as client:
+        body = _open_an_auction(client)
+        ranked = {row["store_id"] for row in body["ranked"]}
+        excluded = {row["store_id"]: row["bid_ref"] for row in body["excluded"]}
+
+        if blacklisted:
+            assert "s1" not in ranked, "a blacklisted store was ranked"
+            assert "s1" in excluded, body
+            answer = client.post(
+                f"/auctions/{body['auction_id']}/accept", json={"bid_ref": excluded["s1"]}
+            )
+            assert answer.status_code == 409, (
+                f"a store the ranking excluded was accepted {answer.status_code}: {answer.text}"
+            )
+            assert "code" not in answer.json(), answer.json()
+        else:
+            # The control. s1 is rankable in this arm, so a 409 here would mean the exchange
+            # refuses everyone and the arm above proves nothing.
+            assert "s1" in ranked, body["excluded"]
+            ref = next(row["bid_ref"] for row in body["ranked"] if row["store_id"] == "s1")
+            answer = client.post(f"/auctions/{body['auction_id']}/accept", json={"bid_ref": ref})
+            assert answer.status_code == 200, answer.text
+            assert answer.json()["code"].startswith("PSX-")
+
+
+def test_a_deployment_document_that_will_not_parse_is_a_503_and_never_a_500(
+    monkeypatch: pytest.MonkeyPatch, unwired: None
+) -> None:
+    """Deeply nested JSON raises ``RecursionError``, which is not a ``ValueError``.
+
+    ``read_deployment`` caught only ``ValueError``, so this escaped ``DeploymentConfiguration
+    Error`` entirely and surfaced as an unauthenticated **HTTP 500** on both served POST
+    routes — on every request, because a failed configuration is deliberately not cached. The
+    repo carries an open ticket for exactly this class (``test_t270_no_field_of_any_request_
+    can_produce_a_5xx``); this is the same defect one door over, and it is closed here.
+    """
+    monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+    monkeypatch.setenv(ENV_DEPLOYMENT_JSON, "[" * 100_000 + "]" * 100_000)
+
+    with served_exchange() as client:
+        response = client.post("/auctions", json={"intent": INTENT, "roster": []})
+
+    assert response.status_code == 503, f"{response.status_code}: {response.text[:300]}"
+    assert "not valid JSON" in response.json()["detail"]
+
+
+def test_a_slow_store_agent_cannot_hold_a_fan_out_worker_open(agent_url: str) -> None:
+    """httpx's timeout resets on every chunk, so a drip is not a timeout.
+
+    Measured before the wall-clock deadline, against an agent sending one chunked byte every
+    0.5s with the solicitor's httpx timeout at 1.0s: ``solicit()`` returned after **21.12s**.
+    At that rate one hostile agent pins one of ``MAX_FAN_OUT_WORKERS = 32`` process-wide
+    workers for around 36 hours, and 32 of them end all outbound bidding — the residual
+    ``BoundedFanOutPool`` names in its own docstring, and this solicitor is the first thing in
+    the tree that could drive it.
+    """
+    import time as _time
+
+    from exchange.composition import HttpBidSolicitor
+    from fastapi.responses import StreamingResponse
+
+    slow = FastAPI(title="a store agent that answers one byte at a time")
+
+    @slow.post("/v1/bid-requests")
+    def door(body: dict[str, Any]) -> StreamingResponse:
+        def drip() -> Iterator[bytes]:
+            for _ in range(10_000):
+                _time.sleep(0.05)
+                yield b" "
+
+        return StreamingResponse(drip(), media_type="application/json")
+
+    with serve(slow) as url:
+        solicitor = HttpBidSolicitor({"slow": f"{url}/v1/bid-requests"}, timeout=1.0)
+        bound = solicitor.for_auction(auction_id="a1", intent={}, profile={}, respond_by=0.0)
+        started = _time.monotonic()
+        assert bound.solicit({"store_id": "slow"}) is None
+        elapsed = _time.monotonic() - started
+
+    from exchange.composition import MAX_SOLICIT_WALL_CLOCK_SECONDS
+
+    assert elapsed < MAX_SOLICIT_WALL_CLOCK_SECONDS + 5.0, (
+        f"the drip held one fan-out worker for {elapsed:.2f}s against a "
+        f"{MAX_SOLICIT_WALL_CLOCK_SECONDS}s wall-clock ceiling"
+    )
