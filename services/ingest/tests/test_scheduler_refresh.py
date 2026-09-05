@@ -349,7 +349,12 @@ def refresh_client(storefront: Any) -> Any:
     try:
         yield _TestClient(create_app()), stub, sessions
     finally:
+        # The router's registry and runner are MODULE state — that is the point of them, and
+        # it is also how a fixture leaks into the next test. Everything touched here is put
+        # back, including the registration itself: a store left registered would make the
+        # unknown-store 404 test next door pass or fail depending on ordering.
         routes.runner.registry, routes.runner.policy, routes.runner.session_factory = saved
+        routes.registry.unregister("store-1")
         routes.runner.forget("store-1")
 
 
@@ -464,4 +469,27 @@ def test_the_refresh_404_comes_from_the_handler_and_not_from_an_unmounted_route(
     )
     assert "store-1" in unknown_store.json()["detail"], (
         "the refusal does not name what IS registered, so it cannot be told from a routing 404"
+    )
+
+
+def test_the_routers_module_state_does_not_leak_out_of_the_fixture() -> None:
+    """LAST in this file on purpose, and takes no fixture, so it sees what was left behind.
+
+    pytest runs a module's tests in definition order, so by the time this runs every
+    ``refresh_client`` user above has torn down. The router's registry and runner are module
+    state — deliberately, because the differential guarantee is about two requests — and that
+    is exactly what leaks between tests if a fixture forgets to undo its registration. This is
+    the only way a leak of this kind is caught: a leaked registration makes other tests PASS,
+    never fail, so nothing else in the suite would notice.
+    """
+    from ingest.scheduler import routes  # noqa: PLC0415
+
+    assert "store-1" not in routes.registry, (
+        f"the refresh fixture left store-1 registered: {routes.registry.store_ids}"
+    )
+    assert routes.runner.registry is routes.registry, (
+        "the runner is pointing at a registry the fixture built, not the module's own"
+    )
+    assert routes.runner.session_factory is not None, (
+        "the fixture left the runner's session factory swapped out for its capture double"
     )

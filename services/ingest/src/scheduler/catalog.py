@@ -204,6 +204,10 @@ class StoreRegistry:
         self._targets[target.store_id] = target
         return target
 
+    def unregister(self, store_id: str) -> None:
+        """Drop one target. Silent when nothing was registered under that id."""
+        self._targets.pop(str(store_id), None)
+
     def get(self, store_id: str) -> StoreTarget:
         """The target for ``store_id``.
 
