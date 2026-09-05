@@ -1305,13 +1305,38 @@ def _t270_corpus() -> list[dict[str, Any]]:
     return cases
 
 
-def _t270_client() -> Any:
-    from exchange.main import create_app  # noqa: PLC0415
+def _t270_clients() -> list[tuple[str, Any]]:
+    """BOTH exchange apps: the module-level ASGI object uvicorn serves, and a fresh build.
+
+    Testing only ``create_app()`` is a measured hole, and an adversarial pass found it by
+    exploiting it. ``apps/exchange/src/main.py:52`` is a module-level ``app = create_app()``,
+    executed at import time — BEFORE the feature modules are imported — and FastAPI binds its
+    default exception handlers by ``setdefault`` in ``__init__``. So a repair that installs a
+    handler while a feature module is being imported (the only shape available inside the
+    ticket's one-file scope) is picked up by every app built AFTERWARDS and by none built
+    before. Probing a fresh ``create_app()`` alone therefore reports that repair as working
+    while ``uvicorn exchange.main:app`` — the literal object the Dockerfile's CMD names —
+    still answers 500 to an anonymous caller. Both are asked, and the failure message says
+    which one answered.
+
+    ``raise_server_exceptions=False`` so the transport answers 500 the way uvicorn does,
+    instead of re-raising into the test and turning a served 500 into an ERROR.
+    """
+    import exchange.main  # noqa: PLC0415
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
-    # `raise_server_exceptions=False` so the transport answers 500 the way uvicorn does,
-    # instead of re-raising into the test and turning a served 500 into an ERROR.
-    return TestClient(create_app(), raise_server_exceptions=False)
+    return [
+        # First, because it is the one that ships. `exchange.main:app` is what the container
+        # runs; a gate that never touches it is grading a sibling of the deployed service.
+        (
+            "exchange.main:app (the served ASGI object)",
+            TestClient(exchange.main.app, raise_server_exceptions=False),
+        ),
+        (
+            "exchange.main.create_app()",
+            TestClient(exchange.main.create_app(), raise_server_exceptions=False),
+        ),
+    ]
 
 
 def test_the_non_finite_payload_corpus_is_armed() -> None:
@@ -1330,9 +1355,15 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
     produce a 201 is not measuring the error path; it is measuring its own staleness.
     """
     cases = _t270_corpus()
-    client = _t270_client()
+    clients = _t270_clients()
 
     assert len(cases) >= 60, f"the corpus built only {len(cases)} cases; the sweep is unarmed"
+
+    assert len(clients) == 2, (
+        f"the gate probes {len(clients)} app(s); it must ask BOTH the module-level "
+        "`exchange.main:app` that uvicorn serves and a fresh `create_app()`, because a "
+        "handler installed at feature-module import time reaches only the latter"
+    )
 
     routes = {case["route"] for case in cases}
     assert routes == {"POST /auctions", "POST /auctions/{auction_id}/accept"}, (
@@ -1356,17 +1387,29 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
     paths = {(case["route"], case["path"]) for case in cases}
     assert len(paths) >= 12, f"only {len(paths)} distinct positions are covered; too narrow"
 
+    # EVERY drawn template, on EVERY app, not just the first. An earlier version of this loop
+    # `break`ed after one case, so it validated one of the four templates the corpus draws —
+    # three quarters of the battery could have gone stale invisibly.
+    checked = 0
+    seen: list[Any] = []
     for case in cases:
-        if case["route"] != "POST /auctions":
+        if case["route"] != "POST /auctions" or case["template"] in seen:
             continue
-        control = client.post("/auctions", json=case["template"])
-        assert control.status_code == 201, (
-            f"the corpus's own unmodified template answered {control.status_code}, not 201 — "
-            f"seed {case['seed']}, body {json.dumps(case['template'])[:400]}, response "
-            f"{control.text[:400]}. Every gate assertion is `status < 500`, so a stale "
-            "template makes the gate pass on 422s without the defect being touched."
-        )
-        break
+        seen.append(case["template"])
+        for label, client in clients:
+            control = client.post("/auctions", json=case["template"])
+            checked += 1
+            assert control.status_code == 201, (
+                f"on {label} the corpus's own unmodified template answered "
+                f"{control.status_code}, not 201 — seed {case['seed']}, body "
+                f"{json.dumps(case['template'])[:400]}, response {control.text[:400]}. Every "
+                "gate assertion is `status < 500`, so a stale template makes the gate pass on "
+                "422s without the defect being touched."
+            )
+    assert checked >= 4, (
+        f"only {checked} unmodified-template controls ran; the corpus draws four shapes and "
+        "each must be shown to be a request the app still accepts"
+    )
 
 
 @pytest.mark.xfail(
@@ -1429,7 +1472,7 @@ def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
     500s.
     """
     cases = _t270_corpus()
-    client = _t270_client()
+    clients = _t270_clients()
 
     assert len(cases) >= 60, (
         f"the shared corpus holds {len(cases)} cases; this gate cannot conclude anything from "
@@ -1437,22 +1480,34 @@ def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
     )
 
     failures: list[str] = []
-    for case in cases:
-        response = client.post(
-            case["url"], content=case["raw"].encode(), headers={"content-type": "application/json"}
-        )
-        if response.status_code >= 500:
-            where = ".".join(str(part) for part in case["path"]) or "<the whole body>"
-            failures.append(
-                f"{case['route']} with {case['literal']} at {where} "
-                f"(a {case['kind']} position) -> {response.status_code}"
+    probed = 0
+    for label, client in clients:
+        for case in cases:
+            response = client.post(
+                case["url"],
+                content=case["raw"].encode(),
+                headers={"content-type": "application/json"},
             )
+            probed += 1
+            if response.status_code >= 500:
+                where = ".".join(str(part) for part in case["path"]) or "<the whole body>"
+                failures.append(
+                    f"[{label}] {case['route']} with {case['literal']} at {where} "
+                    f"(a {case['kind']} position) -> {response.status_code}"
+                )
+
+    assert probed == len(cases) * len(clients), (
+        f"{probed} probes ran, expected {len(cases) * len(clients)}; the sweep is unarmed"
+    )
 
     assert not failures, (
-        f"{len(failures)} of {len(cases)} unauthenticated requests were answered 5xx by the "
+        f"{len(failures)} of {probed} unauthenticated requests were answered 5xx by the "
         f"exchange (corpus seed {cases[0]['seed']}); a caller that can open a socket can make "
         "the service fail, and the failure is in the error renderer rather than in any one "
-        f"field:\n  " + "\n  ".join(sorted(failures)[:25])
+        "field. The label on each line says WHICH app answered — a repair that reaches only "
+        "`create_app()` and not the module-level `exchange.main:app` has not shipped, because "
+        f"`app = create_app()` runs at import time before any feature module:\n  "
+        + "\n  ".join(sorted(failures)[:25])
     )
 
 
@@ -1710,14 +1765,36 @@ def _t294_corpus() -> dict[str, Any]:
     The wiring here is deliberately the MINIMUM that produces real bids, and it deliberately
     leaves the bid store alone. ``configure_auctions`` is given an eligibility source and a
     solicitor — the two things any deployment must supply, and without which every store is
-    denied ``unavailable`` and ``entries`` comes back empty — and ``configure_accept`` is
-    never called at all. So ``app.state.auction_bids`` keeps its fail-closed default,
-    ``NoRecordedBids``, which is exactly the state ``uvicorn exchange.main:app`` runs in.
+    denied ``unavailable`` and ``entries`` comes back empty. ``configure_accept`` IS called,
+    with everything a real deployment must supply — a registered-domain source, an
+    eligibility source and a ``CHECKOUT_MODE`` — and **deliberately without ``bids=``**, which
+    is the one seam under test. So ``app.state.auction_bids`` keeps its fail-closed default,
+    ``NoRecordedBids``, exactly as ``uvicorn exchange.main:app`` runs it.
 
-    That matters for what counts as a fix. The gate must pass for ANY honest wiring: a
-    ``POST /auctions`` that records ``[entry.bid for entry in result.entries]`` into whatever
-    bid store the app carries (creating one if absent) closes it, and so does threading a
-    store through both ``configure_*`` calls. Nothing here prescribes which.
+    **Wiring the rest of the deployment is not incidental; it is what gives this gate any
+    discriminating power at all, and an adversarial pass proved the earlier version had almost
+    none.** With ``configure_accept`` omitted, ``registered_domains`` stays fail-closed, so
+    every checkout is off-domain and the accept is refused ``checkout_refused`` whether or not
+    the bid was ever recorded. A gate whose corpus can never produce a successful acceptance
+    can only assert something about the refusal's *code word*, and two edits defeated exactly
+    that: relabelling ``DENIAL_UNKNOWN_BID = "unavailable"`` in ``accept/reasons.py`` (one
+    line, no behaviour change, gate green), and rebuilding bids from ``roster`` — the shape
+    the ticket forbids by name because it re-opens T-169 — which refused off-domain and landed
+    on an allowed code. Both are now red, because the corpus can reach a real acceptance and
+    the gate demands one.
+
+    ``checkout_mode="redirect"`` is the simulated provider that mints locally and needs no
+    merchant client, so the corpus needs no ``code_creator`` and touches no network. The
+    solicitor's ``store_domain`` and the registered-domain source AGREE, which is the honest
+    configuration: the platform's registry vouches for the domain the store actually bid from.
+    That agreement is also what makes the forbidden roster-rebuild fail — a bid rebuilt from a
+    ``RosterEntry`` carries no ``store_domain`` at all, so there is nothing for the registry to
+    match and the checkout is refused.
+
+    The gate still passes for ANY honest wiring: a ``POST /auctions`` that records
+    ``[entry.bid for entry in result.entries]`` into whatever bid store the app carries
+    (creating one if absent) closes it, and so does threading a store through both
+    ``configure_*`` calls. Nothing here prescribes which.
     """
     global _T294_CORPUS
     if _T294_CORPUS is not None:
@@ -1725,6 +1802,7 @@ def _t294_corpus() -> dict[str, Any]:
 
     import random  # noqa: PLC0415 - kept out of this file's frozen import head
 
+    from exchange.accept.routes import configure_accept  # noqa: PLC0415
     from exchange.auction.routes import configure_auctions  # noqa: PLC0415
     from exchange.eligibility import ELIGIBLE, StaticSellerEligibility  # noqa: PLC0415
     from exchange.main import create_app  # noqa: PLC0415
@@ -1768,6 +1846,14 @@ def _t294_corpus() -> dict[str, Any]:
     known = {f"store-{index}": ELIGIBLE for index in range(1, 80)}
     app = create_app()
     configure_auctions(app, eligibility=StaticSellerEligibility(known), solicitor=_Solicitor())
+    # A complete deployment EXCEPT `bids=`. Every keyword here is one a real operator must
+    # set; the omitted one is the seam the ticket is about, so it keeps `NoRecordedBids`.
+    configure_accept(
+        app,
+        registered_domains=lambda store_id: f"{store_id}.example",
+        eligibility=StaticSellerEligibility(known),
+        checkout_mode="redirect",
+    )
     client = TestClient(app, raise_server_exceptions=False)
 
     auctions: list[dict[str, Any]] = []
@@ -1882,14 +1968,23 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     (``accept/routes.py:110``), so ``accept()`` -> ``_find_bid`` -> ``_bids_of``
     (``accept/offer.py:209``) is handed an empty sequence and refuses everything.
 
-    Measured at HEAD against the app as ``uvicorn exchange.main:app`` builds it, with only an
-    eligibility source and a solicitor wired — nothing touching the bid store::
+    Measured at HEAD against a COMPLETE deployment — eligibility, solicitor, registered
+    domains and ``CHECKOUT_MODE`` all wired, and only ``bids=`` left at its default::
 
         20 auctions, 55 non-fallback bids returned in `entries`
         20 accepts of a bid the exchange had just published -> 20 x
           409 {"accepted": false, "denial_reason":
                "unknown_bid: auction 'auction-…' carries no bid 'bid-store-37';
                 there is nothing to accept"}
+
+    and with the one-line recording fix applied, the same wiring, same corpus::
+
+        POST /auctions/{id}/accept -> 200
+          {"permalink_url": "https://store-1.example/cart/1:1?discount=PSX-6E3YCST1",
+           "code": "PSX-6E3YCST1"}
+
+    So the property has a real, observable positive form — a minted discount code — and that
+    is what is asserted.
 
     Both halves are already built and simply not joined: ``InMemoryAuctionBids.record`` exists
     at ``accept/routes.py:136`` and ``configure_accept(..., bids=...)`` at ``:177``/``:211``.
@@ -1898,22 +1993,33 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     (``accept/routes.py:34-44``) and reported it rather than fixing it, because
     ``auction/routes.py`` was out of its scope.
 
-    **THE WRONG FIX, EXPLICITLY, and this gate cannot tell you off for it — so it is written
-    down here instead.** Do not rebuild bids from ``roster``. ``RosterEntry`` carries
-    ``list_price`` and no ``store_domain``, so an accept built from a roster row would hand the
-    buyer a discount computed against a price the store never offered, and would leave the
-    registered-domain check with no domain to check — re-opening T-169 through the back door.
+    **THE WRONG FIX, EXPLICITLY — and unlike the first draft of this gate, it is now actually
+    REFUSED rather than merely deprecated in prose.** Do not rebuild bids from ``roster``.
+    ``RosterEntry`` carries ``list_price`` and no ``store_domain``, so an accept built from a
+    roster row would hand the buyer a discount computed against a price the store never
+    offered, and would leave the registered-domain check with no domain to check — re-opening
+    T-169 through the back door. Measured: that fix produces ``409 checkout_refused:
+    OffDomainCheckout: the platform holds no registered domain for 'store-24'; the bid's claim
+    '' is not evidence of one`` on 20 of 20 accepts, so it cannot reach the 200 below.
 
-    **The assertion is positive, not "the reason is not ``unknown_bid``".** A negative on a
-    string prefix has two cheap greens: ``accept_bid`` answers ``auction_not_acceptable``
-    *before* the bid store is consulted at all (``accept/routes.py:322``), and ``_denied()``
-    re-publishes any undeclared code as ``unspecified: <prose>``, so deleting
-    ``DENIAL_UNKNOWN_BID`` from ``accept/reasons.py`` would change the prefix while the
-    behaviour stayed byte-identical. So each auction is accepted exactly ONCE — never twice,
-    which is what would manufacture an ``already_accepted`` that passes a negative check — and
-    the outcome must be either an acceptance or a refusal drawn from
-    :data:`T294_CODES_REACHED_ONLY_AFTER_THE_BID_IS_FOUND`, every member of which is
-    unreachable until ``_find_bid`` has returned a bid.
+    **The assertion is HTTP 200 with a minted code — not "the reason is not ``unknown_bid``",
+    and not an allowlist of denial codes.** Both weaker forms were defeated by an adversarial
+    pass, and cheaply:
+
+    * a negative on the string prefix is satisfied by ``auction_not_acceptable``, which
+      ``accept_bid`` answers *before* the bid store is consulted at all
+      (``accept/routes.py:322``), and by ``_denied()`` re-publishing any undeclared code as
+      ``unspecified: <prose>``;
+    * an allowlist of "codes reachable only after ``_find_bid`` returns" was defeated by a
+      ONE-LINE relabel — ``DENIAL_UNKNOWN_BID = "unavailable"`` in ``accept/reasons.py``,
+      nothing else touched, no bid recorded, all 20 accepts still refused — because only the
+      code *word* was being graded.
+
+    Demanding the 200 removes the string from the loop entirely: a discount code either exists
+    or it does not, and no relabelling produces one. Each auction is still accepted exactly
+    ONCE — a second accept would answer ``already_accepted`` for reasons unrelated to the bid
+    store. :data:`T294_CODES_REACHED_ONLY_AFTER_THE_BID_IS_FOUND` is retained only to make the
+    failure message say whether a refusal at least got past the lookup.
     """
     corpus = _t294_corpus()
     client = corpus["client"]
@@ -1929,6 +2035,7 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     )
 
     refusals: list[str] = []
+    minted = 0
     examined = 0
     for auction in auctions:
         if not auction["bids"]:
@@ -1941,22 +2048,30 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
             f"/auctions/{auction['auction_id']}/accept", json={"bid_ref": bid["bid_ref"]}
         )
         payload = answer.json()
-        if payload.get("accepted"):
+        # The positive form: a 200 carrying a real permalink and a real single-use code. No
+        # relabelling of a denial constant can manufacture one, and a bid rebuilt from the
+        # roster cannot reach it because it carries no `store_domain` to vouch for.
+        if answer.status_code == 200 and payload.get("code") and payload.get("permalink_url"):
+            minted += 1
             continue
-        reason = str(payload.get("denial_reason", ""))
+        reason = str(payload.get("denial_reason", "")) or answer.text
         code = reason.split(":", 1)[0].strip()
-        if code not in T294_CODES_REACHED_ONLY_AFTER_THE_BID_IS_FOUND:
-            refusals.append(f"{bid['bid_ref']} -> {answer.status_code} {reason[:160]}")
+        past_lookup = code in T294_CODES_REACHED_ONLY_AFTER_THE_BID_IS_FOUND
+        refusals.append(
+            f"{bid['bid_ref']} -> {answer.status_code} {reason[:150]} "
+            f"[{'past the bid lookup' if past_lookup else 'BEFORE the bid lookup'}]"
+        )
 
     assert examined >= 15, (
         f"only {examined} auctions carried a bid to accept (seed {seed}); the sweep is unarmed"
     )
 
     assert not refusals, (
-        f"{len(refusals)} of {examined} bids that the exchange itself returned in its own "
-        f"`entries` could not be accepted (seed {seed}). Every refusal below is a code the "
-        "accept path can only reach when the bid lookup found NOTHING, so the auction is "
-        "publishing offers it has no record of:\n  " + "\n  ".join(refusals[:10])
+        f"{minted} of {examined} bids that the exchange itself returned in its own `entries` "
+        f"were acceptable; {len(refusals)} were refused (seed {seed}). The deployment is fully "
+        "wired except for the bid store, so a bid the auction published and still holds a "
+        "record of would mint a discount code. The bracketed note says whether each refusal "
+        "even got as far as the bid lookup:\n  " + "\n  ".join(refusals[:10])
     )
 
 
