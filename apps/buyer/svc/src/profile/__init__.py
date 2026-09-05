@@ -720,11 +720,16 @@ def generalise_region(region: str | None) -> str | None:
     return region.split("-", 1)[0].strip() or None
 
 
-def build_buckets(account: Mapping[str, Any]) -> ProfileBuckets:
-    """The five coarse facets, each from its own coarsener. No other account key is read.
+def _coarsen(account: Mapping[str, Any]) -> ProfileBuckets:
+    """Rung 0, with no backstop — the raw output of the five coarseners.
 
-    This is rung 0 of the ladder and the default release: no k-anonymity floor is applied,
-    per SPEC §Non-goals. :func:`anonymise_cohort` is where a configured floor is spent.
+    Private, and it is the *only* bucket-producing path in this module that is not behind
+    :func:`identity_leaks`. It exists so the ladder in :func:`buckets_at_level` can build every
+    rung of a record before anyone decides which rung is released: a record whose rung 0 leaks
+    may still be released, clean, at rung 3, and refusing it while merely *considering* rung 0
+    would be a refusal about a value no store was ever going to be shown.
+
+    Every public caller checks what it is about to emit. See :func:`build_buckets`.
     """
     return ProfileBuckets(
         budget_band=coarsen_budget_band(account),
@@ -733,6 +738,39 @@ def build_buckets(account: Mapping[str, Any]) -> ProfileBuckets:
         region=coarsen_region(account.get("region")),
         first_time=not _orders(account),
     )
+
+
+def _refuse_if_leaking(emitted: Any, account: Mapping[str, Any]) -> None:
+    """Raise :class:`IdentityLeak` if ``emitted`` carries any identity value of ``account``.
+
+    The one line every public bucket-producing entry point runs before it returns (T-164). The
+    refusal is :func:`_leak_report`'s, so it names account keys and never values, wherever it
+    is raised from.
+    """
+    leaked = identity_leaks(emitted, account)
+    if leaked:
+        raise _leak_report(account, leaked)
+
+
+def build_buckets(account: Mapping[str, Any]) -> ProfileBuckets:
+    """The five coarse facets, each from its own coarsener. No other account key is read.
+
+    This is rung 0 of the ladder and the default release: no k-anonymity floor is applied,
+    per SPEC §Non-goals. :func:`anonymise_cohort` is where a configured floor is spent.
+
+    Raises:
+        IdentityLeak: an identity value from ``account`` reached the buckets. **This is a
+            public entry point, so it is behind the R5 backstop** (T-164). It was not, and the
+            asymmetry was a trap rather than a live defect: ``build_profile`` refused an
+            account whose own order category spelled its surname while ``build_buckets``
+            published ``['reyes-gear']`` for the same account, and the only thing keeping that
+            off a store was that nothing yet called it. T-142 wires ``publish_profile``; a
+            caller that sourced its buckets here instead of from ``build_profile`` would have
+            bypassed the backstop entirely and nothing would have said so.
+    """
+    buckets = _coarsen(account)
+    _refuse_if_leaking(buckets, account)
+    return buckets
 
 
 # --------------------------------------------------------------------------------------
@@ -784,7 +822,7 @@ def buckets_at_level(account: Mapping[str, Any], level: int) -> ProfileBuckets:
     if not isinstance(level, int) or isinstance(level, bool) or not 0 <= level <= BOTTOM_LEVEL:
         raise ValueError(f"generalisation level must be 0..{BOTTOM_LEVEL}, got {level!r}")
     if level == 0:
-        return build_buckets(account)
+        return _coarsen(account)
     if level >= BOTTOM_LEVEL:
         return ProfileBuckets(
             budget_band=None,
@@ -873,6 +911,13 @@ def anonymise_cohort(
         ValueError: ``k`` is below 1, or a floor above 1 was asked of a release with fewer
             than ``k`` accounts — which no generalisation can satisfy, and saying so is
             better than returning something that merely looks anonymous.
+        IdentityLeak: an identity value from one of the ``accounts`` survived into the buckets
+            released for it. **This is a public entry point, so it is behind the R5 backstop**
+            (T-164) — see :func:`build_buckets` for why an unguarded one is a trap. The check
+            is made against what this function actually **releases**, not against rung 0: a
+            record whose rung-0 buckets carry a fragment may be released, clean, three rungs
+            up, and refusing it for a value no store would have been shown would be a
+            generalisation ladder that punishes the buyer it just protected.
     """
     floor = k_anonymity_floor() if k is None else k
     if floor < 1:
@@ -930,7 +975,10 @@ def anonymise_cohort(
         for index in min(movable, key=len):
             levels[index] = BOTTOM_LEVEL
 
-    return [ladder[index][level] for index, level in enumerate(levels)]
+    released = [ladder[index][level] for index, level in enumerate(levels)]
+    for account, buckets in zip(records, released, strict=True):
+        _refuse_if_leaking(buckets, account)
+    return released
 
 
 # --------------------------------------------------------------------------------------

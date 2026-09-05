@@ -115,15 +115,23 @@ def _orders(category: str) -> list[dict[str, Any]]:
 # ======================================================================================
 # T-164 — the public bucket builders run no identity-leak check
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-164: build_buckets() and anonymise_cohort() are public and run NO identity-leak "
-        "check — only build_profile()/build_profiles() do — so an account whose own order "
-        "category carries its surname is refused through one public entry point and "
-        "published verbatim through the other two; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-164 is FIXED, by the ticket's FIRST accepted repair: `build_buckets` and
+# `anonymise_cohort` both run the R5 backstop now and both refuse LEAKING_ACCOUNT. Neither was
+# made private, so both are still reachable by `getattr` and this gate still grades them.
+#
+# CAUSATION PROVEN: reverting ONLY the `_refuse_if_leaking` call inside `build_buckets` and
+# changing nothing else returns this node to `xfailed`. No assertion in the body was touched.
+#
+# READ THIS BEFORE TRUSTING THIS GATE — it grades LESS than it appears to. It calls
+# `anonymise_cohort([LEAKING_ACCOUNT], k=1)`, and at k == 1 that function returns
+# `[build_buckets(a) for a in accounts]`, so the refusal it observes is `build_buckets`'s.
+# Measured: reverting ONLY `anonymise_cohort`'s own check and leaving `build_buckets` guarded,
+# this node STILL PASSES. Its own emission path — the generalisation ladder at k > 1, which
+# builds rungs through a private coarsener and never calls `build_buckets` — is selected by
+# nothing here. That half is graded instead by
+# apps/buyer/svc/tests/test_profile_identity_floor.py::
+#   test_anonymise_cohort_refuses_on_its_own_and_not_only_through_build_buckets
+# which was confirmed to fail when that check alone is reverted. Same family as T-328.
 def test_t164_no_public_bucket_builder_publishes_identity_without_the_backstop() -> None:
     """Every public entry point that emits buckets must be behind the R5 backstop.
 

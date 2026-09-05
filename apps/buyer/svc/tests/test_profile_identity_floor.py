@@ -244,6 +244,71 @@ def test_the_other_two_closed_vocabularies_keep_their_exemption() -> None:
 
 
 # =======================================================================================
+# T-164 — the half of the fix its own gate cannot see
+# =======================================================================================
+
+
+def test_anonymise_cohort_refuses_on_its_own_and_not_only_through_build_buckets() -> None:
+    """T-164's gate calls ``anonymise_cohort([account], k=1)``, and that proves nothing about it.
+
+    At ``k == 1`` ``anonymise_cohort`` returns ``[build_buckets(a) for a in accounts]``, so the
+    refusal the gate observes is ``build_buckets``'s. Measured: reverting ONLY the
+    ``anonymise_cohort`` check and leaving ``build_buckets`` guarded, the gate still passes.
+    Its own emission path — the generalisation ladder at ``k > 1``, which builds rungs through
+    a private coarsener and never calls ``build_buckets`` at all — is not selected by anything.
+
+    So this test drives that path deliberately. Two identical leaking accounts at ``k = 2``
+    already share an equivalence class at rung 0, so nothing is generalised and the ladder
+    releases the rung-0 buckets verbatim — the exact case where the only thing between a
+    surname and a store is ``anonymise_cohort``'s own check.
+    """
+    from buyer_svc.profile import IdentityLeak, anonymise_cohort, build_profile
+
+    # No email on purpose: "reyes" would then reach the account through two keys and the
+    # attribution assertion below would stop saying anything about which one was found.
+    leaking: dict[str, Any] = {
+        "last_name": "Reyes",
+        "region": "US-OR",
+        "orders": _orders("reyes gear"),
+    }
+
+    # Control: the guarded single-account builder does refuse this account, so it is a real
+    # leak and not a badly-built fixture.
+    with pytest.raises(IdentityLeak):
+        build_profile(leaking, PSEUDONYM)
+
+    with pytest.raises(IdentityLeak, match="R5") as caught:
+        anonymise_cohort([dict(leaking), dict(leaking)], k=2)
+    assert caught.value.account_keys == ("last_name",)
+
+
+def test_the_ladder_may_still_release_a_record_whose_rung_zero_would_leak() -> None:
+    """The check is against what is RELEASED, not against rung 0. That distinction is the point.
+
+    A generalisation ladder that refused a record because a rung nobody published carries a
+    fragment would punish the buyer it had just protected. Here the same leaking account sits
+    in a cohort large enough that it is generalised past its own free-text slug, and the
+    release is admitted — carrying a closed-taxonomy label instead of the surname.
+    """
+    from buyer_svc.profile import CATEGORY_TAXONOMY, anonymise_cohort
+
+    leaking: dict[str, Any] = {
+        "last_name": "Reyes",
+        "region": "US-OR",
+        "orders": _orders("reyes gear"),
+    }
+    crowd = [dict(leaking)] + [
+        {"region": "US-OR", "orders": _orders("camera-lenses")} for _ in range(9)
+    ]
+
+    released = anonymise_cohort(crowd, k=5)
+    assert len(released) == len(crowd)
+    for buckets in released:
+        for label in buckets.category_affinity:
+            assert label in CATEGORY_TAXONOMY, f"free text survived generalisation: {label}"
+
+
+# =======================================================================================
 # The seam, pinned independently of the threshold
 # =======================================================================================
 
