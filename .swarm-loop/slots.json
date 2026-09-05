@@ -13,6 +13,31 @@
       "claimed_at": "2026-09-05T16:43:14",
       "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/buyer-identity",
       "branch": "task/buyer-identity"
+    },
+    "1": {
+      "claimed_at": "2026-09-05T17:15:07",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-trust",
+      "branch": "task/lane-trust"
+    },
+    "2": {
+      "claimed_at": "2026-09-05T17:15:08",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-merchant",
+      "branch": "task/lane-merchant"
+    },
+    "3": {
+      "claimed_at": "2026-09-05T17:15:08",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-ingest",
+      "branch": "task/lane-ingest"
+    },
+    "4": {
+      "claimed_at": "2026-09-05T17:15:09",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-store-agent",
+      "branch": "task/lane-store-agent"
+    },
+    "7": {
+      "claimed_at": "2026-09-05T17:15:09",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-exchange",
+      "branch": "task/lane-exchange"
     }
   }
 }
