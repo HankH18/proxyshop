@@ -292,14 +292,13 @@ function asString(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-function asFiniteNumber(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
-}
-
 /**
- * The finite number `value` is, or `undefined`. The difference from
- * {@link asFiniteNumber} is the whole point: a caller that has no honest fallback must be
- * able to say "nothing arrived" rather than pick a number the service never sent.
+ * The finite number `value` is, or `undefined`.
+ *
+ * There is deliberately NO `asFiniteNumber(value, fallback)` beside this. One used to sit
+ * here, and every field that reached for it — `rank_score`, then `fit_score` — had to name
+ * a fallback it had no authority to name, so `0` went onto the page as though the service
+ * had sent it. A reader with no honest default must be able to say "nothing arrived".
  */
 function finiteNumberOrUndefined(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
