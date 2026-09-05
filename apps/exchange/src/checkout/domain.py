@@ -28,8 +28,13 @@ here it is refused explicitly, with a reason, instead.
 second.** :func:`is_on_domain` is a question about a URL, so an empty URL is not on-domain —
 there is no host to be on the domain. That is *not* the same as "this offer must be refused":
 a list-price fallback offer (R10, built by ``collect_bids`` for every Tier-0 and silent
-store) carries no ``checkout_url`` at all, and treating its absence as a spoof refused every
-fallback bid the exchange had manufactured for itself. The caller decides — see
+store) arrived with no ``checkout_url`` at all, and treating its absence as a spoof refused
+every fallback bid the exchange had manufactured for itself. A shortlisted fallback now
+arrives carrying one — ``ranking/candidates.py`` completes it from the platform's
+``store_id -> domain`` registry, and ``auction/routes.py::collected_bid_records`` builds the
+bid book from those same candidates — but an absent URL is still a legal thing to hand this
+module: a direct caller supplies whatever it holds, and a fallback for a store the registry
+knows no domain for is completed with nothing. The caller decides — see
 ``CheckoutProvider.checkout``, which validates the offer's URL only when the offer has one
 and validates the *provider's* permalink unconditionally.
 

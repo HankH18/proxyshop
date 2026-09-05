@@ -732,10 +732,21 @@ class CheckoutProvider:
         #    Only when there IS one. "No checkout_url" and "a checkout_url pointing at
         #    attacker.tld" are not the same condition and must not get the same answer:
         #    `collect_bids` manufactures a list-price fallback offer for every Tier-0 and
-        #    silent store (R10), and that offer carries no checkout_url by construction —
-        #    it is catalog data, not a store's reply. Refusing an absent URL therefore
-        #    refused every fallback bid the exchange had just built for itself, so a Tier-0
-        #    store could be ranked and shortlisted but never bought from.
+        #    silent store (R10) out of catalog data, not a store's reply. That offer used to
+        #    reach this port with no checkout_url at all, so refusing an absent URL refused
+        #    every fallback bid the exchange had just built for itself, and a Tier-0 store
+        #    could be ranked and shortlisted but never bought from.
+        #
+        #    An absent URL is no longer that offer's everyday shape. `ranking/candidates.py`
+        #    now completes a FALLBACK entry's offer with a checkout_url built from the
+        #    platform-registered domain it has already looked up, and
+        #    `auction/routes.py::collected_bid_records` builds the bid book out of those same
+        #    projected candidates — so a fallback that reached the shortlist arrives here
+        #    WITH a URL and this comparison does run on it. Absent is still reachable and
+        #    still legal: a direct caller of `checkout()` can hand over an offer that has
+        #    none, and `NoRegisteredDomains` — the fail-closed wired default — holds no
+        #    domain to build one from, so a fallback under it still arrives with nothing here
+        #    to look at.
         #
         #    Nothing is relaxed by allowing it: with no URL there is no untrusted host in
         #    play at all, the provider builds the permalink from `registered` below, and
@@ -780,8 +791,17 @@ class CheckoutProvider:
         #
         #    This is the one check that CANNOT be hoisted ahead of the mint — the permalink
         #    does not exist until the provider has run — and it is reachable on a perfectly
-        #    legal offer: the R10 list-price fallback carries no `checkout_url`, so step 2
-        #    has nothing to look at and this is the first failable host comparison.
+        #    legal offer. It used to be reachable by the most ordinary route there is: the
+        #    R10 list-price fallback carried no `checkout_url`, so step 2 had nothing to look
+        #    at and this was the first failable host comparison for an everyday bid. A
+        #    shortlisted fallback now arrives with a URL — `ranking/candidates.py` completes
+        #    it from the platform's registered-domain lookup, and
+        #    `auction/routes.py::collected_bid_records` builds the bid book from those
+        #    candidates — so step 2 checks it first. This check is unchanged and is still the
+        #    only one that can fail with a live code behind it: passing step 2 says nothing
+        #    about what the provider hands back, and an offer with no URL at all — a direct
+        #    call, or a fallback for a store the platform holds no domain for — still reaches
+        #    here having faced no host comparison.
         try:
             # `secret=` is T-215 pass 3, and it is the ONLY difference between this call and
             # the pre-mint one at step 2. From here on a real discount exists, so every

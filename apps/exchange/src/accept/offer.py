@@ -64,9 +64,15 @@ the race discovers it has lost only once ``POST /codes`` has issued a live singl
 so the outcome is a correct 409 sitting on top of a real double spend.
 
 **A merchant client that answers off-domain has already minted.** The port checks the offer's
-``checkout_url`` before the mint, but an offer with *no* URL (the R10 list-price fallback shape)
-has nothing to check, so the first host comparison a delegating provider can fail is the one on
-the permalink it got *back* — after ``POST /codes`` issued a real single-use discount. The buyer
+``checkout_url`` before the mint, but that check says nothing about the permalink the provider
+hands *back*, so the first host comparison a delegating provider can fail is the one on that
+permalink — after ``POST /codes`` issued a real single-use discount. An offer with *no* URL
+reaches the mint having faced no host comparison at all; that used to be the R10 list-price
+fallback's everyday shape, and is now the narrower case of a direct call or a fallback for a
+store the platform registry holds no domain for — ``ranking/candidates.py`` completes a
+fallback entry's offer from that registry, and
+:func:`~..auction.routes.collected_bid_records` builds this bid book from the ranking's own
+candidates, so a shortlisted fallback arrives here carrying a URL. The buyer
 is still protected (no permalink is returned, and the auction stays open) and the live code is
 **no longer lost**: the port carries it out on
 :attr:`~apps.exchange.src.checkout.provider.OrphanedCheckoutCode.orphan`, and :func:`accept`
@@ -628,10 +634,17 @@ def accept(
         # What is NOT true, and what T-157 measured false, is the comforting half of the old
         # comment here: "a refusal from any of them has created no code anywhere". The port
         # hoists every check it can ahead of the mint, but one cannot be hoisted — the
-        # permalink a provider hands back does not exist until the provider has run — and the
-        # R10 list-price fallback offer carries no `checkout_url`, so that post-mint check is
-        # the FIRST failable host comparison for a legal, everyday bid. By then `POST /codes`
-        # has issued a live single-use discount.
+        # permalink a provider hands back does not exist until the provider has run, and a
+        # pre-mint check on the offer's own URL says nothing about it. When T-157 was
+        # measured, the R10 list-price fallback offer carried no `checkout_url` at all, which
+        # made that post-mint check the FIRST failable host comparison for a legal, everyday
+        # bid. A shortlisted fallback now arrives with a URL (`ranking/candidates.py`
+        # completes it from the platform registry, and
+        # `auction/routes.py::collected_bid_records` builds this bid book from those
+        # candidates), so the pre-mint check does run on it. The post-mint refusal is
+        # unchanged and still reachable — by any provider whose permalink leaves the
+        # registered domain, and by an offer that arrived with no URL to check at all. By
+        # then `POST /codes` has issued a live single-use discount.
         #
         # The port carries that code out on `OrphanedCheckoutCode.orphan`. Reading it is this
         # frame's entire job: dropping it here is the original defect, one frame higher up.
