@@ -1920,25 +1920,45 @@ def test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer(
     delegates to, whichever route a caller takes — and asks whether a delisting ever went
     through it. A decision that never reaches the writer is not in the ledger, however it is
     reported.
+
+    And it binds the answer to ONE STORE. Spying on the class alone would accept a fix that
+    appends the delistings to a throwaway ``InMemoryEventStore()`` and leaves the run's real
+    chain untouched: the spy would see them, and ``chain_ok`` would still be True because the
+    real store verified fine. So the appends are grouped by instance and only the store that
+    took the run's own episode events counts. Every spied ``self`` is kept alive for the
+    duration, because ``id()`` is only unique among LIVE objects and a discarded throwaway
+    could otherwise inherit the principal store's id.
     """
+    import collections
+
     from trust.events.store import InMemoryEventStore
 
-    sealed: list[dict[str, Any]] = []
+    appends: list[tuple[int, dict[str, Any]]] = []
+    alive: list[Any] = []
     original = InMemoryEventStore.append
 
     def spy(self: Any, event: Any) -> Any:
-        sealed.append(dict(event))
+        alive.append(self)
+        appends.append((id(self), dict(event)))
         return original(self, event)
 
     monkeypatch.setattr(InMemoryEventStore, "append", spy)
     run = _t303_simulation_run()
 
-    assert len(sealed) >= 20, (
-        f"the append spy saw only {len(sealed)} events go through "
-        f"InMemoryEventStore.append during a whole simulation run (36 when this was written). "
-        f"The seam moved, so this gate is watching a door nobody uses any more and every "
-        f"assertion below would pass by seeing nothing"
+    per_store = collections.Counter(store for store, _ in appends)
+    assert per_store, (
+        "the append spy saw no event at all go through InMemoryEventStore.append during a "
+        "whole simulation run. The seam moved, so this gate is watching a door nobody uses "
+        "any more and every assertion below would pass by seeing nothing"
     )
+    principal, principal_count = per_store.most_common(1)[0]
+    assert principal_count >= 20, (
+        f"the busiest event store took only {principal_count} appends during a whole "
+        f"simulation run (36 when this was written), across {len(per_store)} store(s). The "
+        f"run's chain is not being written through this seam any more, so the sweep below "
+        f"would conclude from nothing"
+    )
+    sealed = [event for store, event in appends if store == principal]
     assert run.chain_ok, "the simulation's own chain does not verify; nothing below is trustworthy"
 
     delistings = run.snapshot["delistings"]
@@ -1951,9 +1971,10 @@ def test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer(
         if str(event.get("event_id")) not in sealed_ids
     ]
     assert dropped == [], (
-        f"{len(dropped)} of {len(delistings)} delisting decisions the run computed were never "
-        f"handed to the ledger writer — {len(sealed)} events went through the append seam and "
-        f"none of them was one of these: {dropped}. They are computed and dropped. The "
+        f"{len(dropped)} of {len(delistings)} delisting decisions the run computed never "
+        f"reached the store that seals the run's chain — {len(sealed)} events went into it "
+        f"(of {len(appends)} appends across {len(per_store)} store(s)) and none of them was "
+        f"one of these: {dropped}. They are computed and dropped. The "
         f"exchange, an auditor and an appeal all read the ledger, and none of them can see a "
         f"decision that was only ever a dict on a dataclass; SimulationRun.to_json() does not "
         f"even carry the snapshot, so replay determinism never compares it either"
@@ -2165,6 +2186,30 @@ def _t256_required_columns(body: str) -> list[str]:
     return required
 
 
+def _t256_constraint_protected(body: str) -> bool:
+    """Whether a replay can be refused by the DATABASE rather than by the writer.
+
+    True only when the table carries a multi-column UNIQUE or a composite PRIMARY KEY over
+    real columns. ``ledger.trust_observations`` has neither — its only unique index is the
+    server-generated ``observation_id`` default — so ``on conflict do nothing`` there is
+    vacuous: measured on live Postgres, three identical calls still wrote three rows with the
+    clause in place. A gate that accepts the clause as proof grades a substring.
+    """
+    return bool(
+        re.search(r"\bunique\s*\(", body, re.IGNORECASE)
+        or re.search(r"\bprimary\s+key\s*\(", body, re.IGNORECASE)
+    )
+
+
+def _t256_inserts(connection: Any, table: str) -> list[str]:
+    """Every statement this recorder saw that inserts into ``table``."""
+    return [
+        statement
+        for statement, _ in connection.log
+        if re.search(rf"insert\s+into\s+{re.escape(table)}\b", statement, re.IGNORECASE)
+    ]
+
+
 def _t256_cases() -> list[dict[str, Any]]:
     """The FULL claim_type x status cross product, each with randomized surroundings.
 
@@ -2213,11 +2258,13 @@ class _T256RecordingCursor:
 
     def __init__(self, log: list[tuple[str, Any]]) -> None:
         self._log = log
+        self._last = ""
         self.description = None
         self.rowcount = -1
 
     def execute(self, sql: Any, params: Any = None) -> _T256RecordingCursor:
         self._log.append((str(sql), params))
+        self._last = str(sql)
         return self
 
     def executemany(self, sql: Any, seq: Any = None) -> _T256RecordingCursor:
@@ -2230,11 +2277,25 @@ class _T256RecordingCursor:
     #: marks NOT NULL, so a correct writer would look broken and an incorrect one identical.
     RETURNED_ID = "00000000-0000-0000-0000-0000000000ff"
 
-    def fetchone(self) -> Any:
+    def _answer(self) -> Any:
+        """What the last statement would plausibly have read back.
+
+        Contextual, because a fixed uuid is not a universal answer: a writer asking
+        ``select coalesce(max(snapshot_version), 0) + 1`` needs a NUMBER, and answering it a
+        uuid made ``int()`` raise on every case — the whole sweep erroring before a single
+        assertion ran. A double that can only answer one shape refuses honest writers.
+        """
+        if re.search(r"returning\s+[\w.\"]*id\b", self._last, re.IGNORECASE):
+            return (self.RETURNED_ID,)
+        if re.search(r"\b(count|max|min|sum|coalesce)\s*\(", self._last, re.IGNORECASE):
+            return (0,)
         return (self.RETURNED_ID,)
 
+    def fetchone(self) -> Any:
+        return self._answer()
+
     def fetchall(self) -> list[Any]:
-        return [(self.RETURNED_ID,)]
+        return [self._answer()]
 
     def close(self) -> None:
         return None
@@ -2334,8 +2395,14 @@ def _t256_calls(source: str, name: str) -> bool:
     literal equally well, so it cannot tell a caller from a definition. Only an
     :class:`ast.Call` whose callee resolves to that identifier counts.
     """
+    import warnings
+
     try:
-        tree = ast.parse(source)
+        with warnings.catch_warnings():
+            # Product sources carry regexes written as plain strings; parsing them here
+            # re-emits their SyntaxWarnings against `<unknown>`, which is noise this gate adds.
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
     except SyntaxError:
         return False
     for node in ast.walk(tree):
@@ -2427,7 +2494,17 @@ def test_t256_the_verification_persistence_sweep_is_armed() -> None:
     assert uuid_columns, f"{_T256_MIGRATION} declares no uuid column; the reader lost its shape"
     for column in sorted(uuid_columns & set(cases[0])):
         for case in cases:
-            uuid.UUID(str(case[column]))  # raises ValueError if the fixture is un-insertable
+            try:
+                uuid.UUID(str(case[column]))
+            except ValueError:
+                pytest.fail(
+                    f"the generated {column!r} is {case[column]!r}, which is not a UUID — and "
+                    f"{_T256_MIGRATION} declares that column `uuid`. Live Postgres answers "
+                    f"`invalid input syntax for type uuid`, so every generated case would be "
+                    f"un-insertable and the conformance assertion in the repro could only ever "
+                    f"be the column-name check it already is: a gate defanged by its own "
+                    f"fixture data"
+                )
 
     assert _t256_calls("persist_it(1)", "persist_it"), "the call detector sees no plain call"
     assert _t256_calls("mod.persist_it(1)", "persist_it"), "the call detector sees no method call"
@@ -2558,35 +2635,37 @@ def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_
         f"cursor takes all {len(cases)}:\n  " + "\n  ".join(sorted(incomplete)[:8])
     )
 
-    replay = _T256RecordingConnection()
-    payload = {
-        key: value for key, value in dict(cases[0], connection=replay).items() if key in parameters
-    }
-    seam(**payload)
-    seam(**payload)
+    once = _T256RecordingConnection()
+    twice = _T256RecordingConnection()
+    payload = {key: value for key, value in dict(cases[0]).items() if key in parameters}
+    seam(**dict(payload, connection=once))
+    seam(**dict(payload, connection=twice))
+    seam(**dict(payload, connection=twice))
+
     doubled: list[str] = []
     for table in _T256_TABLES:
-        statements = [
-            statement
-            for statement, _ in replay.log
-            if re.search(rf"insert\s+into\s+{re.escape(table)}\b", statement, re.IGNORECASE)
-        ]
-        once = len(statements) // 2 if statements else 0
-        unguarded = [
-            statement
-            for statement in statements
-            if not re.search(r"on\s+conflict", statement, re.IGNORECASE)
-        ]
-        if len(statements) > max(once, 1) and unguarded:
-            doubled.append(f"{table}: {len(statements)} INSERTs, {len(unguarded)} unguarded")
+        first = len(_t256_inserts(once, table))
+        replayed = _t256_inserts(twice, table)
+        if len(replayed) <= first:
+            continue
+        extra = replayed[first:]
+        protected = _t256_constraint_protected(_t256_table_ddl(sql, table))
+        if protected and all(
+            re.search(r"on\s+conflict", statement, re.IGNORECASE) for statement in extra
+        ):
+            continue
+        doubled.append(
+            f"{table}: {first} INSERT(s) on one call, {len(replayed)} on two"
+            + ("" if protected else " — and this table has no UNIQUE for ON CONFLICT to catch")
+        )
     assert doubled == [], (
-        f"replaying the identical (claim_ref, catalog_snapshot_id, verifier_version) writes a "
-        f"second row into {[entry.split(':')[0] for entry in doubled]} — {doubled}. T-065's "
-        f"acceptance 2 is about ROWS, not statements: deferring to a UNIQUE constraint with "
-        f"ON CONFLICT is fine and is the design claim_verifications_idempotency_key exists "
-        f"for, but ledger.trust_observations carries NO unique constraint at all, so nothing "
-        f"but the writer can stop a replay double-counting an observation — which is exactly "
-        f"the corruption that acceptance item is about"
+        f"replaying the identical (claim_ref, catalog_snapshot_id, verifier_version) writes "
+        f"more rows the second time: {doubled}. T-065's acceptance 2 is about ROWS, not "
+        f"statements. Deferring to a UNIQUE constraint with ON CONFLICT counts as a defence "
+        f"ONLY where such a constraint exists — ledger.trust_observations has none beyond its "
+        f"server-generated observation_id, so the clause there is decoration and measurably "
+        f"still wrote three rows for three identical calls. Not emitting the second INSERT at "
+        f"all is always a defence"
     )
 
 
