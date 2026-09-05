@@ -394,8 +394,8 @@ _TAXONOMY_TOKENS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: Rungs of the generalisation ladder, finest (0) to fully suppressed. Rung 0 **is**
-#: :func:`build_buckets` — the default release — and each rung widens exactly one facet,
+#: Rungs of the generalisation ladder, finest (0) to fully suppressed. Rung 0 emits what
+#: :func:`build_buckets` emits — the default release — and each rung widens exactly one facet,
 #: highest-entropy first, so a record is never made to give up two things when giving up one
 #: would have put it in a crowd::
 #:
@@ -742,13 +742,16 @@ def generalise_region(region: str | None) -> str | None:
 def _coarsen(account: Mapping[str, Any]) -> ProfileBuckets:
     """Rung 0, with no backstop — the raw output of the five coarseners.
 
-    Private, and it is the *only* bucket-producing path in this module that is not behind
-    :func:`identity_leaks`. It exists so the ladder in :func:`buckets_at_level` can build every
-    rung of a record before anyone decides which rung is released: a record whose rung 0 leaks
-    may still be released, clean, at rung 3, and refusing it while merely *considering* rung 0
-    would be a refusal about a value no store was ever going to be shown.
+    Private. Together with :func:`_buckets_at_level`, which wraps it, these are the only two
+    bucket-producing paths in this module that are not behind :func:`identity_leaks`, and both
+    are private. They exist so :func:`anonymise_cohort` can build every rung of a record before
+    anyone decides which rung is released: a record whose rung 0 leaks may still be released,
+    clean, at rung 3, and refusing it while merely *considering* rung 0 would be a refusal
+    about a value no store was ever going to be shown.
 
-    Every public caller checks what it is about to emit. See :func:`build_buckets`.
+    Every PUBLIC entry point checks what it is about to emit — :func:`build_buckets`,
+    :func:`buckets_at_level`, :func:`anonymise_cohort`, :func:`build_profile` and
+    :func:`build_profiles`. If you add a sixth, guard it; that omission is the whole of T-164.
     """
     return ProfileBuckets(
         budget_band=coarsen_budget_band(account),
@@ -828,7 +831,35 @@ def k_anonymity_floor(env: Mapping[str, str] | None = None) -> int:
 
 
 def buckets_at_level(account: Mapping[str, Any], level: int) -> ProfileBuckets:
-    """The five facets, generalised to ``level`` of the ladder. Rung 0 is :func:`build_buckets`.
+    """The five facets, generalised to ``level`` of the ladder, behind the R5 backstop.
+
+    Raises:
+        ValueError: ``level`` is not an integer rung in ``0..BOTTOM_LEVEL``.
+        IdentityLeak: the buckets at ``level`` carry an identity value from ``account``.
+
+    This is the THIRD public bucket-emitting entry point, and T-164 named only two. It is
+    guarded anyway, because the argument the ticket makes about the other two is exactly as
+    true here: it is public, it is in ``__all__``, it returns a ``ProfileBuckets`` that
+    ``BuyerProfile`` accepts, and at rung 0 it returns the account's own free text. Measured
+    before it was guarded: ``buckets_at_level(account, 0)`` on the contaminated fixture
+    returned ``category_affinity=['running-shoes',
+    'gift-for-dana-reyes-44-alder-way-portland-97205']`` and that value went through
+    ``BuyerProfile`` into ``publish_profile`` and out to ``app.buyer_accounts`` with no refusal
+    anywhere, while ``build_buckets``, ``build_profile`` and ``anonymise_cohort`` all refused
+    the same account. That asymmetry did not exist before T-164's fix — rung 0 used to be
+    ``build_buckets`` and inherited its guard — so guarding the other two without this one
+    would have *created* the hole it was closing.
+
+    The ladder itself is built through :func:`_buckets_at_level`, which is unguarded, so
+    :func:`anonymise_cohort` can still consider a rung it does not release.
+    """
+    buckets = _buckets_at_level(account, level)
+    _refuse_if_leaking(buckets, account)
+    return buckets
+
+
+def _buckets_at_level(account: Mapping[str, Any], level: int) -> ProfileBuckets:
+    """The rung itself, with no backstop — see :func:`buckets_at_level` for the public one.
 
     The rungs are the table on :data:`BOTTOM_LEVEL`. They are *monotone*: every facet at rung
     ``n+1`` is at least as coarse as the same facet at rung ``n``, which is what makes
@@ -954,7 +985,7 @@ def anonymise_cohort(
         )
 
     ladder = [
-        [buckets_at_level(account, level) for level in range(BOTTOM_LEVEL + 1)]
+        [_buckets_at_level(account, level) for level in range(BOTTOM_LEVEL + 1)]
         for account in records
     ]
     levels = [0] * len(records)
@@ -1318,7 +1349,6 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
     """
     sources = _identity_sources(account)
     naming = {value for value, keys in sources.items() if keys & _NAMING_IDENTITY_KEYS}
-    beyond_email = {value for value, keys in sources.items() if keys - {"email"}}
 
     exempt: set[str] = set()
     for slug in _account_category_slugs(account):

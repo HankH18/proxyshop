@@ -428,24 +428,43 @@ def test_the_ladder_may_still_release_a_record_whose_rung_zero_would_leak() -> N
     """The check is against what is RELEASED, not against rung 0. That distinction is the point.
 
     A generalisation ladder that refused a record because a rung nobody published carries a
-    fragment would punish the buyer it had just protected. Here the same leaking account sits
-    in a cohort large enough that it is generalised past its own free-text slug, and the
-    release is admitted — carrying a closed-taxonomy label instead of the surname.
+    fragment would punish the buyer it had just protected. Here the leaking account sits in a
+    cohort that generalises it past its own free-text slug, and the release is admitted —
+    carrying a closed-taxonomy label instead of the surname.
+
+    THE COHORT IS BUILT SO THE RELEASE IS NOT SUPPRESSED, and that is not incidental. An
+    earlier version of this test used a crowd whose members all landed in the bottom class:
+    every released set was ``category_affinity == []``, the assertion loop over the labels ran
+    zero times in total, and the only surviving assertion was ``10 == 10``. It stayed green
+    against an implementation that suppressed everything. So the released affinity is asserted
+    to be non-empty FIRST, and the six accounts here share a rung-1 class rather than falling
+    to the floor.
     """
-    from buyer_svc.profile import CATEGORY_TAXONOMY, anonymise_cohort
+    from buyer_svc.profile import CATEGORY_TAXONOMY, IdentityLeak, anonymise_cohort, build_profile
 
     leaking: dict[str, Any] = {
         "last_name": "Reyes",
         "region": "US-OR",
         "orders": _orders("reyes gear"),
     }
-    crowd = [dict(leaking)] + [
-        {"region": "US-OR", "orders": _orders("camera-lenses")} for _ in range(9)
-    ]
+    # Control: rung 0 for this account really does leak, so the release below is the ladder
+    # doing work rather than the account having been harmless all along.
+    with pytest.raises(IdentityLeak):
+        build_profile(dict(leaking), PSEUDONYM)
 
+    crowd = [dict(leaking)] + [
+        {"region": "US-OR", "orders": _orders(f"widget-{suffix}")} for suffix in "abcde"
+    ]
     released = anonymise_cohort(crowd, k=5)
+
     assert len(released) == len(crowd)
+    assert all(buckets.category_affinity for buckets in released), (
+        "the cohort was suppressed rather than generalised, so this test would grade nothing: "
+        f"{[b.model_dump() for b in released]}"
+    )
+    assert released[0].category_affinity == ["other"]
     for buckets in released:
+        assert buckets.region == "US"  # generalised, not blanked
         for label in buckets.category_affinity:
             assert label in CATEGORY_TAXONOMY, f"free text survived generalisation: {label}"
 
@@ -479,6 +498,6 @@ def test_bucket_values_are_searched_one_at_a_time_and_never_concatenated() -> No
 
     # The control that proves the assertion above can fail: the joined form, in one bucket, IS
     # found. An implementation that concatenated before searching would produce exactly this.
-    assert identity_leaks(
-        {"pseudonym": "psn-x", "buckets": {"region": "ab cd"}}, account
-    ) == ["ab  cd"]
+    assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "ab cd"}}, account) == [
+        "ab  cd"
+    ]
