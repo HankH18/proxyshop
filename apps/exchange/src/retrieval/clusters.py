@@ -51,8 +51,10 @@ takes ``(cluster_id, label)`` rows rather than inventing a shape. A merchant's
 refuses free text outright ("a free-text cluster name cannot be resolved to a cluster id")
 and resolves the merchant's prose against an **option list** of ``{cluster_id, label}`` pairs
 carried on the interview question. That option list is the named vocabulary, in the one place
-it exists — and nothing publishes it anywhere the exchange can read. Today the only such list
-in the repository is the fixture ``fixtures/interviews/northwind-outfitters.json:72``.
+it exists — and nothing publishes it anywhere the exchange can read. The lists that exist today
+are hand-written: ``fixtures/interviews/northwind-outfitters.json:73-77`` (the ``options`` array
+on the ``pursue_clusters`` question) and ``apps/merchant/svc/tests/test_onboarding_interview.py``'s
+``_OPTIONS``. No route, service or UI generates one.
 
 So this module does not pretend to read a populated catalogue. It takes one through a port,
 :class:`IntentClusterCatalogue`, and the implementation that is real **today** is
@@ -83,7 +85,13 @@ The four rules
 4. **Evidence, not a score.** Every assignment carries the specific facts that decided it —
    ``category=coffee``, ``brew_method=espresso``, ``term:espresso machine`` — because "why is
    this auction addressed to cluster-espresso" is a question an operator will ask about a
-   shortlist, and a bare 4.0 does not answer it.
+   shortlist, and a bare 4.0 does not answer it. Stated honestly: today that explanation reaches
+   a CALLER of :func:`assign_cluster` and the tests, and no further. The auction route reads
+   only :attr:`ClusterAssignment.assigned` and :meth:`ClusterAssignment.applied_to`; nothing
+   logs the rest, because ``apps/exchange`` contains no logging call site at all (T-308), and
+   the ``auction_opened`` ledger payload's key vocabulary is frozen at ``(intent_id,
+   cluster_id, roster_size)``. The evidence is built so that the answer EXISTS when a sink for
+   it does; it is not yet surfaced.
 
 Wiring
 ------
@@ -118,6 +126,8 @@ __all__ = [
     "CATEGORY_WEIGHT",
     "CONSTRAINT_WEIGHT",
     "MAX_CATALOGUE_CLUSTERS",
+    "MAX_QUERY_CHARS_SCANNED",
+    "MIN_ASSIGNMENT_SCORE",
     "SOURCE_ASSIGNED",
     "SOURCE_STATED",
     "SOURCE_UNASSIGNED",
@@ -145,6 +155,21 @@ CONSTRAINT_WEIGHT = 2.0
 #: What one matched term contributes. The lightest, because free text is the weakest evidence
 #: this module has and DESIGN forbids retrieval by product name alone.
 TERM_WEIGHT = 1.0
+
+#: The least evidence that may address an auction to a cluster. One :data:`TERM_WEIGHT` is
+#: deliberately BELOW it, so a single incidental word cannot authorise a store to bid.
+#: Measured before this bar existed: the row ``{"cluster_id": "cluster-coffee", "label":
+#: "Coffee"}`` and the query *"a walnut coffee table for the lounge"* assigned
+#: ``cluster-coffee`` on the evidence ``('term:coffee',)`` — a furniture shopper addressed to a
+#: coffee merchant's envelope. Rule 1 says never invent a member, and "score > 0" made that
+#: rule true only nominally.
+#:
+#: 2.0 is exactly the bar that admits ONE STRUCTURED signal — a category match
+#: (:data:`CATEGORY_WEIGHT`) or one satisfied hard constraint (:data:`CONSTRAINT_WEIGHT`) — or
+#: TWO independent words, and refuses one word alone. A cluster that can only ever be found by
+#: a single common word should say so with a ``category`` or an ``attributes`` entry, which is
+#: the catalogue stating what it groups rather than the exchange guessing.
+MIN_ASSIGNMENT_SCORE = 2.0
 
 #: How many clusters a deployment may name. The catalogue is walked once per auction on the
 #: request path, so its size is time a shopper waits; and a vocabulary this large is a data
@@ -208,8 +233,13 @@ class ClusterRow:
 
     Attributes:
         cluster_id: the name a merchant's envelope authorises. Never empty.
-        label: the human-facing name. Also matched as a term, because a catalogue that spells
-            a cluster "Espresso machines" has already told us the words for it.
+        label: the human-facing name. Also matched, as ONE term and therefore as an exact
+            phrase — ``"Espresso machines"`` is found in ``"espresso machines for the office"``
+            and NOT in ``"an espresso machine for the office"``, because the plural is part of
+            the phrase. The label is a convenience, not a substitute for ``terms``: a catalogue
+            that wants the singular, an abbreviation or a synonym to match states it. Splitting
+            the label into independent words instead would drop the evidence bar to one common
+            word, which :data:`MIN_ASSIGNMENT_SCORE` exists to keep it above.
         category: the `Intent.category` vocabulary term this cluster groups, folded. ``None``
             when the cluster is not category-scoped.
         terms: the phrases a shopper uses for this cluster, folded.
@@ -331,6 +361,16 @@ class StaticIntentClusterCatalogue:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rows", tuple(self.rows))
+        # Checked HERE and not only in `from_rows`, because a cap that lives in one
+        # constructor is a cap on one caller. The class is public and `configure_auctions`
+        # takes any catalogue, so a deployment that assembled its rows some other way could
+        # hand the request path an unbounded walk.
+        if len(self.rows) > MAX_CATALOGUE_CLUSTERS:
+            raise ValueError(
+                f"a cluster catalogue may name at most {MAX_CATALOGUE_CLUSTERS} clusters, got "
+                f"{len(self.rows)}; it is walked once per auction on the request path, so its "
+                f"size is time a shopper waits"
+            )
         seen: dict[str, int] = {}
         for row in self.rows:
             seen[row.cluster_id] = seen.get(row.cluster_id, 0) + 1
@@ -349,6 +389,9 @@ class StaticIntentClusterCatalogue:
         if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
             raise ValueError(f"'intent_clusters' must be a JSON array, got {type(raw).__name__}")
         if len(raw) > MAX_CATALOGUE_CLUSTERS:
+            # Refused BEFORE the rows are parsed: an over-cap document is rejected without
+            # first building the objects it is over the cap for. `__post_init__` enforces the
+            # same bound for every other way a catalogue can be built.
             raise ValueError(
                 f"'intent_clusters' names {len(raw)} clusters; this exchange reads at most "
                 f"{MAX_CATALOGUE_CLUSTERS}. The catalogue is walked once per auction on the "
@@ -443,6 +486,17 @@ def _satisfies(criterion: Any, key: str, value: Any) -> bool:
     return parsed.decide([_reading(key, value)]).satisfied
 
 
+#: The most of ``intent.query`` that is scanned for catalogue terms. An `Intent`'s query is the
+#: shopper's own sentence; past 4 KiB it is not one, and the exchange has no body-size limit and
+#: no bound on this field — ``_refuse_an_oversized_intent`` measures ``hard_constraints`` only.
+#: Without this, one request's cost is the caller's chosen length multiplied by the catalogue
+#: size, spent SYNCHRONOUSLY inside ``async def create_auction``, which blocks the event loop
+#: for every other buyer. Measured at the 2000-cluster cap before this bound: a 1,000,000-char
+#: query took 3.26s of CPU in one auction. Truncation is stated rather than silent: it changes
+#: only which TERMS are found, never which cluster wins for a query of a plausible length.
+MAX_QUERY_CHARS_SCANNED = 4096
+
+
 def _haystack(query_text: str) -> str:
     """The shopper's words, folded once, space-delimited on both ends for whole-word search.
 
@@ -453,7 +507,7 @@ def _haystack(query_text: str) -> str:
     bounds ``intent.query``: ``_refuse_an_oversized_intent`` measures ``hard_constraints``
     only.
     """
-    words = _WORD.findall(canonical_text(query_text))
+    words = _WORD.findall(canonical_text(query_text[:MAX_QUERY_CHARS_SCANNED]))
     return f" {' '.join(words)} " if words else ""
 
 
@@ -547,7 +601,7 @@ def assign_cluster(intent: Any, catalogue: Any) -> ClusterAssignment:
     best: tuple[float, str, tuple[str, ...]] | None = None
     for row in rows:
         score, evidence = _weigh(row, category=category, constraints=constraints, haystack=haystack)
-        if score <= 0.0:
+        if score < MIN_ASSIGNMENT_SCORE:
             continue
         # `-score` first, then the id: highest weight wins and a tie is broken on the LOWEST
         # cluster id, which is a property of the catalogue's contents rather than of the order

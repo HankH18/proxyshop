@@ -75,7 +75,25 @@ CATALOGUE_CLUSTER = "cluster-espresso"
 
 #: What the operator tells this exchange its catalogue clusters are. Only the vocabulary —
 #: no intent, no hash, and nothing derived from what the clarifier is about to answer.
+#:
+#: **The order is load-bearing and it is a control.** ``cluster-espresso`` is deliberately NOT
+#: first, and it does not sort first either — ``cluster-brewing-accessories`` precedes it both
+#: positionally and alphabetically, so an implementation that ignored the evidence and returned
+#: the first row, or the lowest id, would address this auction to the wrong cluster and every
+#: assertion below would fail. An earlier revision of this file put the espresso row first, and
+#: an adversarial sabotage that assigned ``rows[0]`` regardless of evidence passed all three
+#: tests here. That is the hole this ordering closes.
+#:
+#: ``cluster-brewing-accessories`` also shares the ``coffee`` category with the winner, so the
+#: category alone cannot decide it: the hard constraint and the terms have to do real work.
 INTENT_CLUSTERS: tuple[dict[str, Any], ...] = (
+    {
+        "cluster_id": "cluster-brewing-accessories",
+        "label": "Brewing accessories",
+        "category": "coffee",
+        "terms": ["tamper", "milk jug", "descaler"],
+        "attributes": {"brew_method": "pour over"},
+    },
     {
         "cluster_id": CATALOGUE_CLUSTER,
         "label": "Espresso machines",
@@ -425,6 +443,13 @@ def test_the_store_agent_states_cluster_not_pursued_for_the_hash_and_bids_for_th
 
     assert assignment.cluster_id == CATALOGUE_CLUSTER, (
         f"assigned {assignment.cluster_id!r} on evidence {assignment.evidence!r}"
+    )
+    assert INTENT_CLUSTERS[0]["cluster_id"] != CATALOGUE_CLUSTER, (
+        "this file's control depends on the winning cluster NOT being the first catalogue row; "
+        "see INTENT_CLUSTERS"
+    )
+    assert min(row["cluster_id"] for row in INTENT_CLUSTERS) != CATALOGUE_CLUSTER, (
+        "and not being the lowest id either, or the tie-break alone would produce this answer"
     )
     assert after.status_code == 200, (
         f"the agent answered {after.status_code} to the ASSIGNED cluster "

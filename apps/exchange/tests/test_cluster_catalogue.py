@@ -170,12 +170,17 @@ def test_a_term_and_a_query_are_reduced_to_the_same_word_sequence(term: str) -> 
     same way, and this pins it from the catalogue side because that fold happens once at
     deployment while the query's happens per auction — two places to drift apart.
     """
-    row = {"cluster_id": "cluster-hx", "terms": [term]}
+    # The row carries a matching category as well, so it clears MIN_ASSIGNMENT_SCORE on
+    # structured evidence alone and this test measures the TERM's normalisation rather than
+    # the evidence floor. The assertion is on the evidence, not on the cluster id, for the
+    # same reason: a passing cluster id could be the category's doing.
+    row = {"cluster_id": "cluster-hx", "category": "coffee", "terms": [term]}
     assignment = assign_cluster(
-        _intent(query="a heat exchange machine for the office", category=None, hard_constraints=[]),
+        _intent(query="a heat exchange machine for the office", hard_constraints=[]),
         _catalogue(row),
     )
-    assert assignment.cluster_id == "cluster-hx", (
+    assert assignment.cluster_id == "cluster-hx"
+    assert "term:heat exchange" in assignment.evidence, (
         f"the term {term!r} did not match 'heat exchange' in the query: {assignment!r}"
     )
 
@@ -215,6 +220,88 @@ def test_the_query_is_folded_once_however_many_clusters_are_weighed() -> None:
         f"the intent was folded {calls} times against a 50-cluster catalogue; the query must be "
         f"folded once per auction, not once per cluster"
     )
+
+
+def test_one_incidental_word_does_not_authorise_a_bid() -> None:
+    """The evidence floor, driven by the case that found it.
+
+    A furniture shopper says "coffee" once, in "coffee table". Before
+    :data:`MIN_ASSIGNMENT_SCORE` existed this assigned ``cluster-coffee`` on the evidence
+    ``('term:coffee',)`` — addressing the auction to a coffee merchant's envelope on the
+    strength of one accidental word. Rule 1 says never invent a member of that envelope's set,
+    and "any evidence at all" made the rule true only nominally.
+    """
+    coffee = {"cluster_id": "cluster-coffee", "label": "Coffee"}
+    assignment = assign_cluster(
+        _intent(
+            query="a walnut coffee table for the lounge",
+            category="furniture",
+            hard_constraints=[],
+        ),
+        _catalogue(coffee),
+    )
+    assert assignment.cluster_id is None, (
+        f"one incidental word assigned {assignment.cluster_id!r} on {assignment.evidence!r}"
+    )
+
+
+def test_two_words_or_one_structured_signal_is_enough() -> None:
+    """The other side of the floor: it must not refuse the evidence it was set to admit.
+
+    Three shapes that each clear it on their own — two term hits, a category match, and one
+    satisfied hard constraint — because a bar that only ever said "no" would pass the test
+    above while breaking every real assignment.
+    """
+    two_terms = {"cluster_id": "cluster-a", "terms": ["espresso", "machine"]}
+    by_category = {"cluster_id": "cluster-b", "category": "coffee"}
+    by_constraint = {"cluster_id": "cluster-c", "attributes": {"brew_method": "espresso"}}
+
+    plain = _intent(category=None, hard_constraints=[])
+    assert assign_cluster(plain, _catalogue(two_terms)).cluster_id == "cluster-a"
+    assert assign_cluster(_intent(hard_constraints=[]), _catalogue(by_category)).cluster_id == (
+        "cluster-b"
+    )
+    assert assign_cluster(_intent(category=None), _catalogue(by_constraint)).cluster_id == (
+        "cluster-c"
+    )
+
+
+def test_the_query_scanned_for_terms_is_bounded() -> None:
+    """A caller does not get to choose how much text the request path scans.
+
+    ``intent.query`` is unbounded and the exchange has no body-size middleware, so the term
+    search is capped at :data:`MAX_QUERY_CHARS_SCANNED`. Asserted as a behaviour — a term
+    beyond the bound is not found — rather than as a timing, because a wall-clock assertion is
+    a flaky test on a busy machine.
+    """
+    from exchange.retrieval.clusters import MAX_QUERY_CHARS_SCANNED
+
+    row = {"cluster_id": "cluster-late", "category": "coffee", "terms": ["needle"]}
+    padded = ("filler " * (MAX_QUERY_CHARS_SCANNED // 4)) + "needle"
+    assert len(padded) > MAX_QUERY_CHARS_SCANNED
+
+    assignment = assign_cluster(_intent(query=padded, hard_constraints=[]), _catalogue(row))
+    assert "term:needle" not in assignment.evidence, (
+        f"a term past the {MAX_QUERY_CHARS_SCANNED}-char bound was still scanned: {assignment!r}"
+    )
+    assert assign_cluster(
+        _intent(query="a needle in the query", hard_constraints=[]), _catalogue(row)
+    ).evidence == ("category=coffee", "term:needle"), "the same term inside the bound must match"
+
+
+def test_a_catalogue_over_the_cap_is_refused_however_it_is_built() -> None:
+    """The cap is the TYPE's, not one constructor's.
+
+    ``configure_auctions(app, clusters=...)`` takes any catalogue, so a bound enforced only in
+    ``from_rows`` would be a bound on one caller while the request path walked the rest.
+    """
+    from exchange.retrieval.clusters import MAX_CATALOGUE_CLUSTERS
+
+    rows = tuple(
+        ClusterRow(cluster_id=f"cluster-{index:05d}") for index in range(MAX_CATALOGUE_CLUSTERS + 1)
+    )
+    with pytest.raises(ValueError, match="at most"):
+        StaticIntentClusterCatalogue(rows=rows)
 
 
 def test_a_constraint_the_module_cannot_decide_contributes_nothing_and_does_not_raise() -> None:
