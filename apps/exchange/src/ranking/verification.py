@@ -52,6 +52,7 @@ from .filters import read
 
 __all__ = [
     "DEFAULT_VERIFIER_VERSION",
+    "MAX_CATALOG_PRODUCTS",
     "NoCatalogSnapshots",
     "StaticCatalogSnapshots",
     "STORE_SUPPLIED_FIELDS_DROPPED",
@@ -65,6 +66,22 @@ __all__ = [
 #: every attestation and covered by its MAC, so a comparator change invalidates the verdicts
 #: minted under the previous one rather than silently inheriting them.
 DEFAULT_VERIFIER_VERSION = "verification/1.0.0"
+
+#: The most products one store's snapshot may hold when it arrives in a deployment document.
+#:
+#: The ``products`` list is walked LINEARLY, once per claim per candidate:
+#: :func:`claim_verification._resolve_product` scans it for the claim's ``product_ref`` and
+#: :func:`catalog_unit` scans it again for the unit. So the cost of one auction is
+#: candidates x claims x products, and the deployment document is parsed and held on the
+#: request path — the same place :data:`~exchange.composition.MAX_DEPLOYMENT_SELLERS` is
+#: bounded, and for the same reason.
+#:
+#: An operator-supplied value, not an attacker-supplied one, so this is a guard against a
+#: mistake rather than against an adversary — which is why the number is generous. It bounds
+#: only the DOCUMENT grammar (:meth:`StaticCatalogSnapshots.from_document`); a deployment that
+#: already holds real snapshots in memory hands them to the constructor unbounded, exactly as
+#: it hands over a trust snapshot.
+MAX_CATALOG_PRODUCTS = 1000
 
 
 class NoCatalogSnapshots:
@@ -91,16 +108,121 @@ class StaticCatalogSnapshots:
     def __init__(self, snapshots: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         self._snapshots = dict(snapshots or {})
 
+    @classmethod
+    def from_document(cls, raw: Any) -> StaticCatalogSnapshots:
+        """Build a catalog source from the ``{store_id: snapshot}`` object a deployment writes.
+
+        The grammar lives HERE, beside the code that reads a snapshot, so there is one
+        spelling of "what the exchange can grade a claim against" rather than a second one in
+        the composition root. :func:`~exchange.composition.parse_deployment` calls this and
+        turns the ``ValueError`` into its own 503.
+
+        It validates the DOCUMENT, not the class. ``__init__`` stays permissive on purpose:
+        a deployment that already holds real snapshots in memory (``apps/buyer/devstack``
+        builds them out of the same catalogue rows its agents read) hands them straight over,
+        and so does every test in this package that writes a snapshot by hand. What needs a
+        grammar is the thing a *person types*, because every rule below has the same silent
+        failure — a snapshot the verifier cannot resolve a claim against answers
+        ``unsupported``, R19 refuses to let an unsupported claim satisfy a hard constraint,
+        and the operator is shown an empty shortlist that reads like a policy decision.
+
+        Raises:
+            ValueError: naming the store and the row that is wrong.
+        """
+        if raw is None:
+            return cls()
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"'catalog' must be a JSON object keyed by store_id, got {type(raw).__name__}"
+            )
+        snapshots: dict[str, Mapping[str, Any]] = {}
+        for store_id, snapshot in raw.items():
+            snapshots[str(store_id)] = _document_snapshot(snapshot, str(store_id))
+        return cls(snapshots=snapshots)
+
     def snapshot_for(
         self, store_id: str, product_ref: str | None = None
     ) -> Mapping[str, Any] | None:
         return self._snapshots.get(str(store_id))
+
+    @property
+    def snapshots(self) -> Mapping[str, Mapping[str, Any]]:
+        """The snapshots this source holds, ``{store_id: snapshot}``.
+
+        A copy. The composition root reads this back out of a catalog it has just validated,
+        and a source whose contents can be rewritten from outside it is not a source — the
+        same rule :class:`~exchange.ranking.serving.ShortlistStore` states about its own
+        entries.
+        """
+        return {store_id: dict(row) for store_id, row in self._snapshots.items()}
 
     def register(self, store_id: str, snapshot: Mapping[str, Any]) -> None:
         self._snapshots[str(store_id)] = dict(snapshot)
 
     def __len__(self) -> int:
         return len(self._snapshots)
+
+
+def _document_snapshot(raw: Any, store_id: str) -> Mapping[str, Any]:
+    """One store's snapshot as a deployment document states it, or a ``ValueError``.
+
+    Four rules, and each one is here because its silent version produces the same symptom —
+    a store whose every claim comes back ``unsupported``, therefore a hard constraint nothing
+    satisfies, therefore an empty shortlist with nothing in the response pointing at the row
+    that was wrong.
+    """
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"catalog[{store_id!r}] must be a JSON object, got {type(raw).__name__}")
+
+    snapshot_id = str(raw.get("snapshot_id") or "").strip()
+    if not snapshot_id:
+        # `attest_candidate_claims` records this id on every verdict it mints and the MAC
+        # covers it, and the published `VerificationResult.catalog_snapshot` is `minLength: 1`.
+        # A snapshot that names itself nothing produces verdicts nobody can trace back to the
+        # document that decided them.
+        raise ValueError(
+            f"catalog[{store_id!r}] states no 'snapshot_id'. Every verdict this exchange mints "
+            f"records the snapshot it was decided against, so a snapshot with no id is a "
+            f"verdict no auditor can reproduce"
+        )
+
+    products = raw.get("products")
+    if isinstance(products, (str, bytes)) or not isinstance(products, Sequence):
+        raise ValueError(
+            f"catalog[{store_id!r}] states 'products' as {type(products).__name__}; it must be "
+            f"a JSON array. The verifier resolves a claim by walking this list, and a list it "
+            f"cannot walk is a store whose every claim comes back unsupported"
+        )
+    if not products:
+        raise ValueError(
+            f"catalog[{store_id!r}] holds no products. A snapshot with an empty catalogue "
+            f"answers 'unsupported' to every claim, so no hard constraint is satisfied and "
+            f"this store is excluded from every constrained auction with no hint that its "
+            f"snapshot is the reason; state its products, or omit the store"
+        )
+    if len(products) > MAX_CATALOG_PRODUCTS:
+        raise ValueError(
+            f"catalog[{store_id!r}] holds {len(products)} products; this exchange reads at "
+            f"most {MAX_CATALOG_PRODUCTS} per store. The list is walked once per claim per "
+            f"candidate on the request path, so its length is time a shopper waits"
+        )
+
+    for index, product in enumerate(products):
+        if not isinstance(product, Mapping):
+            raise ValueError(
+                f"catalog[{store_id!r}].products[{index}] must be a JSON object, got "
+                f"{type(product).__name__}"
+            )
+        if not str(product.get("product_ref") or "").strip():
+            # The exchange resolves every claim against the ROSTER's `product_ref`, and
+            # `claim_verification` matches it by `str(product["product_ref"]) == str(wanted)`.
+            # A product row naming no ref therefore matches no auction that names one.
+            raise ValueError(
+                f"catalog[{store_id!r}].products[{index}] states no 'product_ref'. Claims are "
+                f"graded against the product the AUCTION names, matched against this field, so "
+                f"a product row with no ref is evidence no claim can ever reach"
+            )
+    return dict(raw)
 
 
 def snapshot_for(catalog: Any, store_id: str, product_ref: Any = None) -> Any:

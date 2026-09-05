@@ -12,9 +12,12 @@ joined them. ``uvicorn exchange.main:app`` boots an exchange with
 * ``auction_bids``        -> :class:`~exchange.accept.routes.NoRecordedBids`, which knows none;
 * ``intent_clusters``     -> :class:`~exchange.retrieval.clusters.NoIntentClusters`, which
   names no catalogue cluster, so no intent is assigned one and every store agent whose
-  envelope pursues NAMED clusters answers ``204 cluster_not_pursued``.
+  policy document pursues NAMED clusters answers ``204 cluster_not_pursued``;
+* ``ranking_catalog``     -> :class:`~exchange.ranking.verification.NoCatalogSnapshots`, which
+  holds a snapshot for nobody, so no claim is ever checked, no hard constraint is ever
+  satisfied, and a shopper who states a must-have is shown an empty shortlist.
 
-Six fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
+Seven fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
 this tree, on the app exactly as ``create_app()`` builds it::
 
     POST /auctions -> 201
@@ -65,6 +68,16 @@ The document
          "terms": ["espresso machine", "espresso"],
          "attributes": {"brew_method": "espresso"}}
       ],
+      "catalog": {
+        "s1": {"snapshot_id": "snap-s1",
+               "captured_at": "2026-01-01T00:00:00Z",
+               "products": [
+                 {"product_ref": "prod-1",
+                  "attributes": {"water_tank_l": {"value": 2.0, "unit": "l"},
+                                 "availability": {"value": "in_stock"}},
+                  "offer": {"unit_price": 389.0, "currency": "USD"}}
+               ]}
+      },
       "checkout_mode": "redirect"
     }
 
@@ -91,6 +104,28 @@ The document
     has zero callers, and no table, node or registry holds the names — so the exchange cannot
     discover it and a person states it, exactly as a person states the trust snapshot.
     Omitted, nothing is assigned and the exchange behaves as it did before.
+``catalog``
+    The catalogue snapshots this exchange grades a store's CLAIMS against, ``{store_id:
+    snapshot}``, in the shape :func:`claim_verification.verify` reads. It is the last of the
+    seven and the one whose absence is least visible: with no catalog wired, every claim comes
+    back ``unsupported``, R19 refuses to let an unsupported claim satisfy a hard constraint,
+    and **an intent carrying any must-have shortlists nobody**. Measured on this tree, one
+    market, one auction — the same request with and without this key::
+
+        without "catalog": ranked [], 0 shortlist slots, all three stores excluded
+                           hard_constraint_unsatisfied
+        with    "catalog": 2 shortlist slots
+
+    A real shopper sentence always yields at least a price constraint, so before this key
+    existed a deployed exchange shortlisted nobody and the only green demonstrations were the
+    ones whose fixtures happened to state no must-have. It is stated by a person for the same
+    reason the trust snapshot is: the SNAPSHOT is the exchange's evidence and the claim is the
+    store's, and a store that supplied both would be marking its own homework
+    (:mod:`~exchange.ranking.verification`). ``apps/buyer/devstack/run.py`` had to reach past
+    this module and call ``configure_ranking(catalog=…)`` by hand because this key did not
+    exist; the shape it builds there is the shape this key takes.
+    Omitted, nothing is bound and :func:`~exchange.ranking.serving.catalog_of` keeps its
+    ``NoCatalogSnapshots`` default — exactly today's behaviour.
 ``checkout_mode``
     Optional; ``CHECKOUT_MODE`` still works and this overrides it for this app.
 
@@ -105,8 +140,12 @@ an empty shortlist that looks like a policy decision:
   ``ranking/filters.py`` reads ``0`` and ``"false"`` as *unreadable*, which denies;
 * an unregistered ``checkout_mode`` is refused here rather than 503-ing once per accept;
 * an ``intent_clusters`` row with no ``cluster_id``, or a name stated twice, is refused — a
-  cluster nobody can name is not a member of any envelope's ``pursue_clusters``, and a
-  duplicate would let the later row silently decide which terms find that cluster.
+  cluster nobody can name is not a member of any store's ``pursue_clusters``, and a
+  duplicate would let the later row silently decide which terms find that cluster;
+* a ``catalog`` snapshot with no ``snapshot_id``, with no ``products``, or holding a product
+  row that names no ``product_ref``, is refused — the verifier resolves a claim by matching
+  the auction's product against that field, so each of those is a store whose every claim
+  comes back ``unsupported`` and which is therefore excluded from every constrained auction.
 
 A malformed document raises :class:`DeploymentConfigurationError`, which the two routes turn
 into a **503 naming the problem**. That is the same answer this service already gives for an
@@ -262,6 +301,12 @@ class Deployment:
     #: saying "this exchange has no cluster vocabulary" on purpose. See
     #: :mod:`~exchange.retrieval.clusters` for why the vocabulary is configuration.
     intent_clusters: tuple[Any, ...] | None = None
+    #: The catalogue snapshots this exchange checks claims against, ``{store_id: snapshot}``,
+    #: or ``None`` when the document states none. ``None`` leaves
+    #: :func:`~exchange.ranking.serving.catalog_of` on ``NoCatalogSnapshots``; an empty object
+    #: BINDS an empty catalog, which is the same behaviour and a different statement — the
+    #: same distinction :attr:`intent_clusters` draws, for the same reason.
+    catalog: Mapping[str, Any] | None = None
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
@@ -413,6 +458,30 @@ def _intent_clusters(raw: Any, source: str) -> tuple[Any, ...] | None:
     return catalogue.rows
 
 
+def _catalog(raw: Any, source: str) -> Mapping[str, Any] | None:
+    """The catalogue snapshots this deployment states, validated where they are read.
+
+    ``None`` when the document names none — the pre-existing exchange, holding a snapshot for
+    nobody and therefore checking no claim. A stated-but-malformed catalog is REFUSED rather
+    than degraded to "none", because the degraded version is invisible: the exchange still
+    answers ``201`` and still returns a shortlist, and the shortlist is simply empty for every
+    intent that states a must-have.
+
+    Built through :meth:`~.ranking.verification.StaticCatalogSnapshots.from_document`, so the
+    grammar sits beside the code that walks a snapshot rather than in a second copy here —
+    the same arrangement :func:`_intent_clusters` uses.
+    """
+    if raw is None:
+        return None
+    from .ranking.verification import StaticCatalogSnapshots  # noqa: PLC0415
+
+    try:
+        catalog = StaticCatalogSnapshots.from_document(raw)
+    except (ValueError, TypeError) as exc:
+        raise DeploymentConfigurationError(f"{source}: {exc}") from exc
+    return catalog.snapshots
+
+
 def parse_deployment(document: Any, *, source: str) -> Deployment:
     """Validate one deployment document. Raises rather than degrading."""
     body = _require_mapping(document, "the deployment document", source)
@@ -462,6 +531,7 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         trust_snapshot=snapshot,
         checkout_mode=checkout_mode,
         intent_clusters=_intent_clusters(body.get("intent_clusters"), source),
+        catalog=_catalog(body.get("catalog"), source),
     )
 
 
@@ -705,6 +775,17 @@ def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
     if deployment.trust_snapshot is not None and unset("trust_snapshot"):
         configure_ranking(app, trust_snapshot=dict(deployment.trust_snapshot))
         bound.append("trust_snapshot")
+
+    if deployment.catalog is not None and unset("ranking_catalog"):
+        # `is not None`, not truthiness, for the same reason `intent_clusters` above is: a
+        # document stating `"catalog": {}` has said "this exchange holds no snapshot for
+        # anybody", and binding the empty source records that decision rather than leaving the
+        # seam looking unwired. Bound through `configure_ranking`, never by assigning to
+        # `app.state.ranking_catalog`, so this module cannot drift from what that seam means.
+        from .ranking.verification import StaticCatalogSnapshots  # noqa: PLC0415
+
+        configure_ranking(app, catalog=StaticCatalogSnapshots(deployment.catalog))
+        bound.append("ranking_catalog")
 
     domains = deployment.registered_domains
     if domains:
