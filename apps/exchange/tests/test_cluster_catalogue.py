@@ -1,0 +1,418 @@
+"""The assignment rule itself, and the deployment key that states its vocabulary.
+
+``test_cluster_assignment.py`` proves the journey works end to end over three loopback ports.
+This file pins the properties that make that green mean something — the ones a live run
+cannot distinguish because it only ever exercises one intent:
+
+* nothing is invented (no evidence -> no cluster), because a "closest" cluster would put an
+  auction in front of a store whose merchant authorised a different catalogue;
+* an id the caller already stated and the catalogue knows is not overruled;
+* the answer does not depend on the order a JSON array happened to list clusters in;
+* a malformed constraint contributes no evidence rather than raising into the auction;
+* a deployment document that states a broken vocabulary is REFUSED, loudly, rather than
+  degraded to "no clusters" — which is the same empty shortlist with no line pointing at it.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+from exchange.composition import (
+    ENV_DEPLOYMENT,
+    ENV_DEPLOYMENT_JSON,
+    DeploymentConfigurationError,
+    ensure_configured,
+    parse_deployment,
+)
+from exchange.main import create_app
+from exchange.retrieval.clusters import (
+    SOURCE_ASSIGNED,
+    SOURCE_STATED,
+    SOURCE_UNASSIGNED,
+    ClusterRow,
+    NoIntentClusters,
+    StaticIntentClusterCatalogue,
+    assign_cluster,
+    intent_clusters_of,
+)
+
+ESPRESSO: dict[str, Any] = {
+    "cluster_id": "cluster-espresso",
+    "label": "Espresso machines",
+    "category": "coffee",
+    "terms": ["espresso machine", "espresso"],
+    "attributes": {"brew_method": "espresso"},
+}
+WARM_LAYERS: dict[str, Any] = {
+    "cluster_id": "cluster-warm-layers",
+    "label": "Warm layers",
+    "category": "apparel",
+    "terms": ["fleece", "base layer"],
+    "attributes": {"insulation": "down"},
+}
+
+
+def _catalogue(*rows: dict[str, Any]) -> StaticIntentClusterCatalogue:
+    return StaticIntentClusterCatalogue.from_rows(list(rows))
+
+
+def _intent(**overrides: Any) -> dict[str, Any]:
+    intent: dict[str, Any] = {
+        "intent_id": "int-1",
+        "cluster_id": "cl-306c4c3b28e29cfd",
+        "query": "I want an espresso machine for the office",
+        "category": "coffee",
+        "hard_constraints": [{"field": "brew_method", "op": "eq", "value": "espresso"}],
+        "preferences": [],
+        "created_at": "2026-01-01T00:00:00Z",
+        "schema_version": "1.0.0",
+    }
+    intent.update(overrides)
+    return intent
+
+
+# =====================================================================================
+# The rule
+# =====================================================================================
+def test_an_intent_that_matches_nothing_is_assigned_nothing() -> None:
+    """No "closest" cluster. The nearest miss is not a member of an envelope's set.
+
+    Asserted on an intent with a real category and a real constraint, both of which simply
+    belong to another cluster — not on an empty intent, because an empty intent would fail
+    this for the wrong reason.
+    """
+    assignment = assign_cluster(
+        _intent(
+            query="a merino base layer for winter running",
+            category="apparel",
+            hard_constraints=[{"field": "insulation", "op": "eq", "value": "synthetic"}],
+        ),
+        _catalogue(ESPRESSO),
+    )
+    assert assignment.cluster_id is None
+    assert assignment.source == SOURCE_UNASSIGNED
+    assert assignment.considered == 1, (
+        "the catalogue must be reported as READ; 'considered=0' says the exchange has no "
+        "vocabulary wired, which is a different condition an operator must be able to tell apart"
+    )
+
+
+def test_an_unwired_exchange_assigns_nothing_and_says_it_read_no_catalogue() -> None:
+    """The fail-closed default, and the distinction a bare ``None`` would lose."""
+    assignment = assign_cluster(_intent(), NoIntentClusters())
+    assert assignment.cluster_id is None
+    assert assignment.source == SOURCE_UNASSIGNED
+    assert assignment.considered == 0
+
+
+def test_a_cluster_the_caller_already_named_is_not_overruled() -> None:
+    """A caller that named a real cluster is not second-guessed by an inference.
+
+    The intent below states ``cluster-warm-layers`` while its words, category and constraint
+    all point at ``cluster-espresso``. The stated name wins, because it is a statement and the
+    rest is evidence.
+    """
+    assignment = assign_cluster(
+        _intent(cluster_id="cluster-warm-layers"), _catalogue(ESPRESSO, WARM_LAYERS)
+    )
+    assert assignment.cluster_id == "cluster-warm-layers"
+    assert assignment.source == SOURCE_STATED
+
+
+def test_an_id_the_catalogue_does_not_know_is_replaced() -> None:
+    """The clarifier's hash is exactly this case, and it is the whole defect."""
+    assignment = assign_cluster(_intent(), _catalogue(ESPRESSO, WARM_LAYERS))
+    assert assignment.cluster_id == "cluster-espresso"
+    assert assignment.source == SOURCE_ASSIGNED
+    assert "category=coffee" in assignment.evidence
+    assert "brew-method=espresso" in assignment.evidence
+
+
+def test_the_answer_does_not_depend_on_catalogue_order() -> None:
+    """S4: two runs on one intent give one answer, whatever order the document listed.
+
+    Driven with two clusters that tie exactly — same category, same single matching term —
+    so the tie-break is the only thing deciding, and it is asserted in both orders.
+    """
+    left = {"cluster_id": "cluster-aaa", "category": "coffee", "terms": ["espresso"]}
+    right = {"cluster_id": "cluster-bbb", "category": "coffee", "terms": ["espresso"]}
+    intent = _intent(hard_constraints=[])
+    forwards = assign_cluster(intent, _catalogue(left, right))
+    backwards = assign_cluster(intent, _catalogue(right, left))
+    assert forwards.cluster_id == backwards.cluster_id == "cluster-aaa"
+    assert forwards.score == backwards.score
+
+
+def test_a_term_matches_whole_words_only() -> None:
+    """``tea`` must not be found inside ``steam``.
+
+    A substring test would put a shopper asking about a steam wand into the tea cluster on the
+    strength of one accident, and an envelope would authorise a bid nobody approved.
+    """
+    tea = {"cluster_id": "cluster-tea", "terms": ["tea"]}
+    assignment = assign_cluster(
+        _intent(query="a machine with a steam wand", category=None, hard_constraints=[]),
+        _catalogue(tea),
+    )
+    assert assignment.cluster_id is None, f"matched on {assignment.evidence!r}"
+
+
+@pytest.mark.parametrize("term", ["heat-exchange", "Heat  Exchange", "HEAT EXCHANGE"])
+def test_a_term_and_a_query_are_reduced_to_the_same_word_sequence(term: str) -> None:
+    """One normalisation, not two.
+
+    The query is reduced to its words to make whole-word matching possible; a catalogue term
+    that kept its punctuation would then be a needle that could never occur in that haystack,
+    and a cluster written ``heat-exchange`` would silently match nothing. Both sides fold the
+    same way, and this pins it from the catalogue side because that fold happens once at
+    deployment while the query's happens per auction — two places to drift apart.
+    """
+    # The row carries a matching category as well, so it clears MIN_ASSIGNMENT_SCORE on
+    # structured evidence alone and this test measures the TERM's normalisation rather than
+    # the evidence floor. The assertion is on the evidence, not on the cluster id, for the
+    # same reason: a passing cluster id could be the category's doing.
+    row = {"cluster_id": "cluster-hx", "category": "coffee", "terms": [term]}
+    assignment = assign_cluster(
+        _intent(query="a heat exchange machine for the office", hard_constraints=[]),
+        _catalogue(row),
+    )
+    assert assignment.cluster_id == "cluster-hx"
+    assert "term:heat exchange" in assignment.evidence, (
+        f"the term {term!r} did not match 'heat exchange' in the query: {assignment!r}"
+    )
+
+
+def test_the_query_is_folded_once_however_many_clusters_are_weighed() -> None:
+    """A caller does not get to multiply their own query's length by the catalogue size.
+
+    ``intent.query`` is unbounded — ``_refuse_an_oversized_intent`` measures
+    ``hard_constraints`` only — so folding it inside the per-cluster loop made one
+    ``POST /auctions`` cost the product of two numbers, one of which the caller picks. This
+    asserts the shape rather than a wall-clock number, by counting the NFKC normalisations.
+    """
+    from exchange.retrieval import clusters as module
+
+    calls = 0
+    real = module.canonical_text
+
+    def counted(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real(value)
+
+    rows = [
+        {"cluster_id": f"cluster-{index:03d}", "category": "coffee", "terms": ["espresso"]}
+        for index in range(50)
+    ]
+    catalogue = _catalogue(*rows)
+
+    module.canonical_text = counted  # type: ignore[assignment]
+    try:
+        assignment = assign_cluster(_intent(hard_constraints=[]), catalogue)
+    finally:
+        module.canonical_text = real  # type: ignore[assignment]
+
+    assert assignment.cluster_id == "cluster-000"
+    assert calls <= 2, (
+        f"the intent was folded {calls} times against a 50-cluster catalogue; the query must be "
+        f"folded once per auction, not once per cluster"
+    )
+
+
+def test_one_incidental_word_does_not_authorise_a_bid() -> None:
+    """The evidence floor, driven by the case that found it.
+
+    A furniture shopper says "coffee" once, in "coffee table". Before
+    :data:`MIN_ASSIGNMENT_SCORE` existed this assigned ``cluster-coffee`` on the evidence
+    ``('term:coffee',)`` — addressing the auction to a coffee merchant's envelope on the
+    strength of one accidental word. Rule 1 says never invent a member of that envelope's set,
+    and "any evidence at all" made the rule true only nominally.
+    """
+    coffee = {"cluster_id": "cluster-coffee", "label": "Coffee"}
+    assignment = assign_cluster(
+        _intent(
+            query="a walnut coffee table for the lounge",
+            category="furniture",
+            hard_constraints=[],
+        ),
+        _catalogue(coffee),
+    )
+    assert assignment.cluster_id is None, (
+        f"one incidental word assigned {assignment.cluster_id!r} on {assignment.evidence!r}"
+    )
+
+
+def test_two_words_or_one_structured_signal_is_enough() -> None:
+    """The other side of the floor: it must not refuse the evidence it was set to admit.
+
+    Three shapes that each clear it on their own — two term hits, a category match, and one
+    satisfied hard constraint — because a bar that only ever said "no" would pass the test
+    above while breaking every real assignment.
+    """
+    two_terms = {"cluster_id": "cluster-a", "terms": ["espresso", "machine"]}
+    by_category = {"cluster_id": "cluster-b", "category": "coffee"}
+    by_constraint = {"cluster_id": "cluster-c", "attributes": {"brew_method": "espresso"}}
+
+    plain = _intent(category=None, hard_constraints=[])
+    assert assign_cluster(plain, _catalogue(two_terms)).cluster_id == "cluster-a"
+    assert assign_cluster(_intent(hard_constraints=[]), _catalogue(by_category)).cluster_id == (
+        "cluster-b"
+    )
+    assert assign_cluster(_intent(category=None), _catalogue(by_constraint)).cluster_id == (
+        "cluster-c"
+    )
+
+
+def test_the_query_scanned_for_terms_is_bounded() -> None:
+    """A caller does not get to choose how much text the request path scans.
+
+    ``intent.query`` is unbounded and the exchange has no body-size middleware, so the term
+    search is capped at :data:`MAX_QUERY_CHARS_SCANNED`. Asserted as a behaviour — a term
+    beyond the bound is not found — rather than as a timing, because a wall-clock assertion is
+    a flaky test on a busy machine.
+    """
+    from exchange.retrieval.clusters import MAX_QUERY_CHARS_SCANNED
+
+    row = {"cluster_id": "cluster-late", "category": "coffee", "terms": ["needle"]}
+    padded = ("filler " * (MAX_QUERY_CHARS_SCANNED // 4)) + "needle"
+    assert len(padded) > MAX_QUERY_CHARS_SCANNED
+
+    assignment = assign_cluster(_intent(query=padded, hard_constraints=[]), _catalogue(row))
+    assert "term:needle" not in assignment.evidence, (
+        f"a term past the {MAX_QUERY_CHARS_SCANNED}-char bound was still scanned: {assignment!r}"
+    )
+    assert assign_cluster(
+        _intent(query="a needle in the query", hard_constraints=[]), _catalogue(row)
+    ).evidence == ("category=coffee", "term:needle"), "the same term inside the bound must match"
+
+
+def test_a_catalogue_over_the_cap_is_refused_however_it_is_built() -> None:
+    """The cap is the TYPE's, not one constructor's.
+
+    ``configure_auctions(app, clusters=...)`` takes any catalogue, so a bound enforced only in
+    ``from_rows`` would be a bound on one caller while the request path walked the rest.
+    """
+    from exchange.retrieval.clusters import MAX_CATALOGUE_CLUSTERS
+
+    rows = tuple(
+        ClusterRow(cluster_id=f"cluster-{index:05d}") for index in range(MAX_CATALOGUE_CLUSTERS + 1)
+    )
+    with pytest.raises(ValueError, match="at most"):
+        StaticIntentClusterCatalogue(rows=rows)
+
+
+def test_a_constraint_the_module_cannot_decide_contributes_nothing_and_does_not_raise() -> None:
+    """A malformed constraint must not become a 500 on a route that answers 422 for it.
+
+    ``op: "regex"`` is not in the pinned ``ConstraintOp`` vocabulary, so ``HardCriterion``
+    refuses it. The assignment weighs the rest of the evidence and carries on.
+    """
+    assignment = assign_cluster(
+        _intent(hard_constraints=[{"field": "brew_method", "op": "regex", "value": "esp.*"}]),
+        _catalogue(ESPRESSO),
+    )
+    assert assignment.cluster_id == "cluster-espresso"
+    assert not any(reason.startswith("brew-method=") for reason in assignment.evidence), (
+        f"an undecidable constraint was counted as evidence: {assignment.evidence!r}"
+    )
+
+
+def test_applying_an_assignment_copies_the_intent_rather_than_mutating_it() -> None:
+    """The caller's request body is FastAPI's, and the auction's record of what was asked for
+    must not depend on when it was read."""
+    intent = _intent()
+    applied = assign_cluster(intent, _catalogue(ESPRESSO)).applied_to(intent)
+    assert applied["cluster_id"] == "cluster-espresso"
+    assert intent["cluster_id"] == "cl-306c4c3b28e29cfd"
+    assert applied is not intent
+
+
+def test_a_cluster_row_needs_a_name() -> None:
+    with pytest.raises(ValueError, match="non-empty cluster_id"):
+        ClusterRow(cluster_id="  ")
+
+
+# =====================================================================================
+# The deployment key
+# =====================================================================================
+def test_a_document_that_states_no_clusters_leaves_the_seam_unbound() -> None:
+    """Omitting the key is the pre-existing exchange, and must stay that way."""
+    deployment = parse_deployment({"sellers": []}, source="test")
+    assert deployment.intent_clusters is None
+
+
+def test_an_explicitly_empty_vocabulary_is_a_statement_and_is_bound() -> None:
+    """``"intent_clusters": []`` is a person saying "this exchange has no vocabulary".
+
+    Behaviourally identical to omitting it — nothing is assigned — and recorded differently,
+    so an operator reading ``app.state`` can tell a decision from an oversight.
+    """
+    deployment = parse_deployment({"sellers": [], "intent_clusters": []}, source="test")
+    assert deployment.intent_clusters == ()
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"intent_clusters": {"cluster_id": "c"}}, "must be a JSON array"),
+        ({"intent_clusters": [{"label": "no id"}]}, "non-empty cluster_id"),
+        (
+            {"intent_clusters": [dict(ESPRESSO), dict(ESPRESSO)]},
+            "more than once",
+        ),
+        ({"intent_clusters": [{"cluster_id": "c", "terms": "espresso"}]}, "array of strings"),
+        ({"intent_clusters": [{"cluster_id": "c", "attributes": []}]}, "JSON object"),
+    ],
+)
+def test_a_broken_vocabulary_is_refused_rather_than_degraded(
+    document: dict[str, Any], message: str
+) -> None:
+    """Loud, because the silent version of each of these is an empty shortlist.
+
+    A deployment that shrugged at a typo here would boot, answer ``201``, and have every store
+    decline ``cluster_not_pursued`` — the exact symptom the composition root exists to remove,
+    with nothing in the output pointing at the row that was wrong.
+    """
+    with pytest.raises(DeploymentConfigurationError, match=message):
+        parse_deployment({"sellers": [], **document}, source="test")
+
+
+def test_a_deployed_exchange_binds_the_catalogue_its_document_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The composition root, end to end: a document on disk becomes a live catalogue.
+
+    Through :func:`ensure_configured` — the request-time hook the routes call — rather than by
+    assigning ``app.state`` here, so this measures the wiring an operator gets and not one
+    this test wrote.
+    """
+    document = tmp_path / "deployment.json"
+    document.write_text(
+        json.dumps({"sellers": [], "intent_clusters": [dict(ESPRESSO)]}), encoding="utf-8"
+    )
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(document))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    app = create_app()
+    bound = ensure_configured(app)
+    assert "intent_clusters" in bound, f"the document's vocabulary was not bound: {bound}"
+
+    catalogue = intent_clusters_of(app)
+    assert [row.cluster_id for row in catalogue.clusters()] == ["cluster-espresso"]
+    assert assign_cluster(_intent(), catalogue).cluster_id == "cluster-espresso"
+
+
+def test_an_exchange_with_no_document_still_assigns_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one property the composition root may not break, stated for this seam too."""
+    monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    app = create_app()
+    assert ensure_configured(app) == ()
+    assert isinstance(intent_clusters_of(app), NoIntentClusters)
+    assert assign_cluster(_intent(), intent_clusters_of(app)).cluster_id is None

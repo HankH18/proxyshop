@@ -9,9 +9,12 @@ joined them. ``uvicorn exchange.main:app`` boots an exchange with
 * ``bid_solicitor``       -> :class:`~exchange.auction.routes.NullSolicitor`, which asks nobody;
 * ``trust_snapshot``      -> ``{}``, in which no store can be shown to be off the blacklist;
 * ``ranking_registered_domains`` -> nothing, so the platform vouches for no checkout host;
-* ``auction_bids``        -> :class:`~exchange.accept.routes.NoRecordedBids`, which knows none.
+* ``auction_bids``        -> :class:`~exchange.accept.routes.NoRecordedBids`, which knows none;
+* ``intent_clusters``     -> :class:`~exchange.retrieval.clusters.NoIntentClusters`, which
+  names no catalogue cluster, so no intent is assigned one and every store agent whose
+  envelope pursues NAMED clusters answers ``204 cluster_not_pursued``.
 
-Five fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
+Six fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
 this tree, on the app exactly as ``create_app()`` builds it::
 
     POST /auctions -> 201
@@ -55,6 +58,13 @@ The document
          "bid_endpoint": "http://store-agent-s1:8080/v1/bid-requests"}
       ],
       "trust_snapshot": {"s1": {"store_id": "s1", "blacklisted": false, "score": 0.8}},
+      "intent_clusters": [
+        {"cluster_id": "cluster-espresso",
+         "label": "Espresso machines",
+         "category": "coffee",
+         "terms": ["espresso machine", "espresso"],
+         "attributes": {"brew_method": "espresso"}}
+      ],
       "checkout_mode": "redirect"
     }
 
@@ -72,6 +82,15 @@ The document
     inventing an answer the trust service never gave. The *served* trust document
     (``{"version": ..., "stores": {...}}``) is accepted and unwrapped here — that unwrap is
     the seam ``e2e/support/s1/flow.py`` documents as "nothing in the tree performs".
+``intent_clusters``
+    The NAMED catalogue clusters this exchange addresses intents to, in the same
+    ``{cluster_id, label}`` spelling ``apps/merchant``'s onboarding interview already uses for
+    the option list a merchant's ``pursue_clusters`` is resolved against. It is configuration
+    for the reason :mod:`~exchange.retrieval.clusters` states at length and does not repeat
+    here: no service in this repository publishes that vocabulary — ``upsert_intent_cluster``
+    has zero callers, and no table, node or registry holds the names — so the exchange cannot
+    discover it and a person states it, exactly as a person states the trust snapshot.
+    Omitted, nothing is assigned and the exchange behaves as it did before.
 ``checkout_mode``
     Optional; ``CHECKOUT_MODE`` still works and this overrides it for this app.
 
@@ -84,7 +103,10 @@ an empty shortlist that looks like a policy decision:
   that store with no hint as to why;
 * a ``trust_snapshot`` row whose ``blacklisted`` is not a real ``bool`` is refused —
   ``ranking/filters.py`` reads ``0`` and ``"false"`` as *unreadable*, which denies;
-* an unregistered ``checkout_mode`` is refused here rather than 503-ing once per accept.
+* an unregistered ``checkout_mode`` is refused here rather than 503-ing once per accept;
+* an ``intent_clusters`` row with no ``cluster_id``, or a name stated twice, is refused — a
+  cluster nobody can name is not a member of any envelope's ``pursue_clusters``, and a
+  duplicate would let the later row silently decide which terms find that cluster.
 
 A malformed document raises :class:`DeploymentConfigurationError`, which the two routes turn
 into a **503 naming the problem**. That is the same answer this service already gives for an
@@ -234,6 +256,12 @@ class Deployment:
     sellers: tuple[SellerRow, ...] = ()
     trust_snapshot: Mapping[str, Any] | None = None
     checkout_mode: str | None = None
+    #: The NAMED catalogue clusters this exchange assigns intents to, or ``None`` when the
+    #: document states none. ``None`` and an empty list are the same behaviour today — nothing
+    #: is assigned — but they are different STATEMENTS, and only the second one is a person
+    #: saying "this exchange has no cluster vocabulary" on purpose. See
+    #: :mod:`~exchange.retrieval.clusters` for why the vocabulary is configuration.
+    intent_clusters: tuple[Any, ...] | None = None
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
@@ -361,6 +389,30 @@ def _trust_snapshot(raw: Any, source: str) -> Mapping[str, Any]:
     return snapshot
 
 
+def _intent_clusters(raw: Any, source: str) -> tuple[Any, ...] | None:
+    """The named cluster vocabulary this deployment states, validated here rather than later.
+
+    ``None`` when the document names none — which is the pre-existing exchange, assigning
+    nothing. A stated-but-malformed vocabulary is REFUSED rather than degraded to "none", for
+    the reason this whole module exists: an exchange that shrugs at a typo here boots, answers
+    ``201``, and shortlists nobody, because every store declines ``cluster_not_pursued`` and
+    the operator has no line of output pointing at the row that was wrong.
+
+    Built through :class:`~.retrieval.clusters.StaticIntentClusterCatalogue`, so the shape
+    rules live next to the rule that reads them and there is exactly one spelling of "what is
+    a catalogue cluster".
+    """
+    if raw is None:
+        return None
+    from .retrieval.clusters import StaticIntentClusterCatalogue  # noqa: PLC0415
+
+    try:
+        catalogue = StaticIntentClusterCatalogue.from_rows(raw)
+    except (ValueError, TypeError) as exc:
+        raise DeploymentConfigurationError(f"{source}: {exc}") from exc
+    return catalogue.rows
+
+
 def parse_deployment(document: Any, *, source: str) -> Deployment:
     """Validate one deployment document. Raises rather than degrading."""
     body = _require_mapping(document, "the deployment document", source)
@@ -409,6 +461,7 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         sellers=sellers,
         trust_snapshot=snapshot,
         checkout_mode=checkout_mode,
+        intent_clusters=_intent_clusters(body.get("intent_clusters"), source),
     )
 
 
@@ -637,6 +690,17 @@ def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
     if endpoints and unset("bid_solicitor"):
         configure_auctions(app, solicitor=HttpBidSolicitor(endpoints))
         bound.append("bid_solicitor")
+
+    if deployment.intent_clusters is not None and unset("intent_clusters"):
+        # `is not None`, not truthiness: a document that states `"intent_clusters": []` has
+        # said "this exchange has no cluster vocabulary", and binding the empty catalogue
+        # records that decision on `app.state` instead of leaving the seam looking unwired.
+        from .retrieval.clusters import StaticIntentClusterCatalogue  # noqa: PLC0415
+
+        configure_auctions(
+            app, clusters=StaticIntentClusterCatalogue(rows=deployment.intent_clusters)
+        )
+        bound.append("intent_clusters")
 
     if deployment.trust_snapshot is not None and unset("trust_snapshot"):
         configure_ranking(app, trust_snapshot=dict(deployment.trust_snapshot))

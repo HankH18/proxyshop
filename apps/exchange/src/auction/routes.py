@@ -64,6 +64,7 @@ from ..ranking.serving import (
     trust_snapshot_of,
     weights_of,
 )
+from ..retrieval.clusters import assign_cluster, configure_clusters, intent_clusters_of
 from ..retrieval.criteria import MAX_CANDIDATE_LIMIT
 from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
@@ -347,6 +348,7 @@ def configure_auctions(
     solicitor: Any | None = None,
     eligibility: Any | None = None,
     bids: Any | None = None,
+    clusters: Any | None = None,
 ) -> None:
     """Wire an app's auction dependencies. Anything omitted keeps what is already there.
 
@@ -356,6 +358,11 @@ def configure_auctions(
     normal case — :func:`_bid_book` installs an
     :class:`~..accept.routes.InMemoryAuctionBids` on first use — and it is named only so a
     deployment that wants the book to outlive one process can hand over its own.
+
+    ``clusters`` is the named-cluster catalogue this exchange assigns intents against — see
+    :mod:`~..retrieval.clusters`. Omitting it leaves
+    :class:`~..retrieval.clusters.NoIntentClusters`, which assigns nothing and leaves every
+    intent's ``cluster_id`` exactly as it arrived.
     """
     if machine is not None:
         app.state.auction_machine = machine
@@ -365,6 +372,8 @@ def configure_auctions(
         app.state.seller_eligibility = eligibility
     if bids is not None:
         app.state.auction_bids = bids
+    if clusters is not None:
+        configure_clusters(app, clusters)
 
 
 def _machine(request: Request) -> AuctionStateMachine:
@@ -718,6 +727,24 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     machine = _machine(request)
     intent = body.intent
     _refuse_an_oversized_intent(intent)
+
+    # DESIGN.md:34's first exchange job, and the one nothing performed: address this intent to
+    # a NAMED catalogue cluster. The buyer's clarifier mints `cluster_id` by hashing the query
+    # — it has no catalogue in scope and, by its own contract, no exchange handle — while a
+    # merchant's envelope authorises bidding inside names. A hash is never a member of a set of
+    # names, so before this line every solicited store answered `204 cluster_not_pursued` and
+    # every shortlist was empty (measured live over loopback; see `retrieval.clusters`).
+    #
+    # It happens HERE, before `machine.create` and before the fan-out, so that all three
+    # readers agree: the auction record, the `auction_opened` ledger payload, and the
+    # `BidRequest` each store agent is handed. Assigning it later would put the exchange's own
+    # audit trail in one namespace and the store's authorization check in another.
+    #
+    # An exchange with no cluster catalogue wired assigns nothing and this is a no-op.
+    assignment = assign_cluster(intent, intent_clusters_of(request.app))
+    if assignment.assigned:
+        intent = assignment.applied_to(intent)
+
     auction_id = f"auction-{uuid.uuid4()}"
     roster = [entry.model_dump() for entry in body.roster]
 
