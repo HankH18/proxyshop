@@ -986,9 +986,9 @@ def test_a_bid_may_not_charge_more_off_than_the_depth_it_declares(path: str) -> 
         claims=[list_price_claim(100.0), make_claim("authorized_discount_pct", 20.0)],
         offer=priced_offer(80.0, 80.0),
     )
-    assert (
-        check(honest, path, list_prices=LIST_100_ROSTER).ok is True
-    ), check(honest, path, list_prices=LIST_100_ROSTER).reasons
+    assert check(honest, path, list_prices=LIST_100_ROSTER).ok is True, check(
+        honest, path, list_prices=LIST_100_ROSTER
+    ).reasons
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
@@ -1070,7 +1070,9 @@ def test_a_depth_the_boundary_cannot_read_is_refused_rather_than_skipped(path: s
         (priced_offer(15.0, 15.0, depth=True), "offer.discount:depth_not_a_number"),
     ):
         result = check(
-            make_bid(claims=[list_price_claim(100.0)], offer=offer), path, list_prices=LIST_100_ROSTER
+            make_bid(claims=[list_price_claim(100.0)], offer=offer),
+            path,
+            list_prices=LIST_100_ROSTER,
         )
         assert result.ok is False, (offer, path)
         assert any(needle in reason for reason in result.reasons), (needle, list(result.reasons))
@@ -1187,9 +1189,7 @@ def test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price(path:
     # permissive again without also flipping the refusal below.
     table = make_snapshot_table()
     omitted = validate_bid(silent, path=path, trust_snapshot=table, now=NOW)
-    verdicts = [omitted] + [
-        check(silent, path, list_prices=spelling) for spelling in (None, {})
-    ]
+    verdicts = [omitted] + [check(silent, path, list_prices=spelling) for spelling in (None, {})]
     assert len({(v.ok, tuple(v.reasons)) for v in verdicts}) == 1, [
         list(v.reasons) for v in verdicts
     ]
