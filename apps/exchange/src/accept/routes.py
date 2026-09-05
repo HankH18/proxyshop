@@ -88,7 +88,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from .. import describe_exception
+from .. import describe_exception, redact_addresses
 from ..auction.state import (
     ACCEPTED,
     AUCTION_TTL_SECONDS,
@@ -108,7 +108,6 @@ from .reasons import (
     DENIAL_UNSPECIFIED,
     denial_code,
     denial_reason,
-    redact_addresses,
 )
 
 __all__ = [
@@ -409,7 +408,7 @@ def _claims(request: Request) -> Any:
             # refused. Same 503 the unusable bid source gets, for the same reason: dressing a
             # misconfiguration up as a decision about the buyer hides it from the operator,
             # and letting it through would mint on a path with no one-accept guard at all.
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
         request.app.state.acceptance_claims = claims
     return claims
 
@@ -466,7 +465,7 @@ def _bind_the_deployment(request: Request) -> None:
     try:
         ensure_configured(request.app)
     except DeploymentConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
 
 def _checkout_mode(request: Request) -> str:
@@ -556,7 +555,7 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     try:
         record = machine.get(auction_id)
     except UnknownAuction as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=redact_addresses(exc)) from exc
 
     # Asked BEFORE anything is minted: an auction that cannot record its acceptance cannot
     # refuse the second accept either. See the module docstring on what this does not close.
@@ -597,7 +596,7 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     except UnknownCheckoutMode as exc:
         # A deployment misconfiguration, not a decision about this buyer — and the registry's
         # contract is that it never falls back to the simulated path.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
     if not result.accepted:
         return _denied(str(result.denial_reason or ""))

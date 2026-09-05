@@ -54,6 +54,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .. import redact_addresses
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
 from ..ranking.serving import (
@@ -458,7 +459,7 @@ def _bind_the_deployment(request: Request) -> None:
     try:
         ensure_configured(request.app)
     except DeploymentConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
 
 def _bid_book(request: Request) -> Any:
@@ -900,7 +901,7 @@ async def read_auction(auction_id: str, request: Request) -> dict[str, Any]:
     try:
         record = _machine(request).get(auction_id)
     except UnknownAuction as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=redact_addresses(exc)) from exc
     return {
         "auction_id": record.auction_id,
         "state": record.state,
