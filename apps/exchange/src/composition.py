@@ -109,16 +109,22 @@ The document
     snapshot}``, in the shape :func:`claim_verification.verify` reads. It is the last of the
     seven and the one whose absence is least visible: with no catalog wired, every claim comes
     back ``unsupported``, R19 refuses to let an unsupported claim satisfy a hard constraint,
-    and **an intent carrying any must-have shortlists nobody**. Measured on this tree, one
-    market, one auction — the same request with and without this key::
+    and **an intent carrying any must-have shortlists nobody**. Measured on this tree over a
+    real socket, two rostered stores that both bid, one auction, the same request differing
+    only in whether this key is present::
 
-        without "catalog": ranked [], 0 shortlist slots, all three stores excluded
-                           hard_constraint_unsatisfied
-        with    "catalog": 2 shortlist slots
+        without "catalog": ranked [], 0 shortlist slots, both stores excluded
+                           "hard_constraint_unsatisfied: 'capacity_l': the candidate carries
+                            no such attribute, so the constraint is undecidable and does not
+                            count as satisfied (R19)"
+        with    "catalog": ranked ['s1', 's2'], 2 shortlist slots, excluded []
 
     A real shopper sentence always yields at least a price constraint, so before this key
     existed a deployed exchange shortlisted nobody and the only green demonstrations were the
-    ones whose fixtures happened to state no must-have. It is stated by a person for the same
+    ones whose fixtures happened to state no must-have. ``proxyshop_demo`` is that exactly:
+    it prints the clarifier's ``brew_method eq espresso`` two beats before it opens its
+    auction on ``e2e/support/s1/run.json``'s intent, whose ``hard_constraints`` is ``[]``.
+    It is stated by a person for the same
     reason the trust snapshot is: the SNAPSHOT is the exchange's evidence and the claim is the
     store's, and a store that supplied both would be marking its own homework
     (:mod:`~exchange.ranking.verification`). ``apps/buyer/devstack/run.py`` had to reach past
