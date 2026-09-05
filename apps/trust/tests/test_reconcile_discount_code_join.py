@@ -1102,23 +1102,83 @@ def test_a_bridge_does_not_vote_on_which_store_an_event_belongs_to() -> None:
     assert event["payload"]["price_honored"] is False
 
 
-def test_a_code_link_does_not_hand_an_order_a_foreign_checkouts_pixel() -> None:
-    """``pixel_price`` / ``pixel_agrees`` are published, so a wrong pixel is a wrong finding.
+def test_the_beacon_fired_against_the_exchanges_token_is_still_this_orders_pixel() -> None:
+    """The premise of the whole join is that the two halves carry DIFFERENT tokens.
 
-    The module records a persistently disagreeing pixel as a finding about the integration. A
-    code edge that pulled in a bridge group holding a DIFFERENT checkout's beacon fabricated
-    exactly that finding — measured, ``pixel_missing: true`` became a foreign beacon's
-    ``pixel_price: 7.0, pixel_agrees: false``.
+    So a beacon fired against the checkout the EXCHANGE authorized is not in the order's own
+    identity group — the order's group is the merchant's token — and taking only the order's
+    own group reported the real beacon as missing. ``pixel_missing`` is a published
+    integration finding, so that is a wrong finding, not a harmless omission.
     """
-    foreign = checkout_pixel(token=AUTHORIZED_TOKEN, store=STORE)
-    foreign["payload"]["total_price"] = 7.0
+    beacon = checkout_pixel(token=AUTHORIZED_TOKEN, store=STORE)
+    beacon["payload"]["total_price"] = 389.0
 
-    (event,) = reconcile([accepted(), code_created(), order_paid(), foreign])
+    (event,) = reconcile([accepted(), code_created(), order_paid(), beacon])
     payload = event["payload"]
-    assert payload["pixel_missing"] is True, (
-        f"a foreign checkout's beacon was published as this order's: {payload['pixel_price']}"
+    assert payload["pixel_missing"] is False, "the order's own beacon was reported missing"
+    assert payload["pixel_price"] == 389.0 and payload["pixel_agrees"] is True
+
+
+def test_a_beacon_that_belongs_to_another_order_is_never_taken() -> None:
+    """A pixel already claimed by an order of its own is that order's, and only that order's.
+
+    The fallback that finds the beacon above must not reach across to a beacon some other
+    order has already claimed — that would publish one order's ``pixel_price`` on another's
+    verdict, which is a fabricated finding about an integration that was working.
+    """
+    other_token = "b" * 32
+    other_platform = "c" * 32
+    other_ref = "gid://shopify/Order/5500000000002"
+    other_beacon = checkout_pixel(token=other_platform, store=STORE)
+    other_beacon["payload"]["total_price"] = 7.0
+
+    emitted = reconcile(
+        [
+            accepted(),
+            code_created(),
+            order_paid(),
+            accepted(token=other_token),
+            code_created(token=other_token, code="PSX-SECOND01"),
+            order_paid(
+                token=other_platform,
+                code="PSX-SECOND01",
+                order_ref=other_ref,
+                total_price=7.0,
+            ),
+            other_beacon,
+        ]
     )
-    assert payload["pixel_price"] is None and payload["pixel_agrees"] is False
+    by_ref = {event["payload"]["order_ref"]: event["payload"] for event in emitted}
+    assert len(emitted) == 2
+    assert by_ref[other_ref]["pixel_price"] == 7.0
+    assert by_ref[ORDER_REF]["pixel_missing"] is True, (
+        f"another order's beacon was published here: {by_ref[ORDER_REF]['pixel_price']}"
+    )
+
+
+def test_an_order_that_joins_on_a_payload_store_id_is_still_scored() -> None:
+    """``_store_of`` honours ``payload["store_id"]``; the emitter used to read only the top.
+
+    So a pair could JOIN on a payload store and then emit ``store_id: None`` — whereupon both
+    translators drop the event for having no store, and a computed contradiction moves
+    nothing at all. The empty store segment also made two shops' orders spell one
+    ``event_id``, which is the ledger's idempotency key.
+    """
+    from apps.trust.src.reconcile import observation_events, reconciled_observations
+
+    offer = accepted()
+    offer.pop("store_id")
+    offer["payload"]["store_id"] = STORE
+    webhook = order_paid(total_price=3890.0)
+    webhook.pop("store_id")
+    webhook["payload"]["store_id"] = STORE
+
+    (event,) = reconcile([offer, code_created(), webhook])
+    assert event["store_id"] == STORE
+    assert event["event_id"] == f"reconciled:{STORE}:gid%3A//shopify/Order/5500000000001"
+    assert event["payload"]["price_honored"] is False
+    assert [row["type"] for row in reconciled_observations(event)] == ["contradicted"]
+    assert len(observation_events(event)) == 1
 
 
 # =====================================================================================
@@ -1212,11 +1272,14 @@ def test_both_application_spellings_are_read_not_the_first_one_present() -> None
     ("total", "expected"),
     [
         ("389.00", (389.0, True, True)),
-        ("1,234", (1234.0, True, False)),
-        ("1.234,56", (None, False, False)),  # a locale this function cannot read
+        ("1.234,56", (None, False, False)),  # €1 234,56 — not 1.23456
+        ("100,00", (None, False, False)),  # €100.00 — not 10000.0
+        ("1,234", (None, False, False)),  # 1234 or 1.234? unknowable, so unknown
         ("nan", (None, False, False)),
         ("inf", (None, False, False)),
         ("-inf", (None, False, False)),
+        ("\u0661\u0662\u0663", (None, False, False)),  # Arabic-Indic digits float() accepts
+        ("1_000.5", (None, False, False)),  # a Python literal is not a money field
     ],
 )
 def test_a_price_that_cannot_be_read_is_unknown_and_not_a_verdict(
@@ -1229,7 +1292,11 @@ def test_a_price_that_cannot_be_read_is_unknown_and_not_a_verdict(
     a malformed body, and a ``NaN`` in the emitted payload is not valid JSON either.
     ``"-inf"`` came back honored, minting the store a 1.0 ``fulfilled``. And stripping commas
     turned the European ``"1.234,56"`` into ``1.23456``, so €1 234,56 against a €100 promise
-    read as a kept promise — a 12x overcharge graded green.
+    read as a kept promise — a 12x overcharge graded green — while its sibling ``"100,00"``
+    became ``10000.0``, so a store that charged exactly the promised €100.00 took the full
+    2.0 penalty. A bare comma is 1234 in one locale and 1.234 in another and nothing here can
+    tell which, so it is refused rather than guessed: refusing costs an honest store 0.5,
+    guessing wrong costs it 2.0 or pays a dishonest one 1.0.
     """
     webhook = order_paid()
     webhook["payload"]["total_price"] = total

@@ -45,6 +45,7 @@ then moved nothing at all. The consumer's shape is fixed and public, so the emit
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
@@ -143,23 +144,35 @@ def _field(record: Any, name: str, default: Any = None) -> Any:
     return getattr(record, name, default)
 
 
+#: What a payload number may look like as text: an optional sign, ASCII digits, an optional
+#: fraction, an optional exponent. Nothing else. ``float()`` alone is far more permissive than
+#: a money field is — it reads ``"١٢٣"`` (Arabic-Indic), ``"１２３"`` (fullwidth) and the Python
+#: literal ``"1_000.5"`` as numbers, and a value spelled in a script this system never emits
+#: is a value it should say it cannot read.
+_NUMERIC_TEXT = re.compile(r"\A[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+
+
 def _number(value: Any) -> float | None:
     """A payload number as a float, or ``None`` when it is absent or not a number.
 
-    ``None`` is the "the webhook did not say" answer, and two shapes have to reach it rather
-    than a plausible-looking float, because both are on the money path:
+    ``None`` is the "the webhook did not say" answer, which becomes ``unsupported`` (0.5).
+    Three shapes have to reach it rather than a plausible-looking float, because a wrong
+    number here is a 2.0 ``contradicted`` or a 1.0 ``fulfilled`` on real money:
 
     * **non-finite.** ``float("nan")`` and ``float("-inf")`` parse. Measured, a webhook
       reporting ``total_price: "nan"`` came back ``price_comparable: True,
-      price_honored: False`` — a 2.0 ``contradicted`` manufactured out of a malformed body,
-      which is the one thing ``price_comparable`` exists to prevent — and ``"-inf"`` came
-      back ``price_honored: True``, minting a store a positive. ``NaN`` in the emitted
-      payload is also not valid JSON, so it is a ledger-append hazard as well as a wrong
-      verdict.
-    * **two separators.** Stripping commas turns the European ``"1.234,56"`` into
-      ``1.23456``, so €1 234,56 against a €100 promise read as honored — a 12x overcharge
-      graded as a kept promise. A string carrying both a dot and a comma is a locale this
-      function cannot read, and saying so is the only safe answer.
+      price_honored: False`` — a contradiction manufactured out of a malformed body, which is
+      the one thing ``price_comparable`` exists to prevent — and ``"-inf"`` came back honored,
+      minting the store a positive. ``NaN`` in the emitted payload is not valid JSON either,
+      so it is a ledger-append hazard as well as a wrong verdict.
+    * **a comma, in any position.** This function used to strip commas as thousands
+      separators. Measured, that read the European ``"1.234,56"`` as ``1.23456`` — €1 234,56
+      against a €100 promise graded as a kept promise — and ``"100,00"`` as ``10000.0``, so a
+      store that charged exactly the promised €100.00 took the full 2.0 penalty. ``"1,234"``
+      is 1234 in one locale and 1.234 in another and this function cannot tell which, so it
+      does not guess. Refusing costs an honest store 0.5; guessing wrong costs it 2.0, or
+      pays a dishonest one 1.0.
+    * **anything that is not this syntax**, per :data:`_NUMERIC_TEXT`.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -167,11 +180,11 @@ def _number(value: Any) -> float | None:
         number = float(value)
         return number if math.isfinite(number) else None
     text = str(value).strip()
-    if "," in text and "." in text:
+    if not _NUMERIC_TEXT.match(text):
         return None
     try:
-        number = float(text.replace(",", ""))
-    except (TypeError, ValueError):
+        number = float(text)
+    except (TypeError, ValueError):  # pragma: no cover - the pattern already excludes these
         return None
     return number if math.isfinite(number) else None
 
@@ -248,9 +261,17 @@ def _discount_percentage(payload: Mapping[str, Any]) -> float | None:
     present = False
     for name in _APPLICATION_ALIASES:
         candidate = payload.get(name)
-        if isinstance(candidate, Sequence) and not isinstance(candidate, (str, bytes)):
-            present = True
-            applications.extend(candidate)
+        if not isinstance(candidate, Sequence) or isinstance(candidate, (str, bytes)):
+            continue
+        present = True
+        # The first POPULATED spelling, not the union of both. Accumulating both double-counts
+        # a body that states one discount twice — measured, 10% under each spelling summed to
+        # 20.0 and paid a store that gave half its promised discount a `fulfilled` instead of
+        # a `contradicted`. The double count always errs generous, because the verdict is
+        # `observed >= promised`. An EMPTY list is still "present", so an empty camelCase
+        # beside a populated snake_case reads the snake_case one rather than "no discount".
+        if candidate and not applications:
+            applications = list(candidate)
     if not present:
         return _number(payload.get("discount_percentage"))
 
@@ -494,6 +515,29 @@ def _code_key(code: str) -> str:
 _CODE_BEARING_KINDS: frozenset[str] = frozenset({ACCEPTED_KIND, WEBHOOK_KIND, *CODE_BRIDGE_KINDS})
 
 
+#: The key space a CHECKOUT TOKEN also lives in, alongside the shared identifier space.
+#: ``checkout_token``, ``order_ref`` and ``order_id`` share one space on purpose: an event
+#: carrying a token and an order reference is what teaches the union that they name one order,
+#: and that bridging is why :class:`_Groups` exists. A BRIDGE has no business in that space —
+#: it names a checkout and nothing else — so it contributes only this namespaced form, and
+#: every event that carries a token contributes it too, so a bridge still meets its offer.
+#:
+#: Measured without it: a ``code_created`` whose exchange-minted token happened to spell
+#: another order's ``order_ref`` merged that order into a foreign offer's group and graded an
+#: order billed 5000 as ``price_honored: True`` against a 9000 promise — a fabricated
+#: ``fulfilled`` where reconciliation had previously emitted nothing at all.
+_TOKEN_NAMESPACE = "checkout_token"
+
+
+def _token_key(event: Any) -> tuple[str, ...]:
+    """The namespaced checkout-token key of an event, if it names one."""
+    token = _payload(event).get("checkout_token")
+    text = "" if token is None else str(token).strip()
+    if not text:
+        return ()
+    return (f"{_TOKEN_NAMESPACE}{_SCOPE_SEPARATOR}{_key_component(text)}",)
+
+
 def _bridge_keys(event: Any) -> tuple[str, ...]:
     """The one identifier a bridge event is allowed to contribute: its checkout token.
 
@@ -502,10 +546,11 @@ def _bridge_keys(event: Any) -> tuple[str, ...]:
     ``order_ref`` — is a claim about a record it does not own, and the producing boundary
     welcomes extra keys, so such a payload is a sanctioned shape rather than an attack.
     Honouring them let a bridge merge two unrelated orders and delete one of them.
+
+    The token is namespaced (:data:`_TOKEN_NAMESPACE`) so that a bridge cannot join anything
+    but another event's checkout token, whatever its token happens to spell.
     """
-    token = _payload(event).get("checkout_token")
-    text = "" if token is None else str(token).strip()
-    return (_key_component(text),) if text else ()
+    return _token_key(event)
 
 
 def _store_of(event: Any) -> str | None:
@@ -753,7 +798,11 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         # carrying `checkout_token: T1` and `order_id: R2` — with no discount code on it at
         # all — merged two unrelated orders, and the second one's 500-against-50 overcharge
         # disappeared. Two reconciled events became one.
-        identifiers = _bridge_keys(event) if kind in CODE_BRIDGE_KINDS else _join_keys(event)
+        identifiers = (
+            _bridge_keys(event)
+            if kind in CODE_BRIDGE_KINDS
+            else _join_keys(event) + _token_key(event)
+        )
         if not identifiers:
             if kind == WEBHOOK_KIND:
                 # Unchanged, and deliberately checked BEFORE any code is consulted. A code is
@@ -888,18 +937,30 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
 
     # ONE EMITTED EVENT PER ORDER, keyed by the ORDER's own identity group rather than by the
     # group the code links produced. An order is a thing the ledger names; a group is a thing
-    # this function computes. Keying on the group meant that anything which merged two orders
-    # — a code, a bridge, a pixel carrying one order's token and another's reference — made
-    # one of them silently disappear, because `setdefault` kept whichever webhook arrived
-    # first. That is the single worst outcome this module has, worse than a wrong verdict,
-    # because a wrong verdict is visible and a missing order is not. Now a merge can at worst
-    # grade two orders against one promise, which is legible in the output.
+    # this function computes. Keying on the group meant that a code or a bridge merging two
+    # orders made one of them silently disappear, because `setdefault` kept whichever webhook
+    # arrived first. That is the single worst outcome this module has, worse than a wrong
+    # verdict, because a wrong verdict is visible in the output and a missing order is not.
+    # A code link can now at worst grade two orders against one promise, which is legible.
     #
     # Two deliveries of ONE order share an identity group and still emit one event, which is
     # what the ledger's idempotency key requires.
+    #
+    # WHAT THIS DOES NOT FIX, stated because the obvious reading of the paragraph above is
+    # wrong: identity groups are built from identifier keys, so anything that merges two
+    # orders AT THAT LEVEL still collapses them to one event. A `checkout_pixel` carrying one
+    # order's `checkout_token` and another's `order_ref` does exactly that — measured, two
+    # orders in and one event out, and which order survives depends on the order of the page.
+    # The pixel is the input R4 declares lossy and untrusted and it is the one input that can
+    # still make an order vanish. It is pre-existing and unchanged here, and narrowing what a
+    # pixel may contribute is blocked by `test_events_join_on_the_order_ref_alone`, which
+    # deliberately requires a pixel to join on `order_ref` alone. The same `setdefault`
+    # without a tie-break decides which `accepted` grades a group that holds two, and which
+    # of two disagreeing deliveries of one order is believed.
     members: dict[str, dict[str, Any]] = {}
     orders: dict[str, Any] = {}
     pixels: dict[str, Any] = {}
+    group_pixels: dict[str, list[str]] = {}
     group_of_order: dict[str, str] = {}
     for (kind, event, keys, _codes, _scope), identity in zip(relevant, identity_root, strict=True):
         root = groups.find(keys[0])
@@ -912,18 +973,32 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
             orders.setdefault(identity, event)
             group_of_order.setdefault(identity, root)
         elif kind == PIXEL_KIND:
-            # The pixel of an ORDER, not of a group. A code link can pull in a bridge group
-            # that holds a different checkout's beacon, and the pixel fields are published:
-            # measured, a code edge turned `pixel_missing: true` into a foreign beacon's
-            # `pixel_price: 7.0, pixel_agrees: false` — a manufactured integration finding.
+            # The pixel of an ORDER first, the group's only as a fallback. A code link can
+            # pull in a bridge group holding a DIFFERENT checkout's beacon, and the pixel
+            # fields are published: measured, a code edge turned `pixel_missing: true` into a
+            # foreign beacon's `pixel_price: 7.0, pixel_agrees: false` — a manufactured
+            # integration finding. Taking only the order's own beacon then went too far the
+            # other way: the whole premise of the code join is that the two halves of a
+            # checkout carry DIFFERENT tokens, so a beacon fired against the exchange's token
+            # is not in the order's identity group and the real pixel was reported missing.
+            # So: prefer the order's own, fall back to a group beacon that no other order
+            # claims, and never take one that is already some other order's.
             pixels.setdefault(identity, event)
+            group_pixels.setdefault(root, []).append(identity)
 
     emitted: list[dict[str, Any]] = []
     for identity, webhook in orders.items():
-        bucket = members[group_of_order[identity]]
+        group = group_of_order[identity]
+        bucket = members[group]
         accepted = bucket.get(ACCEPTED_KIND)
         if accepted is None:
             continue
+        pixel = pixels.get(identity)
+        if pixel is None:
+            for candidate in group_pixels.get(group, ()):
+                if candidate not in orders:  # not already some other order's own beacon
+                    pixel = pixels[candidate]
+                    break
         order_ref = _field(webhook, "order_ref") or _payload(webhook).get("order_id")
         # The fallback is the WEBHOOK's own first identifier, never the group's root key.
         # Three things went wrong when it was the root. The root is whichever key union-find
@@ -939,12 +1014,18 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         emitted.append(
             reconciled_event(
                 order_ref=str(order_ref) if order_ref is not None else fallback,
-                store_id=_field(webhook, "store_id") or _field(accepted, "store_id"),
+                # Read the store the same way `_store_of` does. Reading only the
+                # top-level field while `_store_of` also honours `payload["store_id"]` meant
+                # an event pair could JOIN on a payload store and then emit `store_id: None`
+                # — whereupon `reconciled_observations` and `observation_events` both drop it
+                # for having no store, so a computed contradiction moved nothing at all, and
+                # the empty store segment made two shops' orders spell one `event_id`.
+                store_id=_store_of(webhook) or _store_of(accepted),
                 checkout_token=_payload(webhook).get("checkout_token")
                 or _payload(accepted).get("checkout_token"),
                 promised=_promised(accepted),
                 webhook=webhook,
-                pixel=pixels.get(identity),
+                pixel=pixel,
                 ts=_field(webhook, "ts"),
                 bid_ref=_payload(accepted).get("bid_ref"),
             )
