@@ -647,6 +647,15 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
     # `setdefault` below keep the first webhook and drop the second one's overcharge without
     # a trace, which is exactly the escape hatch `_scoped_keys` exists to close, reached
     # through a different field.
+    #
+    # The residual, stated rather than hidden: a store that redeems one code on two orders
+    # makes that code useless as a key and — where the code was the only bridge — suppresses
+    # its OWN reconciliation. That is a worse trade than it sounds only if the alternative
+    # were grading both orders, and it is not: two webhooks in one group are ONE bucket, so
+    # honouring the code would grade whichever arrived first and lose the other silently.
+    # Refusing at least leaves the evidence legible — two `order_paid` events naming one
+    # code, and no verdict — where grading the first leaves nothing at all. The platform's
+    # own `usage_limit: 1` is what stops this happening by accident.
     claims: dict[tuple[str, str, str], set[tuple[str, ...]]] = {}
     scopes: list[str] = []
     for kind, _event, identifiers, codes, store in read:
