@@ -58,8 +58,52 @@ VERIFY_SH_MARKERS = "not needs_model and not slow"
 #: an unrelated four-digit id anywhere in any collected test file forges a grader.
 _TICKET_ID = re.compile(r"\bT-\d{3}\b")
 
-#: This module's own repo-relative path. It is excluded from the grader map below.
+#: This module's own repo-relative path.
 _SELF = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
+
+#: The collected test files whose SUBJECT IS THE TICKET GRAPH. They are excluded from the
+#: grader map below, and this module is only one of them.
+#:
+#: WHY A NAMED SET AND NOT A PROPERTY. The property is easy to state — "a file that is
+#: itself a ticket-graph sweep should not grade tickets it merely describes" — and three
+#: machine-checkable forms of it were measured against the live collection. All three fail:
+#:
+#: * "reads ``tickets.json``" catches ``apps/exchange/tests/test_accept_denials.py``, which
+#:   scans the graph in ONE test (:767) and genuinely grades seven tickets with the rest of
+#:   the file. Excluding it would delete seven real graders.
+#: * "reads ``tickets.json`` and names N+ ticket ids" cannot be thresholded.
+#:   ``apps/trust/tests/test_repro_open_tickets.py`` on main reads the graph (to check a
+#:   ticket's declared scope globs) and names NINETEEN ids, more than either sweep — while
+#:   being a per-ticket reproduction file that really does grade all nineteen.
+#: * "names many ids but has test functions for almost none of them" — ids in string
+#:   constants minus ids in ``test_tNNN_`` function names — comes closest and still does not
+#:   separate: 15 for the ticket-graph sweep against 14 for that same trust file. One ticket
+#:   of margin is not a rule, it is a false red waiting for the next merge.
+#:
+#: And an exclusion is not fail-safe the way the shared-grader allowlist next door is:
+#: removing a grader can DELETE a violation, because a whole-suite gate is a violation only
+#: ``if owned``. So a property any file could satisfy with a source edit would be a way to
+#: make a ticket's violation disappear, not merely a way to be ignored. A named set can only
+#: be widened by editing this file, which is visible in the diff of the gate itself.
+#:
+#: What the arming test pins instead is the direction that fails OPEN: every path listed here
+#: must still be collected, because a renamed sweep leaves a dead entry behind and rejoins
+#: the grader map silently. The escape that remains — a THIRD sweep added later and not
+#: listed — is named there rather than left to be discovered.
+#:
+#: ``services/sim/tests/test_repro_open_tickets.py`` is deliberately NOT here, and it was
+#: proposed. It names exactly one ticket, T-242, and it is T-242's own reproduction — it
+#: exercises the ticket rather than describing it. Measured: adding it strips T-242's ONLY
+#: grader, and since T-242's verify runs that very file while its scope is
+#: ``services/sim/src/runner.py``, the sweep would report T-242 as "has no dedicated grader,
+#: and nothing it selects is inside its own scope" the moment T-242 closes. That is the gate
+#: inventing a violation, which is the same category of error as missing one.
+_DESCRIBES_THE_GRAPH = frozenset(
+    {
+        "proxyshop_support/tests/test_repro_open_tickets.py",
+        "proxyshop_support/tests/test_repro_ticket_graph.py",
+    }
+)
 
 #: pytest flags that consume the NEXT word. Without this table ``-k t160 packages/llm``
 #: would read ``t160`` as an operand, and ``-m docker apps/trust`` would read ``docker`` as
@@ -169,19 +213,41 @@ def graders_by_ticket(files: list[str]) -> dict[str, set[str]]:
     verify, so a grader map built from "every committed file" would hand T-111 a free pass.
     A shell script is not collected and does not parse, so it cannot be a grader here.
 
-    THIS MODULE IS EXCLUDED FROM ITS OWN GRADER MAP, and the reason is the whole reason a
+    EVERY TICKET-GRAPH SWEEP IS EXCLUDED FROM THIS MAP, and the reason is the whole reason a
     gate about gates is delicate. A test about the ticket graph names tickets in order to
     DESCRIBE them; the AST rule cannot tell that from naming them in order to test them.
-    Left in, this file counted as a grader for nine closed tickets it does not exercise —
+    Left in, THIS file counted as a grader for nine closed tickets it does not exercise —
     T-000, T-109, T-111, T-112, T-118, T-122, T-123, T-129 and T-133 — so the sweep's own
     failure message recommended repointing T-112's verify at the sweep, and doing so turned
     the sweep green. The violator set is unchanged by the exclusion (measured both ways),
     because every one of those tickets has a real grader elsewhere; what changes is that
     the gate can no longer be satisfied by pointing a ticket at the gate.
+
+    THE EXCLUSION WAS ONE PATH AND SHOULD ALWAYS HAVE BEEN A SET, and the file that proved it
+    arrived in the very same merge. ``proxyshop_support/tests/test_repro_ticket_graph.py``
+    names SIXTEEN ticket ids in prose — T-082, T-085, T-087, T-122, T-130, T-134, T-167,
+    T-204, T-228, T-262, T-298, T-301, T-304, T-313, T-314, T-315 — and contains no test that
+    exercises any of them, so it registered as a grader for all sixteen. That is verbatim the
+    forgery the self-exclusion exists to prevent, reintroduced next door and reachable by a
+    single verify-field edit.
+
+    Measured on an in-memory copy of the graph, with T-122 first restored to the whole-suite
+    gate it carried when it was a violator:
+
+        T-122 verify = `./scripts/verify.sh check`        violations [T-122, T-133]
+        T-122 verify = `pytest .../test_repro_ticket_graph.py`
+                       exclusion = this file only         violations [T-133]
+                       exclusion = both graph sweeps      violations [T-122, T-133]
+
+    i.e. the forgery cured a violator with a file whose only mention of T-122 is one prose
+    sentence, and the promoted exclusion refuses it. On the live graph the violator set is
+    unchanged either way ([T-133]) — the ten tickets that lose their only "grader" here
+    (T-085, T-087, T-130, T-134, T-167, T-262, T-304, T-313, T-314, T-315) are all
+    not-yet-closed, and this sweep grades closed tickets only.
     """
     graders: dict[str, set[str]] = {}
     for rel in files:
-        if rel == _SELF:
+        if rel in _DESCRIBES_THE_GRAPH:
             continue
         source = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="replace")
         for ticket_id in ticket_ids_in_ast(source):
@@ -450,7 +516,45 @@ def test_t160_the_gate_vacuity_sweep_is_armed() -> None:
     assert len(files) >= 100, f"collection found {len(files)} test files; 141 at HEAD"
 
     graders = graders_by_ticket(files)
-    assert len(graders) >= 120, f"{len(graders)} tickets have a grader; 157 at HEAD"
+    assert len(graders) >= 120, f"{len(graders)} tickets have a grader; 166 at HEAD"
+
+    # THE GRAPH-SWEEP EXCLUSION, armed in the only direction that can fail open. An entry
+    # that no longer names a collected file is a DEAD entry: the renamed sweep rejoins the
+    # grader map and starts forging graders again, silently, with the count above unchanged.
+    # So every entry must still be collected, and this module must still be in the set under
+    # its current name.
+    assert _SELF in _DESCRIBES_THE_GRAPH, (
+        f"this module is now {_SELF} and is no longer in _DESCRIBES_THE_GRAPH, so it grades "
+        "the nine closed tickets it merely describes again"
+    )
+    for rel in sorted(_DESCRIBES_THE_GRAPH):
+        assert rel in files, (
+            f"{rel} is excluded from the grader map but pytest does not collect it, so the "
+            "entry is dead — a renamed or moved graph sweep is back in the map and forging "
+            f"graders. Collected files: {len(files)}"
+        )
+    # And the forgery itself: the ticket-graph sweep names 16 ids in prose and exercises
+    # none of them. None of the 16 may have it as a grader.
+    _sweep = "proxyshop_support/tests/test_repro_ticket_graph.py"
+    _named = ticket_ids_in_ast((REPO_ROOT / _sweep).read_text(encoding="utf-8"))
+    assert len(_named) >= 10, (
+        f"the ticket-graph sweep now names only {len(_named)} ticket ids ({sorted(_named)}); "
+        "16 at HEAD. If it has stopped describing the graph this exclusion is measuring "
+        "nothing, and if it was renamed the check above is the one that fires."
+    )
+    assert not [tid for tid in _named if _sweep in graders.get(tid, set())], (
+        f"{_sweep} is registered as a grader for tickets it only names in prose: "
+        f"{sorted(tid for tid in _named if _sweep in graders.get(tid, set()))}"
+    )
+    # NO COMPLETENESS ASSERTION ON THE SET, and that is a measured decision rather than an
+    # omission — see `_DESCRIBES_THE_GRAPH` for the numbers. Three candidate properties for
+    # "this file is a graph sweep" were tried against the live collection and every one of
+    # them either misses a sweep or catches a real grader, so an assertion built on any of
+    # them would be a false red on the next merge. The set is therefore maintained by hand,
+    # and the checks above cover the direction that fails OPEN (a listed path going dead).
+    # THE ESCAPE THIS LEAVES, named rather than left to be discovered: a THIRD ticket-graph
+    # sweep added later joins the grader map silently and forges graders for every ticket it
+    # describes, exactly as test_repro_ticket_graph.py did. Whoever adds one must add it here.
 
     graded = [t for t in closed_gated if t["id"] in graders_by_ticket(files)]
     assert len(graded) >= 40, (
@@ -530,10 +634,12 @@ def test_t160_the_gate_vacuity_sweep_is_armed() -> None:
     reason=(
         "T-160: closed tickets whose recorded `verify` cannot fail for their own reason — "
         "it names no selector, or selects no test that grades the ticket, or runs the whole "
-        "suite so that no failure is attributable to it. Measured at HEAD: nine, namely "
-        "T-000, T-010, T-111, T-112, T-118, T-122, T-123, T-129 and T-133. Each is repaired "
-        "by repointing its verify at one of the tests named beside it in the failure "
-        "output. Remove this marker with the fix"
+        "suite so that no failure is attributable to it. Nine when this gate was written "
+        "(T-000, T-010, T-111, T-112, T-118, T-122, T-123, T-129, T-133); re-measured after "
+        "the orchestrator's repointing amendment, ONE remains — T-133, whose gate is "
+        "`verify.sh check` while `apps/buyer/svc/tests/test_profile_identity_leaks.py` "
+        "grades it. Repaired by repointing its verify at one of the tests named beside it "
+        "in the failure output. Remove this marker with the fix"
     ),
 )
 def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
@@ -588,12 +694,28 @@ def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
     the orchestrator's routine maintenance doing it as a side effect.
 
     Re-measured across that merge, the violator set is UNCHANGED: the same nine ids, for the
-    same reasons, and the two ratchet floors still read exactly 57 and 84. The reason it
+    same reasons, and the two ratchet floors read exactly 57 and 84 across it. (Both have
+    since moved with the graph — 59 closed gated tickets here, and the sibling module's
+    population floor re-baselined from 84 to 94 after it was found carrying ten tickets of
+    slack.) The reason it
     held is narrow and worth naming, because it is the difference between surviving and
-    getting lucky: every extractor here skips a word containing ``=``, so the entire
-    ``PROXYSHOP_WORKER=...`` token — parameter expansion and all — is discarded before any
-    operand is read. Nothing in this file parses a worker index, and the arming test now
-    pins that with the parameterised form spelled out literally.
+    getting lucky: ``verify_operands`` scans every word from index 0 and skips any word
+    containing ``=``, so the entire ``PROXYSHOP_WORKER=...`` token — parameter expansion and
+    all — is discarded before any operand is read. (``pytest_selection`` carries the same
+    clause, but there it is redundant: that scan only starts after the ``pytest`` token, so
+    position discards the prefix first. The distinction matters because the ``=`` sentence
+    was copied into the sibling ticket-graph module, where position is the only reason it
+    holds.) Nothing in this file parses a worker index, and the arming test now pins that
+    with the parameterised form spelled out literally.
+
+    AND IT HAS SINCE BEEN REPAIRED DOWN TO ONE, which is what a sweep over the property
+    rather than the instance is for. The orchestrator's repointing amendment fixed eight of
+    the nine; re-measured here the violator set is exactly ``[T-133]`` — its gate is
+    ``verify.sh check`` while ``apps/buyer/svc/tests/test_profile_identity_leaks.py`` is a
+    dedicated grader it could point at instead. The count moved because the graph was
+    repaired, not because the sweep went quiet: the arming test's floors (57 closed gated
+    tickets, 100 collected files, 120 tickets with a grader) all still read above their
+    thresholds at 59, 147 and 166.
     """
     files = _run_collection()
     violations = gate_violations(_tickets(), files, graders_by_ticket(files))
