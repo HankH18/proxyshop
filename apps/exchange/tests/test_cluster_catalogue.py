@@ -160,6 +160,63 @@ def test_a_term_matches_whole_words_only() -> None:
     assert assignment.cluster_id is None, f"matched on {assignment.evidence!r}"
 
 
+@pytest.mark.parametrize("term", ["heat-exchange", "Heat  Exchange", "HEAT EXCHANGE"])
+def test_a_term_and_a_query_are_reduced_to_the_same_word_sequence(term: str) -> None:
+    """One normalisation, not two.
+
+    The query is reduced to its words to make whole-word matching possible; a catalogue term
+    that kept its punctuation would then be a needle that could never occur in that haystack,
+    and a cluster written ``heat-exchange`` would silently match nothing. Both sides fold the
+    same way, and this pins it from the catalogue side because that fold happens once at
+    deployment while the query's happens per auction — two places to drift apart.
+    """
+    row = {"cluster_id": "cluster-hx", "terms": [term]}
+    assignment = assign_cluster(
+        _intent(query="a heat exchange machine for the office", category=None, hard_constraints=[]),
+        _catalogue(row),
+    )
+    assert assignment.cluster_id == "cluster-hx", (
+        f"the term {term!r} did not match 'heat exchange' in the query: {assignment!r}"
+    )
+
+
+def test_the_query_is_folded_once_however_many_clusters_are_weighed() -> None:
+    """A caller does not get to multiply their own query's length by the catalogue size.
+
+    ``intent.query`` is unbounded — ``_refuse_an_oversized_intent`` measures
+    ``hard_constraints`` only — so folding it inside the per-cluster loop made one
+    ``POST /auctions`` cost the product of two numbers, one of which the caller picks. This
+    asserts the shape rather than a wall-clock number, by counting the NFKC normalisations.
+    """
+    from exchange.retrieval import clusters as module
+
+    calls = 0
+    real = module.canonical_text
+
+    def counted(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real(value)
+
+    rows = [
+        {"cluster_id": f"cluster-{index:03d}", "category": "coffee", "terms": ["espresso"]}
+        for index in range(50)
+    ]
+    catalogue = _catalogue(*rows)
+
+    module.canonical_text = counted  # type: ignore[assignment]
+    try:
+        assignment = assign_cluster(_intent(hard_constraints=[]), catalogue)
+    finally:
+        module.canonical_text = real  # type: ignore[assignment]
+
+    assert assignment.cluster_id == "cluster-000"
+    assert calls <= 2, (
+        f"the intent was folded {calls} times against a 50-cluster catalogue; the query must be "
+        f"folded once per auction, not once per cluster"
+    )
+
+
 def test_a_constraint_the_module_cannot_decide_contributes_nothing_and_does_not_raise() -> None:
     """A malformed constraint must not become a 500 on a route that answers 422 for it.
 

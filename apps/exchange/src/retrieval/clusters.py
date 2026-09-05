@@ -182,10 +182,16 @@ def _fields(obj: Any) -> Mapping[str, Any]:
 
 
 def _folded_terms(values: Iterable[Any]) -> tuple[str, ...]:
-    """Canonicalised, de-duplicated, non-empty terms, in a stable order."""
+    """De-duplicated, non-empty terms reduced to their word sequence, in a stable order.
+
+    Reduced to WORDS — ``"heat-exchange"`` and ``"Heat Exchange"`` both become
+    ``"heat exchange"`` — because that is the form :func:`_haystack` reduces the shopper's
+    query to, and two spellings of one normalisation would mean a catalogue term written with
+    a hyphen silently matched nothing. Done here, once per deployment, rather than per auction.
+    """
     seen: dict[str, None] = {}
     for raw in values:
-        folded = canonical_text(str(raw))
+        folded = " ".join(_WORD.findall(canonical_text(str(raw))))
         if folded:
             seen.setdefault(folded, None)
     return tuple(seen)
@@ -437,25 +443,33 @@ def _satisfies(criterion: Any, key: str, value: Any) -> bool:
     return parsed.decide([_reading(key, value)]).satisfied
 
 
-def _term_hits(query_text: str, terms: Sequence[str]) -> tuple[str, ...]:
+def _haystack(query_text: str) -> str:
+    """The shopper's words, folded once, space-delimited on both ends for whole-word search.
+
+    Computed ONCE per auction and reused for every catalogue row. Folding it inside the
+    per-cluster loop instead made the cost of one ``POST /auctions`` the product of the query
+    length and the catalogue size — up to :data:`MAX_CATALOGUE_CLUSTERS` NFKC normalisations
+    and regex scans of a string the CALLER chose the length of, on the request path. Nothing
+    bounds ``intent.query``: ``_refuse_an_oversized_intent`` measures ``hard_constraints``
+    only.
+    """
+    words = _WORD.findall(canonical_text(query_text))
+    return f" {' '.join(words)} " if words else ""
+
+
+def _term_hits(haystack: str, terms: Sequence[str]) -> tuple[str, ...]:
     """The catalogue terms that appear in the shopper's own words, as whole words.
 
     Whole words, and phrases as whole word sequences: a substring test reports ``"tea"``
     inside ``"steam"`` and would put a shopper asking for an espresso machine into the tea
     cluster on the strength of one accident.
+
+    ``terms`` are already folded by :meth:`ClusterRow.__post_init__`, so only the delimiters
+    are added here — the catalogue is validated once at deployment, not once per auction.
     """
-    words = _WORD.findall(canonical_text(query_text))
-    if not words:
+    if not haystack:
         return ()
-    haystack = f" {' '.join(words)} "
-    hits: list[str] = []
-    for term in terms:
-        needle_words = _WORD.findall(term)
-        if not needle_words:
-            continue
-        if f" {' '.join(needle_words)} " in haystack:
-            hits.append(term)
-    return tuple(hits)
+    return tuple(term for term in terms if f" {term} " in haystack)
 
 
 def _weigh(
@@ -463,7 +477,7 @@ def _weigh(
     *,
     category: str | None,
     constraints: Sequence[Any],
-    query: str,
+    haystack: str,
 ) -> tuple[float, tuple[str, ...]]:
     """One cluster's evidence weight and the facts behind it."""
     score = 0.0
@@ -482,7 +496,7 @@ def _weigh(
             score += CONSTRAINT_WEIGHT
             evidence.append(f"{name}={row.attributes[name]}")
 
-    for term in _term_hits(query, row.terms):
+    for term in _term_hits(haystack, row.terms):
         score += TERM_WEIGHT
         evidence.append(f"term:{term}")
 
@@ -527,11 +541,12 @@ def assign_cluster(intent: Any, catalogue: Any) -> ClusterAssignment:
     raw_category = fields.get("category")
     category = None if raw_category is None else canonical_text(str(raw_category))
     constraints = tuple(fields.get("hard_constraints") or ())
-    query = str(fields.get("query") or "")
+    # Folded ONCE, outside the loop. See :func:`_haystack`.
+    haystack = _haystack(str(fields.get("query") or ""))
 
     best: tuple[float, str, tuple[str, ...]] | None = None
     for row in rows:
-        score, evidence = _weigh(row, category=category, constraints=constraints, query=query)
+        score, evidence = _weigh(row, category=category, constraints=constraints, haystack=haystack)
         if score <= 0.0:
             continue
         # `-score` first, then the id: highest weight wins and a tie is broken on the LOWEST
