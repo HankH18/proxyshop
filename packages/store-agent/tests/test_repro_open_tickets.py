@@ -1499,8 +1499,9 @@ def _t175_cases() -> list[dict[str, Any]]:
     for product in sorted(T175_FLOORS):
         floor = T175_FLOORS[product]
         for placement in T175_PLACEMENTS:
-            for cent in _t156_draw(1, int(round(floor * 100.0)) - 1, pinned, system,
-                                   T175_DRAWS_PER_SHAPE):
+            for cent in _t156_draw(
+                1, int(round(floor * 100.0)) - 1, pinned, system, T175_DRAWS_PER_SHAPE
+            ):
                 cases.append(
                     {
                         "product": product,
@@ -1514,8 +1515,7 @@ def _t175_cases() -> list[dict[str, Any]]:
 
 def _t175_label(case: dict[str, Any], field: str) -> str:
     return (
-        f"{case['product']} floor={case['floor']} at .{case['placement']}.{field}"
-        f"={case['price']}"
+        f"{case['product']} floor={case['floor']} at .{case['placement']}.{field}={case['price']}"
     )
 
 
@@ -1647,8 +1647,12 @@ def test_t175_the_unread_total_price_sweep_is_armed() -> None:
         for product in sorted(T175_FLOORS):
             listed = float(_t156_fixture()["catalog"][product]["list_price"])
             honest = _t175_bid(
-                {"product": product, "placement": placement, "floor": T175_FLOORS[product],
-                 "price": listed},
+                {
+                    "product": product,
+                    "placement": placement,
+                    "floor": T175_FLOORS[product],
+                    "price": listed,
+                },
                 "unit_price",
             )
             assert _t175_refusal(honest) == [], (
@@ -1713,4 +1717,484 @@ def test_t175_a_total_price_under_the_envelope_floor_is_refused_like_a_unit_pric
         "approved floor for a catalogued product were admitted by the store agent's auditor, "
         "where the identical node spelling the same number `unit_price` is refused by both "
         "walls:\n  " + "\n  ".join(escapes)
+    )
+
+
+# =============================================================================================
+# T-209 / T-218 — the contracts boundary was tightened and the store agent's own auditor was not
+#
+# One apparatus, two gates. T-209 is the named case (`offer.commitments: null`); T-218 is the
+# ticket that says the cause is generic and asks for "a property test asserting the two doors
+# agree on nullability, not six more point fixes". So the family below is DISCOVERED at run time
+# from the contracts door itself rather than written down: every field the pydantic model refuses
+# a `null` for is in it, including the ones a future `--strict-nullable` regeneration adds. That
+# is the structural half of T-218 — "every future field the generator tightens silently joins the
+# family, and nothing on the store-agent side notices" — and a hard-coded list of six would
+# reproduce exactly the defect it is grading.
+#
+# Function-local imports, for the reason stated at the T-156 header.
+# =============================================================================================
+
+#: `now` for the contracts door. Fixed, so the offer's expiry is judged against a constant.
+T209_NOW = "2026-06-01T00:00:00Z"
+
+#: The eligibility row for the base bid's store. The nullability question is about SCHEMA, so
+#: every other wall on that door is satisfied deliberately — a bid refused for eligibility would
+#: be refused with the flipped field too, and the comparison would be measuring nothing.
+T209_SNAPSHOT_SCORE = 0.6
+
+#: Fields the ticket says are in the family. NOT the source of truth — the family is discovered
+#: from the model below — but the arming test requires the discovered set to CONTAIN these, so a
+#: regeneration that quietly widened `commitments` back to optional turns this red instead of
+#: shrinking the sweep to nothing. T-218 says "at least six"; nine were measured.
+T209_EXPECTED_FAMILY = frozenset(
+    {
+        "auction_id",
+        "store_id",
+        "offer",
+        "claims",
+        "agent_version",
+        "schema_version",
+        "offer.commitments",
+        "offer.unit_price",
+        "offer.total_price",
+    }
+)
+
+#: Fields that are genuinely nullable by contract. Both doors must ADMIT a null here, or the
+#: property below would be asking the store agent to refuse honest traffic.
+T209_NULLABLE_CONTROLS = ("pitch_ref", "message", "offer.currency", "offer.variant_ref")
+
+#: The one field in the family both doors ALREADY agree about. It is the negative control: it
+#: proves the store agent's auditor CAN refuse a null-valued field, so the escapes below are a
+#: measurement of which fields it looks at rather than of an auditor that never refuses anything.
+T209_AGREED_CONTROL = "offer.product_ref"
+
+
+def _t209_base() -> dict[str, Any]:
+    """A dict-shaped bid BOTH doors admit. Every value here is load-bearing.
+
+    `product_ref` is on the approved envelope's catalog and `unit_price` is its list price with
+    no discount declared, so the floor wall, the reconciliation and the grant ledger are all
+    satisfied and cannot stand in for the schema question. `claims` and `commitments` are empty
+    for the same reason. `expires_at` is in the future because the shared door fails closed on a
+    missing expiry, which is a refusal that has nothing to do with nullability.
+    """
+    envelope = _t156_fixture()["envelope"]
+    listed = float(_t156_fixture()["catalog"]["prod-cap"]["list_price"])
+    return {
+        "auction_id": "auction-t209",
+        "store_id": envelope["store_id"],
+        "offer": {
+            "product_ref": "prod-cap",
+            "unit_price": listed,
+            "total_price": listed,
+            "currency": "USD",
+            "commitments": [],
+            "expires_at": "2999-01-01T00:00:00Z",
+        },
+        "claims": [],
+        "agent_version": "store-agent/t209-gate",
+        "schema_version": "1.0.0",
+    }
+
+
+def _t209_snapshot() -> dict[str, Any]:
+    store_id = _t156_fixture()["envelope"]["store_id"]
+    return {
+        store_id: {
+            "store_id": store_id,
+            "score": T209_SNAPSHOT_SCORE,
+            "blacklisted": False,
+        }
+    }
+
+
+def _t209_paths() -> list[str]:
+    """Every field of `Bid`, plus every field of `Offer` as ``offer.<name>``.
+
+    Read off the generated models rather than listed, so a field the schema gains is a field this
+    sweep asks about on its next run. That is the whole of T-218's structural complaint.
+    """
+    from contracts.protocol import Bid, Offer  # noqa: PLC0415
+
+    return [*Bid.model_fields, *(f"offer.{name}" for name in Offer.model_fields)]
+
+
+def _t209_with_none(path: str) -> dict[str, Any]:
+    """`_t209_base()` with exactly one field set to an explicit `None`."""
+    import copy  # noqa: PLC0415
+
+    body = copy.deepcopy(_t209_base())
+    head, _, tail = path.partition(".")
+    if tail:
+        body[head][tail] = None
+    else:
+        body[head] = None
+    return body
+
+
+def _t209_contracts_verdict(body: dict[str, Any]) -> list[str]:
+    """The shared door's reasons for `body`. It never raises."""
+    from contracts.boundary import validate_bid  # noqa: PLC0415
+
+    return list(
+        validate_bid(body, path="hosted", trust_snapshot=_t209_snapshot(), now=T209_NOW).reasons
+    )
+
+
+def _t209_schema_refused(path: str) -> bool:
+    """Whether the CONTRACTS door refuses a null at `path` as a schema violation.
+
+    `schema_invalid:<dotted path>` specifically, not any refusal: `offer.expires_at` is genuinely
+    nullable at the pydantic door and is refused `offer_expiry_missing` by a different wall, and
+    counting that as a nullability divergence would put a field in the family that the generator
+    never tightened.
+    """
+    for reason in _t209_contracts_verdict(_t209_with_none(path)):
+        if str(reason).startswith("schema_invalid") and path in str(reason):
+            return True
+    return False
+
+
+def _t209_store_agent_admits(body: dict[str, Any]) -> bool:
+    """Whether the STORE AGENT's own auditor lets `body` through."""
+    from store_agent.hooks import HookProvenanceError, enforce_bid_provenance  # noqa: PLC0415
+
+    try:
+        enforce_bid_provenance(body, _t156_hooks())
+    except HookProvenanceError:
+        return False
+    return True
+
+
+def _t209_family() -> list[str]:
+    """Every field the contracts door refuses a null for, discovered rather than listed."""
+    return [path for path in _t209_paths() if _t209_schema_refused(path)]
+
+
+def test_t209_the_two_doors_nullability_sweep_is_armed() -> None:
+    """A base both doors admit, a family discovered from the model, and an auditor that can
+    still refuse. NOT xfail.
+
+    Five ways the gates below could report green while the divergence lived:
+
+    1. **The family is empty.** If the discovery probe stopped seeing `schema_invalid` reasons —
+       a regeneration without `--strict-nullable`, a reason string respelled — the property
+       below would iterate nothing and pass. The discovered family is required to contain the
+       nine measured fields by name.
+    2. **The base bid is not admitted.** Every case is the base with ONE field flipped, so if the
+       base were refused, every case would be refused for the base's reason and the sweep would
+       be blind. Both doors are required to admit it.
+    3. **The auditor refuses everything.** A store agent that refused any dict-built bid would
+       satisfy the property without reading a field. The genuinely NULLABLE fields are required
+       to be admitted by both doors.
+    4. **The auditor refuses nothing.** The mirror image, and the one that matters: if
+       `enforce_bid_provenance` could not refuse a null-valued field at all, the escapes below
+       would be an artefact. `offer.product_ref` is the negative control — a field in the family
+       that BOTH doors already refuse today — so the apparatus is proven able to produce the
+       verdict the gate is asking for.
+    5. **The two doors are not being asked about the same document.** The same dict object is
+       handed to both, built once per case.
+    """
+    base = _t209_base()
+    assert _t209_contracts_verdict(base) == [], (
+        f"the base bid is refused by the contracts door {_t209_contracts_verdict(base)}; every "
+        "case below is this bid with one field flipped, so the sweep would be measuring the "
+        "base's refusal rather than the flip"
+    )
+    assert _t209_store_agent_admits(base), (
+        "the base bid is refused by enforce_bid_provenance; every case below would be refused "
+        "for the base's reason and the property would pass without reading a field"
+    )
+
+    paths = _t209_paths()
+    assert len(paths) == len(set(paths)) and len(paths) >= 15, (
+        f"the model fields this sweep asks about are {paths}; that is not the shape of Bid+Offer"
+    )
+
+    family = _t209_family()
+    missing = sorted(T209_EXPECTED_FAMILY - set(family))
+    assert not missing, (
+        f"the contracts door no longer refuses a null at {missing}. Either --strict-nullable was "
+        "dropped from the generator (T-195's fix, packages/contracts/src/codegen.py) or the "
+        "reason spelling moved; the family this property sweeps is discovered from that door, so "
+        "it has just silently shrunk"
+    )
+
+    # 3. Genuinely nullable fields, admitted by BOTH.
+    for path in T209_NULLABLE_CONTROLS:
+        assert path not in family, (
+            f"{path} is documented nullable but the contracts door now refuses a null there; the "
+            "control has become a case"
+        )
+        body = _t209_with_none(path)
+        assert _t209_contracts_verdict(body) == [], (
+            f"{path}: a null in a NULLABLE field was refused by the contracts door "
+            f"{_t209_contracts_verdict(body)}"
+        )
+        assert _t209_store_agent_admits(body), (
+            f"{path}: a null in a NULLABLE field was refused by enforce_bid_provenance; the "
+            "property below would be asking the auditor to refuse honest traffic"
+        )
+
+    # 4. The negative control: one field in the family that BOTH doors already refuse.
+    assert T209_AGREED_CONTROL in family, (
+        f"{T209_AGREED_CONTROL} is no longer refused by the contracts door, so it can no longer "
+        "serve as the control proving the two doors CAN agree"
+    )
+    assert not _t209_store_agent_admits(_t209_with_none(T209_AGREED_CONTROL)), (
+        f"enforce_bid_provenance now ADMITS a null {T209_AGREED_CONTROL}. That was the one field "
+        "in the family the store agent refused, and it is what proved the auditor is able to "
+        "refuse a null-valued field at all — without it the gates below measure nothing"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-209: T-195 regenerated the model with --strict-nullable, so `offer.commitments: null` "
+        "is now correctly refused `schema_invalid:offer.commitments` at the contracts door. The "
+        "store agent walks `commitments` with no pydantic gate at all: `_walk`'s first statement "
+        "is `if node is None: return`, so the null is skipped SILENTLY — not recorded in "
+        "`unwalkable`, not refused — and a dict-built bid carrying it is admitted by "
+        "enforce_bid_provenance. The two doors disagree about the same shape; remove this marker "
+        "with the fix"
+    ),
+)
+def test_t209_a_null_commitments_list_is_refused_by_the_store_agents_own_door_too() -> None:
+    """The named case. `offer.commitments: null` must not be admitted by the auditor that walks it.
+
+    `commitments` is in `CLAIM_BEARING_FIELDS`, so the walk goes looking for claims under it and
+    finds a `None`. Returning on that is the difference between "there are no claims here" and
+    "I could not look", and the boundary's own comment elsewhere insists that difference be said
+    out loud: the `unwalkable` list exists precisely so that "we did not look" is an answer the
+    boundary gives rather than swallows. A null where a list belongs is the same silence with a
+    tighter door one package over now refusing it.
+    """
+    body = _t209_with_none("offer.commitments")
+    assert any(
+        str(reason).startswith("schema_invalid") for reason in _t209_contracts_verdict(body)
+    ), (
+        "the contracts door no longer refuses this shape either, so there is no disagreement "
+        "left to grade; see the arming test"
+    )
+    assert not _t209_store_agent_admits(body), (
+        "enforce_bid_provenance ADMITTED a bid whose offer.commitments is an explicit null, "
+        "which contracts.validate_bid refuses as "
+        f"{_t209_contracts_verdict(body)}. The walk short-circuits on the None and records "
+        "nothing, so the auditor cannot even report that it did not look"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-218: the cause is generic, not specific to commitments. `_walk` short-circuits on ANY "
+        "None while --strict-nullable made a growing set of fields non-nullable at the pydantic "
+        "door, so the family is whatever the generator has tightened so far. MEASURED: 9 of the "
+        "10 fields the contracts door refuses a null for are ADMITTED by enforce_bid_provenance, "
+        "with offer.product_ref the only one the two doors agree about. Every future field the "
+        "generator tightens joins the family and nothing on the store-agent side notices; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t218_the_two_doors_agree_about_every_field_that_may_not_be_null() -> None:
+    """The property, not the six point fixes: whatever the contracts door refuses a null for,
+    the store agent's own auditor must refuse too.
+
+    The family is DISCOVERED from the contracts door on every run, which is the part that makes
+    this a property rather than a longer list. T-218's structural complaint is that a field the
+    generator tightens tomorrow joins the divergence silently; a sweep that enumerated today's
+    six would go on passing through exactly that. This one asks the model.
+
+    It does not require the same REASON from both doors, and deliberately so. The store agent
+    does not speak `schema_invalid` and should not learn to — it is not a schema validator, it is
+    a provenance auditor, and the honest repair is for the walk to record a null where it expected
+    a container instead of returning on it silently. All this asks is that the bid not be
+    ADMITTED.
+
+    MEASURED at HEAD: 9 in the family, 8 of them admitted by `enforce_bid_provenance`, the ninth
+    (`offer.product_ref`) refused by a price wall that happens to need the name.
+    """
+    family = _t209_family()
+    assert family, "the discovered family is empty; see the arming test"
+
+    escapes: list[str] = []
+    for path in family:
+        body = _t209_with_none(path)
+        if _t209_store_agent_admits(body):
+            escapes.append(
+                f"{path}: refused {_t209_contracts_verdict(body)} by the contracts "
+                "door, ADMITTED by enforce_bid_provenance"
+            )
+
+    assert not escapes, (
+        f"{len(escapes)} of {len(family)} fields that may not be null at the contracts door are "
+        "admitted with an explicit null by the store agent's own auditor:\n  "
+        + "\n  ".join(escapes)
+    )
+
+
+# =============================================================================================
+# T-280 — a refusal receipt with no identity
+# =============================================================================================
+
+#: Nesting depths past `door._SNAPSHOT_MAX_DEPTH` (32). `_snapshot` raises `ValueError` on these
+#: and the door answers `malformed_submission` — the one refusal site in the file that passes no
+#: `payload=`. Restated rather than imported so a bound that moves makes the arming test say so.
+T280_DEPTHS: tuple[int, ...] = (33, 34, 36, 40, 48, 64)
+
+T280_SIGNER = "store-external-t280"
+T280_KEY_ID = "key-2026-01"
+T280_SECRET = "gate-secret-t280"
+T280_NOW = "2026-01-01T00:00:05Z"
+T280_DEADLINE = "2026-01-01T00:05:00Z"
+
+
+def _t280_payload(depth: int) -> dict[str, Any]:
+    """A fully valid, correctly signable submission carrying one absurdly nested extra key.
+
+    A PLAIN dict, and that is the whole point of the shape: every read `_refuse` would make is
+    an ordinary dict lookup that cannot fail, so the identity is sitting right there and the
+    receipt's silence about it is the omission and nothing else. A mapping whose reads raise
+    would be refused anonymously by `_refuse`'s own guard no matter what this site passed, and
+    would therefore grade nothing.
+    """
+    node: Any = {"leaf": "kettle"}
+    for level in range(depth):
+        node = {f"layer{level}": node}
+    return {
+        "auction_id": f"auction-t280-{depth}",
+        "store_id": "store-t280",
+        "offer": {
+            "product_ref": "prod-t280",
+            "unit_price": 10.0,
+            "total_price": 10.0,
+            "discount": None,
+            "commitments": [],
+            "expires_at": "2999-01-01T00:00:00Z",
+        },
+        "claims": [],
+        "message": "a submission the door cannot copy",
+        "agent_version": "ext-1.0.0",
+        "schema_version": "1",
+        "signer_id": T280_SIGNER,
+        "key_id": T280_KEY_ID,
+        "issued_at": "2026-01-01T00:00:00Z",
+        "nonce": f"nonce-t280-{depth}",
+        "deep": node,
+    }
+
+
+def _t280_receipt(depth: int, *, signature: Any = None) -> Any:
+    from store_agent.external import NonceStore, receive_bid, sign_bid  # noqa: PLC0415
+
+    payload = _t280_payload(depth)
+    return receive_bid(
+        payload,
+        sign_bid(payload, T280_SECRET) if signature is None else signature,
+        {T280_SIGNER: {T280_KEY_ID: T280_SECRET}},
+        queue=lambda item: None,
+        nonce_store=NonceStore(),
+        now=T280_NOW,
+        auction_deadline=T280_DEADLINE,
+        trust_snapshot={
+            "store-t280": {"store_id": "store-t280", "score": 0.9, "blacklisted": False}
+        },
+    )
+
+
+def test_t280_the_anonymous_receipt_sweep_is_armed() -> None:
+    """Six submissions the door really cannot copy, and a neighbouring refusal that DOES carry
+    identity on the identical payload. NOT xfail.
+
+    Four ways the gate below could report green while the omission lived:
+
+    1. **The sweep reaches a different refusal.** `malformed_submission` is emitted at exactly
+       two sites, and only one of them — the `_snapshot` failure — is this ticket's. Every case
+       is required to come back with that reason and no other, so a submission refused earlier
+       (an incomplete envelope, an unknown key, a stale `issued_at`) cannot be mistaken for it.
+    2. **The identity was never readable.** The payload is a plain dict; its `signer_id` and
+       `nonce` are asserted to be present, non-empty strings, so "the receipt has no identity"
+       cannot be explained by there being none to carry.
+    3. **The receipt cannot carry identity at all.** This is the control that makes the gate a
+       measurement. The SAME payload presented with an empty signature is refused
+       `signature_missing` at a site that DOES pass `payload=`, and that receipt is required to
+       carry both fields today. If `ExternalBidReceipt` ever stopped reporting them, this fails
+       first.
+    4. **The nesting bound moved.** If `_SNAPSHOT_MAX_DEPTH` were raised past these depths the
+       cases would sail through and be ACCEPTED, and a sweep of accepted submissions grades
+       nothing. Requirement 1 catches that.
+    """
+    for depth in T280_DEPTHS:
+        payload = _t280_payload(depth)
+        assert isinstance(payload["signer_id"], str) and payload["signer_id"], (
+            f"depth {depth}: the submission carries no readable signer_id"
+        )
+        assert isinstance(payload["nonce"], str) and payload["nonce"], (
+            f"depth {depth}: the submission carries no readable nonce"
+        )
+
+        receipt = _t280_receipt(depth)
+        assert receipt.accepted is False, f"depth {depth}: the door ADMITTED it: {receipt!r}"
+        assert receipt.reasons == ("malformed_submission",), (
+            f"depth {depth}: refused {receipt.reasons}, not the single malformed_submission this "
+            "gate is about. The case is no longer reaching the _snapshot failure — check whether "
+            "the door's copy bound moved, or whether an earlier gate now refuses this shape"
+        )
+
+    # 3. The neighbouring refusal, on the identical payload, DOES carry identity.
+    control = _t280_receipt(T280_DEPTHS[0], signature="")
+    assert control.reasons == ("signature_missing",), (
+        f"the control was refused {control.reasons}, not signature_missing; it can no longer "
+        "stand for 'a refusal that passes payload='"
+    )
+    assert control.signer_id == T280_SIGNER and control.nonce, (
+        f"the control receipt carries signer_id={control.signer_id!r} nonce={control.nonce!r}. "
+        "A refusal that DOES pass payload= has stopped reporting identity, so the gate below "
+        "would be measuring the receipt rather than the omission"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-280: the `malformed_submission` refusal for a mapping whose reads fail during "
+        "`_snapshot` is built by `_refuse(REASON_MALFORMED_SUBMISSION)` with no `payload=`, so "
+        "the receipt carries no signer_id and no nonce and cannot be tied to the submission it "
+        "refused. The same file argues the opposite case ninety lines earlier for "
+        "door_failed_closed — 'without it a genuine internal fault produced a receipt with no "
+        "identity at all, indistinguishable in a rejection log from an ordinary policy refusal' "
+        "— and every neighbouring refusal passes payload=. Measured: 6 of 6 anonymous; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t280_a_refused_submission_the_door_could_read_is_named_in_its_own_receipt() -> None:
+    """A rejection log entry that cannot be tied to a submission is not a rejection log entry.
+
+    The submissions swept here are plain dicts whose `signer_id` and `nonce` are ordinary
+    strings — the door read them to get this far — and `_refuse`'s own reads are guarded, so
+    handing it the caller's object at this site cannot itself raise. That guarantee is the
+    reason the file gives for passing `payload=` at the `door_failed_closed` site, and it holds
+    here unchanged.
+
+    The sibling site — the not-a-`Mapping` refusal — is deliberately NOT swept. There the object
+    provably is not a mapping, so there is nothing to read and the omission is defensible. This
+    is the one where a submission with a perfectly readable identity is refused anonymously.
+    """
+    escapes: list[str] = []
+    for depth in T280_DEPTHS:
+        receipt = _t280_receipt(depth)
+        if receipt.signer_id != T280_SIGNER or not receipt.nonce:
+            escapes.append(
+                f"depth {depth}: refused {receipt.reasons} with signer_id="
+                f"{receipt.signer_id!r} nonce={receipt.nonce!r}, where the submission states "
+                f"signer_id={T280_SIGNER!r} nonce={_t280_payload(depth)['nonce']!r}"
+            )
+
+    assert not escapes, (
+        f"{len(escapes)} of {len(T280_DEPTHS)} malformed_submission receipts carry no identity, "
+        "so nothing in a rejection log can tie them to the submission they refused:\n  "
+        + "\n  ".join(escapes)
     )
