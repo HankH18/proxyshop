@@ -411,6 +411,14 @@ def run_journey(stream: TextIO | None = None) -> JourneyResult:
         result.buyer_url = buyer_url
         result.exchange_url = exchange_url
 
+        # The buyer service reads its exchange address the same way a deployed one does —
+        # `EXCHANGE_URL`, which apps/buyer/compose.yaml already sets to the service name.
+        # It is bound at REQUEST time, not app-construction time, so setting it here (after
+        # the exchange is actually listening) is what a container's env would have done
+        # before either process started. Without it the shopper's confirmation is a 503:
+        # "confirm() was given no auction client, so the confirmed intent has nowhere to go."
+        os.environ["EXCHANGE_URL"] = exchange_url
+
         buyer = stack.enter_context(
             httpx.Client(base_url=buyer_url, timeout=REQUEST_TIMEOUT_SECONDS)
         )
