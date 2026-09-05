@@ -30,11 +30,56 @@ DESIGN-pinned one. ``RedisAuctionStore`` takes its client from
 ``proxyshop_support.redis_client.worker_redis`` and never constructs one itself — D39
 forbids a raw client here, because an unprefixed key lands in a logical database shared with
 every other worker.
+
+Why a store has to do more than ``load``/``save`` (T-158)
+---------------------------------------------------------
+
+The paragraph above says ``accept`` twice on the same auction is refused. Until T-158 that
+was true only of *sequential* accepts. :meth:`AuctionStateMachine._transition` was a bare
+``get()`` -> mutate -> ``save()`` with nothing between the read and the write, and
+``RedisAuctionStore`` is literally two separate network round trips, so two concurrent
+requests both read ``closed``, both found ``accepted`` legal, and both wrote. Measured on a
+store with a 2 ms round trip, before the repair::
+
+    A: ACCEPTED ok -> accepted_bid_ref='bid-a'
+    B: ACCEPTED ok -> accepted_bid_ref='bid-b'
+    transitions that succeeded  : 2 of 2
+    ACCEPTED transition is serialised: False
+
+The ticket's own prescription — "put the guard on the already-serialised ACCEPTED
+transition" — therefore could not work: there was no serialisation to put it on. Moving the
+check inside ``_transition`` would have relocated the race, not closed it.
+
+What closes it is a **uniqueness constraint in the durable store**, which is what
+:meth:`AuctionStore.reserve` is: an at-most-once, atomic, durable reservation of a named
+move for one auction id. It is not a lock — nothing blocks, nothing is held for a duration,
+there is nothing to time out and nothing to deadlock. Exactly one caller is told it won; every
+other caller is told, truthfully, who did. It is one Redis ``SET key value NX EX`` — the one
+command Redis makes atomic by construction — and one lock-guarded ``dict`` insertion in
+memory. Three call sites use it:
+
+``exit:{state}``
+    the single move *out of* a state. Each state in :data:`TRANSITIONS` is left at most once,
+    so this is precisely the state machine's own semantics rather than an approximation of
+    them, and it correctly makes ``accept`` and ``expire`` race each other for the one exit
+    from ``closed`` instead of both silently winning.
+
+``create``
+    the ``if not exists: create`` at :meth:`AuctionStateMachine.create`, which was the same
+    read-modify-write shape. Not exploitable today — the only HTTP caller mints
+    ``auction-{uuid4()}`` — but it is one line away from the primitive now that it exists.
+
+``accept``
+    the acceptance claim :mod:`apps.exchange.src.accept.claims` takes **before** the merchant
+    is asked to mint. That ordering is the whole of the money fix: an atomic transition that
+    happens *after* ``POST /codes`` still leaves two live single-use discount codes behind and
+    merely refuses the second buyer a permalink.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
@@ -49,6 +94,7 @@ __all__ = [
     "CREATED",
     "EXPIRED",
     "OPEN",
+    "RESERVATION_KEY_TEMPLATE",
     "TRANSITIONS",
     "AuctionRecord",
     "AuctionStateMachine",
@@ -57,6 +103,8 @@ __all__ = [
     "InMemoryAuctionStore",
     "RedisAuctionStore",
     "UnknownAuction",
+    "creation_reservation",
+    "exit_reservation",
 ]
 
 CREATED = "created"
@@ -86,6 +134,23 @@ _TRANSITION_KIND: Mapping[str, str] = {
 #: DESIGN: `auction:{id}` in Redis, TTL 15 minutes.
 AUCTION_KEY_TEMPLATE = "auction:{auction_id}"
 AUCTION_TTL_SECONDS = 15 * 60
+
+#: Where a reservation lives, beside the record it constrains and under the same TTL. A
+#: reservation that outlived its auction would refuse a legitimate accept on a *later*
+#: auction that reused the id; one that expired first would let the constraint lapse while
+#: the auction it protects is still live. Same key prefix, same TTL, same lifetime.
+RESERVATION_KEY_TEMPLATE = "auction:{auction_id}:reserved:{name}"
+
+
+def exit_reservation(state: str) -> str:
+    """The reservation name for "the one move out of ``state``"."""
+    return f"exit:{state}"
+
+
+#: The reservation name for "this auction id has been created". Not a state exit — there is
+#: no state to leave — but the same at-most-once constraint.
+def creation_reservation() -> str:
+    return "create"
 
 
 class IllegalAuctionTransition(RuntimeError):
@@ -120,18 +185,56 @@ class AuctionRecord:
 
 
 class AuctionStore(Protocol):
-    """Where auction records live for their fifteen minutes."""
+    """Where auction records live for their fifteen minutes.
+
+    ``load``/``save`` are the record. :meth:`reserve`/:meth:`release` are the *constraint*,
+    and a store that implements the first pair without the second cannot make this state
+    machine safe: two callers that both read and both write are two callers that both won.
+    See the module docstring for what that cost on the money path (T-158).
+    """
 
     def load(self, auction_id: str) -> AuctionRecord | None: ...
 
     def save(self, record: AuctionRecord) -> None: ...
 
+    def reserve(self, auction_id: str, name: str, token: str) -> str | None:
+        """Claim ``name`` for ``auction_id``, at most once, atomically and durably.
+
+        Returns ``None`` when this caller won the reservation, and otherwise the ``token``
+        the caller that already holds it wrote. It must never be possible for two callers to
+        both be told they won, *including two callers in different OS processes*: that is the
+        entire contract, and an implementation that cannot honour it must not be used to
+        hold auctions on a money path.
+        """
+        ...
+
+    def release(self, auction_id: str, name: str, token: str) -> None:
+        """Give back a reservation this caller holds, so a failed attempt can be retried.
+
+        A no-op unless the reservation is currently held with exactly ``token`` — releasing a
+        reservation somebody else won is how a "safe" retry mints the second discount code.
+        """
+        ...
+
 
 class InMemoryAuctionStore:
-    """Process-local store. The default, and what every non-docker test drives."""
+    """Process-local store. The default, and what every non-docker test drives.
+
+    :meth:`reserve` is atomic **within this process** — the lock makes it safe against
+    threads, which is what the served app's thread pool actually is — and is honest about
+    being nothing more: two processes each holding their own ``InMemoryAuctionStore`` share
+    no state at all, so they share no constraint either. That is a property of the store, not
+    of the guard built on it; :class:`RedisAuctionStore` gives the same guard a cross-process
+    reach because Redis is a shared, durable place to put a ``SET NX``.
+    """
 
     def __init__(self) -> None:
         self._records: dict[str, str] = {}
+        self._reservations: dict[tuple[str, str], str] = {}
+        # Guards the reservation table only. The record dict is left alone: CPython's own
+        # lock already makes a single dict assignment atomic, and pretending a lock here
+        # made `load`-decide-`save` safe is exactly the illusion this ticket is about.
+        self._lock = threading.Lock()
 
     def load(self, auction_id: str) -> AuctionRecord | None:
         blob = self._records.get(auction_id)
@@ -141,6 +244,29 @@ class InMemoryAuctionStore:
         # Serialise on the way in, exactly like the Redis store, so a value that would not
         # survive a round trip fails in the cheap test rather than only under docker.
         self._records[record.auction_id] = record.to_json()
+
+    def reserve(self, auction_id: str, name: str, token: str) -> str | None:
+        with self._lock:
+            held = self._reservations.get((str(auction_id), str(name)))
+            if held is not None:
+                return held
+            self._reservations[(str(auction_id), str(name))] = str(token)
+            return None
+
+    def release(self, auction_id: str, name: str, token: str) -> None:
+        with self._lock:
+            key = (str(auction_id), str(name))
+            if self._reservations.get(key) == str(token):
+                del self._reservations[key]
+
+
+def _as_text(value: Any) -> str | None:
+    """Redis answers ``bytes`` or ``str`` depending on ``decode_responses``. Take both."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
 
 
 class RedisAuctionStore:
@@ -160,15 +286,46 @@ class RedisAuctionStore:
         return AUCTION_KEY_TEMPLATE.format(auction_id=auction_id)
 
     def load(self, auction_id: str) -> AuctionRecord | None:
-        blob = self._client.get(self.key(auction_id))
+        blob = _as_text(self._client.get(self.key(auction_id)))
         if blob is None:
             return None
-        if isinstance(blob, bytes):
-            blob = blob.decode("utf-8")
         return AuctionRecord.from_json(blob)
 
     def save(self, record: AuctionRecord) -> None:
         self._client.set(self.key(record.auction_id), record.to_json(), ex=self._ttl)
+
+    @staticmethod
+    def reservation_key(auction_id: str, name: str) -> str:
+        return RESERVATION_KEY_TEMPLATE.format(auction_id=auction_id, name=name)
+
+    def reserve(self, auction_id: str, name: str, token: str) -> str | None:
+        """``SET key token NX EX ttl`` — one command, atomic in the server, not in us.
+
+        This is deliberately *not* ``WATCH``/``MULTI`` and not a Lua script. ``SET`` with
+        ``NX`` is a single round trip that Redis itself serialises, so there is no optimistic
+        retry loop to get wrong, no transaction to abandon, and nothing that behaves
+        differently under a proxy or a cluster. ``WATCH`` would also have to reach through
+        :class:`~proxyshop_support.redis_client.WorkerRedis`'s ``execute_command`` key
+        rewriting via a pipeline object that does not go through it; ``SET`` does go through
+        it, so the ``w{N}:`` prefix and the per-worker logical DB (D39) apply to reservations
+        exactly as they apply to records.
+        """
+        key = self.reservation_key(auction_id, name)
+        if self._client.set(key, str(token), nx=True, ex=self._ttl):
+            return None
+        return _as_text(self._client.get(key)) or ""
+
+    def release(self, auction_id: str, name: str, token: str) -> None:
+        """Release only what we still hold.
+
+        The read-then-delete here is not the shape this ticket forbids: a reservation cannot
+        change hands while it is held, so "it is still ours" cannot become false under us
+        except by the TTL expiring — fifteen minutes, against a release that follows its
+        reservation within one request.
+        """
+        key = self.reservation_key(auction_id, name)
+        if _as_text(self._client.get(key)) == str(token):
+            self._client.delete(key)
 
 
 class AuctionStateMachine:
@@ -208,6 +365,14 @@ class AuctionStateMachine:
         roster: list[dict[str, Any]] | None = None,
         deadline: float | None = None,
     ) -> AuctionRecord:
+        # Reserve FIRST, then look. `load() is not None` -> `save()` is the same
+        # read-modify-write shape as the double accept: two concurrent creates both read
+        # `None` and the second overwrites the first's roster, deadline and history. The
+        # only caller today mints `auction-{uuid4()}` so it is not reachable over HTTP, but
+        # the primitive that closes it is one line away and a client-supplied id would make
+        # it live.
+        if self.store.reserve(auction_id, creation_reservation(), auction_id) is not None:
+            raise IllegalAuctionTransition(f"auction {auction_id!r} already exists")
         if self.store.load(auction_id) is not None:
             raise IllegalAuctionTransition(f"auction {auction_id!r} already exists")
         record = AuctionRecord(
@@ -252,6 +417,30 @@ class AuctionStateMachine:
             raise IllegalAuctionTransition(
                 f"auction {auction_id!r} is {record.state!r}; {target!r} is not a legal move "
                 f"(legal: {sorted(allowed) or 'none — terminal state'})"
+            )
+
+        # THE serialisation point (T-158). The check above reads a record that another
+        # request may already be rewriting; this line is the only thing in the method that
+        # cannot be won twice. Reserving the *exit from a state* rather than the arrival at
+        # one is what makes `accept` and `expire` race each other for the single move out of
+        # `closed`, instead of both being told they succeeded and the later `save` silently
+        # discarding the earlier one.
+        source = record.state
+        taken = self.store.reserve(auction_id, exit_reservation(source), target)
+        if taken is not None:
+            raise IllegalAuctionTransition(
+                f"auction {auction_id!r} has already left {source!r} for {taken!r}; a "
+                f"concurrent request won that move, so {target!r} is not applied"
+            )
+
+        # Re-read behind the reservation. Nothing else can be leaving `source` now, so this
+        # is the freshest record that can exist, and a stale copy read before the reservation
+        # was won would write back fields a concurrent writer had already changed.
+        record = self.get(auction_id)
+        if record.state != source:
+            raise IllegalAuctionTransition(
+                f"auction {auction_id!r} moved from {source!r} to {record.state!r} while "
+                f"{target!r} was being applied; it is not applied"
             )
 
         record.state = target
