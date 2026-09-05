@@ -124,25 +124,74 @@ def selection_operands(words: list[str]) -> list[str]:
     return operands
 
 
-def scope_covers(path: str, scope: Any) -> bool:
-    """``swarmloop.py:_scope_match`` semantics, reduced to what this gate needs.
+def expand_braces(pattern: str, cap: int = 64) -> list[str]:
+    """``a/{b,c}/d`` -> ``["a/b/d", "a/c/d"]``, as ``swarmloop.py:_expand_braces`` does.
 
-    Case-folded on both sides; ``dir/**`` matches the bare directory as well as everything
-    under it, which is what makes a respelt ``pytest docs/tests -q`` still a violation;
-    ``**`` is a catch-all (T-000's whole scope) and confers no OWNERSHIP, or every path in
-    the repo would belong to the scaffold ticket; a ``path:SUFFIX`` entry grants the part
-    before the first colon; a prose entry grants nothing.
+    Not decoration: without it, rewriting an owner's scope from ``docs/tests/**`` to
+    ``docs/{tests}/**`` is a semantic NO-OP for the harness that actually enforces scope,
+    and yet it silenced this gate completely. A braced entry already exists live — T-167's
+    ``apps/trust/src/{scoring,reconcile,feedback,snapshot}/_binding.py``.
     """
-    target = _normalise(path)
+    out = [pattern]
+    while True:
+        grown: list[str] = []
+        changed = False
+        for item in out:
+            match = re.search(r"\{([^{}]*)\}", item)
+            if match is None:
+                grown.append(item)
+                continue
+            changed = True
+            for alternative in match.group(1).split(","):
+                grown.append(item[: match.start()] + alternative + item[match.end() :])
+        out = grown[:cap]
+        if not changed:
+            return out
+
+
+def scope_patterns(scope: Any) -> list[str]:
+    """Every path pattern a ticket's ``scope`` actually grants.
+
+    Four shapes, all measured against the live graph:
+
+    * ``path:SUFFIX`` (40 entries) grants the part before the first colon;
+    * a **space-bearing** entry grants its first token when that token looks like a path.
+      28 live entries are shaped ``packages/store-agent/src/hooks/tools.py (price
+      arithmetic)``, and an earlier draft rejected every one of them outright — which meant
+      those 28 conferred zero ownership, and rewriting an owner's glob to ``docs/tests/**
+      (runbook tests)`` silenced this gate while changing nothing about who owns what;
+    * a genuinely prose entry ("ORCHESTRATION — measuring while the swarm runs") grants
+      nothing, which is right: a ticket that names no files owns no files;
+    * ``**`` is a catch-all and confers NO ownership, or every path in the repo would belong
+      to the scaffold ticket. The arming test caps how many tickets may hold it, because
+      widening an owner's scope to ``**`` is otherwise a way to make it own nothing.
+    """
+    patterns: list[str] = []
     for entry in scope or ():
         if not isinstance(entry, str):
             continue
         head = entry.split(":", 1)[0].strip()
-        if not head or " " in head:
+        if not head:
             continue
-        pattern = _normalise(head)
-        if not pattern or pattern == "**":
-            continue
+        if " " in head:
+            first = head.split()[0]
+            if "/" not in first and "." not in first:
+                continue
+            head = first
+        for pattern in expand_braces(_normalise(head)):
+            if pattern and pattern != "**":
+                patterns.append(pattern)
+    return patterns
+
+
+def scope_covers(path: str, scope: Any) -> bool:
+    """``swarmloop.py:_scope_match`` semantics, reduced to what this gate needs.
+
+    Case-folded on both sides; ``dir/**`` matches the bare directory as well as everything
+    under it, which is what makes a respelt ``pytest docs/tests -q`` still a violation.
+    """
+    target = _normalise(path)
+    for pattern in scope_patterns(scope):
         if pattern.endswith("/**") and (target == pattern[:-3] or target.startswith(pattern[:-2])):
             return True
         if target == pattern or fnmatch.fnmatch(target, pattern):
@@ -158,11 +207,21 @@ def _tickets() -> list[dict[str, Any]]:
 
 
 def graded_population(tickets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Open tickets carrying a real gate — the ones that still have a lane to be built by."""
+    """Every NOT-YET-CLOSED ticket carrying a real gate — the ones a lane still has to build.
+
+    ``status != "closed"``, not ``status == "open"``, and the difference is 8 of the 9
+    violations this sweep finds. Only 66 tickets say ``"open"``; **124 carry ``status:
+    null``** (findings mints omit the field) and 3 say ``"unknown"``. An open-only
+    population left all 127 of those invisible, and it also handed the gate a one-word
+    escape: setting the graded ticket's own status to anything but ``"open"`` removed it
+    from the sweep. Closed tickets are excluded because the answer-key inversion can only
+    bite a ticket that has not been built yet.
+    """
     return [
         ticket
         for ticket in tickets
-        if ticket.get("status") == "open" and not str(ticket.get("verify", "")).startswith("false")
+        if ticket.get("status") != "closed"
+        and not str(ticket.get("verify", "")).startswith("false")
     ]
 
 
@@ -188,17 +247,49 @@ def ownership_violations(
     return found
 
 
-def selector_violations(tickets: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """Clause B — a pytest command that names no path selects by ``-k`` and owns nothing.
+def runs_whole_suite(verify: str) -> bool:
+    """``verify.sh check``/``all`` or ``make verify`` — a gate that selects nothing in particular."""
+    for segment in re.split(r"\s*(?:&&|\|\||;)\s*", verify):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            words = segment.split()
+        if any(w.endswith("verify.sh") for w in words) and {"check", "all"} & set(words):
+            return True
+        if "make" in words and "verify" in words:
+            return True
+    return False
 
-    Without this, clause A is escaped by pure spelling: ``pytest -k runbook -q`` extracts
-    zero operands, so an ungrantable grader becomes invisible rather than repaired.
+
+def selector_violations(tickets: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """Clauses B and C — a gate that names no grader cannot be owned, or repaired, at all.
+
+    Clause A asks who owns the path a gate runs. Both of these exist because a gate can
+    stop naming a path, at which point clause A has nothing to look at and goes quiet while
+    the ownership defect is completely intact. Two spellings do that, and both were
+    measured taking this sweep from red to green with one field:
+
+    * **B** — ``pytest -k runbook -q``: a pytest segment that names no path selects by test
+      name, so nothing it runs can be attributed to a file anyone owns.
+    * **C** — ``make verify`` / ``./scripts/verify.sh check``: no pytest segment at all, so
+      clause B never even looks. A whole-suite run is not a gate for one ticket; ``red-check``
+      stamps it ``weak`` rather than ``red``, and ESC-015 established that a ``weak`` stamp
+      is not closable, so refusing it here asks for nothing the harness does not already
+      imply. At HEAD this fires on exactly two tickets besides the escape it closes.
     """
     found: list[tuple[str, str]] = []
     for ticket in graded_population(tickets):
-        for segment in pytest_segments(str(ticket["verify"])):
+        verify = str(ticket["verify"])
+        if runs_whole_suite(verify):
+            found.append(
+                (ticket["id"], f"`{verify}` runs the whole suite and grades nothing it owns")
+            )
+            continue
+        for segment in pytest_segments(verify):
             if not selection_operands(segment):
-                found.append((ticket["id"], " ".join(segment)))
+                found.append(
+                    (ticket["id"], f"`{' '.join(segment)}` names no path, so it selects by -k")
+                )
     return found
 
 
@@ -222,7 +313,27 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     assert len(tickets) >= 250, f"the graph parsed {len(tickets)} tickets; it holds ~292"
 
     population = graded_population(tickets)
-    assert len(population) >= 40, f"only {len(population)} open tickets carry a real gate"
+    # RATCHET, and it is the only thing that catches two one-field escapes clause A cannot
+    # see: downgrading the graded ticket's verify to the placeholder, and flipping its
+    # status to "closed". Either removes it from the population rather than repairing it,
+    # and either drops this count. 84 at HEAD (42 open, 39 null, 3 "unknown"); it only ever
+    # rises as gateless tickets acquire gates.
+    assert len(population) >= 84, (
+        f"{len(population)} not-yet-closed tickets carry a real gate; 84 did at HEAD. A "
+        "graded ticket's gate was downgraded to the placeholder, or its status was flipped "
+        "to closed, which removes it from this sweep rather than repairing it."
+    )
+
+    # A scope-degradation ceiling. Widening an owner's scope to `**` makes it own NOTHING
+    # here (a catch-all confers no ownership), so it silences clause A while making the
+    # real ownership problem worse. Exactly one ticket holds it at HEAD — T-000, the
+    # scaffold root — so a second one is someone escaping rather than scoping.
+    catchall = [t["id"] for t in tickets if list(t.get("scope") or ()) == ["**"]]
+    assert len(catchall) <= 1, (
+        f"{len(catchall)} tickets have a scope of exactly ['**'] ({catchall}); only the "
+        "scaffold root should, and a catch-all confers no ownership, so this is how an "
+        "owner stops owning the file it owns"
+    )
 
     operands = [
         op
@@ -256,6 +367,20 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     assert scope_covers("tickets.json", ["tickets.json:T-087"]), (
         "a `path:SUFFIX` entry grants its prefix"
     )
+    assert scope_covers("docs/tests/test_runbook.py", ["docs/{tests,demo}/**"]), (
+        "brace expansion is gone, so respelling an owner's glob as `docs/{tests}/**` — a "
+        "no-op for the harness that actually enforces scope — would silence clause A"
+    )
+    assert scope_covers(
+        "packages/store-agent/src/hooks/tools.py",
+        ["packages/store-agent/src/hooks/tools.py (price arithmetic)"],
+    ), (
+        "a space-bearing scope entry confers no ownership again; 28 live entries are shaped "
+        "that way, and rewriting a glob as `docs/tests/** (runbook tests)` would silence it"
+    )
+    assert runs_whole_suite("PROXYSHOP_WORKER=15 make verify")
+    assert runs_whole_suite("PROXYSHOP_WORKER=15 ./scripts/verify.sh check")
+    assert not runs_whole_suite("PROXYSHOP_WORKER=15 uv run python -m pytest docs/tests/x.py -q")
 
     # The allowlists, in both directions.
     assert is_shared_grader(".swarm-loop/acceptance/test_e8_proofs.py")
@@ -276,11 +401,14 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-262: T-087's verify runs `docs/tests/test_runbook.py`, a path its own scope "
+        "T-262: not-yet-closed tickets that are graded by a file they cannot write. T-087's "
+        "verify runs `docs/tests/test_runbook.py`, a path its own scope "
         "(`docs/demo/shopify-onboarding-extension.md`) forbids it to create and that sits "
-        "inside open T-085's `docs/tests/**` — so T-087 cannot write its own grader and "
-        "would inherit an unearned green from a test another lane wrote. Remove this "
-        "marker with the scope amendment"
+        "inside open T-085's `docs/tests/**`, so it would inherit an unearned green from a "
+        "test another lane wrote. Measured at HEAD: eleven, namely T-087, T-228, T-298, "
+        "T-299, T-300, T-301, T-304, T-313 and T-314 by ownership, plus T-130 and T-134 "
+        "whose gate is a whole-suite run that grades nothing they own. Remove this marker "
+        "with the scope amendment"
     ),
 )
 def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
@@ -320,6 +448,16 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
     as owning what is under it. ``proxyshop_support/tests/test_runbook_shape.py`` is not
     either: closed T-122's scope reaches it through ``proxyshop_support/**``.
 
+    THE REFUSAL OF THE EXISTENCE CLAUSE IS NOT HYPOTHETICAL, and the sweep found the proof
+    once its population was widened past ``status == "open"``. T-298, T-299, T-300 and
+    T-301 all run ``proxyshop_support/tests/test_artifact_copyset.py``, a file none of them
+    owns — and that file EXISTS, is collected, and its syntax tree already names all four
+    ids. Their answer key has already been written by a third party. An invariant keyed on
+    "the path does not exist yet" would report those four as clean precisely because the
+    inversion is complete, which is the whole argument for asking about ownership instead.
+    T-304, T-313 and T-314 name the same file and are worse off still: it does not mention
+    them at all, so their gates select nothing.
+
     ONE ESCAPE IS OPEN AND IS NAMED HERE RATHER THAN LEFT TO BE DISCOVERED: this asks
     "does someone else own it", not "may I create it". Repointing T-087 at an UNOWNED path
     outside its own scope — ``docs/test_runbook.py``, say — goes green with the original
@@ -328,6 +466,14 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
     nearly all of them legitimately pointing at shared graders, so it is not a trade worth
     making today. The next person to read this should not believe the invariant is
     stronger than it is.
+
+    Four one-field escapes WERE open in an earlier draft and are closed, each having been
+    measured taking this test fully green with T-087's defect intact: closing the graded
+    ticket, or downgrading its verify to the placeholder (both now caught by the
+    population ratchet, 84 -> 83); rewriting the owner's glob as ``docs/{tests}/**`` or as
+    ``docs/tests/** (runbook tests)``, neither of which changes ownership for the harness
+    that enforces it; and replacing the gate with ``make verify`` or ``verify.sh check``,
+    which left clause A nothing to look at.
     """
     tickets = _tickets()
     ownership = ownership_violations(tickets)

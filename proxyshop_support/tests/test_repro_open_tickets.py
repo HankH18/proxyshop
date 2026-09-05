@@ -84,8 +84,11 @@ _VALUE_FLAGS = frozenset(
     }
 )
 
+#: Words that are never path operands even without a leading dash.
+_NOT_OPERANDS = frozenset({"pytest", "npx", "vitest", "run", "make", "python", "uv", "exec", "-m"})
+
 #: Sentinel: this verify runs the WHOLE suite (``verify.sh check``/``all``, ``make verify``,
-#: or a bare ``pytest`` with no operand).
+#: or a bare ``pytest`` carrying neither a flag nor an operand).
 WHOLE_SUITE = "<whole-suite>"
 
 
@@ -211,18 +214,29 @@ def pytest_selection(verify: str, files: list[str]) -> set[str] | str | None:
             index += 1
         index += 1
         operands: list[str] = []
+        narrowed = False
         while index < len(words):
             word = words[index]
             if word in _VALUE_FLAGS:
+                narrowed = True
                 index += 2
                 continue
             if word.startswith("-") or "=" in word:
                 index += 1
                 continue
+            if word in _NOT_OPERANDS:
+                index += 1
+                continue
             operands.append(word)
             index += 1
         if not operands:
-            return WHOLE_SUITE
+            # A bare `pytest` with neither an operand nor a narrowing flag really is the
+            # whole suite. `pytest -k schema -q` is NOT, and conflating the two was a
+            # measured hole: it made a command that selects a handful of tests by name
+            # score as maximally coupled, which took the sweep green on a one-field edit.
+            if not narrowed:
+                return WHOLE_SUITE
+            continue
         for operand in operands:
             head = operand.split("::", 1)[0]
             prefix = head.rstrip("/") + "/"
@@ -248,28 +262,83 @@ def _scope_covers(rel: str, scope: Any) -> bool:
     return False
 
 
+def verify_operands(verify: str) -> list[str]:
+    """Every path-like operand the command names, whatever the runner.
+
+    Deliberately not restricted to pytest segments: a verify of ``npx vitest run
+    packages/contracts`` names a real selector and a verify of ``true`` does not, and the
+    sweep has to be able to say so. The ``(REPO_ROOT / head).exists()`` arm is why a bare
+    ``pytest proxyshop_support -q`` counts — a slash-free operand is invisible to a
+    "contains /" test, and that dropped operand is exactly the half of T-120's and T-109's
+    gates that selects their grader. Existence is safe HERE and only here: this asks
+    whether a selector was written at all, never who owns it, so it cannot reintroduce the
+    fail-open that a "does the path exist yet" ownership test would.
+    """
+    operands: list[str] = []
+    for segment in re.split(r"\s*(?:&&|\|\||;)\s*", verify):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            words = segment.split()
+        index = 0
+        while index < len(words):
+            word = words[index]
+            if word in _VALUE_FLAGS:
+                index += 2
+                continue
+            if word.startswith("-") or "=" in word or word in _NOT_OPERANDS:
+                index += 1
+                continue
+            head = word.split("::", 1)[0]
+            if "/" in head or (REPO_ROOT / head).exists():
+                operands.append(head)
+            index += 1
+    return operands
+
+
 def gate_violations(
     tickets: list[dict[str, Any]], files: list[str], graders: dict[str, set[str]]
 ) -> list[tuple[str, str, list[str]]]:
     """Every CLOSED ticket whose recorded gate cannot fail on the defect it graded.
 
-    The property, stated once: a ticket that was closed on a gate must have been closable
-    on it, so the command has to select at least one test COUPLED to the ticket — either a
-    test that names the ticket, or a test living inside the ticket's own scope, which is
-    the case for the many tickets whose fix and whose tests share a directory.
+    The property: a ticket closed on a gate must have been closable on it, so the command
+    has to name a selector at all, and that selector has to be COUPLED to the ticket.
 
-    ONE CLAUSE WAS DESIGNED IN AND THEN MEASURED OUT, and the reason belongs here because
-    it is the difference between this gate and a plausible wrong one. The obvious extra
-    rule is "a whole-suite verify (``verify.sh check``, ``make verify``) attributes nothing
-    and therefore counts as selecting nothing"; ``red-check`` even agrees in spirit, since
-    it stamps such a gate ``weak`` rather than ``red``. It is still the wrong rule HERE,
-    because T-160's defect is a gate that passes IDENTICALLY with and without the fix, and
-    a whole-suite run does not have that defect: measured on T-133, its grader
-    ``apps/buyer/svc/tests/test_profile_identity_leaks.py`` contributes 21 tests with none
-    deselected under ``-m "not needs_model and not slow"``, so if that grader goes red,
-    ``verify.sh check`` goes red. Adding the clause turns this sweep from 2 violators into
-    8 by flagging six tickets whose gates do discriminate. Weak attribution is a real
-    complaint and a different one; it is reported in this lane's notes, not gated here.
+    Three clauses, and every one of them is a hole an adversarial reviewer measured open
+    in an earlier draft of this sweep. Each was demonstrated by a ONE-FIELD edit to
+    ``tickets.json`` that took the sweep fully green with both violators' defects intact —
+    and the cheapest of them were verify-field edits, i.e. the very amendment class this
+    test's own failure message invites. They are recorded here because "the gate can be
+    silenced by the repair it recommends" is the exact shape of the defect T-160 is about.
+
+    * **Names no selector.** ``verify: "true"``, ``bash -c true``, ``npx vitest run`` with
+      no operand. The earlier draft dropped any ticket whose verify carried no pytest
+      token, so it left the population entirely; the placeholder ratchet could not see it
+      because ``"true"`` does not start with ``"false"``.
+    * **``-k``-only.** ``pytest -k schema -q`` names zero paths. The earlier draft
+      classified "no operands" as a whole-suite run and then expanded it to every collected
+      file, so a command selecting a handful of tests by name scored as maximally coupled.
+      Only a bare ``pytest`` with no flags AND no operands is a whole-suite run.
+    * **Whole-suite.** ``./scripts/verify.sh check`` and ``make verify`` are now violations
+      whenever the ticket has a dedicated grader, and this REVERSES a call I made earlier
+      on this same sweep. The argument for accepting them is real — measured on T-133, its
+      grader contributes 21 non-deselected tests, so if that grader reddens, ``verify.sh
+      check`` reddens. But accepting them means a narrow-and-wrong gate can be repaired
+      INTO a whole-suite gate and go green, which is verbatim T-111's recorded shape, and
+      it is a verify-field edit. ``red-check`` already stamps such a gate ``weak`` rather
+      than ``red``, and ESC-015 established that a ``weak`` stamp is not closable, so
+      demanding a repoint asks for nothing the harness does not already imply.
+
+    Coupling itself is asymmetric on purpose, and that closes a fourth hole: adding one
+    broad glob such as ``apps/**`` to a violator's ``scope`` used to cure it, because
+    own-scope locality was accepted as an alternative to naming a grader. Locality is now
+    only a FALLBACK for a ticket that has NO dedicated grader — where there is nothing
+    better to point at — so a ticket that has one must actually select it.
+
+    Two population escapes are deliberately NOT handled here, because they are the
+    arming test's job and it catches both: downgrading a verify to the placeholder, and
+    nulling a ticket's ``status``. Either takes the count of closed tickets carrying a real
+    gate from 57 to 48, and the ratchet's floor is 57.
 
     There is deliberately NO exemption field. An ``if ticket.get("bootstrap")`` escape
     hatch was written and removed: whatever its contract says elsewhere, inside this sweep
@@ -282,22 +351,52 @@ def gate_violations(
         verify = str(ticket.get("verify", ""))
         if verify.startswith("false"):
             continue
+        owned = graders.get(ticket["id"], set())
         selection = pytest_selection(verify, files)
-        if selection is None:
+        whole_suite = selection == WHOLE_SUITE
+        operands = verify_operands(verify)
+        if not operands and not whole_suite:
+            violations.append(
+                (
+                    ticket["id"],
+                    "names no selector at all, so it cannot fail for this ticket's reason",
+                    sorted(owned),
+                )
+            )
             continue
-        if selection == WHOLE_SUITE:
-            selection = set(files)
-        assert isinstance(selection, set)
-        if selection & graders.get(ticket["id"], set()):
+        if whole_suite:
+            if owned:
+                violations.append(
+                    (
+                        ticket["id"],
+                        "runs the WHOLE suite, so no failure is attributable to it even "
+                        "though it has a dedicated grader",
+                        sorted(owned),
+                    )
+                )
             continue
-        if any(_scope_covers(rel, ticket.get("scope")) for rel in selection):
+        selected = selection if isinstance(selection, set) else set()
+        if owned and selection is not None:
+            if selected & owned:
+                continue
+            violations.append(
+                (
+                    ticket["id"],
+                    f"selects {len(selected)} collected file(s), none of which grades it",
+                    sorted(owned),
+                )
+            )
+            continue
+        if any(_scope_covers(rel, ticket.get("scope")) for rel in selected) or any(
+            _scope_covers(operand, ticket.get("scope")) for operand in operands
+        ):
             continue
         violations.append(
             (
                 ticket["id"],
-                f"selects {len(selection)} collected file(s); none of them grades it and "
-                f"none is inside its own scope {ticket.get('scope')}",
-                sorted(graders.get(ticket["id"], set())),
+                "has no dedicated grader, and nothing it selects is inside its own scope "
+                f"{ticket.get('scope')}",
+                sorted(owned),
             )
         )
     return violations
@@ -348,8 +447,28 @@ def test_t160_the_gate_vacuity_sweep_is_armed() -> None:
     graders = graders_by_ticket(files)
     assert len(graders) >= 120, f"{len(graders)} tickets have a grader; 157 at HEAD"
 
+    graded = [t for t in closed_gated if t["id"] in graders_by_ticket(files)]
+    assert len(graded) >= 40, (
+        f"only {len(graded)} of {len(closed_gated)} closed gated tickets have a dedicated "
+        "grader (48 at HEAD); the sweep's main clause would fall through to the own-scope "
+        "fallback for nearly everything"
+    )
     population = [t for t in closed_gated if pytest_selection(str(t["verify"]), files) is not None]
     assert len(population) >= 40, f"the sweep would iterate {len(population)} tickets; 54 at HEAD"
+    # The operand extractor has to see selectors that carry no slash, or T-109 and T-120
+    # look like they name nothing and the "names no selector" clause fires on two gates
+    # that are fine.
+    assert verify_operands("PROXYSHOP_WORKER=15 uv run python -m pytest proxyshop_support -q") == [
+        "proxyshop_support"
+    ], "a slash-free operand naming a real directory is invisible to the operand extractor"
+    assert verify_operands("PROXYSHOP_WORKER=15 uv run python -m pytest -k schema -q") == [], (
+        "a `-k`-only command now reports an operand, so the clause that catches it is dead"
+    )
+    assert pytest_selection("uv run python -m pytest -k schema -q", files) == set(), (
+        "a `-k`-only command is being resolved as a whole-suite run again, which scores it "
+        "as maximally coupled — the measured one-field escape"
+    )
+    assert pytest_selection("PROXYSHOP_WORKER=15 ./scripts/verify.sh check", files) == WHOLE_SUITE
     resolved = [
         t
         for t in population
@@ -383,11 +502,12 @@ def test_t160_the_gate_vacuity_sweep_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-160: closed tickets whose recorded `verify` selects no test coupled to them — "
-        "neither a test that names the ticket nor a test inside the ticket's own scope — so "
-        "the command that closed them passes identically with and without the defect it was "
-        "supposed to grade. Measured at HEAD: T-112 and T-123. Remove this marker with the "
-        "fix"
+        "T-160: closed tickets whose recorded `verify` cannot fail for their own reason — "
+        "it names no selector, or selects no test that grades the ticket, or runs the whole "
+        "suite so that no failure is attributable to it. Measured at HEAD: nine, namely "
+        "T-000, T-010, T-111, T-112, T-118, T-122, T-123, T-129 and T-133. Each is repaired "
+        "by repointing its verify at one of the tests named beside it in the failure "
+        "output. Remove this marker with the fix"
     ),
 )
 def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
@@ -412,19 +532,24 @@ def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
       bootstrap defect returns that gate goes red. Weak attribution is a real complaint and
       a different one from the defect T-160 states.
 
-    What the sweep finds instead is T-123 plus **T-112, a fourth instance the ticket never
-    named**: its verify runs ``apps/trust/tests/test_schema_grants.py``, whose role-password
-    block grades T-110, whose two static tests read only ``db/init/00-roles.sql`` and pass
-    with T-112's defect live, and whose three docker tests inject
-    ``PROXYSHOP_ROLE_PASSWORD`` into a private container without ever invoking
+    What the sweep finds instead is T-123 plus **eight instances the ticket never named**.
+    The clearest is T-112: its verify runs ``apps/trust/tests/test_schema_grants.py``,
+    whose role-password block grades T-110, whose two static tests read only
+    ``db/init/00-roles.sql`` and pass with T-112's defect live, and whose three docker tests
+    inject ``PROXYSHOP_ROLE_PASSWORD`` into a private container without ever invoking
     ``docker compose`` — so T-112's first acceptance, that compose forwards the variable, is
-    structurally ungradeable there. Every real grader for it is in a file its verify does
-    not select.
+    structurally ungradeable there. Every real grader for it sits in a file its verify does
+    not select. T-010 is the same shape: its verify runs ``packages/contracts``, its own
+    scope, while the two tests written to grade it are in ``apps/buyer`` and ``e2e``. The
+    remaining six (T-000, T-111, T-118, T-122, T-129, T-133) close on ``verify.sh check`` or
+    ``make verify`` while having a dedicated grader to point at — the gates ``red-check``
+    already stamps ``weak``.
 
-    So the instance-versus-class proof is this, measured on an in-memory copy of the graph:
-    repointing exactly the three tickets T-160 names leaves **T-112 still violating**. The
-    property outlives the instance, which is the whole reason it is written as a sweep over
-    all 54 closed gated tickets rather than as three assertions.
+    So the instance-versus-class proof, measured on an in-memory copy of the graph:
+    repointing the two of the three tickets T-160 names that are actually violators leaves
+    **seven still violating** — T-000, T-010, T-112, T-118, T-122, T-129, T-133. Repointing
+    all nine takes it to zero. The property outlives the instance, which is the whole reason
+    this is a sweep over all 57 closed gated tickets rather than three assertions.
     """
     files = _run_collection()
     violations = gate_violations(_tickets(), files, graders_by_ticket(files))
