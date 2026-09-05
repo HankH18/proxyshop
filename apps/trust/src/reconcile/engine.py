@@ -365,9 +365,9 @@ def discount_codes_of(event: Any) -> tuple[str, ...]:
 
 
 #: The key space discount codes live in, kept apart from tokens and order references. The
-#: separator is the same control character :data:`_SCOPE_SEPARATOR` uses and for the same
-#: reason: it cannot occur inside a code, a token or an order reference, so no value in one
-#: space can be spelled to collide with a value in the other.
+#: separator is the same control character :data:`_SCOPE_SEPARATOR` uses, and what makes it a
+#: separator rather than a convention is :func:`_key_component`, which escapes it out of every
+#: value first — so no value in one space can be *spelled* to collide with a value in another.
 _CODE_NAMESPACE = "discount_code"
 
 
