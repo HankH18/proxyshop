@@ -101,6 +101,39 @@ it unset gives the documented dev default on both the seed side and the connect 
 it before the pgdata volume is first created changes both together — the initdb hook runs
 once, so setting it later changes nothing.
 
+### A `.env` in the worktree re-points `make verify`, not just compose
+
+Worth knowing before you relocate anything in it. `scripts/verify.sh:19-24` sources `.env`
+**itself**, on every run, with `set -a`:
+
+```sh
+if [ -f "$ROOT/.env" ]; then
+  _keep_worker="${PROXYSHOP_WORKER:-}"
+  set -a; . "$ROOT/.env"; set +a
+  if [ -n "$_keep_worker" ]; then export PROXYSHOP_WORKER="$_keep_worker"; fi
+  unset _keep_worker
+fi
+```
+
+Every assignment in the file is exported into the pytest process, and only `PROXYSHOP_WORKER`
+is shielded. So a `.env` carrying a relocated port block silently points the whole suite at a
+stack that may not be there — and a clean caller shell does not protect you, because the
+script does the sourcing.
+
+Measured, on this branch, by running the gate with a relocated `.env` present:
+
+```
+2 failed, 5600 passed, 133 skipped, 1 deselected, 57 xfailed in 358.39s
+  postgres localhost:15432 · redis localhost:16379 · neo4j-bolt localhost:17687
+```
+
+against `5735 passed, 1 deselected, 57 xfailed` and **0 skipped** with no `.env` in the tree.
+Same population — 5600 + 133 + 2 = 5735 — with 135 tests diverted onto dead endpoints. The
+133 skips are the tell: a datastore-marked test that skips looks exactly like one that passed.
+
+If you relocate ports to run a second stack, remove `.env` before running `make verify`, or
+expect the gate to grade a different cluster than you think.
+
 ## Readiness, and why the health signal can be trusted now
 
 Each service's healthcheck runs `proxyshop_support.service_launch ready`, which keeps the
