@@ -374,7 +374,7 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
     checkout root and its ``.pkgroot``. ``site`` processes ``.pth`` files at interpreter
     startup, so those two directories land on ``sys.path`` *regardless of* ``PYTHONPATH``
     and regardless of ``cwd`` — the probe resolved ``claim_verification`` out of the LIVE
-    CHECKOUT and printed ``RESOLVED`` while the image would have raised. ``-S`` disables
+    CHECKOUT and reported ``resolved`` while the image would have raised. ``-S`` disables
     ``site`` and therefore ``.pth`` handling; the verifier is stdlib-only (``hashlib``,
     ``json``, ``math``, ``re``, ``datetime``, ``types``, ``typing``, ``collections``), so
     losing ``site-packages`` costs the probe nothing it needs. ``-E`` is NOT usable here —
@@ -389,6 +389,15 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
     ../packages/verification/src``, so closing T-193 takes a ``COPY`` *and* a matching
     ``ln -s``. Against a hardcoded pair the fixed Dockerfile still measured FAILS — the gate
     could not see its own fix. Reading the pairs off the ``RUN`` makes the witness fire.
+
+    **One nonce-tagged verdict, not tokens in stdout.** The probe used to report through
+    three unanchored readers — ``SYSPATH ``/``SHIM `` lines read FIRST-match, and
+    ``"RESOLVED" in result.stdout`` — on a channel every shipped module can write at import
+    time. All three were forged, measured, by module-scope statements in
+    ``apps/trust/src/verification/__init__.py``. It now emits ONE line, tagged with a
+    per-run nonce that exists only inside the probe's own source, carrying a JSON report
+    that this gate parses and asserts fields of. See the comment above ``nonce`` for what
+    each forgery did and what is left reachable.
     """
     dockerfile = (REPO_ROOT / "apps" / "trust" / "Dockerfile").read_text(encoding="utf-8")
     copies = re.findall(r"^COPY\s+(\S+)\s+(\S+)\s*$", dockerfile, flags=re.MULTILINE)
@@ -422,17 +431,80 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
     for target, link in links:
         spot = app / link.removeprefix("/app/")
         spot.parent.mkdir(parents=True, exist_ok=True)
+        # `target` is read VERBATIM off the Dockerfile and `symlink_to` will accept an
+        # absolute host path without complaint. Unchecked, such a link resolves on THIS
+        # host: the gate would import happily out of the live checkout while the real image
+        # got a link to a path that does not exist in it. Refuse it here, where the message
+        # can name the offending Dockerfile line, rather than let it reach the import and
+        # be caught — or not — further down. This repo's Dockerfile has no such link; the
+        # check is a sensitivity guard, and it reproduces against one that does.
+        landing = pathlib.Path(os.path.normpath(spot.parent.resolve() / target))
+        assert app.resolve() == landing or app.resolve() in landing.parents, (
+            f"apps/trust/Dockerfile links {link} -> {target}, which lands at {landing}, "
+            f"outside the container-shaped tree at {app.resolve()}. In the real image that "
+            f"link dangles; here it would resolve against this host and hand the gate an "
+            f"import the image cannot make. An `ln -s` target under /app has to be relative "
+            f"and has to stay inside /app."
+        )
         if not spot.is_symlink() and not spot.exists():
             spot.symlink_to(target)
 
+    # A per-run token, minted HERE and interpolated into the probe's SOURCE. It is what
+    # makes this gate's verdict unforgeable by anything a shipped module can print, and it
+    # replaced three separate readers that were forgeable — all three measured, on this
+    # gate, against this repo:
+    #
+    #   * ``"RESOLVED" in result.stdout`` was an UNANCHORED substring test on a channel
+    #     shipped code writes. A module-scope ``print("RESOLVED")`` in
+    #     ``apps/trust/src/verification/__init__.py`` made it read True with the verifier
+    #     genuinely unresolvable. Only the ``returncode == 0`` conjunct held the gate red —
+    #     and a module-scope ``sys.exit(0)`` in the same window forged THAT, at which point
+    #     all four guards read green over an image that cannot verify a claim at all.
+    #   * the ``SHIM ``/``SYSPATH `` readers took the FIRST matching line. With the probe
+    #     genuinely importing ``trust.verification`` from OUTSIDE the container-shaped tree
+    #     (reproduced by pointing the Dockerfile's ``ln -s`` at an absolute host path, which
+    #     the materialiser below recreates verbatim), the gate correctly reported
+    #     ``1 failed``; one module-scope ``print("SHIM <a path inside the temp tree>")``
+    #     turned that same broken state into ``1 passed``, because the real
+    #     ``shim.__file__`` sat one line BELOW the decoy and was never read.
+    #
+    # The nonce is NOT passed through the environment, where a module-scope ``os.environ``
+    # read would find it, and ``python -S -c <code>`` hands the child no copy of its own
+    # source: measured, ``sys.argv == ["-c"]``, ``__main__.__file__`` is unset,
+    # ``linecache.getlines("<string>")`` is ``[]`` and ``inspect.getsource(__main__)``
+    # raises. It is NOT unreachable, though, and the honest statement of the bound matters
+    # more than a comfortable one: a module can walk ``sys._getframe()`` to the ``<string>``
+    # frame and read the literal straight out of ``f_code.co_consts`` — measured, it comes
+    # back as ``'\nDEADBEEFCAFE {}\n'``.
+    #
+    # A scraped nonce still does not buy a green gate, and that is what the exactly-one rule
+    # below is for. A module that prints a forged verdict produces TWO nonce-tagged lines —
+    # its own and the probe's — and two is refused. To be believed a forger has to SUPPRESS
+    # the probe's own write, which takes ``os._exit(0)``: not a print, and not something any
+    # in-band channel survives. A verdict file and an exit status are forgeable by the same
+    # statement, so moving the channel would buy nothing. What this gate claims is therefore
+    # exact: nothing a shipped module can PRINT can make it read green.
+    nonce = os.urandom(16).hex()
+
     probe = textwrap.dedent(
-        """
-        import json, sys
-        print("SYSPATH " + json.dumps(sys.path))
-        import trust.verification as shim
-        print("SHIM " + shim.__file__)
-        shim.verify
-        print("RESOLVED")
+        f"""
+        import json, sys, traceback
+        report = {{"syspath": list(sys.path), "shim": None, "resolved": False, "error": None}}
+        try:
+            import trust.verification as shim
+            report["shim"] = shim.__file__
+            shim.verify
+            report["resolved"] = True
+        except BaseException:
+            # BaseException, not Exception: a module-scope `sys.exit()` anywhere under this
+            # import becomes a REPORTED error here instead of a silent exit 0.
+            report["error"] = traceback.format_exc()
+        # The leading newline is load-bearing: a shipped module that wrote a partial line
+        # with no trailing newline would otherwise glue its text onto the verdict's prefix
+        # and cost this gate a FALSE RED.
+        sys.stdout.write("\\n{nonce} " + json.dumps(report) + "\\n")
+        sys.stdout.flush()
+        raise SystemExit(0 if report["resolved"] else 1)
         """
     )
     env = {
@@ -450,12 +522,23 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
         timeout=120,
     )
 
-    def _tagged(tag: str) -> str | None:
-        prefix = f"{tag} "
-        return next(
-            (line[len(prefix) :] for line in result.stdout.splitlines() if line.startswith(prefix)),
-            None,
-        )
+    tagged = [
+        line[len(nonce) + 1 :]
+        for line in result.stdout.splitlines()
+        if line.startswith(f"{nonce} ")
+    ]
+    assert len(tagged) == 1, (
+        f"the container-shaped probe emitted {len(tagged)} nonce-tagged verdict lines, not "
+        f"one, so this gate has nothing it is entitled to grade. ZERO does not mean 'clean' "
+        f"— it means the probe never reached its own final write, which is where a "
+        f"module-scope `os._exit` or a hard crash lands; MORE THAN ONE means something "
+        f"other than the probe produced a line carrying this run's nonce, and a collision "
+        f"is refused here rather than silently resolved by position.\n"
+        f"exit={result.returncode}\n"
+        f"stdout:\n{result.stdout.strip()[-1200:]}\n"
+        f"stderr:\n{result.stderr.strip()[-1200:]}"
+    )
+    verdict: dict[str, Any] = json.loads(tagged[0])
 
     def _inside_checkout(entry: str) -> bool:
         if not entry:
@@ -463,13 +546,10 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
         resolved = pathlib.Path(entry).resolve()
         return resolved == REPO_ROOT or REPO_ROOT in resolved.parents
 
-    reported_path = _tagged("SYSPATH")
-    assert reported_path is not None, (
-        "the container-shaped probe never reached its first statement, so this gate graded "
-        f"nothing at all:\n{result.stderr.strip()[-1200:]}"
-    )
-
-    leaked = [entry for entry in json.loads(reported_path) if _inside_checkout(entry)]
+    # `syspath` is snapshotted by the probe BEFORE it imports anything shipped, so no
+    # shipped module runs early enough to influence it — and, unlike the `SYSPATH ` line it
+    # replaced, there is no separate line here for a stray print to displace.
+    leaked = [entry for entry in verdict["syspath"] if _inside_checkout(entry)]
     assert leaked == [], (
         f"the probe subprocess can see the live checkout on sys.path ({leaked}), so it can "
         f"import the claim verifier from the repo instead of from the container-shaped tree "
@@ -478,20 +558,23 @@ def test_the_trust_image_copy_set_can_resolve_the_claim_verifier(tmp_path: Any) 
         f"regardless of PYTHONPATH; `-S` is what keeps them off."
     )
 
-    shim_file = _tagged("SHIM")
+    shim_file = verdict["shim"]
     assert shim_file is not None, (
         "the container-shaped tree cannot import `trust.verification` at all, so this gate "
         "is going red BEFORE the verifier lookup it exists to grade — fix the tree, not the "
-        f"COPY set:\n{result.stderr.strip()[-1200:]}"
+        f"COPY set:\n{verdict['error']}\n{result.stderr.strip()[-1200:]}"
     )
     assert app.resolve() in pathlib.Path(shim_file).resolve().parents, (
         f"the probe imported trust.verification from {shim_file}, which is outside the "
         f"container-shaped tree at {app.resolve()} — it is grading the live checkout"
     )
 
-    assert result.returncode == 0 and "RESOLVED" in result.stdout, (
-        "the trust image's COPY set cannot resolve `trust.verification.verify`:\n"
-        f"{result.stderr.strip()[-1200:]}\n"
+    # `returncode == 0` stays, and stays FIRST: it is the conjunct that a stray print cannot
+    # forge, and the probe derives it from `resolved` rather than from having merely run.
+    assert result.returncode == 0 and verdict["resolved"] is True, (
+        "the trust image's COPY set cannot resolve `trust.verification.verify` "
+        f"(exit={result.returncode}, resolved={verdict['resolved']!r}):\n"
+        f"{verdict['error']}\n{result.stderr.strip()[-1200:]}\n"
         "T-065's engine, whose golden set passes 36/36 in the repo, is absent from the "
         "artifact that deploys. Closing this takes BOTH halves, because the flat layout "
         "needs both (R1b/D42): `COPY packages/verification/{__init__.py,src/}` AND "
