@@ -53,8 +53,13 @@ GATE_PLACEHOLDER = "false  # NO GATE YET"
 #: against this repo.
 VERIFY_SH_MARKERS = "not needs_model and not slow"
 
-#: ``T-123`` and friends.
-_TICKET_ID = re.compile(r"T-\d{3}")
+#: ``T-123`` and friends. The word boundaries are not decoration and match the harness's
+#: own ``\bT-\d+\b``: without them ``T-1234`` and ``REPORT-1234`` both register as T-123, so
+#: an unrelated four-digit id anywhere in any collected test file forges a grader.
+_TICKET_ID = re.compile(r"\bT-\d{3}\b")
+
+#: This module's own repo-relative path. It is excluded from the grader map below.
+_SELF = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
 
 #: pytest flags that consume the NEXT word. Without this table ``-k t160 packages/llm``
 #: would read ``t160`` as an operand, and ``-m docker apps/trust`` would read ``docker`` as
@@ -155,9 +160,21 @@ def graders_by_ticket(files: list[str]) -> dict[str, set[str]]:
     bootstrap.sh`` already contains the string "T-111" and is an operand of T-111's own
     verify, so a grader map built from "every committed file" would hand T-111 a free pass.
     A shell script is not collected and does not parse, so it cannot be a grader here.
+
+    THIS MODULE IS EXCLUDED FROM ITS OWN GRADER MAP, and the reason is the whole reason a
+    gate about gates is delicate. A test about the ticket graph names tickets in order to
+    DESCRIBE them; the AST rule cannot tell that from naming them in order to test them.
+    Left in, this file counted as a grader for nine closed tickets it does not exercise —
+    T-000, T-109, T-111, T-112, T-118, T-122, T-123, T-129 and T-133 — so the sweep's own
+    failure message recommended repointing T-112's verify at the sweep, and doing so turned
+    the sweep green. The violator set is unchanged by the exclusion (measured both ways),
+    because every one of those tickets has a real grader elsewhere; what changes is that
+    the gate can no longer be satisfied by pointing a ticket at the gate.
     """
     graders: dict[str, set[str]] = {}
     for rel in files:
+        if rel == _SELF:
+            continue
         source = (REPO_ROOT / rel).read_text(encoding="utf-8", errors="replace")
         for ticket_id in ticket_ids_in_ast(source):
             graders.setdefault(ticket_id, set()).add(rel)
@@ -513,6 +530,25 @@ def _run_child(path: Path, lock: Path, worker: int) -> int:
     return completed.returncode
 
 
+def _reap(holder: subprocess.Popen[bytes]) -> None:
+    """Make sure the lock holder is gone, and never let its teardown mask a real result.
+
+    Both parts were measured problems in an earlier draft. A bare ``wait(timeout=30)`` in a
+    ``finally`` raises ``TimeoutExpired`` if SIGTERM is ignored, which REPLACES whatever the
+    test was about to report with a teardown error — and leaks a process still holding the
+    scratch flock, so every later case in the sweep would see contention it did not create.
+    """
+    holder.terminate()
+    try:
+        holder.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        holder.kill()
+        try:
+            holder.wait(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - the OS has bigger problems
+            pass
+
+
 def _draw_shapes(count: int) -> list[dict[str, Any]]:
     """``count`` case shapes: pinned adversarial ones first, then SystemRandom draws.
 
@@ -596,8 +632,7 @@ def _measure(shape: dict[str, Any], workdir: Path, scratch: Path) -> dict[str, i
             time.sleep(0.02)
         contention_rc = _run_child(module, lock, shape["worker"]) if held else -1
     finally:
-        holder.terminate()
-        holder.wait(timeout=30)
+        _reap(holder)
 
     if shape["failing_at"] is not None:
         module.write_text(_child_source(shape), encoding="utf-8")
@@ -726,13 +761,22 @@ def test_t210_lock_contention_and_a_product_defect_do_not_share_an_exit_status()
     tell a machine condition from a defect without a human. The cure for the zeros is
     scheduler-level, which the ticket says itself and which no lane can reach.
     """
-    # A UNIQUE directory per run, not `.t210-<pid>`: this test is called more than once in
-    # a process by its own control harness, and two runs sharing a name would have the
-    # first one's teardown delete the second one's module out from under it. The leading
-    # dot keeps it out of `norecursedirs = [".*"]`, so the repo's own collection can never
-    # pick these modules up even if a kill leaves one behind; stale ones are swept here.
-    for stale in REPO_ROOT.glob(".t210-*"):
-        shutil.rmtree(stale, ignore_errors=True)
+    # A UNIQUE directory per run, and DELIBERATELY NO SWEEP OF OLD ONES. Both halves of
+    # that were mistakes I made in turn and had measured back at me.
+    #
+    # The name has to be unique because this test's own control harness calls it four times
+    # in ONE process, so a `.t210-<pid>` name had every run sharing a directory and one
+    # run's teardown deleting another's module.
+    #
+    # Then the stale-sweep that came with it — `for stale in REPO_ROOT.glob(".t210-*")` —
+    # was worse, and it is worth spelling out because it is the exact failure this file is
+    # about. It had no age check and no ownership check, so a second run's PROLOGUE deleted
+    # a concurrent first run's in-flight directory and its live child module; the first run
+    # then raised FileNotFoundError. Under `--runxfail` that is a red for the wrong reason,
+    # and under a normal run `xfail(strict=True)` reports ANY exception as `xfailed`, so the
+    # collision would have been completely invisible in `make verify`. Leftovers need no
+    # sweeping anyway: the leading dot keeps them outside `norecursedirs = [".*"]` and they
+    # are not under `testpaths`, so the repo's own collection can never pick them up.
     workdir = Path(tempfile.mkdtemp(prefix=".t210-", dir=REPO_ROOT))
     try:
         with tempfile.TemporaryDirectory() as raw:
