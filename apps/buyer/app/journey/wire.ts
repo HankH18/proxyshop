@@ -51,10 +51,88 @@ export const RENDER_PATH = '/buyer/shortlist/render'
 export const DISCOUNT_PARAM = 'discount'
 
 /**
- * The exchange's `fallback_reason` for a store whose agent did not answer with a usable bid.
- * Recognised so the screen can explain it in a sentence — never re-derived, never invented.
+ * The exchange's `fallback_reason` vocabulary — the FAMILIES, not the whole strings.
+ *
+ * `exchange.auction.collect.refusal_reason` writes every reason either as one of these words
+ * on its own or as `family:detail`, and `fallback_reason_family` reads one back by splitting
+ * on the FIRST colon. This app copies the families rather than whole values because the detail
+ * half is open-ended by construction: on a refusal it is the HTTP status the store's agent
+ * answered with, and on a decline it is a reason header the store itself chose. A screen that
+ * matched whole strings would recognise `store_refused:422` and then fail to recognise
+ * `store_refused:503`, which is the same store behaviour.
+ *
+ * Copied from `apps/exchange/src/auction/collect.py::FALLBACK_REASONS`, in its order. A copy
+ * and not an import — this app does not import the exchange's package — so it can go stale,
+ * and `WhyEmpty` therefore has an explicit sentence for a family it does not recognise rather
+ * than assuming this list is complete.
+ */
+export const FALLBACK_REASON_FAMILIES = [
+  'tier_0_no_agent',
+  'no_response',
+  'response_after_deadline',
+  'response_carried_no_bid',
+  'response_not_stamped',
+  'arrival_stamp_unparseable',
+  'bid_price_unreconcilable',
+  'store_declined',
+  'store_refused',
+] as const
+
+/** One word out of {@link FALLBACK_REASON_FAMILIES}. */
+export type FallbackReasonFamily = (typeof FALLBACK_REASON_FAMILIES)[number]
+
+/**
+ * Nothing came back from that store's agent at all.
+ *
+ * It used to cover three different facts, because the solicitor mapped every non-200 answer to
+ * `None`: a store that declined, a store that refused the solicitation, and a store that was
+ * switched off were one indistinguishable entry. It now means only the last of those, and the
+ * other two have words of their own below.
  */
 export const NO_RESPONSE_REASON = 'no_response'
+
+/**
+ * The store ANSWERED and its answer was no — the store-agent contract's published `204`. The
+ * detail, when there is one, is the reason the store stated in `x-proxyshop-decline-reason`.
+ */
+export const STORE_DECLINED_REASON = 'store_declined'
+
+/**
+ * The store answered something the exchange could not read a bid out of. The detail is the
+ * HTTP status, and a `422` there is the exchange's own fault rather than the store's.
+ */
+export const STORE_REFUSED_REASON = 'store_refused'
+
+/**
+ * What the exchange writes in place of a detail that was empty, longer than its 64-character
+ * bound, or spelled outside its allowlist. It says "there was a detail and it could not be
+ * rendered" — never "there was no detail".
+ */
+export const UNDISCLOSED_REFUSAL_DETAIL = 'undisclosed'
+
+/**
+ * The family half of a `fallback_reason`, or `''` when there is nothing to read.
+ *
+ * The mirror of `exchange.auction.collect.fallback_reason_family`: split on the FIRST colon
+ * and keep the left. A reason carrying no colon is all family.
+ */
+export function fallbackReasonFamily(reason: string | null | undefined): string {
+  if (typeof reason !== 'string') return ''
+  return (reason.split(':', 1)[0] ?? '').trim()
+}
+
+/**
+ * The detail half of a `fallback_reason`, or `''` when it carries none.
+ *
+ * `''` is returned both for "no colon at all" and for "a colon with nothing after it", which
+ * are the same fact to a reader: the exchange named no detail. `refusal_reason` never writes
+ * the second — it returns the bare family instead — so that branch is defensive, not observed.
+ */
+export function fallbackReasonDetail(reason: string | null | undefined): string {
+  if (typeof reason !== 'string') return ''
+  const at = reason.indexOf(':')
+  return at < 0 ? '' : reason.slice(at + 1).trim()
+}
 
 /** R5's rotating handle. The only thing about the buyer a store is ever told. */
 export const PSEUDONYM_PREFIX = 'psn-'
@@ -62,11 +140,26 @@ export const PSEUDONYM_PREFIX = 'psn-'
 /**
  * The pseudonymous buyer profile the confirm route forwards to the exchange.
  *
- * `contracts.BidRequest` makes `profile` REQUIRED, so this is not decoration. Measured
- * against the running stack: confirming without one has the exchange coerce it to `{}`, the
- * store agent answer HTTP 422, and the exchange report that as
- * `fallback: true, fallback_reason: "no_response"` for every store — a silently empty
- * shortlist whose stated reason is true of the wire and false of the market.
+ * **What this comment used to say, so a reader can see what moved underneath it.** It stated
+ * as measured fact that `contracts.BidRequest` makes `profile` REQUIRED and that "confirming
+ * without one has the exchange coerce it to `{}`, the store agent answer HTTP 422, and the
+ * exchange report that as `fallback: true, fallback_reason: "no_response"` for every store".
+ * Both halves of that are now false:
+ *
+ * 1. **The exchange no longer sends `{}`.** `exchange.composition.solicitation_profile` mints
+ *    an opaque per-auction pseudonym — `anon-{auction_id}` — for a confirmation that named no
+ *    profile, and leaves the buckets exactly as the caller stated them, empty when there were
+ *    none. The solicitation that goes out is a valid `BidRequest`, so the stores answer it.
+ * 2. **A refusal is reported as itself.** When a store really does answer 422 —
+ *    `ProfileBuckets` is `extra="forbid"`, so a profile with an undeclared bucket key still
+ *    earns one — `exchange.auction.collect` names it `store_refused:422`, and a store that
+ *    declines with the contract's `204` reads `store_declined:<the reason it stated>`.
+ *    `no_response` has gone back to meaning the one thing it says: nothing arrived.
+ *
+ * So this field is no longer what makes the request legal, and the page is no longer choosing
+ * between sending it and getting an empty shortlist blamed on the market. It is here because
+ * R5's handle is the buyer's to state: `anon-{auction_id}` is a name the exchange gives this
+ * shopper, and `mintPseudonym` is one the shopper arrives with.
  */
 export interface BuyerProfile {
   readonly pseudonym: string
@@ -74,13 +167,21 @@ export interface BuyerProfile {
   readonly buckets: Readonly<Record<string, unknown>>
 }
 
-/** Thrown when a confirmation is about to go out with no usable pseudonym behind it. */
+/**
+ * Thrown when a confirmation is about to go out with no usable pseudonym behind it.
+ *
+ * No longer a prediction about the market. `solicitation_profile` replaces a blank or absent
+ * pseudonym with its own `anon-{auction_id}`, so sending one would not empty the shortlist —
+ * it would quietly swap the handle this page believes it is rotating for one the exchange
+ * chose. That is the thing worth refusing: a page that thinks it named the buyer and did not.
+ */
 export class MissingProfileError extends Error {
   constructor(readonly reason: string) {
     super(
-      `the exchange requires a pseudonymous buyer profile before any store is solicited: ` +
-        `${reason}. Sending none makes every store answer 422 and the whole shortlist come ` +
-        `back empty for a reason that is not the market's.`,
+      `this page will not open an auction without a pseudonymous handle of its own: ` +
+        `${reason}. The exchange would mint an "anon-{auction_id}" one in its place, so the ` +
+        `buyer would be named by the exchange rather than naming itself, and this page would ` +
+        `be showing a rotating pseudonym it never actually sent.`,
     )
     this.name = 'MissingProfileError'
   }

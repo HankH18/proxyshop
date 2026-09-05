@@ -41,7 +41,9 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { CLARIFY_PATH, CONFIRM_PATH, type Intent } from '../intent/intent'
 import { ACCEPT_PATH } from '../shortlist/shortlist'
 import { Journey } from './Journey'
+import { UNRECOGNISED_GLOSS, explainFallbackReason, glossedReasons } from './WhyEmpty'
 import {
+  FALLBACK_REASON_FAMILIES,
   HttpFailure,
   MalformedResponseError,
   MissingProfileError,
@@ -55,6 +57,8 @@ import {
   discountCodeFrom,
   entryForSlot,
   explain,
+  fallbackReasonDetail,
+  fallbackReasonFamily,
   instrumentFetcher,
   loadAuction,
   mintPseudonym,
@@ -62,6 +66,7 @@ import {
   rankedForSlot,
   renderShortlist,
   storeIdFromBidRef,
+  type AuctionEntry,
   type Fetcher,
 } from './wire'
 
@@ -202,11 +207,11 @@ const DENIED_VARIANT = [
   },
 ]
 
-// CONSTRUCTED: a store whose agent did not answer with a usable bid. `no_response` is the one
-// `fallback_reason` `wire.ts` recognises by name, and the exchange then represents the store
-// at the list price its roster row carried. Paired with the exclusion reason a fallback
-// really produces — `claims: []` makes every hard constraint undecidable, measured by running
-// `hard_constraint_reasons([], [material eq merino-wool])`.
+// CONSTRUCTED: a store whose agent did not answer at all. `no_response` is the exchange's
+// word for exactly that — one of the families `wire.ts` carries — and the exchange then
+// represents the store at the list price its roster row carried. Paired with the exclusion
+// reason a fallback really produces — `claims: []` makes every hard constraint undecidable,
+// measured by running `hard_constraint_reasons([], [material eq merino-wool])`.
 const SILENT_ENTRY = {
   store_id: 'demo-alpine-supply',
   tier: 1,
@@ -597,8 +602,10 @@ describe('the wire the journey owns', () => {
     expect(created.auction_id).toBe(AUCTION_ID)
     expect(calls[0]?.path).toBe(CONFIRM_PATH)
     const body = bodyOf(calls[0]?.init) as Record<string, unknown>
-    // `contracts.BidRequest` makes `profile` required; without it every store agent 422s and
-    // the exchange reports `no_response` for all of them.
+    // The page states R5's handle itself rather than letting the exchange name the shopper:
+    // `solicitation_profile` would mint `anon-{auction_id}` in its place. It used to be here
+    // because a missing profile made the exchange send `{}` and every store answer 422; that
+    // is fixed on the exchange's side, and the field stays for the handle.
     expect(body.profile).toEqual({ pseudonym: 'psn-0123456789', buckets: {} })
     // `StrictBool` on the service: the string "true" is a 422, and a lax bool would coerce it.
     expect(typeof body.confirmed).toBe('boolean')
@@ -1338,11 +1345,13 @@ describe('the four beats', () => {
     )
   })
 
-  it('glosses the one fallback_reason it recognises, beside the raw string and not over it', async () => {
+  it('glosses a fallback_reason beside the raw string and not over it', async () => {
     // CONSTRUCTED, exactly as `SILENT_ENTRY` and `SILENT_EXCLUSION` say: this market's three
     // stores all answer, so nothing here is a state it produces. Both rows use the exchange's
-    // own vocabulary — `no_response` is its value for a store whose agent sent no usable bid,
-    // and the exclusion is the verdict a claim-less fallback really earns.
+    // own vocabulary — `no_response` is its value for a store whose agent sent nothing at all
+    // — and the exclusion is the verdict a claim-less fallback really earns. This title used
+    // to say "the one fallback_reason it recognises"; the panel now has a sentence for every
+    // family the exchange publishes, and the reason-shape suite below covers the rest.
     const { fetcher } = demoService({
       slots: [],
       body: {
@@ -1442,5 +1451,191 @@ describe('the four beats', () => {
     // And with no shortlist section there is no Accept button: a labelling failure is not an
     // offer, and a control that cannot produce one must not be on the page.
     expect(screen.queryByRole('button', { name: /accept this one/i })).toBeNull()
+  })
+})
+
+// MEASURED, off the exchange's own suite rather than composed here:
+// `apps/exchange/tests/test_composition_catalog_and_refusals.py` runs four refusing store
+// agents through `POST /auctions` and asserts exactly these strings —
+//
+//     decliner     -> 'store_declined:no_matching_product'
+//     refuser      -> 'store_refused:422'
+//     shouter      -> 'store_declined:undisclosed'
+//     misreporter  -> 'store_refused:503'
+//
+// — and, on the same line, that `'no_response' not in reasons.values()`. The reasons below are
+// those; the store ids are this market's own three, so nothing here invents a store OR a word.
+// Before that repair every one of these arrived as `no_response`, which is why this panel only
+// ever had a sentence for `no_response`.
+const REFUSAL_ENTRIES = [
+  {
+    store_id: 'demo-woolworks',
+    tier: 1,
+    fallback: true,
+    unit_price: 78.0,
+    total_price: 78.0,
+    fallback_reason: 'store_declined:no_matching_product',
+  },
+  {
+    store_id: 'demo-fastfleece',
+    tier: 1,
+    fallback: true,
+    unit_price: 45.0,
+    total_price: 45.0,
+    fallback_reason: 'store_refused:422',
+  },
+  {
+    store_id: 'demo-alpine-supply',
+    tier: 1,
+    fallback: true,
+    unit_price: 72.0,
+    total_price: 72.0,
+    fallback_reason: 'store_declined:undisclosed',
+  },
+]
+
+describe('the reasons a shortlist is empty, in a shopper’s words', () => {
+  it('reads a reason the way the exchange writes one', () => {
+    // The mirror of `exchange.auction.collect.fallback_reason_family`, which is
+    // `str(reason).split(":", 1)[0]` — the FIRST colon, and nothing clever about the rest.
+    expect(fallbackReasonFamily('store_refused:422')).toBe('store_refused')
+    expect(fallbackReasonDetail('store_refused:422')).toBe('422')
+    expect(fallbackReasonFamily('no_response')).toBe('no_response')
+    expect(fallbackReasonDetail('no_response')).toBe('')
+    expect(fallbackReasonFamily('store_declined:a:b')).toBe('store_declined')
+    expect(fallbackReasonDetail('store_declined:a:b')).toBe('a:b')
+    // `entry.fallback_reason` is `string | null`, and null is "it did not have to fall back".
+    expect(fallbackReasonFamily(null)).toBe('')
+    expect(fallbackReasonDetail(null)).toBe('')
+  })
+
+  it('has a plain-English sentence for every family the exchange publishes', () => {
+    // Not "for `no_response`". `FALLBACK_REASON_FAMILIES` is copied from
+    // `collect.py::FALLBACK_REASONS`, and this is what stops the copy from being carried
+    // without a sentence attached to each word in it.
+    for (const family of FALLBACK_REASON_FAMILIES) {
+      const sentence = explainFallbackReason(family)
+      expect(sentence, family).not.toBe(UNRECOGNISED_GLOSS)
+      expect(sentence, family).toMatch(/^means /)
+    }
+  })
+
+  it('says it does not recognise a family rather than leaving the raw string bare', () => {
+    // The set is open-ended: the exchange can add a word, and this is a COPY of its
+    // vocabulary, so the unknown case is answered on purpose instead of falling through.
+    expect(explainFallbackReason('quantum_flux:7')).toBe(UNRECOGNISED_GLOSS)
+    expect(explainFallbackReason('')).toBe(UNRECOGNISED_GLOSS)
+  })
+
+  it('tells a decline, a refusal and a silence apart', () => {
+    const declined = explainFallbackReason('store_declined:no_matching_product')
+    expect(declined).toContain('its answer was no')
+    expect(declined).toContain('The reason it gave for itself is “no_matching_product”.')
+
+    // A decline with a reason the exchange could not print is not a decline with no reason.
+    const undisclosed = explainFallbackReason('store_declined:undisclosed')
+    expect(undisclosed).toContain('It did state a reason and the exchange could not print it')
+    // ...and a bare `store_declined` is the one that really said nothing.
+    expect(explainFallbackReason('store_declined')).toContain('It stated no reason')
+
+    const refused = explainFallbackReason('store_refused:422')
+    expect(refused).toContain('It is an error, not a decision about what you asked for')
+    expect(refused).toContain('its agent answered HTTP 422')
+    // The 422 is the exchange's own fault and the page says so rather than blaming the store.
+    expect(refused).toContain('a fault on the exchange’s side of the wire rather than the store’s')
+    expect(explainFallbackReason('store_refused:503')).toContain('its agent answered HTTP 503')
+    // `_unusable_because` makes the WHOLE unrecognised string the detail, so a non-numeric
+    // detail is a real shape here — `reason_for('no_matching_product')` is measured to be
+    // `store_refused:no_matching_product` in the exchange's suite.
+    expect(explainFallbackReason('store_refused:no_matching_product')).toContain(
+      'What the exchange recorded of it is “no_matching_product”.',
+    )
+
+    const silent = explainFallbackReason('no_response')
+    expect(silent).toContain('nothing came back from that store’s agent at all')
+    // The three sentences are three different sentences. That is the whole point.
+    expect(new Set([declined, refused, silent]).size).toBe(3)
+  })
+
+  it('glosses each distinct reason once, in the order the entries carried them', () => {
+    const entries: readonly AuctionEntry[] = [
+      { store_id: 'a', fallback: true, fallback_reason: 'store_refused:422' },
+      { store_id: 'b', fallback: false, fallback_reason: null },
+      { store_id: 'c', fallback: true, fallback_reason: 'store_refused:422' },
+      { store_id: 'd', fallback: true, fallback_reason: 'store_declined' },
+    ]
+
+    expect(glossedReasons(entries).map((gloss) => gloss.reason)).toEqual([
+      'store_refused:422',
+      'store_declined',
+    ])
+    // A store that did not fall back has nothing to explain, and gets no paragraph.
+    expect(glossedReasons([entries[1]!])).toEqual([])
+  })
+
+  it('explains a market where the stores declined, instead of printing the raw string alone', async () => {
+    const { fetcher } = demoService({ slots: [], body: { entries: REFUSAL_ENTRIES } })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+
+    // The raw string is still printed as the exchange spelled it — that rule has not moved.
+    expect(screen.getByTestId('entry-demo-woolworks').textContent).toContain(
+      'fallback_reason: store_declined:no_matching_product',
+    )
+
+    // ...and now it has a sentence beside it. THIS is what was missing: before this change the
+    // panel filtered `fallback_reason === 'no_response'`, found none of these three, and
+    // rendered no explanation at all for a page made entirely of refusals.
+    const declined = screen.getByTestId('gloss-store-declined-no-matching-product').textContent ?? ''
+    expect(declined).toContain('fallback_reason: "store_declined:no_matching_product"')
+    expect(declined).toContain('it answered, and its answer was no')
+    expect(declined).toContain('The reason it gave for itself is “no_matching_product”')
+
+    const refused = screen.getByTestId('gloss-store-refused-422').textContent ?? ''
+    expect(refused).toContain('fallback_reason: "store_refused:422"')
+    expect(refused).toContain('its agent answered HTTP 422')
+
+    const undisclosed = screen.getByTestId('gloss-store-declined-undisclosed').textContent ?? ''
+    expect(undisclosed).toContain('the exchange could not print it')
+
+    // Not one store here was silent, so the one gloss this panel used to have is absent — and
+    // with only that gloss, the page a shopper saw carried no explanation whatsoever.
+    expect(screen.queryByTestId('no-response-gloss')).toBeNull()
+
+    // Nothing the exchange reported is left on the page as a bare machine word: every reason
+    // in the entries list appears inside a gloss paragraph as well as in its own row.
+    const glosses = screen.getByTestId('reason-glosses').textContent ?? ''
+    for (const entry of REFUSAL_ENTRIES) {
+      expect(glosses, entry.fallback_reason).toContain(entry.fallback_reason)
+    }
+  })
+
+  it('names a reason it does not recognise as unrecognised, on the page', async () => {
+    // `wire.ts`'s family list is a COPY of the exchange's, so it can go stale. A shopper meets
+    // that as a sentence saying this page does not know the word — never as the word alone.
+    const { fetcher } = demoService({
+      slots: [],
+      body: {
+        entries: [
+          { ...REFUSAL_ENTRIES[0]!, fallback_reason: 'a_word_this_page_has_never_seen' },
+          REFUSAL_ENTRIES[1]!,
+        ],
+      },
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+
+    const unknown = screen.getByTestId('gloss-a-word-this-page-has-never-seen').textContent ?? ''
+    expect(unknown).toContain('fallback_reason: "a_word_this_page_has_never_seen"')
+    expect(unknown).toContain('is a reason this page has no plain-English sentence for')
+    expect(unknown).toContain('nothing is being hidden')
+    // The recognised one beside it is still recognised.
+    expect(screen.getByTestId('gloss-store-refused-422').textContent).toContain('HTTP 422')
   })
 })
