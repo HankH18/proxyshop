@@ -10,7 +10,7 @@ the real services over loopback::
 
 ``apps/buyer/svc/src/intent/clarifier.py::_cluster_id`` mints an intent's ``cluster_id`` by
 hashing what the shopper asked for — ``cl-306c4c3b28e29cfd`` — because that is the identity a
-clarifier can compute with no catalogue in scope. A merchant's approved envelope, meanwhile,
+clarifier can compute with no catalogue in scope. A merchant's approval record, meanwhile,
 authorises bidding inside **named** catalogue clusters — ``cluster-espresso`` — and
 ``store_agent.runtime.context.AuctionContext.pursues`` is a set membership over exactly those
 names. A content hash is never a member of a set of names, so every store declined every
@@ -40,8 +40,8 @@ repository publishes one. That is measured, not assumed:
   write the node even in principle. ``services/ingest/src/graph/schema.py`` still creates a
   uniqueness constraint for it: the graph has an index for a label nothing populates.
 * No ``MATCH (:IntentCluster)`` exists anywhere, so nothing reads it either.
-* There is no Postgres table of clusters — ``sealed.envelopes.pursue_clusters``,
-  ``sealed.learned_policy.cluster_id`` and ``app.intents.cluster_id`` are opaque columns with
+* There is no Postgres table of clusters — the merchant-approval table's ``pursue_clusters`` column,
+  the learned-policy table's ``cluster_id`` column and ``app.intents.cluster_id`` are opaque columns with
   no referenced table, no foreign key and no CHECK — and no registry module, and no
   catalogue JSON.
 
@@ -68,7 +68,7 @@ is what it fills.
 
 The consequence is stated rather than hidden: **an exchange whose deployment names no
 clusters assigns none**, every intent keeps whatever ``cluster_id`` it arrived with, and a
-store whose envelope pursues names still declines. That is the pre-existing behaviour,
+store whose approval record pursues names still declines. That is the pre-existing behaviour,
 unchanged, which is what makes wiring this a deployment decision rather than a silent one.
 
 The four rules
@@ -76,7 +76,7 @@ The four rules
 1. **Never invent a member.** An intent that matches nothing is assigned nothing — the
    :class:`ClusterAssignment` carries ``cluster_id=None`` and the evidence it weighed. A
    "closest" cluster with no supporting evidence would authorise a store to bid on an auction
-   its merchant never approved, which is the envelope's whole purpose.
+   its merchant never approved, which is that record's whole purpose.
 2. **Never overwrite a name the caller already stated.** If the intent's own ``cluster_id`` is
    a cluster the catalogue knows, it is kept and reported as :data:`SOURCE_STATED`. Only an
    id the catalogue does not know — a clarifier hash, or a stale name — is replaced.
@@ -161,7 +161,7 @@ TERM_WEIGHT = 1.0
 #: Measured before this bar existed: the row ``{"cluster_id": "cluster-coffee", "label":
 #: "Coffee"}`` and the query *"a walnut coffee table for the lounge"* assigned
 #: ``cluster-coffee`` on the evidence ``('term:coffee',)`` — a furniture shopper addressed to a
-#: coffee merchant's envelope. Rule 1 says never invent a member, and "score > 0" made that
+#: coffee merchant's approval record. Rule 1 says never invent a member, and "score > 0" made that
 #: rule true only nominally.
 #:
 #: 2.0 is exactly the bar that admits ONE STRUCTURED signal — a category match
@@ -182,7 +182,7 @@ SOURCE_STATED = "stated"
 #: This module chose the cluster from the evidence below.
 SOURCE_ASSIGNED = "assigned"
 
-#: Nothing matched. The intent keeps whatever id it arrived with, and a store whose envelope
+#: Nothing matched. The intent keeps whatever id it arrived with, and a store whose approval record
 #: pursues names will decline it — which is the honest outcome, not a bug in this module.
 SOURCE_UNASSIGNED = "unassigned"
 
@@ -232,7 +232,7 @@ class ClusterRow:
     module is to decide that from evidence rather than from string similarity.
 
     Attributes:
-        cluster_id: the name a merchant's envelope authorises. Never empty.
+        cluster_id: the name a merchant's approval record authorises. Never empty.
         label: the human-facing name. Also matched, as ONE term and therefore as an exact
             phrase — ``"Espresso machines"`` is found in ``"espresso machines for the office"``
             and NOT in ``"an espresso machine for the office"``, because the plural is part of
@@ -259,7 +259,7 @@ class ClusterRow:
         if not cluster_id:
             raise ValueError(
                 "a catalogue cluster needs a non-empty cluster_id; an unnamed cluster cannot "
-                "be the member of an envelope's pursue_clusters that this module exists to find"
+                "be the member of an approval record's pursue_clusters that this module exists to find"
             )
         object.__setattr__(self, "cluster_id", cluster_id)
         object.__setattr__(self, "label", str(self.label))
@@ -339,7 +339,7 @@ class NoIntentClusters:
     ``NoCatalogSnapshots`` and ``trust_snapshot_of``'s empty snapshot. An exchange nobody has
     told about a cluster vocabulary must not guess one: guessing would put an auction in front
     of a store whose merchant authorised a different catalogue, which is the one thing the
-    envelope exists to prevent.
+    approval record exists to prevent.
     """
 
     name: str = "none"
@@ -576,7 +576,7 @@ def assign_cluster(intent: Any, catalogue: Any) -> ClusterAssignment:
     2. Some cluster carries evidence -> :data:`SOURCE_ASSIGNED`, highest weight wins, ties
        broken on the lowest ``cluster_id`` so the answer does not depend on catalogue order.
     3. Nothing carries evidence -> :data:`SOURCE_UNASSIGNED`, ``cluster_id=None``, and the
-       intent keeps whatever it arrived with. No "closest" cluster: an envelope authorises a
+       intent keeps whatever it arrived with. No "closest" cluster: an approval record authorises a
        set, and the nearest miss is not a member of it.
     """
     rows = tuple(getattr(catalogue, "clusters", lambda: ())())
