@@ -1647,7 +1647,7 @@ def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -
     assert len(cases) == _T259_CASES, "the generator is not armed; see the guard above"
 
     rejected: list[tuple[str, str, str]] = []
-    accepted: list[tuple[dict[str, Any], Any, Any]] = []
+    accepted: list[tuple[dict[str, Any], dict[str, Any], Any, Any]] = []
     for case in cases:
         emitted = trust_event_payload(case)
         runner = AgentRunner(
@@ -1658,7 +1658,7 @@ def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -
         except Exception as refusal:
             rejected.append((case["dim"], type(refusal).__name__, str(refusal).splitlines()[0]))
         else:
-            accepted.append((case, validated, runner.trust_posture))
+            accepted.append((case, emitted, validated, runner.trust_posture))
 
     assert rejected == [], (
         f"{len(rejected)} of {len(cases)} events trust emits are refused by the store agent's "
@@ -1670,9 +1670,16 @@ def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -
     )
 
     losses: list[str] = []
-    for case, validated, posture in accepted:
-        dumped = validated.model_dump(mode="json")
-        seen = _t259_values_by_key(dumped)
+    for case, emitted, validated, posture in accepted:
+        # Read off the dict TRUST EMITTED, not the object the intake returned. Measured cheat:
+        # a fix that deletes the six carriers and has `ingest_trust_event` graft them onto its
+        # own return value passes every check below when they are read off `validated` — the
+        # gate then cannot tell "trust put the redaction report on the wire" from "the store
+        # agent invented it". Because TrustEventPayload forbids extras, a carrier present in
+        # `emitted` AND a payload that validates together mean the carrier sits at an address
+        # the contract admits, so it really did cross.
+        seen = _t259_values_by_key(emitted)
+        landed_keys = set(_t259_values_by_key(validated.model_dump(mode="json")))
 
         signals = {signal.dim: signal for signal in posture.signals}
         landed = signals.get(case["dim"]) or next(
@@ -1687,16 +1694,35 @@ def test_t259_every_trust_event_trust_emits_is_ingestible_by_the_store_agent() -
 
         for carrier in _T259_CARRIERS:
             if carrier not in seen:
-                losses.append(f"{case['store_id']}: {carrier!r} is nowhere on the ingested payload")
-        if "redacted_fields" in seen and case["planted_identity_keys"] not in {
-            value for value in seen["redacted_fields"] if isinstance(value, int)
-        }:
+                losses.append(f"{case['store_id']}: {carrier!r} is nowhere on the emitted payload")
+            elif carrier not in landed_keys:
+                losses.append(
+                    f"{case['store_id']}: {carrier!r} was emitted but is absent from the "
+                    f"payload the intake accepted"
+                )
+        # Exactly one occurrence, and it must EQUAL the planted count. Measured cheat: a
+        # shotgun of candidates (`[{"redacted_fields": 0}, ... {"redacted_fields": 3}]`) parked
+        # in the open event payload satisfies a set-membership test for every case at once,
+        # and that membership test was the only load-bearing assertion in this block.
+        reported = seen.get("redacted_fields", [])
+        if len(reported) != 1 or reported[0] != case["planted_identity_keys"]:
             losses.append(
-                f"{case['store_id']}: redacted_fields reads {seen['redacted_fields']} but "
-                f"{case['planted_identity_keys']} identity keys were planted"
+                f"{case['store_id']}: redacted_fields reads {reported} but exactly "
+                f"{case['planted_identity_keys']} identity keys were planted, and exactly one "
+                f"report of it may be on the wire"
             )
-        if "identity_disclosed" in seen and any(value for value in seen["identity_disclosed"]):
-            losses.append(f"{case['store_id']}: identity_disclosed is truthy on the wire")
+        disclosed = seen.get("identity_disclosed", [])
+        if disclosed != [False]:
+            losses.append(
+                f"{case['store_id']}: identity_disclosed reads {disclosed}, not [False] — a "
+                f"None or a missing flag is not a promise that identity was withheld"
+            )
+        policy = seen.get("policy", [])
+        if len(policy) != 1 or not (isinstance(policy[0], str) and policy[0].strip()):
+            losses.append(
+                f"{case['store_id']}: policy reads {policy}; the field is the auditable "
+                f"statement of WHY the scrub happened and an empty or absent one says nothing"
+            )
         if "schema_version" in seen and TRUST_EVENT_SCHEMA_VERSION not in seen["schema_version"]:
             losses.append(f"{case['store_id']}: schema_version does not round-trip")
         if case["reason_code"] is not None and case["reason_code"] not in seen.get(
@@ -1863,56 +1889,87 @@ def test_t303_the_exchange_eligibility_gate_never_fails_open() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-303 (a): the sim computes snapshot['delistings'] and drops it — nothing appends the "
-        "blacklisted/blacklist_expired events into the chain the run seals, so the delisting "
-        "decision is recorded nowhere an exchange, an auditor or an appeal can read it; remove "
+        "T-303 (a): the sim computes snapshot['delistings'] and drops it — no blacklisted or "
+        "blacklist_expired event is ever handed to trust.events' append seam, so the delisting "
+        "decision is sealed nowhere an exchange, an auditor or an appeal can read it; remove "
         "this marker with the fix"
     ),
 )
-def test_t303_a_delisting_the_run_computes_lands_in_the_chain_the_run_seals() -> None:
-    """The decision is computed. S2 is only closed when it is also RECORDED.
+def test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer(
+    monkeypatch: Any,
+) -> None:
+    """The decision is computed. S2 is only closed when it is also SEALED.
 
-    Behavioural on purpose. The nine T-237 gates above grade ``snapshot['delistings']``'s
-    payload, idempotence and threshold — all of which pass — and an AST sweep for "some module
-    both reads ``delistings`` and calls ``append``" would be closed by one added subscript in
-    ``services/sim/src/runner.py``, which already contains a bare ``append(...)`` 44 lines
-    earlier inside a loop that has finished by then. Co-occurrence in a file is not data flow.
+    Behavioural, and measured at the WRITER rather than on the run's report. Two earlier
+    shapes of this gate were both wrong, and an adversarial lane proved both:
 
-    So this runs the chain instead of scanning for it: drive the only product caller of
-    ``build_snapshot``, then ask the sealed event stream whether the delisting it computed is
-    in there. The negative half is asserted too — a store the run did NOT delist must not
-    acquire a blacklisted event — so "append one for everybody" is not a way through.
+    * An AST sweep for "some module both reads ``delistings`` and calls ``append``" is closed
+      by one added subscript in ``services/sim/src/runner.py``, which already holds a bare
+      ``append(...)`` 44 lines earlier inside a loop that has finished by then. Co-occurrence
+      in a file is not data flow.
+    * Comparing ``event_id`` against ``run.events`` is worse than useless:
+      ``sim.runner.normalise_event`` deliberately DROPS ``event_id`` and ``ts`` (a UUID and a
+      wall clock, so two runs of one seed agree), which makes that set the single string
+      ``"None"``. Measured consequences — the honest fix (append each delisting through
+      ``trust.events.append``, then verify) FAILED that gate, while splicing the delistings
+      into the reported list after ``verify()`` PASSED it. It graded the exact inverse of the
+      property. ``run.chain_ok`` cannot rescue it either: ``verify()`` runs before
+      ``build_snapshot`` produces the delistings, and the flag is a stored field.
+
+    So this spies on ``InMemoryEventStore.append`` — the one seam ``trust.events.append``
+    delegates to, whichever route a caller takes — and asks whether a delisting ever went
+    through it. A decision that never reaches the writer is not in the ledger, however it is
+    reported.
     """
+    from trust.events.store import InMemoryEventStore
+
+    sealed: list[dict[str, Any]] = []
+    original = InMemoryEventStore.append
+
+    def spy(self: Any, event: Any) -> Any:
+        sealed.append(dict(event))
+        return original(self, event)
+
+    monkeypatch.setattr(InMemoryEventStore, "append", spy)
     run = _t303_simulation_run()
+
+    assert len(sealed) >= 20, (
+        f"the append spy saw only {len(sealed)} events go through "
+        f"InMemoryEventStore.append during a whole simulation run (36 when this was written). "
+        f"The seam moved, so this gate is watching a door nobody uses any more and every "
+        f"assertion below would pass by seeing nothing"
+    )
+    assert run.chain_ok, "the simulation's own chain does not verify; nothing below is trustworthy"
+
     delistings = run.snapshot["delistings"]
     assert delistings, "no delisting computed; see the armed guard above"
 
-    sealed = {str(event.get("event_id")) for event in run.events}
+    sealed_ids = {str(event.get("event_id")) for event in sealed}
     dropped = [
         f"{event['kind']} for {event['payload']['store_id']} ({event['event_id']})"
         for event in delistings
-        if str(event.get("event_id")) not in sealed
+        if str(event.get("event_id")) not in sealed_ids
     ]
     assert dropped == [], (
-        f"{len(dropped)} of {len(delistings)} delisting decisions the run computed are absent "
-        f"from the {len(run.events)}-event chain it sealed, so they are computed and dropped: "
-        f"{dropped}. The exchange, an auditor and an appeal all read the ledger, and none of "
-        f"them can see a decision that was only ever a dict on a dataclass — note "
-        f"SimulationRun.to_json() does not even carry the snapshot, so replay determinism "
-        f"never compares it either"
+        f"{len(dropped)} of {len(delistings)} delisting decisions the run computed were never "
+        f"handed to the ledger writer — {len(sealed)} events went through the append seam and "
+        f"none of them was one of these: {dropped}. They are computed and dropped. The "
+        f"exchange, an auditor and an appeal all read the ledger, and none of them can see a "
+        f"decision that was only ever a dict on a dataclass; SimulationRun.to_json() does not "
+        f"even carry the snapshot, so replay determinism never compares it either"
     )
 
     delisted = {str(event["payload"]["store_id"]) for event in delistings}
     spurious = sorted(
         {
             str(event.get("store_id"))
-            for event in run.events
+            for event in sealed
             if str(event.get("kind")) in _BLACKLIST_EVENT_KINDS
             and str(event.get("store_id")) not in delisted
         }
     )
     assert spurious == [], (
-        f"the chain carries a delisting event for {spurious}, which the trust snapshot did not "
+        f"the writer sealed a delisting event for {spurious}, which the trust snapshot did not "
         f"delist. Recording a decision nobody made is not the fix for dropping the one that "
         f"was made"
     )
@@ -1941,14 +1998,41 @@ def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one()
     ``test_t303_the_exchange_eligibility_gate_never_fails_open`` instead: that the wiring is
     fail-closed. Splitting them matters — the one-line way to satisfy this test alone is a
     source whose default is ELIGIBLE, and that companion is what makes that route red.
+
+    STRENGTHENED. A control lane executed the cheat this originally admitted: a hardcoded
+    ``StaticSellerEligibility({<the five manifest ids>: "eligible"})`` in ``create_app()``,
+    importing nothing from trust and consulting no score, turned it green — because
+    "nobody is denied with a static-eligibility reason" is satisfied VACUOUSLY by
+    ``denied == []``, which made the gate EASIER the emptier the denial list, inverting the
+    property. Under that cheat ``store-brightbean`` — scored 0.073, five times below the
+    threshold, and explicitly delisted by the real verdict — was solicited.
+
+    So the ground truth is now the run's OWN verdict rather than the roster's size: the store
+    the trust engine delisted must not be solicited, and a store it scored above the threshold
+    must be. Both come from ``_t303_simulation_run()``, so nothing here is a number typed into
+    the gate, and a hardcoded table cannot satisfy both halves without transcribing a verdict
+    it never computed.
     """
     from exchange.main import create_app
     from fastapi.testclient import TestClient
+    from trust.scoring import BLACKLIST_THRESHOLD
 
     from fixtures.manifest import load_manifest
 
     store_ids = [str(store["store_id"]) for store in load_manifest()["stores"]]
     assert len(store_ids) >= 3, f"the manifest roster is too small to discriminate: {store_ids}"
+
+    run = _t303_simulation_run()
+    delisted = {str(event["payload"]["store_id"]) for event in run.snapshot["delistings"]}
+    healthy = {
+        store_id
+        for store_id, entry in run.snapshot["stores"].items()
+        if float(entry["score"]) >= BLACKLIST_THRESHOLD and str(store_id) not in delisted
+    }
+    assert delisted and healthy, (
+        f"the run produced no store on one side of the threshold — delisted={sorted(delisted)}, "
+        f"healthy={sorted(healthy)} — so the two assertions below cannot discriminate"
+    )
 
     app = create_app()
     with TestClient(app) as client:
@@ -1972,9 +2056,24 @@ def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one()
         f"the deployed exchange cannot stop asking a dishonest store, because it is not asking "
         f"anyone"
     )
-    assert body["solicited"], (
-        f"the served exchange solicited no store at all from a {len(store_ids)}-store roster, "
-        f"so S2's chain has no end-to-end path even for the honest stores"
+    solicited = {
+        str(entry) if isinstance(entry, str) else str(entry.get("store_id"))
+        for entry in body["solicited"]
+    }
+    assert solicited & healthy, (
+        f"the served exchange solicited none of the stores the trust engine scores at or above "
+        f"BLACKLIST_THRESHOLD ({sorted(healthy)}); it solicited {sorted(solicited)} out of a "
+        f"{len(store_ids)}-store roster. S2's chain has no end-to-end path even for the honest "
+        f"stores"
+    )
+    still_asked = sorted(solicited & delisted)
+    assert still_asked == [], (
+        f"the served exchange is still asking {still_asked}, which the trust engine delisted in "
+        f"this very run (scores: "
+        f"{ {k: round(float(v['score']), 4) for k, v in run.snapshot['stores'].items()} }, "
+        f"threshold {BLACKLIST_THRESHOLD}). S2 says the exchange stops asking a dishonest "
+        f"store; a source that answers 'eligible' for a store trust has blacklisted is not "
+        f"consulting trust, whatever else it is doing"
     )
 
 
