@@ -1133,9 +1133,32 @@ def test_t310_the_served_exchange_app_reaches_the_published_ranking() -> None:
 
 #: Every JSON literal a caller can put on the wire that ``json.loads`` accepts and
 #: ``json.dumps`` refuses. ``NaN``/``Infinity`` are Python's JSON extension, which starlette's
-#: ``Request.json()`` reads by default; ``1e400`` is *ordinary, RFC-legal JSON* that overflows
-#: to ``inf`` on parse, so a deployment that "just rejects NaN at the parser" still ships it.
-T270_NON_FINITE_LITERALS: tuple[str, ...] = ("NaN", "Infinity", "-Infinity", "1e400", "-1e400")
+#: ``Request.json()`` reads by default; the exponent forms are *ordinary, RFC-legal JSON* that
+#: overflow to ``inf`` on parse, so a deployment that "just rejects NaN at the parser" still
+#: ships them.
+#:
+#: **The overflow forms are deliberately varied, and this list being short was a measured
+#: hole.** An adversarial pass defeated the gate with a token blocklist in a middleware —
+#: ``_BLOCKED = ("NaN", "Infinity", "-Infinity", "1e400", "-1e400")``, byte-for-byte the five
+#: members this tuple used to hold, rejecting any body containing one and leaving the error
+#: renderer untouched. It passed every assertion. Measured against the same tree, these all
+#: still returned 500: ``1e999``, ``1E400``, ``1e+400``, ``-1e401``. A blocklist cannot
+#: enumerate float overflow — there are unboundedly many spellings — so the corpus carries
+#: enough of them that copying the list is visibly not a fix, and the armer asserts the
+#: variety is present.
+T270_NON_FINITE_LITERALS: tuple[str, ...] = (
+    "NaN",
+    "Infinity",
+    "-Infinity",
+    "1e400",
+    "-1e400",
+    "1E400",
+    "1e+400",
+    "1e999",
+    "-1e401",
+    "2.5e400",
+    "1e4000",
+)
 
 #: The denial codes ``accept_bid`` can answer only AFTER ``_find_bid`` has returned a bid.
 #: Used by T-294; declared here beside the accept-route knowledge it belongs to.
@@ -1229,6 +1252,17 @@ def _t270_at(node: Any, path: tuple[Any, ...]) -> Any:
     for key in path:
         node = node[key]
     return node
+
+
+def _t270_refuse_constant(token: str) -> Any:
+    """Reject ``NaN``/``Infinity`` while parsing, the way a strict JSON client does.
+
+    ``json.loads`` accepts Python's non-standard constants by default, so a body containing a
+    bare ``NaN`` parses here and looks fine while a browser's ``JSON.parse``, Go's
+    ``encoding/json`` and every strict parser reject it. Passing this as ``parse_constant``
+    makes the check measure what a real client would experience.
+    """
+    raise ValueError(f"{token} is not valid JSON; a strict client cannot read this body")
 
 
 #: How a non-finite literal is wrapped before being planted. ``bare`` is the scalar case;
@@ -1325,6 +1359,31 @@ def _t270_corpus() -> list[dict[str, Any]]:
                         "raw": _t270_plant(accept_template, path, literal, wrapping),
                     }
                 )
+    # EVERY SPELLING IS DRIVEN, not only the ones the draw happened to pick. The loops
+    # above sample `rng.choice(T270_NON_FINITE_LITERALS)` per position, so with eleven
+    # members a given spelling is absent from an entire run with probability
+    # `(10/11) ** len(cases)` — small, and not zero. The consequence runs BOTH ways, which
+    # is why it is closed here rather than tolerated: the armer's variety assertions grade
+    # the SAMPLED literals, so a run that never drew `1E400` would have failed the arming
+    # test — a flake on `make verify`, the frozen build_succeeds metric — and on the same
+    # run the gate would silently not have driven the one spelling a case-sensitive
+    # blocklist misses. Completing the coverage removes the flake by making the corpus
+    # STRONGER, which is the only direction this file permits.
+    drawn = {case["literal"] for case in cases}
+    for literal in T270_NON_FINITE_LITERALS:
+        if literal in drawn:
+            continue
+        base = cases[rng.randrange(len(cases))]
+        wrapping = rng.choice(T270_WRAPPINGS)
+        cases.append(
+            {
+                **base,
+                "literal": literal,
+                "wrapping": wrapping,
+                "raw": _t270_plant(base["template"], base["path"], literal, wrapping),
+            }
+        )
+
     _T270_CORPUS = cases
     return cases
 
@@ -1347,7 +1406,7 @@ def _t270_clients() -> list[tuple[str, Any]]:
     instead of re-raising into the test and turning a served 500 into an ERROR.
 
     **This function measures only the fresh build; the served object is measured in a
-    subprocess** by :func:`_t270_served_app_statuses`, and that split is not fussiness. Whether
+    subprocess** by :func:`_t270_served_app_responses`, and that split is not fussiness. Whether
     the in-process ``exchange.main.app`` was built before or after a feature module is a
     property of THIS PROCESS'S IMPORT HISTORY, not of the code under test. Measured: running
     this gate alone is red, but running ``test_t294_… test_t270_…`` together turned it GREEN
@@ -1363,8 +1422,8 @@ def _t270_clients() -> list[tuple[str, Any]]:
     return [("exchange.main.create_app()", TestClient(create_app(), raise_server_exceptions=False))]
 
 
-def _t270_served_app_statuses(cases: list[dict[str, Any]]) -> list[int]:
-    """POST every corpus case at ``exchange.main:app`` in a FRESH interpreter, and report status.
+def _t270_served_app_responses(cases: list[dict[str, Any]]) -> list[tuple[int, str, str]]:
+    """POST every corpus case at ``exchange.main:app`` in a FRESH interpreter; report status+body.
 
     The subprocess imports ``exchange.main`` as its first repo import, so the module-level
     ``app = create_app()`` at ``main.py:52`` runs exactly as it does under
@@ -1389,9 +1448,19 @@ def _t270_served_app_statuses(cases: list[dict[str, Any]]) -> list[int]:
         "    try:\n"
         "        response = client.post(case['url'], content=case['raw'].encode(),\n"
         "                               headers={'content-type': 'application/json'})\n"
-        "        out.append(response.status_code)\n"
-        "    except Exception:\n"
-        "        out.append(599)\n"
+        # The strict-JSON parse happens HERE, on the WHOLE body, and only a boolean plus a
+        # short snippet crosses the process boundary. Parsing a truncated body in the parent
+        # is what a first version of this did, and it reported every long 201 as unreadable.
+        "        def _refuse(token):\n"
+        "            raise ValueError('non-finite constant ' + token)\n"
+        "        try:\n"
+        "            json.loads(response.text, parse_constant=_refuse)\n"
+        "            note = ''\n"
+        "        except Exception as exc:\n"
+        "            note = f'{type(exc).__name__}: {exc}'\n"
+        "        out.append([response.status_code, note, response.text[:200]])\n"
+        "    except Exception as exc:\n"
+        "        out.append([599, f'{type(exc).__name__}: {exc}', ''])\n"
         "print(json.dumps(out))\n"
     )
     env = dict(os.environ)
@@ -1409,7 +1478,10 @@ def _t270_served_app_statuses(cases: list[dict[str, Any]]) -> list[int]:
     assert completed.returncode == 0, (
         f"the served-app probe would not run:\n{completed.stderr[-3000:]}"
     )
-    return list(json.loads(completed.stdout.strip().splitlines()[-1]))
+    return [
+        (int(status), str(note), str(snippet))
+        for status, note, snippet in json.loads(completed.stdout.strip().splitlines()[-1])
+    ]
 
 
 def test_the_non_finite_payload_corpus_is_armed() -> None:
@@ -1440,13 +1512,13 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
     # The served-app probe must actually run and actually see the defect's shape. A probe that
     # returned 599 for everything (its own exception sentinel) would make the gate red for the
     # wrong reason forever, and one that returned nothing would make it green.
-    control_statuses = _t270_served_app_statuses(cases[:5])
-    assert len(control_statuses) == 5, (
-        f"the served-app subprocess returned {control_statuses}; it is not measuring the corpus"
+    control = _t270_served_app_responses(cases[:5])
+    assert len(control) == 5, (
+        f"the served-app subprocess returned {control}; it is not measuring the corpus"
     )
-    assert all(status != 599 for status in control_statuses), (
+    assert all(status != 599 for status, _note, _snippet in control), (
         f"the served-app subprocess could not dispatch at all (599 is its own exception "
-        f"sentinel): {control_statuses}"
+        f"sentinel): {control}"
     )
 
     routes = {case["route"] for case in cases}
@@ -1456,9 +1528,36 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
     )
 
     literals = {case["literal"] for case in cases}
-    assert len(literals) >= 4, (
+    assert len(literals) >= 6, (
         f"only {sorted(literals)} were planted; a fix that rejects NaN at the parser still "
         "ships 1e400, which is RFC-legal JSON that overflows to inf"
+    )
+
+    # Completeness, on top of the variety checks below rather than instead of them: the
+    # builder now guarantees every declared spelling is planted, so a run in which one is
+    # missing means the completion pass broke, not that the dice were unkind.
+    assert set(T270_NON_FINITE_LITERALS) <= literals, (
+        f"the corpus drove {sorted(literals)} but the declared spellings are "
+        f"{sorted(T270_NON_FINITE_LITERALS)}; the coverage-completion pass in"
+        " `_t270_corpus` is not running"
+    )
+
+    # The overflow forms must VARY in spelling. A token blocklist matching this corpus's
+    # exact literals passed the whole gate once — the corpus was the blocklist's spec — so
+    # the battery has to make it visible that enumeration is not a repair: mixed exponent
+    # case, an explicit `+`, and exponents other than 400.
+    overflow = {literal for literal in literals if "e" in literal or "E" in literal}
+    assert any("E" in literal for literal in overflow), (
+        f"no upper-case exponent among {sorted(overflow)}; `1E400` overflows exactly as "
+        "`1e400` does and a case-sensitive blocklist misses it"
+    )
+    assert any("e+" in literal or "E+" in literal for literal in overflow), (
+        f"no explicit-plus exponent among {sorted(overflow)}; `1e+400` is the same value "
+        "spelled a third way"
+    )
+    assert len({literal.lower().split("e")[-1].lstrip("+") for literal in overflow}) >= 3, (
+        f"the overflow literals {sorted(overflow)} use fewer than three distinct exponents; "
+        "a blocklist keyed to one magnitude would pass"
     )
 
     kinds = {case["kind"] for case in cases}
@@ -1471,8 +1570,13 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
     paths = {(case["route"], case["path"]) for case in cases}
     assert len(paths) >= 12, f"only {len(paths)} distinct positions are covered; too narrow"
 
+    # The expected set is written out LITERALLY, not read from `T270_WRAPPINGS`. Comparing the
+    # corpus against the same module global the builder read is self-consistent under any
+    # narrowing: an adversarial pass shrank `T270_WRAPPINGS` to `("bare",)` and both this
+    # assertion and the gate stayed green, with a non-recursive handler installed. A literal
+    # is the only form of this check that can notice the constant itself being narrowed.
     wrappings = {case["wrapping"] for case in cases}
-    assert set(T270_WRAPPINGS) <= wrappings, (
+    assert {"bare", "in_list", "in_object"} <= wrappings, (
         f"the corpus only plants {sorted(wrappings)}; without `in_list` and `in_object` the "
         "non-finite always sits at the top of the echoed value, so a repair that sanitises a "
         "scalar and recurses into nothing passes — measured, that exact non-recursive handler "
@@ -1572,16 +1676,45 @@ def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
     )
 
     failures: list[str] = []
+    unreadable: list[str] = []
     probed = 0
 
-    def _record(label: str, case: dict[str, Any], status: int) -> None:
-        if status < 500:
-            return
+    def _record(
+        label: str,
+        case: dict[str, Any],
+        status: int,
+        body: str | None = None,
+        *,
+        json_error: str = "",
+        snippet: str = "",
+    ) -> None:
         where = ".".join(str(part) for part in case["path"]) or "<the whole body>"
-        failures.append(
-            f"[{label}] {case['route']} with {case['literal']} at {where} "
-            f"(a {case['kind']} position) -> {status}"
-        )
+        if status >= 500:
+            failures.append(
+                f"[{label}] {case['route']} with {case['literal']} at {where} "
+                f"(a {case['kind']} position) -> {status}"
+            )
+            return
+        # A 4xx whose body is not parseable JSON is the same defect wearing a 4xx: the
+        # non-finite reached the serialiser and came out the other side. Two measured
+        # "repairs" did exactly this — rendering with `allow_nan=True`, and forcing
+        # `json.dumps(..., allow_nan=True)` — producing a 422 containing a bare `NaN`
+        # token, which every strict JSON parser rejects. The caller is no better off.
+        if json_error:
+            unreadable.append(
+                f"[{label}] {case['route']} with {case['literal']} at {where} -> {status} "
+                f"but the body is not valid JSON ({json_error}): {snippet[:160]}"
+            )
+            return
+        if body is None:
+            return
+        try:
+            json.loads(body, parse_constant=_t270_refuse_constant)
+        except Exception as exc:
+            unreadable.append(
+                f"[{label}] {case['route']} with {case['literal']} at {where} -> {status} "
+                f"but the body is not valid JSON ({type(exc).__name__}: {exc}): {body[:160]}"
+            )
 
     for label, client in clients:
         for case in cases:
@@ -1591,18 +1724,25 @@ def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
                 headers={"content-type": "application/json"},
             )
             probed += 1
-            _record(label, case, response.status_code)
+            _record(label, case, response.status_code, response.text)
 
     # The object uvicorn serves, measured in a clean interpreter so the answer does not depend
     # on what this pytest process happened to import first.
-    served_statuses = _t270_served_app_statuses(cases)
-    assert len(served_statuses) == len(cases), (
-        f"the served-app probe returned {len(served_statuses)} statuses for {len(cases)} cases; "
+    served = _t270_served_app_responses(cases)
+    assert len(served) == len(cases), (
+        f"the served-app probe returned {len(served)} responses for {len(cases)} cases; "
         "it is not measuring the corpus"
     )
-    for case, status in zip(cases, served_statuses, strict=True):
+    for case, (status, note, snippet) in zip(cases, served, strict=True):
         probed += 1
-        _record("exchange.main:app (the served ASGI object)", case, status)
+        _record(
+            "exchange.main:app (the served ASGI object)",
+            case,
+            status,
+            None,
+            json_error=note,
+            snippet=snippet,
+        )
 
     assert probed == len(cases) * (len(clients) + 1), (
         f"{probed} probes ran, expected {len(cases) * (len(clients) + 1)}; the sweep is unarmed"
@@ -1617,6 +1757,44 @@ def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
         f"`app = create_app()` runs at import time before any feature module:\n  "
         + "\n  ".join(sorted(failures)[:25])
     )
+
+    assert not unreadable, (
+        f"{len(unreadable)} of {probed} responses were under 500 but carried a body no strict "
+        f"JSON parser can read (corpus seed {cases[0]['seed']}). Turning the 500 into a 4xx "
+        "whose body still contains a bare `NaN` moves the defect rather than fixing it — the "
+        "caller still cannot read the answer:\n  " + "\n  ".join(sorted(unreadable)[:10])
+    )
+
+    # THE VALIDATION CONTRACT MUST SURVIVE THE REPAIR. Three measured "fixes" passed the
+    # no-5xx assertion by destroying the 422 instead of serialising it: an
+    # `app.add_exception_handler(Exception, ...)` returning 400, an http middleware catching
+    # everything and returning 400, and the same trick per-route. Each answers every
+    # malformed request — and every unhandled bug — with an opaque 400, so a caller can no
+    # longer tell which field it got wrong, and a genuine 500 is now indistinguishable from a
+    # typo. An ordinary type error (nothing non-finite anywhere) must still come back as a
+    # 422 carrying the per-field `detail` list FastAPI documents.
+    type_error_body = json.dumps(
+        {
+            "intent": {"intent_id": "i-1", "cluster_id": "c-1"},
+            "roster": [{"store_id": 123, "tier": 1, "product_ref": "p-1", "list_price": "cheap"}],
+        }
+    )
+    for label, client in clients:
+        control = client.post(
+            "/auctions",
+            content=type_error_body.encode(),
+            headers={"content-type": "application/json"},
+        )
+        assert control.status_code == 422, (
+            f"on {label} an ordinary type error answered {control.status_code}, not 422. The "
+            "no-5xx property must be met by RENDERING the validation error, not by replacing "
+            f"it with a blanket refusal: {control.text[:250]}"
+        )
+        detail = control.json().get("detail")
+        assert isinstance(detail, list) and detail, (
+            f"on {label} the 422 carried no per-field `detail` list, so the caller cannot tell "
+            f"which field it got wrong: {control.text[:250]}"
+        )
 
 
 # =====================================================================================
@@ -1744,8 +1922,26 @@ def _t293_corpus() -> list[dict[str, Any]]:
                 event["payload"] for event in direct.events if event["kind"] == "policy_event"
             ]
             persisted = str(payloads[0].get("reason", "")) if payloads else ""
+            # A THIRD sink. An adversarial pass scrubbed the HTTP boundary AND the event's
+            # `reason` while leaving providers.py alone; `AcceptResult.denial_reason` — what
+            # any in-process caller of accept() reads — still carried the address, and no
+            # assertion looked at it. Redacting at N sinks is not the fix; not building the
+            # string is.
+            returned = str(getattr(direct, "denial_reason", "") or "")
         except Exception as exc:  # pragma: no cover - reported by the armer, never swallowed
+            # BOTH sinks are rebound here, and the second binding is a repair made during
+            # the port of this file. `returned` used to be bound ONLY by the last statement
+            # of the `try` body, so a probe that raised left it unbound, with two distinct
+            # failures. The FIRST case to raise crashed the corpus builder with
+            # `NameError: name 'returned' is not defined` inside a helper BOTH T-293 nodes
+            # call — which made the `# pragma: no cover - reported by the armer` above a
+            # false claim, because the armer never ran. A LATER case was worse: no
+            # NameError at all, `returned` silently carrying the PREVIOUS case's string, so
+            # `_pointers` graded case N against case N-1 and the decimal half of the check
+            # went vacuously green. That is the exact false-green shape this file exists to
+            # prevent, so the fix is to bind every sink on every path.
             persisted = f"<the persisted-event probe raised {type(exc).__name__}: {exc}>"
+            returned = f"<the persisted-event probe raised {type(exc).__name__}: {exc}>"
 
         cases.append(
             {
@@ -1756,6 +1952,12 @@ def _t293_corpus() -> list[dict[str, Any]]:
                 "body": refused.text,
                 "denial_reason": str(refused.json().get("denial_reason", "")),
                 "persisted_reason": persisted,
+                "returned_reason": returned,
+                # The pointer in BASE TEN. `id(creator)` and `0x…` are the same byte; an
+                # adversarial pass published `(instance {id(creator)})` and the hex-only
+                # pattern did not match, so the address reached the unauthenticated caller
+                # and the persisted event in decimal with the gate green.
+                "creator_id_decimal": str(id(creator)),
             }
         )
     _T293_CORPUS = cases
@@ -1911,7 +2113,22 @@ def test_t293_an_unusable_code_creator_does_not_render_a_memory_address() -> Non
         f"{[case['denial_reason'][:120] for case in cases if case not in entered][:3]}"
     )
 
-    leaked = [case for case in cases if address.search(case["body"])]
+    def _pointers(case: dict[str, Any], text: str) -> list[str]:
+        """Every rendering of this creator's address in ``text`` — hex OR decimal.
+
+        The decimal half is not hypothetical. An adversarial pass "fixed" the leak by
+        publishing ``(instance {id(creator)})`` beside the class name: the hex pattern did
+        not match, so the gate went green while the pointer reached the unauthenticated 409
+        caller and the persisted event in base ten. ``id(o) == 4380480800`` and
+        ``0x10518d520`` are the same byte.
+        """
+        found = [match.group(0) for match in address.finditer(text)]
+        decimal = case["creator_id_decimal"]
+        if decimal and decimal in text:
+            found.append(f"{decimal} (the address in DECIMAL, via id())")
+        return found
+
+    leaked = [case for case in cases if _pointers(case, case["body"])]
     assert not leaked, (
         f"{len(leaked)} of {len(cases)} unauthenticated 409 bodies carry a live CPython "
         f"memory address (corpus seed {cases[0]['seed']}):\n  "
@@ -1923,7 +2140,7 @@ def test_t293_an_unusable_code_creator_does_not_render_a_memory_address() -> Non
     # policy_event untouched: the gate went green, the whole apps/exchange suite stayed green,
     # and the pointer was still being written into a persisted event forever. The ticket names
     # both halves; both are now measured, and a boundary-only redaction fails here.
-    durable = [case for case in cases if address.search(case["persisted_reason"])]
+    durable = [case for case in cases if _pointers(case, case["persisted_reason"])]
     assert not durable, (
         f"{len(durable)} of {len(cases)} persisted policy_event reasons carry a live CPython "
         f"memory address (corpus seed {cases[0]['seed']}). Redacting only the HTTP response "
@@ -1931,6 +2148,21 @@ def test_t293_an_unusable_code_creator_does_not_render_a_memory_address() -> Non
         "months later; the fix belongs where the message is BUILT "
         "(checkout/providers.py), not at the boundary:\n  "
         + "\n  ".join(case["persisted_reason"][:200] for case in durable[:3])
+    )
+
+    # THE THIRD SINK: `AcceptResult.denial_reason`, what any in-process caller of `accept()`
+    # reads. An adversarial pass scrubbed the HTTP boundary AND the event's reason, leaving
+    # `providers.py` alone, and this value still carried the address with nothing looking at
+    # it. Three sinks is where the whack-a-mole stops being worth playing: the point of
+    # listing them is that redacting at N places is not the repair — not building the string
+    # is. Any further sink added later inherits the leak for free.
+    in_process = [case for case in cases if _pointers(case, case["returned_reason"])]
+    assert not in_process, (
+        f"{len(in_process)} of {len(cases)} `AcceptResult.denial_reason` values carry a live "
+        f"address (corpus seed {cases[0]['seed']}). The HTTP body and the persisted event can "
+        "both be clean while this one is not — which means the redaction was applied at the "
+        "sinks rather than at the source, and the next caller to read this field re-opens the "
+        "leak:\n  " + "\n  ".join(case["returned_reason"][:200] for case in in_process[:3])
     )
 
     forgotten = [case for case in cases if case["class_name"] not in case["body"]]
@@ -2113,7 +2345,21 @@ def _t294_corpus() -> dict[str, Any]:
             }
         )
 
-    _T294_CORPUS = {"seed": seed, "client": client, "auctions": auctions}
+    # Refs drawn from the SAME generator as the real ones and deliberately never published to
+    # anyone, so a fix cannot tell them apart from a genuine bid ref by shape, length or
+    # alphabet. Generated here, with the corpus, so the gate and its armer see one list.
+    unpublished = [f"bid-{rng.randrange(16**8):08x}" for _ in range(len(auctions) + 2)]
+    published_here = {
+        ref for auction in auctions for ref in (b["bid_ref"] for b in auction["bids"])
+    }
+    unpublished = [ref for ref in unpublished if ref not in published_here]
+
+    _T294_CORPUS = {
+        "seed": seed,
+        "client": client,
+        "auctions": auctions,
+        "unpublished_refs": unpublished,
+    }
     return _T294_CORPUS
 
 
@@ -2161,6 +2407,27 @@ def test_the_recorded_bid_corpus_is_armed() -> None:
     assert richest >= 2, (
         f"no auction carried more than {richest} non-fallback bid (seed {seed}); the corpus "
         "is too thin to distinguish 'this bid is unknown' from 'this auction is empty'"
+    )
+
+    # The forged refs must be INDISTINGUISHABLE from real ones. Four separate attacks keyed
+    # off a forged ref that was not: a length comparison, and a regex blacklisting the one
+    # literal string the gate sent. Same prefix, same length, same alphabet, or the
+    # "can this store say no?" question answers itself.
+    published = {bid["bid_ref"] for auction in auctions for bid in auction["bids"]}
+    unpublished = list(corpus["unpublished_refs"])
+    assert len(unpublished) >= 2, (
+        f"the corpus holds {len(unpublished)} unpublished refs (seed {seed}); the gate cannot "
+        "ask whether the accept path is able to refuse a ref it has no record of"
+    )
+    real_lengths = {len(ref) for ref in published}
+    assert {len(ref) for ref in unpublished} <= real_lengths, (
+        f"the forged refs {sorted({len(r) for r in unpublished})} are not the same length as "
+        f"the real ones {sorted(real_lengths)} (seed {seed}), so `len(bid_ref) != N` alone "
+        "distinguishes them — measured as a working one-line defeat of this gate"
+    )
+    assert not (published & set(unpublished)), (
+        f"an 'unpublished' ref was actually published (seed {seed}); refusing it would be "
+        "correct behaviour and the gate would be red for the wrong reason"
     )
 
 
@@ -2266,6 +2533,39 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     fabricated: list[str] = []
     minted = 0
     examined = 0
+
+    # Per-auction forged refs, prepared up front so the loop stays readable. `unpublished`
+    # was never handed to anyone; `foreign` is a ref a DIFFERENT auction genuinely published.
+    import random  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    # Drawn per run, like every other seed in this file, so the accept ORDER is not an
+    # enumerable table either. Reported in the failure message with the corpus seed.
+    order_seed = _drawn_seed()
+    order_rng = random.Random(order_seed)
+
+    with_bids = [auction for auction in auctions if auction["bids"]]
+    pool = list(corpus["unpublished_refs"])
+    unpublished_refs = [pool[index % len(pool)] if pool else "" for index in range(len(with_bids))]
+    extra_unpublished_refs = [
+        pool[(index + 1) % len(pool)] if len(pool) > 1 and order_rng.random() < 0.5 else ""
+        for index in range(len(with_bids))
+    ]
+
+    # A store may be rostered in several auctions, and refs are per STORE, so "some other
+    # auction's ref" can be one THIS auction also published — in which case refusing it would
+    # be wrong and the gate would be red for a reason the ticket is not about. Each auction's
+    # own refs are excluded explicitly; where no genuinely foreign ref exists, the check is
+    # skipped for that auction rather than guessed at.
+    foreign_refs: list[str] = []
+    for index, auction in enumerate(with_bids):
+        mine = {bid["bid_ref"] for bid in auction["bids"]}
+        elsewhere = [
+            bid["bid_ref"]
+            for offset in range(1, len(with_bids))
+            for bid in with_bids[(index + offset) % len(with_bids)]["bids"]
+            if bid["bid_ref"] not in mine
+        ]
+        foreign_refs.append(elsewhere[0] if elsewhere else "")
     for auction in auctions:
         if not auction["bids"]:
             continue
@@ -2280,21 +2580,52 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
         # against an attacker who has to guess, and `accept_bid` is handed the ref — so the
         # question is asked directly. It runs before the real accept because a refusal leaves
         # the auction open, while an acceptance would close it.
-        forged_ref = f"bid-{'f' * 8}{examined:04d}"
-        forged = client.post(
-            f"/auctions/{auction['auction_id']}/accept", json={"bid_ref": forged_ref}
-        )
-        forged_payload = forged.json()
-        if forged.status_code == 200 and forged_payload.get("code"):
-            fabricated.append(
-                f"{forged_ref} (never published by this auction) -> 200 "
-                f"{forged_payload.get('code')}"
+        # Two refs this auction never published, and BOTH are drawn from the same generator
+        # as the real ones — `bid-<8 hex>`, byte-for-byte the same shape. An earlier version
+        # used a literal `bid-ffffffff0001`, and four separate attacks keyed off exactly that
+        # distinguishability: `if len(bid_ref) != 12: return []` was enough, and so was a
+        # regex blacklisting the one literal string the gate happened to send. A forged ref
+        # that is shape-indistinguishable from a real one cannot be special-cased.
+        #
+        # The second forged ref is one a DIFFERENT auction really did publish, which asks a
+        # question the single-ref version never did: is the book keyed by auction, or is it a
+        # process-global bag? A store returning every bid it ever saw for any auction id lets
+        # a buyer accept another auction's offer.
+        forged_plan = [
+            (ref, provenance)
+            for ref, provenance in (
+                (unpublished_refs[examined - 1], "never published by any auction"),
+                (foreign_refs[examined - 1], "published by a DIFFERENT auction"),
+                (extra_unpublished_refs[examined - 1], "never published by any auction"),
             )
-
-        answer = client.post(
-            f"/auctions/{auction['auction_id']}/accept", json={"bid_ref": bid["bid_ref"]}
-        )
-        payload = answer.json()
+            if ref
+        ]
+        # THE REAL ACCEPT SITS AT A RANDOM POSITION AMONG THE FORGERIES, and the number of
+        # forgeries varies per auction. An adversarial pass defeated a fixed
+        # two-forged-then-real order completely, with no bid store at all: a process-global
+        # counter returning `[]` for calls 1 and 2 and a roster-synthesized bid thereafter
+        # reproduced the exact signature the gate reads as a repair, 6 runs out of 6. Call
+        # ORDER must not identify the genuine bid.
+        real_slot = order_rng.randint(0, len(forged_plan))
+        plan: list[tuple[str, str]] = [
+            *forged_plan[:real_slot],
+            (bid["bid_ref"], "REAL"),
+            *forged_plan[real_slot:],
+        ]
+        answer = None
+        payload: dict[str, Any] = {}
+        for ref, provenance in plan:
+            response = client.post(
+                f"/auctions/{auction['auction_id']}/accept", json={"bid_ref": ref}
+            )
+            body = response.json()
+            if provenance == "REAL":
+                answer = response
+                payload = body
+                continue
+            if response.status_code == 200 and body.get("code"):
+                fabricated.append(f"{ref} ({provenance}) -> 200 {body.get('code')}")
+        assert answer is not None, "the plan must contain the real accept"
         # The positive form: a 200 carrying a real permalink and a real single-use code.
         if answer.status_code == 200 and payload.get("code") and payload.get("permalink_url"):
             minted += 1
@@ -2441,7 +2772,7 @@ def _post_paths(app):
 
 report = {}
 for label, builder in (("store_agent", "store_agent.main"), ("exchange", "exchange.main")):
-    before = entries["n"]
+    import_time_entries = entries["n"]
     try:
         import importlib
 
@@ -2451,6 +2782,15 @@ for label, builder in (("store_agent", "store_agent.main"), ("exchange", "exchan
 
         client = TestClient(app, raise_server_exceptions=False)
         posts = _post_paths(app)
+        # BASELINE TAKEN HERE, AFTER the app is fully built, and this placement is the whole
+        # measurement. Six attacks defeated a process-wide counter by calling the door AT
+        # IMPORT TIME: `create_app()` imports every `<feature>/routes.py` before it checks for
+        # a `router`, so a module that mounts nothing still executes, and a bare
+        # `receive_bid({}, "", {})` at module level — even a zero-arg call that raises
+        # immediately — was counted as "a request reached the door". Only entries that happen
+        # BETWEEN this line and the end of the dispatch loop are requests.
+        import_time_entries = entries["n"] - import_time_entries
+        before = entries["n"]
         for path in posts:
             concrete = path
             for opening, closing in (("{", "}"),):
@@ -2468,10 +2808,18 @@ for label, builder in (("store_agent", "store_agent.main"), ("exchange", "exchan
             "posts": posts,
             "mounted": list(getattr(app.state, "mounted_routers", []) or []),
             "door_entries": entries["n"] - before,
+            "import_time_door_entries": import_time_entries,
         }
     except Exception as exc:
         report[label] = {"built": False, "error": f"{type(exc).__name__}: {exc}",
-                         "posts": [], "mounted": [], "door_entries": entries["n"] - before}
+                         "posts": [], "mounted": [], "door_entries": 0,
+                         # ZERO, not `import_time_entries`. On this path the app never
+                         # finished building, so the subtraction that turns that snapshot
+                         # into a DELTA never ran and the name still holds a raw absolute
+                         # counter. Publishing it would put a fabricated number into the
+                         # sentence "the door WAS entered N time(s) while the apps were
+                         # being built" - a failure message written to be trusted.
+                         "import_time_door_entries": 0}
 
 report["modules"] = {name: getattr(m, "__file__", "") or "" for name, m in sys.modules.items()}
 report["total_door_entries"] = entries["n"]
@@ -2698,13 +3046,22 @@ def test_t244_the_external_bid_door_is_reachable_from_a_served_process() -> None
     caller is exactly what is needed.
     """
     probe = _bid_door_dispatch_probe()
-    entries = int(probe["total_door_entries"])
+    # The sum of PER-LABEL DISPATCH deltas, never `total_door_entries`. Six attacks defeated
+    # the process-wide total by calling the door at import time — a routes.py with no router
+    # at all, or a call in an unrelated `__init__`, both of which `create_app()` executes.
+    # Import-time entries are reported separately below so the failure can say so out loud.
+    entries = sum(int(probe[label]["door_entries"]) for label in ("store_agent", "exchange"))
+    incidental = sum(
+        int(probe[label].get("import_time_door_entries", 0))
+        for label in ("store_agent", "exchange")
+    )
     call_sites = _t244_production_call_sites("receive_bid")
 
     detail = "; ".join(
         f"{label}: built={probe[label]['built']}, POST routes={probe[label]['posts'] or 'none'}, "
         f"mounted={probe[label]['mounted'] or 'none'}, "
-        f"door entries={probe[label]['door_entries']}"
+        f"door entries during dispatch={probe[label]['door_entries']}, "
+        f"at import time={probe[label].get('import_time_door_entries', 0)}"
         + (f", error={probe[label]['error']}" if not probe[label]["built"] else "")
         for label in ("store_agent", "exchange")
     )
@@ -2717,6 +3074,14 @@ def test_t244_the_external_bid_door_is_reachable_from_a_served_process() -> None
         f"AST scan separately finds {len(call_sites)} production call site(s) of receive_bid "
         f"{[f'{p}:{n}' for _s, p, n in call_sites][:5]}, which is context, not the assertion: "
         "a call site proves someone wrote the name, and this gate is about whether a request "
-        f"arrives. Measured: {detail}. So e4_store_agent_passing counts a signed-external-bid "
-        "capability that no running process performs."
+        f"arrives. Measured: {detail}. "
+        + (
+            f"NOTE: the door WAS entered {incidental} time(s) while the apps were being built, "
+            "which is import-time execution and deliberately does not count — a module that "
+            "calls the door on import serves nobody. "
+            if incidental
+            else ""
+        )
+        + "So e4_store_agent_passing counts a signed-external-bid capability that no running "
+        "process performs."
     )
