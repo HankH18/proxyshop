@@ -2727,16 +2727,33 @@ def test_t256_the_verification_persistence_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-256: T-065's persistence half is unimplemented — ledger.claims, "
-        "claim_verifications, verification_evidence_refs, trust_observations and trust_scores "
-        "all exist in db/migrations/0002 and the only INSERT in the product tree targets "
-        "ledger.commerce_events, so no trust-side seam persists a verification outcome and "
-        "nothing calls one; remove this marker with the fix"
-    ),
-)
+# JUSTIFY-TEST-EDIT (T-256) — xfail marker REMOVED because the defect it encoded is fixed.
+#
+# The marker read, verbatim:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-256: T-065's persistence half is unimplemented — ledger.claims, "
+#         "claim_verifications, verification_evidence_refs, trust_observations and trust_scores "
+#         "all exist in db/migrations/0002 and the only INSERT in the product tree targets "
+#         "ledger.commerce_events, so no trust-side seam persists a verification outcome and "
+#         "nothing calls one; remove this marker with the fix"))
+#
+# What it encoded: no trust-side callable persisted a verification outcome to the five
+# ledger tables the migration reserves for it, and nothing that ships called one — so
+# T-065's acceptance item 2 ("re-running the same (claim, snapshot, verifier version) writes
+# nothing") was satisfied trivially by a pure function that wrote nothing ever.
+#
+# Would this test still be wrong if my change were reverted? YES, and that was MEASURED:
+# with apps/trust/src/verification/persistence.py and apps/trust/src/claims/ removed and
+# apps/trust/src/verification/__init__.py restored to its HEAD content, this gate goes
+# "1 failed" on `assert seams` — literally `assert []`, no seam found at all; with them
+# restored it goes "2 passed". The pass is caused by this lane's new writer and its route,
+# and by nothing else.
+#
+# The seam is trust.verification.persist_claim_verification; its shipped caller is
+# apps/trust/src/claims/routes.py, a router main.py's glob genuinely mounts — verified live,
+# not inferred: create_app().state.mounted_routers reads ['trust.claims.routes',
+# 'trust.events.routes'] and app.openapi()['paths'] carries '/claims/verifications'.
+# No assertion body in this gate was touched; only the marker above it was deleted.
 def test_t256_a_verification_result_is_persisted_to_the_tables_it_was_specified_for() -> None:
     """A verification that writes nothing is graded, correctly, as writing nothing.
 

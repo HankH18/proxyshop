@@ -14,7 +14,13 @@ does a verification outcome mean here", so that answer is written down once.
 observation ``trust.scoring.score`` consumes, routing it through the human-approved
 ``claim_type -> dimension`` table and raising loudly on a claim type nobody approved.
 
-Imports are LAZY (PEP 562), and the reason has CHANGED — read this before deleting it.
+:func:`persist_claim_verification` is the second such answer (T-256): where a verification
+outcome becomes rows in the five ``ledger.*`` tables T-065 reserved for it. It lives in
+:mod:`.persistence` and is imported EAGERLY, which the paragraph below does not contradict —
+it needs no verifier on the path, only a database connection the caller hands it.
+
+The VERIFIER imports are LAZY (PEP 562), and the reason has CHANGED — read this before
+deleting it.
 
 It used to be that ``apps/trust/Dockerfile`` did not copy ``packages/verification`` at all, so
 an eager ``import claim_verification`` here would have made the whole trust service
@@ -35,9 +41,34 @@ the image's COPY set has a gate of its own rather than relying on this module to
 
 from __future__ import annotations
 
+import importlib as _importlib
+from pathlib import Path as _Path
 from typing import Any
 
-__all__ = ["observation_from_claim", "satisfies_hard_constraint", "verify"]
+# --- The two spellings are SEQUENCED before anything else runs (the T-126 pattern) -------
+# See `apps/trust/src/ledger/__init__.py` for the measured rationale; not duplicated here.
+# This package grew a submodule with T-256 (`.persistence`), so it now needs the same
+# elected-primary binding every other feature package here already has.
+_SPELLINGS: tuple[str, ...] = ("trust.verification", "apps.trust.src.verification")
+_PRIMARY_SPELLING = _SPELLINGS[0]
+
+if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
+    try:
+        _importlib.import_module(_PRIMARY_SPELLING)
+    except ImportError:
+        pass
+
+# E402 below is the point of the block above: the sequencing has to run BEFORE the first
+# relative import, because it is the eager imports that build the second copy.
+from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
+from .persistence import persist_claim_verification  # noqa: E402
+
+__all__ = [
+    "observation_from_claim",
+    "persist_claim_verification",
+    "satisfies_hard_constraint",
+    "verify",
+]
 
 _LAZY = {"verify": "verify", "satisfies_hard_constraint": "satisfies_hard_constraint"}
 
@@ -111,3 +142,12 @@ def observation_from_claim(claim: Any, store_id: str, *, observed_at: Any) -> di
         "type": str(status),
         "observed_at": observed_at,
     }
+
+
+_REPO_ROOT = _Path(__file__).resolve().parents[4]
+_SPELLING_ROOTS: dict[str, _Path] = {
+    "trust.verification": _REPO_ROOT / ".pkgroot",
+    "apps.trust.src.verification": _REPO_ROOT,
+}
+
+_bind_submodules(__name__, __path__, _SPELLINGS, _SPELLING_ROOTS)
