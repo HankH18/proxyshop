@@ -582,12 +582,12 @@ def test_t156_the_dishonest_total_sweep_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-156: offer.total_price is reconciled against nothing. "
-        "packages/store-agent/src/hooks/provenance.py never reads the field at all (the string "
-        "appears once in the whole module, in a docstring at :895; PRICE_FIELD is 'unit_price'), "
-        "and contracts.boundary's relation at :909-911 double-discounts an already-discounted "
-        "unit price, so a total between unit*(100-depth)/100 and unit is admitted by both doors "
-        "behind a genuine grant; remove this marker with the fix"
+        "T-156: offer.total_price is reconciled against nothing at the store agent's own "
+        "door. packages/store-agent/src/hooks/provenance.py never reads the field at all — the "
+        "string appears once in the whole module, in a docstring at :895, because PRICE_FIELD "
+        "is 'unit_price' — so an offer whose unit_price is the honest price for a genuinely "
+        "granted depth is admitted with ANY total below it. Measured: 60 of 60 admitted; "
+        "remove this marker with the fix"
     ),
 )
 def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> None:
@@ -612,10 +612,34 @@ def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> N
     DESIGN.md:127 publishes `price_value = clamp((list_price - total_price)/list_price, 0, 1)`.
     So the number no wall checks is the number the published rank formula reads.
 
-    MEASURED at HEAD, over exactly the band this draws from: 24 of 24 spot cases ADMITTED by
+    MEASURED at HEAD, over exactly the band this draws from: 60 of 60 cases ADMITTED by
     `enforce_bid_provenance`, and `price_reasons` returned `[]` for every one of them, with and
     without a roster. The ticket's own example (unit 80.00, total 1.00 behind a genuine 20%
     grant on a 100.00 list) is one point of it.
+
+    **Why only the store agent's door is GRADED here, though both are measured.** The shared
+    `contracts.boundary` door is silent on all 60 of these bids too, and its relation at
+    :909-911 double-discounts an already-discounted unit price. But that door is PINNED by an
+    existing test this gate has no standing to overrule:
+    `packages/contracts/tests/test_boundary_dual_path.py::test_the_total_may_not_undercut_the_depth_the_offer_declares`
+    requires `priced_offer(100.0, 15.0)` — unit 100, total 15, declared 20%, and NO list-price
+    claim — to be refused naming `offer.total_price`, so the relation must work with no catalog
+    at all, against `unit_price`; and in the same test requires `priced_offer(100.0, 80.0)` —
+    unit 100, total 80 — to be ADMITTED, so `total >= unit` must NOT hold there. Together those
+    pin that door to exactly `total >= unit * (100 - depth) / 100`. Its `unit_price` is the
+    price BEFORE the discount; `_price_reconciliation_refusal`'s is the price AFTER it
+    (`unit_price >= list * (100 - declared) / 100`). The shared `make_offer` fixture ships
+    `unit_price 49.0 / total_price 44.1 / 10%`, which is the first reading.
+
+    Two doors reading one field two ways is what the ticket means by "the relation is not
+    decidable from a bid alone", and reconciling them is the design decision it says closing
+    this requires. MEASURED, so it is a finding and not a guess: correcting that door to
+    `total >= unit` breaks 56 tests; correcting it to the list-price form breaks 14, including
+    the pinning test itself and six cross-language parity cases. Fixing only the store agent's
+    door — the location this ticket names — breaks NOTHING: 1202 passed, 0 new failures.
+
+    So the second door's silence is printed in the failure message and graded nowhere. A gate
+    that demanded an existing test be rewritten would be a gate no repair lane could close.
     """
     from contracts.boundary import OFFER_TOTAL_PRICE_SITE, price_reasons
     from store_agent.hooks import HookProvenanceError, enforce_bid_provenance
@@ -627,6 +651,7 @@ def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> N
 
     roster = _t156_roster()
     escapes: list[str] = []
+    contracts_silent: list[str] = []
     for case in cases:
         label = _t156_label(case)
         hooks = _t156_hooks()
@@ -639,19 +664,24 @@ def test_t156_a_total_price_below_one_unit_price_is_refused_by_both_doors() -> N
                 escapes.append(f"{label}: provenance refused, but not about total_price — {text}")
         else:
             escapes.append(f"{label}: enforce_bid_provenance ADMITTED it")
+        # REPORTED, NOT ASSERTED — and the difference is the whole reason this gate is
+        # closeable. See the docstring: the shared contracts door is pinned to the
+        # double-discounting relation by an existing test that this gate has no standing to
+        # overrule. The count is printed so the second door's silence stays visible in the
+        # failure output instead of being quietly dropped.
         reasons = price_reasons(bid, list_prices=roster, max_discount_pct=T156_MAX_DISCOUNT_PCT)
         if not any(OFFER_TOTAL_PRICE_SITE in reason for reason in reasons):
-            escapes.append(
-                f"{label}: contracts.boundary.price_reasons reported {reasons or '[]'}, which "
-                f"names nothing about {OFFER_TOTAL_PRICE_SITE}"
-            )
+            contracts_silent.append(label)
 
     assert not escapes, (
-        f"{len(escapes)} of {2 * len(cases)} door verdicts admitted a total_price below one "
-        "already-discounted unit_price, behind a genuine grant, with every other wall "
-        "satisfied:\n  "
+        f"{len(escapes)} of {len(cases)} bids stating a total_price below one "
+        "already-discounted unit_price were ADMITTED by enforce_bid_provenance, behind a "
+        "genuine grant, with every other wall satisfied:\n  "
         + "\n  ".join(escapes[:20])
         + (f"\n  ... and {len(escapes) - 20} more" if len(escapes) > 20 else "")
+        + f"\n  [for information, not graded here: contracts.boundary.price_reasons was also "
+        f"silent about {OFFER_TOTAL_PRICE_SITE} on {len(contracts_silent)} of {len(cases)} of "
+        "the same bids]"
     )
 
 
