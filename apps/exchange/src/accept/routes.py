@@ -277,12 +277,20 @@ class AcceptBidRequest(BaseModel):
 
 
 class AcceptedOfferResponse(BaseModel):
-    """200 — the buyer follows this permalink and never mints its own (R3)."""
+    """200 — the buyer follows this permalink and never mints its own (R3).
+
+    ``code`` is ``None`` on exactly one shape of accept: the exchange's own list-price
+    fallback for a store whose agent never answered (R10). ``notice`` is what stops that
+    ``null`` from being the only thing that says so — it carries a sentence a shopper can
+    read, saying no discount applies and why. A buyer that renders the permalink and ignores
+    the rest is unaffected, which is why the field is optional rather than required.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     permalink_url: str
     code: str | None = None
+    notice: str | None = None
 
 
 class AcceptDeniedResponse(BaseModel):
@@ -614,7 +622,11 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
             )
         )
 
-    return AcceptedOfferResponse(permalink_url=str(result.permalink_url), code=result.code)
+    return AcceptedOfferResponse(
+        permalink_url=str(result.permalink_url),
+        code=result.code,
+        notice=result.discount_notice,
+    )
 
 
 # LAST: this module is reachable as `exchange.accept.routes` and as

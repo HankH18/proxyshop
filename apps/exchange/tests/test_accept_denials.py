@@ -31,11 +31,11 @@ from exchange.accept import (
     DENIAL_AUCTION_NOT_ACCEPTABLE,
     DENIAL_BLACKLISTED,
     DENIAL_CHECKOUT_REFUSED,
-    DENIAL_FALLBACK_NOT_PURCHASABLE,
     DENIAL_REASONS,
     DENIAL_UNAVAILABLE,
     DENIAL_UNKNOWN_BID,
     DENIAL_UNRECORDABLE_ACCEPTANCE,
+    DENIAL_UNROUTABLE_FALLBACK,
     DENIAL_UNSPECIFIED,
     accept,
     accept_offer,
@@ -175,8 +175,14 @@ def _fallback_auction() -> dict[str, Any]:
     """An auction whose `bid-a` is the exchange's own list-price fallback (R10).
 
     The flag is what `auction/routes.py::collected_bid_records` stamps off the `BidEntry`; the
-    offer is left fully mintable on purpose, so the refusal below can only be the fallback gate
-    and never an offer the checkout port would have rejected anyway.
+    offer is left fully mintable on purpose, so the refusal below can only be the one this
+    fixture is for and never an offer the checkout port would have rejected anyway.
+
+    Driven under the ``unwired`` fixture, this refuses ``unroutable_fallback``: accepting a
+    fallback SUCCEEDS since the tier-0 ruling — no code, and the store's own checkout URL
+    handed back — but that URL can only be built from the PLATFORM's registry, and with none
+    wired there is nowhere to send the shopper. The bid's own ``store_domain`` is deliberately
+    unreachable from that path, which is why a bid that carries one still refuses here.
     """
     record = auction()
     record["bids"][0]["fallback"] = True
@@ -237,9 +243,10 @@ def test_every_reason_accept_can_emit_names_a_declared_code(unwired: None) -> No
             eligibility=None,
         ),
         DENIAL_AUCTION_NOT_ACCEPTABLE: _route_refusal(),
-        # R10's list-price fallback: shown, never sold. An INTERIM fail-closed default rather
-        # than a rule R10 states — see `accept.offer`'s block for the measurement behind it.
-        DENIAL_FALLBACK_NOT_PURCHASABLE: accept(_fallback_auction(), "bid-a", Creator(), "shopify"),
+        # R10's list-price fallback with no platform registry in force (the `unwired`
+        # fixture): the accept would have SUCCEEDED as a no-discount handoff, but there is no
+        # registered domain to send the shopper to, so it fails closed instead.
+        DENIAL_UNROUTABLE_FALLBACK: accept(_fallback_auction(), "bid-a", Creator(), "shopify"),
     }
 
     assert set(emitted) == set(DENIAL_REASONS) - {DENIAL_UNSPECIFIED}, (

@@ -52,11 +52,11 @@ __all__ = [
     "DENIAL_AUCTION_NOT_ACCEPTABLE",
     "DENIAL_BLACKLISTED",
     "DENIAL_CHECKOUT_REFUSED",
-    "DENIAL_FALLBACK_NOT_PURCHASABLE",
     "DENIAL_REASONS",
     "DENIAL_UNAVAILABLE",
     "DENIAL_UNKNOWN_BID",
     "DENIAL_UNRECORDABLE_ACCEPTANCE",
+    "DENIAL_UNROUTABLE_FALLBACK",
     "DENIAL_UNSPECIFIED",
     "denial_code",
     "denial_reason",
@@ -85,12 +85,16 @@ DENIAL_BLACKLISTED = BLACKLISTED
 DENIAL_UNAVAILABLE = UNAVAILABLE
 #: The auction is in a state from which ``accepted`` is not a legal move (served route only).
 DENIAL_AUCTION_NOT_ACCEPTABLE = "auction_not_acceptable"
-#: The bid is the exchange's own list-price fallback (R10) — a price the store never quoted —
-#: so it may be shown but not bought. **An interim fail-closed default, not a rule R10 states:**
-#: R10 requires only that a silent store is represented and can reach the shortlist, and is
-#: silent on whether that entry may then be minted a code. See :func:`~.offer.accept` for the
-#: measurement behind the default and for what un-gating it would take.
-DENIAL_FALLBACK_NOT_PURCHASABLE = "fallback_not_purchasable"
+#: The bid is the exchange's own list-price fallback (R10) and the platform holds no
+#: registered domain for the store, so there is **nowhere to send the shopper**.
+#:
+#: A fallback is not refused for being a fallback — accepting one succeeds, mints no discount
+#: code and hands back the store's own checkout destination (:func:`~.offer.accept`). This is
+#: what is left when even that destination cannot be established: the only defensible source
+#: for a fallback's host is the platform's ``store_id -> domain`` registry, and a bid's own
+#: ``store_domain`` is a field the store wrote, so an unanswered registry is a refusal rather
+#: than an excuse to trust the store's claim (C10/D22/S8).
+DENIAL_UNROUTABLE_FALLBACK = "unroutable_fallback"
 #: The boundary's fail-safe, and the reason this vocabulary is closed rather than advisory: a
 #: refusal reaching the published surface with a code nothing declares is re-published under
 #: this one, its prose kept intact. A client parsing ``denial_reason`` therefore never sees a
@@ -104,10 +108,10 @@ DENIAL_REASONS: tuple[str, ...] = (
     DENIAL_AUCTION_NOT_ACCEPTABLE,
     DENIAL_BLACKLISTED,
     DENIAL_CHECKOUT_REFUSED,
-    DENIAL_FALLBACK_NOT_PURCHASABLE,
     DENIAL_UNAVAILABLE,
     DENIAL_UNKNOWN_BID,
     DENIAL_UNRECORDABLE_ACCEPTANCE,
+    DENIAL_UNROUTABLE_FALLBACK,
     DENIAL_UNSPECIFIED,
 )
 

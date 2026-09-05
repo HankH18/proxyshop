@@ -146,7 +146,8 @@
                   "required": ["permalink_url"],
                   "properties": {
                     "permalink_url": { "type": "string" },
-                    "code": { "type": ["string", "null"] }
+                    "code": { "type": ["string", "null"] },
+                    "notice": { "type": ["string", "null"] }
                   }
                 },
                 "example": {

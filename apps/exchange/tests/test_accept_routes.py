@@ -184,7 +184,22 @@ def test_an_accept_reaches_the_mint_and_answers_with_the_permalink(unwired: None
     body = response.json()
     assert urlsplit(body["permalink_url"]).hostname == SELLER_DOMAIN
     assert body["code"] and body["code"] in body["permalink_url"]
-    assert set(body) == {"permalink_url", "code"}, "the 200 body carries only what is published"
+    # `notice` joined the published body with the tier-0 fallback ruling: an accept that mints
+    # nothing has to be able to SAY so, and a real accept says nothing. It is checked twice on
+    # purpose — once against a literal, so the document alone cannot license a new field, and
+    # once against the document, so this literal alone cannot license one either.
+    assert set(body) == {"permalink_url", "code", "notice"}, (
+        "the 200 body carries only what is published"
+    )
+    declared = set(
+        json.loads(EXCHANGE_OPENAPI.read_text(encoding="utf-8"))["paths"][
+            "/auctions/{auction_id}/accept"
+        ]["post"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+    )
+    assert set(body) == declared, (
+        f"the served 200 body {sorted(body)} is not the published one {sorted(declared)}"
+    )
+    assert body["notice"] is None, f"a minting accept carries no fallback notice: {body}"
 
 
 def test_the_acceptance_is_persisted_so_the_second_request_gets_no_second_code(

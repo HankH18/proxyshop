@@ -125,21 +125,24 @@ from ..checkout import (
     CheckoutResult,
     OrphanedCheckoutCode,
     OrphanedCode,
+    assert_on_domain,
     code_fingerprint,
+    registered_domain_for,
     resolve_provider,
 )
 from .claims import platform_acceptance_claims
 from .reasons import (
     DENIAL_ALREADY_ACCEPTED,
     DENIAL_CHECKOUT_REFUSED,
-    DENIAL_FALLBACK_NOT_PURCHASABLE,
     DENIAL_UNKNOWN_BID,
     DENIAL_UNRECORDABLE_ACCEPTANCE,
+    DENIAL_UNROUTABLE_FALLBACK,
     denial_reason,
 )
 
 __all__ = [
     "ACCEPT_REFUSED",
+    "NO_DISCOUNT_ON_A_FALLBACK",
     "AcceptResult",
     "accept",
     "next_slot",
@@ -154,6 +157,22 @@ ACCEPT_REFUSED = "accept_refused"
 
 #: Field the auction is stamped with once a code exists for it.
 _ACCEPTED_FIELD = "accepted_bid_ref"
+
+#: What a buyer is told when the offer they accepted was the exchange's own list-price
+#: fallback (R10) rather than a price a store quoted.
+#:
+#: It is a sentence rather than a flag because the flag already exists — ``code`` is ``None``
+#: — and a ``null`` is not something a shopper reads. The ruling this implements is that a
+#: silent store is treated as an ordinary merchant: no discount, and the buyer is sent to that
+#: merchant's own checkout. Handing back a destination with a quiet ``null`` beside it would
+#: leave a shopper expecting the discount the exchange usually negotiates, which is the one
+#: outcome worse than the refusal this replaced.
+NO_DISCOUNT_ON_A_FALLBACK = (
+    "No discount applies to this offer. This store's agent never answered the exchange, so "
+    "the price shown is the store's own catalogue list price rather than anything it quoted "
+    "for you, and no discount code was created. You are being sent to the store's ordinary "
+    "checkout, at its ordinary prices."
+)
 
 #: Distinguishes "the caller passed no registered-domain source" from "the caller explicitly
 #: passed ``None``". The first falls back to the deployment default; the second does not.
@@ -228,6 +247,12 @@ class AcceptResult:
     #: T-158 was a guard that *looked* real, so "which guard actually ran" has to be a value
     #: somebody can read rather than something inferred from the wiring.
     claim_verified: bool = False
+    #: Set on a **successful** accept that deliberately minted nothing, and it says why in
+    #: words a shopper can read (:data:`NO_DISCOUNT_ON_A_FALLBACK`). ``None`` means the
+    #: ordinary case: a store quoted a price and :attr:`code` carries the discount it agreed
+    #: to. This is the positive half of the invariant one field down — ``code is None`` says
+    #: nothing was minted, and this says the buyer was TOLD.
+    discount_notice: str | None = None
     denial_reason: str | None = None
     #: The next slot to offer the buyer when this one could not be completed (A5).
     reoffer_bid_ref: str | None = None
@@ -375,6 +400,143 @@ def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any]:
             # The join to the refusal's redacted prose (T-215).
             "fingerprint": code_fingerprint(orphan.code),
         },
+    )
+
+
+def _fallback_destination(request: CheckoutRequest) -> str:
+    """Where a shopper who accepted a list-price fallback is sent: the store's own checkout.
+
+    Two functions do the work and neither is re-implemented here, which is the point of this
+    being three lines:
+
+    * :func:`~apps.exchange.src.checkout.provider.registered_domain_for` is the PLATFORM's
+      answer to "what host does this seller live on", read through the same port the minting
+      path reads it through — so a fallback's destination and a real accept's permalink can
+      never name two different hosts for one store; and
+    * :func:`~apps.exchange.src.ranking.candidates.fallback_checkout_url` builds the cart URL
+      with no discount on it. Its docstring already carries the reason it is not
+      ``build_cart_permalink``: *"A fallback's pre-accept URL is a destination, not an
+      entitlement."* The ruling this implements is that it never stops being one — the URL
+      the buyer was shown before accepting is the URL they are handed after, unchanged.
+
+    Imported inside the function because ``ranking.serving`` already reaches the other way
+    (``from ..accept.offer import platform_registered_domains``), and two module-level
+    imports across that seam would be a cycle. The convention is this tree's own.
+
+    **The built URL is then checked against the domain it was built from, and that third line
+    is not ceremony.** ``fallback_checkout_url`` interpolates the registry value **verbatim**
+    — deliberately, its docstring explains, because normalising would be that function
+    quietly repairing the platform's own record. It then says the malformed result is caught
+    downstream: *"the candidate is excluded ``off_domain_checkout``, which is the direction to
+    fail in."* That is true of its ORIGINAL consumer, where ``ranking.filters.domain_reason``
+    runs ``is_on_domain`` over the completed offer. It was **not** true here, and adding an
+    unguarded second consumer of a deliberately-unnormalising builder is how that sentence
+    became a lie. Measured on this function before the check was added, with the platform
+    registry holding a malformed row::
+
+        row 'good.tld:8080@evil.tld'  ->  200  https://good.tld:8080@evil.tld/cart/1:1
+        row 'https://x.com'           ->  200  https://https://x.com/cart/1:1
+
+    The first URL's effective host — the one a browser connects to — is ``evil.tld``, by the
+    userinfo trick ``checkout/domain.py`` exists to defeat. The same rows are refused on the
+    minting path (``checkout_refused: OrphanedOffDomainCheckout``), so the handoff was the
+    weaker door of the two. A store cannot write a registry row, so this is the platform's own
+    data integrity rather than a spoof anyone can mount — but "only the platform can trigger
+    it" is a reason to fail closed cheaply, not a reason to skip the check. S8's rule is that
+    no checkout URL is ever returned off the seller's registered domain, and a handoff URL is
+    one the buyer's browser follows exactly like a minted permalink.
+
+    Raises:
+        Exception: whatever the registry lookup raises — typically ``OffDomainCheckout`` for
+            a store the platform holds no domain for — or ``OffDomainCheckout`` from the
+            check above when the row is malformed enough to move the URL's host. There is no
+            fall back to the bid's own claim, because on a fallback the store never made one;
+            see :attr:`CheckoutRequest.store_domain` at the call site, which is emptied for
+            exactly this reason.
+    """
+    from ..ranking.candidates import fallback_checkout_url  # noqa: PLC0415
+
+    domain = registered_domain_for(request)
+    destination = fallback_checkout_url(domain)
+    # `secret=""` because nothing has been minted and there is nothing to keep out of the
+    # message — the same reason the port passes it empty on its own pre-mint call.
+    assert_on_domain(destination, domain, what="fallback destination")
+    return destination
+
+
+def _handoff_events(
+    auction_id: str,
+    bid_ref: str,
+    store_id: str,
+    offer: Any,
+    destination: str,
+) -> tuple[Mapping[str, Any], ...]:
+    """C11 for a handoff: the two events that happened, and pointedly not the third.
+
+    A minting checkout emits :data:`~apps.exchange.src.checkout.CHECKOUT_EVENT_KINDS` —
+    ``accepted``, ``code_created``, ``checkout_redirect``. This emits the first and the last.
+    The absent ``code_created`` is not an omission to be tidied up later; it is the ledger
+    saying, in the frozen vocabulary (D24) and where a reconciler can read it, that no
+    discount was created for this acceptance. An event filed here to "keep the trio
+    symmetrical" would be a record of a code that does not exist.
+
+    ``checkout_token`` is ``None`` in both bodies for the same honesty: a token is the
+    platform's handle on a checkout it is party to, and it is what
+    ``trust.reconcile.engine`` joins an ``order_paid`` webhook back to. This exchange is not
+    party to what the shopper does at the store's own till, so inventing a token would
+    promise a join that can never be made.
+
+    **This function cannot raise on a hostile ``offer``, and that is a fix rather than
+    caution.** ``accept()`` reads the offer as ``_read(bid, "offer") or {}``, which is not a
+    mapping check — a bid whose ``offer`` is a truthy non-mapping (a list, say) reaches here
+    intact, and ``dict(offer)`` on it raised ``ValueError`` straight out of ``accept()``.
+    Measured before the guard: the auction was already stamped and its claim already taken by
+    then, so the buyer got a 500, no code, no destination and no re-offer, and every later
+    accept on that auction answered ``already_accepted`` — one malformed bid record burning
+    an auction permanently. The minting path handles the identical input as an ordinary
+    refusal, so this was the handoff being *worse*, not the tree being uniformly fragile.
+    Both halves are closed: the shape is coerced here, and the call site now builds these
+    events BEFORE the stamp so that anything else that surprises us is a refusal rather than
+    a lockout.
+    """
+    body = dict(offer) if isinstance(offer, Mapping) else {}
+    return (
+        build_published_event(
+            "accepted",
+            auction_id=auction_id,
+            store_id=store_id,
+            payload={
+                # The published `accepted` body (D24).
+                "bid_ref": bid_ref,
+                "checkout_token": None,
+                "offer": body,
+                # ...and what makes it readable as the handoff it is.
+                "fallback": True,
+                "discount_applied": False,
+            },
+        ),
+        build_published_event(
+            "checkout_redirect",
+            auction_id=auction_id,
+            store_id=store_id,
+            payload={
+                # The published `checkout_redirect` body (D24).
+                "checkout_token": None,
+                "permalink_url": destination,
+                # ...and the same two markers, so a consumer reading either event alone can
+                # still tell a handoff from a checkout.
+                "fallback": True,
+                "discount_applied": False,
+                # Carried because the module docstring above promises it is: "the
+                # `checkout_redirect` event ... records that nothing external was consulted".
+                # The minting path's redirect event carries this field and the handoff's did
+                # not, which made that sentence false for exactly one of the two paths it
+                # describes. Always `True` here — `_fallback_destination` refuses unless the
+                # platform registry answered — but written rather than implied, because a
+                # reader of one event should not have to know which path produced it.
+                "domain_verified": True,
+            },
+        ),
     )
 
 
@@ -542,51 +704,12 @@ def accept(
             store_id=store_id,
         )
 
-    if _read(bid, "fallback"):
-        # R10's list-price fallback is SHOWN but not SOLD.
-        #
-        # **This gate is an interim fail-closed default, and R10 does not require it.** R10 is
-        # "a store whose agent never answers is still represented, at its catalogue list price,
-        # and can still reach the shortlist" — represented and shown. It says nothing about
-        # whether that entry may then be minted a single-use code, and this refusal is a
-        # deployment's answer to a question the requirement leaves open, pending a product
-        # ruling. A future lane un-gating it after that ruling deletes this block and nothing
-        # else; do NOT read it as the specification.
-        #
-        # Why the default points this way. Measured over the real composed exchange, with the
-        # ranking and the accept path wired to one registry as `composition.py` wires them: an
-        # accept on a shortlisted fallback returned `200 {"code": "PSX-6KNY1ESD",
-        # "permalink_url": "https://store-silent.example.com/cart/1:1?discount=PSX-6KNY1ESD"}`.
-        # A price no store ever quoted became a live single-use discount, and in `shopify_stub`
-        # mode that code is created by the merchant's own `POST /codes` — asking a merchant to
-        # honour a number its agent never said. Worse with no outbound bid client wired, which
-        # is the default: EVERY rostered store falls back, so the whole shortlist is the
-        # caller's roster, at prices the caller wrote, on an unauthenticated request. The
-        # T-177 price wall cannot catch it — `collect_bids._price_refusal` runs only when a
-        # reply arrived, so `0.01` is refused when a store BIDS it and admitted when the
-        # caller WRITES it on the roster.
-        #
-        # Reversibility is the whole argument. Un-gating is deleting this block once someone
-        # rules; un-minting a discount a merchant never quoted is not a code change.
-        #
-        # `fallback` is stamped by `auction/routes.py::collected_bid_records` off the
-        # `BidEntry` — `collect_bids`' own verdict — and never off the store's document, so a
-        # store cannot clear this by writing `fallback: false` into its reply.
-        return _refused(
-            auction,
-            ref,
-            mode,
-            denial_reason(
-                DENIAL_FALLBACK_NOT_PURCHASABLE,
-                f"bid {ref!r} is this exchange's own list-price fallback for {store_id!r} "
-                f"(R10): the store never answered, so this price is catalogue data rather "
-                f"than an offer that store made. It is shown so the store is represented, "
-                f"and it is not purchasable — no discount code is minted against a price no "
-                f"seller quoted",
-            ),
-            store_id=store_id,
-            reoffer_bid_ref=next_slot(auction, ref),
-        )
+    # R10's list-price fallback is a HANDOFF, not a checkout — see `_fallback_destination`
+    # and `_handoff_events`, and the branch further down that returns without minting.
+    # Read here, once, off the flag `auction/routes.py::collected_bid_records` stamps from the
+    # `BidEntry` (`collect_bids`' own verdict) and never off the store's document, so a store
+    # cannot clear it by writing `fallback: false` into its reply.
+    fallback = bool(_read(bid, "fallback"))
 
     if not _acceptance_is_recordable(auction):
         return _refused(
@@ -614,7 +737,14 @@ def accept(
         # The bid's CLAIM about its own domain. Kept because the frozen contract pins it and
         # because it is what the refusal message needs to quote — but overridden outright
         # whenever `registered_domains` below answers.
-        store_domain=str(_read(bid, "store_domain") or ""),
+        #
+        # For a FALLBACK it is dropped instead of kept, and that is not tidiness. With no
+        # registry wired `registered_domain_for` returns this field, so it is the one door
+        # through which a store's own word could become the host a shopper is sent to — and
+        # on a fallback the store never spoke at all, so there is no word of its to honour.
+        # Empty, that same function refuses (`_usable`), which is why a fallback destination
+        # can only ever be the platform's own record.
+        store_domain="" if fallback else str(_read(bid, "store_domain") or ""),
         offer=_read(bid, "offer") or {},
         mode=str(mode),
         code_creator=code_creator,
@@ -625,6 +755,41 @@ def accept(
         # build for any call site that leaves it out.
         registered_domains=sellers,
     )
+
+    # Where a fallback's shopper is being sent, settled HERE — before the claim, because
+    # everything between the claim and the `try` below must be unable to raise, and this
+    # lookup can. A destination that cannot be established is a refusal that has cost
+    # nothing: no claim taken, no auction stamped, and the next slot offered instead.
+    destination = ""
+    handoff: tuple[Mapping[str, Any], ...] = ()
+    if fallback:
+        try:
+            destination = _fallback_destination(request)
+            # Built HERE, beside the lookup, and not after the stamp further down. Both are
+            # the same kind of work — turning this bid into the answer the buyer gets — and
+            # a failure in either must land in the same place: a refusal, with no claim
+            # taken and no auction stamped. Building the events after `_record_acceptance`
+            # is what let one malformed bid record burn an auction permanently; see
+            # `_handoff_events`.
+            handoff = _handoff_events(auction_id, ref, store_id, request.offer, destination)
+        except Exception as exc:
+            return _refused(
+                auction,
+                ref,
+                mode,
+                denial_reason(
+                    DENIAL_UNROUTABLE_FALLBACK,
+                    # The exception's TYPE and its message, never the value it was raised
+                    # from (T-264). `registered_domain_for` already builds its own messages
+                    # out of type names for exactly this reason.
+                    f"bid {ref!r} is this exchange's own list-price fallback for {store_id!r} "
+                    f"(R10), so the buyer is sent to that store's own checkout rather than "
+                    f"handed a discount — but no usable destination could be established for "
+                    f"it ({type(exc).__name__}: {exc})",
+                ),
+                store_id=store_id,
+                reoffer_bid_ref=next_slot(auction, ref),
+            )
 
     # THE guard (T-158), and its position in this function is the fix. Everything above is a
     # read or a pure construction; this is the first line that cannot be won twice, and it
@@ -696,6 +861,39 @@ def accept(
                 store_id=store_id,
             )
         claimed = True
+
+    if fallback:
+        # THE HANDOFF. The claim above has closed the auction, so this stamp is the second
+        # line exactly as it is on the minting path below, and it is taken for the same
+        # reason: accepting a fallback IS an acceptance of this auction, and a buyer who took
+        # the handoff must not then be able to accept a real bid and collect a code as well.
+        #
+        # `provider` is deliberately never asked for anything. It was resolved above so that
+        # an unregistered `CHECKOUT_MODE` is still a deployment error rather than a silently
+        # different answer for fallbacks — but a provider's job is to MINT, and there is
+        # nothing here to mint. That is the whole invariant, and it holds by construction
+        # rather than by configuration: no code_creator is reached, no `POST /codes` is made,
+        # and no branch below this line can put a value in `code`.
+        _record_acceptance(auction, ref)
+        return AcceptResult(
+            accepted=True,
+            auction_id=auction_id,
+            bid_ref=ref,
+            mode=str(mode),
+            store_id=store_id,
+            permalink_url=destination,
+            code=None,
+            checkout_token=None,
+            expires_at=None,
+            provider=None,
+            # True, and earned rather than assumed: `_fallback_destination` refuses unless
+            # the PLATFORM's registry answered, and the bid's own `store_domain` was emptied
+            # out of the request above so it could not have answered in the registry's place.
+            domain_verified=True,
+            claim_verified=claimed,
+            discount_notice=NO_DISCOUNT_ON_A_FALLBACK,
+            events=handoff,
+        )
 
     try:
         checkout: CheckoutResult = provider.checkout(request)

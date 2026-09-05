@@ -1270,7 +1270,7 @@ def test_the_gaming_probes_are_armed():
 
 
 # =====================================================================================
-# 5. R10 is "shown", not "sold" — the interim accept gate
+# 5. R10 is "shown", and sold as an ORDINARY SHOP — the tier-0 fallback handoff
 # =====================================================================================
 def _accept_wired_app(*, bidders: Bidders, stores: tuple[str, ...]) -> Any:
     """A `_wired_app` whose ACCEPT door is wired too, the way ``composition.py`` wires one.
@@ -1290,21 +1290,32 @@ def _accept_wired_app(*, bidders: Bidders, stores: tuple[str, ...]) -> Any:
     return app
 
 
-def test_a_shortlisted_fallback_is_shown_but_cannot_be_bought():
-    """R10's second half holds AND the fallback mints no code — both, in one request.
+def test_a_shortlisted_fallback_is_shown_and_hands_the_buyer_over_with_no_discount():
+    """R10's second half holds AND accepting the fallback mints nothing — one request.
 
-    **This gate is an INTERIM fail-closed default and R10 does not require it.** R10 is
-    "represented … and can still reach the shortlist" — shown. It is silent on whether a
-    shortlisted fallback may then be accepted and minted a single-use code, and that is a
-    product question this test does not answer. It pins the default that is in force until
-    someone rules, and `accept/offer.py` carries the measurement behind it: before the gate,
-    an accept on a shortlisted fallback returned 200 with a live code for a price no store
-    ever quoted.
+    **The contract this asserts is a product ruling, not an inference from R10.** R10 says
+    only "represented … and can still reach the shortlist" — shown — and is silent on what
+    happens if a buyer then accepts. Until the ruling this repo refused that accept with a
+    409 ``fallback_not_purchasable`` and said in three places that it was an interim default
+    pending a decision. The decision was given, verbatim:
 
-    The two halves are asserted together on purpose. "Shown" and "not sold" are separate
-    properties and a gate that quietly dropped the fallback out of the shortlist would satisfy
-    the second while destroying the first — which is exactly the regression this whole branch
-    exists to undo.
+        "It seems to me like the fallback should be basically the same thing that we offer at
+        tier 0. If a store isn't responding, then we just treat them as a random merchant,
+        don't give a discount, and direct customers to their checkout instead of having
+        anything native."
+
+    So the accept SUCCEEDS, and the three things that make it a handoff rather than a sale
+    are each asserted separately, because each can regress on its own:
+
+    * no code — the invariant, and the reason the 409 existed at all;
+    * a destination with no ``discount=`` on it, which is the URL the buyer was already
+      shown, not a new entitlement; and
+    * a sentence saying so, because a ``null`` code is not something a shopper reads.
+
+    The "shown" half is asserted alongside on purpose. "Shown" and "no discount" are separate
+    properties and an implementation that quietly dropped the fallback out of the shortlist
+    would satisfy the second while destroying the first — which is exactly the regression
+    R10's branch exists to undo.
     """
     app = _accept_wired_app(bidders=Bidders({}), stores=(STORE_A,))
     client = TestClient(app)
@@ -1317,21 +1328,22 @@ def test_a_shortlisted_fallback_is_shown_but_cannot_be_bought():
     assert [slot["bid_ref"] for slot in body["shortlist"]["slots"]] == [ref]
     assert body["shortlist"]["slots"][0]["provenance_labels"] == ["unverified"]
 
-    # ...and it is not purchasable.
-    refused = client.post(f"/auctions/{body['auction_id']}/accept", json={"bid_ref": ref})
-    payload = refused.json()
-    assert refused.status_code == 409, refused.text
-    assert payload["accepted"] is False
-    assert payload["denial_reason"].startswith("fallback_not_purchasable: "), payload
-    assert "never answered" in payload["denial_reason"], payload
-    assert "code" not in payload and "permalink_url" not in payload, payload
+    # ...and accepting it hands the buyer to an ordinary shop at ordinary prices.
+    accepted = client.post(f"/auctions/{body['auction_id']}/accept", json={"bid_ref": ref})
+    payload = accepted.json()
+    assert accepted.status_code == 200, accepted.text
+    assert payload["code"] is None, f"a fallback minted a discount code: {payload}"
+    assert payload["permalink_url"] == f"https://{_domain(STORE_A)}/cart/1:1", payload
+    assert "discount" not in payload["permalink_url"], payload
+    assert payload["notice"] and "No discount applies" in payload["notice"], payload
+    assert "never answered" in payload["notice"], payload
 
 
 def test_a_real_bid_is_still_bought_with_a_code_and_a_permalink():
-    """The non-regression, asserted as explicitly as the gate.
+    """The non-regression, asserted as explicitly as the handoff.
 
-    A gate that refused everything would pass the test above. This is the control for it: the
-    same app, the same accept door, a store that actually answered.
+    An implementation that stopped minting for EVERYBODY would pass the test above. This is
+    the control for it: the same app, the same accept door, a store that actually answered.
     """
     app = _accept_wired_app(bidders=Bidders({STORE_A: _bid(STORE_A, 100.0)}), stores=(STORE_A,))
     client = TestClient(app)
@@ -1344,15 +1356,19 @@ def test_a_real_bid_is_still_bought_with_a_code_and_a_permalink():
     assert accepted.status_code == 200, accepted.text
     assert payload["code"].startswith("PSX-"), payload
     assert payload["permalink_url"].startswith(f"https://{_domain(STORE_A)}/"), payload
+    assert f"discount={payload['code']}" in payload["permalink_url"], payload
+    # ...and a real bid is told nothing, because there is nothing to warn it about.
+    assert payload["notice"] is None, payload
 
 
-def test_removing_the_fallback_gate_makes_a_fallback_mintable_again(monkeypatch):
-    """The control for the gate: take the flag away and the code comes back.
+def test_suppressing_the_fallback_flag_makes_the_same_auction_mint_again(monkeypatch):
+    """The control for the handoff: take the flag away and the discount code comes back.
 
-    `collected_bid_records` stamps `fallback` off the `BidEntry`, so suppressing that stamp is
-    the whole of the gate's input. With it gone the accept path cannot tell a manufactured
-    price from a quoted one and mints against it — which is the exposure the gate closes, and
-    the measurement `accept/offer.py` records.
+    `collected_bid_records` stamps `fallback` off the `BidEntry`, so suppressing that stamp
+    is the whole of the no-mint path's input. With it gone this identical auction — the same
+    silent store, the same roster price nobody quoted — mints a live single-use code again,
+    which is both the exposure the handoff closes and the proof that the test above is
+    measuring the flag rather than passing for some unrelated reason.
     """
     import exchange.auction.routes as auction_routes  # noqa: PLC0415
 
@@ -1375,6 +1391,10 @@ def test_removing_the_fallback_gate_makes_a_fallback_mintable_again(monkeypatch)
     payload = ungated.json()
     assert ungated.status_code == 200, ungated.text
     assert payload["code"].startswith("PSX-"), (
-        "with the fallback flag suppressed the accept door minted nothing, so the gate above "
+        "with the fallback flag suppressed the accept door minted nothing, so the test above "
         "is passing for some other reason and this control is not measuring it"
+    )
+    assert payload["notice"] is None, (
+        "the flag is gone, so this accept is an ordinary one and must carry no fallback "
+        f"notice: {payload}"
     )
