@@ -409,23 +409,56 @@ def default_sink(event: ReceivedWebhook) -> None:
     )
 
 
+def inbox_only_sink(event: ReceivedWebhook) -> None:
+    """A sink that deliberately hands the delivery to nobody. Inbox and nothing else.
+
+    This exists so that "verified, recorded, and passed on to no one" has to be **asked
+    for by name**. It is a real function rather than ``None`` for one reason: ``None`` is
+    what a caller passes when it means "I have nothing in particular to say", and the state
+    it used to select is the single worst state this module can be in.
+    """
+    _log.info(
+        "webhook %s recorded in the inbox only; no downstream is installed (order=%s)",
+        event.topic,
+        event.order_ref or "<none>",
+    )
+
+
 #: The active sink. It starts as :func:`default_sink` rather than ``None``: ``main.create_app``
 #: is frozen and mounts routers only, so a sink that had to be installed by a caller was a
 #: sink no production path ever installed — every authenticated delivery the deployed
 #: service received was verified, recorded in a display ring and handed to nobody.
-#: :func:`set_webhook_sink` still replaces it, and ``None`` still means "inbox only", but
-#: that is now a deliberate act rather than the state the app boots in.
-_sink: Callable[[ReceivedWebhook], None] | None = default_sink
+#:
+#: T-247 is the same bug with one extra step. Booting to :func:`default_sink` fixed the state
+#: the app *starts* in, but ``set_webhook_sink(None)`` could still put the process back into
+#: it, and a caller restoring what it borrowed writes exactly that: a ``finally`` that says
+#: ``set_webhook_sink(None)`` reads as "put it back" and means "unwire the service". Measured:
+#: one merchant install test left the process-global sink as ``None``, and every later
+#: authenticated delivery in that process was answered "200 recorded" and handed to nobody.
+#: So ``None`` now means **restore the boot default**, and handing deliveries to nobody is
+#: spelled :func:`inbox_only_sink` — a deliberate act with a name, which is what it always
+#: claimed to be.
+_sink: Callable[[ReceivedWebhook], None] = default_sink
 
 
 def set_webhook_sink(sink: Callable[[ReceivedWebhook], None] | None) -> None:
-    """Route authenticated deliveries to ``sink`` as well as the inbox (``None`` clears)."""
+    """Route authenticated deliveries to ``sink`` as well as the inbox.
+
+    Args:
+        sink: the downstream to hand each fresh, authenticated delivery to. ``None`` restores
+            :func:`default_sink`, the value the module boots with — it does **not** clear the
+            sink. Pass :func:`inbox_only_sink` to hand deliveries to nobody on purpose.
+
+    There is deliberately no way to leave this module with no sink at all. Every state
+    reachable through this function delivers somewhere, so the failure mode T-247 records —
+    a process silently unwired by a test's own cleanup — is not expressible.
+    """
     global _sink
-    _sink = sink
+    _sink = default_sink if sink is None else sink
 
 
-def webhook_sink() -> Callable[[ReceivedWebhook], None] | None:
-    """The sink deliveries are currently handed to, or ``None`` if it was cleared."""
+def webhook_sink() -> Callable[[ReceivedWebhook], None]:
+    """The sink deliveries are currently handed to. Never ``None``; see :func:`set_webhook_sink`."""
     return _sink
 
 

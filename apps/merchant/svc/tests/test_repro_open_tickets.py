@@ -499,17 +499,28 @@ print("PROBE" + json.dumps({
 """
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-247: install/webhooks.py:418 boots the process-global _sink to default_sink, but "
-        "apps/merchant/svc/tests/test_install.py:859 'restores' it with "
-        "set_webhook_sink(None) in its finally — to None, not to the value it found — so "
-        "every later test in the same process runs against a service that answers an "
-        "authenticated delivery '200 recorded' and hands it to nobody, which is exactly the "
-        "state webhooks.py:412-417 says it closed; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-247 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-247: install/webhooks.py:418 boots the process-global _sink to default_sink, but "
+#       "apps/merchant/svc/tests/test_install.py:859 'restores' it with "
+#       "set_webhook_sink(None) in its finally — to None, not to the value it found — so "
+#       "every later test in the same process runs against a service that answers an "
+#       "authenticated delivery '200 recorded' and hands it to nobody, which is exactly the "
+#       "state webhooks.py:412-417 says it closed; remove this marker with the fix"))
+#
+# What it encodes: while one install test can leave the process-global sink unwired this
+# test must fail, and strict=True makes it fail loudly once it starts passing, so the marker
+# cannot outlive the bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with install/webhooks.py and install/__init__.py restored from HEAD the test reports
+# `1 xfailed`; with the fix back it reports `1 passed`. My change is the cause.
+# The assertion body is untouched — the diff removes the decorator and nothing else.
+#
+# The repair is production-side, where the ticket's scope puts it: set_webhook_sink(None) now
+# restores the boot default instead of clearing the sink, and "hand deliveries to nobody" is
+# spelled inbox_only_sink. test_install.py:859 was NOT edited.
 def test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it() -> None:
     """A suite may install its own sink; it may not leave the process worse than it found it.
 

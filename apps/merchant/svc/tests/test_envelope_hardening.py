@@ -383,3 +383,46 @@ def test_the_decision_is_asked_of_is_live_and_not_re_derived() -> None:
     assert store_may_bid("s-fourth", versions=versions) is False, (
         "the gate re-derived the decision instead of asking is_live"
     )
+
+
+# ======================================================================================
+# T-247 — the webhook sink cannot be left unwired by a caller putting back what it took
+# ======================================================================================
+def test_set_webhook_sink_none_restores_the_boot_default_rather_than_clearing() -> None:
+    """`None` means "put it back", because that is what every caller passing it means.
+
+    Restored explicitly at the end rather than through a fixture: this test writes a
+    process-global, and leaving it changed is the exact defect the ticket is about.
+    """
+    from merchant_svc.install import webhooks  # noqa: PLC0415
+
+    borrowed = webhooks.webhook_sink()
+    try:
+        webhooks.set_webhook_sink(lambda event: None)
+        assert webhooks.webhook_sink() is not webhooks.default_sink
+
+        webhooks.set_webhook_sink(None)
+        assert webhooks.webhook_sink() is webhooks.default_sink, (
+            "set_webhook_sink(None) left the service unwired instead of restoring the default"
+        )
+
+        # Handing deliveries to nobody is still reachable — it just has to be asked for.
+        webhooks.set_webhook_sink(webhooks.inbox_only_sink)
+        assert webhooks.webhook_sink() is webhooks.inbox_only_sink
+    finally:
+        webhooks.set_webhook_sink(borrowed)
+
+
+def test_no_state_reachable_through_the_setter_leaves_the_sink_missing() -> None:
+    """The property, not one example: the module cannot be talked into having no sink."""
+    from merchant_svc.install import webhooks  # noqa: PLC0415
+
+    borrowed = webhooks.webhook_sink()
+    try:
+        for candidate in (None, webhooks.default_sink, webhooks.inbox_only_sink, print):
+            webhooks.set_webhook_sink(candidate)
+            assert callable(webhooks.webhook_sink()), (
+                f"set_webhook_sink({candidate!r}) left the sink un-callable"
+            )
+    finally:
+        webhooks.set_webhook_sink(borrowed)
