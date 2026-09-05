@@ -23,17 +23,17 @@ services:
       # localhost — inside the network `postgres` and `redis` are the hosts, and a .env
       # copied from .env.example (which is written for the HOST side) must not leak in here.
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
-      # T-112: PROXYSHOP_ROLE_PASSWORD is the ONE source of truth for the four
-      # least-privilege role passwords, so it is interpolated INTO the DSN rather than
-      # defaulted here. The default is deliberately EMPTY and not `:-x` for exactly the
-      # reason the postgres service in the root file gives: a value here would be a second
-      # copy of the dev password, and a second copy is a copy that stops agreeing with the
-      # cluster. Set it in the environment (or .env) before `docker compose up` — a
-      # password-less DSN reaches postgres and then sits in a 30s pool timeout, which is
-      # what an unset variable looked like the first time this was run.
-      PROXYSHOP_PG_DSN_EXCHANGE: "postgresql://exchange:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
-      PROXYSHOP_PG_DSN_APP: "postgresql://app:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
-      # Forwarded as well as interpolated: proxyshop_support.postgres reads this variable
+      # T-112 makes PROXYSHOP_ROLE_PASSWORD the ONE source of truth for the four
+      # least-privilege role passwords, so NO password is written here. The interpolation
+      # these lines replace was `${PROXYSHOP_ROLE_PASSWORD:-}`, whose empty default produced
+      # `postgresql://exchange:@postgres:5432/...` on the documented `cp .env.example .env`
+      # path — and an explicitly EMPTY password is not the same thing as no password; libpq
+      # rejects it before it reaches the server. The password is resolved at container start
+      # by the `command:` below, through proxyshop_support.postgres.role_dsn. See the long
+      # note in apps/trust/compose.yaml for the measurement.
+      PROXYSHOP_PG_DSN_EXCHANGE: "postgresql://exchange@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      PROXYSHOP_PG_DSN_APP: "postgresql://app@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      # Forwarded as well as resolved: proxyshop_support.postgres reads this variable
       # directly when a component builds its own DSN instead of taking one from the env.
       PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
       # D39: no database component. The logical DB index is the worker index and
@@ -68,16 +68,34 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # The probe is `/openapi.json` rather than `/healthz` because there IS no health route:
-    # apps/exchange/src/main.py is orchestrator-frozen (B6(iii)) and no feature router under
-    # it declares one, so this deploy lane cannot add one without editing another lane's
-    # source. /openapi.json is served by FastAPI itself and a 200 from it proves the real
-    # thing this ticket is about — the ASGI app imported, every discovered router mounted,
-    # and uvicorn is answering on the port. It does NOT prove the datastores are reachable;
-    # a readiness route that does is recorded as a NEEDS against the exchange lane.
+    # Resolve the DSNs through the single source of truth, then exec the image's own CMD.
+    # The uvicorn line MIRRORS apps/exchange/Dockerfile's CMD — compose clears the image CMD
+    # when it overrides the command, so it has to be repeated, and
+    # proxyshop_support/tests/test_deploy_readiness.py pins the two together.
+    command: ["python", "-m", "proxyshop_support.service_launch", "serve", "--",
+              "uvicorn", "exchange.main:app", "--host", "0.0.0.0", "--port", "8083", "--workers", "1"]
+    # READINESS, not liveness — see the long note in apps/trust/compose.yaml.
+    #
+    # `--redis` is the MEASURED dependency: `exchange/auction/state.py` holds the auction
+    # state machine in a `proxyshop_support.redis_client.WorkerRedis` (D39), and the check
+    # also refuses a worker index the running server cannot isolate, which is a state in
+    # which no auction route can serve.
+    #
+    # `--postgres exchange:app.sellers` covers what this fragment DECLARES it depends on.
+    # Measured honestly: `git grep -l psycopg -- apps/exchange/src` is empty today, so the
+    # exchange's own closure does not open a postgres connection — but this fragment hands it
+    # two DSNs and a `depends_on: postgres`, and the eligibility gate reads seller status from
+    # `app.sellers`. A check that can only ever make the probe stricter is the conservative
+    # side of that uncertainty; the alternative (probing nothing) is the defect being fixed.
+    #
+    # There is deliberately NO `--neo4j` here even though `exchange/retrieval/sources.py`
+    # names a neo4j source: apps/exchange/Dockerfile ships `ingest.graph` but NOT the `neo4j`
+    # driver (it is lazily imported at `graph/reembed.py:386` and installed only in the ingest
+    # image), so a `--neo4j` probe here would fail on the import rather than on the datastore
+    # — a red light with nothing behind it, which is the same lie in the other direction.
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8083/openapi.json').status==200 else 1)"]
+      test: ["CMD", "python", "-m", "proxyshop_support.service_launch", "ready",
+             "--http-port", "8083", "--postgres", "exchange:app.sellers", "--redis"]
       interval: 10s
       timeout: 5s
       retries: 6

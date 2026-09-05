@@ -17,17 +17,18 @@ services:
       - "${MERCHANT_SVC_PORT:-8082}:8082"      # D40: env-overridable
     environment:
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
-      # T-112: PROXYSHOP_ROLE_PASSWORD is the ONE source of truth for the four
-      # least-privilege role passwords, so it is interpolated INTO the DSN rather than
-      # defaulted here. The default is deliberately EMPTY and not `:-x` for exactly the
-      # reason the postgres service in the root file gives: a value here would be a second
-      # copy of the dev password, and a second copy is a copy that stops agreeing with the
-      # cluster. Set it in the environment (or .env) before `docker compose up` — a
-      # password-less DSN reaches postgres and then sits in a 30s pool timeout, which is
-      # what an unset variable looked like the first time this was run.
-      PROXYSHOP_PG_DSN_APP: "postgresql://app:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
-      PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
-      REDIS_URL: "redis://redis:6379"                            # D39: no db component
+      # NO PROXYSHOP_PG_DSN_* and NO REDIS_URL here, and no `depends_on:` either — both were
+      # removed rather than repaired. This service touches no datastore at all, measured:
+      #
+      #     $ git grep -n "psycopg\|worker_redis\|import redis\|neo4j" -- apps/merchant/svc/src
+      #     (no output)
+      #
+      # The offline token store is `install/tokens.py`'s in-memory dict. A DSN it never reads
+      # and a `depends_on: postgres` it never needs are the same class of thing this lane is
+      # here to delete: configuration that makes a service look wired to something it is not.
+      # When the merchant grows a datastore, its dependency and its readiness check land in
+      # this fragment together — that pairing is what `test_deploy_readiness.py` enforces.
+      #
       # The install flow talks to the Shopify Admin API. In the compose stack that is the
       # stub, by service name — the stub is on the `e2e` profile, so a `docker compose up`
       # without that profile leaves this pointed at a host that is not running, which is the
@@ -36,13 +37,28 @@ services:
       SHOPIFY_API_KEY: "${SHOPIFY_API_KEY:-}"
       SHOPIFY_API_SECRET: "${SHOPIFY_API_SECRET:-}"
       MERCHANT_APP_URL: "${MERCHANT_APP_URL:-http://localhost:8082}"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    # /openapi.json — see the note in apps/exchange/compose.yaml.
+      # The bearer token the administrative routes require. It appeared in NO compose
+      # fragment and in NO .env.example until now, so discount-code minting and every
+      # `/install/shops`, `/stores/{id}/envelope` and `/stores/{id}/kill` call was
+      # unreachable in the deployment — `install/routes.py:63` reads it with no default and
+      # no fallback, on purpose, so an unset value makes the route refuse every caller:
+      #
+      #     $ curl -s localhost:8082/install/shops
+      #     {"error":"admin-api-not-configured","missing":["MERCHANT_ADMIN_TOKEN"], ...}   503
+      #
+      # ...answered by a container reporting `(healthy)`. The default below comes from
+      # .env.example, which now ships a dev value so `cp .env.example .env` produces a
+      # deployment whose admin surface is actually reachable. It is a DEV token: change it
+      # anywhere the merchant API is exposed beyond a laptop.
+      MERCHANT_ADMIN_TOKEN: "${MERCHANT_ADMIN_TOKEN:-}"
+    # READINESS, not liveness — see the long note in apps/trust/compose.yaml. There is no
+    # datastore check here because there is no datastore (measured above); what there IS, is
+    # a setting whose absence turns every administrative route into a 503 while the container
+    # reports healthy. That is the same lie as an unreachable database, so it is checked the
+    # same way.
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8082/openapi.json').status==200 else 1)"]
+      test: ["CMD", "python", "-m", "proxyshop_support.service_launch", "ready",
+             "--http-port", "8082", "--require-env", "MERCHANT_ADMIN_TOKEN"]
       interval: 10s
       timeout: 5s
       retries: 6

@@ -20,16 +20,21 @@ services:
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
       # The vault role is the buyer's alone (D5): the pseudonym mapping is the one table the
       # exchange must never be able to read, and the separation starts with the credential.
-      # T-112: PROXYSHOP_ROLE_PASSWORD is the ONE source of truth for the four
-      # least-privilege role passwords, so it is interpolated INTO the DSN rather than
-      # defaulted here. The default is deliberately EMPTY and not `:-x` for exactly the
-      # reason the postgres service in the root file gives: a value here would be a second
-      # copy of the dev password, and a second copy is a copy that stops agreeing with the
-      # cluster. Set it in the environment (or .env) before `docker compose up` — a
-      # password-less DSN reaches postgres and then sits in a 30s pool timeout, which is
-      # what an unset variable looked like the first time this was run.
-      PROXYSHOP_PG_DSN_VAULT: "postgresql://buyer_vault:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
-      PROXYSHOP_PG_DSN_APP: "postgresql://app:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      # T-112 makes PROXYSHOP_ROLE_PASSWORD the ONE source of truth for the four
+      # least-privilege role passwords, so NO password is written here. The interpolation
+      # these lines replace was `${PROXYSHOP_ROLE_PASSWORD:-}`, whose empty default is what
+      # made the documented `cp .env.example .env` path unserviceable: an explicitly EMPTY
+      # password is not the same thing as no password, and libpq rejects it before it
+      # reaches the server. THIS service is where that was first measured, in its own log:
+      #
+      #     psycopg.OperationalError: connection failed: connection to server at
+      #     "172.27.0.3", port 5432 failed: fe_sendauth: no password supplied
+      #
+      # while `docker compose ps` reported this container `(healthy)` and
+      # `POST /buyer/auth/magic-link` answered 500. The password is now resolved at container
+      # start by the `command:` below, through proxyshop_support.postgres.role_dsn.
+      PROXYSHOP_PG_DSN_VAULT: "postgresql://buyer_vault@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      PROXYSHOP_PG_DSN_APP: "postgresql://app@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
       REDIS_URL: "redis://redis:6379"                            # D39: no db component
       LLM_PROVIDER: "${LLM_PROVIDER:-double}"                    # D19: offline by default
@@ -43,10 +48,20 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # /openapi.json — see the note in apps/exchange/compose.yaml.
+    # Resolve the DSNs through the single source of truth, then exec the image's own CMD.
+    # The uvicorn line MIRRORS apps/buyer/Dockerfile's CMD — compose clears the image CMD
+    # when it overrides the command, so it has to be repeated, and
+    # proxyshop_support/tests/test_deploy_readiness.py pins the two together.
+    command: ["python", "-m", "proxyshop_support.service_launch", "serve", "--",
+              "uvicorn", "buyer_svc.main:app", "--host", "0.0.0.0", "--port", "8081", "--workers", "1"]
+    # READINESS, not liveness — see the long note in apps/trust/compose.yaml.
+    # `buyer_vault` is the role `auth/routes.py:_vault_from_env` actually connects as, and
+    # `vault.pseudonym_history` is the one table it reads and writes (vault/store.py:146), so
+    # this probe fails in exactly the two states that used to read as healthy: no resolvable
+    # credential, and a database with no migrations applied.
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/openapi.json').status==200 else 1)"]
+      test: ["CMD", "python", "-m", "proxyshop_support.service_launch", "ready",
+             "--http-port", "8081", "--postgres", "buyer_vault:vault.pseudonym_history"]
       interval: 10s
       timeout: 5s
       retries: 6

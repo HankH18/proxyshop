@@ -47,6 +47,18 @@ Both are already the defaults in `.env.example`. Copy it and leave them alone:
 cp .env.example .env
 ```
 
+**Then load it into your shell.** The copy gives Compose its interpolation values and nothing
+else — no Makefile target, no script and no test reads `.env` — so the next step, straight
+after the copy, would fail with `FATAL: PROXYSHOP_WORKER is unset`:
+
+```bash
+set -a && . ./.env && set +a
+```
+
+That is also where `PROXYSHOP_WORKER` comes from, and `.env.example` ships `1`. **Do not use
+worker 0**: it is reserved for this project's scored measurement run, and a demo that takes
+it corrupts the number the project is graded on.
+
 ## 1. Bring up the stack
 
 ```bash
@@ -56,7 +68,19 @@ make deps-up
 
 `bootstrap` builds the virtualenv and installs the Node toolchain. `deps-up` starts
 Postgres, Neo4j and Redis, waits for them to report healthy, and then initialises this
-worker's database. The merchant stub is not started by `deps-up` — it carries the `e2e`
+worker's database.
+
+`deps-up` creates that database **empty** — it applies no migrations, and nothing else in the
+repo did either outside the test fixtures, so a stack brought up this way used to answer 503
+on every database-backed route. Apply the schema:
+
+```bash
+./.venv/bin/python scripts/db_migrate.py
+```
+
+Idempotent; run it again after any `make deps-down`, which destroys the volumes.
+
+The merchant stub is not started by `deps-up` — it carries the `e2e`
 compose profile, because the tests build it in-process on an ephemeral port instead. For the
 live demo you want it running as a service:
 
@@ -185,9 +209,14 @@ closes the loop: what a store did last time changes what it can win next time.
 Everything in section 3 runs unattended, offline, in about a second and a half:
 
 ```bash
-export PROXYSHOP_WORKER=0
+export PROXYSHOP_WORKER=1
 uv run python -m pytest e2e/test_s1_flow.py -q
 ```
+
+This used to say `export PROXYSHOP_WORKER=0`, which contradicted `.env.example`'s
+`PROXYSHOP_WORKER=1` and pointed the demo at the index reserved for the project's scored
+measurement run. Any index other than 0 works; 1 is what the copied `.env` already gives you,
+so in a shell that ran `set -a && . ./.env && set +a` the export above is a no-op.
 
 One scripted pass drives every component named above and then asserts the acceptance
 criteria against it, including an exact per-kind count over all eighteen frozen
