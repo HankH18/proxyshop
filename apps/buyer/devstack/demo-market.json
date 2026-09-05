@@ -1,0 +1,322 @@
+{
+  "_comment": [
+    "The demo market. This file is the ONLY thing the demo supplies.",
+    "",
+    "Everything a person sees in the buyer UI when `devstack/run.py` is running comes out of a",
+    "real HTTP response from a real service on a real loopback socket. This file supplies the",
+    "merchant side of that world and nothing else: three stores' approved envelopes, their",
+    "catalogues, their live stock, the platform's trust reading of each of them, and the two",
+    "conversations a reader can type in to reach them. No shortlist, no ranking, no score, no",
+    "exclusion reason, no verdict and no permalink is written down here - every one of those is",
+    "computed by the real store agents, the real exchange and the real buyer service at run time.",
+    "",
+    "PRICES ARE WRITTEN DOWN HERE, and an earlier version of this comment claimed they were not.",
+    "They are, and they have to be: `catalog[].list_price` (78.00 / 72.00 / 45.00), the",
+    "envelopes' `floors` (60.00 / 55.00 / 35.00) and the pinned intents' price constraints",
+    "(80.0 and 100.0) are the merchant's own catalogue and the buyer's own budget. This file is",
+    "where a merchant supplies that input; a demo market that stated no prices would not be a",
+    "market. What is COMPUTED is what the store agent does with them. Measured on this stack,",
+    "the bid prices that come back are 78.00 / 72.00 / 45.00 - byte-identical to the list prices",
+    "above - and a reader cannot tell that apart from a copy by looking, so here is why it is",
+    "not one: the agent runs its pricing pass over the envelope and, with no authorized",
+    "discount, `store_agent.modes.runner` writes the rationale 'no authorized discount: the",
+    "catalog list price stands'. All three stores here carry `learned_policy: null`, which is a",
+    "cold start, so every pass ends there. Give a store a learned policy or authorize a depth",
+    "and the same file yields a different `entries[].unit_price`.",
+    "",
+    "WHY THE CLUSTER IDS ARE PINNED. `buyer_svc.intent.clarifier._cluster_id` is a sha256 over",
+    "(query.casefold(), budget_band, hard_constraints, preferences) truncated to 16 hex and",
+    "prefixed `cl-`. A store agent declines a solicitation whose cluster is not in its envelope's",
+    "`pursue_clusters` (DeclineReason.cluster_not_pursued), so these strings have to match the",
+    "clarifier's answer byte-for-byte or the demo shows three declines. They were measured by",
+    "running `clarify(turns)` on this tree, not guessed:",
+    "",
+    "    clarify(['looking for a winter hat', '$80'])                              -> cl-4b6a37aebc537bd5",
+    "    clarify(['I want a warm merino wool beanie for winter, under $100'])      -> cl-4d3c3e4edadaa5e7",
+    "",
+    "The exact turn wording matters, and that is measured too rather than assumed: the same",
+    "opener answered with 'my budget is about $80' instead of '$80' clarifies to a DIFFERENT",
+    "cluster (cl-d401b1642abedc5e, and no hard constraint at all), which no envelope here",
+    "pursues. That is not a bug in the demo - it is the clarifier reading a hedged answer as an",
+    "unresolved constraint - but it is why `conversations[].turns` are written out verbatim.",
+    "",
+    "`further_answers` IS THE SAME RULE, one step further on. R1 caps the clarifier at three",
+    "questions and it keeps asking until it has asked them, so after the scripted turns a",
+    "person is asked some more - and every answer is another turn in the hash. Measured against",
+    "this stack by re-clarifying with one extra 'no' at a time:",
+    "",
+    "    winter-hat     +1 'no' -> cl-4b6a37aebc537bd5   +2 -> cl-4b6a37aebc537bd5   +3 -> cl-d35bd50812d2d9a0",
+    "    merino-beanie  +1 'no' -> cl-e437e6d0c763d905",
+    "",
+    "So winter-hat takes exactly TWO further answers and merino-beanie takes NONE - its confirm",
+    "screen is up the moment the one turn is clarified. Answering more than the stated number",
+    "moves the cluster to one no envelope above pursues, every store declines with",
+    "`cluster_not_pursued`, and the demo shows an empty shortlist for a reason that is the",
+    "reader's keystrokes rather than the market's. `run.py` prints this number per conversation.",
+    "",
+    "The `intent` recorded on each conversation is the clarifier's own measured answer for those",
+    "turns, with two fields replaced by fixed values: `intent_id` (unique per session by design)",
+    "and `created_at` (the wall clock). Neither participates in the cluster hash, so replacing",
+    "them cannot change which stores are reached. They are here so a probe can drive",
+    "`POST /auctions` directly with the same intent the UI produces; the UI itself never reads",
+    "them - it calls `POST /buyer/intent/clarify` and uses what comes back."
+  ],
+
+  "conversations": [
+    {
+      "id": "winter-hat",
+      "title": "A winter hat under $80",
+      "reaches": [
+        "demo-woolworks bids (beanie-merino-01 at 78.00 satisfies price_usd lte 80)",
+        "demo-alpine-supply bids (beanie-merino-pro at 72.00 satisfies it too)",
+        "demo-fastfleece bids (beanie-fleece-01 at 45.00 satisfies it) and is then EXCLUDED by",
+        "  the exchange's ranking because the trust snapshot blacklists it - a real R12 exclusion",
+        "  carrying a real reason string, which is the point of having it in the market at all"
+      ],
+      "turns": [
+        "looking for a winter hat",
+        "$80"
+      ],
+      "further_answers": 2,
+      "cluster_id": "cl-4b6a37aebc537bd5",
+      "intent": {
+        "intent_id": "int-demo-winter-hat",
+        "cluster_id": "cl-4b6a37aebc537bd5",
+        "query": "looking for a winter hat",
+        "hard_constraints": [
+          {"field": "price_usd", "op": "lte", "value": 80.0}
+        ],
+        "preferences": [],
+        "currency": "USD",
+        "budget_band": "50-100",
+        "created_at": "2026-01-01T00:00:00Z",
+        "schema_version": "1.0.0"
+      }
+    },
+    {
+      "id": "merino-beanie",
+      "title": "A merino wool beanie under $100",
+      "reaches": [
+        "demo-woolworks bids (material merino-wool, 78.00 <= 100)",
+        "demo-alpine-supply bids (material merino-wool, 72.00 <= 100)",
+        "demo-fastfleece DECLINES at the store agent with HTTP 204 and",
+        "  x-proxyshop-decline-reason: no_matching_product - its only product is fleece. The",
+        "  exchange turns that non-200 into an entry with fallback: true,",
+        "  fallback_reason: 'no_response'. A second real refusal, from a different layer."
+      ],
+      "turns": [
+        "I want a warm merino wool beanie for winter, under $100"
+      ],
+      "further_answers": 0,
+      "cluster_id": "cl-4d3c3e4edadaa5e7",
+      "intent": {
+        "intent_id": "int-demo-merino-beanie",
+        "cluster_id": "cl-4d3c3e4edadaa5e7",
+        "query": "I want a warm merino wool beanie for winter, under $100",
+        "hard_constraints": [
+          {"field": "material", "op": "eq", "value": "merino-wool"},
+          {"field": "price_usd", "op": "lte", "value": 100.0}
+        ],
+        "preferences": [],
+        "currency": "USD",
+        "budget_band": "100-250",
+        "created_at": "2026-01-01T00:00:00Z",
+        "schema_version": "1.0.0"
+      }
+    }
+  ],
+
+  "checkout_mode": "redirect",
+
+  "stores": [
+    {
+      "store_id": "demo-woolworks",
+      "store_domain": "demo-woolworks.example.com",
+      "tier": 1,
+      "product_ref": "beanie-merino-01",
+      "eligibility": "eligible",
+      "trust": {
+        "store_id": "demo-woolworks",
+        "score": 0.82,
+        "blacklisted": false
+      },
+      "catalog": {
+        "beanie-merino-01": {
+          "product_ref": "beanie-merino-01",
+          "list_price": 78.0,
+          "material": "merino-wool",
+          "price_usd": 78.0,
+          "variant_id": "44352913"
+        }
+      },
+      "live_state": {
+        "beanie-merino-01": {
+          "in_stock": true,
+          "units_left": 12
+        }
+      },
+      "envelope": {
+        "store_id": "demo-woolworks",
+        "version": "v1",
+        "floors": [
+          {"product_ref": "beanie-merino-01", "min_price": 60.0}
+        ],
+        "max_discount_pct": 20.0,
+        "budget_cap": 5000.0,
+        "pursue_clusters": [
+          "cl-4b6a37aebc537bd5",
+          "cl-4d3c3e4edadaa5e7"
+        ],
+        "standing_commitments": [
+          {
+            "key": "free_returns",
+            "value": "30 days",
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:demo-woolworks:v1#free_returns",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "activation": "active"
+      },
+      "learned_policy": null,
+      "network_priors": {
+        "cl-4b6a37aebc537bd5": {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]},
+        "cl-4d3c3e4edadaa5e7": {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]}
+      }
+    },
+
+    {
+      "store_id": "demo-alpine-supply",
+      "store_domain": "demo-alpine-supply.example.com",
+      "tier": 1,
+      "product_ref": "beanie-merino-pro",
+      "eligibility": "eligible",
+      "trust": {
+        "store_id": "demo-alpine-supply",
+        "score": 0.61,
+        "blacklisted": false
+      },
+      "catalog": {
+        "beanie-merino-pro": {
+          "product_ref": "beanie-merino-pro",
+          "list_price": 72.0,
+          "material": "merino-wool",
+          "price_usd": 72.0,
+          "variant_id": "77120044"
+        }
+      },
+      "live_state": {
+        "beanie-merino-pro": {
+          "in_stock": true,
+          "units_left": 4
+        }
+      },
+      "envelope": {
+        "store_id": "demo-alpine-supply",
+        "version": "v1",
+        "floors": [
+          {"product_ref": "beanie-merino-pro", "min_price": 55.0}
+        ],
+        "max_discount_pct": 15.0,
+        "budget_cap": 4000.0,
+        "pursue_clusters": [
+          "cl-4b6a37aebc537bd5",
+          "cl-4d3c3e4edadaa5e7"
+        ],
+        "standing_commitments": [
+          {
+            "key": "ships_within",
+            "value": "2 business days",
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:demo-alpine-supply:v1#ships_within",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "activation": "active"
+      },
+      "learned_policy": null,
+      "network_priors": {
+        "cl-4b6a37aebc537bd5": {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]},
+        "cl-4d3c3e4edadaa5e7": {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]}
+      }
+    },
+
+    {
+      "_comment": [
+        "The blacklisted store, and it is here on purpose. Its eligibility word is 'eligible'",
+        "so the exchange's R12 gate does NOT deny it up front - it is solicited, it really",
+        "bids, and it is then thrown out by the ranking's blacklist filter reading the trust",
+        "snapshot below. That path is the one worth showing: the buyer UI's diagnostics get a",
+        "real `excluded[]` row carrying a real reason string produced by",
+        "`exchange.ranking.filters.blacklist_reason`, rather than a store that was quietly",
+        "never asked. Change `eligibility` to 'blacklisted' and it lands in `denied[]` instead,",
+        "which is a different (also real) story.",
+        "",
+        "It is also the cheapest offer in the market at 45.00, so if it ever reaches a shortlist",
+        "slot the trust exclusion has stopped working and the demo says so loudly by showing it."
+      ],
+      "store_id": "demo-fastfleece",
+      "store_domain": "demo-fastfleece.example.com",
+      "tier": 1,
+      "product_ref": "beanie-fleece-01",
+      "eligibility": "eligible",
+      "trust": {
+        "store_id": "demo-fastfleece",
+        "score": 0.2,
+        "blacklisted": true
+      },
+      "catalog": {
+        "beanie-fleece-01": {
+          "product_ref": "beanie-fleece-01",
+          "list_price": 45.0,
+          "material": "fleece",
+          "price_usd": 45.0,
+          "variant_id": "99001122"
+        }
+      },
+      "live_state": {
+        "beanie-fleece-01": {
+          "in_stock": true,
+          "units_left": 30
+        }
+      },
+      "envelope": {
+        "store_id": "demo-fastfleece",
+        "version": "v1",
+        "floors": [
+          {"product_ref": "beanie-fleece-01", "min_price": 35.0}
+        ],
+        "max_discount_pct": 25.0,
+        "budget_cap": 3000.0,
+        "pursue_clusters": [
+          "cl-4b6a37aebc537bd5",
+          "cl-4d3c3e4edadaa5e7"
+        ],
+        "standing_commitments": [
+          {
+            "key": "ships_within",
+            "value": "1 business day",
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:demo-fastfleece:v1#ships_within",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "activation": "active"
+      },
+      "learned_policy": null,
+      "network_priors": {
+        "cl-4b6a37aebc537bd5": {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]},
+        "cl-4d3c3e4edadaa5e7": {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]}
+      }
+    }
+  ]
+}

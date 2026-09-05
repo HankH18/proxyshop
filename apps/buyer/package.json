@@ -3,6 +3,11 @@
   "private": true,
   "type": "module",
   "version": "0.0.0",
+  "scripts": {
+    "build:ui": "vite build --config vite.config.ts",
+    "demo": "npm run build:ui && ../../.venv/bin/python devstack/run.py",
+    "devstack": "../../.venv/bin/python devstack/run.py"
+  },
   "dependencies": {
     "next": "15.5.25",
     "react": "19.2.8",
