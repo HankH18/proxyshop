@@ -296,6 +296,10 @@ def test_a_context_that_states_no_domain_mints_no_url_rather_than_guessing() -> 
         pytest.param("store-alpha.example.com:8443", id="carries-a-port"),
         pytest.param("store-alpha.example.com@evil.tld", id="userinfo-spoof"),
         pytest.param("https://store-alpha.example.com/?next=x", id="carries-a-query"),
+        pytest.param("[::1]", id="bracketed-ipv6-literal"),
+        pytest.param("store alpha.example.com", id="carries-a-space"),
+        pytest.param("store-alpha..example.com", id="empty-label"),
+        pytest.param("store_alpha.example.com", id="underscore"),
         pytest.param(None, id="unset"),
     ],
 )
@@ -311,6 +315,26 @@ def test_a_stated_domain_that_is_not_a_bare_host_is_refused_rather_than_trimmed(
     """
     assert store_domain_host(stated) is None
     assert answered(context(domain=stated)).offer.checkout_url is None
+
+
+@pytest.mark.parametrize(
+    "stated",
+    ["store-alpha.example.com", "127.0.0.1", "xn--strae-oqa.example", "sub.store.example.co.uk"],
+)
+def test_every_domain_the_agent_accepts_round_trips_through_the_platforms_own_check(
+    stated: str,
+) -> None:
+    """Whatever `store_domain_host` accepts must survive being made into a URL and parsed back.
+
+    This is the property, and it is the one an earlier draft broke twice: `[::1]` came back as
+    `::1` and built a URL with no host at all, and `a b.com` came back whole and built a URL no
+    browser can dial while the platform's comparison still said on-domain.
+    """
+    host = store_domain_host(stated)
+    assert host is not None
+    url = answered(context(domain=stated)).offer.checkout_url
+    assert url is not None
+    assert is_on_domain(url, host), f"{url!r} is not on {host!r} by the platform's own check"
 
 
 def test_the_domain_the_context_states_beats_the_one_the_envelope_states() -> None:

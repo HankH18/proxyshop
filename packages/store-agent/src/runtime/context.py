@@ -69,16 +69,29 @@ OFFER_EXPIRES_AT_KEY = "offer_expires_at"
 #: conditions, and refuses only the second).
 STORE_DOMAIN_KEYS: tuple[str, ...] = ("store_domain", "domain")
 
+#: The characters a DNS label may carry, once the host is lower-cased. Deliberately narrow —
+#: letters, digits and the hyphen — which is exactly a DNS name, covers punycode (``xn--…``) and
+#: an IPv4 literal, and refuses two shapes measured coming out of an earlier draft of
+#: :func:`store_domain_host`:
+#:
+#: * ``[::1]`` — `urlsplit` strips the brackets, so the host came back ``::1`` and the URL built
+#:   on it (``https://::1/cart/…``) had **no parsable host at all**. The offer looked configured
+#:   and the exchange refused it, which is the worst of both.
+#: * ``a b.com`` — a space survived, and `urlsplit` is lenient enough that the platform's own
+#:   host comparison then said *on-domain* about a string no browser can dial.
+_HOST_LABEL_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
+
 
 def store_domain_host(value: Any) -> str | None:
     """The bare, lower-cased hostname a checkout URL may be built on, or `None`.
 
     Accepts what an operator actually writes — ``store-alpha.example.com`` and
     ``https://store-alpha.example.com`` both yield ``store-alpha.example.com`` — and refuses
-    everything that is not purely a host: a path, a query, a fragment, userinfo, or a port. Those
-    are refused rather than silently trimmed, because trimming would publish a checkout URL the
-    merchant did not write while still looking configured; a `None` here leaves the offer with no
-    `checkout_url` at all, which is a condition the exchange already reads correctly.
+    everything that is not purely a DNS host: a path, a query, a fragment, userinfo, a port, an
+    IPv6 literal, or a character a DNS label cannot carry. Those are refused rather than silently
+    trimmed, because trimming would publish a checkout URL the merchant did not write while still
+    looking configured; a `None` here leaves the offer with no `checkout_url` at all, which is a
+    condition the exchange already reads correctly.
 
     Lower-cased and de-dotted to the same spelling `checkout/domain.py` normalises the registered
     domain to, so the two strings the platform compares cannot differ by case or a trailing dot.
@@ -101,7 +114,16 @@ def store_domain_host(value: Any) -> str | None:
         return None
     if not host:
         return None
-    return host.strip().lower().rstrip(".") or None
+    host = host.strip().lower().rstrip(".")
+    labels = host.split(".")
+    if not host or not all(label and set(label) <= _HOST_LABEL_CHARACTERS for label in labels):
+        return None
+    # The round trip, checked rather than assumed: whatever is returned here becomes the
+    # authority of a URL, and the platform compares `urlsplit(url).hostname`. If those two ever
+    # disagree the agent publishes a URL that fails a check it believes it passes.
+    if urlsplit(f"https://{host}/").hostname != host:  # pragma: no cover - defence in depth
+        return None
+    return host
 
 
 def as_mapping(value: Any, what: str) -> dict[str, Any]:
