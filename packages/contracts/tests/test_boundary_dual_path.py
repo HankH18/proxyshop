@@ -1142,8 +1142,15 @@ def test_an_illegible_or_contradictory_list_price_is_refused_not_read_past(path:
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
-def test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price(path: str) -> None:
+def test_the_wall_answers_one_identical_refusal_to_every_spelling_of_no_roster(path: str) -> None:
     """THE DOCUMENTED GAP — CLOSED BY T-306, and this test is the record of that.
+
+    Renamed with the assertions. It was `test_the_wall_abstains_deliberately_when_the_bid_
+    carries_no_list_price`, and after the rewrite that name said the opposite of what the
+    body asserts: the wall does not abstain, it refuses and names the input it lacks. Its
+    TypeScript peer was renamed in the same lane, so leaving this one would have left the two
+    doors' test names disagreeing about one property — the exact drift the shared corpus
+    exists to prevent.
 
     JUSTIFY-TEST-EDIT. Two assertions here were REPLACED, not relaxed. They were::
 

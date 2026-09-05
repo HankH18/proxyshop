@@ -955,7 +955,7 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
     roster at the Tier-2 door — "Pass the roster here or that choice is the only list price
     anybody checks" — not the door confessing to this asymmetry. The no-roster abstention is
     documented as a deliberate opt-in, and existing tests pin it
-    (`test_boundary_dual_path.py::test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price`,
+    (`test_boundary_dual_path.py::test_the_wall_answers_one_identical_refusal_to_every_spelling_of_no_roster`,
     `test_boundary_price_roster.py::test_the_cap_is_never_consulted_without_a_roster`). So this
     gate is a claim that the OPT-IN ITSELF is the defect on the money path, and closing it is a
     deliberate behaviour change with a measured blast radius — not the correction of an

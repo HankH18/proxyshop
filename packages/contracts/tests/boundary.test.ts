@@ -108,7 +108,12 @@ function check(
     path,
     trustSnapshot: snapshot,
     now: NOW,
-    listPrices: (roster ?? undefined) as PriceRosterMap | undefined,
+    // NOT `roster ?? undefined`: that collapsed the `null` spelling into the `undefined`
+    // one, so the "three spellings" assertion below had only two distinct inputs and an
+    // explicit `null` reached `validateBid` from nowhere in this file. T-336 is precisely
+    // about `null` and `undefined` diverging between the two doors, so the one spelling the
+    // Python peer genuinely passes must reach this door too.
+    listPrices: roster as PriceRosterMap | undefined,
   });
 }
 

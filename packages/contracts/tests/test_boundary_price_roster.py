@@ -4,7 +4,8 @@
 of evidence only: a `list_price` claim the bid itself carries. A bid that simply omits that
 claim gave the relation no number to be a percentage of, and the wall abstained — pinned there
 as a deliberate gap by
-`test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price`.
+`test_the_wall_answers_one_identical_refusal_to_every_spelling_of_no_roster`
+(named `..._abstains_deliberately_...` when that abstention was still the contract).
 
 That gap is the whole attack. Measured through the real door, on the tree before this file:
 
@@ -439,7 +440,7 @@ def test_the_roster_read_never_raises_and_never_admits_on_a_hostile_read(path: s
     assert unhashable.reasons
 
 
-def test_omitting_the_roster_changes_nothing_about_any_existing_verdict() -> None:
+def test_omitting_the_roster_answers_exactly_as_spelling_it_none_does() -> None:
     """Every bid must answer identically with `list_prices` absent and with it explicitly `None`.
 
     Unchanged by T-306, and it says MORE now than it used to: the two spellings used to agree on

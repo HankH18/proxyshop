@@ -22,7 +22,7 @@
     "`path` and `now` apply to every case; the trust snapshot is each suite's `make_snapshot_table()`",
     "/ `makeSnapshotTable()`, which is why every bid names `store-1`.",
     "",
-    "T-306/T-307 \u2014 THE ABSENT ROSTER IS THE EMPTY ROSTER, and eight rows here were re-baselined",
+    "T-306/T-307 \u2014 THE ABSENT ROSTER IS THE EMPTY ROSTER, and seven rows here were re-baselined",
     "for it. `list_prices: null` used to mean 'abstain': the wall read the bid's own `list_price`",
     "claim and said nothing when there was none. That made the argument a caller FORGETS more",
     "permissive than the argument a caller passes empty, on the money path \u2014 measured, a bid",
@@ -56,7 +56,7 @@
   "cases": [
     {
       "name": "charges_under_the_carried_list_price",
-      "why": "the bid states its own list price and then charges 85% off behind a 20% declaration. The two `price_unreconcilable` reasons are T-306's: a caller passing no roster is told it cannot price what it admits, and cannot authorize the depth either. The original `price_under_declared_depth` still fires and still comes from the CARRIED claim \u2014 nothing here supplied a list price but the bid \u2014 so this row still pins the carried-claim relation",
+      "why": "the bid states its own list price and then charges 85% off behind a 20% declaration. The two `price_unreconcilable` reasons are T-306's: a caller passing no roster is told it cannot price what it admits, and cannot authorize the depth either. The original `price_under_declared_depth` still fires and still comes from the CARRIED claim \u2014 nothing here supplied a list price but the bid \u2014 so this row still pins WHERE the list price is read from. It no longer pins the DEPTH half: with no roster `authorized` is 0, so 15.00 is refused against the full 100.00, exactly as an honest 80.00 would be, and the row cannot tell whether the declared 20% was honoured at all. `a_carried_claim_is_measured_against_the_full_list_price_with_no_roster` is what carries that now \u2014 it charges 85.00, which the two bounds disagree about",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -1976,6 +1976,56 @@
         "price_unreconcilable:offer.discount:authorized_depth_unavailable",
         "price_unreconcilable:offer.unit_price:list_price_unavailable",
         "price_under_declared_depth:offer.unit_price"
+      ]
+    },
+    {
+      "name": "a_call_wide_ceiling_is_read_at_a_zero_declared_depth_with_no_roster",
+      "why": "THE FOURTH SITE. `_price_reasons` / `priceReasonsFor` reads the cap twice \u2014 once for a declared depth and once, in the `else`, for a declared ZERO \u2014 and the T-306 repair had to remove a `list_prices is not None` / `listPrices !== undefined` guard from BOTH. A per-site mutation sweep found the zero-depth one ungraded in both languages: reverting it alone left 910 pytest and 173 vitest green. Nothing else in this table can see it, because the two behaviours only diverge when a caller supplies a call-wide `max_discount_pct`, supplies NO roster, and meets an offer declaring no discount at all \u2014 every other row misses at least one of the three. Here the offer declares 0%, carries a list price of 100.00 and charges 85.00 under a ceiling of 20: reading the ceiling authorizes 20, the bound is 80.00 and 85.00 clears it, so the ONLY reason is the missing roster. Not reading it leaves `authorized` at zero, measures 85.00 against the full 100.00 and adds `price_under_declared_depth:offer.unit_price` \u2014 so the absence of that reason is the whole assertion. Note the direction: this mutant is stricter, not looser. It refuses an honest bid rather than admitting a dishonest one, which is the closed-rather-than-fail-closed defect this walk names elsewhere, and it is still a divergence between the two doors",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 85.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 0.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 85.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "claims": [
+          {
+            "key": "list_price",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0"
+      },
+      "list_prices": null,
+      "max_discount_pct": 20.0,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
       ]
     }
   ]

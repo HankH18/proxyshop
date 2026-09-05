@@ -531,11 +531,16 @@ const NO_ROW = Symbol("no roster row");
 function rosterRow(offer: Record<string, unknown>, listPrices: PriceRosterMap | undefined): unknown {
   // `readRecord` alone, with no `=== undefined` arm in front of it: it already answers `undefined`
   // for `undefined`, for `null`, for an array and for a primitive, so the roster nobody passed,
-  // the roster spelled `null` and the roster that is not a readable object are ONE case. The arm
-  // that used to sit here made `undefined` special one layer above a function that did not treat
-  // it specially, which is the divergence T-336 names: the Python peer tested `is None` and this
-  // one tested `=== undefined`, so an explicit `null` was an empty roster on one door and an
-  // absent one on the other.
+  // the roster spelled `null` and the roster that is not a readable object are ONE case.
+  //
+  // THIS PARTICULAR EDIT CHANGED NO BEHAVIOUR and the comment here used to claim otherwise. The
+  // arm that sat in front — `listPrices === undefined ? undefined : readRecord(listPrices)` —
+  // was REDUNDANT, not wrong: `readRecord(undefined)` is already `undefined`. Measured by
+  // reverting this line alone, the whole vitest suite stays green, which is the honest signal
+  // that it is a readability change. T-336's actual divergence lived in the two `if (listPrices
+  // === undefined) return <abstain>` guards in `rosterListPrice` and `authorizedDepth`: those
+  // fired for `undefined` and NOT for `null`, so an explicit `null` was an empty roster on this
+  // door and an absent one on the Python peer, which tested `is None`. Removing those closed it.
   const table = readRecord(listPrices);
   if (table === undefined) return NO_ROW;
   const productRef = offer["product_ref"];
