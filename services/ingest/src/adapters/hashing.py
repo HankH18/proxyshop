@@ -87,11 +87,25 @@ def snapshot_ref(url: str, digest: str) -> str:
     Shaped ``snapshot://<host><path>@sha256:…`` so a provenance record names both *what*
     was read and *which version* of it, and two observations of the same unchanged page
     produce the same ref.
+
+    **This function does not raise.** Two ordinary things in a URL make ``urllib`` throw:
+    ``urlsplit("http://[")`` raises ``Invalid IPv6 URL``, and ``.port`` raises for
+    ``"http://host:notaport/"`` — lazily, so a URL that *split* cleanly can still explode on
+    the port. Both were reachable: a store configured with a non-integer port answered
+    ``POST /refresh/{store_id}`` with HTTP 500, thrown while building the provenance for a
+    crawl that had already finished correctly. A ref is a record of what was read; failing to
+    make one must not destroy the read. A URL that cannot be parsed is named by the digest of
+    its own text instead, which is still stable and still distinguishes two different
+    unparseable URLs.
     """
-    split = urlsplit(str(url))
-    host = (split.hostname or "").lower()
-    port = f":{split.port}" if split.port and split.port not in (80, 443) else ""
-    path = split.path or "/"
-    query = f"?{split.query}" if split.query else ""
     prefixed = digest if str(digest).startswith(HASH_PREFIX) else HASH_PREFIX + str(digest)
+    try:
+        split = urlsplit(str(url))
+        host = (split.hostname or "").lower()
+        port = f":{split.port}" if split.port and split.port not in (80, 443) else ""
+        path = split.path or "/"
+        query = f"?{split.query}" if split.query else ""
+    except ValueError:
+        opaque = content_hash(str(url)).removeprefix(HASH_PREFIX)[:32]
+        return f"snapshot://unparseable/{opaque}@{prefixed}"
     return f"snapshot://{host}{port}{path}{query}@{prefixed}"

@@ -250,19 +250,85 @@ def test_the_currency_and_availability_still_come_from_the_page() -> None:
         (False, True),
         ("-5.00", True),
         ("free", True),
-        ([], True),
-        ({}, True),
+        ("12,50", True),
+        # CHANGED, and this is the justification the diff has to carry.
+        #
+        # These four rows asserted `True` when this file was written an hour ago. The
+        # assertion was: "a store that puts a container in a price field has stated
+        # something, so the JSON-LD gap-fill must not replace it."
+        #
+        # Would that assertion still be wrong if I reverted my change? YES — it was wrong on
+        # the day it was written, and an adversarial verifier proved it through a real crawl:
+        # `{"amount": "12.00", "currency_code": "USD"}` is the money-object shape the SIBLING
+        # adapter reads correctly (`catalog_mcp._money`, catalog_mcp.py:774-787). Under the
+        # old rule signed_fetch called it a refused statement, suppressed the fall-through,
+        # and emitted NO `offer` op at all for a variant whose price is perfectly readable —
+        # measured ops `['store', 'product', 'sells', 'variant']`, no offer. Before T-249 the
+        # page's 12.00 filled that gap and the Offer existed. So the old row encoded a
+        # regression I introduced as if it were the contract.
+        #
+        # T-249's trade is about hostile SCALARS — "-5.00", NaN, true, unreadable text — where
+        # the store has stated a number we refuse. A SHAPE `coerce_price` cannot read at all
+        # is not that; it is a surface this adapter does not understand, which is exactly what
+        # the gap-fill is for. The rows below assert the corrected contract precisely rather
+        # than deleting the cases.
+        ([], False),
+        ({}, False),
+        ({"amount": "12.00", "currency_code": "USD"}, False),
+        (("12.00",), False),
     ],
 )
 def test_price_is_stated_separates_silence_from_a_bad_statement(value: Any, stated: bool) -> None:
     """The predicate's whole table, including the cases nothing else exercises.
 
-    ``[]`` and ``{}`` read as *stated*: a store that puts a list in a price field has said
-    something, and something unreadable is refused rather than replaced. ``False`` is stated
-    for the same reason — ``coerce_price`` refuses booleans, and "the store wrote ``false``"
-    is not "the store wrote nothing".
+    ``False`` reads as *stated*: ``coerce_price`` refuses booleans, and "the store wrote
+    ``false``" is not "the store wrote nothing". A container reads as *not* stated — see the
+    justification in the parametrize list, which is the one row of this table that changed
+    after it was first written.
     """
     assert price_is_stated(value) is stated
+
+
+def test_a_money_object_price_still_lets_the_page_fill_the_gap() -> None:
+    """The regression the predicate's container rule exists to prevent, end to end.
+
+    ``catalog_mcp`` reads ``{"amount": …, "currency_code": …}`` through its own unwrapper.
+    ``signed_fetch`` cannot, so for it that field is a gap — and a gap is what the product
+    page's JSON-LD is fetched to fill. Asserted through a real crawl rather than against the
+    predicate, because the predicate is not the thing that would break.
+    """
+    snapshot = _crawl(
+        _TwoSurfaceStore(
+            entry_price={"amount": "12.00", "currency_code": "USD"}, page_price="12.00"
+        )
+    )
+    assert _only_variant(snapshot).price == 12.0, (
+        "a money-object price the sibling adapter reads fine was treated as a refused "
+        "statement, and the page's price was suppressed"
+    )
+    assert "offer" in [op.kind for op in SignedFetchAdapter().to_upserts(snapshot)]
+
+
+def test_a_european_decimal_comma_is_refused_rather_than_read_as_thousands() -> None:
+    """``"12,50"`` is not 1250.00, and guessing which it is costs two orders of magnitude.
+
+    ``coerce_price`` stripped commas unconditionally, so a store writing the European decimal
+    form got a hundredfold overcharge into the graph as a price — and T-249 then made it
+    unrecoverable, because a value that parses is never a gap for the page to fill. Grouped
+    thousands separators are still read; anything else is refused, which costs the offer.
+    """
+    from ingest.adapters.mapping import coerce_price  # noqa: PLC0415
+
+    assert coerce_price("12,50") is None
+    assert coerce_price("1,234.56") == 1234.56
+    assert coerce_price("1,234,567.89") == 1234567.89
+    assert coerce_price("1_000") is None, "a Python literal is not a price a storefront writes"
+    assert coerce_price("1e3") is None, "scientific notation in a price field is a misread"
+
+    snapshot = _crawl(_TwoSurfaceStore(entry_price="12,50", page_price="12.00"))
+    assert _only_variant(snapshot).price is None, (
+        "an ambiguous comma price was coerced to a number instead of being refused"
+    )
 
 
 # =========================================================================================

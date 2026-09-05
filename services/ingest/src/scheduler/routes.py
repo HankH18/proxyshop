@@ -36,6 +36,7 @@ guarantee observable across two calls to a running service.
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -57,7 +58,7 @@ __all__ = [
     "POLICIES",
     "PRODUCTS",
     "RefreshRequest",
-    "ingestor",
+    "ingestor_for",
     "registry",
     "router",
     "runner",
@@ -83,10 +84,28 @@ registry = StoreRegistry.from_env(warnings=registry_warnings)
 #: The process-wide refresh runner. Module state on purpose — see the module docstring.
 runner = CatalogRefreshRunner(registry=registry)
 
-#: The process-wide policy-page ingestor. It holds the extraction ledger, which is what makes
-#: "an unchanged policy page performs no extraction" observable across two refreshes rather
-#: than only within one.
-ingestor = PolicyPageIngestor(confidence_floor=DEFAULT_CONFIDENCE_FLOOR)
+#: One policy-page ingestor PER STORE, built on first use. Each holds its own extraction
+#: ledger, which is what makes "an unchanged policy page performs no extraction" observable
+#: across two refreshes rather than only within one.
+#:
+#: Per store rather than one for the process, because `force` has to be able to drop what a
+#: store remembers. `ExtractionLedger.hashes` is keyed by page ref across every store, so
+#: clearing it on one shared ingestor discarded EVERY store's ledger: measured, forcing a
+#: refresh of store A threw away all six of store B's remembered pages, and B's next refresh
+#: re-extracted work it had already done — silently, and at the cost of real model calls once
+#: a real extractor is configured.
+_ingestors: dict[str, PolicyPageIngestor] = {}
+_ingestors_guard = Lock()
+
+
+def ingestor_for(store_id: str) -> PolicyPageIngestor:
+    """The policy-page ingestor for one store, created on first use."""
+    with _ingestors_guard:
+        existing = _ingestors.get(str(store_id))
+        if existing is None:
+            existing = PolicyPageIngestor(confidence_floor=DEFAULT_CONFIDENCE_FLOOR)
+            _ingestors[str(store_id)] = existing
+        return existing
 
 
 class RefreshRequest(BaseModel):
@@ -161,35 +180,43 @@ def refresh_store_catalog(store_id: str, payload: RefreshRequest | None = None) 
     sections = _sections_for(payload)
     force = bool(payload.force) if payload else False
 
-    report: CatalogRefreshReport | None = None
-    if PRODUCTS in sections:
-        try:
-            report = runner.refresh(store_id, force=force)
-        except UnknownStore as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # Resolved once, through the runner's registry — the same object the products branch uses.
+    # Two references to "the registry" is how the two halves of one request end up with
+    # different views of which stores exist.
+    try:
+        target = runner.registry.get(store_id)
+    except UnknownStore as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    if POLICIES in sections:
-        try:
-            target = registry.get(store_id)
-        except UnknownStore as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        if force:
-            ingestor.ledger.hashes.clear()
-        # The runner's posture, not the transport default: an operator crawling a dev store
-        # on a private address configures ONE policy for the process, and a refresh whose two
-        # halves obeyed different SSRF postures would read the catalog and silently refuse
-        # every policy page on the same host.
-        policy_report = ingestor.run(
-            store_id=target.store_id,
-            base_url=target.base_url,
-            allowed_hosts=target.allowed_hosts,
-            policy=runner.policy,
-            budget=runner.budget,
-        )
-        # Through the runner rather than a second copy of the session handling: a policy
-        # page's writes and a product's writes are the same `UpsertOp` shape and must reach
-        # the graph the same way, including failing the same way when it is unreachable.
-        runner.apply(ingestor.to_upserts(policy_report))
+    # One store's whole refresh is ONE critical section. The handler is `def`, so Starlette
+    # runs it in a worker thread: without this, two concurrent requests for the same store
+    # both crawl the merchant and both write the graph, because each reads the differential
+    # ledger before either updates it.
+    with runner.lock_for(target.store_id):
+        report: CatalogRefreshReport | None = None
+        if PRODUCTS in sections:
+            report = runner.refresh(target.store_id, force=force)
+
+        if POLICIES in sections:
+            ingestor = ingestor_for(target.store_id)
+            if force:
+                ingestor.ledger.hashes.clear()
+            # The runner's posture, not the transport default: an operator crawling a dev
+            # store on a private address configures ONE policy for the process, and a refresh
+            # whose two halves obeyed different SSRF postures would read the catalog and
+            # silently refuse every policy page on the same host.
+            policy_report = ingestor.run(
+                store_id=target.store_id,
+                base_url=target.base_url,
+                allowed_hosts=target.allowed_hosts,
+                policy=runner.policy,
+                budget=runner.budget,
+            )
+            # Through the runner rather than a second copy of the session handling: a policy
+            # page's writes and a product's writes are the same `UpsertOp` shape and must
+            # reach the graph the same way, including failing the same way when it is
+            # unreachable.
+            runner.apply(ingestor.to_upserts(policy_report))
 
     job_id = report.job_id if report is not None else f"crawl-{store_id}-policies"
     return {

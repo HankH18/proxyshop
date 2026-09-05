@@ -31,6 +31,7 @@ seam a seam:
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import SplitResult, urlsplit
@@ -55,6 +56,16 @@ __all__ = [
     "stable_id",
     "variant_id_for",
 ]
+
+#: ``1,234`` and ``1,234,567.89`` are prices; ``12,50`` and ``1,2345`` are not. A comma that
+#: does not group digits in threes is a decimal comma or a typo, and either way the number it
+#: appears in cannot be read without guessing which.
+_THOUSANDS_GROUPED = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+
+#: What a storefront actually writes in a price field, once commas are resolved. Deliberately
+#: narrower than ``float``: no underscores, no exponent, no leading ``+``, no ``inf``/``nan``
+#: spellings. A price outside this shape is refused rather than coerced into a wrong number.
+_DECIMAL = re.compile(r"-?\d+(?:\.\d*)?|-?\.\d+")
 
 #: schema.org / storefront availability tokens -> the vocabulary `ingest.graph` stores on an
 #: Offer. One table for every adapter: a second copy would drift, and an availability string
@@ -109,8 +120,23 @@ def coerce_price(value: Any) -> float | None:
     """
     if value is None or isinstance(value, bool):
         return None
+    text = str(value).strip()
+    if "," in text:
+        # Commas are a THOUSANDS separator or they are nothing. Stripping them unconditionally
+        # read the European decimal ``"12,50"`` as ``1250.0`` — a hundredfold overcharge that
+        # reached the graph as a price, and that T-249 then made unrecoverable by refusing to
+        # let the page's correct JSON-LD figure fill in. Only the grouped form is accepted.
+        if not _THOUSANDS_GROUPED.fullmatch(text):
+            return None
+        text = text.replace(",", "")
+    if not _DECIMAL.fullmatch(text):
+        # ``float`` accepts things no storefront writes and every one of them is a misread
+        # rather than a price: ``"1_000"`` -> 1000.0 (Python literal underscores),
+        # ``"1e3"`` -> 1000.0, ``"infinity"``, ``"nan"``, ``"+5"``. Refusing them costs the
+        # offer, which is the documented answer for a price we cannot read.
+        return None
     try:
-        price = float(str(value).replace(",", "").strip())
+        price = float(text)
     except (TypeError, ValueError):
         return None
     if price != price or price in (float("inf"), float("-inf")):  # NaN, ±Infinity
@@ -138,6 +164,15 @@ def price_is_stated(value: Any) -> bool:
         return False
     if isinstance(value, str):
         return bool(value.strip())
+    if isinstance(value, Mapping | list | tuple | set):
+        # A *shape* is not a statement of this kind. The catalog MCP adapter reads the money
+        # object ``{"amount": "12.00", "currency_code": "USD"}`` through its own ``_money``
+        # unwrapper; ``coerce_price`` cannot read it at all, so treating it as "the store
+        # stated a price we refuse" would suppress the JSON-LD gap-fill and silently drop the
+        # Offer for a variant whose price the OTHER adapter reads perfectly well. Measured
+        # through a real crawl before this clause: no ``offer`` op emitted at all.
+        # The T-249 trade is about hostile SCALARS; it must not extend to shapes.
+        return False
     return True
 
 

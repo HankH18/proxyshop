@@ -314,8 +314,18 @@ def test_the_registry_reads_the_environment_and_skips_what_it_cannot_read() -> N
         warnings=warnings,
     )
 
+    # CHANGED from `len(warnings) == 1`. The assertion said "one bad entry produces one
+    # warning". Would it still be wrong if I reverted my change? YES: `store-3` carries the
+    # unknown field `nope`, and at the time this was written `from_env` dropped unknown fields
+    # in SILENCE. An adversarial verifier showed what that buys — `{"souce": "catalog_mcp"}`
+    # registers a signed_fetch target and crawls the live URL, a typo turning into traffic at
+    # a merchant. The old count encoded that silence as the contract. `from_env` now names
+    # ignored fields, so the fixture below legitimately produces TWO warnings, and this
+    # asserts each by what it says rather than by counting.
     assert registry.store_ids == ("store-1", "store-3"), registry.store_ids
-    assert len(warnings) == 1 and "store target" in warnings[0], warnings
+    assert any("store target" in w and "[1]" in w for w in warnings), warnings
+    assert any("does not read" in w and "nope" in w for w in warnings), warnings
+    assert len(warnings) == 2, warnings
     assert registry.get("store-1").source == SIGNED_FETCH
 
 
@@ -533,3 +543,139 @@ def test_the_routers_module_state_does_not_leak_out_of_the_fixture() -> None:
     assert routes.runner.session_factory is not None, (
         "the fixture left the runner's session factory swapped out for its capture double"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# regressions an adversarial verifier found after the first pass
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("base_url", "http://example.com:notaport/", "no usable port"),
+        ("max_products", "lots", "not a whole number"),
+        ("max_products", 0, "at least 1"),
+        ("fetch_product_pages", "yes", "true or false"),
+        ("allowed_hosts", ("",), "non-empty strings"),
+        ("cassette", "/tmp/recording.json", "only meaningful"),
+    ],
+)
+def test_a_target_that_would_fail_mid_request_is_refused_at_configuration(
+    field: str, value: Any, match: str
+) -> None:
+    """Every one of these reached a request as an HTTP 500 before it was validated here.
+
+    The nastiest is the port. ``urlsplit`` parses it LAZILY, so
+    ``"http://example.com:notaport/"`` splits cleanly, reports a hostname, and passes a
+    ``safe_split``-based check — then throws the first time anything reads ``.port``, which
+    happens while building the crawl's provenance, AFTER the crawl has already succeeded.
+    Measured before this validation: ``POST /refresh/{store}`` -> 500 for a store whose
+    catalog had been read correctly.
+
+    ``StoreTarget``'s whole reason to exist is that a bad entry is rejected where the message
+    names the entry. A field it does not check is a field that fails somewhere else.
+    """
+    fields: dict[str, Any] = {"store_id": "store-1", "base_url": "https://shop.example.com"}
+    fields[field] = value
+    with pytest.raises(ValueError, match=match):
+        StoreTarget(**fields)
+
+
+def test_forcing_one_store_does_not_discard_another_stores_extraction_ledger(
+    storefront_factory: Any,
+) -> None:
+    """``force`` means "re-read THIS store", and it used to mean "re-read everything".
+
+    ``ExtractionLedger.hashes`` is keyed by page ref across every store, so clearing it on one
+    process-wide ingestor threw away every store's ledger. Measured: forcing store A dropped
+    all of store B's remembered pages, and B's next refresh re-extracted work it had already
+    done — silently, and at the cost of real model calls once a real extractor is configured.
+    """
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from ingest.main import create_app  # noqa: PLC0415
+    from ingest.scheduler import routes  # noqa: PLC0415
+
+    url_a, _ = storefront_factory()
+    url_b, _ = storefront_factory()
+    saved = (routes.runner.policy, routes.runner.session_factory)
+    routes.runner.policy = LOOPBACK
+    routes.runner.session_factory = _SessionFactory()
+    routes.registry.register(_target(url_a, "store-a"))
+    routes.registry.register(_target(url_b, "store-b"))
+    try:
+        client = TestClient(create_app())
+        for store in ("store-a", "store-b"):
+            assert client.post(f"/refresh/{store}", json={"sections": ["policies"]}).status_code
+        remembered_b = dict(routes.ingestor_for("store-b").ledger.hashes)
+        assert remembered_b, "store-b remembered no policy page; nothing to lose"
+
+        client.post("/refresh/store-a", json={"force": True, "sections": ["policies"]})
+
+        assert routes.ingestor_for("store-b").ledger.hashes == remembered_b, (
+            "forcing store-a discarded what store-b had already extracted"
+        )
+    finally:
+        routes.runner.policy, routes.runner.session_factory = saved
+        for store in ("store-a", "store-b"):
+            routes.registry.unregister(store)
+            routes.runner.forget(store)
+            routes._ingestors.pop(store, None)
+
+
+def test_two_concurrent_refreshes_of_one_store_do_the_work_once(storefront: Any) -> None:
+    """The handler is ``def``, so Starlette really does run two of them at the same time.
+
+    That is advertised — the module docstring says two stores refresh concurrently — and it is
+    exactly what made the differential guarantee false for ONE store: measured, two concurrent
+    requests both opened a graph session, because each read the hash ledger before either
+    wrote it. The per-store lock closes that: the second request now sees the first's hashes,
+    finds nothing changed, and does no graph work.
+
+    What this test deliberately does NOT assert, because it is not true and claiming it would
+    be worse than the gap: the merchant is still fetched twice. Serialising two refreshes does
+    not merge them, and it should not — a refresh that arrives after another has finished is
+    entitled to re-read the store; that is what "refresh" means. Capping how often a caller
+    may ask is RATE LIMITING, and this service has none, on this route or any other. That is
+    reported as an open gap rather than papered over here.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+    from ingest.main import create_app  # noqa: PLC0415
+    from ingest.scheduler import routes  # noqa: PLC0415
+
+    base_url, stub = storefront
+    sessions = _SessionFactory()
+    saved = (routes.runner.policy, routes.runner.session_factory)
+    routes.runner.policy = LOOPBACK
+    routes.runner.session_factory = sessions
+    routes.registry.register(_target(base_url))
+    routes.runner.forget("store-1")
+    try:
+        client = TestClient(create_app())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = [
+                f.result()
+                for f in [
+                    pool.submit(client.post, "/refresh/store-1", json={"sections": ["products"]})
+                    for _ in range(2)
+                ]
+            ]
+        assert [r.status_code for r in results] == [202, 202], [r.text for r in results]
+        assert sessions.opened == 1, (
+            "two concurrent refreshes of one store both wrote the graph; the second read the "
+            "differential ledger before the first updated it"
+        )
+        # The differential guarantee, stated as the thing it protects: the SECOND refresh
+        # found nothing to write, rather than racing the first to write the same nodes twice.
+        remembered = routes.runner.hashes.get("store-1") or {}
+        assert len(remembered) > 1, f"the first refresh remembered nothing: {remembered}"
+        assert stub.paths_fetched().count("/products.json") == 2, (
+            "the two requests were merged rather than serialised — see the docstring: this "
+            "test asserts they do not RACE, not that the second never happens"
+        )
+    finally:
+        routes.runner.policy, routes.runner.session_factory = saved
+        routes.registry.unregister("store-1")
+        routes.runner.forget("store-1")

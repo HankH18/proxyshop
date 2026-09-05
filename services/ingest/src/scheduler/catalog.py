@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -146,10 +147,21 @@ class StoreTarget:
     def __post_init__(self) -> None:
         """Refuse a target that cannot produce a fetchable request.
 
+        Every field is checked, not just the obvious three. This class exists so that a bad
+        entry is rejected at CONFIGURATION time, where the message names the entry, rather
+        than at request time as an HTTP 500 from a door a client is holding open. Two ways
+        that promise was broken and are closed here, both measured as live 500s from
+        ``POST /refresh/{store_id}``:
+
+        * ``urlsplit`` parses the port LAZILY, so ``"http://example.com:notaport/"`` splits
+          cleanly and has a hostname — and then throws the first time anything reads
+          ``.port``, which happens while building the crawl's provenance, after the crawl has
+          already succeeded;
+        * ``max_products`` was never validated, so ``"lots"`` was accepted here and raised
+          out of ``int()`` when the request was built.
+
         Raises:
-            ValueError: the store id is blank, the source is not one this service
-                implements, or the base URL will not parse. Each of the three would fail
-                later, inside a crawl, where the cause is far less obvious.
+            ValueError: any field cannot produce a fetchable request.
         """
         if not str(self.store_id).strip():
             raise ValueError("StoreTarget.store_id must be non-empty")
@@ -158,10 +170,45 @@ class StoreTarget:
                 f"StoreTarget.source {self.source!r} is not one of {list(CATALOG_SOURCES)}"
             )
         base = str(self.base_url or "").strip()
-        if not base or safe_split(base) is None or not safe_host(base):
+        split = safe_split(base)
+        if not base or split is None or not safe_host(base):
             raise ValueError(
                 f"StoreTarget.base_url {self.base_url!r} does not parse to a host; a target "
                 f"whose URL cannot be split names no store"
+            )
+        try:
+            # Read, not discarded: `SplitResult.port` is a lazily-evaluated property and
+            # reading it is the whole check. Bound to a name so it is not a bare expression.
+            _port = split.port
+        except ValueError as exc:
+            raise ValueError(
+                f"StoreTarget.base_url {self.base_url!r} names no usable port ({exc}); "
+                f"`urlsplit` parses the port lazily, so this would surface mid-crawl"
+            ) from exc
+        try:
+            products = int(self.max_products)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"StoreTarget.max_products {self.max_products!r} is not a whole number"
+            ) from exc
+        if products < 1:
+            raise ValueError(f"StoreTarget.max_products must be at least 1, got {products}")
+        if not isinstance(self.fetch_product_pages, bool):
+            raise ValueError(
+                f"StoreTarget.fetch_product_pages must be true or false, got "
+                f"{self.fetch_product_pages!r}"
+            )
+        if not all(isinstance(host, str) and host.strip() for host in self.allowed_hosts):
+            raise ValueError(
+                f"StoreTarget.allowed_hosts must be non-empty strings, got {self.allowed_hosts!r}"
+            )
+        if self.cassette is not None and self.source != CATALOG_MCP:
+            # Silently ignoring it would send a live crawl at a merchant when the operator
+            # asked for a recorded replay — the one configuration mistake that reaches
+            # somebody else's server.
+            raise ValueError(
+                f"StoreTarget.cassette is only meaningful for {CATALOG_MCP!r}; "
+                f"{self.source!r} reads the store over HTTP and would ignore it"
             )
 
     def request(
@@ -263,6 +310,15 @@ class StoreRegistry:
             if not isinstance(entry, dict):
                 note.append(f"{STORES_ENV}[{index}] is not an object; skipped")
                 continue
+            unknown = sorted(set(entry) - known)
+            if unknown:
+                # Named rather than dropped: `{"souce": "catalog_mcp"}` silently registered a
+                # signed_fetch target that crawled the live URL, which is a typo becoming
+                # traffic at a merchant.
+                note.append(
+                    f"{STORES_ENV}[{index}] has field(s) this service does not read: "
+                    f"{unknown}; they were ignored"
+                )
             fields = {k: v for k, v in entry.items() if k in known}
             if "allowed_hosts" in fields:
                 hosts = fields["allowed_hosts"]
@@ -397,6 +453,24 @@ class CatalogRefreshRunner:
         #: with the request could never demonstrate it. T-024 persists this.
         self.hashes: dict[str, dict[str, str]] = {}
         self._runs = 0
+        #: One re-entrant lock per store. The route handler is `def`, so Starlette runs it in
+        #: a worker thread and two requests for the SAME store genuinely overlap — measured:
+        #: both crawled the storefront and both opened a graph session, because each read the
+        #: hash ledger before either wrote it. That makes the differential guarantee false
+        #: under exactly the concurrency this service advertises, and turns N requests into N
+        #: full crawls of a third party. Per store, not global, so two DIFFERENT stores still
+        #: refresh at the same time.
+        self._locks: dict[str, threading.RLock] = {}
+        self._locks_guard = threading.Lock()
+
+    def lock_for(self, store_id: str) -> threading.RLock:
+        """The re-entrant lock serialising refreshes of one store.
+
+        Public because a refresh is not only the catalog: the route holds this around the
+        policy-page half too, so one store's whole refresh is one critical section.
+        """
+        with self._locks_guard:
+            return self._locks.setdefault(str(store_id), threading.RLock())
 
     def forget(self, store_id: str) -> None:
         """Drop what was remembered about ``store_id`` so the next refresh re-reads it."""
@@ -428,22 +502,23 @@ class CatalogRefreshRunner:
             UnknownStore: ``store_id`` is not registered.
         """
         target = self.registry.get(store_id)
-        if force:
-            self.forget(target.store_id)
+        with self.lock_for(target.store_id):
+            if force:
+                self.forget(target.store_id)
 
-        catalog = adapter if adapter is not None else self._adapter_for(target)
-        request = target.request(
-            known_hashes=self.hashes.get(target.store_id, {}),
-            policy=policy or self.policy,
-            budget=budget or self.budget,
-        )
-        snapshot = catalog.fetch_catalog(request)
-        ops = catalog.to_upserts(snapshot)
+            catalog = adapter if adapter is not None else self._adapter_for(target)
+            request = target.request(
+                known_hashes=self.hashes.get(target.store_id, {}),
+                policy=policy or self.policy,
+                budget=budget or self.budget,
+            )
+            snapshot = catalog.fetch_catalog(request)
+            ops = catalog.to_upserts(snapshot)
 
-        warnings = list(snapshot.warnings)
-        written = self._apply(ops, warnings)
-        self.hashes[target.store_id] = dict(snapshot.hash_index)
-        self._runs += 1
+            warnings = list(snapshot.warnings)
+            written = self._apply(ops, warnings)
+            self.hashes[target.store_id] = dict(snapshot.hash_index)
+            self._runs += 1
 
         return CatalogRefreshReport(
             store_id=target.store_id,
