@@ -103,7 +103,12 @@ def _run_collection() -> list[str]:
     doing this properly instead of matching path strings is under two seconds.
     """
     env = dict(os.environ)
-    env.setdefault("PROXYSHOP_WORKER", "0")
+    # Never default to 0: that index is the scorer's, and it is the sole isolation key for
+    # both the Postgres database name and the Redis logical DB, so a stray child badged
+    # with it can collide with a scored measurement. Inherit, then fall back to the gate
+    # worker the graph's own verify strings use, then to a fixed non-reserved index.
+    if not env.get("PROXYSHOP_WORKER"):
+        env["PROXYSHOP_WORKER"] = env.get("PROXYSHOP_GATE_WORKER") or "9"
     completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
         [
             sys.executable,
@@ -464,6 +469,27 @@ def test_t160_the_gate_vacuity_sweep_is_armed() -> None:
     assert verify_operands("PROXYSHOP_WORKER=15 uv run python -m pytest -k schema -q") == [], (
         "a `-k`-only command now reports an operand, so the clause that catches it is dead"
     )
+    # The PARAMETERISED worker form, which arrived in freeze-log amendment 22 and rewrote
+    # the verify field of all 130 gated tickets — the exact field this sweep reads. The
+    # extractor must see straight through it: the whole `PROXYSHOP_WORKER=...` word is
+    # skipped because it contains `=`, so the `${...}` never reaches the operand list.
+    _parameterised = (
+        "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-2} && ./scripts/bootstrap.sh "
+        "&& ./.venv/bin/python -m pytest packages/llm -q"
+    )
+    assert verify_operands(_parameterised) == [
+        "./scripts/bootstrap.sh",
+        "./.venv/bin/python",
+        "packages/llm",
+    ], "the parameterised worker form is leaking into the operand list"
+    assert not any("PROXYSHOP" in operand for operand in verify_operands(_parameterised)), (
+        "an operand carrying the worker expression means the extractor is reading the "
+        "environment prefix as a selector"
+    )
+    assert (
+        pytest_selection("PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} make verify", files)
+        == WHOLE_SUITE
+    ), "the parameterised worker form hides `make verify` from whole-suite detection"
     assert pytest_selection("uv run python -m pytest -k schema -q", files) == set(), (
         "a `-k`-only command is being resolved as a whole-suite run again, which scores it "
         "as maximally coupled — the measured one-field escape"
@@ -550,6 +576,24 @@ def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
     **seven still violating** — T-000, T-010, T-112, T-118, T-122, T-129, T-133. Repointing
     all nine takes it to zero. The property outlives the instance, which is the whole reason
     this is a sweep over all 57 closed gated tickets rather than three assertions.
+
+    THE SWEEP HAS SINCE SURVIVED A BULK REWRITE OF THE FIELD IT GRADES, and that is worth
+    more than any of the adversarial mutations above because nobody aimed it. An adversarial
+    review had found this gate could be silenced by a one-field ``tickets.json`` edit, and
+    noted the cheapest such edits were VERIFY-FIELD edits — the pre-approved amendment
+    class. Freeze-log amendment 22 then made exactly that edit, to all 130 gated tickets at
+    once, for an unrelated and legitimate reason: every ``PROXYSHOP_WORKER=15`` became
+    ``PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-N}`` so that concurrent lanes stop sharing
+    one Postgres database and one Redis logical DB. Not an adversary silencing the gate —
+    the orchestrator's routine maintenance doing it as a side effect.
+
+    Re-measured across that merge, the violator set is UNCHANGED: the same nine ids, for the
+    same reasons, and the two ratchet floors still read exactly 57 and 84. The reason it
+    held is narrow and worth naming, because it is the difference between surviving and
+    getting lucky: every extractor here skips a word containing ``=``, so the entire
+    ``PROXYSHOP_WORKER=...`` token — parameter expansion and all — is discarded before any
+    operand is read. Nothing in this file parses a worker index, and the arming test now
+    pins that with the parameterised form spelled out literally.
     """
     files = _run_collection()
     violations = gate_violations(_tickets(), files, graders_by_ticket(files))

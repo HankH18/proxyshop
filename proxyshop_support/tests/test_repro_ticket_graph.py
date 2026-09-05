@@ -413,6 +413,23 @@ def test_t262_the_grader_ownership_sweep_is_armed() -> None:
     assert runs_whole_suite("PROXYSHOP_WORKER=15 ./scripts/verify.sh check")
     assert not runs_whole_suite("PROXYSHOP_WORKER=15 uv run python -m pytest docs/tests/x.py -q")
 
+    # The PARAMETERISED worker form. Freeze-log amendment 22 rewrote the verify field of
+    # all 130 gated tickets from a literal `PROXYSHOP_WORKER=15` to
+    # `PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-N}` — a bulk edit to the exact field this
+    # sweep grades, made for an unrelated and legitimate reason. Every clause has to see
+    # straight through it, and the whole word is skipped only because it contains `=`.
+    _parameterised = (
+        "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-12} uv run python -m pytest "
+        "docs/tests/test_runbook.py -q"
+    )
+    assert [selection_operands(w) for w in pytest_segments(_parameterised)] == [
+        ["docs/tests/test_runbook.py"]
+    ], "the parameterised worker form is leaking into the operand list"
+    assert runs_whole_suite("PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} make verify")
+    assert runs_whole_suite(
+        "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} ./scripts/verify.sh check"
+    )
+
     # The allowlists, in both directions.
     assert is_shared_grader(".swarm-loop/acceptance/test_e8_proofs.py")
     assert is_shared_grader("services/sim/tests/test_repro_open_tickets.py")
@@ -542,6 +559,21 @@ def test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns() -> None:
     ``docs/tests/** (runbook tests)``, neither of which changes ownership for the harness
     that enforces it; and replacing the gate with ``make verify`` or ``verify.sh check``,
     which left clause A nothing to look at.
+
+    THEN THE REAL TEST ARRIVED, unaimed. The review that found those escapes observed that
+    the cheapest of them were VERIFY-FIELD edits, i.e. the pre-approved amendment class —
+    and freeze-log amendment 22 subsequently made exactly that edit to all 130 gated
+    tickets at once, rewriting every ``PROXYSHOP_WORKER=15`` into
+    ``PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-N}`` so concurrent lanes stop sharing one
+    Postgres database and one Redis logical DB. A bulk rewrite of the exact field this
+    sweep grades, by the orchestrator, for a good reason unrelated to this gate.
+
+    Re-measured across that merge the violator set is UNCHANGED — T-087 and T-228 by
+    ownership, T-130 and T-134 by whole-suite — and the population ratchet still reads
+    exactly 84. It held for a narrow, nameable reason rather than by luck: every operand
+    word containing ``=`` is discarded before anything is parsed, so the entire
+    ``PROXYSHOP_WORKER=...`` token goes with it, and nothing here ever reads a worker
+    index. The arming test now pins that with the parameterised form spelled out.
     """
     tickets = _tickets()
     ownership = ownership_violations(tickets)
