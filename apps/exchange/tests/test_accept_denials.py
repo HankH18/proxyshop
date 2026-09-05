@@ -31,6 +31,7 @@ from exchange.accept import (
     DENIAL_AUCTION_NOT_ACCEPTABLE,
     DENIAL_BLACKLISTED,
     DENIAL_CHECKOUT_REFUSED,
+    DENIAL_FALLBACK_NOT_PURCHASABLE,
     DENIAL_REASONS,
     DENIAL_UNAVAILABLE,
     DENIAL_UNKNOWN_BID,
@@ -170,6 +171,18 @@ def _route_refusal() -> Any:
     return _RouteRefusal()
 
 
+def _fallback_auction() -> dict[str, Any]:
+    """An auction whose `bid-a` is the exchange's own list-price fallback (R10).
+
+    The flag is what `auction/routes.py::collected_bid_records` stamps off the `BidEntry`; the
+    offer is left fully mintable on purpose, so the refusal below can only be the fallback gate
+    and never an offer the checkout port would have rejected anyway.
+    """
+    record = auction()
+    record["bids"][0]["fallback"] = True
+    return record
+
+
 # =====================================================================================
 # The vocabulary itself
 # =====================================================================================
@@ -224,6 +237,9 @@ def test_every_reason_accept_can_emit_names_a_declared_code(unwired: None) -> No
             eligibility=None,
         ),
         DENIAL_AUCTION_NOT_ACCEPTABLE: _route_refusal(),
+        # R10's list-price fallback: shown, never sold. An INTERIM fail-closed default rather
+        # than a rule R10 states — see `accept.offer`'s block for the measurement behind it.
+        DENIAL_FALLBACK_NOT_PURCHASABLE: accept(_fallback_auction(), "bid-a", Creator(), "shopify"),
     }
 
     assert set(emitted) == set(DENIAL_REASONS) - {DENIAL_UNSPECIFIED}, (

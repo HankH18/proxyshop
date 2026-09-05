@@ -1267,3 +1267,114 @@ def test_the_gaming_probes_are_armed():
         "true for every key and the probes above would be measuring nothing"
     )
     assert baseline["components"], "the baseline produced no components to compare"
+
+
+# =====================================================================================
+# 5. R10 is "shown", not "sold" — the interim accept gate
+# =====================================================================================
+def _accept_wired_app(*, bidders: Bidders, stores: tuple[str, ...]) -> Any:
+    """A `_wired_app` whose ACCEPT door is wired too, the way ``composition.py`` wires one.
+
+    ``composition.py`` binds ONE ``RegisteredDomains`` object into both
+    ``configure_ranking(registered_domains=…)`` and ``configure_accept(registered_domains=…)``
+    — "two sources would be two opinions about which host a store owns". ``_wired_app`` wires
+    only the ranking half, so an accept through it is refused for a reason that has nothing to
+    do with what these tests are about. This wires both, so a 200 here is a real 200.
+    """
+    from exchange.accept.routes import configure_accept  # noqa: PLC0415
+
+    app = _wired_app(bidders=bidders, stores=stores)
+    configure_accept(
+        app, registered_domains=StaticRegisteredDomains({s: _domain(s) for s in stores})
+    )
+    return app
+
+
+def test_a_shortlisted_fallback_is_shown_but_cannot_be_bought():
+    """R10's second half holds AND the fallback mints no code — both, in one request.
+
+    **This gate is an INTERIM fail-closed default and R10 does not require it.** R10 is
+    "represented … and can still reach the shortlist" — shown. It is silent on whether a
+    shortlisted fallback may then be accepted and minted a single-use code, and that is a
+    product question this test does not answer. It pins the default that is in force until
+    someone rules, and `accept/offer.py` carries the measurement behind it: before the gate,
+    an accept on a shortlisted fallback returned 200 with a live code for a price no store
+    ever quoted.
+
+    The two halves are asserted together on purpose. "Shown" and "not sold" are separate
+    properties and a gate that quietly dropped the fallback out of the shortlist would satisfy
+    the second while destroying the first — which is exactly the regression this whole branch
+    exists to undo.
+    """
+    app = _accept_wired_app(bidders=Bidders({}), stores=(STORE_A,))
+    client = TestClient(app)
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+    ref = mint_bid_id(body["auction_id"], STORE_A)
+
+    # R10's second half — still true.
+    assert body["entries"][0]["fallback"] is True
+    assert body["excluded"] == [], body["excluded"]
+    assert [slot["bid_ref"] for slot in body["shortlist"]["slots"]] == [ref]
+    assert body["shortlist"]["slots"][0]["provenance_labels"] == ["unverified"]
+
+    # ...and it is not purchasable.
+    refused = client.post(f"/auctions/{body['auction_id']}/accept", json={"bid_ref": ref})
+    payload = refused.json()
+    assert refused.status_code == 409, refused.text
+    assert payload["accepted"] is False
+    assert payload["denial_reason"].startswith("fallback_not_purchasable: "), payload
+    assert "never answered" in payload["denial_reason"], payload
+    assert "code" not in payload and "permalink_url" not in payload, payload
+
+
+def test_a_real_bid_is_still_bought_with_a_code_and_a_permalink():
+    """The non-regression, asserted as explicitly as the gate.
+
+    A gate that refused everything would pass the test above. This is the control for it: the
+    same app, the same accept door, a store that actually answered.
+    """
+    app = _accept_wired_app(bidders=Bidders({STORE_A: _bid(STORE_A, 100.0)}), stores=(STORE_A,))
+    client = TestClient(app)
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+    ref = mint_bid_id(body["auction_id"], STORE_A)
+
+    assert body["entries"][0]["fallback"] is False
+    accepted = client.post(f"/auctions/{body['auction_id']}/accept", json={"bid_ref": ref})
+    payload = accepted.json()
+    assert accepted.status_code == 200, accepted.text
+    assert payload["code"].startswith("PSX-"), payload
+    assert payload["permalink_url"].startswith(f"https://{_domain(STORE_A)}/"), payload
+
+
+def test_removing_the_fallback_gate_makes_a_fallback_mintable_again(monkeypatch):
+    """The control for the gate: take the flag away and the code comes back.
+
+    `collected_bid_records` stamps `fallback` off the `BidEntry`, so suppressing that stamp is
+    the whole of the gate's input. With it gone the accept path cannot tell a manufactured
+    price from a quoted one and mints against it — which is the exposure the gate closes, and
+    the measurement `accept/offer.py` records.
+    """
+    import exchange.auction.routes as auction_routes  # noqa: PLC0415
+
+    real = auction_routes.collected_bid_records
+
+    def without_the_flag(candidates, entries):
+        records = real(candidates, entries)
+        for record in records:
+            record.pop("fallback", None)
+        return records
+
+    monkeypatch.setattr(auction_routes, "collected_bid_records", without_the_flag)
+
+    app = _accept_wired_app(bidders=Bidders({}), stores=(STORE_A,))
+    client = TestClient(app)
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+    ref = mint_bid_id(body["auction_id"], STORE_A)
+
+    ungated = client.post(f"/auctions/{body['auction_id']}/accept", json={"bid_ref": ref})
+    payload = ungated.json()
+    assert ungated.status_code == 200, ungated.text
+    assert payload["code"].startswith("PSX-"), (
+        "with the fallback flag suppressed the accept door minted nothing, so the gate above "
+        "is passing for some other reason and this control is not measuring it"
+    )

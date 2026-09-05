@@ -571,6 +571,8 @@ def collected_bid_records(
     another store's alias — because ``_find_bid`` returns the FIRST match, so honouring a
     colliding ref would let one bidder decide which offer another store's reference accepts.
     """
+    by_store = {str(getattr(entry, "store_id", "")): entry for entry in entries}
+
     records: list[dict[str, Any]] = []
     minted: set[str] = set()
     for candidate in candidates:
@@ -581,20 +583,27 @@ def collected_bid_records(
         bid_id = str(candidate.get("bid_id") or "")
         if not bid_id:
             continue
+        store_id = str(candidate.get("store_id") or "")
         record: dict[str, Any] = {
             "bid_id": bid_id,
-            "store_id": str(candidate.get("store_id") or ""),
+            "store_id": store_id,
             "offer": candidate.get("offer") or {},
         }
         domain = candidate.get("store_domain")
         if domain:
             record["store_domain"] = str(domain)
+        # Carried so the accept door can tell a price a STORE quoted from one the exchange
+        # manufactured for it (R10). Read off the `BidEntry`, which is `collect_bids`' own
+        # verdict, and never off `candidate` — the rank row does not carry it, and a bid is a
+        # document the store wrote. See `accept.offer`'s fallback refusal for what it is for
+        # and for why that refusal is an interim default rather than a rule R10 states.
+        if getattr(by_store.get(store_id), "fallback", False):
+            record["fallback"] = True
         records.append(record)
         minted.add(bid_id)
 
     aliases: dict[str, dict[str, Any]] = {}
     collided: set[str] = set()
-    by_store = {str(getattr(entry, "store_id", "")): entry for entry in entries}
     for record in list(records):
         entry = by_store.get(record["store_id"])
         bid = getattr(entry, "bid", None)

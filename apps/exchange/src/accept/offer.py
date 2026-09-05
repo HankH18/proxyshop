@@ -132,6 +132,7 @@ from .claims import platform_acceptance_claims
 from .reasons import (
     DENIAL_ALREADY_ACCEPTED,
     DENIAL_CHECKOUT_REFUSED,
+    DENIAL_FALLBACK_NOT_PURCHASABLE,
     DENIAL_UNKNOWN_BID,
     DENIAL_UNRECORDABLE_ACCEPTANCE,
     denial_reason,
@@ -539,6 +540,52 @@ def accept(
                 f"issues no second discount code (R3/A5)",
             ),
             store_id=store_id,
+        )
+
+    if _read(bid, "fallback"):
+        # R10's list-price fallback is SHOWN but not SOLD.
+        #
+        # **This gate is an interim fail-closed default, and R10 does not require it.** R10 is
+        # "a store whose agent never answers is still represented, at its catalogue list price,
+        # and can still reach the shortlist" — represented and shown. It says nothing about
+        # whether that entry may then be minted a single-use code, and this refusal is a
+        # deployment's answer to a question the requirement leaves open, pending a product
+        # ruling. A future lane un-gating it after that ruling deletes this block and nothing
+        # else; do NOT read it as the specification.
+        #
+        # Why the default points this way. Measured over the real composed exchange, with the
+        # ranking and the accept path wired to one registry as `composition.py` wires them: an
+        # accept on a shortlisted fallback returned `200 {"code": "PSX-6KNY1ESD",
+        # "permalink_url": "https://store-silent.example.com/cart/1:1?discount=PSX-6KNY1ESD"}`.
+        # A price no store ever quoted became a live single-use discount, and in `shopify_stub`
+        # mode that code is created by the merchant's own `POST /codes` — asking a merchant to
+        # honour a number its agent never said. Worse with no outbound bid client wired, which
+        # is the default: EVERY rostered store falls back, so the whole shortlist is the
+        # caller's roster, at prices the caller wrote, on an unauthenticated request. The
+        # T-177 price wall cannot catch it — `collect_bids._price_refusal` runs only when a
+        # reply arrived, so `0.01` is refused when a store BIDS it and admitted when the
+        # caller WRITES it on the roster.
+        #
+        # Reversibility is the whole argument. Un-gating is deleting this block once someone
+        # rules; un-minting a discount a merchant never quoted is not a code change.
+        #
+        # `fallback` is stamped by `auction/routes.py::collected_bid_records` off the
+        # `BidEntry` — `collect_bids`' own verdict — and never off the store's document, so a
+        # store cannot clear this by writing `fallback: false` into its reply.
+        return _refused(
+            auction,
+            ref,
+            mode,
+            denial_reason(
+                DENIAL_FALLBACK_NOT_PURCHASABLE,
+                f"bid {ref!r} is this exchange's own list-price fallback for {store_id!r} "
+                f"(R10): the store never answered, so this price is catalogue data rather "
+                f"than an offer that store made. It is shown so the store is represented, "
+                f"and it is not purchasable — no discount code is minted against a price no "
+                f"seller quoted",
+            ),
+            store_id=store_id,
+            reoffer_bid_ref=next_slot(auction, ref),
         )
 
     if not _acceptance_is_recordable(auction):
