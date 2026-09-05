@@ -164,5 +164,6 @@
     7
   ],
   "goal_stall_count": 0,
-  "last_retire_at": "2026-09-04T17:25:33"
+  "last_retire_at": "2026-09-04T17:25:33",
+  "lane_slots": 9
 }
