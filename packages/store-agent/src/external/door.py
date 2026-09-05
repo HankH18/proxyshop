@@ -310,8 +310,38 @@ def _freshness_window(value: Any) -> float | None:
     return window
 
 
+@dataclass(frozen=True)
+class _ResolvedEligibility(Mapping):  # type: ignore[type-arg]
+    """The ONE eligibility row this submission's verdict depends on, already read.
+
+    A container this module owns, holding a value read exactly once — the same discipline
+    `_snapshot` applies to the submission itself, and for the same reason. `.get` answers from
+    the value it is holding and never touches the caller's object or hashes the caller's key, so
+    there is nothing left for a second read to answer differently and nothing for a hostile
+    `store_id` to raise from. `row=None` means "this store has no row", which the shared boundary
+    reads as an unavailable eligibility read and denies (R12).
+    """
+
+    key: Any
+    row: Any
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return default if self.row is None else self.row
+
+    def __getitem__(self, key: Any) -> Any:
+        if self.row is None:
+            raise KeyError(key)
+        return self.row
+
+    def __iter__(self) -> Any:
+        return iter(() if self.row is None else (self.key,))
+
+    def __len__(self) -> int:
+        return 0 if self.row is None else 1
+
+
 def _readable_eligibility(trust_snapshot: Any, store_id: Any) -> Mapping[str, Any]:
-    """The eligibility snapshot to judge this store against — or `{}` when it cannot be read.
+    """The eligibility row to judge this store against, read ONCE, in a container we own.
 
     T-233 settled that an ABSENT snapshot is an empty one rather than a permissive one: the
     boundary reads a store with no row as an unavailable eligibility read and denies it (R12),
@@ -329,21 +359,34 @@ def _readable_eligibility(trust_snapshot: Any, store_id: Any) -> Mapping[str, An
     not be the braces — with it holding this case up, every by-name eligibility gate inside this
     function could regress and a test asserting only "not accepted" would stay green.
 
-    Returning `{}` rather than refusing here on the spot is deliberate: it routes the answer back
-    through the one function that owns R12, so this door and the exchange keep agreeing about
-    what an unavailable read means, and a submission that is ALSO wrong in some other way still
-    collects that door's other reasons instead of being short-circuited by ours.
+    Answering with an EMPTY row rather than refusing here on the spot is deliberate: it routes
+    the verdict back through the one function that owns R12, so this door and the exchange keep
+    agreeing about what an unavailable read means, and a submission that is ALSO wrong in some
+    other way still collects that door's other reasons instead of being short-circuited by ours.
 
-    The probe reads the row this submission's verdict actually depends on, so a snapshot that can
-    answer for this store is passed through untouched — including its rows for every other store.
+    **Read once, then hand on what was read — never probe and pass the original.** The first
+    version of this function called `.get` to see whether the snapshot could answer and then gave
+    the shared boundary the caller's object, which reads it a SECOND time. That is a
+    time-of-check/time-of-use gap and an adversarial verifier walked straight through it: a
+    mapping over a feed that answers one row and then loses its connection passes the probe,
+    raises inside `contracts.boundary._eligibility_reasons` (which guards `TypeError` only),
+    escapes `_receive_bid` entirely and comes back `door_failed_closed` — exactly the erosion
+    T-279 is about, moved one read to the right. It also made the door read a caller-supplied
+    mapping twice, so a snapshot whose read has a side effect (a cursor, a pop-on-read cache)
+    answered the boundary differently from the probe.
+
+    Two reads cannot be made safe by guarding both; only one read can. So the row is taken here,
+    once, and everything downstream sees `_ResolvedEligibility` — which also means a `store_id`
+    that cannot be hashed is never used as a dict key again, closing the same escape from the
+    other side.
     """
     if trust_snapshot is None:
-        return {}
+        return _ResolvedEligibility(store_id, None)
     try:
-        trust_snapshot.get(store_id)  # type: ignore[union-attr]
+        row = trust_snapshot.get(store_id)  # type: ignore[union-attr]
     except Exception:  # noqa: BLE001 - a row that cannot be read is a row that is not there
-        return {}
-    return trust_snapshot
+        row = None
+    return _ResolvedEligibility(store_id, row)
 
 
 def _work_item(

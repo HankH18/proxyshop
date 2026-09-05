@@ -1011,7 +1011,28 @@ def _total_price_refusal(path: str, unit_price: Any, total_price: Any) -> str | 
     A total that is not a number at all is refused rather than skipped. `_as_depth` reads NaN and
     `inf` as "not a number", and it has to: NaN loses every comparison, so a wall built out of
     comparisons waves it through — which is precisely how `freshness_window_seconds=nan` turned
-    the door's freshness gate decorative. A price wall must not have the same hole.
+    the door's freshness gate decorative. A price wall must not have the same hole. A NUMERIC
+    STRING is not in that class and is accepted: `_as_depth` coerces `"44.10"` through `float()`,
+    which is the same idiom `unit_price` has always used here, so both fields behave alike. The
+    shared `contracts.boundary` refuses a stringly-typed price, so the two doors differ on that
+    shape — recorded because it is measured, not because this wall is the place to change it.
+
+    **The two doors read `unit_price` differently, and this wall inherits the store agent's
+    reading.** `_price_reconciliation_refusal` above treats `unit_price` as the price AFTER the
+    declared discount (`unit >= list * (100 - declared) / 100`); `contracts.boundary` treats it
+    as the price BEFORE, which is why its own total/unit relation is
+    `total >= unit * (100 - declared) / 100` and why that relation is applied only at a NON-ZERO
+    depth — at zero it would degenerate into exactly the claim made here. Under the contracts
+    reading an offer may honestly state `unit_price 49.00 / total_price 44.10` at 10%, and
+    `packages/contracts/openapi/store-agent.openapi.json`'s own 200 example does; this wall
+    refuses that shape, and the shared door admits it.
+
+    That divergence is the design question T-156 says closing it requires, and it is left OPEN
+    rather than silently decided: nothing in the repo currently sends such a bid through this
+    guard — `enforce_bid_provenance`'s only production caller is
+    `store_agent.runtime.bidding`, which emits `total_price = unit_price` — and the full suite is
+    unchanged. It is recorded here so the next reader meets it at the wall rather than in a
+    rejection log.
 
     Anything the floor wall already refuses about the UNIT — a non-numeric or negative unit price
     — returns `None` here, so one bad number is reported once and by the wall whose subject it is.
