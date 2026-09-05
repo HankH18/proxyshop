@@ -466,6 +466,27 @@ def _checkout_mode(request: Request) -> str:
     return str(os.environ.get(CHECKOUT_MODE_ENV) or DEFAULT_CHECKOUT_MODE)
 
 
+def _accepted_offer(result: Any) -> Mapping[str, Any] | None:
+    """The offer body the checkout port already built for its own ``accepted`` event.
+
+    Read back off ``result.events`` rather than rebuilt from the bid, so the offer the
+    auction stamps into the ledger is the *same* offer the checkout was made against. The
+    trust reconciler grades the webhook against exactly this mapping
+    (``reconcile.engine._promised`` reads ``product_ref`` / ``unit_price`` / ``total_price`` /
+    ``discount`` off it), and a second reading of the bid could disagree with the first.
+    ``None`` when the port emitted no ``accepted`` event, which is not something to invent
+    a substitute for.
+    """
+    for event in getattr(result, "events", ()) or ():
+        if not isinstance(event, Mapping) or str(event.get("kind", "")) != ACCEPTED:
+            continue
+        payload = event.get("payload")
+        offer = payload.get("offer") if isinstance(payload, Mapping) else None
+        if isinstance(offer, Mapping):
+            return offer
+    return None
+
+
 def _denied(reason: str) -> JSONResponse:
     """The 409 body the contract publishes: ``{accepted, denial_reason}`` and nothing else.
 
@@ -567,7 +588,18 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
         return _denied(str(result.denial_reason or ""))
 
     try:
-        machine.accept(auction_id, result.bid_ref, now=now)
+        # The token and the offer travel with the stamp, because the `accepted` event this
+        # writes is the only record of the promise the trust reconciler ever sees, and it
+        # joins on `payload['checkout_token']`. Stamping without them recorded that an
+        # acceptance happened while making it impossible to say what was promised or which
+        # order it became.
+        machine.accept(
+            auction_id,
+            result.bid_ref,
+            now=now,
+            checkout_token=result.checkout_token,
+            offer=_accepted_offer(result),
+        )
     except IllegalAuctionTransition as exc:
         # NOT the T-158 window any more: the acceptance claim inside `accept()` is what makes
         # a second accept impossible, and it was taken before `POST /codes`. What is left here
