@@ -1925,6 +1925,58 @@
       "reasons": [
         "price_unreconcilable:offer.unit_price:list_price_unavailable"
       ]
+    },
+    {
+      "name": "a_carried_claim_is_measured_against_the_full_list_price_with_no_roster",
+      "why": "T-337's THIRD SITE, and the only row in this table that can see it. The other two sites of the T-306 repair are `authorizedDepth` and `rosterListPrice`; the third is the `authorized` fallback in `priceReasonsFor` / `_price_reasons`, which used to read `authorized = listPrices === undefined ? depth : 0` and so handed the offer its OWN declared depth back as its bound whenever the roster was absent \u2014 the self-granting cap the whole walk exists to end. Every other no-roster row in this table is blind to it, because they all charge far enough under list to be refused at BOTH bounds: `charges_under_the_carried_list_price` charges 15.00, which is under 100.00 and under 80.00 alike, so the verdict is identical either way. This row sits BETWEEN the two bounds on purpose \u2014 a carried list price of 100.00, a declared 20%, charging 85.00. Against the full list price (authorized 0, correct) 85.00 is an undercut and is REFUSED; against the depth the offer granted itself (authorized 20) the bound is 80.00 and 85.00 is ADMITTED. Measured: restoring that one ternary in `boundary.ts` left all 867 vitest tests and all 55 corpus rows green, so the divergence this corpus exists to prevent was invisible to it in exactly the place it matters most",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 85.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 20.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 85.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "claims": [
+          {
+            "key": "list_price",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0"
+      },
+      "list_prices": null,
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable",
+        "price_under_declared_depth:offer.unit_price"
+      ]
     }
   ]
 }
