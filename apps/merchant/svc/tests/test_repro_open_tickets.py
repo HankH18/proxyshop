@@ -252,16 +252,24 @@ def test_t243_the_merchant_envelope_store_has_exactly_one_module_identity() -> N
 # ======================================================================================
 # T-248 — record() accepts a caller-asserted 'active' with no approval artifact
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-248: EnvelopeVersions.record (envelope/store.py:46) validates the contract shape "
-        "and the monotonic-version rule and never looks at `activation`, so a caller-asserted "
-        "activation='active' is filed with approval=None and Envelope.is_live returns True — "
-        "one import away from defeating the approve-then-edit guarantee that put()/activate() "
-        "establish on the HTTP surface; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-248 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-248: EnvelopeVersions.record (envelope/store.py:46) validates the contract shape "
+#       "and the monotonic-version rule and never looks at `activation`, so a caller-asserted "
+#       "activation='active' is filed with approval=None and Envelope.is_live returns True — "
+#       "one import away from defeating the approve-then-edit guarantee that put()/activate() "
+#       "establish on the HTTP surface; remove this marker with the fix"))
+#
+# What it encodes: while record() files a caller-asserted `active` this test must fail, and
+# strict=True makes it fail loudly once it starts passing, so the marker cannot outlive the
+# bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? NO. Measured on this worktree:
+# with envelope/store.py restored from HEAD (keeping only T-243's relative-import form, so
+# the two changes are separated) the test reports `1 xfailed`; with
+# `_refuse_unapproved_activation` back it reports `1 passed`. My change is the cause.
+# The assertion body is untouched — the diff removes the decorator and nothing else.
 def test_t248_an_envelope_cannot_be_recorded_live_without_an_approval_artifact() -> None:
     """Nothing may be live on the caller's say-so. Live means an approval artifact exists.
 

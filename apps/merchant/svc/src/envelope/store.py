@@ -18,7 +18,8 @@ import threading
 from collections.abc import Mapping
 from typing import Any
 
-from .model import ACTIVE, SHADOW, Envelope, EnvelopeError
+from .digest import approval_covers, approval_digest
+from .model import ACTIVE, SHADOW, ApprovalRejected, Envelope, EnvelopeError
 from .versions import activate_envelope, edit_envelope, kill_envelope
 
 
@@ -32,6 +33,50 @@ class VersionWentBackwards(EnvelopeError, ValueError):
 
 class StoreMismatch(EnvelopeError, ValueError):
     """The submitted envelope names a different store than the one being written."""
+
+
+def _refuse_unapproved_activation(candidate: Envelope) -> None:
+    """Refuse any version that calls itself ``active`` without an approval that covers it.
+
+    T-248. ``record`` is the one door every other write goes through — ``put``, ``activate``
+    and ``kill`` all end in it — and it used to validate only the contract shape and the
+    monotonic-version rule. ``activation`` is a plain string field of the DESIGN document, so
+    ``record({... "activation": "active"})`` filed a live envelope with ``approval=None`` and
+    ``is_live`` then answered ``True``. The HTTP surface never does that (``put`` forces
+    ``shadow`` and ``activate`` goes through :func:`~merchant_svc.envelope.versions.
+    activate_envelope`), but ``record`` is public and exported, so the approve-then-edit
+    guarantee held only for callers who happened to use the polite entry points.
+
+    Both halves are checked, because the artifact alone is not the guarantee:
+
+    * an artifact must **exist** — R6 asks for a *recorded* written approval, and "the caller
+      said so" is not a record;
+    * it must be **bound to these very terms**. Without this,
+      ``record(edit_envelope(live_v1, {...}).with_activation(ACTIVE, live_v1.approval))``
+      would carry v1's approval onto v2's terms — the exact edit-after-approve substitution
+      :func:`activate_envelope` refuses, arriving through the back door instead.
+
+    Raises:
+        ApprovalRejected: the version is ``active`` with no artifact, or with one bound to a
+            different document.
+    """
+    if candidate.activation != ACTIVE:
+        return
+    approval = candidate.approval
+    if approval is None:
+        raise ApprovalRejected(
+            f"store {candidate.store_id!r} envelope v{candidate.version} was submitted as "
+            f"{ACTIVE!r} with no written approval artifact; an envelope is never activated "
+            "on the caller's say-so alone (R6) — record it in shadow and activate it against "
+            "an approval"
+        )
+    if not approval_covers(candidate, approval.envelope_hash):
+        raise ApprovalRejected(
+            f"the approval by {approval.approver!r} is bound to {approval.envelope_hash!r}, "
+            f"which is not store {candidate.store_id!r} envelope v{candidate.version} "
+            f"({approval_digest(candidate)!r}); an approval only activates the exact terms it "
+            "was given for"
+        )
 
 
 class EnvelopeVersions:
@@ -55,8 +100,11 @@ class EnvelopeVersions:
         Raises:
             VersionWentBackwards: the store already has a *higher* version on file.
             EnvelopeInvalid: ``envelope`` is not a DESIGN Envelope.
+            ApprovalRejected: the submitted version calls itself ``active`` without a written
+                approval artifact bound to its own terms (T-248).
         """
         candidate = Envelope.from_obj(envelope)
+        _refuse_unapproved_activation(candidate)
         with self._lock:
             history = self._history.setdefault(candidate.store_id, [])
             if history and candidate.version < history[-1].version:
