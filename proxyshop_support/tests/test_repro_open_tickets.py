@@ -608,7 +608,13 @@ def test_t210_the_lock_attribution_sweep_is_armed() -> None:
     assert len({tuple(s["names"]) for s in shapes}) >= 15, "the draw is not varying the shapes"
     assert len({s["n_tests"] for s in shapes}) >= 3, "every case has the same test count"
     assert len({s["guard_at"] for s in shapes}) >= 2, "the lock-taking test is always in one slot"
-    assert len({s["timeout"] for s in shapes}) >= 15, "the timeouts are not being drawn"
+    # 10, not 20, and not 15 either: the timeouts come from `round(uniform(.25,.6), 3)`,
+    # which is 351 possible values, so 20 draws collide by the birthday argument. Measured
+    # over 2000 draws the minimum distinct count was 16, i.e. a threshold of 15 sits ONE
+    # collision from a spurious red — the same near-threshold flakiness a control already
+    # caught in this gate's product-defect count. Ten distinct values out of twenty is
+    # ample evidence the draw is live and needs eleven collisions to fail by chance.
+    assert len({s["timeout"] for s in shapes}) >= 10, "the timeouts are not being drawn"
 
     # The primitive really is the repo's, and a contended acquisition really does raise.
     from proxyshop_support import neo4j_lock
@@ -699,8 +705,14 @@ def test_t210_lock_contention_and_a_product_defect_do_not_share_an_exit_status()
     tell a machine condition from a defect without a human. The cure for the zeros is
     scheduler-level, which the ticket says itself and which no lane can reach.
     """
-    workdir = REPO_ROOT / f".t210-{os.getpid()}"
-    workdir.mkdir(exist_ok=True)
+    # A UNIQUE directory per run, not `.t210-<pid>`: this test is called more than once in
+    # a process by its own control harness, and two runs sharing a name would have the
+    # first one's teardown delete the second one's module out from under it. The leading
+    # dot keeps it out of `norecursedirs = [".*"]`, so the repo's own collection can never
+    # pick these modules up even if a kill leaves one behind; stale ones are swept here.
+    for stale in REPO_ROOT.glob(".t210-*"):
+        shutil.rmtree(stale, ignore_errors=True)
+    workdir = Path(tempfile.mkdtemp(prefix=".t210-", dir=REPO_ROOT))
     try:
         with tempfile.TemporaryDirectory() as raw:
             scratch = Path(raw)
