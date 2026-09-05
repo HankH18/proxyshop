@@ -6,9 +6,11 @@ buyer who actually transacted say whether the pitch matched what arrived.
 
 The push (R13/R5)
 -----------------
-:func:`push_trust_event` sends **once**, to **the affected store only**, carrying the full
-originating event so the store can act on a concrete thing rather than an unexplained score
-move — and carrying no buyer identity at all. "Once, to one store" is not a detail: a
+:func:`push_trust_event` sends **once**, to **the affected store only**, carrying the
+originating event — every field ``contracts.LedgerEvent`` declares, so the store can act on a
+concrete thing rather than an unexplained score move — and carrying no buyer identity at all.
+The ledger's own ``seq``/``event_hash`` bookkeeping is dropped rather than smuggled through,
+because the intake forbids extras and would refuse the whole event over them. "Once, to one store" is not a detail: a
 broadcast is a leak of one store's trust movement to its competitors, and a duplicate send is
 a second penalty for the same event once the receiving agent starts counting.
 
@@ -48,11 +50,13 @@ from .scrub import scrub, scrub_report
 
 __all__ = [
     "BASE_FEEDBACK_WEIGHT",
+    "DISCLOSURE_POLICY",
     "FEEDBACK_DIMENSION",
     "FEEDBACK_NEGATIVE_TYPE",
     "FEEDBACK_POSITIVE_TYPE",
     "RETURN_CONTRADICTION_FACTOR",
     "TRUST_EVENT_SCHEMA_VERSION",
+    "TRUST_REPORT_KEY",
     "FeedbackRejected",
     "accept_feedback",
     "feedback_observation",
@@ -96,11 +100,11 @@ FEEDBACK_POSITIVE_TYPE = "fulfilled"
 #: what was pitched, and returns it." So ``mismatch_return`` on this dimension is the NEGATIVE
 #: report, which is what is emitted here.
 #:
-#: Note this contradicts the gloss in ``trust.scoring.engine``'s weight table ("the buyer said
-#: it matched and then returned it"), which reads it as the *positive*-report case. Ground
-#: truth is the manifest, not a comment in the engine that consumes it (D18/A3), so the
-#: manifest wins — but the comment is a real divergence and is reported rather than silently
-#: worked around.
+#: That gloss and ``trust.scoring.engine``'s weight table now AGREE. They did not: the table
+#: read this as the positive-report case ("the buyer said it matched and then returned it"),
+#: inverting what the 1.5 weight is applied to. Ground truth is the manifest, not a comment in
+#: the engine that consumes it (D18/A3), so the manifest won and the gloss was corrected
+#: (T-207) rather than this note being left to describe a divergence that no longer exists.
 #:
 #: The published 1.5 also sits where a buyer report belongs: above ``unsupported`` (0.5, "no
 #: evidence either way") and below ``contradicted`` (2.0, which is the catalog or the
@@ -125,6 +129,12 @@ def _field(record: Any, name: str, default: Any = None) -> Any:
 
 #: The auditable statement of WHY a scrub happened, carried with every pushed event.
 DISCLOSURE_POLICY = "R13/R5: the affected store learns what moved and never who moved it."
+
+#: Where the audit report sits inside ``LedgerEvent.payload``. One namespaced key rather than
+#: five loose ones: that mapping is deliberately open and belongs to whoever produced the
+#: event, so writing ``policy`` / ``reason_code`` / ``schema_version`` straight into it would
+#: silently overwrite a producer that already uses those perfectly ordinary names.
+TRUST_REPORT_KEY = "trust_report"
 
 #: The eight fields ``contracts.LedgerEvent`` declares, and therefore the ONLY keys a pushed
 #: event may carry: the model sets ``extra="forbid"``, so anything else is a refusal at the
@@ -163,13 +173,22 @@ def _pseudonymous_context(delta: Any, event: Any) -> dict[str, Any]:
     cluster_id = (
         _field(delta, "cluster_id") or payload.get("cluster_id") or _field(event, "cluster_id")
     )
+    # SCRUBBED, and the asymmetry with `pseudonym` above is deliberate. A pseudonym is a
+    # rotating token minted to be safe to publish; a cluster id is an arbitrary upstream
+    # string that nothing guarantees is clean. Both are read off the RAW event here, so
+    # without this call a `cluster_id` of "cluster-dana@example.com" would reach the store
+    # verbatim — while the SAME value copied into `event.payload` goes through `_redact_text`
+    # and arrives as "cluster-[redacted]". One field, two treatments, the untreated one
+    # winning, is precisely the leak R13 forbids.
     return {
-        "cluster_id": str(cluster_id) if cluster_id is not None else None,
+        "cluster_id": scrub(str(cluster_id)) if cluster_id is not None else None,
         "pseudonym": str(pseudonym) if pseudonym is not None else None,
     }
 
 
-def _wire_event(scrubbed: Any, *, delta: Any, redacted_fields: int, reason_code: Any) -> Any:
+def _wire_event(
+    scrubbed: Any, *, event: Any, delta: Any, redacted_fields: int, reason_code: Any
+) -> Any:
     """The scrubbed event projected onto the published wire shape, carrying the audit report.
 
     Two things happen here, and the ORDER of the second against the scrub is load-bearing.
@@ -178,13 +197,27 @@ def _wire_event(scrubbed: Any, *, delta: Any, redacted_fields: int, reason_code:
     ``contracts.LedgerEvent`` forbids extras and a storage column riding along would have the
     intake refuse the event rather than ignore the column.
 
-    Then the audit report is parked in ``payload``. That is not an arbitrary address: it is
-    the one OPEN mapping anywhere in this chain — ``LedgerEvent.payload`` is typed
-    ``dict[str, Any]`` precisely because every kind carries a different body — while
-    ``TrustEventPayload`` and ``PseudonymousContext`` both forbid extras. ``order_ref`` goes
-    somewhere better still: it is a real ``LedgerEvent`` field, which is where the published
-    OpenAPI example puts it, and it is set unconditionally (``None`` included) so a reader
-    never has to distinguish "no order" from "this build forgot".
+    Then the audit report is parked in ``payload``, under the single key
+    :data:`TRUST_REPORT_KEY`. The mapping is the right address — ``LedgerEvent.payload`` is
+    typed ``dict[str, Any]`` precisely because every kind carries a different body, while
+    ``TrustEventPayload`` and ``PseudonymousContext`` both forbid extras — but the NAMESPACE
+    is not decoration. Writing five fixed names straight into that mapping silently
+    overwrites any producer whose own body already uses one of them, and ``policy`` /
+    ``reason_code`` / ``schema_version`` are not exotic names to collide with. One key that
+    is this module's own is a collision surface of one instead of five.
+
+    ``order_ref`` goes somewhere better still: it is a real ``LedgerEvent`` field, which is
+    where the published OpenAPI example puts it, and it is set unconditionally (``None``
+    included) so a reader never has to distinguish "no order" from "this build forgot".
+
+    It is read from the RAW event, NOT the scrubbed one, and that is a correctness fix rather
+    than a style choice: ``scrub`` redacts any run of nine or more digits, so a perfectly
+    ordinary order id like ``"5678901234"`` scrubs to ``"[redacted]"`` — still truthy, so no
+    fallback fires — and the store is told its score moved on an order it cannot identify.
+    That is the exact harm ``test_innocent_keys_survive_the_scrub`` exists to prevent, and it
+    slips past that test because the test asserts the key is present, not that its value
+    survived. The raw read is also what this function replaced, so it is the behaviour that
+    was already correct.
 
     The report is added AFTER :func:`~trust.feedback.scrub.scrub_report` has run, never
     before. Scrubbing first would let the redaction walk count and mangle the very fields
@@ -198,17 +231,24 @@ def _wire_event(scrubbed: Any, *, delta: Any, redacted_fields: int, reason_code:
     )
     payload = projected.get("payload")
     payload = dict(payload) if isinstance(payload, Mapping) else {}
-    payload.update(
-        {
-            "schema_version": TRUST_EVENT_SCHEMA_VERSION,
-            "reason_code": reason_code,
-            "identity_disclosed": False,
-            "redacted_fields": redacted_fields,
-            "policy": DISCLOSURE_POLICY,
-        }
-    )
+    payload[TRUST_REPORT_KEY] = {
+        "schema_version": TRUST_EVENT_SCHEMA_VERSION,
+        "reason_code": reason_code,
+        "identity_disclosed": False,
+        "redacted_fields": redacted_fields,
+        "policy": DISCLOSURE_POLICY,
+    }
     projected["payload"] = payload
-    projected["order_ref"] = _field(scrubbed, "order_ref") or _field(delta, "order_ref")
+
+    # `is not None` rather than `or`: an order reference of "" or 0 is a value the ORIGINATING
+    # event carried, and falling through to the delta on it would name a DIFFERENT order than
+    # the one that moved the score. Coerced to str because `LedgerEvent.order_ref` is
+    # `str | None` and pydantic v2 does not coerce int -> str, so an integer order id would
+    # be refused by the intake — reintroducing the very failure class this fix exists to end.
+    order_ref = _field(event, "order_ref")
+    if order_ref is None:
+        order_ref = _field(delta, "order_ref")
+    projected["order_ref"] = None if order_ref is None else str(order_ref)
     return projected
 
 
@@ -266,15 +306,26 @@ def trust_event_payload(delta: Any) -> dict[str, Any]:
         )
 
     scrubbed_event, redacted = scrub_report(event)
+
+    # The reason code's OWN redactions count too. `scrub_report` walks the event and nothing
+    # else, so identity stripped out of a mapping-valued reason_code used to be invisible in
+    # the number that is presented to an auditor as the only signal a scrub happened.
+    raw_reason_code = _field(delta, "reason_code")
+    if isinstance(raw_reason_code, Mapping):
+        reason_code, reason_redacted = scrub_report(raw_reason_code)
+    else:
+        reason_code, reason_redacted = scrub(raw_reason_code), 0
+
     return {
         "store_id": str(store_id),
         "dim": _field(delta, "dim"),
         "delta": float(_field(delta, "delta", 0.0) or 0.0),
         "event": _wire_event(
             scrubbed_event,
+            event=event,
             delta=delta,
-            redacted_fields=redacted,
-            reason_code=scrub(_field(delta, "reason_code")),
+            redacted_fields=redacted + reason_redacted,
+            reason_code=reason_code,
         ),
         "pseudonymous_context": _pseudonymous_context(delta, event),
     }
@@ -293,7 +344,10 @@ def push_trust_event(delta: Any, sink: Any) -> dict[str, Any]:
         The payload that was sent, so a caller can log or ledger exactly what left.
 
     Raises:
-        FeedbackRejected: the delta names no store.
+        FeedbackRejected: the delta names no store, OR names no originating event —
+            see :func:`trust_event_payload`, which decides both. Named here in full
+            because this is the public entry point and a caller reading only this
+            docstring would otherwise learn about one of the two refusals.
         AttributeError: the sink cannot ``send``. Deliberately NOT swallowed — a push that
             silently does nothing is indistinguishable from a store that ignored it, and the
             store would be graded on a signal it was never told about.

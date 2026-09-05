@@ -13,7 +13,9 @@ resolve to the same objects — see :mod:`trust._shared._binding`.
 :func:`scrub`                   the recursive buyer-identity scrub the push applies.
 ==============================  ========================================================
 
-R13/R5: the pushed payload carries the FULL originating event and no buyer identity — the
+R13/R5: the pushed payload carries the originating event — every field the published
+``contracts.LedgerEvent`` declares, the ledger's own ``seq``/``event_hash`` bookkeeping
+dropped because the intake forbids extras — and no buyer identity. The
 identity keys are removed, not nulled, because a labelled empty box tells the recipient
 exactly what to correlate against. R14: only a buyer the network routed may leave feedback,
 and a positive report from a buyer who returned the item is downweighted rather than
@@ -41,11 +43,13 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
 from .engine import (  # noqa: E402
     BASE_FEEDBACK_WEIGHT,
+    DISCLOSURE_POLICY,
     FEEDBACK_DIMENSION,
     FEEDBACK_NEGATIVE_TYPE,
     FEEDBACK_POSITIVE_TYPE,
     RETURN_CONTRADICTION_FACTOR,
     TRUST_EVENT_SCHEMA_VERSION,
+    TRUST_REPORT_KEY,
     FeedbackRejected,
     accept_feedback,
     feedback_observation,
@@ -62,6 +66,7 @@ from .scrub import (  # noqa: E402
 
 __all__ = [
     "BASE_FEEDBACK_WEIGHT",
+    "DISCLOSURE_POLICY",
     "FEEDBACK_DIMENSION",
     "FEEDBACK_NEGATIVE_TYPE",
     "FEEDBACK_POSITIVE_TYPE",
@@ -70,6 +75,7 @@ __all__ = [
     "REDACTED",
     "RETURN_CONTRADICTION_FACTOR",
     "TRUST_EVENT_SCHEMA_VERSION",
+    "TRUST_REPORT_KEY",
     "FeedbackRejected",
     "accept_feedback",
     "feedback_observation",

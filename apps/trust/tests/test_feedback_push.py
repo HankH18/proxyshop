@@ -39,6 +39,7 @@ from apps.trust.src.feedback import (
     REDACTED,
     RETURN_CONTRADICTION_FACTOR,
     TRUST_EVENT_SCHEMA_VERSION,
+    TRUST_REPORT_KEY,
     FeedbackRejected,
     accept_feedback,
     push_trust_event,
@@ -300,7 +301,9 @@ def test_the_full_originating_event_reaches_the_store(e6_make_event):
     # intake refuse the entire payload, 60 times out of 60. Would this test still be wrong if
     # the product change were reverted? Yes: it would be asserting that trust emits a field at
     # an address that guarantees the event is never delivered at all.
-    assert delivered["event"]["payload"]["schema_version"] == TRUST_EVENT_SCHEMA_VERSION
+    assert delivered["event"]["payload"][TRUST_REPORT_KEY]["schema_version"] == (
+        TRUST_EVENT_SCHEMA_VERSION
+    )
     assert delivered["event"]["event_id"] == "ev-77", "the originating event was not pushed"
     assert delivered["event"]["kind"] == "reconciled"
     assert delivered["event"]["payload"]["price_honored"] is False, (
@@ -348,7 +351,7 @@ def test_the_pseudonymous_context_carries_the_pseudonym_and_never_the_redacted_n
     # wire, not an absence — at the address `contracts.PseudonymousContext` leaves room for.
     # That model declares only `cluster_id` and `pseudonym` and forbids extras, so this flag
     # could never have reached a real intake where it used to sit.
-    assert delivered["event"]["payload"]["identity_disclosed"] is False
+    assert delivered["event"]["payload"][TRUST_REPORT_KEY]["identity_disclosed"] is False
 
     _, strings = _keys_and_strings(delivered)
     for name in ("buyer_email", "recipient_name", "customer_id", "user_agent"):
@@ -370,7 +373,7 @@ def test_the_pseudonymous_context_reports_how_many_fields_were_redacted(e6_make_
     # the reason for asserting the EXACT number are untouched; only where the report rides has
     # moved, from a container that forbids extras into `event.payload`, the one open mapping
     # the published contract admits.
-    report = sink.sent[0][1]["event"]["payload"]
+    report = sink.sent[0][1]["event"]["payload"][TRUST_REPORT_KEY]
 
     assert report["redacted_fields"] == len(PLANTED_IDENTITY_KEYS), (
         "the redaction count does not match the identity keys planted at every depth: "
@@ -400,7 +403,7 @@ def test_the_pseudonymous_context_is_present_even_when_there_is_no_pseudonym(e6_
     # addresses the contract admits. `order_ref` in particular is a declared field of
     # `contracts.LedgerEvent`, which is where the published OpenAPI example puts it, so this
     # is the address it should always have had.
-    assert delivered["event"]["payload"]["redacted_fields"] == 0
+    assert delivered["event"]["payload"][TRUST_REPORT_KEY]["redacted_fields"] == 0
     assert delivered["event"]["order_ref"] == "o-2"
 
 
@@ -421,7 +424,7 @@ def test_the_delta_reason_code_is_scrubbed_too(e6_make_event):
     # were reverted? Yes: it would be asserting that a scrubbed reason code rides at an
     # address that makes the whole event unreadable to the intake, so the scrub it checks
     # would protect a payload nobody ever receives.
-    reason_code = delivered["event"]["payload"]["reason_code"]
+    reason_code = delivered["event"]["payload"][TRUST_REPORT_KEY]["reason_code"]
     assert BUYER_EMAIL not in reason_code, "the reason code carried the buyer's e-mail"
     assert REDACTED in reason_code
 
