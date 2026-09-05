@@ -1,0 +1,377 @@
+/*
+ * Plain, self-contained CSS for the buyer journey. No CDN, no framework, no design system.
+ *
+ * It styles the existing components by the hooks they already publish — the `aria-label` on
+ * each section and the `data-tone` on each provenance label — rather than by asking those
+ * components to grow class names. Nothing here hides a value: every rule is spacing, weight
+ * or colour.
+ */
+
+:root {
+  --ink: #16181d;
+  --ink-soft: #4a5160;
+  --paper: #f6f6f4;
+  --card: #ffffff;
+  --rule: #d9dae0;
+  --accent: #1d4ed8;
+  --alarm: #a8200d;
+  --confirmed: #0f6b3f;
+  --observed: #7a4a06;
+  --unverified: #8a1c1c;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.journey {
+  max-width: 54rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 5rem;
+}
+
+.masthead h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.9rem;
+  letter-spacing: -0.02em;
+}
+
+.lede {
+  margin: 0 0 1.75rem;
+  max-width: 44rem;
+  color: var(--ink-soft);
+}
+
+/* ---- steps ---------------------------------------------------------------- */
+
+.step,
+.gaps,
+.diagnostics {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 1.25rem 1.4rem;
+  margin: 0 0 1.25rem;
+}
+
+.step > h2,
+.gaps > h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.9rem;
+  font-size: 1.15rem;
+  letter-spacing: 0.01em;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.6rem;
+}
+
+.ordinal {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--card);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.step h3 {
+  margin: 1.1rem 0 0.4rem;
+  font-size: 1rem;
+}
+
+.step h4 {
+  margin: 1rem 0 0.35rem;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+
+.gloss {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+/* ---- form controls -------------------------------------------------------- */
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+textarea,
+input[type="text"],
+input:not([type]) {
+  width: 100%;
+  font: inherit;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--ink);
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  margin-top: 0.7rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--ink);
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--card);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.linkish {
+  margin: 0;
+  padding: 0 0.2rem;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.cta {
+  display: inline-block;
+  margin-top: 0.4rem;
+  padding: 0.55rem 1.1rem;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/* ---- transcript ----------------------------------------------------------- */
+
+.transcript {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.transcript li {
+  margin-bottom: 0.3rem;
+}
+
+/* ---- the reused components ------------------------------------------------ */
+
+section[aria-label="Clarifying question"] p[data-testid="question-counter"] {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  margin-top: 0;
+}
+
+section[aria-label="Confirm what we will shop for"] dl {
+  display: grid;
+  grid-template-columns: minmax(9rem, 14rem) 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0 0 0.8rem;
+}
+
+section[aria-label="Confirm what we will shop for"] dt,
+.facts dt {
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+section[aria-label="Confirm what we will shop for"] dd,
+.facts dd {
+  margin: 0;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(9rem, 18rem) 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0.6rem 0 0.9rem;
+}
+
+section[aria-label="Shortlist"] ul[aria-label="Options"] {
+  display: grid;
+  gap: 0.9rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+section[aria-label="Shortlist"] ul[aria-label="Options"] > li {
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--ink);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+}
+
+section[aria-label="Shortlist"] ul[aria-label="Options"] > li > h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1.05rem;
+  text-transform: capitalize;
+}
+
+section[aria-label="Shortlist"] ul[aria-label="Options"] > li > p {
+  margin: 0.15rem 0;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+/* Provenance labels: visibly different by the tone `labelTone` picked for them. */
+section[aria-label="Shortlist"] ul[aria-label^="Where this came from"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.55rem 0 0.2rem;
+  padding: 0;
+  list-style: none;
+}
+
+li[data-tone] {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+li[data-tone="confirmed"] {
+  color: var(--confirmed);
+  background: #e6f4ec;
+}
+
+li[data-tone="observed"] {
+  color: var(--observed);
+  background: #fbf1de;
+}
+
+li[data-tone="unverified"] {
+  color: var(--unverified);
+  background: #fbe9e7;
+}
+
+li[data-tone="unknown"] {
+  color: var(--ink-soft);
+  background: #eef0f3;
+}
+
+/* ---- errors and refusals -------------------------------------------------- */
+
+.failure,
+[role="alert"] {
+  color: var(--alarm);
+}
+
+.failure {
+  background: #fdecea;
+  border: 1px solid #f0b3aa;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin: 0 0 1.25rem;
+}
+
+/* ---- diagnostics ---------------------------------------------------------- */
+
+.mono,
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 0.83rem;
+}
+
+.diagnostics {
+  border-left: 4px solid var(--alarm);
+}
+
+.diagnostics ul.mono {
+  list-style: none;
+  margin: 0.3rem 0 0.6rem;
+  padding: 0;
+}
+
+.diagnostics ul.mono > li {
+  border-top: 1px solid var(--rule);
+  padding: 0.4rem 0;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics ul.mono > li ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.diagnostics .key {
+  font-weight: 700;
+}
+
+.provenance-source {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  color: var(--ink-soft);
+}
+
+.permalink {
+  overflow-wrap: anywhere;
+  background: #eef0f3;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  padding: 0.55rem 0.7rem;
+}
+
+details {
+  margin-top: 0.9rem;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+pre {
+  max-height: 26rem;
+  overflow: auto;
+  background: #1e2128;
+  color: #e8eaf0;
+  padding: 0.8rem 0.9rem;
+  border-radius: 8px;
+}
+
+/* ---- the honest gaps ------------------------------------------------------ */
+
+.gaps {
+  border-left: 4px solid var(--observed);
+}
+
+.gaps ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.gaps li {
+  margin-bottom: 0.6rem;
+}

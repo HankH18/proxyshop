@@ -338,7 +338,12 @@ def print_banner(
     print("\n  DEMO CONVERSATIONS - type the turns in order, exactly as written.", file=out)
     print("  The wording is load-bearing: cluster_id is a hash over the clarified", file=out)
     print("  query, band and constraints, and a store only bids for a cluster its", file=out)
-    print("  envelope pursues.\n", file=out)
+    print("  envelope pursues.", file=out)
+    print("  The clarifier keeps asking until it has asked its three (R1's cap), so", file=out)
+    print("  after the turns below you will still be asked one or two more. Answer", file=out)
+    print("  them with anything that adds no new constraint ('no') - the cluster is", file=out)
+    print("  already fixed by the turns below, and the Confirm button appears once", file=out)
+    print("  nothing is outstanding.\n", file=out)
     for conversation in market.get("conversations", ()):
         print(f"    [{conversation['id']}] {conversation.get('title', '')}", file=out)
         for index, turn in enumerate(conversation.get("turns", ()), start=1):
