@@ -17,43 +17,73 @@ services:
       - "${TRUST_PORT:-8084}:8084"      # D40: env-overridable
     environment:
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
-      # T-112: PROXYSHOP_ROLE_PASSWORD is the ONE source of truth for the four
-      # least-privilege role passwords, so it is interpolated INTO the DSN rather than
-      # defaulted here. The default is deliberately EMPTY and not `:-x` for exactly the
-      # reason the postgres service in the root file gives: a value here would be a second
-      # copy of the dev password, and a second copy is a copy that stops agreeing with the
-      # cluster. Set it in the environment (or .env) before `docker compose up` — a
-      # password-less DSN reaches postgres and then sits in a 30s pool timeout, which is
-      # what an unset variable looked like the first time this was run.
+      # T-112 makes PROXYSHOP_ROLE_PASSWORD the ONE source of truth for the four
+      # least-privilege role passwords, so NO password is written here — not the dev literal,
+      # and (since the deploy lane's readiness work) not an interpolation of the variable
+      # either. These DSNs carry a user and a database and nothing else.
       #
-      # PROXYSHOP_LEDGER_DSN is set FIRST because it is what the writer actually reads
-      # first: trust/events/pg.py's DEFAULT_DSN_ENV is
-      # ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_TRUST_RW", "PROXYSHOP_PG_DSN_APP").
+      # The interpolation they replace was `${PROXYSHOP_ROLE_PASSWORD:-}`, and its empty
+      # default is what made `cp .env.example .env` produce a stack that could not serve.
+      # `.env.example` documents leaving the variable unset, so the DSN compose actually
+      # built was `postgresql://trust_rw:@postgres:5432/proxyshop_w1` — and an EXPLICITLY
+      # EMPTY password is not the same thing as no password. libpq rejects it before it
+      # reaches the server. Measured, from `docker compose logs`:
       #
-      # This comment used to say that walk was ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_APP")
-      # and "never looks at PROXYSHOP_PG_DSN_TRUST_RW". That was true when it was written and
-      # stopped being true when T-151 put the writer's own role variable second; the DSNs below
-      # were already correct, so nothing was mis-deployed, but the stated reason for the first
-      # line was wrong. Both of the first two entries now resolve `trust_rw`, and the `app` DSN
-      # is a last-resort fallback rather than the second choice. Without either of the first two
-      # lines a deployed ledger silently writes as the `app` role instead of the `trust_rw` role
-      # D5 gives it — observed here, not theorised.
-      PROXYSHOP_LEDGER_DSN: "postgresql://trust_rw:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
-      PROXYSHOP_PG_DSN_TRUST_RW: "postgresql://trust_rw:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
-      PROXYSHOP_PG_DSN_APP: "postgresql://app:${PROXYSHOP_ROLE_PASSWORD:-}@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      #     psycopg.OperationalError: connection failed: ... fe_sendauth: no password supplied
+      #
+      # The password is instead resolved at container start by the `command:` below, through
+      # proxyshop_support.postgres.role_dsn — the one function on the connect side that knows
+      # how ($PROXYSHOP_ROLE_PASSWORD > the password in the DSN > DEV_ROLE_PASSWORD), and the
+      # one the T-112 tests pin against db/init/00-roles.sql's coalesce(). Setting
+      # PROXYSHOP_ROLE_PASSWORD still overrides everything, exactly as documented; the
+      # difference is that leaving it unset now yields a cluster this container can reach.
+      #
+      # PROXYSHOP_LEDGER_DSN is deliberately GONE. trust/events/pg.py's DEFAULT_DSN_ENV is
+      # ("PROXYSHOP_LEDGER_DSN", "PROXYSHOP_PG_DSN_TRUST_RW", "PROXYSHOP_PG_DSN_APP"), so it
+      # would win — and it is not one of the role variables `serve` resolves, which would put
+      # the un-resolvable spelling back in front of the resolvable one. pg.py's own docstring
+      # calls it "the workaround that bug forced ... now free to drop". Dropping it leaves
+      # PROXYSHOP_PG_DSN_TRUST_RW first, which names the same role D5 grants the ledger.
+      PROXYSHOP_PG_DSN_TRUST_RW: "postgresql://trust_rw@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
+      PROXYSHOP_PG_DSN_APP: "postgresql://app@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
-      REDIS_URL: "redis://redis:6379"                            # D39: no db component
+      # NO REDIS_URL, and no `depends_on: redis` below. Both were here and both were
+      # decoration: this service never opens a Redis connection. Measured —
+      # `git grep -n REDIS_URL -- apps/trust/src` is empty, and the only redis name anywhere
+      # under it is `ledger/errors.py`'s `import redis.exceptions`, whose own docstring says
+      # "Note what is *not* imported: no client, no connection pool, no from_url" — it names
+      # exception TYPES so a psycopg-backed store can classify a transient failure.
+      #
+      # This is the same rule applied to apps/merchant/compose.yaml, and it is the rule this
+      # lane's readiness work rests on: probe only what the service uses. A `depends_on` with
+      # no probe behind it makes the container WAIT on a store it never speaks to; adding
+      # `--redis` instead would have been a green light with nothing behind it. Either way it
+      # is a claim the service cannot honour. proxyshop_support/tests/test_deploy_readiness.py
+      # is what caught this — it requires a declared datastore dependency and a readiness
+      # check that names it to land together, and it caught it in this lane's own diff.
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    # /openapi.json, not /healthz — see the note in apps/exchange/compose.yaml: main.py is
-    # frozen and no router under it declares a health route, so a liveness probe that this
-    # lane is allowed to write has exactly one always-present endpoint to aim at.
+    # Resolve the DSNs through the single source of truth, then exec the image's own CMD.
+    # The uvicorn line below MIRRORS apps/trust/Dockerfile's CMD — compose clears the image
+    # CMD when it overrides the command, so it has to be repeated, and
+    # proxyshop_support/tests/test_deploy_readiness.py pins the two together so the copy
+    # cannot drift.
+    command: ["python", "-m", "proxyshop_support.service_launch", "serve", "--",
+              "uvicorn", "trust.main:app", "--host", "0.0.0.0", "--port", "8084", "--workers", "1"]
+    # READINESS, not liveness. The probe this replaces was `/openapi.json`, which proves the
+    # ASGI app imported and uvicorn is answering — and proves nothing about whether the
+    # service can serve. Measured on this stack: this container reported `(healthy)` while
+    # `GET /events/head` answered `503 {"error":"store_unavailable", ... PoolTimeout}`.
+    #
+    # `trust_rw` is the role the ledger writer authenticates as (D5), so the probe uses it
+    # rather than the superuser: a probe connecting as admin stays green through a missing
+    # GRANT. `ledger.commerce_events` is named because `make deps-up` creates the database
+    # and applies NO migrations — without the relation check this probe passes against a
+    # database holding nothing but `public`, which is the state the runbook actually produced.
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8084/openapi.json').status==200 else 1)"]
+      test: ["CMD", "python", "-m", "proxyshop_support.service_launch", "ready",
+             "--http-port", "8084", "--postgres", "trust_rw:ledger.commerce_events"]
       interval: 10s
       timeout: 5s
       retries: 6

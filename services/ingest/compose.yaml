@@ -36,13 +36,19 @@ services:
     depends_on:
       neo4j:
         condition: service_healthy
-    # The probe is `/openapi.json` rather than `/healthz` because there IS no health route:
-    # services/ingest/src/main.py is orchestrator-frozen (B6(iii)) and neither router under
-    # it declares one. A 200 proves the ASGI app imported, both discovered routers mounted
-    # and uvicorn is answering on the port. It does NOT prove neo4j is reachable.
+    # READINESS, not liveness — see the long note in apps/trust/compose.yaml. The probe this
+    # replaces was `/openapi.json`, and its own comment ended "It does NOT prove neo4j is
+    # reachable." Now it does.
+    #
+    # No `--postgres`: this service opens no postgres connection (`git grep -l psycopg --
+    # services/ingest/src` is empty) and this fragment hands it no DSN. Neo4j is the whole of
+    # its datastore surface, and `verify_connectivity` opens a real bolt session rather than
+    # TCP-probing 7687 — a Neo4j that is listening but still recovering its store accepts the
+    # socket and refuses the session, which is exactly the window in which this container
+    # used to report healthy and fail every write.
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8085/openapi.json').status==200 else 1)"]
+      test: ["CMD", "python", "-m", "proxyshop_support.service_launch", "ready",
+             "--http-port", "8085", "--neo4j"]
       interval: 10s
       timeout: 5s
       retries: 6
