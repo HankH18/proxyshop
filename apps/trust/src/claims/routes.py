@@ -14,10 +14,19 @@ ledger cannot corroborate. A replayed call writes neither: the database refuses 
 verification on ``claim_verifications_idempotency_key``, the seam reports ``written=False``,
 and this handler answers 200 with that outcome instead of 201.
 
-``claim_verified`` was, until this route, one of three kinds reserved in all four frozen
-vocabularies and produced by nothing (see T-302) — including by
-``packages/contracts/openapi/trust.openapi.json``, which uses it as its example body. This
-route is the producer that had been missing.
+``claim_verified`` was, until this route, a kind reserved in every frozen vocabulary and
+produced by nothing — including by ``packages/contracts/openapi/trust.openapi.json``, which
+uses it as its EXAMPLE BODY, so the published contract advertised an event the system could
+not emit. This route is the producer that had been missing. Six kinds still have none
+(auction_closed, auction_opened, checkout_redirect, order_fulfilled, policy_event, shown);
+that is T-302's remainder and is gated in apps/trust/tests/test_repro_open_tickets.py.
+
+KNOWN CONTRACT DRIFT, recorded rather than hidden: ``/claims/verifications`` is served and
+is published nowhere. It is in neither ``trust.openapi.json`` nor
+``contracts.openapi.PINNED_ROUTES``, both of which live in ``packages/contracts`` and are
+outside the write scope of the lane that added this route. Nothing currently fails on it —
+the contract tests compare the DOCUMENTS to PINNED_ROUTES and neither to what boots — but it
+is the same served-but-unpublished class T-312 files against ingest.
 """
 
 from __future__ import annotations
@@ -47,10 +56,11 @@ _MIGRATION = Path(__file__).resolve().parents[4] / "db" / "migrations" / "0002_l
 CLAIM_VERIFIED_KIND = "claim_verified"
 
 
-#: The provenance vocabulary ``claims_provenance_source_check`` pins. Duplicated here ONLY as
-#: a fallback: :func:`_vocabularies` reads the migration itself, and this is what a deployment
-#: that ships without ``db/migrations`` falls back to so the route still refuses a value
-#: Postgres would reject with a 500 instead of a 422.
+#: What the two vocabularies are when the migration is not on this deployment's path.
+#: Fallbacks ONLY — :func:`_vocabularies` reads the migration itself first. They exist so an
+#: image that ships the app without ``db/migrations`` still answers 422 for a value Postgres
+#: would refuse, rather than 500.
+_FALLBACK_STATUSES = ("verified", "contradicted", "unsupported", "ambiguous")
 _FALLBACK_PROVENANCE = (
     "scraped",
     "pixel_feed",
@@ -62,34 +72,46 @@ _FALLBACK_PROVENANCE = (
 )
 
 
-def _vocabularies() -> tuple[frozenset[str], frozenset[str]]:
-    """``(verification statuses, provenance sources)``, read from the authorities that own them.
+def _check_values(
+    sql: str, constraint: str, column: str, fallback: tuple[str, ...]
+) -> frozenset[str]:
+    """The literal vocabulary one named CHECK constraint pins, or ``fallback``.
 
-    The statuses come from the verifier package, the provenance sources from the migration's
-    own CHECK constraint. Both are read rather than typed, because a second copy of a
-    vocabulary is a second thing to drift — and where a copy is unavoidable (see
-    :data:`_FALLBACK_PROVENANCE`) it is a fallback, never the first answer.
+    Keyed on the CONSTRAINT NAME rather than on the column, because the migration constrains
+    more than one column per table and a column-only match would happily read the wrong list.
     """
     import re
 
-    statuses: frozenset[str] = frozenset()
-    try:
-        from claim_verification import VERIFICATION_STATUSES
+    found = re.search(
+        rf"{re.escape(constraint)}\s*CHECK\s*\(\s*{re.escape(column)}\s+IN\s*\(([^)]*)\)",
+        sql,
+        re.IGNORECASE,
+    )
+    parsed = frozenset(re.findall(r"'([^']+)'", found.group(1))) if found else frozenset()
+    return parsed or frozenset(fallback)
 
-        statuses = frozenset(VERIFICATION_STATUSES)
-    except Exception:  # noqa: BLE001 - the verifier is not on every deployment's path
-        statuses = frozenset()
 
-    provenance = frozenset(_FALLBACK_PROVENANCE)
-    migration = _MIGRATION
-    if migration.is_file():
-        found = re.search(
-            r"provenance_source\s+in\s*\(([^)]*)\)", migration.read_text(encoding="utf-8"), re.I
-        )
-        if found:
-            parsed = frozenset(re.findall(r"'([^']+)'", found.group(1)))
-            if parsed:
-                provenance = parsed
+def _vocabularies() -> tuple[frozenset[str], frozenset[str]]:
+    """``(verification statuses, provenance sources)``, read from the authority that owns them.
+
+    BOTH come from the migration's own CHECK constraints — the same file, read once. Reading
+    rather than typing is the point: a second copy of a vocabulary is a second thing to drift.
+
+    The statuses used to be imported from ``claim_verification``, and that was WRONG for a
+    reason no unit test could see. ``services/sim/Dockerfile`` ships ``apps/trust/src/`` and
+    does NOT ship ``packages/verification/``, so the import made this module reference a
+    package absent from an image that carries it — caught by
+    ``proxyshop_support/tests/test_artifact_copyset.py::test_t301_...``, which reads the
+    Dockerfiles' COPY sets against the imports of the tree they ship. Being lazy did not save
+    it; it moved the failure from import time to first call. The migration is the better
+    authority anyway: it is what Postgres actually enforces, and it is what this route is
+    trying to avoid handing a 500 for.
+    """
+    sql = _MIGRATION.read_text(encoding="utf-8") if _MIGRATION.is_file() else ""
+    statuses = _check_values(sql, "claim_verifications_status_check", "status", _FALLBACK_STATUSES)
+    provenance = _check_values(
+        sql, "claims_provenance_source_check", "provenance_source", _FALLBACK_PROVENANCE
+    )
     return statuses, provenance
 
 
