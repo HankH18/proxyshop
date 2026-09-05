@@ -49,15 +49,7 @@ def _orders(*categories: str) -> list[dict[str, Any]]:
 
 
 def test_a_three_character_name_is_tracked_and_a_two_character_one_is_not() -> None:
-    """The threshold itself, asserted as a boundary rather than as a single example.
-
-    Three is a deliberate stopping point, not a step on the way to zero. ``coarsen_region``
-    emits two- and three-letter ISO codes, and ``region`` is the one bucket with no exemption
-    of any kind, so a two-character fragment collides with it by construction: the buyer at
-    "12 Park Lane, Boulder CO 80301" whose profile says ``region == "US-CO"`` would have their
-    own address word reported as a disclosure. That is the denial of service the exemptions
-    exist to prevent, arriving through the one place they do not reach.
-    """
+    """The threshold itself, asserted as a boundary rather than as a single example."""
     from buyer_svc.profile import identity_leaks
 
     lee = {"first_name": "Ann", "last_name": "Lee", "region": "US-OR", "orders": []}
@@ -65,15 +57,63 @@ def test_a_three_character_name_is_tracked_and_a_two_character_one_is_not() -> N
         {"pseudonym": "psn-x", "buckets": {"category_affinity": ["ann-lee-gear"]}}, lee
     ) == ["ann", "lee"]
 
-    boulder = {
+    # Two characters is still invisible, everywhere. This is a real residue, not a win: Ng,
+    # Wu, Yu, Li, Oh and Xu are among the most common surnames on earth and none of them can
+    # be tracked. Lowering the global floor to 2 was measured and refused — it reds eleven
+    # tests, including the HTTP route tests, because a two-character fragment matches inside
+    # every ISO region code there is.
+    ng = {"last_name": "Ng", "orders": []}
+    assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "ng"}}, ng) == []
+
+
+@pytest.mark.parametrize(
+    ("surname", "region"),
+    [("Eng", "GB-ENG"), ("Ben", "BEN"), ("Pan", "PAN"), ("Nam", "NAM"), ("Che", "CHE")],
+)
+def test_a_three_letter_name_that_spells_an_iso_code_does_not_lock_the_buyer_out(
+    surname: str, region: str
+) -> None:
+    """``region`` keeps a floor of four, and this is the buyer that argument is about.
+
+    ``coarsen_region`` accepts alphabetic parts of two OR THREE characters, so the bucket
+    emits ``GB-ENG`` and ``BEN`` as readily as ``US-OR``. Dropping the global floor to three
+    without exempting this bucket refused every one of these buyers permanently — measured,
+    all five, before ``_MIN_LEAKABLE_BY_BUCKET`` existed. They are ordinary surnames and the
+    collision is with the code's alphabet, not a disclosure: nothing about ``GB-ENG`` in a
+    profile tells a store the buyer is called Eng, and no rotation of the pseudonym helps.
+
+    ``region`` has no per-value exemption at all, which is exactly why the floor has to carry
+    the argument here.
+    """
+    from buyer_svc.profile import build_profile, coarsen_region
+
+    assert coarsen_region(region) == region, "this test is about a code the coarsener emits"
+
+    account = {
+        "last_name": surname,
+        "email": "b@mail.invalid",
+        "region": region,
+        "orders": _orders("trail-gear"),
+    }
+    built = build_profile(account, PSEUDONYM).model_dump()  # must not raise
+    assert built["buckets"]["region"] == region
+
+
+def test_a_genuine_disclosure_through_region_is_still_reported() -> None:
+    """The other side of that floor: four characters is above anything a real code can be."""
+    from buyer_svc.profile import identity_leaks
+
+    park = {
         "address": "12 Park Lane, Boulder CO 80301",
         "postal_code": "80301",
         "region": "US-CO",
         "orders": [],
     }
-    assert (
-        identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "US-CO"}}, boulder) == []
-    ), "a two-character address word must not be able to make the region bucket a disclosure"
+    assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "US-CO"}}, park) == []
+    for rewired in ("80301", "US-CO 80301", "boulder", "park-lane-boulder"):
+        assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": rewired}}, park), (
+            f"a coarsener rewired to return {rewired!r} must still be caught"
+        )
 
 
 def test_the_short_name_fix_still_admits_the_documented_collisions() -> None:
@@ -105,13 +145,18 @@ def test_the_short_name_fix_still_admits_the_documented_collisions() -> None:
 # =======================================================================================
 
 
-def test_a_phone_number_is_found_under_every_grouping_of_its_own_digits() -> None:
-    """Regrouped, repunctuated and verbatim are spellings of one number, not three numbers.
+def test_a_phone_stored_under_any_grouping_is_found_in_the_joined_slug() -> None:
+    """However the ACCOUNT spells the number, the joined form in a slug is caught.
+
+    The name of this test is deliberately narrow, and an earlier one was not: it claimed
+    "every grouping" while varying only the stored side and holding the published slug fixed.
+    What shipped rewrites the needle, never the haystack — the account's digits are joined,
+    and a published value is matched only if it carries them fully joined. The published-side
+    residue that leaves is pinned separately below.
 
     The ticket left open *which* digits of a phone number are the phone number. The answer
     taken is the conservative one — all of them, in order, separators dropped — because that is
     the only grouping-independent reading and it is exactly the transformation that hid it.
-    Every spelling below carries the same seven digits and every one is refused.
     """
     from buyer_svc.profile import IdentityLeak, build_profile
 
@@ -156,6 +201,30 @@ def test_a_stored_country_code_the_published_slug_omits_is_still_a_residue() -> 
     assert identity_leaks(built, same_digits) == ["5550100"]
 
 
+def test_a_regrouped_published_slug_is_the_other_half_of_the_same_residue() -> None:
+    """The normalisation rewrites the needle, not the haystack. Recorded, not covered.
+
+    T-198(a)'s own word is "REGROUPED", and the ticket's example regroups the *stored* number.
+    Vary the grouping on the *published* side instead and nothing matches: the account's digits
+    are joined into one fragment, and a slug that keeps its own separators does not contain it.
+
+    Closing this means normalising the bucket text as well — searching in digit space on both
+    sides. That is a bigger change than T-198 describes and it needs a minimum run length
+    nobody has chosen yet, or every two-digit run in a slug starts matching postal codes. It is
+    written down here so the boundary is a decision with a diff rather than a drift, and it is
+    reported as an open defect rather than being quietly folded into a closed ticket.
+    """
+    from buyer_svc.profile import build_profile, identity_leaks
+
+    for regrouped in ("gift 555 01 00 gear", "gift 55 50 100 gear"):
+        account = {"phone": "555-0100", "region": "US-OR", "orders": _orders(regrouped)}
+        built = build_profile(account, PSEUDONYM).model_dump()
+        assert identity_leaks(built, account) == [], (
+            "if this now reports the phone, the published-side residue was closed — delete "
+            f"this case and say so ({regrouped!r})"
+        )
+
+
 def test_the_digit_normalisation_is_attributed_to_the_key_that_carried_it() -> None:
     """The refusal names ``phone``, not a synthetic key invented by the normalisation.
 
@@ -185,23 +254,36 @@ def test_the_email_domain_is_split_exactly_as_the_local_part_is() -> None:
         assert caught.value.account_keys == ("email",), email
 
 
-def test_splitting_the_domain_does_not_refuse_an_ordinary_shared_domain() -> None:
-    """"example", "com" and "invalid" are now fragments of every account. They match nothing.
+def test_the_domain_split_stops_at_the_last_label_so_a_tld_is_never_a_fragment() -> None:
+    """The TLD is the one part of an address nobody chooses, and it is inside real merchandise.
 
-    A shared domain carries no identity, which is why splitting it is free: its words are not
-    the buyer's, so no coarsener can emit one. This is the assertion that catches the day one
-    of them starts colliding with a bucket value.
+    ``com`` is a substring of the taxonomy tokens ``comics`` and ``computer``; ``org`` is
+    inside ``organic`` and ``organizers``. Adding it as a fragment gives EVERY ``.com`` account
+    a universal collision, and because ``_MAX_INCIDENTAL_FRAGMENTS`` is 1 and rule 5 charges
+    that budget over the whole published list, one universal fragment plus one real collision
+    withdraws the exemption for every slug on the account.
+
+    Measured before the last label was dropped: both of the module's canonical coincidences
+    broke as soon as the buyer placed one more perfectly ordinary order.
     """
-    from buyer_svc.profile import build_profile
+    from buyer_svc.profile import _identity_sources, build_profile
 
-    account = {
-        "email": "b@example.com",
-        "first_name": "Dana",
-        "region": "US-OR",
-        "orders": _orders("camera-lenses", "headphones"),
-    }
-    built = build_profile(account, PSEUDONYM).model_dump()
-    assert built["buckets"]["category_affinity"] == ["camera-lenses", "headphones"]
+    assert "com" not in _identity_sources({"email": "b@example.com"})
+    assert "org" not in _identity_sources({"email": "b@shop.org"})
+    # Everything left of the last label is still split — that is what T-198(b) needs.
+    assert {"reyes", "family"} <= set(_identity_sources({"email": "x@reyes-family.example"}))
+
+    for account in (
+        {"last_name": "Cook", "email": "cook.buyer@example.com", "orders": _orders("cookware")},
+        {
+            "last_name": "Cook",
+            "email": "cook.buyer@example.com",
+            "orders": _orders("cookware", "computers"),
+        },
+        {"email": "espresso.fan@example.com", "orders": _orders("espresso")},
+        {"email": "espresso.fan@example.com", "orders": _orders("espresso", "comics")},
+    ):
+        build_profile(account, PSEUDONYM)  # must not raise
 
 
 # =======================================================================================
@@ -220,10 +302,70 @@ def test_a_taxonomy_label_carrying_the_buyers_surname_is_reported() -> None:
 
     assert "home" in CATEGORY_TAXONOMY, "this test is about a label that IS in the taxonomy"
 
-    account = {"last_name": "Home", "region": "US-OR", "orders": []}
+    # The orders matter and are not decoration: the exemption is conditional on the label not
+    # being one of the account's OWN slugs, and it is the buyer buying `home` that makes it
+    # one. Without them this is the generalised-release case, which stays exempt on purpose.
+    account = {"last_name": "Home", "region": "US-OR", "orders": _orders("home")}
     assert identity_leaks(
         {"pseudonym": "psn-x", "buckets": {"category_affinity": ["home"]}}, account
     ) == ["home"]
+
+
+def test_a_taxonomy_label_the_account_never_bought_is_still_incidental() -> None:
+    """The narrowing is conditional, and this is the half a blanket removal got wrong.
+
+    "The coarsener chose this from a fixed table" is TRUE for a generalised release — that is
+    exactly what ``taxonomy_affinity`` does — and false at rung 0 for a buyer whose own slug
+    spells the label. Removing the exemption outright rather than conditioning it failed the
+    ENTIRE release below, because one buyer's email local part happened to be ``home@`` while
+    the label ``home`` was chosen off orders for bedding, cookware and lighting.
+    """
+    from buyer_svc.profile import build_profiles, identity_leaks
+
+    def account(index: int, email: str, category: str) -> dict[str, Any]:
+        return {
+            "account_id": f"acct-{index:04d}",
+            "email": email,
+            "region": "US-CO",
+            "orders": _orders(category),
+        }
+
+    cohort = [
+        account(0, "a@mail.example", "bedding"),
+        account(1, "b@mail.example", "cookware"),
+        account(2, "home@mail.example", "lighting"),
+    ]
+    profiles = build_profiles(cohort, [f"psn-{index:032x}" for index in range(3)], k=3)
+    assert len(profiles) == 3
+    assert all(p.buckets.category_affinity == ["home"] for p in profiles)
+
+    # And the condition really is "not the account's own slug", not "never reported".
+    owns_it = {"last_name": "Home", "region": "US-OR", "orders": _orders("home")}
+    assert identity_leaks(
+        {"pseudonym": "psn-x", "buckets": {"category_affinity": ["home"]}}, owns_it
+    ) == ["home"]
+
+
+def test_a_place_word_that_is_also_a_taxonomy_label_still_builds() -> None:
+    """Home Farm Road buying ``home`` is the Park Lane collision, one bucket over.
+
+    ``_NAMING_IDENTITY_KEYS`` deliberately excludes ``address`` and ``street`` because place
+    words genuinely collide with merchandise. Rule 3's one-token leniency used to be spelled
+    "anything but the email", which admitted ``espresso.fan@`` buying ``espresso`` and refused
+    this buyer — a refusal that was invisible only because the blanket taxonomy exemption was
+    covering it for the eleven labels, and for nothing else.
+    """
+    from buyer_svc.profile import build_profile
+
+    account = {
+        "email": "j.k@mail.example",
+        "last_name": "Kim",
+        "address": "9 Home Farm Road, Boulder CO",
+        "region": "US-CO",
+        "orders": _orders("home", "trail-gear"),
+    }
+    built = build_profile(account, PSEUDONYM).model_dump()  # must not raise
+    assert built["buckets"]["category_affinity"] == ["home", "trail-gear"]
 
 
 def test_the_other_two_closed_vocabularies_keep_their_exemption() -> None:

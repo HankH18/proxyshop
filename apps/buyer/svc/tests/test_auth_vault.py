@@ -1145,29 +1145,22 @@ def test_the_identity_backstop_admits_an_address_word_inside_a_category_slug() -
     # search, so a fragment could match across the seam between two values — reporting a
     # leak of a string no bucket ever held. Searching each value on its own removes it.
     #
-    # T-197 CHANGED THE EXPECTED VALUE HERE, and this comment is the record of why.
-    #
-    # This assertion read `== []`. What it was written to claim is that the *joined* fragment
-    # "ana  bo" is not reported, because no single bucket ever held it — and that claim is
-    # unchanged and still asserted below. What it ALSO claimed, silently, is that "ana" is
-    # clean: the buyer's given name sitting verbatim inside the `region` bucket. That was only
-    # true because `_MIN_LEAKABLE` was 4, so a three-letter name never entered the haystack at
-    # all — which is the defect T-197 records, and fixing it is what makes "ana" visible.
-    #
-    # Reporting it is what the two assertions above already demand of exactly this bucket:
-    # `{"region": "80301"} -> ["80301"]`, because a coarsener has no business inventing a
-    # region value that is a piece of the buyer's record. A three-letter given name is not a
-    # smaller version of that; it is the same disclosure.
-    #
-    # The seam is still pinned, and pinned by this same line rather than by a weaker one: an
-    # implementation that concatenated the bucket values would slug them to "ana-bo", match the
-    # `full_name` fragment "ana  bo" in slug space, and return ["ana", "ana  bo"] — measured,
-    # not assumed. `== ["ana"]` fails on that; `in` or a subset check would not, which is why
-    # the equality is kept.
+    # UNCHANGED THROUGH T-197, and it took two tries to leave it alone. T-197 lowers the
+    # identity floor from four characters to three, which briefly made "ana" — a word of this
+    # buyer's `full_name` — visible inside `region` and turned this into `== ["ana"]`. That
+    # was the wrong repair: `region` can only ever hold what `coarsen_region` emits, which is
+    # ISO codes of two and three letters, so a three-character fragment matching in there is
+    # colliding with the code's alphabet, not being disclosed by it — and it would have locked
+    # the buyer surnamed Eng out of `GB-ENG` permanently. The floor for this one bucket
+    # therefore stays at four (`_MIN_LEAKABLE_BY_BUCKET`), and this assertion is right exactly
+    # as it was originally written.
     seam = {"full_name": "Ana  Bo", "email": "ab@example.com", "orders": []}
-    assert identity_leaks(
-        {"pseudonym": "psn-x", "buckets": {"region": "ana", "category_affinity": ["bo"]}}, seam
-    ) == ["ana"], "the buyer's given name in `region` is a disclosure; the joined form is not"
+    assert (
+        identity_leaks(
+            {"pseudonym": "psn-x", "buckets": {"region": "ana", "category_affinity": ["bo"]}}, seam
+        )
+        == []
+    )
 
 
 def test_the_profile_route_serves_a_buyer_who_lives_on_park_lane() -> None:
