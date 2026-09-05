@@ -1160,9 +1160,17 @@ from proxyshop_support import service_markers
 _RECORDS = []
 
 
-@pytest.hookimpl(trylast=True)
+# `tryfirst`, and the docker filter applied here rather than by `-m docker`. Measured: with
+# `trylast`, a `services_for` that REFUSES an undeclared item makes conftest raise a
+# UsageError that aborts collection before this hook ever runs, so the corpus was written
+# EMPTY and the gate died on the return code instead of naming the eight offenders. Running
+# first, and doing our own marker filtering, means the corpus is complete whatever conftest
+# does afterwards.
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items):
     for item in items:
+        if not any(True for _ in item.iter_markers("docker")):
+            continue
         marker_args = [list(mark.args) for mark in item.iter_markers("docker")]
         fixtures = sorted(set(item.fixturenames) & set(service_markers.FIXTURE_SERVICES))
         try:
@@ -1237,8 +1245,6 @@ def _t172_collect_docker_corpus(tmp_path: Any) -> list[dict[str, Any]]:
                 "pytest",
                 "--collect-only",
                 "-q",
-                "-m",
-                "docker",
                 "-p",
                 "no:cacheprovider",
                 "-p",
@@ -1256,16 +1262,18 @@ def _t172_collect_docker_corpus(tmp_path: Any) -> list[dict[str, Any]]:
             "no red at all, so this is a failure and not a slow pass."
         ) from expiry
 
-    assert completed.returncode == 0, (
-        f"collecting `-m docker` failed with rc={completed.returncode}; this gate cannot "
-        f"reason about a corpus it could not build.\nstdout tail:\n"
+    records: list[dict[str, Any]] = (
+        json.loads(out.read_text(encoding="utf-8")) if out.is_file() else []
+    )
+    # A non-zero return code is TOLERATED when the corpus was still built. Once the fallback
+    # is loud, collecting an undeclared item is *supposed* to fail the session — refusing to
+    # reason about that run would hand the diagnosis back as "rc=4" and name one offender of
+    # eight, instead of letting the assertions below name all of them.
+    assert records, (
+        f"the collection subprocess (rc={completed.returncode}) produced no docker corpus at "
+        f"all, so every count below would be silently zero.\nstdout tail:\n"
         f"{completed.stdout[-2000:]}\nstderr tail:\n{completed.stderr[-2000:]}"
     )
-    assert out.is_file(), (
-        "the collection subprocess exited 0 but wrote no corpus, so the collector plugin "
-        "never ran — every count below would have been silently zero"
-    )
-    records: list[dict[str, Any]] = json.loads(out.read_text(encoding="utf-8"))
     _T172_CORPUS_CACHE = records
     return records
 
@@ -2800,9 +2808,17 @@ def _t257_declaring_modules(ticket_id: str) -> dict[str, int]:
             relative = str(path.relative_to(REPO_ROOT))
             if not _t257_in_scope(relative, scope):
                 continue
+            # Module level and class bodies only. `ast.walk` descends into nested scopes, so
+            # a `def test_helper` defined INSIDE another test — or one under
+            # `if TYPE_CHECKING:` — inflated this floor above anything pytest can collect, and
+            # an honest full-file verify then failed the completeness check below.
+            bodies = [tree.body] + [
+                node.body for node in tree.body if isinstance(node, ast.ClassDef)
+            ]
             declaring[relative] = sum(
                 1
-                for node in ast.walk(tree)
+                for body in bodies
+                for node in body
                 if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
                 and node.name.startswith("test_")
             )
@@ -2945,6 +2961,16 @@ def test_t257_the_recorded_gate_for_t112_collects_at_least_one_of_its_own_grader
 
     declaring = _t257_declaring_modules("T-112")
     collected_files = {node_id.split("::")[0] for node_id in node_ids}
+    unreached = sorted(set(declaring) - collected_files)
+    assert unreached == [], (
+        f"T-112's recorded gate collects {len(node_ids)} tests from {sorted(collected_files)} "
+        f"and never reaches {unreached}, which declare themselves its graders. Every declaring "
+        f"module has to be collected, not just one: a five-line module with a matching "
+        f"docstring and a single `assert True` is otherwise a cheaper way to satisfy this gate "
+        f"than running the {sum(declaring.values())} tests that actually grade the ticket — "
+        f"measured, that stub passed every earlier form of this assertion. Its verify is "
+        f"{verify!r}"
+    )
     seen = sorted(collected_files & set(declaring))
     thinned = [
         f"{module}: {len([n for n in node_ids if n.split('::')[0] == module])} of "
