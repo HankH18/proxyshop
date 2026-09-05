@@ -152,22 +152,27 @@ resemble each other.
 
 ### What it will tell you it cannot do
 
-**Four beats on this page do not run yet, and the driver prints each one as a `DOES NOT RUN
-YET` block instead of skipping it.** Read them out loud rather than scrolling past: a demo that
-quietly omitted them would be the same claim as a green board over a broken system. Each is
+**One beat on this page does not run yet, and the driver prints it as a `DOES NOT RUN
+YET` block instead of skipping it.** Read it out loud rather than scrolling past: a demo that
+quietly omitted it would be the same claim as a green board over a broken system. It is
 *measured* by the run — the driver makes the call and prints the answer it got — rather than
 asserted from having read the source:
 
-1. **The shopper's "yes" cannot reach the exchange.** `POST /buyer/intent/confirm` answers 503,
-   in its own words: *"confirm() was given no auction client, so the confirmed intent has
-   nowhere to go."* The buyer service has no composition root binding one. The driver opens the
-   auction by posting to the exchange directly and says so.
-2. **The clarifier's cluster names nothing a store pursues.** Handed the clarified intent
-   unedited, a store agent answers `204` with the reason `cluster_not_pursued`. The clarifier
-   derives `cluster_id` by hashing the query; envelopes authorise bidding inside *named*
-   catalogue clusters; nothing maps one namespace onto the other.
-3. **The silent store's fallback never reaches the shortlist** — see 3.4 below.
-4. **Reconciliation and the trust projection cannot run from anything served** — see 3.6/3.7.
+1. **Reconciliation and the trust projection cannot run from anything served** — see 3.6/3.7.
+
+**This section used to list four.** Three of them have since been closed, and the driver
+measures all three every run rather than taking anyone's word for it:
+
+- The shopper's "yes" now reaches the exchange. `POST /buyer/intent/confirm` answers **201**
+  with an `auction_id`; it used to answer 503 for want of a composition root binding an
+  auction client.
+- The clarifier's cluster now names something. The exchange assigns a named cluster —
+  `cluster-espresso` on this scenario — and the store agent that used to decline
+  `cluster_not_pursued` for want of a namespace mapping now declines `no_matching_product`,
+  which is a merchant's answer about its catalogue rather than a wiring hole. The same store
+  bids normally in the auction itself.
+- The silent store's fallback now reaches the shortlist, in the `value` slot at its catalogue
+  list price. See 3.4.
 
 Each step below names the component that does the work, so a question about "what actually
 happened there" has an answer in the code.
@@ -215,15 +220,17 @@ formula, and builds the shortlist. The ranking is fee-blind and tier-blind: payi
 network more cannot buy a better position. The blacklist filter reads the served trust
 snapshot and, again, fails closed — a store with no row is excluded rather than defaulted in.
 
-**This subsection used to say "show the shortlist carrying both a real hosted bid and the
-silent store's list-price fallback". Over the real composed exchange it does not, and the
-driver measures it every run.** The fallback the exchange manufactures for a silent store
-carries no `expires_at` and no `checkout_url`; both filters fail closed; so the entry is
-excluded `expired_offer` and `off_domain_checkout` before it can be ranked, and the driver
-prints those two reasons verbatim. R10's first half holds — the store *is* represented, at its
-catalogue list price, and the entry says why it fell back. R10's second half, that it can still
-reach the shortlist, does not hold on this path today. `e2e/support/s1` reaches three slots by
-building the fallback's checkout URL itself, which is the join whose absence is the defect.
+**The shortlist carries both a real hosted bid and the silent store's list-price fallback, and
+the driver measures it every run.** On this scenario it prints three slots and zero exclusions:
+the silent `store-slowreply` takes the `value` slot at its catalogue list price of $519.00. Both
+halves of R10 hold on this path — the store is represented, the entry says why it fell back, and
+it can still reach the shortlist.
+
+This subsection previously recorded the opposite, because the fallback the exchange
+manufactured carried no `expires_at` and no `checkout_url`, both filters failed closed, and the
+entry was excluded `expired_offer` + `off_domain_checkout` before it could be ranked. That is
+fixed; the reasons are kept here only so a reader who remembers the old behaviour knows it
+changed rather than wondering which page to believe.
 
 What the shortlist *does* carry is worth pointing at: each slot names why it placed there. The
 driver prints the weighted terms, and they sum to the score — in a normal run the two hosted
