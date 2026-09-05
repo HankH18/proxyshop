@@ -89,7 +89,9 @@ class FakeExchange:
                 exchange.requests.append({"path": self.path, "body": body})
                 status, answer = exchange.answers.get(self.path, exchange.default_answer)
                 payload = (
-                    answer if isinstance(answer, (bytes, bytearray)) else json.dumps(answer).encode()
+                    answer
+                    if isinstance(answer, (bytes, bytearray))
+                    else json.dumps(answer).encode()
                 )
                 self.send_response(status)
                 self.send_header("content-type", "application/json")

@@ -535,8 +535,7 @@ class HttpExchangeClient:
 
         if status not in self.OK_STATUSES and status not in also_accept:
             raise ExchangeCallFailed(
-                f"the exchange answered {status} to {what}: "
-                f"{_excerpt(bytes(body))}",
+                f"the exchange answered {status} to {what}: {_excerpt(bytes(body))}",
                 status_code=status,
             )
 
@@ -594,9 +593,7 @@ def configure_buyer(app: Any, deployment: Deployment) -> tuple[str, ...]:
     def unset(name: str) -> bool:
         return getattr(app.state, name, None) is None
 
-    client = HttpExchangeClient(
-        deployment.exchange_url, timeout=deployment.request_timeout_seconds
-    )
+    client = HttpExchangeClient(deployment.exchange_url, timeout=deployment.request_timeout_seconds)
     for attr in (AUCTION_CLIENT_ATTR, EXCHANGE_CLIENT_ATTR):
         if unset(attr):
             setattr(app.state, attr, client)
