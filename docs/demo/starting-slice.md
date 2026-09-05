@@ -47,9 +47,10 @@ Both are already the defaults in `.env.example`. Copy it and leave them alone:
 cp .env.example .env
 ```
 
-**Then load it into your shell.** The copy gives Compose its interpolation values and nothing
-else — no Makefile target, no script and no test reads `.env` — so the next step, straight
-after the copy, would fail with `FATAL: PROXYSHOP_WORKER is unset`:
+**Then load it into your shell.** The copy gives Compose its interpolation values, and nothing
+on the path you are about to walk reads it — not the Makefile, not the database-init script,
+not any Python at import — so the next step, straight after the copy, would fail with
+`FATAL: PROXYSHOP_WORKER is unset`:
 
 ```bash
 set -a && . ./.env && set +a

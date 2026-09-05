@@ -75,8 +75,10 @@ pinned in the root file so a worktree cannot spawn its own stack):
 
 ```bash
 # 0. Load the environment. `cp .env.example .env` gives `docker compose` its interpolation
-#    values and NOTHING ELSE — no Makefile target, no script and no test sources that file,
-#    so `make deps-up` straight after the copy fails with `FATAL: PROXYSHOP_WORKER is unset`.
+#    values, and nothing on the deps-up path reads the copy — not the Makefile, not
+#    scripts/db_init.py, not any Python at import — so `make deps-up` straight after the
+#    copy fails with `FATAL: PROXYSHOP_WORKER is unset`. (One thing DOES read .env:
+#    scripts/verify.sh sources it on every `make verify`. See the subsection below.)
 cp .env.example .env
 set -a && . ./.env && set +a
 
