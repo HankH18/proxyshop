@@ -110,6 +110,18 @@ false green — so the choice here is still the right one.
 * The probe reports its own ``sys.path`` and the ``__file__`` of everything it imported.
   Any path inside the checkout that is not ``.venv``, and any first-party module resolved
   outside the temp tree, fails the test as a MEASUREMENT error rather than passing it.
+* That report comes back on a PRIVATE channel (:data:`_PROBE_CHANNEL`), not on stdout, and
+  every name the probe was asked about must appear in it. Both halves were false greens
+  found by executing this file rather than reading it. The probe imports ~513 shipped
+  modules in its own process, so its stdout belongs to the code under test as much as to
+  the probe: the old reader took the FIRST ``RESULT ``-prefixed line while the probe emits
+  its own LAST, and the old outcome lookup read a name the probe never mentioned as a clean
+  import. One ``print`` at import time in any shipped module therefore replaced the whole
+  outcome dictionary AND turned every genuinely broken module green — measured on a scratch
+  tree, ten broken merchant modules including the image's own ``uvicorn`` entrypoint went
+  to ``0 broken`` with no error, no checker edit and no ``.dockerignore`` edit. A stray line
+  now changes nothing (no stdout line is parsed), and a short report is an assertion
+  failure naming the missing names rather than a clean bill of health.
 * :func:`test_the_static_copy_set_checker_detects_a_fix_and_a_regression` is the positive
   control: it synthesises a fixed Dockerfile and a broken one in memory — no file in the
   repo is touched — and proves the checker flips in both directions. A checker that cannot
@@ -872,16 +884,68 @@ class _PipLayerOnly:
 sys.meta_path.insert(0, _PipLayerOnly())
 """
 
+#: The probe's PRIVATE report channel, installed into every probe ahead of the pip wall.
+#:
+#: This used to be ``stdout``, tagged ``SYSPATH ``/``RESULT ``, and that was a live
+#: false-green hazard rather than a theoretical one. ``stdout`` is SHARED with the code
+#: under test: the probe imports ~513 shipped modules in-process, any one of which may
+#: print at import time. The reader took the FIRST matching line, and the probe's own
+#: ``RESULT`` is emitted LAST — so one module printing ``RESULT {"_": {"file": null}}``
+#: replaced the entire outcome dictionary, every genuinely broken module then read clean
+#: (the reader treated a name missing from the outcome as a successful import), and the
+#: image reported 0 broken with no error anywhere. Measured on a scratch copy of this
+#: tree: a real defect that the checker reported as ten broken merchant modules —
+#: including ``merchant_svc.main``, the image's own entrypoint — became ``0 broken`` when
+#: a single ``print`` line was added to one unrelated shipped module.
+#:
+#: Reading the LAST tagged line instead of the first would have fixed that one instance
+#: and left the channel shared. This writes the report to a file the parent names, and
+#: ``pop``s the variable naming it out of ``os.environ`` before a single shipped module is
+#: imported. No line a module writes to stdout is read by this gate at all; stdout is kept
+#: only as diagnostic text for the assertion messages (:meth:`ProbeRun.diagnosis`).
+#:
+#: **What that does and does not buy, stated rather than implied.** It removes the ACCIDENT
+#: entirely: no amount of printing, on stdout or stderr, can now alter, shorten or replace
+#: the report, which is the failure this repair exists for — a debugging ``print`` left in
+#: any of the 513 shipped modules. It does not, and cannot, make the measurement proof
+#: against a shipped module that is deliberately trying to defeat it: that module runs
+#: in the probe's own process, so it could scan the temp directory for the channel file,
+#: read the graded name list out of ``sys.argv``, or simply replace ``builtins.open``. No
+#: in-process probe can be hardened against the code it imports. The defence against that
+#: is the other half of this repair — every name must come back with a verdict and every
+#: verdict must grade something — which makes a report that does not add up an assertion
+#: failure rather than a green image, so forging one takes deliberate, legible work
+#: instead of a stray line.
+#:
+#: ``_emit`` is called twice on purpose. The first call, before any import, records that
+#: the probe reached its first statement; the second replaces it with the finished report.
+#: That keeps the three outcomes distinguishable — never started (no file), started and
+#: died mid-import (file, but no report key), finished (both) — which a single write at
+#: the end would collapse into one silent "nothing to grade".
+_PROBE_CHANNEL = """
+import json as _json, os as _os
+
+_CHANNEL = _os.environ.pop("PROXYSHOP_PROBE_OUT")
+
+def _emit(**payload):
+    with open(_CHANNEL, "w") as _fh:
+        _json.dump(payload, _fh)
+        _fh.flush()
+        _os.fsync(_fh.fileno())
+"""
+
 _IMPORT_PROBE = (
     textwrap.dedent(
         """
         import importlib, json, sys
         """
     )
+    + _PROBE_CHANNEL
     + _PIP_LAYER_WALL
     + textwrap.dedent(
         """
-        print("SYSPATH " + json.dumps(sys.path))
+        _sys_path = list(sys.path)
+        _emit(sys_path=_sys_path)
         outcome = {}
         for name in json.loads(sys.argv[1]):
             try:
@@ -890,13 +954,46 @@ _IMPORT_PROBE = (
                 outcome[name] = {"error": f"{type(exc).__name__}: {exc}"}
             else:
                 outcome[name] = {"file": getattr(module, "__file__", None)}
-        print("RESULT " + json.dumps(outcome))
+        _emit(sys_path=_sys_path, outcome=outcome)
         """
     )
 )
 
 
-def run_in_image(label: str, code: str, *argv: str) -> subprocess.CompletedProcess[str]:
+@dataclass(frozen=True)
+class ProbeRun:
+    """One probe subprocess, and the payload it wrote on its own private channel.
+
+    ``payload is None`` means the probe wrote NOTHING — it died before its first
+    statement. It never means "the probe found nothing", and no caller may read it that
+    way: a zero that is really an absence is the whole defect class this file exists to
+    find, and :data:`_PROBE_CHANNEL` records why it was also a defect IN this file.
+    """
+
+    label: str
+    process: subprocess.CompletedProcess[str]
+    payload: dict[str, Any] | None
+
+    def diagnosis(self) -> str:
+        """Assertion-message text for a missing or partial payload.
+
+        The probe's stdout appears here and ONLY here. It is evidence about what the
+        subprocess did; it is never parsed, because the modules under test can write to it.
+        """
+        parts = [f"exit status {self.process.returncode}"]
+        err = self.process.stderr.strip()
+        if err:
+            parts.append(f"stderr tail:\n{err[-1500:]}")
+        out = self.process.stdout.strip()
+        if out:
+            parts.append(
+                "stdout tail (NOT parsed by this gate — shipped modules can write to it):\n"
+                + out[-800:]
+            )
+        return "\n".join(parts)
+
+
+def run_in_image(label: str, code: str, *argv: str) -> ProbeRun:
     """Run ``code`` against the built tree with the image's ``PYTHONPATH`` and nothing else.
 
     ``-S`` is load-bearing: without it ``site`` processes ``_proxyshop.pth`` and the LIVE
@@ -910,6 +1007,12 @@ def run_in_image(label: str, code: str, *argv: str) -> subprocess.CompletedProce
     Every probe is handed the image's allowed third-party import names and the venv's
     ``site-packages`` prefix as ``argv[2]``/``argv[3]``, which is what :data:`_PIP_LAYER_WALL`
     needs.
+
+    The report comes back over :data:`_PROBE_CHANNEL` — a file this function creates the
+    NAME of, deletes before the run so only the probe can bring it into existence, and
+    removes afterwards. Nothing on the subprocess's stdout is parsed. See
+    :data:`_PROBE_CHANNEL` for the measured false-green that made a shared channel
+    unusable here.
     """
     app = materialised_image(label)
     spec = images()[label]
@@ -919,27 +1022,47 @@ def run_in_image(label: str, code: str, *argv: str) -> subprocess.CompletedProce
         for r in spec.path_roots
     ]
     allowed = json.dumps(sorted(image_third_party_imports(label)))
-    return subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [sys.executable, "-S", "-c", code, *(argv or ("",)), allowed, str(SITE_PACKAGES)],
-        cwd=str(app),
-        env={
-            "PATH": os.environ.get("PATH", ""),
-            "PYTHONPATH": os.pathsep.join([*roots, str(SITE_PACKAGES)]),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PROXYSHOP_WORKER": os.environ.get("PROXYSHOP_WORKER", "0"),
-        },
-        capture_output=True,
-        text=True,
-        timeout=180,
-        check=False,
-    )
 
-
-def _tagged(stdout: str, tag: str) -> str | None:
-    prefix = f"{tag} "
-    return next(
-        (line[len(prefix) :] for line in stdout.splitlines() if line.startswith(prefix)), None
-    )
+    handle, channel = tempfile.mkstemp(prefix="copyset-probe-", suffix=".json")
+    os.close(handle)
+    # Deleted, not truncated: an empty file that already exists would be indistinguishable
+    # from a probe that started and wrote nothing, and this file does not get to guess.
+    os.unlink(channel)
+    try:
+        process = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [sys.executable, "-S", "-c", code, *(argv or ("",)), allowed, str(SITE_PACKAGES)],
+            cwd=str(app),
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONPATH": os.pathsep.join([*roots, str(SITE_PACKAGES)]),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PROXYSHOP_WORKER": os.environ.get("PROXYSHOP_WORKER", "0"),
+                "PROXYSHOP_PROBE_OUT": channel,
+            },
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        payload: dict[str, Any] | None = None
+        written = Path(channel).read_text() if os.path.exists(channel) else ""
+        if written:
+            try:
+                payload = json.loads(written)
+            except json.JSONDecodeError as exc:
+                raise AssertionError(
+                    f"{label}: the probe's private channel holds {len(written)} bytes that "
+                    f"are not JSON, so this run cannot be graded in EITHER direction and "
+                    f"must not be read as clean: {exc}\n{written[:400]}"
+                ) from exc
+        if payload is not None and not isinstance(payload, dict):
+            raise AssertionError(
+                f"{label}: the probe's private channel holds {type(payload).__name__}, not "
+                f"the object every caller here indexes: {written[:400]}"
+            )
+        return ProbeRun(label, process, payload)
+    finally:
+        Path(channel).unlink(missing_ok=True)
 
 
 def _leaked_paths(entries: list[str]) -> list[str]:
@@ -1026,14 +1149,17 @@ def image_import_report(label: str) -> ImportReport:
     )
 
     every_name = sorted({name for names in wanted.values() for name in names})
-    result = run_in_image(label, _IMPORT_PROBE, json.dumps(every_name))
+    run = run_in_image(label, _IMPORT_PROBE, json.dumps(every_name))
 
-    reported_path = _tagged(result.stdout, "SYSPATH")
-    assert reported_path is not None, (
+    assert run.payload is not None, (
         f"{label}: the container-shaped probe never reached its first statement, so this "
-        f"gate measured nothing at all:\n{result.stderr.strip()[-1500:]}"
+        f"gate measured nothing at all:\n{run.diagnosis()}"
     )
-    leaked = _leaked_paths(json.loads(reported_path))
+    assert "sys_path" in run.payload, (
+        f"{label}: the probe wrote a report with no sys.path in it, so the leak guard below "
+        f"has nothing to check and this measurement cannot be trusted:\n{run.diagnosis()}"
+    )
+    leaked = _leaked_paths(run.payload["sys_path"])
     assert leaked == [], (
         f"{label}: the probe can see the live checkout on sys.path ({leaked}), so it can "
         f"import packages the image does not ship and this measurement is worthless. "
@@ -1041,11 +1167,35 @@ def image_import_report(label: str) -> ImportReport:
         f"interpreter startup regardless of PYTHONPATH; `-S` is what keeps them off."
     )
 
-    raw = _tagged(result.stdout, "RESULT")
-    assert raw is not None, (
-        f"{label}: the probe did not finish; it graded nothing:\n{result.stderr.strip()[-1500:]}"
+    assert "outcome" in run.payload, (
+        f"{label}: the probe started but did not finish; it graded nothing:\n{run.diagnosis()}"
     )
-    outcome: dict[str, dict[str, Any]] = json.loads(raw)
+    outcome: dict[str, dict[str, Any]] = run.payload["outcome"]
+
+    # EVERY name handed to the probe must come back with a verdict. This used to be
+    # `outcome.get(n, {})` at the bottom of this function, which read a name the probe never
+    # mentioned as a CLEAN import — so any accident that shortened the outcome dictionary
+    # (the stray-stdout hijack :data:`_PROBE_CHANNEL` records, a probe killed part-way, a
+    # future edit that filters the loop) turned every broken module in the image green at
+    # once. "Absent" is now the loudest thing this report can say, not the quietest.
+    reported, asked = set(outcome), set(every_name)
+    assert reported == asked, (
+        f"{label}: the probe was asked to import {len(asked)} module names and returned a "
+        f"verdict on {len(reported)}. A name with no verdict is UNGRADED, not clean, so this "
+        f"report is refused rather than read.\n"
+        f"    no verdict returned ({len(asked - reported)}): {sorted(asked - reported)[:20]}\n"
+        f"    verdicts nobody asked for ({len(reported - asked)}): {sorted(reported - asked)[:20]}\n"
+        f"{run.diagnosis()}"
+    )
+    malformed = sorted(
+        name
+        for name, entry in outcome.items()
+        if not isinstance(entry, dict) or not ({"error", "file"} & set(entry))
+    )
+    assert malformed == [], (
+        f"{label}: {len(malformed)} verdicts say neither 'error' nor 'file', so they grade "
+        f"nothing and would be read as clean by the loop below: {malformed[:20]}"
+    )
 
     packages = frozenset(first_party_packages()) | {"packages", "proxyshop_support"}
     for name, entry in sorted(outcome.items()):
@@ -1060,7 +1210,10 @@ def image_import_report(label: str) -> ImportReport:
 
     broken: dict[str, str] = {}
     for repo_relative, names in sorted(wanted.items()):
-        errors = {n: outcome[n]["error"] for n in sorted(names) if "error" in outcome.get(n, {})}
+        # Direct indexing, never `.get(n, {})`: the set-equality assertion above has already
+        # proved every name is present, and a KeyError here would be a loud bug in this file
+        # rather than a silent clean bill of health for the image.
+        errors = {n: outcome[n]["error"] for n in sorted(names) if "error" in outcome[n]}
         if len(errors) == len(names):
             broken[repo_relative] = "; ".join(sorted(set(errors.values())))
     return ImportReport(label, len(wanted), broken)
@@ -1411,16 +1564,18 @@ _RECORDINGS_PROBE = (
         import json, sys
         """
     )
+    + _PROBE_CHANNEL
     + _PIP_LAYER_WALL
     + textwrap.dedent(
         """
-        print("SYSPATH " + json.dumps(sys.path))
+        _sys_path = list(sys.path)
+        _emit(sys_path=_sys_path)
         import shopify_stub.recordings as recordings
-        print("RESULT " + json.dumps({
+        _emit(sys_path=_sys_path, result={
             "module": recordings.__file__,
             "dir": str(recordings.RECORDINGS_DIR),
             "exists": recordings.RECORDINGS_DIR.is_dir(),
-        }))
+        })
         """
     )
 )
@@ -1445,24 +1600,26 @@ def test_t304_the_shopify_stub_image_resolves_its_recordings_directory() -> None
     rewriting the path expression — turns this green.
     """
     label = "services/shopify-stub/Dockerfile"
-    result = run_in_image(label, _RECORDINGS_PROBE)
+    run = run_in_image(label, _RECORDINGS_PROBE)
 
-    reported_path = _tagged(result.stdout, "SYSPATH")
-    assert reported_path is not None, (
-        f"the probe never started, so this gate measured nothing:\n{result.stderr.strip()[-1200:]}"
+    assert run.payload is not None, (
+        f"the probe never started, so this gate measured nothing:\n{run.diagnosis()}"
     )
-    assert _leaked_paths(json.loads(reported_path)) == [], (
+    assert "sys_path" in run.payload, (
+        f"the probe wrote a report with no sys.path in it, so the leak guard below has "
+        f"nothing to check:\n{run.diagnosis()}"
+    )
+    leaked = _leaked_paths(run.payload["sys_path"])
+    assert leaked == [], (
         f"the probe can see the live checkout on sys.path, so it would find the repo's "
-        f"fixtures rather than the image's: {_leaked_paths(json.loads(reported_path))}"
+        f"fixtures rather than the image's: {leaked}"
     )
 
-    raw = _tagged(result.stdout, "RESULT")
-    assert raw is not None, (
+    assert "result" in run.payload, (
         f"shopify_stub.recordings could not be imported from the container-shaped tree at "
-        f"all, so this gate is red BEFORE the lookup it exists to grade:\n"
-        f"{result.stderr.strip()[-1200:]}"
+        f"all, so this gate is red BEFORE the lookup it exists to grade:\n{run.diagnosis()}"
     )
-    payload = json.loads(raw)
+    payload = run.payload["result"]
     app = materialised_image(label).resolve()
     assert app in Path(payload["module"]).resolve().parents, (
         f"the probe imported recordings from {payload['module']}, outside the tree at {app}"
