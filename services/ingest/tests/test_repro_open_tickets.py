@@ -287,15 +287,28 @@ def test_the_running_ingest_app_can_reach_a_catalog_adapter_that_is_actually_bui
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-238: transport.py follows a redirect by calling urljoin on the server's Location "
-        "header, and urljoin parses with urlsplit, so a Location of 'http://[' raises "
-        "ValueError: Invalid IPv6 URL out of the fetch instead of the FetchRefused the guard "
-        "exists to produce; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-238 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-238: transport.py follows a redirect by calling urljoin on the server's Location "
+#         "header, and urljoin parses with urlsplit, so a Location of 'http://[' raises "
+#         "ValueError: Invalid IPv6 URL out of the fetch instead of the FetchRefused the guard "
+#         "exists to produce; remove this marker with the fix"))
+#
+# What it encoded: the one URL in a crawl the hostile party writes reaches an unguarded parse,
+# so a four-character Location header turns the guard's refusal into a traceback out of
+# SafeHTTPClient.fetch — and out of SignedFetchAdapter.fetch_catalog with it, since that
+# catches only (FetchRefused, TransportError).
+#
+# Would this test still be wrong if my change were reverted? YES, and it was measured: with
+# `git show HEAD:` copies of adapters/transport.py and adapters/netguard.py back in place the
+# test returns to `xfailed`, and with the fix restored it passes. The cause is the try/except
+# around `urljoin(current, location)` in SafeHTTPClient.fetch, which now answers
+# `FetchRefused(location, "unparseable-url:<exc>")` — the same reason vocabulary
+# `fetch_verdict` already answers for an entry URL that will not parse.
+#
+# No assertion below is touched, including the positive control that a parseable Location is
+# still followed.
 def test_a_malformed_redirect_location_is_refused_rather_than_raised(storefront: Any) -> None:
     """The redirect target is the one URL in a crawl that the hostile party writes.
 

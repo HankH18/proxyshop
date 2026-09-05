@@ -40,7 +40,7 @@ import ssl
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlunsplit
 
 from .budgets import BudgetExceeded, CrawlLedger
 from .hashing import content_hash, snapshot_ref
@@ -51,6 +51,7 @@ from .netguard import (
     fetch_verdict,
     host_matches_allowlist,
     normalise_host,
+    safe_split,
 )
 from .robots import USER_AGENT
 
@@ -328,7 +329,11 @@ class SafeHTTPClient:
         # would be the DNS-rebinding window this transport exists to close. When the caller
         # names hosts explicitly that list is used as given — including for the first hop,
         # so "fetch this URL but only if it is on host X" is expressible.
-        origin = normalise_host(urlsplit(str(url)).hostname or "")
+        # `safe_split`, not `urlsplit`: a caller can hand this method a URL that will not
+        # parse, and the refusal for one belongs to `fetch_verdict` below — which answers
+        # `unparseable-url:…` — not to a ValueError out of the allow-list derivation.
+        entry = safe_split(url)
+        origin = normalise_host((entry.hostname if entry is not None else "") or "")
         allow = list(allowed_hosts) if allowed_hosts else [origin]
 
         current = url
@@ -350,7 +355,13 @@ class SafeHTTPClient:
             book.charge_redirect(len(chain) - 1)
             book.charge_page()
 
-            split = urlsplit(current)
+            # `current` has just been through `fetch_verdict`, which refuses what will not
+            # parse, so this cannot be None today. It is still not spelled `urlsplit`: the
+            # invariant lives in another function, and a second bare parse in the fetch loop
+            # is exactly the shape of the defect this method already carries once.
+            split = safe_split(current)
+            if split is None:  # pragma: no cover - fetch_verdict refuses these first
+                raise FetchRefused(current, f"unparseable-url:{current!r}")
             path = urlunsplit(("", "", split.path or "/", split.query, ""))
             timeout = book.request_timeout()
             conn, pinned = self._open(
@@ -375,7 +386,20 @@ class SafeHTTPClient:
 
                 if status in REDIRECT_STATUSES and response_headers.get("location"):
                     response.read()  # drain so the socket closes cleanly
-                    target = urljoin(current, response_headers["location"].strip())
+                    location = response_headers["location"].strip()
+                    # The redirect target is the ONE URL in a crawl the hostile party writes,
+                    # and `urljoin` parses it with the same `urlsplit` that raises on
+                    # `http://[`. Bare, that turns this guard's refusal into a ValueError
+                    # escaping `fetch` — and `SignedFetchAdapter` catches only
+                    # (FetchRefused, TransportError), so it escapes `fetch_catalog` too,
+                    # whose contract is that it never raises for an ordinary crawl outcome.
+                    # A target that will not parse is refused in the guard's own vocabulary,
+                    # the same `unparseable-url:` reason `fetch_verdict` answers for an entry
+                    # URL. A target that DOES parse joins exactly as before.
+                    try:
+                        target = urljoin(current, location)
+                    except ValueError as exc:
+                        raise FetchRefused(location, f"unparseable-url:{exc}") from exc
                     if status == 303 or (
                         status in (301, 302) and current_method not in ("GET", "HEAD")
                     ):
