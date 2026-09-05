@@ -230,11 +230,20 @@ def domain_reason(candidate: Any, offer: Any) -> str | None:
     unlikely.
 
     What this function still owns is what "absent" means HERE. `checkout.domain` deliberately
-    leaves that to its caller, because a list-price fallback bid (R10) carries no checkout URL
-    at all and refusing it as a spoof would refuse every fallback the exchange built for
-    itself. For ranking the answer is deny: a candidate whose checkout destination cannot be
-    established is one the buyer cannot be sent to, and admitting it would put an
-    unreachable offer in a shortlist slot.
+    leaves that to its caller, because a list-price fallback bid (R10) arrived with no
+    checkout URL at all and refusing it as a spoof would have refused every fallback the
+    exchange built for itself. For ranking the answer is deny anyway: a candidate whose
+    checkout destination cannot be established is one the buyer cannot be sent to, and
+    admitting it would put an unreachable offer in a shortlist slot.
+
+    That deny is why the fallback's URL is supplied UPSTREAM rather than excused here.
+    `ranking.candidates.candidate_from_entry` now gives a fallback entry's offer the checkout
+    URL the platform's registered-domain lookup implies, before this filter ever sees the
+    candidate — so a fallback for a registered store reaches this function with a URL and is
+    judged on the same comparison as every other bid, which is what lets a silent store reach
+    the shortlist at all (R10). A fallback for a store the registry holds no domain for is
+    still completed with nothing and is still denied here, and that is the fail-closed
+    direction: no trusted domain means nothing to compare a destination against.
     """
     registered = read(candidate, "store_domain", None) or read(candidate, "domain", None)
     url = read(offer, "checkout_url", None) or read(candidate, "checkout_url", None)
