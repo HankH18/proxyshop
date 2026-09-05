@@ -206,33 +206,29 @@ def check_postgres(role: str, relation: str | None = None) -> None:
 def check_redis() -> None:
     """Redis answers PING, and this worker's index is one the server can isolate (D39).
 
-    The raw ping goes first and with its own tight timeouts, so an unreachable server fails
-    here in ``CHECK_TIMEOUT`` rather than inside
-    :func:`~proxyshop_support.redis_client.worker_redis`, whose ``CONFIG GET databases``
-    probe is allowed a longer socket timeout because it is not normally on a hot path.
+    Built through :func:`~proxyshop_support.redis_client.worker_redis` and never as a raw
+    ``redis.Redis``. That is D39, enforced by ``scripts/check_verify_contracts.py`` — which
+    caught the first draft of this function doing exactly that. The rule is about unprefixed
+    keys and a shared logical DB, and a bare ``PING`` writes no keys at all, so the first
+    draft was harmless *and* the checker was still right to refuse it: a carve-out for "this
+    particular client only reads" is precisely how the next one starts writing.
+
+    Using the required client is also the better check. ``worker_redis`` refuses, at
+    construction, a worker index the running server cannot isolate — a state in which no
+    route touching auction state can serve — so that condition is covered here for free.
+
+    Bounded without needing its own timeouts: ``worker_redis`` builds its client with
+    ``socket_connect_timeout=2.0`` and ``socket_timeout=5.0``, and the compose healthcheck's
+    own ``timeout: 5s`` is the backstop that makes a pathological hang a failure rather than
+    a container stuck in ``starting``.
     """
-    import redis as redis_module
+    from proxyshop_support.redis_client import worker_redis
 
     url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     try:
-        client = redis_module.Redis.from_url(
-            url,
-            socket_connect_timeout=CHECK_TIMEOUT,
-            socket_timeout=CHECK_TIMEOUT,
-        )
-        client.ping()
+        worker_redis(url).ping()
     except Exception as exc:  # noqa: BLE001 - every redis failure is "not ready"
         raise NotReady(f"redis at {url} did not answer PING: {exc}") from exc
-
-    # Reachability is proven; this is now a fast local question. It is part of readiness
-    # because `worker_redis` RAISES on an un-isolatable index, so a service in that state
-    # cannot serve a single request that touches auction state.
-    from proxyshop_support.redis_client import worker_redis
-
-    try:
-        worker_redis(url)
-    except Exception as exc:  # noqa: BLE001
-        raise NotReady(f"redis at {url} cannot isolate this worker: {exc}") from exc
 
 
 def check_neo4j() -> None:
@@ -347,7 +343,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(sys.argv[1:] if argv is None else argv))
 
     if args.subcommand == "serve":
-        command = [token for token in args.command if token != "--"]
+        # Strip only the LEADING `--` separator argparse leaves on a REMAINDER. Dropping
+        # every `--` would eat one the service itself meant to pass through to its own
+        # argument parser.
+        command = list(args.command)
+        if command and command[0] == "--":
+            command = command[1:]
         return serve(command)
 
     try:
