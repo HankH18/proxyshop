@@ -707,3 +707,196 @@ def test_t312_ingest_serves_exactly_the_operations_its_contract_publishes() -> N
         f"{_operation_divergence(served, published)}; mounted routers: "
         f"{getattr(app.state, 'mounted_routers', 'unknown')}"
     )
+
+
+# =============================================================================================
+# T-254 — the DESIGN Claim projection is defined and never produced
+# =============================================================================================
+#
+# The gate is the same shape as T-236's and for the same reason: the question is whether a
+# capability the design names is performed by anything the service runs, and that is a
+# reachability question, not a behaviour one. `ExtractedClaim.as_claim()` returns DESIGN's
+# `Claim{key, value, provenance}` — the projection T-021's objective "decompose to atomic
+# Claims" names — and nothing calls it. Its sibling `as_attribute()` IS called, from
+# `extraction/pipeline.py`, and reaches the graph. So ingestion writes AttributeValues and the
+# Claim projection exists only as a definition.
+#
+# `as_attribute` is what arms this: pointed at it, the scan finds a call in an app-reachable
+# module, so an empty result for `as_claim` means "nothing produces it" rather than "the
+# scanner can no longer see method calls".
+
+#: The projection under test, and the wired sibling that serves as the scanner's control.
+_CLAIM_PROJECTION = "as_claim"
+_ATTRIBUTE_PROJECTION = "as_attribute"
+
+
+def _method_calls(path: Path, name: str) -> list[int]:
+    """Line numbers in ``path`` at which ``.<name>(...)`` is CALLED.
+
+    A ``def`` is not a ``Call``, so the definition never counts as its own caller — which is
+    the entire distinction this ticket turns on. Attribute calls only: the projections are
+    methods, and a bare ``as_claim(...)`` would be a different function.
+    """
+    with warnings.catch_warnings():
+        # Compiling someone else's source re-emits its SyntaxWarnings against this test.
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == name
+    )
+
+
+def _app_reachable_ingest_sources() -> list[Path]:
+    """Every ``services/ingest/src`` file that building the real app pulls in.
+
+    Measured in a subprocess by :func:`_modules_imported_by_the_app` and re-checked against
+    :data:`REPO_ROOT` here, because this venv's ``site-packages/_proxyshop.pth`` puts a
+    checkout root on ``sys.path`` for every process that uses it — a probe that trusts the
+    resolution it happens to get can measure a different tree than the one under test.
+    """
+    reachable: list[Path] = []
+    for name, filename in sorted(_modules_imported_by_the_app().items()):
+        if not filename:
+            continue
+        resolved = Path(filename).resolve()
+        assert REPO_ROOT in resolved.parents, (
+            f"{name} resolved to {resolved}, which is outside the tree under test "
+            f"({REPO_ROOT}) — the probe measured the wrong checkout"
+        )
+        if INGEST_SRC in resolved.parents:
+            reachable.append(resolved)
+    return reachable
+
+
+def _an_extracted_claim() -> Any:
+    """One valid ``ExtractedClaim``, built the way extraction builds them.
+
+    Imported inside the function rather than at this file's head, the way the T-312 helpers
+    below do it, so no import has to be added to the frozen import block (E402).
+    """
+    from ingest.extraction.claims import ClaimProvenance, ExtractedClaim  # noqa: PLC0415
+
+    return ExtractedClaim(
+        key="shipping.dispatch_window_days",
+        value=2,
+        claim_type="shipping_window",
+        confidence=0.9,
+        provenance=ClaimProvenance(
+            source="scraped",
+            ref="snapshot://store-one.example.com/policies/shipping@sha256:0f1e2d3c",
+            observed_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+
+def test_t254_the_claim_projection_sweep_is_armed() -> None:
+    """Not xfail, and not optional: the T-254 gate below is worthless without this.
+
+    Four ways that gate could pass — or fail — while measuring nothing, all closed here:
+
+    * the app imports no ingest source at all, so the scan iterates zero files and an empty
+      result says nothing (three sweeps in this repo were found going QUIET rather than red);
+    * ``ingest.extraction.claims``, the module that DEFINES the projection, is not among the
+      files scanned, so "is it produced" is being asked of a service that does not have it;
+    * the scanner stops seeing method calls for structural reasons — a changed ``ast``, a
+      renamed method — so a wired projection and an unwired one look identical. Closed by
+      pointing the scanner at ``as_attribute``, which IS called from an app-reachable module;
+    * the projection is broken rather than merely unwired, which would make the gate below
+      red for a reason the ticket is not about. Closed by calling it and checking its shape.
+
+    The last check is also where DESIGN's ``Claim{key, value, provenance}`` is pinned: exactly
+    those three keys and nothing else, which is what makes it a *projection* rather than a
+    second serialisation of the whole record.
+    """
+    sources = _app_reachable_ingest_sources()
+    assert sources, "the app imported no ingest source at all; the sweep would be blind"
+
+    claims_module = INGEST_SRC / "extraction/claims.py"
+    assert claims_module in sources, (
+        f"{claims_module} is not reachable from the running app, so this sweep cannot say "
+        f"anything about whether its projection is produced; reachable: "
+        f"{[str(p.relative_to(REPO_ROOT)) for p in sources]}"
+    )
+    assert _method_calls(claims_module, _CLAIM_PROJECTION) == [], (
+        "the projection's own module calls it, which would make the gate below pass without "
+        "the projection ever leaving this file — the finding is about production, not recursion"
+    )
+
+    sibling = {
+        str(path.relative_to(REPO_ROOT)): lines
+        for path in sources
+        if (lines := _method_calls(path, _ATTRIBUTE_PROJECTION))
+    }
+    assert sibling, (
+        f"the scan cannot find a call to the wired sibling {_ATTRIBUTE_PROJECTION}() either, "
+        f"so it is broken rather than measuring anything about {_CLAIM_PROJECTION}(); "
+        f"scanned {len(sources)} app-reachable ingest module(s)"
+    )
+
+    claim = _an_extracted_claim()
+    projection = claim.as_claim()
+    assert projection == {
+        "key": "shipping.dispatch_window_days",
+        "value": 2,
+        "provenance": claim.provenance,
+    }, projection
+    assert set(projection) == {"key", "value", "provenance"}, (
+        f"DESIGN's Claim is {{key, value, provenance}} and nothing else; got {sorted(projection)}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-254: ExtractedClaim.as_claim() — DESIGN's Claim{key, value, provenance}, the "
+        "projection T-021's objective 'decompose to atomic Claims' names — is called by "
+        "nothing the running ingest service imports, while its sibling as_attribute() is "
+        "called from extraction/pipeline.py and reaches the graph; so ingestion writes "
+        "AttributeValues and the Claim projection is defined but never produced; remove this "
+        "marker with the fix"
+    ),
+)
+def test_t254_the_claim_projection_is_produced_by_the_running_service() -> None:
+    """An objective's wiring, not its definition. T-021 said "decompose to atomic Claims".
+
+    ``ExtractedClaim`` carries two projections of the same reading. ``as_attribute()`` becomes
+    the ``AttributeValue`` node a policy page ``STATES``, and it is wired:
+    ``extraction/pipeline.py`` calls it when building the upsert batch, so every claim that
+    clears C10's floor reaches the graph in that shape. ``as_claim()`` becomes DESIGN's
+    ``Claim{key, value, provenance}`` — the shape that crosses a wire or a function boundary,
+    the one T-021's objective names — and it is called by nothing at all.
+
+    That is not a style observation. The two shapes carry different things: an
+    ``AttributeValue`` keeps the typed value and drops the provenance into a ``SUPPORTED_BY``
+    edge, while a ``Claim`` carries the provenance *inline*, which is what lets a downstream
+    consumer hold one fact and its evidence together without a graph round trip. A service
+    that only ever produces the first has implemented half the decomposition.
+
+    Note what this does NOT require. It does not name a caller, a module, or a shape for the
+    fix: the extraction route can build its response on the projection instead of hand-rolling
+    the same three fields; the pipeline can emit Claims beside AttributeValues; a new consumer
+    can produce them. Any of those passes. What is refused is only the current state, in which
+    the projection is defined, exported through no public surface, called by nothing, and
+    therefore free to be wrong without anything noticing.
+
+    The module list is measured in a subprocess and every file in it is checked to be inside
+    this tree, so a stale ``.pth`` cannot answer the question with another checkout's code.
+    """
+    sources = _app_reachable_ingest_sources()
+    produced = {
+        str(path.relative_to(REPO_ROOT)): lines
+        for path in sources
+        if (lines := _method_calls(path, _CLAIM_PROJECTION))
+    }
+
+    assert produced, (
+        f"no module the ingest app imports calls {_CLAIM_PROJECTION}(), so the DESIGN Claim "
+        f"projection is never produced by the running service; its wired sibling "
+        f"{_ATTRIBUTE_PROJECTION}() is called from "
+        f"{sorted(str(p.relative_to(REPO_ROOT)) for p in sources if _method_calls(p, _ATTRIBUTE_PROJECTION))}"
+        f", and {len(sources)} app-reachable ingest module(s) were scanned"
+    )
