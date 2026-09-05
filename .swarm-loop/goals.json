@@ -1,6 +1,6 @@
 {
   "frozen": true,
-  "frozen_at": "2026-09-04T20:23:36",
+  "frozen_at": "2026-09-04T20:53:54",
   "metrics": [
     {
       "id": "acceptance_pass_rate",
@@ -132,7 +132,7 @@
       "timeout": 2400
     }
   ],
-  "amendments": 22,
-  "last_amended_at": "2026-09-04T20:23:36",
-  "last_amend_reason": "ESC-013 approved class, tickets.json verify fields ONLY, 130 tickets. Amendment 47 moved every gate off PROXYSHOP_WORKER=0 (reserved for the scored measurement) and parked all 130 on worker 15, trading a collision with the measurement for a collision among the gates: worker index is the SOLE isolation key for Postgres (proxyshop_w<N>) and Redis (logical DB N), and conftest TRUNCATEs and FLUSHDBs before and after every test, so two lanes verifying different tickets concurrently corrupt each other. Measured earlier this run: two identical runs sharing one index gave 13 failed/107 and 12 failed/108 where solo gave 120/120. Each gate now reads PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-N} with N = 1 + crc32(ticket id) mod 15, spread 5-14 tickets per slot over 1..15, never 0. A lane sets PROXYSHOP_GATE_WORKER to take an exclusive slot. The separate override name is load-bearing: an ambient PROXYSHOP_WORKER=0 cannot leak into a gate, which ${PROXYSHOP_WORKER:-15} would have allowed since 0 is neither unset nor empty."
+  "amendments": 23,
+  "last_amended_at": "2026-09-04T20:53:54",
+  "last_amend_reason": "ESC-013 approved class, tickets.json verify fields ONLY, 4 tickets. T-160, T-210, T-242 and T-262 each carried the findings placeholder (false # NO GATE YET) and now point at the real gates merged at e603441. T-160 -> proxyshop_support/tests/test_repro_open_tickets.py -k t160; T-210 -> same file -k t210; T-262 -> proxyshop_support/tests/test_repro_ticket_graph.py -k t262; T-242 -> services/sim/tests/test_repro_open_tickets.py -k t242. Worker slots follow amendment 22 exactly: PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-N}, N = 1 + crc32(ticket id) mod 15, giving 8, 9, 7 and 1. All four measured RED verbatim from the field after the edit: 1 failed, 1 passed each (the passing one is the non-xfail arming companion the -k selector also picks up), so red-check reads red rather than exit 5 or deselected. Diff is 4 insertions / 4 deletions with an EMPTY non-verify changed-line set. NOTE THE REFLEXIVE CASE, which is why this amendment is worth reading twice: T-160 and T-262 GRADE tickets.json, so this edit changes the file they measure. Both were re-measured after it and both stayed red on unchanged populations - T-160 on the same 9 (T-000, T-010, T-111, T-112, T-118, T-122, T-123, T-129, T-133), T-262 on the same 4 (T-087, T-228, T-130, T-134). The four tickets themselves stay OPEN: these are gates, not fixes, and the defects each describes are live. Placeholder count falls 153 -> 149."
 }

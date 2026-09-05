@@ -2916,7 +2916,7 @@
     {
       "id": "T-160",
       "title": "These three tickets' recorded `verify` commands pass IDENTICALLY with and without their defect, which is the precise mechanism by which all three were reported closed twice while the defects stayed live. red-check measured it this cycle: T-111's `./scripts/bootstrap.sh && ./scripts/verify.sh check` and T-123's `bootstrap.sh && pytest packages/llm && python -c 'import contracts, llm, trust'` both exit 0 with nothing implemented (3046 and 210 tests selected), and T-109's `pytest apps/trust -q && pytest proxyshop_support -q` was green on the parent commit. A ticket whose gate cannot distinguish the two states must not be closable on that gate. Companion to T-159 (except-ImportError vacuity) \u2014 same class, different mechanism. The lane has now written real gates; the graph's verify strings should be repaired to point at them.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-8} uv run python -m pytest proxyshop_support/tests/test_repro_open_tickets.py -q --runxfail -k t160",
       "scope": [
         "tickets.json (T-109, T-111, T-123 verify fields)"
       ],
@@ -3766,7 +3766,7 @@
     {
       "id": "T-210",
       "title": "TWO CORRECTIONS, ONE OF THEM TO MY OWN ASSERTION. (1) I claimed the chflags window could corrupt a metric read. THAT IS WRONG, measured: a pytest run is IMMUNE to the hidden window because pytest's `pythonpath` ini re-adds .pkgroot \u2014 `pytest packages/llm` -> 210 passed, `mypy` -> Success, and `make demo-seed`'s child -> OK, all INSIDE the open window. So T-174 does not explain a false build_succeeds zero through `make verify`; it breaks service entry points and bare imports only. That immunity is also why it survived six cycles with nothing going red. My T-174 record should be read with this correction attached. (2) The real cause stands and is NOT fixed: a Neo4jLockTimeout is still a non-zero `make verify`, so build_succeeds is STILL recorded 0 for a machine condition. Lowering the lock 600->240 makes that zero diagnosable and correctly attributed; it does not stop it happening, and it converts waits of 241-295s from success into failure. The cure is scheduler-level and therefore MINE: never run a measurement concurrently with a lane that touches the graph, or measure in a quiesced tree. The repo's own doctrine rules out the obvious alternative \u2014 skipping instead of failing would be invisible in the metrics.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-9} uv run python -m pytest proxyshop_support/tests/test_repro_open_tickets.py -q --runxfail -k t210",
       "scope": [
         "ORCHESTRATION \u2014 measuring while the swarm runs (supersedes my T-174 rationale)"
       ],
@@ -4268,7 +4268,7 @@
     {
       "id": "T-242",
       "title": "THE SIMULATION VALIDATES ONLY HALF ITS OWN LEDGER, AND THE HALF IT SKIPS CONTAINS THE EXACT DEFECT CLASS THE SIM EXISTS TO CATCH. runner.py:727 validates raw_events only, fed solely from the accept path (runner.py:661). The auction state machine writes to a SEPARATE ledger_sink (runner.py:559-560) that is never read and never validated. Running validate_ledger_payload over that sink (36 events in a default run) yields FOUR unreported deviations: auction_opened missing roster_size, auction_closed missing shortlist_size, and accepted missing checkout_token and offer. The true deviation count is 7, not the 3 the sim reports. CRITICALLY: 'accepted' is emitted CORRECTLY on the accept path and INCORRECTLY on the auction path IN THE SAME RUN \u2014 the identical one-kind-two-bodies defect the sim successfully catches for code_created (T-235). Its own test test_no_kind_other_than_code_created_deviates_from_its_published_payload passes ONLY because the stream it inspects excludes the sink; folding ledger_sink.events in turns it red immediately.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-1} uv run python -m pytest services/sim/tests/test_repro_open_tickets.py -q --runxfail -k t242",
       "scope": [
         "services/sim/src/runner.py"
       ],
@@ -4568,7 +4568,7 @@
     {
       "id": "T-262",
       "title": "T-087's GATE NAMES A FILE ITS OWN SCOPE FORBIDS IT TO CREATE, and that file sits inside a DIFFERENT ticket's scope. T-087.verify is 'pytest docs/tests/test_runbook.py -q'; T-087.scope is ['docs/demo/shopify-onboarding-extension.md'], which does not contain that path. Meanwhile T-085.scope is ['docs/demo/starting-slice.md', 'docs/tests/**'], which does. So the file that grades T-087 is owned by T-085. Consequence, reproduced live this cycle: the lane building T-082/T-085 wrote a 16,651-byte docs/tests/test_runbook.py inside its granted scope, which would have made T-087's gate satisfiable by a test T-087's lane never wrote -- the answer-key problem inverted, a third party writing the key and T-087 inheriting an unearned green. The lane was redirected and the file removed before it committed. The repair is a scope amendment: either narrow T-085's docs/tests/** glob or widen T-087's scope to include the file its gate runs. Until then T-087 is unbuildable by its own lane, because it cannot create its own grader. NOTE this is a SCOPE-field change and is NOT in the pre-approved verify-field amendment class, so it needs its own authorization.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} uv run python -m pytest proxyshop_support/tests/test_repro_ticket_graph.py -q --runxfail -k t262",
       "scope": [
         "tickets.json:T-087"
       ],
