@@ -11,7 +11,7 @@
  *     shortlist is empty instead of showing them a blank page.
  *   * `POST /buyer/shortlist/render`       — the provenance labels for each slot.
  *
- * Three things here are load-bearing rather than decorative:
+ * Four things here are load-bearing rather than decorative:
  *
  * 1. **Every response is validated at runtime.** A JSON body is `unknown` however the types
  *    are written, and a screen whose whole claim is "this came from the service" cannot
@@ -25,6 +25,12 @@
  *    `"accept failed: HTTP 503"` — the status but not the reason. This wrapper reads a
  *    non-OK body off a *clone*, so the module still gets an unread stream, and the shell can
  *    show the buyer what the service actually said instead of a bare number.
+ * 4. **The price join is a lookup, never a calculation.** The exchange's shortlist slot
+ *    carries no price at all. The price for that slot's store is in the SAME response, in
+ *    `entries[]`, so `entryForSlot` takes the store id off the slot's own `bid_ref` — which
+ *    the exchange minted as `{auction_id}:{store_id}` — and looks the entry up by it.
+ *    Nothing here adds, converts, rounds or currency-formats a number, and a slot with no
+ *    matching entry gets no price rather than a zero.
  *
  * Nothing in this module builds a checkout URL, and `discountCodeFrom` reads a query
  * parameter off a URL the exchange minted rather than reconstructing one. R3.
@@ -128,20 +134,56 @@ export interface Denial {
 export interface RankedBid {
   readonly bid_ref: string
   readonly store_id: string
-  readonly rank_score: number
+  /**
+   * `undefined` when the row carried no readable score — NOT `0`.
+   *
+   * A defaulted zero would print on the page as "rank_score 0", which reads as the exchange
+   * having scored this candidate at the bottom rather than as this client not having found a
+   * number. The two are different claims and only one of them is the service's.
+   */
+  readonly rank_score?: number
+  /**
+   * The published components. Numbers only, which loses nothing in practice and is stated
+   * here rather than assumed: `apps/exchange/src/auction/routes.py::_ranked_out` builds this
+   * map as `{str(k): float(v) for k, v in ...}`, so every value the exchange publishes is
+   * already a float. A value that is not a finite number therefore did not come from the
+   * exchange, and is not shown.
+   */
   readonly components: Readonly<Record<string, number>>
 }
+
+/**
+ * Whether the exchange still holds this auction's shortlist.
+ *
+ * `'live'` and `'forgotten'` are two different facts and this module refuses to collapse
+ * them, because the page built on it would then tell a buyer the wrong one:
+ *
+ * * `'live'` — the service answered with a shortlist object. It may carry zero slots, and
+ *   zero slots is a real answer about the MARKET: nothing was eligible.
+ * * `'forgotten'` — the service answered `shortlist: null`. That is an answer about the
+ *   EXCHANGE, not the market: `buyer_svc/auctions/routes.py` writes
+ *   `shortlist=dict(shortlist) if shortlist is not None else None`, and the exchange returns
+ *   nothing once its 15-minute TTL has taken the auction away. The recorded diagnostics are
+ *   still there; the live shortlist is not.
+ *
+ * A body carrying no `shortlist` key at all is neither: that is a malformed answer and it
+ * throws. An ABSENT field and an explicit `null` are not the same claim, and reading a
+ * missing key as "the exchange forgot it" would invent a reason the service never gave.
+ */
+export type ShortlistLiveness = 'live' | 'forgotten'
 
 /** What `GET /buyer/auctions/{auction_id}` answers. */
 export interface AuctionRecord {
   readonly auction_id: string
   /**
    * The live shortlist EXACTLY as the service sent it, forwarded to `/render` untouched.
-   * See this module's docstring for why it is not re-typed on the way through.
+   * See this module's docstring for why it is not re-typed on the way through. `null` when
+   * `liveness` is `'forgotten'` — there is no shortlist to forward, and an empty one is not
+   * a stand-in for a missing one.
    */
   readonly shortlist: unknown
-  /** How many slots that shortlist carries. Zero is the case `WhyEmpty` exists for. */
-  readonly slot_count: number
+  /** Whether the shortlist above is a live answer or the absence of one. */
+  readonly liveness: ShortlistLiveness
   readonly entries: readonly AuctionEntry[]
   readonly excluded: readonly ExcludedBid[]
   readonly denied: readonly Denial[]
@@ -178,9 +220,14 @@ export interface RenderedSlot extends ShortlistSlot {
   readonly store_domain: string
 }
 
-/** What the service answered with when it refused. Kept so the buyer sees its words. */
+/**
+ * What the service answered with when it refused. Kept so the buyer sees its words.
+ *
+ * There is no `path` field. The reused modules already throw messages that name the
+ * operation — `"accept failed: HTTP 503"`, `"load auction failed: HTTP 404"` — and `explain`
+ * joins the detail onto that, so a recorded path was a field nothing on the page ever read.
+ */
 export interface FailureRecord {
-  readonly path: string
   readonly status: number
   /** The service's own message, or `''` when it sent nothing readable. */
   readonly detail: string
@@ -302,7 +349,7 @@ export function instrumentFetcher(inner: Fetcher): InstrumentedFetcher {
       } catch {
         body = ''
       }
-      seen = { path: input, status: response.status, detail: detailFromBody(body) }
+      seen = { status: response.status, detail: detailFromBody(body) }
     }
     return response
   }
@@ -382,9 +429,74 @@ export function readRanked(value: unknown): readonly RankedBid[] {
     .map((row) => ({
       bid_ref: asString(row.bid_ref),
       store_id: asString(row.store_id),
-      rank_score: asFiniteNumber(row.rank_score, 0),
+      rank_score:
+        typeof row.rank_score === 'number' && Number.isFinite(row.rank_score)
+          ? row.rank_score
+          : undefined,
       components: asNumberMap(row.components),
     }))
+}
+
+/**
+ * The store id inside a bid ref, or `undefined` when this ref is not one this auction minted.
+ *
+ * The exchange mints the ref itself, as `f"{auction_id}:{store_id}"` — measured in
+ * `apps/exchange/src/ranking/candidates.py::mint_bid_id`, which is the only place a bid ref
+ * is ever built. So the store id is exactly what follows this auction's id and its colon.
+ *
+ * Matched as a PREFIX against the auction id the page is showing rather than split on the
+ * first `:`, because a split is a guess and a prefix match is a fact: nothing forbids a
+ * colon inside an auction id, and a ref this auction did not mint has no store id this page
+ * may attribute. Such a ref answers `undefined`, and the caller says so on the page instead
+ * of pinning someone else's number to a slot.
+ */
+export function storeIdFromBidRef(bidRef: unknown, auctionId: string): string | undefined {
+  if (!isNonEmptyString(bidRef) || !isNonEmptyString(auctionId)) return undefined
+  const prefix = `${auctionId}:`
+  if (!bidRef.startsWith(prefix)) return undefined
+  const storeId = bidRef.slice(prefix.length)
+  return storeId === '' ? undefined : storeId
+}
+
+/**
+ * What the exchange's own report of this auction says the slot's store bid, or `undefined`.
+ *
+ * The shortlist slot carries NO price — measured, and stated on the page as a gap. The price
+ * is in the same `GET /buyer/auctions/{auction_id}` body, one level up, in `entries[]` keyed
+ * by `store_id`. This is that join and nothing more: no arithmetic, no currency, no default.
+ * A slot whose store is in no entry answers `undefined`.
+ */
+export function entryForSlot(
+  record: Pick<AuctionRecord, 'auction_id' | 'entries'>,
+  bidRef: unknown,
+): AuctionEntry | undefined {
+  const storeId = storeIdFromBidRef(bidRef, record.auction_id)
+  if (storeId === undefined) return undefined
+  return record.entries.find((entry) => entry.store_id === storeId)
+}
+
+/** The published ranking row for one bid ref, or `undefined` when the ranking has none. */
+export function rankedForSlot(
+  record: Pick<AuctionRecord, 'ranked'>,
+  bidRef: unknown,
+): RankedBid | undefined {
+  if (!isNonEmptyString(bidRef)) return undefined
+  return record.ranked.find((row) => row.bid_ref === bidRef)
+}
+
+/**
+ * One ranked row's components, spelled with the keys and numbers the exchange published.
+ *
+ * The five keys are the exchange's own (`contracts.ranking.RANK_FEATURES`) and are never
+ * spelled here, so a build that publishes a sixth term shows a sixth term rather than
+ * swallowing it. What this cannot show is a component whose value is not a finite number —
+ * `RankedBid.components` is a number map — and that is safe rather than lossy for the reason
+ * given on that field: the exchange floats every value before it publishes it.
+ */
+export function describeComponents(components: Readonly<Record<string, number>>): string {
+  const entries = Object.entries(components)
+  if (entries.length === 0) return 'the exchange published no components'
+  return entries.map(([key, value]) => `${key}=${value}`).join(' ')
 }
 
 /**
@@ -437,9 +549,14 @@ export function auctionPath(auctionId: string): string {
 /**
  * The live shortlist plus the diagnostics the exchange published exactly once.
  *
- * A non-OK status is thrown as an `HttpFailure` naming it. A 200 whose body has no shortlist
- * is thrown too: a screen that quietly rendered "no options" for a malformed answer would be
- * telling the buyer something about the market that it does not know.
+ * A non-OK status is thrown as an `HttpFailure` naming it. A 200 whose body has no
+ * `shortlist` KEY is thrown too: a screen that quietly rendered "no options" for a malformed
+ * answer would be telling the buyer something about the market that it does not know.
+ *
+ * An explicit `shortlist: null` is NOT malformed and does not throw. It is the service
+ * saying the exchange no longer holds this auction while the recorded diagnostics survive —
+ * see `ShortlistLiveness`. Three outcomes, kept apart: a shortlist, no shortlist, and a body
+ * this screen cannot read.
  */
 export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<AuctionRecord> {
   const wanted = auctionId.trim()
@@ -455,7 +572,10 @@ export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<
     throw new MalformedResponseError('load auction', 'the body was not an object')
   }
   const shortlist = payload.shortlist
-  if (!isRecord(shortlist) || !Array.isArray(shortlist.slots)) {
+  // `null` only — not `undefined`. `'shortlist' in payload` is what tells an answer that
+  // said "there is none" from an answer that failed to mention it at all.
+  const forgotten = shortlist === null && 'shortlist' in payload
+  if (!forgotten && (!isRecord(shortlist) || !Array.isArray(shortlist.slots))) {
     throw new MalformedResponseError(
       'load auction',
       'it carried no shortlist with a slots array',
@@ -464,7 +584,7 @@ export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<
   return {
     auction_id: isNonEmptyString(payload.auction_id) ? payload.auction_id : wanted,
     shortlist,
-    slot_count: shortlist.slots.length,
+    liveness: forgotten ? 'forgotten' : 'live',
     entries: readEntries(payload.entries),
     excluded: readExcluded(payload.excluded),
     denied: readDenied(payload.denied),

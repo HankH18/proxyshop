@@ -23,25 +23,61 @@ import { NO_RESPONSE_REASON, type AuctionRecord } from './wire'
 
 export interface WhyEmptyProps {
   readonly record: AuctionRecord
+  /**
+   * True when the exchange no longer holds this auction (`shortlist: null`), so none of what
+   * follows is live.
+   *
+   * The rows are identical either way — they are the same recorded diagnostics — but the
+   * CLAIM around them is not. "Why there is nothing here to choose from" says something
+   * about the market; "what the exchange reported when this auction ran" says something
+   * about a window that has closed. Presenting the second as the first would tell a buyer
+   * that no store was eligible when the truth is that nobody asked recently enough.
+   */
+  readonly recorded?: boolean
 }
 
+/**
+ * The prices on one entry, printed as they arrived, or the fact that it carried none.
+ *
+ * `''` would render an empty span, and a blank beside a store's name reads as a price of
+ * nothing rather than as no price reported. The numbers themselves are never touched: no
+ * rounding, no currency symbol, because the exchange's report carries neither.
+ */
 function priceLine(unit?: number, total?: number): string {
   const parts: string[] = []
   if (unit !== undefined) parts.push(`unit ${unit}`)
   if (total !== undefined) parts.push(`total ${total}`)
-  return parts.join(', ')
+  return parts.length === 0 ? 'no price reported' : parts.join(', ')
 }
 
-export function WhyEmpty({ record }: WhyEmptyProps) {
+export function WhyEmpty({ record, recorded = false }: WhyEmptyProps) {
   const silent = record.entries.filter((entry) => entry.fallback_reason === NO_RESPONSE_REASON)
+  // The accessible name and the visible heading are two different strings on purpose, and
+  // they were before this prop existed: the name says which panel this is, the heading says
+  // what it answers. Both change with `recorded`, because both make a claim.
+  const label = recorded
+    ? 'What the exchange reported when this auction ran'
+    : 'Why the shortlist is empty'
+  const heading = recorded
+    ? 'What the exchange reported when this auction ran'
+    : 'Why there is nothing here to choose from'
 
   return (
-    <section aria-label="Why the shortlist is empty" className="diagnostics">
-      <h3>Why there is nothing here to choose from</h3>
-      <p>
-        The auction ran. Below is the exchange&rsquo;s own report of it, printed as it sent it.
-        Nothing on this panel was filled in by this page.
-      </p>
+    <section aria-label={label} className="diagnostics">
+      <h3>{heading}</h3>
+      {recorded ? (
+        <p data-testid="recorded-not-live">
+          None of this is live. The exchange has since forgotten the auction, so what follows
+          is the report the buyer service kept from when it ran &mdash; printed as the
+          exchange sent it then. Nothing on this panel was filled in by this page, and nothing
+          on it can be accepted now.
+        </p>
+      ) : (
+        <p>
+          The auction ran. Below is the exchange&rsquo;s own report of it, printed as it sent
+          it. Nothing on this panel was filled in by this page.
+        </p>
+      )}
 
       <h4 id="why-solicited">Stores the exchange asked ({record.solicited.length})</h4>
       {record.solicited.length === 0 ? (

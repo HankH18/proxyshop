@@ -6,10 +6,14 @@
  * to render anything else, and a test that reached a real service could not tell the two
  * apart when the service was down.
  *
- * The bodies below are shaped like the measured ones — `entries` with `fallback_reason`,
- * `excluded` with several `exclusion_reasons`, the exchange's permalink with its minted
- * `?discount=` code — because the assertions are about the shell surfacing those fields
- * verbatim, and a body invented without them would assert nothing.
+ * The bodies below are not shaped like the measured ones, they ARE the measured ones. Every
+ * store id is one of the three in `apps/buyer/devstack/demo-market.json`; every exclusion
+ * reason begins with a prefix from `apps/exchange/src/ranking/reasons.py` and carries the
+ * detail that filter actually formats after it; every `components` key is one of
+ * `contracts.ranking.RANK_FEATURES`; the denial reason is what `exchange.eligibility` writes
+ * and `orchestration.solicitation._denial` prefixes. A fixture that invents the shape of the
+ * thing it tests tests nothing — the assertions here are that the shell surfaces these
+ * fields verbatim, and a made-up field cannot be surfaced verbatim.
  *
  * Interaction is driven with `fireEvent` rather than `user-event`, which this workspace does
  * not carry — same as `intent/intent-confirm.test.tsx` and `shortlist/shortlist.test.tsx`.
@@ -28,15 +32,19 @@ import {
   RENDER_PATH,
   auctionPath,
   confirmWithProfile,
+  describeComponents,
   describeTrust,
   detailFromBody,
   discountCodeFrom,
+  entryForSlot,
   explain,
   instrumentFetcher,
   loadAuction,
   mintPseudonym,
   permalinkHost,
+  rankedForSlot,
   renderShortlist,
+  storeIdFromBidRef,
   type Fetcher,
 } from './wire'
 
@@ -45,8 +53,15 @@ import {
 afterEach(cleanup)
 
 const AUCTION_ID = 'auc-demo-1'
+// `{auction_id}:{store_id}`, because that is literally what the exchange mints:
+// `apps/exchange/src/ranking/candidates.py::mint_bid_id` is `f"{auction_id}:{store_id}"`.
+// The price join in `wire.ts` reads the store id back out of it, so the two spellings below
+// are the one fact the join depends on and are written out rather than concatenated.
 const BID_REF = 'auc-demo-1:demo-woolworks'
+const FASTFLEECE_BID_REF = 'auc-demo-1:demo-fastfleece'
 const PERMALINK = 'https://demo-woolworks.example.com/cart/1:1?discount=PSX-MC4DM9A1'
+const CREATED_AT = '2026-09-05T00:00:00Z'
+const RECORDED_AT = '2026-09-05T00:00:01Z'
 
 const INTENT: Intent = {
   intent_id: 'int-demo-1',
@@ -63,9 +78,11 @@ const INTENT: Intent = {
 const RAW_SLOT = {
   slot: 'fit',
   bid_ref: BID_REF,
-  fit_score: 0.88,
+  fit_score: 0.564,
   provenance_labels: ['store-confirmed'],
-  trust_summary: { score: 0.7, confidence: 0.4 },
+  // MEASURED off the running exchange, and demo-woolworks' own `trust.score` in the market
+  // file is the 0.82. There is no `confidence` field on a trust summary.
+  trust_summary: { store_id: 'demo-woolworks', available: true, score: 0.82 },
   // The decoy the acceptance fixture ships: a slot may carry one and the buyer never
   // follows it. It is here so the "no href before accept" assertion has something to catch.
   checkout_url: 'https://evil.example.com/cart/hijack',
@@ -76,7 +93,7 @@ const RENDERED_SLOT = {
   slot: 'fit',
   bid_ref: BID_REF,
   auction_id: AUCTION_ID,
-  fit_score: 0.88,
+  fit_score: 0.564,
   provenance_labels: ['store-confirmed'],
   labels_source: 'exchange',
   // MEASURED off the running exchange: two of these three are not numbers, and
@@ -85,6 +102,10 @@ const RENDERED_SLOT = {
   store_domain: '',
 }
 
+// The two stores that were solicited, with the prices `apps/buyer/devstack/demo-market.json`
+// gives them. demo-woolworks bids its catalogue price; demo-fastfleece's agent does not
+// answer, so the exchange represents it at its own list price and says `no_response` — which
+// is the one `fallback_reason` `wire.ts` recognises by name.
 const ENTRIES = [
   {
     store_id: 'demo-woolworks',
@@ -95,51 +116,77 @@ const ENTRIES = [
     fallback_reason: null,
   },
   {
-    store_id: 'demo-slowreply',
-    tier: 2,
+    store_id: 'demo-fastfleece',
+    tier: 1,
     fallback: true,
-    unit_price: 95.0,
-    total_price: 95.0,
+    unit_price: 45.0,
+    total_price: 45.0,
     fallback_reason: 'no_response',
   },
 ]
 
+// demo-fastfleece earns both, and both are real. `blacklisted_store` is
+// `ranking/filters.py`'s own f-string for a store the trust snapshot blacklists (R12) — the
+// market file marks this one `"blacklisted": true`. `hard_constraint_unsatisfied` is
+// `hard_constraint_reasons` wrapped around `HardCriterion.decide`'s verdict, measured by
+// running that criterion against a fleece attribute. There is no `price_over_budget` prefix
+// on this exchange; `EXCLUSION_REASON_PREFIXES` names the eight that exist and that is not
+// one of them.
 const EXCLUDED = [
   {
-    bid_ref: 'auc-demo-1:demo-slowreply',
-    store_id: 'demo-slowreply',
+    bid_ref: FASTFLEECE_BID_REF,
+    store_id: 'demo-fastfleece',
     exclusion_reasons: [
-      "hard_constraint_unsatisfied: material is not 'merino-wool'",
-      'price_over_budget: 95.0 is above 80.0',
+      "blacklisted_store: 'demo-fastfleece' is blacklisted and may not participate (R12)",
+      "hard_constraint_unsatisfied: 'material' eq 'merino-wool' is not satisfied by " +
+        "['fleece'] — only a verified supporting claim satisfies a hard constraint (R19)",
     ],
   },
 ]
 
+// A denial is not an exclusion: a denied store is never solicited, so it has no bid to
+// exclude. demo-alpine-supply is the market's third store, and this is the reason string
+// `exchange.eligibility.StaticSellerEligibility.check` writes for `unavailable` once
+// `orchestration.solicitation._denial` has put the status word in front of it.
 const DENIED = [
   {
-    store_id: 'demo-blocked',
+    store_id: 'demo-alpine-supply',
     status: 'unavailable',
-    reason: "'demo-blocked' is not registered on this exchange (R12)",
+    reason: 'unavailable: static-eligibility: demo-alpine-supply is unavailable',
   },
 ]
 
-function auctionBody(slots: readonly unknown[]) {
+// MEASURED. The five keys are `contracts.ranking.RANK_FEATURES` — there is no `fit` or bare
+// `trust`-plus-`fit` pair anywhere in the formula — and the five values sum to `rank_score`,
+// which is what makes them components rather than decoration.
+const RANKED = [
+  {
+    bid_ref: BID_REF,
+    store_id: 'demo-woolworks',
+    rank_score: 0.564,
+    components: {
+      intent_match: 0.175,
+      verified_claim_ratio: 0.1,
+      trust: 0.164,
+      price_value: 0.075,
+      delivery_fit: 0.05,
+    },
+  },
+]
+
+function auctionBody(
+  slots: readonly unknown[],
+  overrides: Partial<Record<'recorded_at', string>> = {},
+) {
   return {
     auction_id: AUCTION_ID,
     shortlist: { auction_id: AUCTION_ID, slots },
     entries: ENTRIES,
     excluded: EXCLUDED,
     denied: DENIED,
-    ranked: [
-      {
-        bid_ref: BID_REF,
-        store_id: 'demo-woolworks',
-        rank_score: 0.81,
-        components: { fit: 0.5, trust: 0.31 },
-      },
-    ],
-    solicited: ['demo-woolworks', 'demo-slowreply'],
-    recorded_at: '2026-09-05T00:00:01Z',
+    ranked: RANKED,
+    solicited: ['demo-woolworks', 'demo-fastfleece'],
+    recorded_at: overrides.recorded_at ?? RECORDED_AT,
   }
 }
 
@@ -181,20 +228,36 @@ const CLARIFY_ANSWER = {
 }
 
 /** The happy path, with `slots` deciding whether the shortlist comes back empty. */
-function demoService(options: { readonly slots?: readonly unknown[] } = {}) {
+function demoService(
+  options: {
+    readonly slots?: readonly unknown[]
+    /** What `/render` answers with. Defaults to the one slot `slots` implies. */
+    readonly rendered?: readonly unknown[]
+    /** `shortlist: null` — the exchange's TTL took the auction away. Not an empty one. */
+    readonly forgotten?: boolean
+    /** `''` is a real answer: `confirmWithProfile` returns it when the service sent none. */
+    readonly createdAt?: string
+    /** `''` is a real answer too: the buyer service types `recorded_at` as nullable. */
+    readonly recordedAt?: string
+  } = {},
+) {
   const rawSlots = options.slots ?? [RAW_SLOT]
-  const rendered = rawSlots.length === 0 ? [] : [RENDERED_SLOT]
+  const rendered = options.rendered ?? (rawSlots.length === 0 ? [] : [RENDERED_SLOT])
+  const createdAt = options.createdAt ?? CREATED_AT
+  const recordedAt = options.recordedAt ?? RECORDED_AT
   return recorder((path) => {
     switch (path) {
       case CLARIFY_PATH:
         return json(CLARIFY_ANSWER)
       case CONFIRM_PATH:
         return json(
-          { auction_id: AUCTION_ID, intent_id: INTENT.intent_id, created_at: '2026-09-05T00:00:00Z' },
+          { auction_id: AUCTION_ID, intent_id: INTENT.intent_id, created_at: createdAt },
           201,
         )
-      case auctionPath(AUCTION_ID):
-        return json(auctionBody(rawSlots))
+      case auctionPath(AUCTION_ID): {
+        const body = auctionBody(rawSlots, { recorded_at: recordedAt })
+        return json(options.forgotten === true ? { ...body, shortlist: null } : body)
+      }
       case RENDER_PATH:
         return json({ slots: rendered })
       case ACCEPT_PATH:
@@ -232,12 +295,80 @@ describe('the wire the journey owns', () => {
     expect(calls.map((call) => call.path)).toEqual([`/buyer/auctions/${AUCTION_ID}`])
     expect(calls[0]?.init?.method).toBe('GET')
     expect(record.auction_id).toBe(AUCTION_ID)
-    expect(record.slot_count).toBe(1)
-    expect(record.solicited).toEqual(['demo-woolworks', 'demo-slowreply'])
+    expect(record.solicited).toEqual(['demo-woolworks', 'demo-fastfleece'])
     expect(record.entries.map((entry) => entry.fallback_reason)).toEqual([null, 'no_response'])
     expect(record.excluded[0]?.exclusion_reasons).toHaveLength(2)
-    expect(record.denied[0]?.store_id).toBe('demo-blocked')
-    expect(record.ranked[0]?.components).toEqual({ fit: 0.5, trust: 0.31 })
+    expect(record.excluded[0]?.exclusion_reasons[0]).toContain('blacklisted_store:')
+    expect(record.denied[0]?.store_id).toBe('demo-alpine-supply')
+    // The exchange's own five, not two this test made up.
+    expect(record.ranked[0]?.components).toEqual({
+      intent_match: 0.175,
+      verified_claim_ratio: 0.1,
+      trust: 0.164,
+      price_value: 0.075,
+      delivery_fit: 0.05,
+    })
+    expect(record.recorded_at).toBe(RECORDED_AT)
+  })
+
+  it('joins a slot to its price through the store id the exchange minted into the bid ref', async () => {
+    const { fetcher } = recorder(() => json(auctionBody([RAW_SLOT])))
+
+    const record = await loadAuction(AUCTION_ID, fetcher)
+
+    // `mint_bid_id` is `f"{auction_id}:{store_id}"`, so the store id is what follows the
+    // auction id and its colon — matched as a prefix, never split on the first `:`.
+    expect(storeIdFromBidRef(BID_REF, AUCTION_ID)).toBe('demo-woolworks')
+    expect(storeIdFromBidRef(FASTFLEECE_BID_REF, AUCTION_ID)).toBe('demo-fastfleece')
+    // A ref some other auction minted names no store THIS page may attribute a price to.
+    expect(storeIdFromBidRef('auc-other:demo-woolworks', AUCTION_ID)).toBeUndefined()
+    expect(storeIdFromBidRef(`${AUCTION_ID}:`, AUCTION_ID)).toBeUndefined()
+    expect(storeIdFromBidRef(undefined, AUCTION_ID)).toBeUndefined()
+
+    expect(entryForSlot(record, BID_REF)?.unit_price).toBe(78)
+    expect(entryForSlot(record, BID_REF)?.total_price).toBe(78)
+    expect(entryForSlot(record, BID_REF)?.fallback).toBe(false)
+    expect(entryForSlot(record, FASTFLEECE_BID_REF)?.fallback).toBe(true)
+    // No entry for this store: `undefined`, so the page can say so instead of showing a zero.
+    expect(entryForSlot(record, `${AUCTION_ID}:demo-alpine-supply`)).toBeUndefined()
+
+    expect(rankedForSlot(record, BID_REF)?.rank_score).toBe(0.564)
+    expect(rankedForSlot(record, FASTFLEECE_BID_REF)).toBeUndefined()
+  })
+
+  it('leaves an unreadable rank_score undefined rather than defaulting it to a zero', async () => {
+    // A zero would print as "rank_score 0", which reads as the exchange having scored this
+    // candidate at the bottom. It did not; this client just found no number.
+    const body = {
+      ...auctionBody([RAW_SLOT]),
+      ranked: [{ bid_ref: BID_REF, store_id: 'demo-woolworks', components: RANKED[0]!.components }],
+    }
+    const { fetcher } = recorder(() => json(body))
+
+    const record = await loadAuction(AUCTION_ID, fetcher)
+
+    expect(record.ranked[0]?.rank_score).toBeUndefined()
+    expect(record.ranked[0]?.rank_score).not.toBe(0)
+    // The components the exchange DID publish are still all there.
+    expect(record.ranked[0]?.components).toEqual(RANKED[0]!.components)
+  })
+
+  it('spells the exchange own ranking components and never a formula of its own', () => {
+    expect(
+      describeComponents({
+        intent_match: 0.175,
+        verified_claim_ratio: 0.1,
+        trust: 0.164,
+        price_value: 0.075,
+        delivery_fit: 0.05,
+      }),
+    ).toBe(
+      'intent_match=0.175 verified_claim_ratio=0.1 trust=0.164 price_value=0.075 ' +
+        'delivery_fit=0.05',
+    )
+    // A term this build has never heard of still prints; nothing here spells the key set.
+    expect(describeComponents({ some_future_term: 0.5 })).toBe('some_future_term=0.5')
+    expect(describeComponents({})).toBe('the exchange published no components')
   })
 
   it('names the status when the auction read is refused, and keeps the service message', async () => {
@@ -253,6 +384,31 @@ describe('the wire the journey owns', () => {
     const { fetcher } = recorder(() => json({ auction_id: AUCTION_ID }))
 
     await expect(loadAuction(AUCTION_ID, fetcher)).rejects.toThrowError(MalformedResponseError)
+  })
+
+  it('keeps a forgotten shortlist, an empty one and a malformed body three different facts', async () => {
+    // 1. `shortlist: null` — `buyer_svc/auctions/routes.py` writes exactly this when the
+    //    exchange's 15-minute TTL has taken the auction away. The recorded rows survive.
+    const gone = recorder(() => json({ ...auctionBody([]), shortlist: null }))
+    const forgotten = await loadAuction(AUCTION_ID, gone.fetcher)
+    expect(forgotten.liveness).toBe('forgotten')
+    expect(forgotten.shortlist).toBeNull()
+    // Not a shortlist with no slots — and the diagnostics are still all there.
+    expect(forgotten.entries).toHaveLength(ENTRIES.length)
+    expect(forgotten.solicited).toEqual(['demo-woolworks', 'demo-fastfleece'])
+
+    // 2. A shortlist with no slots. A fact about the market, not about the exchange.
+    const barren = recorder(() => json(auctionBody([])))
+    const empty = await loadAuction(AUCTION_ID, barren.fetcher)
+    expect(empty.liveness).toBe('live')
+    expect(empty.shortlist).toEqual({ auction_id: AUCTION_ID, slots: [] })
+
+    // 3. No `shortlist` key at all. An ABSENT field is not an explicit `null`, and reading
+    //    it as "the exchange forgot it" would invent a reason the service never gave.
+    const malformed = recorder(() => json({ auction_id: AUCTION_ID, entries: ENTRIES }))
+    await expect(loadAuction(AUCTION_ID, malformed.fetcher)).rejects.toThrowError(
+      MalformedResponseError,
+    )
   })
 
   it('forwards the shortlist to /render byte-for-byte, fields this client cannot name included', async () => {
@@ -311,11 +467,7 @@ describe('the wire the journey owns', () => {
     expect(response.status).toBe(503)
     expect(response.bodyUsed).toBe(false)
     expect(await response.json()).toEqual({ detail: 'no exchange client is wired' })
-    expect(wire.latest()).toEqual({
-      path: '/buyer/shortlist/accept',
-      status: 503,
-      detail: 'no exchange client is wired',
-    })
+    expect(wire.latest()).toEqual({ status: 503, detail: 'no exchange client is wired' })
     wire.reset()
     expect(wire.latest()).toBeUndefined()
   })
@@ -372,12 +524,10 @@ describe('the wire the journey owns', () => {
 
   it('joins a thrown status to the service message without inventing either', () => {
     const failed = new Error('accept failed: HTTP 503')
-    expect(explain(failed, { path: ACCEPT_PATH, status: 503, detail: 'no client' })).toBe(
+    expect(explain(failed, { status: 503, detail: 'no client' })).toBe(
       'accept failed: HTTP 503 — the service said: no client',
     )
-    expect(explain(failed, { path: ACCEPT_PATH, status: 503, detail: '' })).toBe(
-      'accept failed: HTTP 503',
-    )
+    expect(explain(failed, { status: 503, detail: '' })).toBe('accept failed: HTTP 503')
     expect(explain(failed)).toBe('accept failed: HTTP 503')
   })
 })
@@ -426,7 +576,34 @@ describe('the four beats', () => {
     expect(provenance).toContain('store_id="demo-woolworks"')
     expect(provenance).toContain('available=true')
     expect(provenance).toContain('score=0.82')
-    expect(screen.getByTestId('auction-id').textContent).toContain(AUCTION_ID)
+    // The exchange's published ranking, its own five component keys, its own numbers.
+    expect(provenance).toContain('rank_score 0.564')
+    expect(provenance).toContain('intent_match=0.175')
+    expect(provenance).toContain('delivery_fit=0.05')
+
+    // The PRICE, which the slot itself does not carry: read out of `entries[]` by the store
+    // id in the bid ref, printed exactly as it arrived, and labelled as a bid rather than as
+    // a number this page worked out.
+    expect(screen.getByTestId(`price-${BID_REF}`).textContent).toBe(
+      'unit 78, total 78 — the price this store bid, as the exchange reported this auction.',
+    )
+    expect(screen.getByTestId('slot-prices').textContent).toContain('demo-woolworks')
+    expect(screen.getByTestId('price-provenance').textContent).toContain('entries[]')
+    // No currency symbol anywhere: the exchange named none, so this page names none.
+    expect(screen.getByTestId('slot-prices').textContent).not.toContain('$')
+
+    // The whole transcript is on the page, oldest first, as the buyer said it.
+    expect(screen.getByTestId('transcript').textContent).toContain(
+      'I want a warm merino wool beanie for winter, under $100',
+    )
+    expect(screen.getByTestId('transcript').textContent).toContain('about $100')
+
+    const opened = screen.getByTestId('auction-id').textContent ?? ''
+    expect(opened).toContain(AUCTION_ID)
+    // The service's own clocks, and no invented stand-in for a clock it did not send.
+    expect(opened).toContain(CREATED_AT)
+    expect(opened).toContain(RECORDED_AT)
+    expect(opened).not.toContain('just now')
     // Nothing is linkable before the exchange has minted a destination — and the slot's
     // decoy `checkout_url` is never turned into one.
     expect(container.querySelectorAll('a[href]')).toHaveLength(0)
@@ -458,11 +635,12 @@ describe('the four beats', () => {
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
     await screen.findByLabelText('Why the shortlist is empty')
 
-    expect(screen.getByTestId('solicited').textContent).toContain('demo-slowreply')
+    expect(screen.getByTestId('solicited').textContent).toContain('demo-fastfleece')
 
-    const silent = screen.getByTestId('entry-demo-slowreply')
+    const silent = screen.getByTestId('entry-demo-fastfleece')
     expect(silent.textContent).toContain('fallback: true')
     expect(silent.textContent).toContain('fallback_reason: no_response')
+    expect(silent.textContent).toContain('unit 45, total 45')
     const answered = screen.getByTestId('entry-demo-woolworks')
     expect(answered.textContent).toContain('fallback: false')
     expect(answered.textContent).toContain('fallback_reason: null')
@@ -471,12 +649,26 @@ describe('the four beats', () => {
       'did not answer with a usable bid',
     )
 
-    const excluded = screen.getByTestId('excluded-demo-slowreply')
+    const excluded = screen.getByTestId('excluded-demo-fastfleece')
     for (const reason of EXCLUDED[0]!.exclusion_reasons) {
       expect(excluded.textContent).toContain(reason)
     }
 
-    expect(screen.getByTestId('denied-demo-blocked').textContent).toContain(DENIED[0]!.reason)
+    expect(screen.getByTestId('denied-demo-alpine-supply').textContent).toContain(
+      DENIED[0]!.reason,
+    )
+
+    // The three lists exist as lists, each carrying exactly the rows the service sent and no
+    // row this page padded them out with.
+    expect(screen.getByTestId('entries').querySelectorAll(':scope > li')).toHaveLength(
+      ENTRIES.length,
+    )
+    expect(screen.getByTestId('excluded').querySelectorAll(':scope > li')).toHaveLength(
+      EXCLUDED.length,
+    )
+    expect(screen.getByTestId('denied').querySelectorAll(':scope > li')).toHaveLength(
+      DENIED.length,
+    )
     expect(screen.getByTestId('verbatim-auction').textContent).toContain('recorded_at')
     // No fabricated row stood in for the missing options.
     expect(screen.queryByTestId(`slot-${BID_REF}`)).toBeNull()
@@ -564,7 +756,7 @@ describe('the four beats', () => {
     expect(again).not.toBe(handle)
   })
 
-  it('states the three gaps permanently, and asks for no email it could never redeem', async () => {
+  it('states the five gaps permanently, and asks for no email it could never redeem', async () => {
     const { fetcher } = demoService()
     render(<Journey fetcher={fetcher} />)
 
@@ -576,6 +768,23 @@ describe('the four beats', () => {
     const minted = screen.getByTestId('gap-pseudonym').textContent ?? ''
     expect(minted).toContain('POST /buyer/auth/session')
     expect(minted).toContain('generated in this browser')
+
+    // The slot carries no price either, so the page says where the price it shows came from.
+    const price = screen.getByTestId('gap-price').textContent ?? ''
+    expect(price).toContain('carries no price field')
+    expect(price).toContain('entries[]')
+    expect(price).toContain('bid_ref')
+
+    // And the questions came from D20's offline double, which is measurable rather than
+    // asserted: `build_llm("buyer")` with LLM_PROVIDER unset returns
+    // `<DeterministicLLM role='buyer' calls=0>` with `model='double:buyer'`.
+    const model = screen.getByTestId('gap-model').textContent ?? ''
+    expect(model).toContain('build_llm("buyer")')
+    expect(model).toContain('LLM_PROVIDER')
+    expect(model).toContain('DeterministicLLM')
+    expect(model).toContain('double:buyer')
+    expect(model).toContain('no live model')
+
     expect(screen.queryByLabelText(/email/i)).toBeNull()
 
     // Still there at the end of the journey, not only at the start.
@@ -588,5 +797,203 @@ describe('the four beats', () => {
     await waitFor(() => expect(screen.getByTestId('gap-signin')).toBeInTheDocument())
     expect(screen.getByTestId('gap-domain')).toBeInTheDocument()
     expect(screen.getByTestId('gap-pseudonym')).toBeInTheDocument()
+    expect(screen.getByTestId('gap-price')).toBeInTheDocument()
+    expect(screen.getByTestId('gap-model')).toBeInTheDocument()
+  })
+
+  it('prints the clock the service sent, and nothing at all when it sent none', async () => {
+    const { fetcher } = demoService({ createdAt: '', recordedAt: '' })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    // The service reported no time, so the page reports no time. It does not say 'just now',
+    // which would be this browser's clock wearing the service's voice.
+    const line = screen.getByTestId('auction-id').textContent ?? ''
+    expect(line).toContain(AUCTION_ID)
+    expect(line).not.toContain('just now')
+    expect(line).not.toContain('opened')
+    expect(line).not.toContain('recorded that answer')
+  })
+
+  it('says a slot has no reported price rather than showing a blank or a zero', async () => {
+    // A rendered slot for demo-alpine-supply, which this auction DENIED and therefore never
+    // solicited — so it is in no `entries[]` row and there is no price to join to it.
+    const orphan = { ...RENDERED_SLOT, bid_ref: `${AUCTION_ID}:demo-alpine-supply` }
+    const { fetcher } = demoService({ rendered: [orphan] })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const cell = screen.getByTestId(`price-${orphan.bid_ref}`)
+    expect(cell.textContent).toBe('price not reported for this slot')
+    expect(cell.textContent).not.toBe('')
+    expect(cell.textContent).not.toContain('0')
+    // The ranking published no row for it either, and that is said rather than left blank.
+    expect(screen.getByTestId(`labels-source-${orphan.bid_ref}`).textContent).toContain(
+      'rank_score not published for this slot',
+    )
+  })
+
+  it('prints a zero price and says what a zero there can also mean', async () => {
+    // MEASURED: `apps/exchange/src/auction/routes.py::_entries_out` builds this field as
+    // `float(offer.get("unit_price", 0.0))`, so an offer that named no price arrives as a
+    // real 0.0. The page prints the number it was sent — it may not round it away or hide
+    // it — and says what a zero there can also mean, because "unit 0" alone reads as free.
+    const zeroed = [{ ...ENTRIES[0]!, unit_price: 0.0, total_price: 0.0 }]
+    const { fetcher } = recorder((path) => {
+      switch (path) {
+        case CLARIFY_PATH:
+          return json(CLARIFY_ANSWER)
+        case CONFIRM_PATH:
+          return json(
+            { auction_id: AUCTION_ID, intent_id: INTENT.intent_id, created_at: CREATED_AT },
+            201,
+          )
+        case auctionPath(AUCTION_ID):
+          return json({ ...auctionBody([RAW_SLOT]), entries: zeroed })
+        case RENDER_PATH:
+          return json({ slots: [RENDERED_SLOT] })
+        default:
+          return json({ detail: `nothing serves ${path}` }, 404)
+      }
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const cell = screen.getByTestId(`price-${BID_REF}`).textContent ?? ''
+    expect(cell).toContain('unit 0, total 0')
+    expect(cell).toContain('an offer that named no price')
+    // Not swallowed into "not reported": the service did send a number, and it is shown.
+    expect(cell).not.toBe('price not reported for this slot')
+  })
+
+  it('says the exchange has forgotten the auction, and offers nothing to accept', async () => {
+    const { fetcher, calls } = demoService({ forgotten: true })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByTestId('shortlist-forgotten')
+
+    const notice = screen.getByTestId('shortlist-forgotten').textContent ?? ''
+    expect(notice).toContain('no longer holds this auction')
+    expect(notice).toContain('fifteen minutes')
+    // The distinction the whole outcome exists for: this is the shortlist expiring, NOT the
+    // market coming back empty, and the page says which.
+    expect(notice).toContain('not an empty market')
+
+    // No shortlist section at all, so no Accept button a buyer could press into a refusal.
+    expect(screen.queryByLabelText('Shortlist')).toBeNull()
+    expect(screen.queryByRole('button', { name: /accept this one/i })).toBeNull()
+
+    // The recorded diagnostics ARE shown, labelled as a record rather than as live.
+    await screen.findByLabelText('What the exchange reported when this auction ran')
+    expect(screen.getByTestId('recorded-not-live').textContent).toContain('None of this is live')
+    expect(screen.getByTestId('entry-demo-woolworks').textContent).toContain('fallback: false')
+    expect(screen.getByTestId('denied-demo-alpine-supply')).toBeInTheDocument()
+    // ...and NOT under the empty-market heading, which would be a different claim.
+    expect(screen.queryByLabelText('Why the shortlist is empty')).toBeNull()
+
+    // The count sentence does not report "0 options" for a shortlist that is simply gone.
+    const line = screen.getByTestId('auction-id').textContent ?? ''
+    expect(line).toContain('no longer holds the shortlist it answered with')
+    expect(line).not.toContain('0 options')
+
+    // `/render` labels a shortlist; there is none, so it was never called.
+    expect(calls.map((call) => call.path)).not.toContain(RENDER_PATH)
+  })
+
+  it('tells a forgotten shortlist, an empty one and an unreadable one apart on the page', async () => {
+    // Empty: the Shortlist section is there and says the MARKET had nothing.
+    const barren = demoService({ slots: [] })
+    render(<Journey fetcher={barren.fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+    expect(screen.getByLabelText('Shortlist').textContent).toContain('No store was eligible')
+    expect(screen.queryByTestId('shortlist-forgotten')).toBeNull()
+    cleanup()
+
+    // Forgotten: no Shortlist section, and the notice instead.
+    const gone = demoService({ forgotten: true })
+    render(<Journey fetcher={gone.fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByTestId('shortlist-forgotten')
+    expect(screen.queryByLabelText('Shortlist')).toBeNull()
+    expect(screen.queryByLabelText('Why the shortlist is empty')).toBeNull()
+    cleanup()
+
+    // Unreadable: neither claim is made, and the failure names the status and the reason.
+    const broken = recorder((path) => {
+      if (path === CLARIFY_PATH) return json(CLARIFY_ANSWER)
+      if (path === CONFIRM_PATH) {
+        return json({ auction_id: AUCTION_ID, intent_id: INTENT.intent_id, created_at: '' }, 201)
+      }
+      if (path === auctionPath(AUCTION_ID)) return json({ auction_id: AUCTION_ID })
+      return json({ detail: 'unreachable' }, 500)
+    })
+    render(<Journey fetcher={broken.fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    const alert = await screen.findByTestId('journey-error')
+    expect(alert.textContent).toContain('a body this screen cannot render')
+    expect(screen.queryByTestId('shortlist-forgotten')).toBeNull()
+    expect(screen.queryByLabelText('Shortlist')).toBeNull()
+    expect(screen.queryByLabelText('Why the shortlist is empty')).toBeNull()
+  })
+
+  it('says each diagnostic list was empty rather than padding it with a row', async () => {
+    const bare = {
+      auction_id: AUCTION_ID,
+      shortlist: { auction_id: AUCTION_ID, slots: [] },
+      entries: [],
+      excluded: [],
+      denied: [],
+      ranked: [],
+      solicited: [],
+      recorded_at: RECORDED_AT,
+    }
+    const { fetcher } = recorder((path) => {
+      switch (path) {
+        case CLARIFY_PATH:
+          return json(CLARIFY_ANSWER)
+        case CONFIRM_PATH:
+          return json(
+            { auction_id: AUCTION_ID, intent_id: INTENT.intent_id, created_at: CREATED_AT },
+            201,
+          )
+        case auctionPath(AUCTION_ID):
+          return json(bare)
+        case RENDER_PATH:
+          return json({ slots: [] })
+        default:
+          return json({ detail: `nothing serves ${path}` }, 404)
+      }
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Why the shortlist is empty')
+
+    expect(screen.getByTestId('solicited-empty').textContent).toContain('asked no store at all')
+    expect(screen.getByTestId('entries-empty').textContent).toContain('No store answered')
+    expect(screen.getByTestId('excluded-empty').textContent).toContain('refused nothing')
+    expect(screen.getByTestId('denied-empty').textContent).toContain('Every rostered store')
+    // Four empty lists and not one invented row anywhere.
+    expect(screen.queryByTestId('solicited')).toBeNull()
+    expect(screen.queryByTestId('entries')).toBeNull()
+    expect(screen.queryByTestId('excluded')).toBeNull()
+    expect(screen.queryByTestId('denied')).toBeNull()
+    expect(screen.queryByTestId('no-response-gloss')).toBeNull()
   })
 })
