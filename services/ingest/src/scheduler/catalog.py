@@ -470,9 +470,7 @@ class CatalogRefreshRunner:
     # -- internals ---------------------------------------------------------------------
 
     def _adapter_for(self, target: StoreTarget) -> CatalogAdapter:
-        return self.adapter_factory(
-            target.source, cassette=target.cassette, clock=self._clock
-        )
+        return self.adapter_factory(target.source, cassette=target.cassette, clock=self._clock)
 
     def _apply(self, ops: Sequence[UpsertOp], warnings: list[str]) -> list[str]:
         """Replay ``ops`` against the graph, or say why they were not replayed.
@@ -493,8 +491,7 @@ class CatalogRefreshRunner:
                 return list(apply_upserts(session, ops))
         except Exception as exc:  # noqa: BLE001 - the driver's failures are not a closed set
             warnings.append(
-                f"{len(ops)} graph write(s) computed but not applied: "
-                f"{type(exc).__name__}: {exc}"
+                f"{len(ops)} graph write(s) computed but not applied: {type(exc).__name__}: {exc}"
             )
             return []
 
