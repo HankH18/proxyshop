@@ -52,6 +52,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from ..checkout.codes import UnusableOffer, expiry_epoch
 from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
 from .attestation import ATTESTATION_FIELD, attested_status
@@ -169,7 +170,24 @@ def eligibility_source_reason(source: Any, store_id: str) -> str | None:
 # Expiry
 # ---------------------------------------------------------------------------------
 def expiry_reason(offer: Any, now: float) -> str | None:
-    """The reason this offer is too old to rank, or `None` when it is live."""
+    """The reason this offer is too old to rank, or `None` when it is live.
+
+    The instant is read by :func:`~exchange.checkout.codes.expiry_epoch` — imported, not
+    restated, for the same reason `domain_reason` imports `is_on_domain`. That function is
+    where T-182 already ended this exact contradiction one file over: `contracts.Offer`
+    types `expires_at` as `str | None` with `format: date-time` and `validate_bid` parses it
+    with `contracts.parse_timestamp`, while THIS filter parsed it with bare `float()`. So
+    the only expiry spelling the schema permits was the one the ranker refused, and it
+    refused it as `expired_offer` — measured:
+    `expiry_reason({"expires_at": "2030-01-01T00:00:00Z"}, ...)` came back
+    "not a readable instant", so every bid a real hosted store agent produces
+    (`store_agent.runtime.context.offer_expires_at` returns `str | None`) was excluded from
+    every shortlist. Nothing saw it because every fixture in this tree, the frozen suite
+    included, uses a float epoch.
+
+    Fail-closed hid it rather than excusing it: an eligibility gate that refuses every
+    conformant offer is not a strict gate, it is a shortlist that is always empty.
+    """
     raw = read(offer, "expires_at", _MISSING)
     if raw is _MISSING or raw is None:
         return (
@@ -177,8 +195,8 @@ def expiry_reason(offer: Any, now: float) -> str | None:
             f"live; failing closed"
         )
     try:
-        expires_at = float(raw)
-    except (TypeError, ValueError):
+        expires_at = expiry_epoch(raw)
+    except (UnusableOffer, TypeError, ValueError):
         return f"{REASON_EXPIRED}: expires_at {raw!r} is not a readable instant; failing closed"
     if not math.isfinite(expires_at):
         # NaN in particular: EVERY comparison against it is False, so a plain `expires_at <=
