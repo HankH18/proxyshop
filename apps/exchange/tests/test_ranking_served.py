@@ -45,12 +45,18 @@ is about the ranker being ON the served path, that one is about what the served 
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RANK_FEATURES
-from exchange.auction.collect import BidEntry
+from exchange.auction.collect import (
+    FALLBACK_OFFER_TTL_SECONDS,
+    BidEntry,
+    collect_bids,
+    fallback_expires_at,
+)
 from exchange.auction.routes import (
     MAX_EXCLUSION_REASONS_PER_BID,
     MAX_HARD_CONSTRAINTS,
@@ -516,21 +522,227 @@ def test_the_ranking_reads_the_platform_registry_the_accept_path_was_already_wir
     assert len(body["shortlist"]["slots"]) == 1
 
 
-def test_a_list_price_fallback_is_ranked_as_a_candidate_and_excluded_on_its_own_merits():
-    """A silent store's fallback is a real candidate that the filters then refuse.
+def test_a_silent_stores_list_price_fallback_reaches_the_shortlist():
+    """R10's SECOND half, over the served exchange — and this test used to assert its inverse.
 
-    ``collect_bids`` calls a fallback "a real, rankable, list-price offer, not a hole", and it
-    reaches the ranker as one — carrying a minted ``bid_id`` so it is referable at all. It then
-    fails the C10 check, because a catalog-derived offer names no checkout URL and a buyer
-    cannot be sent to a destination that does not exist.
+    ``docs/demo/starting-slice.md:24-25`` states the requirement in full:
+
+        **R10.** A store whose agent never answers is still represented, at its catalogue list
+        price, **and can still reach the shortlist.**
+
+    Until this commit the test standing here was named
+    ``test_a_list_price_fallback_is_ranked_as_a_candidate_and_excluded_on_its_own_merits`` and
+    asserted the opposite of the second clause::
+
+        assert body["entries"][0]["fallback"] is True
+        excluded = body["excluded"]
+        assert [row["bid_ref"] for row in excluded] == [mint_bid_id(body["auction_id"], STORE_A)]
+        assert any("off_domain" in reason for reason in excluded[0]["exclusion_reasons"])
+
+    **Why that was wrong, so nobody re-reverts it.** It was not a stricter reading of R10; it
+    was R10's negation, pinned against a fully wired deployment — ``_wired_app`` hands the
+    ranker a ``StaticRegisteredDomains`` that DOES hold this store's domain. Its stated
+    justification, "a catalog-derived offer names no checkout URL and a buyer cannot be sent to
+    a destination that does not exist", is refuted by this same tree: the buyer's destination
+    for a fallback is not read off the offer at all, it is BUILT from the platform-registered
+    domain by ``checkout.provider.default_permalink`` at accept time. The destination existed;
+    the ranking simply was not looking it up. So the assertion recorded what the code did rather
+    than what the requirement said — which the runbook itself already called a defect at
+    ``docs/demo/starting-slice.md:223-226``: "R10's second half, that it can still reach the
+    shortlist, does not hold on this path today. ``e2e/support/s1`` reaches three slots by
+    building the fallback's checkout URL itself, which is the join whose absence is the defect."
+
+    It came in with commit 09c4a75, "test(T-310): the served path, and the class of ways a
+    bidder could score itself" — a ticket about whether the ranker is ON the served path, not
+    about what R10 requires of a fallback. Nothing in this file is frozen:
+    ``.swarm-loop/manifest.json`` names 17 frozen paths and none of them is under
+    ``apps/exchange/tests``.
+
+    The half of the old name that WAS right — "excluded on its own merits" — is not lost. It is
+    asserted next door, in
+    :func:`test_a_fallback_still_satisfies_no_hard_constraint_and_is_excluded_on_that_alone`.
+
+    The intent here carries no hard constraint, and that is deliberate rather than convenient:
+    ``starting-slice.md`` §3.3 says a fallback "asserts no claims at all, which is why it can
+    never be the evidence that satisfies one", so R10's second half is only reachable on an
+    unconstrained request. The demo's own run fixture (``e2e/support/s1/run.json``) states
+    ``hard_constraints: []``, which is the shape this models.
+    """
+    app = _wired_app(bidders=Bidders({}), stores=(STORE_A,))
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+
+    assert body["entries"][0]["fallback"] is True, "the store answered nothing; it must fall back"
+    assert body["excluded"] == [], body["excluded"]
+    assert [row["store_id"] for row in body["ranked"]] == [STORE_A], body["ranked"]
+    assert [slot["bid_ref"] for slot in body["shortlist"]["slots"]] == [
+        mint_bid_id(body["auction_id"], STORE_A)
+    ], body["shortlist"]
+
+
+def test_a_fallback_still_satisfies_no_hard_constraint_and_is_excluded_on_that_alone():
+    """The true half of the assertion this file used to make: a fallback IS judged.
+
+    R10 buys a silent store a place in the ranking, not a pass through it. A fallback is catalog
+    data and asserts no claims (``starting-slice.md`` §3.3), so on a hard-constrained intent it
+    is undecidable and R19 excludes it — exactly as it always did.
+
+    What must NOT be in the reasons is either of the two the exchange used to inflict on its own
+    manufactured offer. Those said nothing about the store: they said the exchange had built an
+    offer it could not then vouch for.
     """
     app = _wired_app(bidders=Bidders({}), stores=(STORE_A,))
     body = _post(app, [_rostered(STORE_A, 100.0)])
 
     assert body["entries"][0]["fallback"] is True
-    excluded = body["excluded"]
-    assert [row["bid_ref"] for row in excluded] == [mint_bid_id(body["auction_id"], STORE_A)]
-    assert any("off_domain" in reason for reason in excluded[0]["exclusion_reasons"])
+    assert [row["bid_ref"] for row in body["excluded"]] == [
+        mint_bid_id(body["auction_id"], STORE_A)
+    ]
+    reasons = body["excluded"][0]["exclusion_reasons"]
+    assert [r for r in reasons if "hard_constraint_unsatisfied" in r], reasons
+    assert not [r for r in reasons if "expired_offer" in r or "off_domain" in r], reasons
+    assert body["shortlist"]["slots"] == []
+
+
+def test_the_fallbacks_expiry_and_checkout_url_are_the_exchanges_facts_never_a_stores():
+    """Where each completed field comes from, and that no field a store wrote is read.
+
+    The two derivations are deliberately in different modules, because the two facts are held in
+    different places:
+
+    * ``expires_at`` in ``auction/collect.py``, from the auction's own close plus the auction's
+      own TTL. Both are numbers this exchange computed.
+    * ``checkout_url`` in ``ranking/candidates.py``, from the PLATFORM's ``store_id -> domain``
+      registry — the same lookup that already decides ``store_domain`` for every candidate, and
+      the same one the accept path mints against.
+
+    The roster row below is loaded with the fields a caller might hope get copied — an
+    ``expires_at`` fifty years out, a ``checkout_url`` on an attacker host, and a
+    ``store_domain`` naming another one. None of them reaches the offer or the candidate. (The
+    silent store itself supplied nothing, which is the point: it never answered. The roster is
+    the nearest thing to a store-authored field on this path, so it is what the probe uses.)
+    """
+    deadline = 1_800_000_000.0
+    hostile = {
+        "store_id": STORE_A,
+        "tier": 1,
+        "product_ref": "product-1",
+        "list_price": 100.0,
+        "expires_at": "2075-01-01T00:00:00Z",
+        "checkout_url": "https://attacker.tld/cart/1:1",
+        "store_domain": "attacker.tld",
+    }
+
+    entries = collect_bids([hostile], [], deadline)
+    offer = entries[0].bid["offer"]
+
+    assert entries[0].fallback is True
+    expected = datetime.fromtimestamp(deadline + FALLBACK_OFFER_TTL_SECONDS, tz=UTC)
+    assert offer["expires_at"] == expected.isoformat().replace("+00:00", "Z")
+    assert offer["expires_at"] == fallback_expires_at(deadline)
+    assert "attacker" not in str(offer), offer
+
+    candidate = candidate_from_entry(
+        entries[0],
+        auction_id="auction-1",
+        registered_domains=StaticRegisteredDomains({STORE_A: _domain(STORE_A)}),
+    )
+
+    assert candidate["offer"]["checkout_url"] == f"https://{_domain(STORE_A)}/cart/1:1"
+    assert candidate["store_domain"] == _domain(STORE_A)
+    assert "attacker" not in str(candidate), candidate
+    # The projection copied, it did not edit: the entry the route renders as `entries` still
+    # holds the offer `collect_bids` built.
+    assert "checkout_url" not in entries[0].bid["offer"]
+
+
+def test_an_undatable_auction_close_leaves_the_fallback_unexpirable_and_therefore_unshown():
+    """Fail closed on the half this module owns: no readable deadline, no ``expires_at``.
+
+    ``None`` reads downstream exactly as the absent field always did — "the offer carries no
+    expires_at, so it cannot be shown to be live" — so a fallback whose auction cannot be dated
+    is excluded rather than guessed live off an unreadable clock.
+    """
+    assert fallback_expires_at(float("nan")) is None
+    assert fallback_expires_at(float("inf")) is None
+    assert fallback_expires_at(1e308) is None, "an unrenderable instant must not become an offer"
+    assert fallback_expires_at(0.0) is not None, "a readable epoch must still date the offer"
+
+
+def test_a_hosted_bid_that_omits_its_checkout_url_is_not_handed_a_platform_built_one():
+    """The completion is for fallbacks and for nothing else.
+
+    A store that answers is answering WITH its offer, so a store that omitted the checkout URL
+    and was handed a platform-built one would be choosing which check it faces. Only
+    ``collect_bids``' own verdict — the branch that discards what arrived and substitutes a
+    catalogue offer — opens that door.
+    """
+    naked = _bid(STORE_A, 100.0)
+    naked["offer"].pop("checkout_url")
+    app = _wired_app(bidders=Bidders({STORE_A: naked}), stores=(STORE_A,))
+
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+
+    assert body["entries"][0]["fallback"] is False, "the store DID answer"
+    reasons = body["excluded"][0]["exclusion_reasons"]
+    assert [r for r in reasons if "off_domain" in r], reasons
+    assert body["shortlist"]["slots"] == []
+
+
+def test_an_exchange_holding_no_registered_domain_shortlists_no_fallback_either():
+    """R10 does not overrule C10/D22: no registry row, no checkout URL, no slot.
+
+    ``NoRegisteredDomains`` is the wired default and knows nobody, so an exchange nobody has
+    connected to the seller registry still shows nothing — including the offers it manufactured
+    for itself.
+    """
+    app = _wired_app(bidders=Bidders({}), stores=(STORE_A,), domains={})
+
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+
+    assert body["entries"][0]["fallback"] is True
+    reasons = body["excluded"][0]["exclusion_reasons"]
+    assert [r for r in reasons if "off_domain" in r], reasons
+    assert body["shortlist"]["slots"] == []
+
+
+@pytest.mark.parametrize(
+    ("reverted", "reason_that_returns"),
+    [
+        ("expires_at", "expired_offer"),
+        ("checkout_url", "off_domain_checkout"),
+        ("both", "expired_offer"),
+    ],
+)
+def test_reverting_either_half_of_the_r10_join_puts_the_fallback_back_in_the_excluded_list(
+    monkeypatch, reverted, reason_that_returns
+):
+    """The control. Undo the fix in place and the shortlist slot goes away again.
+
+    Without this, the test above is green for a reason nobody has checked: a fallback could
+    reach the shortlist because some *other* filter stopped running. Each parameter here
+    restores exactly one half of the join to what it did before — ``fallback_expires_at``
+    returning nothing, ``_completed_fallback_offer`` returning its input untouched — and asserts
+    the specific exclusion reason that half was responsible for comes back and the slot is lost.
+
+    Both halves are load-bearing on their own: either one reverted is enough to empty the
+    shortlist, which is why the defect survived a deployment that had the seller registry wired.
+    """
+    if reverted in ("expires_at", "both"):
+        monkeypatch.setattr("exchange.auction.collect.fallback_expires_at", lambda _deadline: None)
+    if reverted in ("checkout_url", "both"):
+        monkeypatch.setattr(
+            "exchange.ranking.candidates._completed_fallback_offer",
+            lambda offer, _registered_domain: offer,
+        )
+
+    app = _wired_app(bidders=Bidders({}), stores=(STORE_A,))
+    body = _post(app, [_rostered(STORE_A, 100.0)], intent=_intent([]))
+
+    assert body["entries"][0]["fallback"] is True
+    assert body["ranked"] == [], "a reverted half must not leave the fallback rankable"
+    assert body["shortlist"]["slots"] == []
+    reasons = body["excluded"][0]["exclusion_reasons"]
+    assert [r for r in reasons if reason_that_returns in r], reasons
 
 
 # =====================================================================================
