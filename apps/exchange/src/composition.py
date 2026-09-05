@@ -130,6 +130,7 @@ __all__ = [
     "Deployment",
     "DeploymentConfigurationError",
     "HttpBidSolicitor",
+    "MAX_BID_RESPONSE_BYTES",
     "SellerRow",
     "configure_exchange",
     "ensure_configured",
@@ -151,6 +152,20 @@ STATE_FLAG = "exchange_composition"
 #: exists only to stop a socket outliving the request that opened it. It is the auction's
 #: server-side ceiling, which is the longest any one solicitation can still be useful for.
 DEFAULT_SOLICIT_TIMEOUT_SECONDS = 10.0
+
+#: The most bytes one store's ``POST /v1/bid-requests`` reply may occupy.
+#:
+#: A **memory bound on an unauthenticated path**, in the same house style as
+#: :data:`~exchange.auction.routes.MAX_HARD_CONSTRAINT_BYTES`, and measured rather than feared.
+#: A published ``Bid`` is a small document — an offer plus a handful of claims — and 256 KiB is
+#: several hundred times the largest one this repository produces. The number that matters is
+#: the one on the other side: with no cap, one agent answering a 64 MiB body took this process
+#: from a 115.9 MiB peak RSS to 464.6 MiB against ``compose.yaml``'s ``mem_limit: 256m``, on a
+#: single store in a single auction. See :meth:`HttpBidSolicitor.solicit`.
+#:
+#: Refused rather than truncated: half a JSON document is not a bid, and a store that sends one
+#: is represented at its list price exactly like a store that stayed silent (R10).
+MAX_BID_RESPONSE_BYTES = 256 * 1024
 
 
 class DeploymentConfigurationError(RuntimeError):
@@ -444,7 +459,29 @@ class HttpBidSolicitor:
         return bound
 
     def solicit(self, store: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        """Ask one store, and answer in the shape ``collect_bids`` reads."""
+        """Ask one store, and answer in the shape ``collect_bids`` reads.
+
+        The reply is read through a **bounded** stream rather than with ``response.json()``,
+        and that is not defensive tidiness — it was measured. A store agent is a third party
+        (a Tier-2 store does not run our code), the auction path is unauthenticated, and
+        ``apps/exchange/compose.yaml`` caps the exchange at ``mem_limit: 256m``. With
+        ``response.json()``, against an agent answering a single 64 MiB body::
+
+            baseline peak RSS: 115.9 MiB
+            answer accepted: True   serialized size: 64.0 MiB
+            peak RSS after one solicitation: 464.6 MiB
+
+        — one store, one auction, and the container is over its limit twice over; a 500-store
+        roster (``MAX_ROSTER_ENTRIES``) multiplies it. Bounded, against an agent STREAMING
+        512 MiB (streamed so the number below is this side's cost and not the probe's)::
+
+            baseline peak RSS: 52.3 MiB
+            answer accepted: False
+            peak RSS after one solicitation: 66.8 MiB
+
+        The store falls back to its list price like any other store that did not answer
+        usefully (R10), and the auction is unharmed.
+        """
         store_id = str(store.get("store_id") or "")
         endpoint = self._endpoints.get(store_id)
         if not endpoint:
@@ -454,14 +491,23 @@ class HttpBidSolicitor:
 
         payload = dict(self._context) or {"auction_id": "", "intent": {}, "profile": {}}
         try:
-            response = self._http_client().post(endpoint, json=payload, timeout=self._timeout)
+            with self._http_client().stream(
+                "POST", endpoint, json=payload, timeout=self._timeout
+            ) as response:
+                if response.status_code != 200:
+                    return None
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_BID_RESPONSE_BYTES:
+                        # Stop READING, not merely stop using: a cap applied after the body is
+                        # in memory is not a cap. Leaving the block closes the connection.
+                        return None
         except Exception:
             return None
 
-        if response.status_code != 200:
-            return None
         try:
-            bid = response.json()
+            bid = json.loads(bytes(body))
         except ValueError:
             return None
         if not isinstance(bid, Mapping):

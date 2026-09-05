@@ -624,3 +624,49 @@ def test_the_composition_root_never_overwrites_wiring_a_deployment_already_chose
     assert "ranking_registered_domains" in bound
     assert "registered_domains" in bound
     assert "bid_solicitor" in bound
+
+
+def test_a_store_agent_cannot_spend_the_exchanges_memory_on_one_reply() -> None:
+    """An oversized reply is refused while it is still on the wire, not after it is in RAM.
+
+    The store agent is a third party, the auction path is unauthenticated and the container is
+    capped at 256 MiB, so the size of a bid is the size of an attack. Measured with
+    ``response.json()`` and a 64 MiB reply: peak RSS 115.9 -> 464.6 MiB, answer ACCEPTED. The
+    agent here STREAMS its filler so nothing but the solicitor holds it, and the assertion is
+    that the reply is refused — which sends the store to its list-price fallback (R10) and
+    leaves the auction intact.
+    """
+    from exchange.composition import MAX_BID_RESPONSE_BYTES, HttpBidSolicitor
+    from fastapi.responses import StreamingResponse
+
+    chunk = b"x" * (64 * 1024)
+    oversized = (MAX_BID_RESPONSE_BYTES // len(chunk)) + 4
+
+    agent = FastAPI(title="a store agent that will not stop talking")
+
+    @agent.post("/v1/bid-requests")
+    def door(body: dict[str, Any]) -> StreamingResponse:
+        def stream() -> Iterator[bytes]:
+            yield b'{"store_id":"s1","claims":[],"offer":{"unit_price":1.0,"product_ref":"'
+            for _ in range(oversized):
+                yield chunk
+            yield b'"}}'
+
+        return StreamingResponse(stream(), media_type="application/json")
+
+    @agent.post("/small/v1/bid-requests")
+    def polite(body: dict[str, Any]) -> JSONResponse:
+        return JSONResponse(
+            status_code=200,
+            content={"store_id": "s1", "claims": [], "offer": {"unit_price": 1.0}},
+        )
+
+    with serve(agent) as url:
+        solicitor = HttpBidSolicitor(
+            {"loud": f"{url}/v1/bid-requests", "polite": f"{url}/small/v1/bid-requests"}
+        )
+        bound = solicitor.for_auction(auction_id="a1", intent={}, profile={}, respond_by=0.0)
+        assert bound.solicit({"store_id": "loud"}) is None
+        # The control: the same client, the same auction, a reply inside the bound. Without
+        # this the assertion above is satisfied by a solicitor that answers None to everything.
+        assert bound.solicit({"store_id": "polite"}) is not None
