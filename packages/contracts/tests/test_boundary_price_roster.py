@@ -15,8 +15,17 @@ That gap is the whole attack. Measured through the real door, on the tree before
 The exchange knows what `prod-1` lists at — it holds the roster the auction was opened from —
 and it had no way to tell the boundary. So these pin the roster parameter: an exchange that can
 price a product may refuse a bid that underprices it, **without trusting a single number the
-emitter wrote down**. Omitting the roster leaves the old abstention exactly where it was, which
-is why no existing test in this suite changes.
+emitter wrote down**.
+
+T-306/T-307 CLOSED THE OTHER HALF OF IT, and the sentence that used to end this docstring —
+"omitting the roster leaves the old abstention exactly where it was, which is why no existing
+test in this suite changes" — was the fail-open written down as a feature. An omitted roster was
+strictly more permissive than `list_prices={}`, so the door was gentler with a caller who said
+nothing than with one who said "I hold no catalog", on the money path; and because the
+abstention returned before the cap was read, a caller passing `max_discount_pct=0` and
+forgetting the roster had its ceiling dropped in silence (T-307). The absent roster is now the
+empty roster at every site, and three tests below carry the `justify-test-edit` record of the
+assertions that pinned the old contract.
 """
 
 from __future__ import annotations
@@ -100,13 +109,48 @@ def test_a_bid_that_omits_its_list_price_is_still_measured_against_the_roster(pa
     the offer is unexpired and the store is not blacklisted. It charges 15.00 for a product the
     exchange lists at 100.00 — 85% off behind a 20% authorization — and it never says so. The
     emitter's only move was to stay silent, and staying silent used to work.
+
+    JUSTIFY-TEST-EDIT. One assertion here was REPLACED. It was::
+
+        admitted = check(silent, path)       # `roster=None`, i.e. no roster
+        assert admitted.ok is True, (
+            "the abstention this ticket exists to close must still be reproducible when no "
+            "roster is supplied, or this test is measuring something else"
+        )
+
+    * **What it claimed.** With no roster supplied, this bid is ADMITTED.
+    * **Origin.** `57c25df` ("fix(T-177): the declared depth is not its own authorization"), where
+      it was the reproduction's "before" half: the point was that the roster changes the verdict.
+    * **Would it still be wrong if the source change were reverted?** YES. It reads `ok is True`
+      as the definition of "the roster reached the wall", and that is a false test of the same
+      thing: `check(silent, path, roster={})` refused this bid throughout, so the admission was
+      never evidence about the roster's effect — it was evidence about which arguments the caller
+      named. T-306 is exactly that: the argument omitted was more permissive than the argument
+      passed empty, which cannot be a property of the bid.
+    * **Independent proof the code is right.** `test_repro_open_tickets.py::test_t306_...`,
+      written as a reproduction in `fbc4636`, failed against the old behaviour and passes now.
+    * **Blast radius.** `test_the_cap_is_never_consulted_without_a_roster` and
+      `test_the_signed_external_door_takes_the_roster_too` in this file, the dual-path suite's
+      `test_the_wall_abstains_deliberately_...`, its TypeScript peer, and the shared corpus row
+      `no_list_price_carried`. Every one is changed in the same commit.
+
+    What replaces it is stronger: the "before" half still exists, but the contrast the test is
+    built on is now between a caller that CANNOT price the product and one that can — not between
+    a caller that spoke and one that stayed quiet.
     """
     silent = make_bid(offer=priced_offer(15.0, 15.0))
 
-    admitted = check(silent, path)
-    assert admitted.ok is True, (
-        "the abstention this ticket exists to close must still be reproducible when no roster "
-        "is supplied, or this test is measuring something else"
+    bare = check(silent, path)
+    assert bare.ok is False, "an omitted roster was more permissive than an empty one"
+    assert list(bare.reasons) == list(check(silent, path, roster={}).reasons), (
+        "omission must be the empty roster to the byte",
+        list(bare.reasons),
+    )
+    assert "price_unreconcilable:offer.unit_price:list_price_unavailable" in list(bare.reasons), (
+        "the refusal must NAME the input the caller did not supply"
+    )
+    assert "price_under_declared_depth:offer.unit_price" not in list(bare.reasons), (
+        "a door with no list price cannot have measured this bid against one"
     )
 
     refused = check(silent, path, roster=ROSTER)
@@ -212,19 +256,81 @@ def test_an_unreadable_cap_is_a_refusal_rather_than_a_default(path: str) -> None
         )
 
 
-def test_the_cap_is_never_consulted_without_a_roster() -> None:
-    """`max_discount_pct` on its own is a cap with no list price to apply it to. Passing one — or
-    passing nonsense as one — must not move a single verdict for a caller that supplies no
-    catalog, or the opt-in property this whole parameter rests on is not true."""
-    table = make_snapshot_table()
-    deep = make_bid(offer=priced_offer(15.0, 15.0, depth=85.0))
-    for path in BOTH_PATHS:
+def test_the_cap_is_consulted_even_when_no_roster_is_passed() -> None:
+    """T-307. A ceiling the door does not read is not a ceiling.
+
+    JUSTIFY-TEST-EDIT. This test's whole body was REPLACED, and it was previously named
+    `test_the_cap_is_never_consulted_without_a_roster`. It asserted::
+
         bare = validate_bid(deep, path=path, trust_snapshot=table, now=NOW)
         for cap in (None, 0.0, 20.0, "nonsense", float("nan")):
             capped = validate_bid(
                 deep, path=path, trust_snapshot=table, now=NOW, max_discount_pct=cap
             )
             assert (bare.ok, list(bare.reasons)) == (capped.ok, list(capped.reasons)), cap
+
+    * **What it claimed.** `max_discount_pct` moves NO verdict at all for a caller that passes no
+      roster — including `max_discount_pct=0`, a caller stating it authorizes no discount.
+    * **Origin.** `57c25df` ("fix(T-177): the declared depth is not its own authorization"), where
+      it guarded the opt-in property: nothing about the price wall was to change for a caller who
+      did not opt in.
+    * **Would it still be wrong if the source change were reverted?** YES — and it is the clearest
+      case of the three, because this assertion is the exact INVERSE of the requirement T-307
+      states. Reverting `boundary.py` makes it green again and leaves the ticket open: a caller
+      that sets a 0% ceiling and forgets the roster is told nothing, silently, because the
+      abstention returned before the ceiling was read at all. An argument that binds only in the
+      presence of a second argument is an argument a caller loses by forgetting, which is the
+      whole defect class T-306 and T-233 name.
+    * **Independent proof the code is right.** `test_repro_open_tickets.py::test_t307_...`
+      (`fbc4636`) failed against the old behaviour and passes now; the shared corpus rows
+      `a_call_wide_ceiling_of_zero_binds_with_no_roster` and
+      `a_call_wide_ceiling_that_covers_the_declared_depth_with_no_roster` assert the same property
+      against BOTH doors.
+    * **Blast radius.** Only this test asserted the negative. The positive is now asserted here,
+      in the corpus (both languages) and in the T-307 reproduction.
+
+    The replacement pins the ceiling in BOTH directions, because a cap that is read and a cap that
+    is ignored answer identically when the cap happens to be satisfied. A ceiling of 0 or 20 must
+    refuse this 85% bid by name; a ceiling of 85 must not.
+    """
+    table = make_snapshot_table()
+    deep = make_bid(offer=priced_offer(15.0, 15.0, depth=85.0))
+    over_depth = "discount_over_authorized_depth:offer.discount"
+    unreadable = "price_unreconcilable:offer.discount:unreadable_authorized_depth"
+    unavailable = "price_unreconcilable:offer.discount:authorized_depth_unavailable"
+
+    for path in BOTH_PATHS:
+
+        def judge(cap: Any, path: str = path) -> Any:
+            return validate_bid(
+                deep, path=path, trust_snapshot=table, now=NOW, max_discount_pct=cap
+            )
+
+        # No ceiling at all: the depth is unauthorized, and says so.
+        assert unavailable in list(judge(None).reasons), list(judge(None).reasons)
+
+        # A ceiling the declared 85% exceeds. `0.0` is the one the old contract lost outright.
+        for cap in (0.0, 20.0, 84.999):
+            assert over_depth in list(judge(cap).reasons), (cap, list(judge(cap).reasons))
+
+        # ...and a ceiling that COVERS the declared depth does not refuse it. Without this half a
+        # door that ignored the ceiling and refused everything would satisfy the half above.
+        for cap in (85.0, 100.0):
+            reasons = list(judge(cap).reasons)
+            assert over_depth not in reasons, (cap, reasons)
+            assert unavailable not in reasons, (cap, reasons)
+
+        # A ceiling the door cannot read is a refusal, not an unbounded one — with no roster too.
+        for cap in ("nonsense", float("nan"), -1.0, 101.0, True):
+            assert unreadable in list(judge(cap).reasons), (cap, list(judge(cap).reasons))
+
+        # The list price is still missing in every one of these calls, so none of them admits:
+        # T-307 is about the ceiling being READ, not about it being sufficient on its own.
+        for cap in (None, 0.0, 20.0, 85.0, 100.0, "nonsense"):
+            assert judge(cap).ok is False, cap
+            assert "price_unreconcilable:offer.unit_price:list_price_unavailable" in list(
+                judge(cap).reasons
+            ), cap
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
@@ -334,9 +440,13 @@ def test_the_roster_read_never_raises_and_never_admits_on_a_hostile_read(path: s
 
 
 def test_omitting_the_roster_changes_nothing_about_any_existing_verdict() -> None:
-    """The parameter is opt-in. Every bid in the pinned price table must answer identically with
-    `list_prices` absent and with it explicitly `None`, or this is a behaviour change wearing a
-    default argument."""
+    """Every bid must answer identically with `list_prices` absent and with it explicitly `None`.
+
+    Unchanged by T-306, and it says MORE now than it used to: the two spellings used to agree on
+    the abstention, and they agree on the refusal instead. `test_the_absent_roster_is_the_empty_
+    roster` below extends the same equality to `{}`, which is the spelling the two used to differ
+    from.
+    """
     bids = (
         make_bid(),
         make_bid(offer=priced_offer(15.0, 15.0)),
@@ -357,7 +467,22 @@ def test_omitting_the_roster_changes_nothing_about_any_existing_verdict() -> Non
 def test_the_signed_external_door_takes_the_roster_too() -> None:
     """`validate_external_submission` is the function an exchange actually calls on the wire body.
     A roster the Tier-2 door could not be handed would leave the hole open on the ONLY door a
-    store not running our runtime ever reaches."""
+    store not running our runtime ever reaches.
+
+    JUSTIFY-TEST-EDIT. One assertion was REPLACED::
+
+        admitted = validate_external_submission(submission, trust_snapshot=table, now=NOW)
+        assert admitted.ok is True, list(admitted.reasons)
+
+    It claimed that a signed external submission charging 15.00 for `prod-1`, behind a declared
+    20%, is ADMITTED when the exchange hands the door no roster. Origin `57c25df`, as the "before"
+    half of the roster reproduction on the external door. It would still be wrong if the source
+    change were reverted, for exactly the reason the other two in this file are: the same call
+    with `list_prices={}` refused this submission the whole time, so the admission recorded which
+    argument the caller named rather than anything about the bid — T-306, on the door the packet
+    calls "the door it matters most on". The positive control that a door refusing everything is
+    not a wall now sits on an honest submission instead, which is what a control should be.
+    """
     submission = make_submission(
         offer=priced_offer(15.0, 15.0),
         auction_id="auc-1",
@@ -367,11 +492,75 @@ def test_the_signed_external_door_takes_the_roster_too() -> None:
     )
     table = make_snapshot_table()
 
-    admitted = validate_external_submission(submission, trust_snapshot=table, now=NOW)
-    assert admitted.ok is True, list(admitted.reasons)
+    bare = validate_external_submission(submission, trust_snapshot=table, now=NOW)
+    assert bare.ok is False, "the external door was gentler with a caller that said nothing"
+    assert list(bare.reasons) == list(
+        validate_external_submission(
+            submission, trust_snapshot=table, now=NOW, list_prices={}
+        ).reasons
+    ), list(bare.reasons)
+    assert "price_unreconcilable:offer.unit_price:list_price_unavailable" in list(bare.reasons)
 
     refused = validate_external_submission(
         submission, trust_snapshot=table, now=NOW, list_prices=ROSTER
     )
     assert refused.ok is False
     assert "price_under_declared_depth:offer.unit_price" in list(refused.reasons), refused.reasons
+
+    # Positive control: the honest submission at the price that depth prices out at is admitted,
+    # so this door is not simply refusing every signed submission it is handed.
+    honest = make_submission(
+        offer=priced_offer(80.0, 80.0),
+        auction_id="auc-1",
+        store_id="store-1",
+        signer_id="store-1",
+        signature="sig-deadbeef",
+    )
+    admitted = validate_external_submission(
+        honest, trust_snapshot=table, now=NOW, list_prices=ROSTER
+    )
+    assert admitted.ok is True, list(admitted.reasons)
+
+
+def test_the_absent_roster_is_the_empty_roster_on_both_doors() -> None:
+    """T-306, stated as its own property rather than as a side effect of the tests above.
+
+    Three spellings of "this caller supplied no catalog" — the argument OMITTED, the argument
+    `None`, the argument `{}` — must produce one verdict, reasons included, for every bid. The
+    one that used to differ is the first, and it differed in the permissive direction, which is
+    the direction a forgotten argument must never differ in.
+    """
+    table = make_snapshot_table()
+    bids = (
+        make_bid(),
+        make_bid(offer=priced_offer(15.0, 15.0)),
+        make_bid(offer=priced_offer(15.0, 15.0, depth=0.0)),
+        make_bid(
+            claims=[make_claim("list_price", 100.0, dict(HOOK_PROVENANCE))],
+            offer=priced_offer(15.0, 15.0),
+        ),
+        make_bid(offer=priced_offer(100.0, 15.0)),
+        make_bid(offer=priced_offer(0.0, 0.0, depth=100.0)),
+    )
+    for bid in bids:
+        for path in BOTH_PATHS:
+            for cap in (None, 0.0, 20.0):
+                omitted = validate_bid(
+                    bid, path=path, trust_snapshot=table, now=NOW, max_discount_pct=cap
+                )
+                spellings = [
+                    validate_bid(
+                        bid,
+                        path=path,
+                        trust_snapshot=table,
+                        now=NOW,
+                        list_prices=roster,
+                        max_discount_pct=cap,
+                    )
+                    for roster in (None, {})
+                ]
+                for other in spellings:
+                    assert (omitted.ok, list(omitted.reasons)) == (
+                        other.ok,
+                        list(other.reasons),
+                    ), (path, cap, list(omitted.reasons), list(other.reasons))

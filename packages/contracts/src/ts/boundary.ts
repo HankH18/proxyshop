@@ -73,9 +73,12 @@ export const PERCENTAGE_DISCOUNT_TYPES: ReadonlySet<string> = new Set([
  * The claim key under which a bid carries the list price its discount is a percentage OF.
  * `get_product_fact(product_ref, "list_price")` is the hook that mints it, so a hosted bid can
  * only carry a list price the catalog actually published. It is the only list price the boundary
- * can see **when the caller supplies no roster** — it holds no catalog of its own, and inventing
- * a lookup it cannot perform would be worse than saying so. It is also the SAME key a `listPrices`
- * roster row may spell its number under, so one name means one thing on both sides.
+ * can see when the caller supplies no roster — it holds no catalog of its own, and inventing a
+ * lookup it cannot perform would be worse than saying so. Since T-306 a caller supplying no roster
+ * is refused by `list_price_unavailable` anyway, so this claim no longer decides such a bid on its
+ * own; it still decides the contradiction check against a roster that IS readable. It is also the
+ * SAME key a `listPrices` roster row may spell its number under, so one name means one thing on
+ * both sides.
  */
 export const LIST_PRICE_CLAIM_KEY = "list_price";
 
@@ -233,18 +236,21 @@ export interface ValidateBidOptions {
    * The caller's OWN catalog, `{product_ref: 100.0}` or
    * `{product_ref: {list_price: 100.0, max_discount_pct: 20.0}}`. Pass it and the price wall stops
    * depending on the bid volunteering what it is discounting from — the one move that defeated it,
-   * and the only one an emitter did not have to forge anything to make. Omit it and the wall reads
-   * the bid's `list_price` claim alone, abstaining when there is none, exactly as before.
+   * and the only one an emitter did not have to forge anything to make.
    *
-   * **A roster you pass is evidence.** A product it cannot price refuses rather than falling back
-   * to that abstention, and a product it prices but authorizes no discount depth on refuses a
-   * discounted offer rather than accepting the depth the bid chose for itself.
+   * **A roster you pass is evidence, and so is the roster you do not** (T-306/T-336). Omitting
+   * this argument, passing `null` and passing `{}` are ONE call: a product the roster cannot price
+   * is `list_price_unavailable` however the roster came to be empty. Omission used to abstain,
+   * which made the argument a caller FORGETS more permissive than the argument a caller passes
+   * empty, on the money path — so a caller holding no catalog is now told it cannot price what it
+   * admits, exactly as a caller passing an empty one is.
    */
   listPrices?: PriceRosterMap;
   /**
    * A caller-wide ceiling in percentage points, for a caller holding one approved number rather
-   * than a per-product column. A roster row's own `max_discount_pct` beats it. Read only when a
-   * roster is passed: on its own it would be a cap with no list price to apply it to.
+   * than a per-product column. A roster row's own `max_discount_pct` beats it. Read whether or not
+   * a roster is passed (T-307): it used to be reached only through `listPrices`, so setting it to
+   * 0 — "I authorize no discount" — while omitting the roster silently authorized everything.
    */
   maxDiscountPct?: number;
 }
@@ -523,7 +529,14 @@ const NO_ROW = Symbol("no roster row");
  * `readOwn` exists to close on the trust snapshot, on the one lookup that decides a price.
  */
 function rosterRow(offer: Record<string, unknown>, listPrices: PriceRosterMap | undefined): unknown {
-  const table = listPrices === undefined ? undefined : readRecord(listPrices);
+  // `readRecord` alone, with no `=== undefined` arm in front of it: it already answers `undefined`
+  // for `undefined`, for `null`, for an array and for a primitive, so the roster nobody passed,
+  // the roster spelled `null` and the roster that is not a readable object are ONE case. The arm
+  // that used to sit here made `undefined` special one layer above a function that did not treat
+  // it specially, which is the divergence T-336 names: the Python peer tested `is None` and this
+  // one tested `=== undefined`, so an explicit `null` was an empty roster on one door and an
+  // absent one on the other.
+  const table = readRecord(listPrices);
   if (table === undefined) return NO_ROW;
   const productRef = offer["product_ref"];
   if (typeof productRef !== "string" && typeof productRef !== "number") return NO_ROW;
@@ -534,16 +547,19 @@ function rosterRow(offer: Record<string, unknown>, listPrices: PriceRosterMap | 
 /**
  * The list price the EXCHANGE holds for this offer's product. Mirrors `_roster_list_price`.
  *
- * `{listed: undefined, reasons: []}` — abstain — only when the caller passed no roster at all.
- * Once a roster IS passed, every way of failing to read it is a refusal: a product it does not
- * price, or prices with something that is not a non-negative finite number.
+ * **There is no abstention for an ABSENT roster** (T-306/T-336). This used to open
+ * `if (listPrices === undefined) return {listed: undefined, reasons: []}` — the abstention "only
+ * when the caller passed no roster at all" — and that sentence was the fail-open: it made
+ * FORGETTING the argument more permissive than passing it empty, on the one door where the
+ * difference is money. Every way of failing to read a roster is a refusal, and the roster nobody
+ * passed is now read exactly like `{}`: a product it does not price is `list_price_unavailable`,
+ * and one it prices with something that is not a non-negative finite number is
+ * `unreadable_roster_list_price`. Neither degrades back to silence.
  */
 function rosterListPrice(
   offer: Record<string, unknown>,
   listPrices: PriceRosterMap | undefined,
 ): {listed: number | undefined; reasons: string[]} {
-  if (listPrices === undefined) return {listed: undefined, reasons: []};
-
   const site = OFFER_UNIT_PRICE_SITE;
   const row = rosterRow(offer, listPrices);
   if (row === NO_ROW) {
@@ -571,14 +587,19 @@ function rosterListPrice(
  * depth the offer DECLARES, and a bound chosen by the thing being bounded is not a bound. The cap
  * is read from the caller — the roster row's own `max_discount_pct` first, then the call's
  * `maxDiscountPct` — and never from the bid. Nothing is a REFUSAL, not a default.
+ *
+ * **There is no abstention for an ABSENT roster, and removing that carve-out is T-306/T-307.**
+ * This used to open `if (listPrices === undefined) return {cap: undefined, reasons: []}`, which
+ * sat BEFORE the cap is read at all — so a caller passing `maxDiscountPct: 0` ("I authorize no
+ * discount") and forgetting the roster had its ceiling dropped on the floor with nothing in the
+ * verdict saying so. The two arguments together ARE the price wall, and omitting one disarmed
+ * both rather than failing closed on the missing input.
  */
 function authorizedDepth(
   offer: Record<string, unknown>,
   listPrices: PriceRosterMap | undefined,
   maxDiscountPct: number | undefined,
 ): {cap: number | undefined; reasons: string[]} {
-  if (listPrices === undefined) return {cap: undefined, reasons: []};
-
   const site = OFFER_DISCOUNT_SITE;
   const row = rosterRow(offer, listPrices);
   const fromRow = row === NO_ROW ? undefined : readRecord(row)?.[MAX_DISCOUNT_ROSTER_KEY];
@@ -636,18 +657,22 @@ function priceReasonsFor(
   // refused above, and restating them as an inequality would report one bad number twice.
   if (depth === undefined || unitPrice === undefined || unitPrice < 0) return reasons;
 
-  // The depth the offer declared is paperwork; the depth the CALLER authorized is the bound. They
-  // are the same number whenever no roster was passed, which is what keeps every existing verdict
-  // identical. A zero depth needs no authorization — it takes nothing off — so the cap is not even
-  // consulted for one.
+  // The depth the offer declared is paperwork; the depth the CALLER authorized is the bound. A
+  // zero depth needs no authorization — it takes nothing off — so the cap is not even consulted
+  // for one.
+  //
+  // T-337's third site, and the one a two-site repair leaves alive: `authorized = listPrices ===
+  // undefined ? depth : 0` restored the abstention one layer up by handing the offer its own
+  // declared depth back as the bound, which is the self-granting cap `authorizedDepth` exists to
+  // end. There is no `listPrices === undefined` branch left in this walk.
   let authorized = depth;
   if (depth > 0) {
     const granted = authorizedDepth(record, listPrices, maxDiscountPct);
     reasons.push(...granted.reasons);
     if (granted.cap === undefined) {
-      // `listPrices === undefined` is the abstention; anything else here is a roster that could
-      // not authorize this depth, and an unauthorized depth authorizes nothing.
-      authorized = listPrices === undefined ? depth : 0;
+      // A roster that could not authorize this depth, and an unauthorized depth authorizes
+      // nothing. An ABSENT roster is one of those rosters now (T-306), not an exemption.
+      authorized = 0;
     } else {
       // No tolerance on this comparison, and none is wanted: a request exactly AT the cap is
       // authorized (`authorize_discount` grants at `max_discount_pct` and denies above it), and a
@@ -657,8 +682,9 @@ function priceReasonsFor(
       }
       authorized = Math.min(depth, granted.cap);
     }
-  } else if (listPrices !== undefined) {
-    // NO depth declared, and a roster to check against. The price is still a depth — an implicit
+  } else {
+    // NO depth declared, and a roster to check against — and after T-306 there is ALWAYS a roster
+    // to check against, because an absent one is an empty one. The price is still a depth — an implicit
     // one — and 15.00 for a 100.00 product is an 85% discount however the paperwork is spelled. So
     // when the roster STATES what is authorized, the undeclared price is measured against that,
     // exactly as a declared one is. The cap's own reasons are dropped: `authorized_depth_

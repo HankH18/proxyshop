@@ -105,8 +105,11 @@ PERCENTAGE_DISCOUNT_TYPES: frozenset[str] = frozenset({"percentage", "percent", 
 #: `get_product_fact(product_ref, "list_price")` is the hook that mints it, so a hosted bid can
 #: only carry a list price the catalog actually published. It is the only list price the boundary
 #: can see when the caller supplies no roster — the boundary holds no catalog of its own, and
-#: inventing a lookup it cannot perform would be worse than saying so. It is also the SAME key a
-#: `list_prices` roster row may spell its number under, so one name means one thing on both sides.
+#: inventing a lookup it cannot perform would be worse than saying so. Since T-306 a caller
+#: supplying no roster is refused by `list_price_unavailable` anyway, so this claim no longer
+#: decides such a bid on its own; it still decides the contradiction check against a roster that
+#: IS readable. It is also the SAME key a `list_prices` roster row may spell its number under, so
+#: one name means one thing on both sides.
 LIST_PRICE_CLAIM_KEY = "list_price"
 
 #: The `list_prices` roster row key naming the deepest percentage discount the caller AUTHORIZES
