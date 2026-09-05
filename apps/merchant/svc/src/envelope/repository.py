@@ -47,9 +47,10 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable, Mapping, Sequence
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Protocol, runtime_checkable
 
-from .model import ACTIVE, SHADOW, Envelope
+from .model import ACTIVE, SHADOW, Envelope, EnvelopeInvalid
 
 __all__ = [
     "ENVELOPES_TABLE",
@@ -80,10 +81,38 @@ _COLUMNS: tuple[str, ...] = (
 
 _SELECT_HISTORY = f"select {', '.join(_COLUMNS)} from {ENVELOPES_TABLE} order by store_id, version"  # noqa: S608
 
-_INSERT_VERSION = (
+#: Columns that carry the version's STATE, as opposed to the two that identify it.
+_STATE_COLUMNS: tuple[str, ...] = _COLUMNS[2:]
+
+#: ``on conflict (store_id, version) do update`` is not a shortcut, it is what the table means.
+#:
+#: The first draft was a plain INSERT, on the reasoning that an append-only history should
+#: never overwrite. Measured against the real table, that made TWO of the three lifecycle
+#: transitions impossible: ``activate`` and ``kill`` deliberately do NOT bump the version
+#: (versions.py — an approval is bound to a digest of *this* version's terms, so minting a new
+#: version at activation time would produce a live document its own approval no longer covers),
+#: and ``envelopes_pkey PRIMARY KEY (store_id, version)`` then rejected the second row.
+#: ``POST /stores/{id}/kill`` raised psycopg's UniqueViolation, which ``onboarding/routes.py``
+#: does not catch, so the kill switch answered 500 — the one control that must always work.
+#:
+#: So the table stores **the current state of each version**, and the in-memory history stores
+#: **every transition**. That is a real difference and it is the schema's, not this module's:
+#: ``sealed.envelopes`` has one row per (store, version) and no ordering column, so a
+#: transition log cannot be expressed in it. The terms columns are in the SET list too, but
+#: they cannot actually change for a fixed version — ``edit_envelope`` always bumps — so the
+#: update rewrites a version's LIFECYCLE and never its approved terms.
+_UPSERT_VERSION = (
     f"insert into {ENVELOPES_TABLE} ({', '.join(_COLUMNS)}) "  # noqa: S608
-    f"values ({', '.join(['%s'] * len(_COLUMNS))})"
+    f"values ({', '.join(['%s'] * len(_COLUMNS))}) "
+    "on conflict (store_id, version) do update set "
+    + ", ".join(f"{column} = excluded.{column}" for column in _STATE_COLUMNS)
 )
+
+#: What ``numeric(6,3)`` and ``numeric(14,2)`` can hold exactly. A merchant's approved terms
+#: must not change by being written down: the approval digest is taken over these numbers, so
+#: a value the column silently rounds comes back as terms no approval on file covers, and R9
+#: says old versions never change. Refused loudly at the boundary instead.
+_NUMERIC_SCALE: dict[str, int] = {"max_discount_pct": 3, "budget_cap": 2}
 
 
 @runtime_checkable
@@ -158,14 +187,44 @@ class PostgresEnvelopeRepository:
         if not self._autocommit:
             self._connection.commit()
 
+    def _finish_read(self) -> None:
+        """End the read's transaction.
+
+        A ``SELECT`` on a non-autocommit connection opens a transaction and holds a snapshot.
+        A merchant service that boots, loads the history and never writes would otherwise sit
+        ``idle in transaction`` for the life of the process — measured — pinning the xmin
+        horizon and blocking vacuum on a table nobody is using.
+        """
+        if not self._autocommit:
+            self._connection.rollback()
+
+    def _abandon_failed_write(self) -> None:
+        """Roll a failed write back so the connection stays usable.
+
+        Without this a single integrity error turns the envelope store into a brick:
+        PostgreSQL aborts the transaction and answers every later statement with
+        ``InFailedSqlTransaction`` — measured, and it took the *reload* and the kill switch
+        down with it, not just the write that failed.
+        """
+        try:
+            self._connection.rollback()
+        except Exception:  # noqa: BLE001 - the original failure is the one worth raising
+            _log.exception("could not roll back a failed envelope write")
+
     def load(self) -> Mapping[str, Sequence[Envelope]]:
         """Every version on file, oldest first per store, activation downgraded if unbacked."""
         history: dict[str, list[Envelope]] = {}
-        with self._connection.cursor() as cur:
-            cur.execute(_SELECT_HISTORY)
-            rows = cur.fetchall()
+        try:
+            with self._connection.cursor() as cur:
+                cur.execute(_SELECT_HISTORY)
+                rows = cur.fetchall()
+        except Exception:
+            self._abandon_failed_write()
+            raise
+        else:
+            self._finish_read()
         for row in rows:
-            document = dict(zip(_COLUMNS, row, strict=True))
+            document = _row_to_document(row)
             document["max_discount_pct"] = float(document["max_discount_pct"] or 0.0)
             document["budget_cap"] = float(document["budget_cap"] or 0.0)
             for jsonb in ("floors", "pursue_clusters", "standing_commitments"):
@@ -177,14 +236,18 @@ class PostgresEnvelopeRepository:
         return history
 
     def persist(self, envelope: Envelope) -> None:
-        """Append one version. A duplicate ``(store_id, version)`` is the table's own refusal.
+        """File one version's current state, inserting it or updating the state it is in.
 
-        ``envelopes_pkey`` is the durable half of the append-only rule: two processes racing to
-        file v4 cannot both succeed, and the loser gets ``UniqueViolation`` rather than
-        silently overwriting a version somebody else recorded. It is deliberately NOT an
-        ``on conflict do nothing`` — "your write vanished" is the worst possible answer here.
+        See :data:`_UPSERT_VERSION` for why this is an upsert rather than the plain insert an
+        append-only history suggests: ``activate`` and ``kill`` do not bump the version, and
+        ``envelopes_pkey`` is ``(store_id, version)``, so an insert made the kill switch a 500.
+
+        Raises:
+            EnvelopeInvalid: a term the column cannot hold exactly, which would change the
+                merchant's approved figures by writing them down.
         """
         document = envelope.to_dict()
+        _refuse_terms_the_columns_would_round(document)
         values = (
             document["store_id"],
             document["version"],
@@ -195,9 +258,58 @@ class PostgresEnvelopeRepository:
             json.dumps(document["pursue_clusters"]),
             json.dumps(document["standing_commitments"]),
         )
-        with self._connection.cursor() as cur:
-            cur.execute(_INSERT_VERSION, values)
+        try:
+            with self._connection.cursor() as cur:
+                cur.execute(_UPSERT_VERSION, values)
+        except Exception:
+            self._abandon_failed_write()
+            raise
         self._commit()
+
+
+def _row_to_document(row: Any) -> dict[str, Any]:
+    """One result row as a column-keyed mapping, whatever row factory the caller wired.
+
+    The connection is supplied by the caller by design, and ``dict_row`` is the common modern
+    psycopg factory. Zipping a mapping against :data:`_COLUMNS` iterates its KEYS, and the
+    lengths match, so ``strict=True`` does not catch it — every field silently becomes its own
+    column name and the failure surfaces later as an unrelated float conversion error.
+    """
+    if isinstance(row, Mapping):
+        missing = [column for column in _COLUMNS if column not in row]
+        if missing:
+            raise EnvelopeInvalid(
+                f"a {ENVELOPES_TABLE} row is missing column(s) {missing}; the table does not "
+                "have the shape this repository was written against"
+            )
+        return {column: row[column] for column in _COLUMNS}
+    return dict(zip(_COLUMNS, row, strict=True))
+
+
+def _refuse_terms_the_columns_would_round(document: Mapping[str, Any]) -> None:
+    """Refuse a term the numeric column cannot hold exactly.
+
+    ``max_discount_pct numeric(6,3)`` and ``budget_cap numeric(14,2)`` round on the way in.
+    Measured: 10.0005 and 100.005 came back as 10.001 and 100.01, and the restored version's
+    approval digest no longer matched the recorded one — so the merchant's approved terms had
+    been changed by the act of storing them, which is precisely what R9 forbids and what an
+    approval artifact exists to make impossible.
+
+    Silently rounding is the one option that is not available. Refusing is loud, recoverable,
+    and names the column; the alternative is a live envelope whose terms nobody approved.
+    """
+    for field, scale in _NUMERIC_SCALE.items():
+        value = document.get(field)
+        if value is None:
+            continue
+        quantized = Decimal(str(value)).quantize(Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP)
+        if quantized != Decimal(str(value)):
+            raise EnvelopeInvalid(
+                f"{ENVELOPES_TABLE}.{field} holds {scale} decimal places and would store "
+                f"{value!r} as {quantized}; an approved term that changes by being written "
+                "down is no longer the term the merchant approved (R9), so it is refused "
+                "rather than rounded"
+            )
 
 
 def _as_list(value: Any) -> list[Any]:

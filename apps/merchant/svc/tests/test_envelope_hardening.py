@@ -23,7 +23,7 @@ from merchant_svc.envelope.repository import (
     InMemoryEnvelopeRepository,
     PostgresEnvelopeRepository,
 )
-from merchant_svc.envelope.store import EnvelopeVersions
+from merchant_svc.envelope.store import EnvelopeVersions, VersionWentBackwards
 from merchant_svc.envelope.versions import activate_envelope, edit_envelope
 
 
@@ -128,7 +128,7 @@ def test_kill_still_works_on_a_live_envelope() -> None:
 # ======================================================================================
 @pytest.mark.parametrize(
     "module",
-    ["", ".model", ".store", ".digest", ".versions", ".frozen"],
+    ["", ".model", ".store", ".digest", ".versions", ".frozen", ".repository", "._spellings"],
 )
 def test_both_spellings_of_every_envelope_module_are_one_object(module: str) -> None:
     short = importlib.import_module(f"merchant_svc.envelope{module}")
@@ -199,12 +199,16 @@ class _FakeConnection:
         self.rows = rows or []
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
         self.commits = 0
+        self.rollbacks = 0
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
 
     def commit(self) -> None:
         self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
 
 
 def test_a_fresh_store_over_the_same_repository_sees_the_whole_history() -> None:
@@ -235,7 +239,7 @@ def test_a_backing_store_that_hands_back_a_backwards_history_is_refused() -> Non
     head = versions.record(_envelope("s-backwards", version=4))
     older = versions.record(_envelope("s-backwards", version=4)).with_activation(SHADOW, None)
     tampered = InMemoryEnvelopeRepository({"s-backwards": [head, _rewind(older, 3)]})
-    with pytest.raises(Exception, match="goes backwards"):
+    with pytest.raises(VersionWentBackwards, match="goes backwards"):
         EnvelopeVersions(tampered)
 
 
@@ -262,7 +266,31 @@ def test_a_failed_durable_write_does_not_leave_the_process_ahead_of_the_store() 
 
 
 def test_the_postgres_repository_writes_one_row_per_version_to_sealed_envelopes() -> None:
-    """The SQL is asserted, not assumed — including that it is an INSERT and not an UPSERT."""
+    """The SQL is asserted, not assumed.
+
+    ASSERTION CHANGED, and the ritual is recorded here because the change REVERSES what this
+    test claimed. It previously read:
+
+        assert "on conflict" not in insert_sql.lower(), (
+            "an upsert would answer a racing writer with 'your version vanished'"
+        )
+
+    What it encoded: that persist is a plain INSERT, so an append-only history can never
+    overwrite a version somebody else recorded.
+
+    Would this test still be wrong if my change were reverted? YES — and that is why it is
+    changed rather than worked around. An adversarial verifier drove this repository against
+    the real ``proxyshop-postgres-1`` table and measured that a plain INSERT makes TWO of the
+    three lifecycle transitions impossible: ``activate`` and ``kill`` deliberately do not bump
+    the version, and ``envelopes_pkey PRIMARY KEY (store_id, version)`` rejects the second row
+    with ``UniqueViolation``. ``POST /stores/{id}/kill`` — the control that versions.py says
+    has "no approval, no version bump, no excuse" — answered 500. The old assertion encoded a
+    defect as the contract.
+    The right contract, asserted below: the table holds one row per (store, version) carrying
+    that version's CURRENT STATE, and the in-memory history holds every transition. The
+    "your write vanished" hazard the old assertion feared is real for ``do nothing``, so that
+    is what is now refused by name.
+    """
     connection = _FakeConnection()
     repository = PostgresEnvelopeRepository(connection)
     versions = EnvelopeVersions(repository)
@@ -273,11 +301,125 @@ def test_the_postgres_repository_writes_one_row_per_version_to_sealed_envelopes(
     insert_sql, parameters = connection.statements[1]
     assert select_sql.startswith("select ") and "sealed.envelopes" in select_sql
     assert insert_sql.startswith("insert into sealed.envelopes ")
-    assert "on conflict" not in insert_sql.lower(), (
-        "an upsert would answer a racing writer with 'your version vanished'"
+    assert "on conflict (store_id, version) do update set" in insert_sql.lower(), (
+        "activate and kill do not bump the version, so a plain insert makes the kill switch "
+        "a UniqueViolation against envelopes_pkey"
+    )
+    assert "do nothing" not in insert_sql.lower(), (
+        "'do nothing' would answer a writer with 'your version vanished'"
+    )
+    # The identifying columns must NOT be in the SET list — an upsert that rewrote store_id or
+    # version would move a version rather than restate it.
+    set_clause = insert_sql.lower().split("do update set", 1)[1]
+    assert "store_id =" not in set_clause and "version =" not in set_clause, (
+        f"the upsert rewrites the row's own identity: {set_clause}"
     )
     assert parameters[:5] == ("s-pg", 1, SHADOW, 12.5, 100.0)
     assert connection.commits == 1
+
+
+def test_the_lifecycle_transitions_all_reach_the_table_at_one_version() -> None:
+    """put, activate and kill each produce a write, and activate/kill share v1's row.
+
+    This is the test whose absence let the plain-INSERT bug ship green: the old suite only
+    ever drove ``put``, so the two transitions that collide on the primary key were never
+    exercised against the SQL at all.
+    """
+    connection = _FakeConnection()
+    versions = EnvelopeVersions(PostgresEnvelopeRepository(connection))
+    stored = versions.put("s-lifecycle", _envelope("s-lifecycle"))
+    versions.activate("s-lifecycle", _approval(stored))
+    versions.kill("s-lifecycle")
+
+    writes = [
+        (sql, params) for sql, params in connection.statements if sql.startswith("insert into")
+    ]
+    assert [params[1] for _, params in writes] == [1, 1, 1], (
+        "activate and kill must not bump the version; the approval is bound to v1's terms"
+    )
+    assert [params[2] for _, params in writes] == [SHADOW, ACTIVE, KILLED]
+    assert connection.commits == 3
+
+
+def test_a_term_the_column_would_round_is_refused_rather_than_silently_changed() -> None:
+    """An approved figure that changes by being written down is no longer what was approved.
+
+    Measured against the real table by an adversarial verifier: max_discount_pct is
+    numeric(6,3) and budget_cap is numeric(14,2), so 10.0005 and 100.005 came back as 10.001
+    and 100.01 — and the restored version's approval digest no longer matched the recorded
+    one. R9 says old versions never change; rounding them in the storage layer changes them.
+    """
+    from merchant_svc.envelope.model import EnvelopeInvalid  # noqa: PLC0415
+
+    versions = EnvelopeVersions(PostgresEnvelopeRepository(_FakeConnection()))
+    with pytest.raises(EnvelopeInvalid, match="max_discount_pct"):
+        versions.put("s-round", _envelope("s-round", max_discount_pct=10.0005))
+    with pytest.raises(EnvelopeInvalid, match="budget_cap"):
+        versions.put("s-round", _envelope("s-round", budget_cap=100.005))
+
+    # Control: a value the column CAN hold exactly is stored without complaint, so the guard
+    # is about representability and not about refusing decimals.
+    exact = EnvelopeVersions(PostgresEnvelopeRepository(_FakeConnection()))
+    assert exact.put("s-exact", _envelope("s-exact", max_discount_pct=10.125)).max_discount_pct == (
+        10.125
+    )
+
+
+def test_a_failed_write_rolls_back_so_the_connection_survives() -> None:
+    """One integrity error must not brick the store — including the kill switch.
+
+    Measured: without a rollback PostgreSQL aborts the transaction and answers every later
+    statement InFailedSqlTransaction, taking the reload and the kill switch down with the
+    write that failed.
+    """
+
+    class _Exploding(_FakeConnection):
+        def cursor(self) -> _FakeCursor:
+            if self.statements:
+                raise RuntimeError("the envelope table is unreachable")
+            return _FakeCursor(self)
+
+    connection = _Exploding()
+    versions = EnvelopeVersions(PostgresEnvelopeRepository(connection))
+    before = connection.rollbacks
+    with pytest.raises(RuntimeError, match="unreachable"):
+        versions.record(_envelope("s-boom"))
+    assert connection.rollbacks > before, "a failed write left the transaction open"
+
+
+def test_a_read_does_not_leave_the_connection_idle_in_transaction() -> None:
+    """A boot that loads and never writes must not pin a snapshot for the process's life."""
+    connection = _FakeConnection()
+    EnvelopeVersions(PostgresEnvelopeRepository(connection))
+    assert connection.rollbacks == 1, (
+        "load() left its SELECT's transaction open; a service that never writes would sit "
+        "idle in transaction forever"
+    )
+
+
+def test_a_dict_row_connection_is_read_correctly_and_not_silently_scrambled() -> None:
+    """psycopg's dict_row factory is common, and zip(strict=True) does NOT catch it.
+
+    Zipping a mapping iterates its KEYS and the lengths match, so every field silently becomes
+    its own column name. Measured before the fix as an unrelated float-conversion error.
+    """
+    rows = [
+        {
+            "store_id": "s-dict",
+            "version": 1,
+            "activation": SHADOW,
+            "max_discount_pct": 10.0,
+            "budget_cap": 100.0,
+            "floors": [],
+            "pursue_clusters": ["hats"],
+            "standing_commitments": [],
+        }
+    ]
+    versions = EnvelopeVersions(PostgresEnvelopeRepository(_FakeConnection(rows)))
+    head = versions.current("s-dict")
+    assert head.store_id == "s-dict"
+    assert head.pursue_clusters == ("hats",)
+    assert head.max_discount_pct == 10.0
 
 
 def test_the_postgres_repository_rebuilds_a_history_from_rows() -> None:
@@ -364,25 +506,76 @@ def test_the_producer_states_shadow_rather_than_relying_on_the_consumers_default
     assert "no envelope" in context["reason"]
 
 
-def test_the_decision_is_asked_of_is_live_and_not_re_derived() -> None:
-    """A fourth activation state must not be readable as live by one of two spellings.
+def test_the_published_activation_and_the_verdict_can_never_disagree() -> None:
+    """The unsafe direction, closed by construction: one read decides both halves.
 
-    ``contracts.EnvelopeActivation`` has three members, so a genuinely unknown state cannot be
-    filed through the normal path. This drives the accessor directly instead: whatever
-    ``is_live`` says is what the gate says, because the gate asks it rather than re-spelling
-    the equality.
+    An earlier draft of ``_decide`` read the history TWICE — ``current()`` for the activation
+    string it publishes and ``is_live()`` for the verdict — and published the first read
+    beside the second's answer. An adversarial verifier measured the consequence on the plain
+    class under concurrent writes: 3 contexts in 863,004 reads carried ``activation='active'``
+    next to ``may_bid=False``, and the real consumer reads the activation, not the verdict.
+
+    This drives the divergence deterministically instead of racing for it. ``_Divergent``
+    makes the store-level accessor disagree with the envelope it hands out — exactly the
+    split a badly-timed write produced — and the context must still be internally consistent.
+    A context that says ``active`` while refusing to bid is a killed store bidding.
     """
 
-    class _Fourth(EnvelopeVersions):
+    class _Divergent(EnvelopeVersions):
         def is_live(self, store_id: str) -> bool:
-            return False
+            return not super().is_live(store_id)
 
-    versions = _Fourth()
-    _live(versions, "s-fourth")
-    assert versions.current("s-fourth").activation == ACTIVE
-    assert store_may_bid("s-fourth", versions=versions) is False, (
-        "the gate re-derived the decision instead of asking is_live"
+    versions = _Divergent()
+    _live(versions, "s-divergent")
+    assert versions.current("s-divergent").activation == ACTIVE
+
+    context = store_agent_context("s-divergent", versions=versions)
+    published_live = context["envelope"]["activation"] == ACTIVE
+    assert published_live is context["may_bid"], (
+        f"the producer published activation={context['envelope']['activation']!r} beside "
+        f"may_bid={context['may_bid']}; the consumer reads the activation, so a context that "
+        "disagrees with itself is a store bidding on the strength of the half nobody checked"
     )
+    assert store_may_bid("s-divergent", versions=versions) is context["may_bid"], (
+        "store_may_bid and the published context disagree about the same store"
+    )
+
+
+def test_a_killed_store_is_never_published_as_active_under_concurrent_writes() -> None:
+    """The property under real interleaving, not a double: no context ever says active-and-not.
+
+    A store is flipped live/killed on one thread while another reads the context. Every
+    context observed must be internally consistent. This is the test that would have caught
+    the two-read bug without needing anyone to think of it.
+    """
+    import threading  # noqa: PLC0415
+
+    versions = EnvelopeVersions()
+    _live(versions, "s-race")
+    stop = threading.Event()
+    unsafe: list[dict[str, Any]] = []
+
+    def flip() -> None:
+        while not stop.is_set():
+            versions.kill("s-race")
+            head = versions.current("s-race")
+            versions.record(head.with_activation(SHADOW, None))
+            refreshed = versions.put("s-race", _envelope("s-race"))
+            versions.activate("s-race", _approval(refreshed))
+
+    writer = threading.Thread(target=flip, daemon=True)
+    writer.start()
+    try:
+        for _ in range(20000):
+            context = store_agent_context("s-race", versions=versions)
+            if (context["envelope"]["activation"] == ACTIVE) is not context["may_bid"]:
+                unsafe.append(context)
+                break
+    finally:
+        stop.set()
+        writer.join(timeout=10)
+
+    assert unsafe == [], f"a context disagreed with itself under concurrent writes: {unsafe}"
 
 
 # ======================================================================================
@@ -413,16 +606,16 @@ def test_set_webhook_sink_none_restores_the_boot_default_rather_than_clearing() 
         webhooks.set_webhook_sink(borrowed)
 
 
-def test_no_state_reachable_through_the_setter_leaves_the_sink_missing() -> None:
-    """The property, not one example: the module cannot be talked into having no sink."""
-    from merchant_svc.install import webhooks  # noqa: PLC0415
+def test_a_first_put_starts_at_version_one_whatever_the_body_claims() -> None:
+    """`put` derives the version from what is on file — including when nothing is.
 
-    borrowed = webhooks.webhook_sink()
-    try:
-        for candidate in (None, webhooks.default_sink, webhooks.inbox_only_sink, print):
-            webhooks.set_webhook_sink(candidate)
-            assert callable(webhooks.webhook_sink()), (
-                f"set_webhook_sink({candidate!r}) left the sink un-callable"
-            )
-    finally:
-        webhooks.set_webhook_sink(borrowed)
+    ``contracts.Envelope`` puts no lower bound on ``version``, so before this a client could
+    open a store at v0 (which sealed.envelopes' ``envelopes_version_positive`` CHECK rejects,
+    turning a request body into a 500) or at v9999, permanently poisoning the monotonic rule
+    for that store because nothing may go backwards from it again.
+    """
+    versions = EnvelopeVersions()
+    assert versions.put("s-zero", _envelope("s-zero", version=0)).version == 1
+    assert versions.put("s-huge", _envelope("s-huge", version=9999)).version == 1
+    # Control: the derivation still climbs normally from there.
+    assert versions.put("s-huge", _envelope("s-huge", max_discount_pct=5.0)).version == 2

@@ -48,10 +48,21 @@ def _decide(store_id: str, versions: EnvelopeVersions | None) -> BiddingDecision
             reason="no envelope has ever been recorded for this store",
         )
 
-    # `is_live` is the accessor, and it is asked rather than re-derived here: spelling the
-    # equality a second time is how a fourth activation state eventually gets treated as
-    # live by one of the two copies.
-    live = store.is_live(store_id)
+    # ONE read decides both halves of what this function publishes.
+    #
+    # The first draft called `store.current()` for the activation string and `store.is_live()`
+    # for the verdict — two reads of a mutable history. Any write landing between them was
+    # published as a context whose `envelope.activation` said one thing and whose `may_bid`
+    # said another, and the consumer reads the FIRST of those. Measured on the plain class
+    # under concurrent writes: 3 contexts in 863,004 reads carried activation='active' beside
+    # may_bid=False, and `store_agent.modes.runner._envelope_states` read them as ACTIVE.
+    # That is the one direction that is not safe to be wrong in — a killed store bidding —
+    # so the verdict is derived from the very envelope being published.
+    #
+    # `is_live` is still the accessor that DEFINES the question (equality against the one live
+    # value, never "not killed"); it is applied to this envelope rather than re-queried, so
+    # there is no second read to disagree with and no second spelling of the equality.
+    live = envelope.is_live
     if live:
         reason = "the store's current envelope is active"
     elif envelope.activation == SHADOW:

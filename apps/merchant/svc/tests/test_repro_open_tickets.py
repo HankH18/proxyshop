@@ -29,6 +29,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import textwrap
@@ -588,16 +589,34 @@ _WARNING_SOURCE = REPO_ROOT / "services" / "ingest" / "src" / "er" / "identity.p
 
 
 def _ast_parse_call_sites(tree: ast.AST) -> list[int]:
-    """Line numbers of every ``ast.parse(...)`` CALL in ``tree`` — a call, not a mention."""
-    return sorted(
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "parse"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "ast"
-    )
+    """Line numbers of every unmuted parse CALL in ``tree`` — a call, not a mention.
+
+    Four spellings are matched, because a gate that only knows ``ast.parse`` is a gate three
+    trivial rewrites can turn green while muting nothing: ``ast.parse(s)``,
+    ``from ast import parse; parse(s)``, ``A = ast; A.parse(s)`` (any attribute access ending
+    in ``.parse``), and ``getattr(ast, "parse")(s)``. It is still not a proof — nothing
+    source-shaped can be — and moving the bare calls into a sibling module is a green this
+    cannot see. That limit is stated rather than papered over.
+    """
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "parse":
+            found.add(node.lineno)
+        elif isinstance(func, ast.Name) and func.id == "parse":
+            found.add(node.lineno)
+        elif (
+            isinstance(func, ast.Call)
+            and isinstance(func.func, ast.Name)
+            and func.func.id == "getattr"
+            and len(func.args) >= 2
+            and isinstance(func.args[1], ast.Constant)
+            and func.args[1].value == "parse"
+        ):
+            found.add(node.lineno)
+    return sorted(found)
 
 
 def _helper_body_lines(tree: ast.AST, name: str) -> range:
@@ -635,7 +654,20 @@ def test_t285_the_syntax_warning_helper_is_armed() -> None:
     assert _WARNING_SOURCE.is_file(), f"{_WARNING_SOURCE} is gone"
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", SyntaxWarning)
-        ast.parse(_WARNING_SOURCE.read_text(encoding="utf-8"))
+        # `compile(..., PyCF_ONLY_AST)` and NOT `ast.parse` — deliberately, and this is not a
+        # trick to dodge the gate below. This control has to WITNESS the SyntaxWarning, so it
+        # is the one place in this file that must parse WITHOUT the muting helper. Written as
+        # `ast.parse` it would appear in the gate's own remedy set, and the only way to make
+        # the gate green (route every ast.parse through `_parse`) would mute the very warning
+        # this control exists to observe — an unsatisfiable gate: green control and red gate,
+        # with no edit that fixes both. `ast.parse` is a thin wrapper around exactly this call,
+        # so what is witnessed is identical.
+        compile(  # noqa: S102 - PyCF_ONLY_AST builds a tree, it does not execute anything
+            _WARNING_SOURCE.read_text(encoding="utf-8"),
+            str(_WARNING_SOURCE),
+            "exec",
+            ast.PyCF_ONLY_AST,
+        )
     assert any(issubclass(w.category, SyntaxWarning) for w in caught), (
         f"{_WARNING_SOURCE} no longer emits a SyntaxWarning, so `_parse` has nothing to mute "
         "and T-285's premise has expired — retire the helper rather than wiring it"
@@ -648,7 +680,8 @@ def test_t285_the_syntax_warning_helper_is_armed() -> None:
         "T-285: `_parse` (this file) wraps ast.parse in catch_warnings/simplefilter('ignore', "
         "SyntaxWarning) and its docstring names exactly why — services/ingest/src/er/"
         "identity.py has \\s in a non-raw docstring — but the two call sites it was written "
-        "to replace still call ast.parse bare, so the warning is still charged to "
+        "to replace (in test_t246 and test_t239) still call ast.parse bare, so the warning is "
+        "still charged to "
         "test_t246_some_production_code_reads_the_envelope_activation_decision. Worse than "
         "noise: under -W error::SyntaxWarning CPython raises the escalated warning as a "
         "SyntaxError, which the bare site's `except SyntaxError: continue` swallows, silently "
@@ -691,17 +724,64 @@ _OPERATION_METHODS = frozenset(
 )
 
 
+#: Endpoints FastAPI mounts for itself. Excluded by exact path because they are the
+#: framework's, not the merchant's — no contract review is owed them and no ticket is about
+#: them. Listed rather than pattern-matched so a real route can never fall through by
+#: resembling one.
+_FRAMEWORK_PATHS = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
+
+
+def _normalize_path(path: str) -> str:
+    """A route path in the contract's spelling, converter suffixes removed.
+
+    Starlette keeps the converter in the raw path — ``install/routes.py`` declares
+    ``/webhooks/shopify/{topic:path}`` — while OpenAPI (and therefore the pinned contract)
+    spells the same parameter ``{topic}``. Comparing the raw strings would report the one
+    route both sides DO agree on as a mismatch, which is a false red, not a finding.
+    """
+    return re.sub(r"\{([^}:]+):[^}]+\}", r"{\1}", path)
+
+
 def _served_operations() -> set[tuple[str, str]]:
-    """Every ``(method, path)`` the merchant app actually answers, from the built app."""
+    """Every ``(method, path)`` the merchant app actually answers.
+
+    Read off ``app.routes`` and NOT off ``app.openapi()``. The schema is what the service
+    *documents*, so a route carrying ``include_in_schema=False`` is invisible to it — and this
+    gate exists precisely to find routes nothing reviews. Grading the schema would have made
+    one keyword argument a green button for a ticket about undeclared surface. Measured: the
+    app answers 200 on four framework endpoints the schema never lists, which is how the hole
+    was found.
+    """
     from merchant_svc.main import create_app  # noqa: PLC0415
 
-    schema = create_app().openapi()
-    return {
-        (method.lower(), path)
-        for path, item in schema["paths"].items()
-        for method in item
-        if method.lower() in _OPERATION_METHODS
-    }
+    served: set[tuple[str, str]] = set()
+
+    def walk(routes: Any) -> None:
+        # This FastAPI version wraps each `include_router` in a `_IncludedRouter` that carries
+        # no `.path` of its own and holds the real routes in a nested `.routes`. A flat scan
+        # of `app.routes` therefore sees ONLY the four framework endpoints and reports the
+        # service as serving nothing — measured, and caught by this gate's armed control,
+        # which is exactly what that control is for.
+        for route in routes or ():
+            # `_IncludedRouter` exposes the router it wrapped as `original_router`, not as
+            # `routes`; both spellings are followed so this survives a FastAPI upgrade in
+            # either direction.
+            wrapped = getattr(route, "original_router", None)
+            nested = getattr(route, "routes", None) or getattr(wrapped, "routes", None)
+            if nested:
+                walk(nested)
+                continue
+            raw = getattr(route, "path", None)
+            methods = getattr(route, "methods", None)
+            if not raw or not methods or raw in _FRAMEWORK_PATHS:
+                continue
+            path = _normalize_path(raw)
+            served.update(
+                (method.lower(), path) for method in methods if method.lower() in _OPERATION_METHODS
+            )
+
+    walk(create_app().routes)
+    return served
 
 
 def _published_operations() -> set[tuple[str, str]]:

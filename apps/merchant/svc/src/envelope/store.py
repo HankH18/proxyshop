@@ -29,7 +29,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .digest import approval_covers, approval_digest
-from .model import ACTIVE, SHADOW, ApprovalRejected, Envelope, EnvelopeError
+from .model import ACTIVE, FIRST_VERSION, SHADOW, ApprovalRejected, Envelope, EnvelopeError
 from .repository import EnvelopeRepository, InMemoryEnvelopeRepository, restorable
 from .versions import activate_envelope, edit_envelope, kill_envelope
 
@@ -220,9 +220,21 @@ class EnvelopeVersions:
         try:
             head = self.current(store_id)
         except UnknownStore:
-            # A store's first envelope is filed exactly as submitted apart from its state:
-            # nothing has been approved yet, so it starts in shadow whatever the body said.
-            return self.record(submitted.with_activation(SHADOW, None))
+            # A store's first envelope starts in shadow whatever the body said — nothing has
+            # been approved yet — and at FIRST_VERSION whatever the body said.
+            #
+            # The version used to be carried through from the submitted document, which
+            # contradicted this method's own contract ("The submitted ``version`` is ignored —
+            # it is derived from what is already on file", onboarding/routes.py) for the one
+            # case where nothing is on file. `contracts.Envelope` puts no lower bound on the
+            # field, so a client could open a store at v0 — which `sealed.envelopes`
+            # `envelopes_version_positive CHECK (version >= 1)` then rejects, turning a
+            # request body into a 500 — or at v9999, permanently poisoning the monotonic rule
+            # for that store because nothing may ever go backwards from it again.
+            first = Envelope.from_obj(
+                {**submitted.to_dict(), "version": FIRST_VERSION}, approval=None
+            )
+            return self.record(first.with_activation(SHADOW, None))
         changes: Mapping[str, Any] = {
             "floors": submitted.to_dict()["floors"],
             "max_discount_pct": submitted.max_discount_pct,
