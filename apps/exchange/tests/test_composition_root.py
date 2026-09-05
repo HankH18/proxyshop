@@ -793,3 +793,136 @@ def test_a_slow_store_agent_cannot_hold_a_fan_out_worker_open(agent_url: str) ->
         f"the drip held one fan-out worker for {elapsed:.2f}s against a "
         f"{MAX_SOLICIT_WALL_CLOCK_SECONDS}s wall-clock ceiling"
     )
+
+
+# =====================================================================================
+# The two halves meeting: the REAL store agent, over HTTP, into the real exchange
+# =====================================================================================
+#: The store the shipped approved-envelope fixture describes, and the domain the PLATFORM
+#: would hold for it. Both sides of every on-domain check read this one value, which is the
+#: only honest arrangement — a deployment populates the seller registry and the merchant's
+#: store context from one seller record.
+REAL_STORE_ID = "store-alpha"
+REAL_STORE_DOMAIN = "store-alpha.example.com"
+REAL_CLUSTER = "cluster-warm-layers"
+REAL_PRODUCT = "prod-cap"
+
+
+def test_the_real_store_agent_and_the_real_exchange_complete_a_purchase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None
+) -> None:
+    """Both deployables, both booted, one loopback socket between them, one discount code.
+
+    Everything above this line uses a store-agent double, deliberately: an acceptance test for
+    the exchange's composition root must not be able to fail for the store agent's reasons.
+    This one is the opposite test and it is the one that proves the system, because the two
+    halves of this defect were fixed in two different packages by two different lanes:
+
+    * the store agent had a bidding runtime nothing served, so no HTTP door existed to knock
+      on and every offer it built carried no ``checkout_url``;
+    * the exchange had no outbound client, no seller registry, no trust snapshot and no bid
+      book, so it solicited nobody and could accept nothing.
+
+    Either half alone still produces an empty shortlist. What is asserted here is the join:
+    ``store_agent.main.create_app()`` serving its published ``POST /v1/bid-requests`` on a real
+    port, ``exchange.main.create_app()`` serving on another, the exchange's own
+    ``HttpBidSolicitor`` dialling the first from inside the fan-out, and a buyer walking away
+    with a code that resolves on the host the platform registered.
+
+    Neither app is wired by this test. The store agent reads ``STORE_AGENT_CONTEXT`` and the
+    exchange reads ``EXCHANGE_DEPLOYMENT``, which is what a person deploying them does.
+    """
+    from store_agent.main import create_app as create_store_agent
+
+    envelope_fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "fixtures"
+            / "envelopes"
+            / "store-alpha.approved.json"
+        ).read_text(encoding="utf-8")
+    )
+    context = {
+        "store_id": REAL_STORE_ID,
+        "envelope": envelope_fixture["envelope"],
+        "catalog": envelope_fixture["catalog"],
+        "live_state": {REAL_PRODUCT: {"in_stock": True, "units_left": 7}},
+        "learned_policy": None,
+        "network_priors": {REAL_CLUSTER: {"depth_buckets": [0.0, 0.05, 0.1, 0.15, 0.2]}},
+    }
+    context_path = tmp_path / "store-context.json"
+    context_path.write_text(json.dumps(context), encoding="utf-8")
+    monkeypatch.setenv("STORE_AGENT_CONTEXT", str(context_path))
+    monkeypatch.setenv("STORE_AGENT_STORE_DOMAIN", REAL_STORE_DOMAIN)
+
+    with serve(create_store_agent()) as agent_url:
+        document = {
+            "sellers": [
+                {
+                    "store_id": REAL_STORE_ID,
+                    "eligibility": "eligible",
+                    "registered_domain": REAL_STORE_DOMAIN,
+                    "bid_endpoint": f"{agent_url}/v1/bid-requests",
+                }
+            ],
+            "trust_snapshot": {
+                "stores": {
+                    REAL_STORE_ID: {
+                        "store_id": REAL_STORE_ID,
+                        "blacklisted": False,
+                        "score": 0.8,
+                    }
+                }
+            },
+            "checkout_mode": "redirect",
+        }
+        deployment = tmp_path / "deployment.json"
+        deployment.write_text(json.dumps(document), encoding="utf-8")
+        monkeypatch.setenv(ENV_DEPLOYMENT, str(deployment))
+        monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+        with served_exchange() as client:
+            opened = client.post(
+                "/auctions",
+                json={
+                    "intent": {**INTENT, "cluster_id": REAL_CLUSTER},
+                    "profile": {"pseudonym": "psn-cross-lane", "buckets": {}},
+                    "roster": [
+                        {
+                            "store_id": REAL_STORE_ID,
+                            "tier": 1,
+                            # The catalogue's own list price and the envelope's own cap.
+                            # They are the PLATFORM's half of the T-177 price wall, and a
+                            # roster that states either one differently makes the store's
+                            # honest bid read as an unauthorized discount: measured, a
+                            # `list_price: 120.0` row turned a real bid into
+                            # `fallback_reason: 'bid_price_unreconcilable'`.
+                            "product_ref": REAL_PRODUCT,
+                            "list_price": 100.0,
+                            "max_discount_pct": 20.0,
+                        }
+                    ],
+                },
+            )
+            assert opened.status_code == 201, opened.text
+            body = opened.json()
+
+            # The agent really answered: a fallback here means the solicitation never landed.
+            assert body["solicited"] == [REAL_STORE_ID], body
+            assert body["entries"] and body["entries"][0]["fallback"] is False, (
+                "the exchange manufactured a list-price fallback, so the real agent was never "
+                f"reached or refused to bid: {body['entries']}"
+            )
+            assert body["ranked"], f"nothing ranked; exclusions were {body['excluded']}"
+            assert body["shortlist"]["slots"], body
+
+            top = body["shortlist"]["slots"][0]
+            accepted = client.post(
+                f"/auctions/{body['auction_id']}/accept", json={"bid_ref": top["bid_ref"]}
+            )
+
+    assert accepted.status_code == 200, accepted.text
+    payload = accepted.json()
+    assert payload["code"].startswith("PSX-"), payload
+    assert payload["permalink_url"].startswith(f"https://{REAL_STORE_DOMAIN}/cart/"), payload
+    assert f"discount={payload['code']}" in payload["permalink_url"], payload
