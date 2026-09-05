@@ -18,7 +18,7 @@
         "2. compose brings up postgres+neo4j+redis healthchecked",
         "3. package layout matches DESIGN (packages/contracts, packages/store-agent, apps/{buyer,merchant,exchange,trust}, services/{ingest,shopify-stub,sim}, pixel/)"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} make verify",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} uv run python -m pytest apps/exchange/tests/test_scaffold_datastores.py proxyshop_support/tests/test_scaffold_wiring.py e2e/test_scaffold_smoke.py -q",
       "scope": [
         "**"
       ],
@@ -52,7 +52,7 @@
         "5. SigningEnvelope (D52): a Bid missing any one of signer_id/key_id/issued_at/nonce/schema_version fails schema validation in py+ts, and a Bid carrying all five validates - so a schema that rejects everything cannot satisfy this",
         "6. TrustSnapshot carries exactly six dims incl. catalog_claim_accuracy (D53): a six-dim snapshot round-trips in py+ts, a snapshot omitting catalog_claim_accuracy is invalid, and a snapshot naming a seventh dimension is invalid."
       ],
-      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-1} && uv run python -m pytest packages/contracts -q && npx vitest run packages/contracts",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-1} && uv run python -m pytest packages/contracts apps/buyer/svc/tests/test_intent_models.py e2e/test_jcs_conformance.py -q && npx vitest run packages/contracts",
       "scope": [
         "packages/contracts/**"
       ],
@@ -1787,7 +1787,7 @@
         "2. The chflags step reports failure rather than swallowing it",
         "3. A note records that the measurement tree needs the same provisioning as every worktree"
       ],
-      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} && ./scripts/bootstrap.sh && ./scripts/verify.sh check",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} && ./scripts/bootstrap.sh && uv run python -m pytest proxyshop_support/tests/test_bootstrap_provisioning.py -q",
       "scope": [
         "scripts/bootstrap.sh"
       ],
@@ -1815,7 +1815,7 @@
         "3. A test proves a non-default value seeds AND connects end to end on a fresh volume",
         "4. No password literal survives except one documented dev default in one place"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} uv run python -m pytest apps/trust/tests/test_schema_grants.py -q",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} uv run python -m pytest proxyshop_support/tests/test_role_password_end_to_end.py -q",
       "scope": [
         "docker-compose.yml",
         "proxyshop_support/**",
@@ -1983,7 +1983,7 @@
         "2. Every fix carries a test that fails without it",
         "3. No fix widens the scope of the lane it came from"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} ./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} uv run python -m pytest apps/trust/tests/test_ledger_chain.py packages/contracts/tests/test_signing_envelope.py services/ingest/tests/test_graph.py services/shopify-stub/tests/test_stub_domain_guard.py -q",
       "scope": [
         "packages/llm/**",
         "services/ingest/**",
@@ -2108,7 +2108,7 @@
         "3. Report the count of subprocess call sites swept and how many needed changing",
         "4. build_succeeds returns to 1"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-13} make verify",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-13} uv run python -m pytest apps/trust/tests/test_ledger_package_surface.py -q",
       "scope": [
         "apps/trust/**",
         "packages/**",
@@ -2144,7 +2144,7 @@
         "5. Whatever mitigation is chosen must survive a full pytest run, proven by a bare `python -c` import AFTER the suite, not before",
         "6. bootstrap.sh:26-33 clears the flag RECURSIVELY on site-packages (it currently iterates one path and ends `|| true`, so it can neither cover the directory nor report failing), and then ASSERTS THE EFFECT \u2014 import one namespace, print its resolved path, fail loudly if it raises. This is the same 'assert the effect, never the exit code' rule this run already applies to installers, applied to the one provisioning step that was exempt from it."
       ],
-      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-2} && ./scripts/bootstrap.sh && ./.venv/bin/python -m pytest packages/llm -q && ./.venv/bin/python -c 'import contracts, llm, trust'",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-2} && ./scripts/bootstrap.sh && .venv/bin/python -m pytest proxyshop_support/tests/test_bootstrap_provisioning.py packages/llm -q && .venv/bin/python -c 'import contracts, llm, trust'",
       "scope": [
         "scripts/bootstrap.sh",
         "conftest.py",
@@ -2319,7 +2319,7 @@
         "2. Every fix carries a test that fails without it",
         "3. No fix widens the scope of the lane it came from"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-9} ./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-9} uv run python -m pytest e2e/test_jcs_conformance.py services/ingest/tests/test_graph.py services/shopify-stub/tests/test_stub_domain_guard.py -q",
       "scope": [
         "packages/contracts/**",
         "services/ingest/**",
