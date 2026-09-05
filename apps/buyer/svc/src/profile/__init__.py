@@ -431,9 +431,28 @@ IDENTITY_ACCOUNT_KEYS: tuple[str, ...] = (
 )
 
 #: Below this length a value is too short to be a meaningful identifier and matching on it
-#: produces noise ("OR" would collide with a region code). Identity values shorter than this
-#: are not leak-checked; nothing in the allowlist can emit one anyway.
-_MIN_LEAKABLE = 4
+#: produces noise. Identity values shorter than this are not leak-checked.
+#:
+#: **Three, not four** (T-197). At four, a short name was not merely under-weighted, it was
+#: invisible: ``first_name='Ann'``, ``last_name='Lee'`` and an order category of ``"ann lee
+#: gear"`` published ``['ann-lee-gear']`` with the backstop reporting clean, because neither
+#: fragment ever entered the haystack. A three-letter name is still the buyer's name.
+#:
+#: **Not two**, and the reason is the one the old comment gave for four: a two-character
+#: fragment collides with the region bucket by construction. :func:`coarsen_region` emits
+#: ``COUNTRY`` and ``COUNTRY-SUBDIVISION`` codes of two and three letters, so the buyer at
+#: "12 Park Lane, Boulder CO 80301" whose profile says ``region == "US-CO"`` would have their
+#: own address word ``"CO"`` reported as a disclosure — the denial of service
+#: :func:`_exempt_category_slugs` exists to prevent, arriving through the one bucket that has
+#: no exemption at all. Three is the largest reduction that keeps every ISO subdivision code
+#: out of the haystack while putting the shortest real names into it.
+#:
+#: The constant gates four places and they must agree: what :func:`_identity_sources` records,
+#: what :func:`_identity_fragments_in_slug` counts, what rule 3 of
+#: :func:`_exempt_category_slugs` will accept as a merchandise token, and which fragments
+#: :func:`identity_leaks` searches for in slug space. A fragment tracked on one side and
+#: ignored on the other is how a slug becomes newly exempt without anybody deciding it should.
+_MIN_LEAKABLE = 3
 
 #: Identity keys that name a **person or an account** rather than a place. A merchandising
 #: slug whose token spells one of these is not a coincidence — nobody's shop sells
@@ -465,6 +484,10 @@ _MAX_INCIDENTAL_FRAGMENTS = 1
 
 _REGION_SEPARATORS = re.compile(r"[-_/,\s]+")
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+
+#: Everything that is not a digit. Used by :func:`_identity_sources` to record a number's
+#: digits with its grouping dropped — see the note on regrouping there (T-198).
+_NON_DIGIT = re.compile(r"\D+")
 
 
 class IdentityLeak(AssertionError):
@@ -926,6 +949,23 @@ def _identity_sources(account: Mapping[str, Any]) -> dict[str, set[str]]:
     what a bare set of strings cannot give them: ``"dana"`` reached by way of ``first_name``
     is a name, and ``"park"`` reached by way of ``address`` is a place, and the two earn
     different answers from the backstop.
+
+    Two normalisations are recorded beside the value as written, both closing a channel a
+    fragment escaped through while the backstop reported clean (T-198):
+
+    * **digits alone.** ``identity_leaks`` searches verbatim and in slug space, and a number
+      *regrouped* rather than repunctuated is neither: the phone ``"555-0100"`` reaches a
+      profile as ``gift-5550100-gear`` and no comparison in either space finds it. Which
+      digits of a phone number are the phone number is the question the ticket left open, and
+      the answer taken here is the conservative one — **all of them, in order, separators
+      dropped** — because that is the only grouping-independent reading of a number, and it is
+      exactly the transformation that hid it. Recorded under the key that contributed it, so
+      the refusal still names ``phone`` rather than some synthetic ``phone_digits``.
+    * **the email domain, word by word.** The local part was already split and the domain was
+      added whole, so ``reyes-family@example.com`` was refused and ``x@reyes-family.example``
+      — the same two words, one character to the right — rode out. A shared domain carries no
+      identity and none of its words will match anything; a vanity domain is the buyer's name.
+      The asymmetry was the defect, not the leniency, and this removes the asymmetry.
     """
     found: dict[str, set[str]] = {}
 
@@ -934,18 +974,28 @@ def _identity_sources(account: Mapping[str, Any]) -> dict[str, set[str]]:
         if len(text) >= _MIN_LEAKABLE:
             found.setdefault(text, set()).add(key)
 
+    def add_digits(text: str, key: str) -> None:
+        """The value's digits with every separator dropped — see the docstring."""
+        digits = _NON_DIGIT.sub("", text)
+        if digits != text.strip().casefold():
+            add(digits, key)
+
     for key in IDENTITY_ACCOUNT_KEYS:
         value = account.get(key)
         if not isinstance(value, str) or not value.strip():
             continue
         add(value, key)
+        add_digits(value, key)
         for word in re.split(r"[\s,]+", value):
             add(word, key)
+            add_digits(word, key)
         if key == "email" and "@" in value:
             local, _, domain = value.partition("@")
             add(local, key)
             add(domain, key)
             for word in re.split(r"[.\-_+]+", local):
+                add(word, key)
+            for word in re.split(r"[.\-_+]+", domain):
                 add(word, key)
     return found
 
@@ -1023,9 +1073,27 @@ _CLOSED_VOCABULARY: frozenset[str] = frozenset(
 #: The same vocabulary, split by the bucket that can actually emit each label — because a
 #: label is only unremarkable in the bucket whose coarsener owns it. ``"footwear"`` turning up
 #: in ``region`` is not a taxonomy label, it is a coarsener that was rewired, and holding it
-#: out of the haystack account-wide meant the backstop could not say so. Buckets absent here
-#: (``region``, ``first_time``) have no fixed vocabulary at all, so nothing in them is ever
-#: incidental.
+#: out of the haystack account-wide meant the backstop could not say so.
+#:
+#: ``category_affinity`` is deliberately **not** here (T-199), and it is the one bucket whose
+#: exemption could not be justified the way the other two are. The justification is *"these
+#: values are chosen by a coarsener from a fixed table, never copied out of the account"*.
+#: That is true of ``budget_band`` and ``frequency_tier`` at every rung. It is true of
+#: ``category_affinity`` only above the default floor, where :func:`taxonomy_affinity` picks
+#: the label; at rung 0 — the default release, and the only release production makes — the
+#: bucket carries the account's **own** ``orders[].category`` slugs verbatim. Roughly eleven
+#: common English words are taxonomy labels, so a buyer whose surname is Home buying ``home``
+#: published their surname and the backstop skipped the value without looking at it.
+#:
+#: Removing the entry does not refuse the coincidence, it just stops exempting it unread:
+#: :func:`_exempt_category_slugs` is the exemption that bucket already has, it is earned per
+#: slug rather than handed over per label, and it is the one that knows the difference between
+#: Cook buying ``cookware`` and Home buying ``home``. A generalised release is unaffected in
+#: practice for the same reason — a taxonomy label that collides with nothing on the account
+#: is matched, found in nothing, and reported as nothing.
+#:
+#: Buckets absent here (``category_affinity``, ``region``, ``first_time``) have no vocabulary
+#: exemption at all, so nothing in them is ever incidental by virtue of the value alone.
 _BUCKET_VOCABULARY: dict[str, frozenset[str]] = {
     "budget_band": frozenset(
         {label for _low, _high, label in BUDGET_BANDS}
@@ -1035,7 +1103,6 @@ _BUCKET_VOCABULARY: dict[str, frozenset[str]] = {
     "frequency_tier": frozenset(
         {tier for _ceiling, tier in FREQUENCY_TIERS} | set(COARSE_FREQUENCY_TIERS)
     ),
-    "category_affinity": frozenset(CATEGORY_TAXONOMY),
 }
 
 

@@ -176,15 +176,14 @@ def test_t164_no_public_bucket_builder_publishes_identity_without_the_backstop()
 # ======================================================================================
 # T-197 — identity fragments shorter than four characters are never tracked at all
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-197: _MIN_LEAKABLE = 4 (profile/__init__.py:436) drops every identity fragment "
-        "shorter than four characters before the backstop ever sees it, so first_name='Ann' "
-        "last_name='Lee' with an order category of 'ann lee gear' builds as "
-        "['ann-lee-gear'] and the backstop reports clean; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-197 is FIXED. `_MIN_LEAKABLE` is 3, not 4
+# (apps/buyer/svc/src/profile/__init__.py), so "Ann" and "Lee" enter the haystack and this
+# account is refused. The marker is gone rather than kept because `strict=True` turns a passing
+# xfail into a FAILURE, which would red `make verify`.
+#
+# CAUSATION PROVEN, not assumed. Reverting ONLY `_MIN_LEAKABLE` to 4 and changing nothing else
+# returns this node to `xfailed` while t198_a, t198_b and t199 stay XPASS — measured on this
+# tree. No assertion in the body was touched.
 def test_t197_a_three_letter_name_in_a_category_slug_is_still_a_leak() -> None:
     """A short name is still the buyer's name."""
     from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks  # noqa: PLC0415
@@ -209,15 +208,13 @@ def test_t197_a_three_letter_name_in_a_category_slug_is_still_a_leak() -> None:
 # ======================================================================================
 # T-198 (a) — a regrouped number escapes the backstop
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-198(a): the backstop matches an identity fragment verbatim and in slug space, but "
-        "a number REGROUPED rather than repunctuated is neither — phone '555-0100' with an "
-        "order category of 'gift 5550100 gear' builds as ['gift-5550100-gear'] with "
-        "identity_leaks == []; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-198(a) is FIXED. `_identity_sources` now records a value's digits with
+# every separator dropped, under the account key that contributed them, so phone "555-0100"
+# is also tracked as "5550100" and the regrouped spelling is found.
+#
+# CAUSATION PROVEN: reverting ONLY the digit normalisation (the two `add_digits` calls) and
+# changing nothing else returns this node to `xfailed` while t197, t198_b and t199 stay XPASS.
+# No assertion in the body was touched.
 def test_t198_a_a_regrouped_phone_number_in_a_category_slug_is_still_a_leak() -> None:
     """Dropping the separators from a phone number does not stop it being a phone number."""
     from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks  # noqa: PLC0415
@@ -240,15 +237,18 @@ def test_t198_a_a_regrouped_phone_number_in_a_category_slug_is_still_a_leak() ->
 # ======================================================================================
 # T-198 (b) — the email domain is added whole, so a vanity domain rides out
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-198(b): _identity_sources (profile/__init__.py:944-949) word-splits the email "
-        "LOCAL PART but adds the domain whole, so 'x@reyes-family.example' with an order "
-        "category of 'reyes family gear' builds as ['reyes-family-gear'] clean, while the "
-        "identical words left of the @ are refused; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-198(b) is FIXED. `_identity_sources` now word-splits the email DOMAIN the
+# way it already split the local part, so the same two words are treated the same on both sides
+# of the "@".
+#
+# CAUSATION PROVEN: reverting ONLY the domain word-split and changing nothing else returns this
+# node to `xfailed` while t197, t198_a and t199 stay XPASS. No assertion in the body was
+# touched.
+#
+# NOTE for whoever reads this next: this node is claimed by T-198 by name, by section comment
+# and by decorator, and T-198's recorded `verify` selects ONLY t198_a. That under-selection is
+# itself an open ticket (T-328) and is not fixed here — tickets.json is a frozen protected
+# path. T-198's gate selects 1 node; both of its nodes pass.
 def test_t198_b_a_vanity_email_domain_in_a_category_slug_is_still_a_leak() -> None:
     """The same two words are a leak on one side of the ``@`` and not on the other."""
     from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks  # noqa: PLC0415
@@ -282,16 +282,14 @@ def test_t198_b_a_vanity_email_domain_in_a_category_slug_is_still_a_leak() -> No
 # ======================================================================================
 # T-199 — the bucket vocabulary exempts taxonomy labels, including at the k=1 default
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-199: _BUCKET_VOCABULARY['category_affinity'] (profile/__init__.py:1038) holds "
-        "every CATEGORY_TAXONOMY label out of the leak haystack on the grounds that they are "
-        "values a coarsener chose from a fixed table, but at the k=1 default "
-        "category_affinity carries the account's OWN slugs — last_name='Home' buying 'home' "
-        "publishes the surname and the backstop skips it; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-199 is FIXED. `_BUCKET_VOCABULARY` no longer carries a
+# `"category_affinity"` entry, so a taxonomy label in that bucket is searched like any other
+# value. `budget_band` and `frequency_tier` keep theirs, because their coarseners really do
+# choose from a fixed table at every rung.
+#
+# CAUSATION PROVEN: putting ONLY `"category_affinity": frozenset(CATEGORY_TAXONOMY)` back into
+# `_BUCKET_VOCABULARY` and changing nothing else returns this node to `xfailed` while t197,
+# t198_a and t198_b stay XPASS. No assertion in the body was touched.
 def test_t199_a_surname_that_is_also_a_taxonomy_label_is_still_a_leak() -> None:
     """A vocabulary exemption that is sound at k>1 is not sound at the default floor."""
     from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks  # noqa: PLC0415
