@@ -57,6 +57,7 @@ import pytest
 
 from apps.trust.src.reconcile import (
     CODE_BRIDGE_KINDS,
+    ReconciliationInputError,
     discount_codes_of,
     reconcile,
 )
@@ -322,8 +323,14 @@ def test_a_code_redeemed_by_two_different_orders_joins_neither_of_them() -> None
 
     Note what the assertion is: **zero**, not one. A reconciler that "handles" the collision
     by grading whichever order it saw first passes a ``len(...) == 1`` test and loses money.
+
+    Each order carries its OWN platform checkout token, because that is what two orders at
+    one shop actually look like. Two webhooks that share an identifier are not two orders —
+    they are one order delivered twice, which is the redelivery case below.
     """
-    second = order_paid(order_ref="gid://shopify/Order/5500000000002", total_price=999.0)
+    second = order_paid(
+        token="2" * 32, order_ref="gid://shopify/Order/5500000000002", total_price=999.0
+    )
     emitted = reconcile([accepted(), code_created(), order_paid(), second])
 
     assert emitted == [], (
@@ -446,49 +453,83 @@ def test_a_bridge_event_is_never_a_promise_and_never_an_outcome() -> None:
     assert reconcile([accepted(), code_created()]) == []
 
 
-def test_a_webhook_with_only_a_code_is_still_attributable_and_not_an_input_error() -> None:
-    """A code IS a join key, so a webhook carrying one is not the keyless case that raises."""
-    tokenless = order_paid()
-    tokenless["payload"].pop("checkout_token")
-    tokenless["payload"].pop("order_ref")
-    tokenless.pop("order_ref")
+def test_a_webhook_that_names_only_a_code_is_refused_not_attributed() -> None:
+    """A code is a BRIDGE between two identified things, never an identity of its own.
 
-    emitted = reconcile([accepted(), code_created(), tokenless])
-    assert len(emitted) == 1
-    assert emitted[0]["payload"]["price_honored"] is True
+    This assertion is the reverse of the one that first stood here, and the reversal is the
+    finding. Letting a code stand in for a missing order reference looked generous and was
+    three defects at once, each measured on this exact page:
 
+    * the emitted ``order_ref`` — half of ``event_id``, the ledger's idempotency key — became
+      the live redeemable discount code, published into a field the repo keeps a whole
+      redaction module to keep codes out of;
+    * two unrelated orders could then spell the SAME ``event_id``, so the second one's append
+      is a silent no-op and its overcharge is gone;
+    * and a second keyless webhook naming the same code was indistinguishable from the first,
+      so the ambiguity guard could not see it — one order graded, the other dropped, where
+      the pre-change code had raised loudly.
 
-def test_an_order_reference_fallen_back_to_a_code_key_does_not_leak_the_namespace() -> None:
-    """When a code is the ONLY key a group has, the emitted ``order_ref`` falls back to it.
-
-    A join key is namespaced twice over — ``{store}\\x1fdiscount_code\\x1f{code}`` — and the
-    fallback strips the scope off a root key to name the order. Splitting on only the first
-    separator would publish ``discount_code\\x1fPSX-…``: a control character, in a field that
-    becomes half of the ledger's idempotency key.
+    The refusal is unchanged from before the discount-code join, and it is now checked BEFORE
+    any code is read so it cannot depend on what else is on the page.
     """
-    bridge = code_created()
-    bridge["payload"].pop("checkout_token")
-    bridge["payload"].pop("permalink_url")
-    offer = accepted()
-    offer["payload"]["checkout_token"] = None
-    offer["payload"]["discount_code"] = CODE  # the offer names only the code
     tokenless = order_paid()
     tokenless["payload"].pop("checkout_token")
     tokenless["payload"].pop("order_ref")
     tokenless.pop("order_ref")
+    assert discount_codes_of(tokenless) == (CODE,), "the code is there; it is just not an id"
 
-    emitted = reconcile([offer, bridge, tokenless])
+    with pytest.raises(ReconciliationInputError):
+        reconcile([accepted(), code_created(), tokenless])
 
-    assert len(emitted) == 1
-    order_ref = emitted[0]["payload"]["order_ref"]
-    assert "\x1f" not in order_ref and "discount_code" not in order_ref
-    assert order_ref == CODE
+
+def test_two_keyless_webhooks_naming_one_code_cannot_be_told_apart_so_neither_is_guessed() -> None:
+    """The reason the refusal above must come first. Measured, when it did not::
+
+        1 reconciled event   order_ref='...T1'  observed_price=100.0  price_honored=True
+
+    — one order graded, and a second order billed 9999.00 gone without an error, because two
+    webhooks carrying nothing but a shared code have identical join keys and the guard that
+    counts distinct orders counted one.
+    """
+    first = order_paid(total_price=389.0)
+    second = order_paid(total_price=9999.0)
+    for webhook in (first, second):
+        webhook["payload"].pop("checkout_token")
+        webhook["payload"].pop("order_ref")
+        webhook.pop("order_ref")
+
+    with pytest.raises(ReconciliationInputError):
+        reconcile([accepted(), code_created(), first, second])
+
+
+def test_the_emitted_order_reference_is_the_webhooks_own_never_the_groups_root() -> None:
+    """A webhook with a token but no order reference names itself, not whatever key won.
+
+    The root of a union-find group is whichever key happened to survive, so deriving the
+    published ``order_ref`` from it made one order's ``event_id`` depend on the ORDER OF THE
+    PAGE — measured, six permutations of one three-event page produced two different
+    ``event_id`` values for one order — and let a discount code become the reference.
+    """
+    import itertools
+
+    webhook = order_paid()
+    webhook["payload"].pop("order_ref")
+    webhook.pop("order_ref")
+    page = [accepted(), code_created(), webhook]
+
+    seen = set()
+    for permutation in itertools.permutations(page):
+        (emitted,) = reconcile(copy.deepcopy(list(permutation)))
+        seen.add((emitted["event_id"], emitted["payload"]["order_ref"]))
+
+    assert seen == {(f"reconciled:{STORE}:{PLATFORM_TOKEN}", PLATFORM_TOKEN)}, (
+        f"one order produced more than one identity across permutations: {sorted(seen)}"
+    )
+    assert CODE not in str(seen), "a live discount code reached a published ledger field"
 
 
 def test_a_webhook_with_no_key_at_all_still_raises() -> None:
     """The pre-existing escape hatch stays closed: silence is not an option."""
-    from apps.trust.src.reconcile import ReconciliationInputError
-
     keyless = order_paid(code=None)
     keyless["payload"].pop("checkout_token")
     keyless["payload"].pop("order_ref")
@@ -712,3 +753,253 @@ def test_an_orphan_code_cannot_reach_a_different_checkouts_promise() -> None:
     )
     assert emitted[0]["payload"]["order_ref"] == ORDER_REF
     assert emitted[0]["payload"]["observed_price"] == 389.0
+
+
+# =====================================================================================
+# the rule, stated once: a code may BRIDGE an offer to an order, and may never MERGE two
+# orders or two offers. Each test below is a way the second half was measured to fail.
+# =====================================================================================
+def test_an_order_that_names_two_codes_cannot_swallow_another_order() -> None:
+    """The transitive merge, and the worst regression the join first introduced.
+
+    A merchant decides how many codes its ``orders/paid`` body lists, and it knows every code
+    the exchange issued to it. Listing a second checkout's code links three identity groups
+    into one component; the component then holds two orders, ``setdefault`` keeps the first
+    webhook, and the OTHER order's overcharge disappears. Measured before the rule::
+
+        with the code join:    1 reconciled event   R1  100.0  honored
+        without the code join: 2 reconciled events  R1  100.0  honored
+                                                    R2  500.0  NOT honored   <- the 10x
+
+    So the check is on the component, not on each code alone, and a component that would hold
+    two orders loses every one of its code links rather than an arbitrary one — which also
+    keeps the answer independent of the order the page arrived in.
+    """
+    other_token = "3" * 32
+    other_code = "PSX-SECOND01"
+    emitted = reconcile(
+        [
+            accepted(),
+            accepted(token=other_token),
+            code_created(),
+            code_created(token=other_token, code=other_code),
+            order_paid(token=AUTHORIZED_TOKEN, code=CODE),
+            # the second order names ONLY its own checkout, and is billed 10x its promise
+            order_paid(
+                token=other_token,
+                code=None,
+                order_ref="gid://shopify/Order/5500000000002",
+                total_price=3890.0,
+            ),
+        ]
+    )
+    by_ref = {event["payload"]["order_ref"]: event["payload"] for event in emitted}
+    assert len(emitted) == 2, f"an order was swallowed: {sorted(by_ref)}"
+    assert by_ref["gid://shopify/Order/5500000000002"]["price_honored"] is False
+
+    # Now the first order lists the second checkout's code as well. Both orders must still be
+    # graded — and each against its OWN promise.
+    greedy = reconcile(
+        [
+            accepted(),
+            accepted(token=other_token),
+            code_created(),
+            code_created(token=other_token, code=other_code),
+            {
+                **order_paid(token=AUTHORIZED_TOKEN),
+                "payload": {
+                    **order_paid(token=AUTHORIZED_TOKEN)["payload"],
+                    "discount_codes": [{"code": CODE}, {"code": other_code}],
+                },
+            },
+            order_paid(
+                token=other_token,
+                code=None,
+                order_ref="gid://shopify/Order/5500000000002",
+                total_price=3890.0,
+            ),
+        ]
+    )
+    greedy_by_ref = {event["payload"]["order_ref"]: event["payload"] for event in greedy}
+    assert len(greedy) == 2, (
+        f"listing a second checkout's code swallowed an order: {sorted(greedy_by_ref)}"
+    )
+    assert greedy_by_ref["gid://shopify/Order/5500000000002"]["price_honored"] is False, (
+        "the 10x overcharge on the OTHER order stopped being graded"
+    )
+
+
+def test_a_third_partys_use_of_the_same_code_string_cannot_blind_a_webhook() -> None:
+    """Store attribution is an identity question, so a code gets no vote in it.
+
+    A real ``orders/paid`` names the shop in a header, not the body, so an ingested webhook
+    can legitimately arrive with no ``store_id`` and adopt one from the checkout token it
+    shares with the offer. When code keys counted toward that vote, an unrelated shop running
+    its own ``WELCOME10`` was enough to make the vote ambiguous — measured, an order that
+    reconciled to a 900-against-100 overcharge stopped reconciling at all, with no error.
+    """
+    unattributed = order_paid(token=AUTHORIZED_TOKEN, total_price=3890.0, store=None)
+    unattributed["store_id"] = None
+    unattributed["payload"]["discount_codes"] = [{"code": "WELCOME10"}]
+    elsewhere = order_paid(
+        token="4" * 32,
+        code="WELCOME10",
+        order_ref="gid://shopify/Order/7700000000001",
+        store="store-brightbean",
+    )
+
+    (event,) = reconcile([accepted(), unattributed, elsewhere])
+    assert event["payload"]["order_ref"] == ORDER_REF
+    assert event["payload"]["price_honored"] is False
+
+
+def test_one_order_delivered_twice_is_one_order() -> None:
+    """Shopify redelivers ``orders/paid``, and an append-only ledger keeps both copies.
+
+    The two copies can expose different key spellings — one with the event-level ``order_ref``,
+    the redelivery with only ``order_id`` in the body. Both name the same order, so they are
+    one identity and the shared code is not "two orders". When identity was the raw key tuple
+    instead, a redelivered webhook made the code ambiguous and the overcharge vanished.
+    """
+    redelivery = {
+        "event_id": "order_paid:redelivered",
+        "ts": "2026-01-01T00:00:03+00:00",
+        "kind": "order_paid",
+        "store_id": STORE,
+        "payload": {
+            "order_id": ORDER_REF,
+            "total_price": 3890.0,
+            "discount_codes": [{"code": CODE}],
+        },
+    }
+    (event,) = reconcile([accepted(), code_created(), order_paid(total_price=3890.0), redelivery])
+    assert event["payload"]["order_ref"] == ORDER_REF
+    assert event["payload"]["price_honored"] is False
+
+
+# =====================================================================================
+# the discount verdict on the body a real merchant actually sends
+# =====================================================================================
+def real_order_paid(*, percentage: float, total: float = 80.0) -> dict[str, Any]:
+    """The ``orders/paid`` body ``services/shopify-stub/src/orders.py`` signs and sends.
+
+    Note ``type: "discount_code"`` and ``value_type: "percentage"``: in Shopify's REST body
+    ``type`` is the APPLICATION kind, and the value kind is ``value_type``. In the camelCase
+    shape this repo's own producers emit, ``type`` is the value kind. Both are real.
+    """
+    return {
+        "event_id": "order_paid:real",
+        "ts": "2026-01-01T00:00:02+00:00",
+        "kind": "order_paid",
+        "store_id": STORE,
+        "order_ref": ORDER_REF,
+        "payload": {
+            "checkout_token": PLATFORM_TOKEN,
+            "order_ref": ORDER_REF,
+            "total_price": f"{total:.2f}",
+            "discount_codes": [{"code": CODE, "amount": "0.00", "type": "percentage"}],
+            "discount_applications": [
+                {
+                    "target_type": "line_item",
+                    "type": "discount_code",
+                    "value": f"{percentage}",
+                    "value_type": "percentage",
+                    "allocation_method": "across",
+                    "target_selection": "all",
+                    "code": CODE,
+                }
+            ],
+        },
+    }
+
+
+def promised_twenty_percent() -> dict[str, Any]:
+    return accepted(
+        offer={
+            "product_ref": "prod-northroast-hx",
+            "unit_price": 80.0,
+            "total_price": 80.0,
+            "discount": {"type": "percentage", "value": 20.0},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "given", "expected_type", "expected_honored"),
+    [
+        ("the store gave the promised 20%", 20.0, "fulfilled", True),
+        ("the store gave nothing at all", 0.0, "contradicted", False),
+    ],
+)
+def test_the_discount_verdict_grades_on_the_body_a_real_merchant_sends(
+    label: str, given: float, expected_type: str, expected_honored: bool
+) -> None:
+    """Reading only ``discountApplications`` made an honest store and a cheat identical.
+
+    This is the defect the join unmasked rather than caused: before it, a real body never
+    reached a comparison at all. Measured with only the camelCase spelling honoured, BOTH
+    rows below came back ``observed_discount_percentage: None``, ``discount_comparable:
+    False`` and translated to ``unsupported`` (0.5) — so the store that kept its promise was
+    penalised and the store that broke it escaped the 2.0 ``contradicted``.
+    """
+    from apps.trust.src.reconcile import reconciled_observations
+
+    (event,) = reconcile(
+        [promised_twenty_percent(), code_created(), real_order_paid(percentage=given)]
+    )
+    payload = event["payload"]
+    assert payload["observed_discount_percentage"] == given, label
+    assert payload["discount_comparable"] is True, label
+    assert payload["discount_honored"] is expected_honored, label
+
+    types = [
+        observation["type"]
+        for observation in reconciled_observations(event)
+        if observation["dim"] == "discount_honored"
+    ]
+    assert types == [expected_type], f"{label}: {types}"
+
+
+def test_the_merchant_still_chooses_which_of_its_own_promises_it_is_graded_against() -> None:
+    """The limit of the code as a handle, pinned so it is a known property and not a surprise.
+
+    The exchange issues the code; the MERCHANT decides which order redeems it and which codes
+    its webhook lists. A store that omits its order's real code and names a different one of
+    its OWN checkouts is indistinguishable, from the ledger, from a store whose buyer really
+    did use that code — so it is graded against that checkout's promise. Below, an order
+    billed 389.00 escapes its own 100.00 promise by naming the code of a 389.00 one.
+
+    Nothing in reconciliation can close this: the exchange never observes redemption, and the
+    only party that does is the one with the incentive. Closing it needs the merchant's own
+    redemption register (``apps/merchant/svc/src/codes/redemption.py``) to be the thing that
+    reports which order redeemed which code. What IS closed is the store's ability to reach
+    ANOTHER shop's promise (the store scope) or to make a second order disappear while doing
+    it (the component rule) — both tested above.
+    """
+    cheap_token = "5" * 32
+    cheap_code = "PSX-CHEAP001"
+    dishonest = order_paid(token="7" * 32, code=CODE, total_price=389.0)
+
+    (event,) = reconcile(
+        [
+            accepted(),  # promises 389.00, code CODE
+            code_created(),
+            accepted(
+                token=cheap_token,
+                offer={
+                    "product_ref": "p",
+                    "unit_price": 100.0,
+                    "total_price": 100.0,
+                    "discount": None,
+                },
+            ),
+            code_created(token=cheap_token, code=cheap_code),
+            dishonest,
+        ]
+    )
+    assert event["payload"]["promised_price"] == 389.0
+    assert event["payload"]["price_honored"] is True
+    assert event["payload"]["bid_ref"] == accepted()["payload"]["bid_ref"], (
+        "the order was graded against the promise whose code it named — if this changes, the "
+        "redemption oracle this docstring asks for has landed and this test should say so"
+    )
