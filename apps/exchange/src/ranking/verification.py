@@ -43,6 +43,7 @@ store "was verified once".
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 from claim_verification import attribute_value, verify
@@ -52,12 +53,14 @@ from .filters import read
 
 __all__ = [
     "DEFAULT_VERIFIER_VERSION",
+    "MAX_CATALOG_PRODUCTS",
     "NoCatalogSnapshots",
     "StaticCatalogSnapshots",
     "STORE_SUPPLIED_FIELDS_DROPPED",
     "attest_candidate_claims",
     "attest_candidates",
     "catalog_unit",
+    "catalog_units",
     "snapshot_for",
 ]
 
@@ -65,6 +68,81 @@ __all__ = [
 #: every attestation and covered by its MAC, so a comparator change invalidates the verdicts
 #: minted under the previous one rather than silently inheriting them.
 DEFAULT_VERIFIER_VERSION = "verification/1.0.0"
+
+#: The most products one store's snapshot may hold when it arrives in a deployment document.
+#:
+#: The list is held on the request path — the same place
+#: :data:`~exchange.composition.MAX_DEPLOYMENT_SELLERS` is bounded, and for the same reason —
+#: and it used to be WALKED there once per claim per candidate, by
+#: :func:`claim_verification._resolve_product` and again by this module for the unit. Both
+#: walks are gone (:func:`_narrowed_to`, :func:`catalog_units`), so what is left is the cost of
+#: parsing and holding the document.
+#:
+#: An operator-supplied value, not an attacker-supplied one, so this is a guard against a
+#: mistake rather than against an adversary — which is why the number is generous. It is NOT
+#: what stops a bidder multiplying it: that is :func:`_narrowed_to`, which cuts the list this
+#: cap bounds down to the single row an auction can resolve against. It bounds only the
+#: DOCUMENT grammar (:meth:`StaticCatalogSnapshots.from_document`); a deployment that already
+#: holds real snapshots in memory hands them to the constructor unbounded, exactly as it hands
+#: over a trust snapshot.
+MAX_CATALOG_PRODUCTS = 1000
+
+
+def _narrowed_to(snapshot: Any, product_ref: Any) -> Any:
+    """The snapshot with ``products`` cut down to the ONE row the auction names.
+
+    **This is a bound, not a tidy-up, and it is the whole of the fix.** How many claims a bid
+    carries is the BIDDER's choice, limited only by
+    :data:`~exchange.composition.MAX_BID_RESPONSE_BYTES` (256 KiB is roughly 9,000 of them),
+    and :func:`claim_verification.verify` walks the operator's ``products`` list once per claim
+    to resolve it. So the cost of one auction was candidates x claims x products, with the
+    middle factor free to whoever was bidding. Measured over a real socket, ten bidding stores,
+    a catalogue at the :data:`MAX_CATALOG_PRODUCTS` ceiling and 9,000 claims per bid::
+
+        before: with "catalog" -> 201 in 34.71s   without -> 201 in 3.45s
+        after : with "catalog" -> 201 in  3.67s   without -> 201 in 3.30s
+
+    — 31 seconds of unauthenticated single-request CPU, none of it chosen by the operator, and
+    the bidding window's own ``MAX_BID_TIMEOUT_SECONDS`` does not bound it because the walk
+    happens after the window has closed.
+
+    Cutting the list is better than capping the claims, which is what this replaced: a cap
+    grades the first N claims in the order the BIDDER wrote them, so an honest store whose
+    deciding evidence sits at position 65 loses a hard constraint it satisfies. Here nothing a
+    store said is ungraded and the answer for every claim is identical — the exchange already
+    resolves every claim against the one product the AUCTION names (that is what dropping
+    ``product_ref`` from :data:`STORE_SUPPLIED_FIELDS_DROPPED` is for), so the rows removed
+    here are rows no claim on this candidate could have resolved against.
+
+    Only when a ``product_ref`` is named. With none, a snapshot holding several products is
+    the ``ambiguous`` case :func:`claim_verification._resolve_product` decides, and narrowing
+    would silently turn it into a resolved one.
+
+    The one observable difference is ``verify()``'s ``verification_key``, which canonicalises
+    the snapshot it was given: two callers grading the same claim against the same catalogue,
+    one narrowed and one not, get different keys. Nothing in this tree reads that field, and it
+    is named here rather than left for the next reader to discover.
+    """
+    if snapshot is None or product_ref is None:
+        return snapshot
+    products = read(snapshot, "products", None)
+    if not isinstance(products, Sequence) or isinstance(products, (str, bytes)):
+        return snapshot
+    wanted = str(product_ref)
+    for product in products:
+        if str(read(product, "product_ref", "")) == wanted:
+            # The FIRST match, and only it — the same row `_resolve_product` and
+            # `catalog_units` would have stopped at, so a duplicate ref does not get a second
+            # say here that it does not get there.
+            narrowed = dict(snapshot) if isinstance(snapshot, Mapping) else snapshot
+            if not isinstance(narrowed, dict):
+                return snapshot
+            narrowed["products"] = [product]
+            return narrowed
+    # No row for this product. Left whole: `_resolve_product` answers `unsupported` either way,
+    # and handing the verifier a document this function invented is worse than handing it the
+    # one the operator wrote.
+    return snapshot
 
 
 class NoCatalogSnapshots:
@@ -91,16 +169,150 @@ class StaticCatalogSnapshots:
     def __init__(self, snapshots: Mapping[str, Mapping[str, Any]] | None = None) -> None:
         self._snapshots = dict(snapshots or {})
 
+    @classmethod
+    def from_document(cls, raw: Any) -> StaticCatalogSnapshots:
+        """Build a catalog source from the ``{store_id: snapshot}`` object a deployment writes.
+
+        The grammar lives HERE, beside the code that reads a snapshot, so there is one
+        spelling of "what the exchange can grade a claim against" rather than a second one in
+        the composition root. :func:`~exchange.composition.parse_deployment` calls this and
+        turns the ``ValueError`` into its own 503.
+
+        It validates the DOCUMENT, not the class. ``__init__`` stays permissive on purpose:
+        a deployment that already holds real snapshots in memory (``apps/buyer/devstack``
+        builds them out of the same catalogue rows its agents read) hands them straight over,
+        and so does every test in this package that writes a snapshot by hand. What needs a
+        grammar is the thing a *person types*, because every rule below has the same silent
+        failure — a snapshot the verifier cannot resolve a claim against answers
+        ``unsupported``, R19 refuses to let an unsupported claim satisfy a hard constraint,
+        and the operator is shown an empty shortlist that reads like a policy decision.
+
+        Raises:
+            ValueError: naming the store and the row that is wrong.
+        """
+        if raw is None:
+            return cls()
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"'catalog' must be a JSON object keyed by store_id, got {type(raw).__name__}"
+            )
+        snapshots: dict[str, Mapping[str, Any]] = {}
+        for store_id, snapshot in raw.items():
+            snapshots[str(store_id)] = _document_snapshot(snapshot, str(store_id))
+        return cls(snapshots=snapshots)
+
     def snapshot_for(
         self, store_id: str, product_ref: str | None = None
     ) -> Mapping[str, Any] | None:
         return self._snapshots.get(str(store_id))
+
+    @property
+    def snapshots(self) -> Mapping[str, Mapping[str, Any]]:
+        """The snapshots this source holds, ``{store_id: snapshot}``.
+
+        A DEEP copy, and the depth is the point. The composition root reads this back out of a
+        catalog it has just validated, and a source whose contents can be rewritten from
+        outside it is not a source — the same rule
+        :class:`~exchange.ranking.serving.ShortlistStore` states about its own entries. The
+        first version of this returned ``{store_id: dict(row)}``, which shares the ``products``
+        LIST with the source, so a holder of the result could append a product to the
+        catalogue the ranker grades claims against — measured, and a one-level copy is not a
+        copy of a document.
+        """
+        return deepcopy(self._snapshots)
 
     def register(self, store_id: str, snapshot: Mapping[str, Any]) -> None:
         self._snapshots[str(store_id)] = dict(snapshot)
 
     def __len__(self) -> int:
         return len(self._snapshots)
+
+
+def _document_name(row: Mapping[str, Any], field: str, where: str, why: str) -> str:
+    """One required NAME out of a document row, or a ``ValueError`` saying which fault it is.
+
+    Two faults, kept apart, because ``str(row.get(field) or "")`` collapses them and gets both
+    wrong. Measured on the first draft of this module: ``product_ref: 0`` and
+    ``product_ref: false`` were refused with a message saying the field was *missing* — which
+    sends the operator looking for a line that is right there — while ``product_ref: true``
+    passed the check and became the ref ``"True"``, and ``snapshot_id: ["a"]`` was accepted and
+    stamped onto every verdict against a published ``catalog_snapshot`` of ``minLength: 1``.
+
+    A name is a non-empty string. Absent is one message; present-but-not-a-name is another.
+    """
+    if field not in row:
+        raise ValueError(f"{where} states no {field!r}. {why}")
+    value = row[field]
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{where} states {field}={value!r}, which is not a name. {why} Write a non-empty "
+            f"string; a number, a boolean or a list is not one, and this exchange will not "
+            f"invent the spelling you meant"
+        )
+    return value.strip()
+
+
+def _document_snapshot(raw: Any, store_id: str) -> Mapping[str, Any]:
+    """One store's snapshot as a deployment document states it, or a ``ValueError``.
+
+    Four rules, and each one is here because its silent version produces the same symptom —
+    a store whose every claim comes back ``unsupported``, therefore a hard constraint nothing
+    satisfies, therefore an empty shortlist with nothing in the response pointing at the row
+    that was wrong.
+    """
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"catalog[{store_id!r}] must be a JSON object, got {type(raw).__name__}")
+
+    # `attest_candidate_claims` records this id on every verdict it mints and the MAC covers
+    # it, and the published `VerificationResult.catalog_snapshot` is `minLength: 1`. A snapshot
+    # that names itself nothing produces verdicts nobody can trace back to the document that
+    # decided them.
+    _document_name(
+        raw,
+        "snapshot_id",
+        f"catalog[{store_id!r}]",
+        "Every verdict this exchange mints records the snapshot it was decided against, so a "
+        "snapshot with no id is a verdict no auditor can reproduce.",
+    )
+
+    products = raw.get("products")
+    if isinstance(products, (str, bytes)) or not isinstance(products, Sequence):
+        raise ValueError(
+            f"catalog[{store_id!r}] states 'products' as {type(products).__name__}; it must be "
+            f"a JSON array. The verifier resolves a claim by walking this list, and a list it "
+            f"cannot walk is a store whose every claim comes back unsupported"
+        )
+    if not products:
+        raise ValueError(
+            f"catalog[{store_id!r}] holds no products. A snapshot with an empty catalogue "
+            f"answers 'unsupported' to every claim, so no hard constraint is satisfied and "
+            f"this store is excluded from every constrained auction with no hint that its "
+            f"snapshot is the reason; state its products, or omit the store"
+        )
+    if len(products) > MAX_CATALOG_PRODUCTS:
+        raise ValueError(
+            f"catalog[{store_id!r}] holds {len(products)} products; this exchange reads at "
+            f"most {MAX_CATALOG_PRODUCTS} per store. The list is walked once per claim per "
+            f"candidate on the request path, so its length is time a shopper waits"
+        )
+
+    for index, product in enumerate(products):
+        if not isinstance(product, Mapping):
+            raise ValueError(
+                f"catalog[{store_id!r}].products[{index}] must be a JSON object, got "
+                f"{type(product).__name__}"
+            )
+        # The exchange resolves every claim against the ROSTER's `product_ref`, and
+        # `claim_verification` matches it by `str(product["product_ref"]) == str(wanted)`.
+        # A product row naming no ref therefore matches no auction that names one.
+        _document_name(
+            product,
+            "product_ref",
+            f"catalog[{store_id!r}].products[{index}]",
+            "Claims are graded against the product the AUCTION names, matched against this "
+            "field, so a product row with no ref is evidence no claim can ever reach.",
+        )
+    return dict(raw)
 
 
 def snapshot_for(catalog: Any, store_id: str, product_ref: Any = None) -> Any:
@@ -173,33 +385,54 @@ STORE_SUPPLIED_FIELDS_DROPPED: tuple[str, ...] = (
 )
 
 
-def catalog_unit(snapshot: Any, product_ref: Any, key: Any) -> Any:
-    """The unit the EXCHANGE's own catalogue records for one attribute, or ``None``.
+def catalog_units(snapshot: Any, product_ref: Any) -> dict[str, Any]:
+    """``{attribute key: unit}`` for the product this candidate is graded against.
 
-    Read out of the snapshot's typed ``attributes`` block — the shape
-    :func:`claim_verification.verify` documents — with the published
-    :func:`claim_verification.attribute_value` doing the ``{"value": …, "unit": …}`` unpacking
-    rather than a second reading of it here.
+    Built ONCE per candidate, and that is a bound rather than a tidy-up. The per-claim version
+    of this walked ``products`` looking for the key, so the cost of one auction was candidates
+    x claims x products — and ``claims`` arrives from a third-party store agent, bounded only
+    by :data:`~exchange.composition.MAX_BID_RESPONSE_BYTES` (256 KiB is roughly 9,000 of them).
+    Measured over a real socket, ten bidding stores, an operator catalogue at the
+    :data:`MAX_CATALOG_PRODUCTS` ceiling and 9,000 claims per bid: ``POST /auctions`` took
+    **34.71s**, against **3.45s** for the byte-identical request with no catalog configured.
+    Indexed here and capped at :data:`MAX_ATTESTED_CLAIMS`, both factors the bidder controls
+    are off the multiplication.
 
     Only ``attributes`` is consulted. The verifier also resolves a key out of the ``offer``
     block and off the product record itself, and both of those carry BARE scalars with no unit
     to state — so "not in ``attributes``" and "carries no unit" are the same answer, and it is
     ``None``. ``None`` denies rather than admits: :meth:`HardCriterion.decide` refuses a
     constraint stated in a unit against a reading that names none.
+
+    The resolution rule is the one it replaces, exactly: with a ``product_ref`` only the FIRST
+    row carrying it is read (a later duplicate does not get a second say); with none, the rows
+    are read in order and the first to carry a key wins.
     """
     if snapshot is None:
-        return None
+        return {}
     products = read(snapshot, "products", None) or ()
     wanted = None if product_ref is None else str(product_ref)
+    units: dict[str, Any] = {}
     for product in products:
         if wanted is not None and str(read(product, "product_ref", "")) != wanted:
             continue
         attributes = read(product, "attributes", None)
-        if isinstance(attributes, Mapping) and str(key) in attributes:
-            return attribute_value(attributes[str(key)])[1]
+        if isinstance(attributes, Mapping):
+            for key, attribute in attributes.items():
+                units.setdefault(str(key), attribute_value(attribute)[1])
         if wanted is not None:
-            return None
-    return None
+            break
+    return units
+
+
+def catalog_unit(snapshot: Any, product_ref: Any, key: Any) -> Any:
+    """The unit the EXCHANGE's own catalogue records for one attribute, or ``None``.
+
+    The one-shot spelling of :func:`catalog_units`, kept because it is this module's published
+    name for the question. The batch path indexes instead — see that function for the
+    measurement that made the difference matter.
+    """
+    return catalog_units(snapshot, product_ref).get(str(key))
 
 
 def _pitch_claims(claims: Iterable[Any], store_id: str) -> list[dict[str, Any]]:
@@ -237,12 +470,16 @@ def attest_candidate_claims(
     ever stops answering one-per-claim in order — is attested ``ambiguous``. Not dropped, and
     certainly not verified: an answer this module could not line up is an answer it does not
     have.
+
+    The verifier is handed the snapshot :func:`_narrowed_to` the product this auction names —
+    every claim gets the same answer it would have got from the whole document, and the walk
+    the bidder was able to multiply is gone. See that function for the measurement.
     """
     presented = list(claims or ())
     if not presented:
         return []
     pitch_claims = _pitch_claims(presented, store_id)
-    snapshot = snapshot_for(catalog, store_id, product_ref)
+    snapshot = _narrowed_to(snapshot_for(catalog, store_id, product_ref), product_ref)
     results: list[Any] = []
     if snapshot is not None:
         pitch = {
@@ -260,6 +497,22 @@ def attest_candidate_claims(
             results = []
     snapshot_id = read(snapshot, "snapshot_id", None) if snapshot is not None else None
 
+    # One index per resolved product, built on first use rather than per claim — the other
+    # half of the bound :func:`catalog_units` records. In practice there is exactly one entry:
+    # a claim's own `product_ref` is dropped before the verifier sees it, so every claim on one
+    # candidate resolves against the product the AUCTION named.
+    units_by_ref: dict[Any, dict[str, Any]] = {}
+
+    def units_for(ref: Any) -> dict[str, Any]:
+        key = None if ref is None else str(ref)
+        if key not in units_by_ref:
+            units_by_ref[key] = catalog_units(snapshot, key)
+        return units_by_ref[key]
+
+    unchecked_reason = (
+        "the exchange holds no catalog snapshot for this store, so its claims could not be checked"
+    )
+
     attested: list[dict[str, Any]] = []
     for index, claim in enumerate(presented):
         result = results[index] if index < len(results) else {}
@@ -271,10 +524,8 @@ def attest_candidate_claims(
                 # `verify()` is not given the claim's unit at all (a bare claimed number is
                 # read in the CATALOGUE's unit), so attesting the author's string would put
                 # this exchange's MAC on something nothing checked.
-                unit=catalog_unit(
-                    snapshot,
-                    read(result, "product_ref", None) or product_ref,
-                    read(claim, "key", None),
+                unit=units_for(read(result, "product_ref", None) or product_ref).get(
+                    str(read(claim, "key", None))
                 ),
                 subject=store_id,
                 verifier_version=verifier_version,
@@ -282,12 +533,7 @@ def attest_candidate_claims(
                 evidence_refs=read(result, "evidence_refs", ()) or (),
                 confidence=read(result, "confidence", None),
                 reason=read(result, "reason", None)
-                or (
-                    None
-                    if snapshot is not None
-                    else "the exchange holds no catalog snapshot for this store, so its claims "
-                    "could not be checked"
-                ),
+                or (None if snapshot is not None else unchecked_reason),
             )
         )
     return attested

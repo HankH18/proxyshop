@@ -12,9 +12,12 @@ joined them. ``uvicorn exchange.main:app`` boots an exchange with
 * ``auction_bids``        -> :class:`~exchange.accept.routes.NoRecordedBids`, which knows none;
 * ``intent_clusters``     -> :class:`~exchange.retrieval.clusters.NoIntentClusters`, which
   names no catalogue cluster, so no intent is assigned one and every store agent whose
-  envelope pursues NAMED clusters answers ``204 cluster_not_pursued``.
+  policy document pursues NAMED clusters answers ``204 cluster_not_pursued``;
+* ``ranking_catalog``     -> :class:`~exchange.ranking.verification.NoCatalogSnapshots`, which
+  holds a snapshot for nobody, so no claim is ever checked, no hard constraint is ever
+  satisfied, and a shopper who states a must-have is shown an empty shortlist.
 
-Six fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
+Seven fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
 this tree, on the app exactly as ``create_app()`` builds it::
 
     POST /auctions -> 201
@@ -65,6 +68,16 @@ The document
          "terms": ["espresso machine", "espresso"],
          "attributes": {"brew_method": "espresso"}}
       ],
+      "catalog": {
+        "s1": {"snapshot_id": "snap-s1",
+               "captured_at": "2026-01-01T00:00:00Z",
+               "products": [
+                 {"product_ref": "prod-1",
+                  "attributes": {"water_tank_l": {"value": 2.0, "unit": "l"},
+                                 "availability": {"value": "in_stock"}},
+                  "offer": {"unit_price": 389.0, "currency": "USD"}}
+               ]}
+      },
       "checkout_mode": "redirect"
     }
 
@@ -91,6 +104,35 @@ The document
     has zero callers, and no table, node or registry holds the names — so the exchange cannot
     discover it and a person states it, exactly as a person states the trust snapshot.
     Omitted, nothing is assigned and the exchange behaves as it did before.
+``catalog``
+    The catalogue snapshots this exchange grades a store's CLAIMS against, ``{store_id:
+    snapshot}``, in the shape :func:`claim_verification.verify` reads. It is the last of the
+    seven and the one whose absence is least visible: with no catalog wired, every claim comes
+    back ``unsupported``, R19 refuses to let an unsupported claim satisfy a hard constraint,
+    and **an intent carrying any must-have shortlists nobody**. Measured on this tree over a
+    real socket, two rostered stores that both bid, one auction, the same request differing
+    only in whether this key is present::
+
+        without "catalog": ranked [], 0 shortlist slots, both stores excluded
+                           "hard_constraint_unsatisfied: 'capacity_l': the candidate carries
+                            no such attribute, so the constraint is undecidable and does not
+                            count as satisfied (R19) — only a verified supporting claim
+                            satisfies a hard constraint (R19)"
+        with    "catalog": ranked ['s1', 's2'], 2 shortlist slots, excluded []
+
+    A real shopper sentence always yields at least a price constraint, so before this key
+    existed a deployed exchange shortlisted nobody and the only green demonstrations were the
+    ones whose fixtures happened to state no must-have. ``proxyshop_demo`` is that exactly:
+    it prints the clarifier's ``brew_method eq espresso`` two beats before it opens its
+    auction on ``e2e/support/s1/run.json``'s intent, whose ``hard_constraints`` is ``[]``.
+    It is stated by a person for the same
+    reason the trust snapshot is: the SNAPSHOT is the exchange's evidence and the claim is the
+    store's, and a store that supplied both would be marking its own homework
+    (:mod:`~exchange.ranking.verification`). ``apps/buyer/devstack/run.py`` had to reach past
+    this module and call ``configure_ranking(catalog=…)`` by hand because this key did not
+    exist; the shape it builds there is the shape this key takes.
+    Omitted, nothing is bound and :func:`~exchange.ranking.serving.catalog_of` keeps its
+    ``NoCatalogSnapshots`` default — exactly today's behaviour.
 ``checkout_mode``
     Optional; ``CHECKOUT_MODE`` still works and this overrides it for this app.
 
@@ -105,8 +147,12 @@ an empty shortlist that looks like a policy decision:
   ``ranking/filters.py`` reads ``0`` and ``"false"`` as *unreadable*, which denies;
 * an unregistered ``checkout_mode`` is refused here rather than 503-ing once per accept;
 * an ``intent_clusters`` row with no ``cluster_id``, or a name stated twice, is refused — a
-  cluster nobody can name is not a member of any envelope's ``pursue_clusters``, and a
-  duplicate would let the later row silently decide which terms find that cluster.
+  cluster nobody can name is not a member of any store's ``pursue_clusters``, and a
+  duplicate would let the later row silently decide which terms find that cluster;
+* a ``catalog`` snapshot with no ``snapshot_id``, with no ``products``, or holding a product
+  row that names no ``product_ref``, is refused — the verifier resolves a claim by matching
+  the auction's product against that field, so each of those is a store whose every claim
+  comes back ``unsupported`` and which is therefore excluded from every constrained auction.
 
 A malformed document raises :class:`DeploymentConfigurationError`, which the two routes turn
 into a **503 naming the problem**. That is the same answer this service already gives for an
@@ -136,6 +182,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .auction.collect import (
+    REFUSAL_FIELD,
+    STORE_DECLINED_REASON,
+    STORE_REFUSED_REASON,
+    refusal_reason,
+)
 from .checkout.registry import registered_modes
 from .checkout.sellers import StaticRegisteredDomains
 from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
@@ -146,8 +198,15 @@ from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
 # other side. They are imported inside :func:`configure_exchange` instead, which also keeps
 # the hook cheap for the case that matters most: an exchange with no deployment configured
 # reaches `read_deployment`, gets `None`, and imports nothing at all.
+#
+# `auction.collect` is the exception and is imported at module scope, because it is not a
+# route module and imports nothing from here: it is the pure collector whose vocabulary this
+# module's solicitor writes into. One spelling of a fallback reason, in the module that
+# publishes the list of them.
 
 __all__ = [
+    "ANONYMOUS_PSEUDONYM_PREFIX",
+    "DECLINE_REASON_HEADER",
     "DEFAULT_SOLICIT_TIMEOUT_SECONDS",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
@@ -162,7 +221,18 @@ __all__ = [
     "configure_exchange",
     "ensure_configured",
     "read_deployment",
+    "solicitation_profile",
 ]
+
+#: The header a store agent's ``204`` decline states its reason in.
+#:
+#: Published on the 204 response of ``POST /v1/bid-requests`` in
+#: ``packages/contracts/openapi/store-agent.openapi.json``: a 204 carries no body, so the
+#: reason has nowhere else to travel. Restated here rather than imported from ``store_agent``
+#: — the exchange does not depend on the seller's package, and the image it ships does not
+#: contain it — which is the same arrangement every other cross-service constant in this
+#: module has.
+DECLINE_REASON_HEADER = "x-proxyshop-decline-reason"
 
 #: Path to the deployment document.
 ENV_DEPLOYMENT = "EXCHANGE_DEPLOYMENT"
@@ -262,6 +332,12 @@ class Deployment:
     #: saying "this exchange has no cluster vocabulary" on purpose. See
     #: :mod:`~exchange.retrieval.clusters` for why the vocabulary is configuration.
     intent_clusters: tuple[Any, ...] | None = None
+    #: The catalogue snapshots this exchange checks claims against, ``{store_id: snapshot}``,
+    #: or ``None`` when the document states none. ``None`` leaves
+    #: :func:`~exchange.ranking.serving.catalog_of` on ``NoCatalogSnapshots``; an empty object
+    #: BINDS an empty catalog, which is the same behaviour and a different statement — the
+    #: same distinction :attr:`intent_clusters` draws, for the same reason.
+    catalog: Mapping[str, Any] | None = None
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
@@ -413,6 +489,30 @@ def _intent_clusters(raw: Any, source: str) -> tuple[Any, ...] | None:
     return catalogue.rows
 
 
+def _catalog(raw: Any, source: str) -> Mapping[str, Any] | None:
+    """The catalogue snapshots this deployment states, validated where they are read.
+
+    ``None`` when the document names none — the pre-existing exchange, holding a snapshot for
+    nobody and therefore checking no claim. A stated-but-malformed catalog is REFUSED rather
+    than degraded to "none", because the degraded version is invisible: the exchange still
+    answers ``201`` and still returns a shortlist, and the shortlist is simply empty for every
+    intent that states a must-have.
+
+    Built through :meth:`~.ranking.verification.StaticCatalogSnapshots.from_document`, so the
+    grammar sits beside the code that walks a snapshot rather than in a second copy here —
+    the same arrangement :func:`_intent_clusters` uses.
+    """
+    if raw is None:
+        return None
+    from .ranking.verification import StaticCatalogSnapshots  # noqa: PLC0415
+
+    try:
+        catalog = StaticCatalogSnapshots.from_document(raw)
+    except (ValueError, TypeError) as exc:
+        raise DeploymentConfigurationError(f"{source}: {exc}") from exc
+    return catalog.snapshots
+
+
 def parse_deployment(document: Any, *, source: str) -> Deployment:
     """Validate one deployment document. Raises rather than degrading."""
     body = _require_mapping(document, "the deployment document", source)
@@ -462,6 +562,7 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         trust_snapshot=snapshot,
         checkout_mode=checkout_mode,
         intent_clusters=_intent_clusters(body.get("intent_clusters"), source),
+        catalog=_catalog(body.get("catalog"), source),
     )
 
 
@@ -511,6 +612,79 @@ def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
 # =====================================================================================
 # The outbound bid client — R10's `POST /v1/bid-requests`
 # =====================================================================================
+#: What the exchange calls a buyer who named no profile.
+#:
+#: A pseudonym is an opaque, rotating handle carrying no identity (R13) — it is the ONE thing
+#: a ``BuyerProfile`` requires, and the exchange has to write something in it or the request is
+#: not a ``BidRequest``. This mints one per auction, which rotates at least as often as the
+#: published contract asks, and reveals nothing the solicitation did not already carry: the
+#: ``auction_id`` is a field of the very same body.
+ANONYMOUS_PSEUDONYM_PREFIX = "anon"
+
+
+def solicitation_profile(profile: Any, *, auction_id: str) -> dict[str, Any]:
+    """The ``BuyerProfile`` this solicitation carries, repaired where the EXCHANGE broke it.
+
+    Stated exactly, because the first version of this docstring said "always a valid one" and
+    that was measured false. What this guarantees is that **the exchange's own coercion no
+    longer produces a body the published contract rejects** — the ``{}`` it used to write for
+    every buyer who named no profile. What it does not and must not do is rewrite a profile the
+    buyer DID state: ``ProfileBuckets`` is ``extra="forbid"``, so an undeclared bucket key, a
+    bucket of the wrong type, or an extra field beside ``pseudonym``/``buckets`` still makes
+    the store answer ``422``. Measured, one store, one auction each::
+
+        omitted                201  fallback=False  reason=None                shortlist 1
+        empty-object           201  fallback=False  reason=None                shortlist 1
+        undeclared-bucket-key  201  fallback=True   reason='store_refused:422' shortlist 0
+        extra-profile-field    201  fallback=True   reason='store_refused:422' shortlist 0
+
+    Those three are the buyer's own statement and the exchange declines to invent a different
+    one — which is bearable only because of the other half of this repair: the refusal reads
+    ``store_refused:422`` rather than ``no_response``, so the caller can see that the profile
+    it sent is what lost the auction. ``intent`` is treated the same way one layer up: the
+    route takes whatever shape a buyer service sends and lets the reader of the field decide
+    what it means.
+
+    ``CreateAuctionRequest.profile`` is ``dict | None``: the buyer service may omit it, and
+    the published ``BidRequest`` may not. This used to be written as ``profile if
+    isinstance(profile, Mapping) else {}``, and ``{}`` is not a ``BuyerProfile`` — it states
+    neither ``pseudonym`` nor ``buckets``, both required. Measured against the real store
+    agent, which validates the body against the pinned model::
+
+        POST /v1/bid-requests, profile={} -> 422
+          {"detail":[{"type":"missing","loc":["body","profile","pseudonym"],
+                      "msg":"Field required","input":{}},
+                     {"type":"missing","loc":["body","profile","buckets"], ...}]}
+
+    Every store on the roster answered that 422, and the exchange reported all of them as
+    ``fallback_reason: "no_response"`` — a schema violation the exchange itself committed,
+    reported as the stores' silence.
+
+    Nothing about the BUYER is invented here. The buckets stay exactly as the caller wrote
+    them, and empty when there were none: an empty bucket set says "this exchange knows
+    nothing about this shopper", which is true, and it is what a store's learning grid reads
+    as "no segment". Only the handle is minted, because a handle is a name and not a fact.
+    """
+    source: Mapping[str, Any] = profile if isinstance(profile, Mapping) else {}
+    out = dict(source)
+
+    pseudonym = out.get("pseudonym")
+    if not isinstance(pseudonym, str) or not pseudonym.strip():
+        out["pseudonym"] = (
+            f"{ANONYMOUS_PSEUDONYM_PREFIX}-{auction_id}"
+            if auction_id
+            else (ANONYMOUS_PSEUDONYM_PREFIX)
+        )
+
+    if not isinstance(out.get("buckets"), Mapping):
+        # Repaired rather than passed through, for the same reason the pseudonym is: a
+        # `buckets` the contract cannot read costs the auction every bid, and the exchange
+        # knows the difference between "the buyer stated no buckets" and "the buyer stated
+        # buckets this exchange dropped" — it is the first one.
+        out["buckets"] = {}
+    return out
+
+
 class HttpBidSolicitor:
     """The real outbound solicitor: one ``POST /v1/bid-requests`` per rostered store.
 
@@ -534,6 +708,22 @@ class HttpBidSolicitor:
     is R10's own degradation, and it is why this returns ``None`` rather than raising — the
     fan-out discards a raising solicitor's future anyway, which would lose the distinction
     between "declined" and "crashed" for every store at once.
+
+    **"Loud in the entry" was not true of the status code, and that is what
+    :meth:`_refusal` fixes.** This method used to map every non-200 to ``None``, which
+    ``collect_bids`` labels ``no_response`` — so a store that DECLINED with the contract's own
+    ``204``, a store that rejected the request body, and a store that was switched off were
+    one indistinguishable fact in the answer. Measured on this tree, one real store agent,
+    ``POST /auctions`` carrying no ``profile``::
+
+        agent, profile={} -> 422 {"detail":[{"type":"missing",
+                                  "loc":["body","profile","pseudonym"], ...}]}
+        entries -> [{"store_id": "store-alpha", "fallback": true,
+                     "fallback_reason": "no_response"}]
+
+    The 422 there was the exchange's OWN doing (see :meth:`for_auction`), and it was reported
+    as the store's silence. Both halves are closed: the request is valid now, and a refusal
+    that still happens is named.
     """
 
     def __init__(
@@ -557,12 +747,17 @@ class HttpBidSolicitor:
         profile: Any = None,
         respond_by: float | None = None,
     ) -> HttpBidSolicitor:
-        """A view of this solicitor bound to one auction's ``BidRequest`` fields."""
+        """A view of this solicitor bound to one auction's ``BidRequest`` fields.
+
+        ``profile`` is passed through :func:`solicitation_profile`, which is the difference
+        between a solicitation a store can answer and one it must refuse: this used to write
+        ``{}`` whenever the buyer named no profile, and ``{}`` is not a ``BuyerProfile``.
+        """
         bound = HttpBidSolicitor(self._endpoints, timeout=self._timeout, client=self._http_client())
         bound._context = {
             "auction_id": str(auction_id),
             "intent": intent if isinstance(intent, Mapping) else {},
-            "profile": profile if isinstance(profile, Mapping) else {},
+            "profile": solicitation_profile(profile, auction_id=str(auction_id)),
             "respond_by": _rfc3339(respond_by),
         }
         return bound
@@ -605,7 +800,7 @@ class HttpBidSolicitor:
                 "POST", endpoint, json=payload, timeout=self._timeout
             ) as response:
                 if response.status_code != 200:
-                    return None
+                    return self._refusal(store_id, response)
                 body = bytearray()
                 for chunk in response.iter_bytes():
                     body.extend(chunk)
@@ -632,6 +827,42 @@ class HttpBidSolicitor:
         return {"store_id": store_id, "bid": dict(bid)}
 
     __call__ = solicit
+
+    @staticmethod
+    def _refusal(store_id: str, response: Any) -> dict[str, Any]:
+        """A store's refusal, in the shape ``collect_bids`` can name it by.
+
+        A record rather than ``None``, and that is the whole repair: ``None`` means "nothing
+        arrived", and something did arrive — the store answered, and its answer was no. It
+        carries no ``bid``, so every downstream rule that decides on a bid decides exactly as
+        it did before; the only thing that changes is the sentence the operator reads.
+
+        ``204`` is read as the store agent contract's DECLINE and its reason is taken from the
+        header that contract publishes for it (a 204 has no body to carry one in). Any other
+        status is a refusal of the SOLICITATION, and the status is the detail because that is
+        the one fact the exchange actually holds: a 422 means this exchange sent something the
+        store could not read, which is a defect on this side, and a 503 means the agent is
+        down, which is a defect on that one. Reported as ``no_response``, they were the same
+        sentence and neither operator could act on it.
+
+        The header name is restated here rather than imported from ``store_agent``: it is a
+        published contract detail (``store-agent.openapi.json`` documents it on the 204), and
+        the exchange does not import the seller's package — the image it ships does not even
+        contain it.
+        """
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status == 204:
+            headers = getattr(response, "headers", None)
+            stated = None
+            if headers is not None:
+                try:
+                    stated = headers.get(DECLINE_REASON_HEADER)
+                except Exception:
+                    stated = None
+            reason = refusal_reason(STORE_DECLINED_REASON, stated)
+        else:
+            reason = refusal_reason(STORE_REFUSED_REASON, status)
+        return {"store_id": store_id, REFUSAL_FIELD: reason}
 
     # -- plumbing -------------------------------------------------------------------
     def _http_client(self) -> Any:
@@ -705,6 +936,17 @@ def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
     if deployment.trust_snapshot is not None and unset("trust_snapshot"):
         configure_ranking(app, trust_snapshot=dict(deployment.trust_snapshot))
         bound.append("trust_snapshot")
+
+    if deployment.catalog is not None and unset("ranking_catalog"):
+        # `is not None`, not truthiness, for the same reason `intent_clusters` above is: a
+        # document stating `"catalog": {}` has said "this exchange holds no snapshot for
+        # anybody", and binding the empty source records that decision rather than leaving the
+        # seam looking unwired. Bound through `configure_ranking`, never by assigning to
+        # `app.state.ranking_catalog`, so this module cannot drift from what that seam means.
+        from .ranking.verification import StaticCatalogSnapshots  # noqa: PLC0415
+
+        configure_ranking(app, catalog=StaticCatalogSnapshots(deployment.catalog))
+        bound.append("ranking_catalog")
 
     domains = deployment.registered_domains
     if domains:

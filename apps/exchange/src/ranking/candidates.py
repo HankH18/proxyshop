@@ -185,13 +185,20 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
       platform-built one.
 
       **But "hosted" is not the complement of "fallback", and an earlier draft of this bullet
-      claimed it was.** ``entry.fallback`` is true for all seven reasons in
+      claimed it was.** ``entry.fallback`` is true for every one of the NINE reasons in
       :data:`~apps.exchange.src.auction.collect.FALLBACK_REASONS`, not only ``no_response``, so
       a store CAN reach this completion by answering — it just has to answer *unusably*.
       Measured over the HTTP door: a reply whose ``offer`` is ``[]``, ``"free"``, ``null``, ``3``
       or absent comes back ``fallback=True`` with ``fallback_reason:
       bid_price_unreconcilable``, and the entry is completed and shortlisted. So is a Tier-0
       store, and so is one the T-177 price wall degraded.
+
+      The count is nine rather than seven since ``store_declined`` and ``store_refused`` landed:
+      a store that answers ``204`` with a decline reason, or ``422``, is no longer flattened
+      into ``no_response`` but is still a fallback, so it is completed too. That makes the point
+      sharper rather than weaker — a store can now reach this branch by *explicitly refusing*
+      to bid, which is as deliberate as an act gets. What it collects for doing so is unchanged,
+      and is the paragraph below.
 
       That is a real widening of the door and it is written down rather than implied — but it is
       not a lever, because of WHAT is on the other side of it. Everything the store wrote is
