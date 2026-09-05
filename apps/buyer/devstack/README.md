@@ -28,11 +28,21 @@ loudly that the page is missing and how to build it.
 
 `demo-market.json` is **the only thing this demo supplies**. It holds merchant data: three
 stores' approved envelopes, catalogues, live stock, the platform's trust reading of each, and
-the two demo conversations. It holds no shortlist, no ranking, no verdict and no permalink.
+the two demo conversations. It holds no shortlist, no ranking, no score, no exclusion reason,
+no verdict and no permalink.
 
-Every price, score, exclusion reason, provenance label and `PSX-` code a person sees is
-computed at run time by the services themselves. If a store declines, the UI shows the
-decline; if the shortlist is empty, the UI shows the exchange's real exclusion reasons.
+It *does* hold **prices** — `list_price` 78.00 / 72.00 / 45.00, the envelope `floors`, and the
+budgets in the two conversations — because those are the merchant's catalogue and the buyer's
+budget, which is exactly the input a market file is for. The bid prices that come back happen
+to be the same three numbers, and that is not a copy: the store agent runs its pricing pass
+over its envelope and, with no authorized discount, `store_agent.modes.runner` records *"no
+authorized discount: the catalog list price stands"*. All three stores here are a cold start
+(`learned_policy: null`), so every pass ends there. Give one a learned policy and the same
+file yields a different `unit_price`.
+
+Every score, exclusion reason, provenance label and `PSX-` code a person sees is computed at
+run time by the services themselves. If a store declines, the UI shows the decline; if the
+shortlist is empty, the UI shows the exchange's real exclusion reasons.
 
 ## The two conversations
 
@@ -40,10 +50,20 @@ Type the turns **exactly** as written. `cluster_id` is a sha256 over the clarifi
 budget band and constraints, and a store agent declines any cluster its envelope does not
 pursue — so the wording decides which stores are even asked.
 
-| turns | cluster | what happens |
-|---|---|---|
-| `looking for a winter hat` then `$80` | `cl-4b6a37aebc537bd5` | woolworks and alpine-supply bid and are shortlisted; fastfleece bids and is **excluded** — `blacklisted_store … may not participate (R12)` |
-| `I want a warm merino wool beanie for winter, under $100` | `cl-4d3c3e4edadaa5e7` | woolworks and alpine-supply bid; fastfleece **declines** at its own agent (HTTP 204, `x-proxyshop-decline-reason: no_matching_product`) and the exchange records `fallback: true, fallback_reason: "no_response"` |
+| turns | further answers | cluster | what happens |
+|---|---|---|---|
+| `looking for a winter hat` then `$80` | **2** | `cl-4b6a37aebc537bd5` | woolworks and alpine-supply bid and are shortlisted; fastfleece bids and is **excluded** — `blacklisted_store … may not participate (R12)` |
+| `I want a warm merino wool beanie for winter, under $100` | **0** | `cl-4d3c3e4edadaa5e7` | woolworks and alpine-supply bid; fastfleece **declines** at its own agent (HTTP 204, `x-proxyshop-decline-reason: no_matching_product`) and the exchange records `fallback: true, fallback_reason: "no_response"` |
+
+**"Further answers" is not decoration.** R1 caps the clarifier at three questions and it keeps
+asking until it has asked them, and *every answer you type is another turn in the cluster hash*.
+Answer exactly the stated number and no more. Measured against a running buyer service:
+winter-hat holds `cl-4b6a37aebc537bd5` through two extra `no`s and moves to
+`cl-d35bd50812d2d9a0` on a third; merino-beanie needs none at all — its confirm screen is up
+immediately — and a single extra `no` moves it to `cl-e437e6d0c763d905`. Neither drifted
+cluster is in any envelope's `pursue_clusters`, so every store declines and the page goes empty
+for a reason that is the reader's keystrokes rather than the market's. `run.py` prints the
+count for each conversation, read from `conversations[].further_answers`.
 
 Answering the budget question with a hedge — `my budget is about $80` rather than `$80` —
 clarifies to a *different* cluster with no hard constraint at all, which no envelope here
@@ -55,7 +75,10 @@ the turns are written out verbatim.
 1. **`configure_solicitation(app, context=…)` per store agent, not `STORE_AGENT_CONTEXT`.**
    That env var is process-wide and names exactly one file, so it cannot describe three stores
    in one process. Each store's own `store_domain` travels in its context, which
-   `store_agent.solicitation.serving` documents as outranking the env var.
+   `store_agent.solicitation.serving` documents as outranking the env var. Unlike (2) this is
+   **not** a hole in the store agent's deployment format: a real deployment runs one store per
+   process and says all of this in `STORE_AGENT_CONTEXT`. It is unreachable-by-document here
+   only because this launcher deliberately puts three merchants in one process.
 
 2. **`configure_ranking(app, catalog=…)` on the exchange.**
    `apps/exchange/src/composition.py` contains the string `catalog` **zero** times, so a

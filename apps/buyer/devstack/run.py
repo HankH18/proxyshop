@@ -211,7 +211,7 @@ def exchange_deployment(market: dict[str, Any], agent_urls: dict[str, str]) -> d
 def buyer_roster(market: dict[str, Any]) -> list[dict[str, Any]]:
     """The candidate set the buyer service opens every auction with.
 
-    Deployment data, never the browser's word: ``ExchangeHttpClient.create_auction`` fills
+    Deployment data, never the browser's word: ``HttpExchangeClient.create_auction`` fills
     it in only when the caller's payload carries none, so the page cannot nominate which
     stores compete for it.
     """
@@ -231,8 +231,15 @@ def buyer_roster(market: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def buyer_deployment(market: dict[str, Any], exchange_url: str) -> dict[str, Any]:
+    """The buyer service's deployment document.
+
+    ``exchange_url`` is the key ``buyer_svc.composition.DOCUMENT_KEYS`` reads, and the module
+    refuses an unrecognised one by name rather than ignoring it - so a document written
+    against an older spelling is a 503 that says which key it did not understand, not a
+    buyer service that boots and quietly reaches nobody.
+    """
     return {
-        "exchange_base_url": exchange_url,
+        "exchange_url": exchange_url,
         "roster": buyer_roster(market),
         "request_timeout_seconds": 30.0,
     }
@@ -295,6 +302,41 @@ def serve_on_port(app: Any, port: int, *, host: str = "127.0.0.1", timeout: floa
 RULE = "=" * 86
 
 
+def _further_answers_line(conversation: dict[str, Any]) -> str:
+    """How many more questions this conversation takes, in a sentence a person can act on.
+
+    Read from the market file rather than computed, because it is a MEASURED fact about the
+    clarifier and this launcher must not pretend to derive it. `demo-market.json`'s comment
+    records how it was measured and what each count is; both were re-measured against a
+    running buyer service on this branch:
+
+        winter-hat     scripted turns + 2 'no' -> cl-4b6a37aebc537bd5 (still pinned)
+                       scripted turns + 3 'no' -> cl-d35bd50812d2d9a0 (nobody pursues it)
+        merino-beanie  scripted turns + 0      -> cl-4d3c3e4edadaa5e7, confirm screen is up
+                       scripted turns + 1 'no' -> cl-e437e6d0c763d905 (nobody pursues it)
+
+    A conversation stating no count says so instead of guessing one: an invented number here
+    is worse than none, because it is the number a reader will follow.
+    """
+    count = conversation.get("further_answers")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return (
+            "further questions: NOT MEASURED for this conversation. Answer them, but know "
+            "that every answer changes the cluster_id."
+        )
+    if count == 0:
+        return (
+            "then answer NO further questions - the confirm screen is up as soon as that "
+            "one turn is clarified. Even a single extra answer changes the cluster_id."
+        )
+    plural = "" if count == 1 else "s"
+    return (
+        f"then answer exactly {count} further question{plural} with anything that adds no "
+        f"new constraint ('no'). One answer more than that changes the cluster_id, and then "
+        f"no store bids."
+    )
+
+
 def print_banner(
     *,
     market: dict[str, Any],
@@ -339,16 +381,19 @@ def print_banner(
     print("  The wording is load-bearing: cluster_id is a hash over the clarified", file=out)
     print("  query, band and constraints, and a store only bids for a cluster its", file=out)
     print("  envelope pursues.", file=out)
-    print("  The clarifier keeps asking until it has asked its three (R1's cap), so", file=out)
-    print("  after the turns below you will still be asked one or two more. Answer", file=out)
-    print("  them with anything that adds no new constraint ('no') - the cluster is", file=out)
-    print("  already fixed by the turns below, and the Confirm button appears once", file=out)
-    print("  nothing is outstanding.\n", file=out)
+    print("  EVERY ANSWER YOU TYPE IS ANOTHER TURN IN THAT HASH, so each conversation", file=out)
+    print("  below states exactly how many further questions it takes after its", file=out)
+    print("  scripted turns. Answer that many and no more: one extra answer moves the", file=out)
+    print("  cluster to one no envelope here pursues, every store declines with", file=out)
+    print("  cluster_not_pursued, and the page goes empty for a reason that is your", file=out)
+    print("  keystrokes rather than the market's. The counts were measured against a", file=out)
+    print("  running buyer service, not assumed.\n", file=out)
     for conversation in market.get("conversations", ()):
         print(f"    [{conversation['id']}] {conversation.get('title', '')}", file=out)
         for index, turn in enumerate(conversation.get("turns", ()), start=1):
             print(f"        {index}. {turn}", file=out)
         print(f"        -> cluster {conversation['cluster_id']}", file=out)
+        print(f"        -> {_further_answers_line(conversation)}", file=out)
         for line in conversation.get("reaches", ()):
             print(f"           {line}", file=out)
         print("", file=out)
@@ -446,16 +491,35 @@ def run(*, open_browser: bool, port: int) -> int:
 
         try:
             import buyer_svc.composition  # noqa: PLC0415
+            import buyer_svc.main  # noqa: PLC0415
         except ModuleNotFoundError as exc:
             raise DevstackError(
-                "buyer_svc.composition could not be imported "
-                f"({exc}). The buyer composition root lives at "
-                "apps/buyer/svc/src/composition.py (reached through .pkgroot/buyer_svc) and "
-                "is what wires the buyer service to the exchange. Without it the stack has "
-                "nothing to serve the journey from."
+                "the buyer service could not be imported "
+                f"({exc}). It lives at apps/buyer/svc/src (reached through "
+                ".pkgroot/buyer_svc); `main.py` is the entrypoint and `composition.py` is "
+                "what wires it to the exchange. Without them the stack has nothing to serve "
+                "the journey from."
             ) from exc
 
-        buyer_app = buyer_svc.composition.create_app()
+        # `buyer_svc.main.create_app()` is the entrypoint the Dockerfile runs
+        # (`uvicorn buyer_svc.main:app`), and it globs and mounts every `<feature>/routes.py`
+        # - including the auction view the page reads. The exchange client is NOT bound here:
+        # `main.py` is orchestrator-frozen, so `buyer_svc.composition` runs as a request-time
+        # hook off `BUYER_DEPLOYMENT`, which was written and exported above.
+        buyer_app = buyer_svc.main.create_app()
+
+        # LAST, after every router is mounted, and by this launcher rather than by the
+        # composition root: Starlette matches in registration order and a `Mount` at `/`
+        # matches everything, so a UI mounted before the routers would shadow
+        # `/buyer/intent/clarify`. It is also why `configure_buyer` never calls this - the
+        # shipped API image should serve the API, not a demo page.
+        mounted_ui = buyer_svc.composition.mount_ui(buyer_app)
+        if ui_dist is not None and mounted_ui is None:  # pragma: no cover - defensive
+            raise DevstackError(
+                f"the built UI at {ui_dist} is there but was not mounted; the buyer app "
+                f"would serve a 404 at '/'."
+            )
+
         buyer_url = stack.enter_context(serve_on_port(buyer_app, port))
 
         # -- 4. tell the person what is running ----------------------------------------
