@@ -595,8 +595,9 @@ def collected_bid_records(
         # Carried so the accept door can tell a price a STORE quoted from one the exchange
         # manufactured for it (R10). Read off the `BidEntry`, which is `collect_bids`' own
         # verdict, and never off `candidate` — the rank row does not carry it, and a bid is a
-        # document the store wrote. See `accept.offer`'s fallback refusal for what it is for
-        # and for why that refusal is an interim default rather than a rule R10 states.
+        # document the store wrote. See `accept.offer`'s fallback handoff for what it is for:
+        # accepting one succeeds, mints no discount code, and sends the buyer to that store's
+        # own checkout — so this flag is what tells the two apart at the accept door.
         if getattr(by_store.get(store_id), "fallback", False):
             record["fallback"] = True
         records.append(record)
