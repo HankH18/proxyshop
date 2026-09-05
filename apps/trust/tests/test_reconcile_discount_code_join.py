@@ -646,3 +646,69 @@ def test_no_published_field_leaks_the_internal_separator() -> None:
     payload = emitted[0]["payload"]
     assert SEP not in str(payload["order_ref"])
     assert SEP not in str(payload["checkout_token"])
+
+
+def orphaned_code_created(*, code: str, store: str = STORE) -> dict[str, Any]:
+    """The ``code_created`` the exchange files when it REFUSES a checkout it already minted for.
+
+    Transcribed from ``apps/exchange/src/accept/offer.py``'s ``_orphan_record``: it carries
+    ``orphaned: True`` / ``revocation_required: True``, a ``bid_ref`` and a ``fingerprint``,
+    and — the part that matters here — **no ``checkout_token``**, because no checkout was
+    authorized. No ``accepted`` and no ``checkout_redirect`` accompany it.
+    """
+    return {
+        "event_id": f"code_created:orphan:{code}",
+        "ts": "2026-01-01T00:00:01+00:00",
+        "kind": "code_created",
+        "store_id": store,
+        "payload": {
+            "code": code,
+            "permalink_url": f"https://{store}.example.com/cart/1:1?discount={code}",
+            "expires_at": 1700172800.0,
+            "orphaned": True,
+            "revocation_required": True,
+            "bid_ref": "bid-refused",
+            "provider": "shopify",
+            "fingerprint": "sha256:refused",
+        },
+    }
+
+
+def test_a_redeemed_orphan_code_does_not_manufacture_a_verdict() -> None:
+    """A refused checkout whose live code was spent anyway is graded against NOTHING.
+
+    Admitting ``code_created`` as a bridge means the orphan record the refusal path files is
+    now read too, so this is a consequence of the join and not a hypothetical. It is safe for
+    a structural reason worth pinning rather than trusting: the orphan carries no
+    ``checkout_token`` and no ``accepted`` accompanies it, so its group holds a webhook and no
+    promise — and ``reconcile`` emits nothing for a group with no promise. Grading here would
+    invent a promise out of a checkout the exchange itself refused.
+    """
+    orphan_code = "PSX-ORPHAN01"
+    assert reconcile([orphaned_code_created(code=orphan_code), order_paid(code=orphan_code)]) == []
+
+
+def test_an_orphan_code_cannot_reach_a_different_checkouts_promise() -> None:
+    """The refused bid's code must not attach its order to the offer that was accepted."""
+    orphan_code = "PSX-ORPHAN01"
+    emitted = reconcile(
+        [
+            accepted(),
+            code_created(),
+            order_paid(),
+            orphaned_code_created(code=orphan_code),
+            order_paid(
+                token="6" * 32,
+                code=orphan_code,
+                order_ref="gid://shopify/Order/6600000000001",
+                total_price=999.0,
+            ),
+        ]
+    )
+
+    assert len(emitted) == 1, (
+        "the refused checkout's order reached a promise: "
+        f"{[(e['payload']['order_ref'], e['payload']['observed_price']) for e in emitted]}"
+    )
+    assert emitted[0]["payload"]["order_ref"] == ORDER_REF
+    assert emitted[0]["payload"]["observed_price"] == 389.0

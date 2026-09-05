@@ -760,23 +760,32 @@ async def _second_redemption(
 def authorized_checkout_token(run: S1Run, completion: dict[str, Any]) -> str:
     """The token of the checkout the EXCHANGE authorized, for the order the merchant closed.
 
-    **This hop has no production owner, and that is a defect this run reports rather than
-    hides.** ``CheckoutProvider.checkout`` invents its ``checkout_token`` with
-    ``secrets.token_hex(16)`` (apps/exchange/src/checkout/provider.py:828) and never
+    **This hop no longer needs a binding here, and this docstring is the record of that
+    changing.** ``CheckoutProvider.checkout`` still invents its ``checkout_token`` with
+    ``secrets.token_hex(16)`` (apps/exchange/src/checkout/provider.py:828) and still never
     transmits it: the cart permalink it builds carries the discount code and nothing else
-    (provider.py:1072). The merchant mints its own, unrelated token when the cart is visited.
-    So ``accepted.payload.checkout_token`` and ``order_paid.payload.checkout_token`` are two
-    different values for one checkout, and ``trust.reconcile.reconcile`` — which joins an
-    order to its offer on exactly those keys (apps/trust/src/reconcile/engine.py:227) — finds
-    no shared key and emits nothing. Measured on this tree: without this binding the run
-    produces zero ``reconciled`` events with every other stage green.
+    (provider.py:1072), and the merchant still mints its own, unrelated token when the cart is
+    visited. So ``accepted.payload.checkout_token`` and the merchant's own token remain two
+    different values for one checkout — that half has not changed and
+    ``test_the_checkout_token_seam_has_no_production_binding`` still measures it.
 
-    The binding below is *derived*, never invented. The single-use discount code IS the
-    exchange's handle on the checkout: the exchange minted it, put it in the permalink, and
-    the merchant's order came back carrying it. Matching the order's ``discount_code`` to the
-    minted code therefore establishes that this order is the completion of that authorized
-    checkout, and its token is the one the ledger already recorded. The platform's own token
-    is kept alongside under ``platform_checkout_token`` so nothing is lost.
+    What changed is the consumer. ``trust.reconcile.reconcile`` used to join an order to its
+    offer on those tokens alone, so it found no shared key and emitted nothing: measured on
+    this tree, without this binding the run produced ZERO ``reconciled`` events with every
+    other stage green. It now also joins on the single-use discount code, reading
+    ``code_created`` / ``checkout_redirect`` as bridges, and the same measurement produces
+    ONE. The binding below is therefore no longer load-bearing and can be deleted — which
+    also means deleting the two ``checkout_token`` assertions in
+    ``test_the_checkout_token_seam_has_no_production_binding``, so it is left standing here
+    for a lane that owns that file.
+
+    The binding is *derived*, never invented, and its premise is the same value the
+    production join now uses. The single-use discount code IS the exchange's handle on the
+    checkout: the exchange minted it, put it in the permalink, and the merchant's order came
+    back carrying it. Matching the order's ``discount_code`` to the minted code therefore
+    establishes that this order is the completion of that authorized checkout, and its token
+    is the one the ledger already recorded. The platform's own token is kept alongside under
+    ``platform_checkout_token`` so nothing is lost.
 
     Raises:
         AssertionError: the order does not carry the code the exchange minted, in which case
