@@ -510,6 +510,10 @@ def test_a_webhook_with_no_key_at_all_still_raises() -> None:
         ({"discount_code": "  "}, ()),
         ({"discount_code": True}, ()),  # a bool is not a code
         ({"discount_codes": "PSX-NOTALIST"}, ()),  # a string is not a list of codes
+        ({"discount_codes": [["PSX-NESTED1"]]}, ()),  # nor is a nested list a code
+        ({"discount_codes": [{"amount": "0.00"}]}, ()),  # an entry with no code
+        ({"discount_code": {"code": CODE}}, ()),  # a mapping is not a scalar code
+        ({"discount_codes": [None, CODE]}, (CODE,)),  # a hole does not stop the read
         ({}, ()),
     ],
 )

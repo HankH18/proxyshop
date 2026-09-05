@@ -339,7 +339,11 @@ def discount_codes_of(event: Any) -> tuple[str, ...]:
     found: list[str] = []
 
     def keep(value: Any) -> None:
-        if value is None or isinstance(value, bool):
+        # Scalars only, and `bool` is not one: a payload read back out of the ledger holds
+        # whatever was stored, and `str()` of a list or a dict is a perfectly good-looking
+        # string that would become a join key spelled `['PSX-A']`. A key nobody can name is
+        # a key nothing should join on.
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return
         text = str(value).strip().upper()
         if text:
