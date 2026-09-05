@@ -2157,16 +2157,12 @@ def test_the_recorded_bid_corpus_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-294: POST /auctions collects bids, renders them into `entries`, and DROPS them — "
-        "AuctionRecord has no `bids` field and nothing in the repository calls "
-        "InMemoryAuctionBids.record — so `app.state.auction_bids` keeps its NoRecordedBids "
-        "default and every accept of a bid the exchange itself just returned is refused "
-        "`unknown_bid`; remove this marker with the fix"
-    ),
-)
+# The `xfail(strict=True)` marker that stood here is GONE, and its removal is the ticket's own
+# instruction ("remove this marker with the fix"). T-294 is closed: `POST /auctions` now records
+# what it collected into `app.state.auction_bids` — `auction/routes.py::collected_bid_records`
+# assembles the rows and the route writes them beside the shortlist — so a bid the exchange
+# published in its own `entries` is one it can be asked to accept. Left in place, the marker
+# would report `FAILED ... [XPASS(strict)]` and take the suite red on a fix.
 def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     """A bid the exchange published in its own response must be one it can be asked to accept.
 
