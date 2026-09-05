@@ -120,7 +120,31 @@ USER proxyshop
 
 EXPOSE 8083
 
-# One worker on purpose. The frozen entrypoint builds the app at import time and a feature
-# router may hold in-process state (the auction registry, the install nonce table); a
-# second worker would answer half the requests from a different copy of it.
+# `--workers 1` is a MONEY-PATH SAFETY constraint. It is not tuning, not a cache-warmth
+# concern and not a memory budget: raise it and this service mints TWO live discount codes for
+# ONE purchase. That is T-158, and this pin is currently the only thing holding it shut.
+#
+# The T-158 guard is a CLAIM IN A STORE, so it is exactly as wide as that store.
+# `accept/routes.py::_claims` derives the acceptance-claim table from the auction machine's own
+# store, and an exchange configured only by the deployment document never binds a machine:
+# `configure_exchange` (src/composition.py) reads `sellers`, `trust_snapshot` and
+# `checkout_mode` and nothing else. The machine therefore falls back to `AuctionStateMachine()`
+# over `InMemoryAuctionStore` and the claim table is process-local. Two workers are two
+# processes, two stores and two claim tables: both accepts win their own copy of the guard and
+# both mint. An independent verifier reproduced that 6-of-6 across a real process boundary and
+# reported it dead only once this pin was in place.
+#
+# WHAT WOULD HAVE TO BE TRUE BEFORE IT COULD BE RAISED — and the same precondition governs a
+# second replica: a SHARED, DURABLE acceptance-claim store bound IN CODE.
+# `StoreAcceptanceClaims` over `RedisAuctionStore` (nothing on the served path constructs one
+# today), or any table with a unique constraint on `(auction_id)` handed to
+# `configure_accept(claims=...)`. NO configuration surface can supply it: the deployment
+# document (EXCHANGE_DEPLOYMENT / EXCHANGE_DEPLOYMENT_JSON) exposes no key for
+# `auction_machine` and none for `acceptance_claims`, so no variable, file or override turns
+# it on.
+#
+# The lesser half, and all this comment used to say: the frozen entrypoint builds the app at
+# import time and a feature router may hold in-process state (the auction registry, the install
+# nonce table), so a second worker would answer half the requests from a different copy of it.
+# True, and a correctness wart. The claim ledger above is money.
 CMD ["uvicorn", "exchange.main:app", "--host", "0.0.0.0", "--port", "8083", "--workers", "1"]
