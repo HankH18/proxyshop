@@ -121,7 +121,15 @@ Two rules kept this from becoming decoration:
   (`git grep -l psycopg` / `worker_redis` / `neo4j` under each source tree), never copied
   between fragments. `merchant-svc` touches no datastore — `git grep -n "psycopg\|worker_redis\|import redis\|neo4j" -- apps/merchant/svc/src`
   returns nothing — so its unread `PROXYSHOP_PG_DSN_APP`, its unread `REDIS_URL` and its
-  `depends_on: postgres` were **deleted** rather than probed.
+  `depends_on: postgres` were **deleted** rather than probed. `trust` and `buyer-svc` lost
+  their `depends_on: redis` and `REDIS_URL` for the same reason: neither reads the variable
+  or builds a client, and the only redis name under either is `ledger/errors.py`'s
+  `import redis.exceptions`, which names exception *types* so a psycopg-backed store can
+  classify a transient failure — its own docstring says *"no client, no connection pool, no
+  `from_url`."* A `depends_on` with no probe behind it makes a container wait on a store it
+  never speaks to; a probe with no usage behind it is a green light with nothing behind it.
+  Both are the same lie. That pairing is now a test, and it caught these two in this lane's
+  own diff rather than in a review.
 * **Name the relation, not just the server.** A probe that stopped at "postgres answers"
   passes against an empty database, which is precisely the state the runbook produced.
 

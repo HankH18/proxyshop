@@ -47,11 +47,22 @@ services:
       PROXYSHOP_PG_DSN_TRUST_RW: "postgresql://trust_rw@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_PG_DSN_APP: "postgresql://app@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
-      REDIS_URL: "redis://redis:6379"                            # D39: no db component
+      # NO REDIS_URL, and no `depends_on: redis` below. Both were here and both were
+      # decoration: this service never opens a Redis connection. Measured —
+      # `git grep -n REDIS_URL -- apps/trust/src` is empty, and the only redis name anywhere
+      # under it is `ledger/errors.py`'s `import redis.exceptions`, whose own docstring says
+      # "Note what is *not* imported: no client, no connection pool, no from_url" — it names
+      # exception TYPES so a psycopg-backed store can classify a transient failure.
+      #
+      # This is the same rule applied to apps/merchant/compose.yaml, and it is the rule this
+      # lane's readiness work rests on: probe only what the service uses. A `depends_on` with
+      # no probe behind it makes the container WAIT on a store it never speaks to; adding
+      # `--redis` instead would have been a green light with nothing behind it. Either way it
+      # is a claim the service cannot honour. proxyshop_support/tests/test_deploy_readiness.py
+      # is what caught this — it requires a declared datastore dependency and a readiness
+      # check that names it to land together, and it caught it in this lane's own diff.
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     # Resolve the DSNs through the single source of truth, then exec the image's own CMD.
     # The uvicorn line below MIRRORS apps/trust/Dockerfile's CMD — compose clears the image

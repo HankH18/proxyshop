@@ -36,7 +36,10 @@ services:
       PROXYSHOP_PG_DSN_VAULT: "postgresql://buyer_vault@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_PG_DSN_APP: "postgresql://app@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
-      REDIS_URL: "redis://redis:6379"                            # D39: no db component
+      # NO REDIS_URL, and no `depends_on: redis` below — see the note in
+      # apps/trust/compose.yaml. Measured the same way: `git grep -n "REDIS_URL\|worker_redis"
+      # -- apps/buyer/svc/src` returns nothing at all, so this service never opened a Redis
+      # connection and the dependency only made the container wait on a store it never used.
       LLM_PROVIDER: "${LLM_PROVIDER:-double}"                    # D19: offline by default
       BUYER_MODEL: "${BUYER_MODEL:-claude-sonnet-4-5}"
       INTERVIEW_MODEL: "${INTERVIEW_MODEL:-claude-opus-4-1}"
@@ -45,8 +48,6 @@ services:
       TRUST_URL: "${TRUST_URL:-http://trust:8084}"
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     # Resolve the DSNs through the single source of truth, then exec the image's own CMD.
     # The uvicorn line MIRRORS apps/buyer/Dockerfile's CMD — compose clears the image CMD
