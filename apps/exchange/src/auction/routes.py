@@ -494,9 +494,49 @@ def collected_bid_records(
     particular is the platform registry's answer, never ``bid["store_domain"]`` — a store that
     supplied both halves of the C10/D22 check would pass its own check (T-169).
 
-    So the records come from the ranking's own projected candidates, which already carry the
-    minted ``bid_id`` and the platform's domain, and are the same rows ``ranked``, ``excluded``
-    and ``shortlist.slots`` name.
+    So the records are meant to come from the ranking's own projected candidates, which already
+    carry the minted ``bid_id`` and the platform's domain, and are the same rows ``ranked``,
+    ``excluded`` and ``shortlist.slots`` name.
+
+    **MEASURED DEFECT — they do not, and this paragraph used to assert they did.** The caller
+    below passes ``ranking["candidates"]``, and that is not the projection in
+    ``ranking/candidates.py``: ``ranking/__init__.py`` sets ``"candidates": rows``, the rank-ROW
+    projection, whose keys are ``bid_id``, ``components``, ``eligible``, ``exclusion_reasons``,
+    ``features``, ``price``, ``provenance_labels``, ``rank_score``, ``store_id``, ``trust``,
+    ``trust_summary`` and ``verified_hard_fit_count``. There is no ``offer`` and no
+    ``store_domain`` on it, so ``candidate.get("offer") or {}`` below records the EMPTY DICT and
+    the ``store_domain`` key is never written. Measured over the HTTP door, one hosted bid and
+    one silent store, both shortlisted::
+
+        [{"bid_id": "…:store-a",      "offer": {}, "store_id": "store-a"},
+         {"bid_id": "…:store-silent", "offer": {}, "store_id": "store-silent"}]
+
+    It is blind to which kind of bid it is: a hosted reply carrying
+    ``checkout_url=https://store-a.example.com/cart/77:1?ref=hosted``, an ``expires_at``, and
+    ``variant_ref: "77"``, ``quantity: 3`` loses all four identically. Four measured
+    consequences, on every served bid rather than only on fallbacks:
+
+    * ``code_expiry(now, {})`` takes the flat ``MAX_CODE_TTL_SECONDS`` ceiling — 172800 s — so a
+      code outlives the offer it discounts, which is the one thing that function exists to
+      prevent. An offer set to expire in 60 seconds still minted a 48-hour code.
+    * the PRE-mint ``assert_on_domain`` at ``checkout/provider.py`` is guarded by ``if
+      request.checkout_url:`` and ``request.checkout_url`` is ``""``, so it never runs. The only
+      host check that fires is the post-mint one, after a live discount exists.
+    * ``assert_offer_is_mintable`` inspects nothing: ``code_expiry(0.0, {})`` and
+      ``offer_quantity({})`` both take their default branch.
+    * ``default_permalink`` reads ``variant_ref``/``variant_id``/``quantity`` off the offer, so
+      the buyer is sent to ``/cart/1:1`` rather than to the ``/cart/77:3`` the store bid.
+
+    **The repair is not the one-line swap it looks like**, which is why it is written down here
+    rather than made in passing: this function gates on ``candidate.get("eligible")``, a key the
+    projection does not carry, so handing it the projected candidates records NOTHING and every
+    accept becomes ``unknown_bid``. The route also has no handle on the projection —
+    ``ranking.serving.rank_auction`` builds it locally and returns only ``rank()``'s output — so
+    a fix has to widen ``rank_auction``'s return or put ``offer``/``store_domain`` on the rank
+    row, and must leave ``_excluded_out``'s argument alone because that one does need the row.
+    Nothing else blocks it: across ``accept/**`` and ``checkout/**`` there is not one read of a
+    rank-row-only key. The defect predates this branch — ``git log -L`` dates the line to
+    ``ec4f2b4``, an ancestor of ``main``.
 
     **Only the candidates the ranking found ELIGIBLE are recorded**, and the first draft of
     this function got that wrong in the expensive direction. It recorded every collected
@@ -531,6 +571,8 @@ def collected_bid_records(
     another store's alias — because ``_find_bid`` returns the FIRST match, so honouring a
     colliding ref would let one bidder decide which offer another store's reference accepts.
     """
+    by_store = {str(getattr(entry, "store_id", "")): entry for entry in entries}
+
     records: list[dict[str, Any]] = []
     minted: set[str] = set()
     for candidate in candidates:
@@ -541,20 +583,27 @@ def collected_bid_records(
         bid_id = str(candidate.get("bid_id") or "")
         if not bid_id:
             continue
+        store_id = str(candidate.get("store_id") or "")
         record: dict[str, Any] = {
             "bid_id": bid_id,
-            "store_id": str(candidate.get("store_id") or ""),
+            "store_id": store_id,
             "offer": candidate.get("offer") or {},
         }
         domain = candidate.get("store_domain")
         if domain:
             record["store_domain"] = str(domain)
+        # Carried so the accept door can tell a price a STORE quoted from one the exchange
+        # manufactured for it (R10). Read off the `BidEntry`, which is `collect_bids`' own
+        # verdict, and never off `candidate` — the rank row does not carry it, and a bid is a
+        # document the store wrote. See `accept.offer`'s fallback refusal for what it is for
+        # and for why that refusal is an interim default rather than a rule R10 states.
+        if getattr(by_store.get(store_id), "fallback", False):
+            record["fallback"] = True
         records.append(record)
         minted.add(bid_id)
 
     aliases: dict[str, dict[str, Any]] = {}
     collided: set[str] = set()
-    by_store = {str(getattr(entry, "store_id", "")): entry for entry in entries}
     for record in list(records):
         entry = by_store.get(record["store_id"])
         bid = getattr(entry, "bid", None)
@@ -818,6 +867,13 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # AFTER the ranking because the ranking's own projected candidates are the shape the
     # accept path reads, minted ref and platform domain included — see
     # :func:`collected_bid_records` for why nothing here is copied from the store's reply.
+    #
+    # THE ARGUMENT ON THE NEXT LINE IS THE WRONG OBJECT, and `collected_bid_records`' docstring
+    # carries the measurement. `ranking["candidates"]` is `rank()`'s ROW projection, not
+    # `ranking/candidates.py`'s — it has no `offer` and no `store_domain` — so every record is
+    # written with `offer: {}`. Pre-existing, and it costs every served bid its expiry, its
+    # pre-mint host check and its cart permalink. Fixing it is not a swap of this one argument;
+    # the docstring says what it needs.
     book = _bid_book(request)
     recorder = getattr(book, "record", None)
     if callable(recorder):

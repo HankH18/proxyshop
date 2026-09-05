@@ -151,6 +151,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from contracts.boundary import (
@@ -163,8 +164,11 @@ from contracts.boundary import (
 from contracts.boundary import MINIMUM_PAYABLE_AMOUNT as _MINIMUM_PAYABLE_AMOUNT
 from contracts.boundary import PRICE_FLOOR_FRACTION as _PRICE_FLOOR_FRACTION
 
+from .state import AUCTION_TTL_SECONDS
+
 __all__ = [
     "BidEntry",
+    "FALLBACK_OFFER_TTL_SECONDS",
     "FALLBACK_REASONS",
     "ILLEGIBLE_OFFER_REASON",
     "MALFORMED_RESPONSE_REASONS",
@@ -178,9 +182,30 @@ __all__ = [
     "UNDISCLOSED_REFUSAL_DETAIL",
     "UNRECONCILABLE_PRICE_REASON",
     "collect_bids",
+    "fallback_expires_at",
     "fallback_reason_family",
     "refusal_reason",
 ]
+
+#: How long past the auction's close a manufactured list-price offer stays live (R10).
+#:
+#: The auction's OWN TTL rather than a number invented here. DESIGN pins ``auction:{id}`` at
+#: fifteen minutes (:data:`~apps.exchange.src.auction.state.AUCTION_TTL_SECONDS`) and
+#: ``ranking.serving.ShortlistStore`` uses the same duration, so a fallback lives about as long
+#: as the shortlist that advertises it and the record that explains it.
+#:
+#: **About**, not exactly, and the first draft of this comment said "forgets on the same clock",
+#: which is measurably false in BOTH directions.  The two are anchored at different instants: an
+#: offer expires at ``deadline + TTL`` while the shortlist expires at ``closed_at + TTL``, and
+#: ``closed_at`` is a second clock reading taken after the fan-out returns.  A fan-out that
+#: finishes early leaves ``closed_at < deadline`` and the offer outlives the shortlist;  one that
+#: overruns its window leaves ``closed_at > deadline`` and the offer dies first.  Measured:
+#: ``window=10.0`` with instant replies gave the offer ``+9.998s`` of life past the shortlist,
+#: and ``window=2.0`` against a 5-second solicitor gave ``-0.013s``.  The skew is bounded by the
+#: bid window — seconds against fifteen minutes — so it changes nothing about which offers are
+#: shown;  it is written down because "the same clock" is the kind of claim a later reader would
+#: build on.
+FALLBACK_OFFER_TTL_SECONDS: float = float(AUCTION_TTL_SECONDS)
 
 #: Why an entry ended up at list price. Recorded on the entry so a downstream reader (the
 #: ranker, a loss report, an operator) never has to guess between "nobody home" and "too
@@ -368,7 +393,47 @@ class BidEntry:
         return float(self.offer.get("unit_price", 0.0))
 
 
-def _list_price_bid(entry: Mapping[str, Any], auction_id: str | None) -> dict[str, Any]:
+def fallback_expires_at(deadline: float) -> str | None:
+    """When a manufactured list-price offer stops being live, as an ISO-8601 UTC instant.
+
+    **R10's second half runs through this function.** A fallback used to carry no ``expires_at``
+    at all, and ``ranking.filters.expiry_reason`` fails closed on an absent one — "the offer
+    carries no expires_at, so it cannot be shown to be live" — so every fallback the exchange
+    manufactured for itself was excluded before it could be ranked. R10 does not only say a
+    silent store is *represented*; it says it "can still reach the shortlist", and an offer that
+    cannot be shown to be live reaches no shortlist.
+
+    Two numbers decide the answer and **this exchange computed both of them**: the auction's own
+    close (``deadline``, struck by the route as ``opened_at + window``) and the auction's own TTL
+    (:data:`FALLBACK_OFFER_TTL_SECONDS`). Nothing here reads a field a store sent — the store
+    sent nothing, which is the entire reason a fallback exists, so anything it had published
+    would be the wrong evidence even if it had published something.
+
+    ISO-8601 rather than a float epoch because that is the spelling the published ``Offer``
+    declares (``str | None``, ``format: date-time``); ``checkout.codes.expiry_epoch`` reads both,
+    and T-182 is the measurement of what happens when the two halves of this system disagree
+    about which one they mean.
+
+    Returns ``None`` — which reads downstream exactly as the absent field always did, i.e. the
+    offer is excluded — when the deadline is not a finite instant this function can render. An
+    auction whose close cannot be dated cannot date the offers it closes over, and a fallback
+    that guessed an expiry off an unreadable clock would be a live offer built on nothing.
+    """
+    seconds = _number(deadline)
+    if seconds is None:
+        return None
+    try:
+        expires = datetime.fromtimestamp(seconds + FALLBACK_OFFER_TTL_SECONDS, tz=UTC)
+    except (OSError, OverflowError, ValueError):
+        # A deadline far enough out of range that no calendar can render it. Undatable, so
+        # unexpirable, so not shown — the same direction the absent field already failed in.
+        return None
+    return expires.isoformat().replace("+00:00", "Z")
+
+
+def _list_price_bid(
+    entry: Mapping[str, Any], auction_id: str | None, deadline: float
+) -> dict[str, Any]:
     """The catalog-derived fallback offer for a store that did not (or cannot) bid.
 
     The read is :func:`_number`, not a bare ``float()``, and that is T-224's shape one row over.
@@ -377,6 +442,14 @@ def _list_price_bid(entry: Mapping[str, Any], auction_id: str | None) -> dict[st
     an unreadable *bid* price did. An unreadable list price is therefore treated exactly as a
     MISSING one always was (``0.0``), which is not a new free item: it is the one the absent field
     already minted, and ``RosterEntry.list_price`` refuses both at the door.
+
+    ``expires_at`` is the exchange's own answer, derived from ``deadline`` — see
+    :func:`fallback_expires_at` for why it is R10's second half and why it can only come from
+    here. The offer's OTHER missing half, a checkout destination, cannot be answered in this
+    module and deliberately is not faked: the trustworthy source for that is the platform's
+    seller registry, which this pure function has no handle on and must not be given one. It is
+    resolved one layer out, in ``ranking.candidates``, where the registry lookup already happens
+    for every candidate.
     """
     listed = _number(entry.get("list_price"))
     list_price = 0.0 if listed is None else listed
@@ -388,6 +461,9 @@ def _list_price_bid(entry: Mapping[str, Any], auction_id: str | None) -> dict[st
             "unit_price": list_price,
             "total_price": list_price,
             "currency": entry.get("currency", "USD"),
+            # R10: a fallback is a real, rankable offer, so it has to be able to show it is
+            # live. This instant is the auction's, never a store's.
+            "expires_at": fallback_expires_at(deadline),
         },
         # R10/R18/R19: a fallback carries no asserted claims. It is catalog data, so it can
         # never be the evidence that satisfies a hard constraint.
@@ -825,7 +901,7 @@ def collect_bids(
                     store_id=store_id,
                     tier=tier,
                     fallback=True,
-                    bid=_list_price_bid(rostered, auction_id),
+                    bid=_list_price_bid(rostered, auction_id, deadline),
                     received_at=None,
                     fallback_reason=reason,
                     price_reasons=refused,

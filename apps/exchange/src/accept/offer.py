@@ -64,11 +64,45 @@ the race discovers it has lost only once ``POST /codes`` has issued a live singl
 so the outcome is a correct 409 sitting on top of a real double spend.
 
 **A merchant client that answers off-domain has already minted.** The port checks the offer's
-``checkout_url`` before the mint, but an offer with *no* URL (the R10 list-price fallback shape)
-has nothing to check, so the first host comparison a delegating provider can fail is the one on
-the permalink it got *back* — after ``POST /codes`` issued a real single-use discount. The buyer
-is still protected (no permalink is returned, and the auction stays open) and the live code is
-**no longer lost**: the port carries it out on
+``checkout_url`` before the mint, but that check says nothing about the permalink the provider
+hands *back*, so the first host comparison a delegating provider can fail is the one on that
+permalink — after ``POST /codes`` issued a real single-use discount. An offer with *no* URL
+reaches the mint having faced no host comparison at all, and that is the everyday shape of a
+bid arriving here — R10 list-price fallback and hosted bid alike.
+
+A doc sweep (edbc422) asserted the opposite, that a shortlisted fallback "arrives here
+carrying a URL". It does not, and the mistake is worth writing down because the expectation
+behind it is reasonable: ``ranking/candidates.py`` really does complete a fallback entry's
+offer from the platform's ``store_id -> domain`` registry, and ``POST /auctions`` really does
+record the bid book *after* the ranking has run. What breaks the chain is the argument in
+between. The route hands :func:`~..auction.routes.collected_bid_records`
+``ranking["candidates"]``, and that key is **not** the projection — ``ranking/__init__.py``
+sets ``"candidates": rows``, the rank-ROW projection, whose keys are ``bid_id``,
+``components``, ``eligible``, ``exclusion_reasons``, ``features``, ``price``,
+``provenance_labels``, ``rank_score``, ``store_id``, ``trust``, ``trust_summary`` and
+``verified_hard_fit_count``. A rank row has no ``offer`` and no ``store_domain``, so
+``candidate.get("offer") or {}`` records the empty dict and no ``store_domain`` key is written
+at all. Measured on the real composed app over ``TestClient``, one hosted bid plus one silent
+store, both shortlisted::
+
+    shortlist slots: ['auction-f718bcd6-…:store-a', 'auction-f718bcd6-…:store-silent']
+    === RECORDED BID BOOK ===
+    [
+      {"bid_id": "auction-f718bcd6-…:store-a", "offer": {}, "store_id": "store-a"},
+      {"bid_id": "auction-f718bcd6-…:store-silent", "offer": {}, "store_id": "store-silent"}
+    ]
+
+So the pre-mint ``assert_on_domain`` on the offer's own ``checkout_url`` does not run for a
+served bid of *either* kind; a fallback's derived ``expires_at`` never reaches this path
+(``code_expiry(now, {})`` takes the 48-hour ceiling, ``code TTL = 172800.0 seconds``); and
+``assert_offer_is_mintable`` and ``offer_quantity`` pass trivially on ``{}``. **This is
+pre-existing, and not something R10 did** — a hosted bid's real ``checkout_url`` and
+``expires_at`` are dropped by the same line — and it is reported separately as its own
+finding. The consequence for this paragraph is only that the post-mint permalink check below
+remains the first failable host comparison, exactly as it was before 87a889f.
+
+The buyer is still protected (no permalink is returned, and the auction stays open) and the
+live code is **no longer lost**: the port carries it out on
 :attr:`~apps.exchange.src.checkout.provider.OrphanedCheckoutCode.orphan`, and :func:`accept`
 reads it and files a ``code_created`` event marked ``orphaned``, which is what makes the live
 code visible to reconciliation and revocable *at all* — nothing in this repo consumes that
@@ -98,6 +132,7 @@ from .claims import platform_acceptance_claims
 from .reasons import (
     DENIAL_ALREADY_ACCEPTED,
     DENIAL_CHECKOUT_REFUSED,
+    DENIAL_FALLBACK_NOT_PURCHASABLE,
     DENIAL_UNKNOWN_BID,
     DENIAL_UNRECORDABLE_ACCEPTANCE,
     denial_reason,
@@ -507,6 +542,52 @@ def accept(
             store_id=store_id,
         )
 
+    if _read(bid, "fallback"):
+        # R10's list-price fallback is SHOWN but not SOLD.
+        #
+        # **This gate is an interim fail-closed default, and R10 does not require it.** R10 is
+        # "a store whose agent never answers is still represented, at its catalogue list price,
+        # and can still reach the shortlist" — represented and shown. It says nothing about
+        # whether that entry may then be minted a single-use code, and this refusal is a
+        # deployment's answer to a question the requirement leaves open, pending a product
+        # ruling. A future lane un-gating it after that ruling deletes this block and nothing
+        # else; do NOT read it as the specification.
+        #
+        # Why the default points this way. Measured over the real composed exchange, with the
+        # ranking and the accept path wired to one registry as `composition.py` wires them: an
+        # accept on a shortlisted fallback returned `200 {"code": "PSX-6KNY1ESD",
+        # "permalink_url": "https://store-silent.example.com/cart/1:1?discount=PSX-6KNY1ESD"}`.
+        # A price no store ever quoted became a live single-use discount, and in `shopify_stub`
+        # mode that code is created by the merchant's own `POST /codes` — asking a merchant to
+        # honour a number its agent never said. Worse with no outbound bid client wired, which
+        # is the default: EVERY rostered store falls back, so the whole shortlist is the
+        # caller's roster, at prices the caller wrote, on an unauthenticated request. The
+        # T-177 price wall cannot catch it — `collect_bids._price_refusal` runs only when a
+        # reply arrived, so `0.01` is refused when a store BIDS it and admitted when the
+        # caller WRITES it on the roster.
+        #
+        # Reversibility is the whole argument. Un-gating is deleting this block once someone
+        # rules; un-minting a discount a merchant never quoted is not a code change.
+        #
+        # `fallback` is stamped by `auction/routes.py::collected_bid_records` off the
+        # `BidEntry` — `collect_bids`' own verdict — and never off the store's document, so a
+        # store cannot clear this by writing `fallback: false` into its reply.
+        return _refused(
+            auction,
+            ref,
+            mode,
+            denial_reason(
+                DENIAL_FALLBACK_NOT_PURCHASABLE,
+                f"bid {ref!r} is this exchange's own list-price fallback for {store_id!r} "
+                f"(R10): the store never answered, so this price is catalogue data rather "
+                f"than an offer that store made. It is shown so the store is represented, "
+                f"and it is not purchasable — no discount code is minted against a price no "
+                f"seller quoted",
+            ),
+            store_id=store_id,
+            reoffer_bid_ref=next_slot(auction, ref),
+        )
+
     if not _acceptance_is_recordable(auction):
         return _refused(
             auction,
@@ -628,10 +709,39 @@ def accept(
         # What is NOT true, and what T-157 measured false, is the comforting half of the old
         # comment here: "a refusal from any of them has created no code anywhere". The port
         # hoists every check it can ahead of the mint, but one cannot be hoisted — the
-        # permalink a provider hands back does not exist until the provider has run — and the
-        # R10 list-price fallback offer carries no `checkout_url`, so that post-mint check is
-        # the FIRST failable host comparison for a legal, everyday bid. By then `POST /codes`
-        # has issued a live single-use discount.
+        # permalink a provider hands back does not exist until the provider has run, and a
+        # pre-mint check on the offer's own URL says nothing about it. When T-157 was
+        # measured, the R10 list-price fallback offer carried no `checkout_url` at all, which
+        # made that post-mint check the FIRST failable host comparison for a legal, everyday
+        # bid. That is STILL true, and a doc sweep (edbc422) wrongly recorded here that it
+        # had stopped being true ("a shortlisted fallback now arrives with a URL, so the
+        # pre-mint check does run on it").
+        #
+        # Why that reads as plausible, and why it is false: `ranking/candidates.py` really
+        # does complete a shortlisted fallback's offer from the platform's
+        # `store_id -> domain` registry, and the route really does record the bid book after
+        # the ranking. But the route never hands that projection over — `auction/routes.py`
+        # passes `ranking["candidates"]` to `collected_bid_records`, and
+        # `ranking/__init__.py` sets `"candidates": rows`, the rank-ROW projection. Its keys
+        # are `bid_id`, `components`, `eligible`, `exclusion_reasons`, `features`, `price`,
+        # `provenance_labels`, `rank_score`, `store_id`, `trust`, `trust_summary` and
+        # `verified_hard_fit_count` — no `offer`, no `store_domain` — so
+        # `candidate.get("offer") or {}` records the EMPTY DICT. Measured on the real
+        # composed app over `TestClient`, one hosted bid plus one silent store, both
+        # shortlisted:
+        #
+        #     [{"bid_id": "auction-f718bcd6-…:store-a",
+        #       "offer": {}, "store_id": "store-a"},
+        #      {"bid_id": "auction-f718bcd6-…:store-silent",
+        #       "offer": {}, "store_id": "store-silent"}]
+        #
+        # The pre-mint check therefore does not run on a served bid of EITHER kind. This is
+        # pre-existing and identical for a hosted bid — whose real `checkout_url` and
+        # `expires_at` are dropped by the same line — so none of it is R10 damage; it is
+        # reported separately as its own finding. The post-mint refusal is unchanged and
+        # still reachable — by any provider whose permalink leaves the registered domain,
+        # and by every offer that arrives with no URL to check at all. By then
+        # `POST /codes` has issued a live single-use discount.
         #
         # The port carries that code out on `OrphanedCheckoutCode.orphan`. Reading it is this
         # frame's entire job: dropping it here is the original defect, one frame higher up.

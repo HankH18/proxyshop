@@ -28,10 +28,30 @@ here it is refused explicitly, with a reason, instead.
 second.** :func:`is_on_domain` is a question about a URL, so an empty URL is not on-domain —
 there is no host to be on the domain. That is *not* the same as "this offer must be refused":
 a list-price fallback offer (R10, built by ``collect_bids`` for every Tier-0 and silent
-store) carries no ``checkout_url`` at all, and treating its absence as a spoof refused every
-fallback bid the exchange had manufactured for itself. The caller decides — see
-``CheckoutProvider.checkout``, which validates the offer's URL only when the offer has one
-and validates the *provider's* permalink unconditionally.
+store) reaches the accept path with no ``checkout_url`` at all, and treating its absence as a
+spoof refused every fallback bid the exchange had manufactured for itself.
+
+A doc sweep (edbc422) claimed that had changed — that "a shortlisted fallback now arrives
+carrying one". It does not, and the reasoning that produced the claim is half right, which is
+why it is written out here rather than simply deleted. ``ranking/candidates.py`` genuinely
+does complete a fallback entry's offer from the platform's ``store_id -> domain`` registry,
+and ``POST /auctions`` genuinely does record the bid book after the ranking. The break is
+between them: the route hands ``collected_bid_records`` the *rank rows*
+(``ranking/__init__.py`` sets ``"candidates": rows``) rather than that projection, and a rank
+row carries no ``offer`` key and no ``store_domain``, so the bid book the accept path reads
+records ``offer: {}``. Measured on the real composed app over ``TestClient``, one hosted bid
+plus one silent store, both shortlisted::
+
+    [{"bid_id": "auction-f718bcd6-…:store-a", "offer": {}, "store_id": "store-a"},
+     {"bid_id": "auction-f718bcd6-…:store-silent", "offer": {}, "store_id": "store-silent"}]
+
+An absent URL is therefore the ordinary case at this module's door, not a corner — and it is
+**pre-existing and identical for a hosted bid**, whose real ``checkout_url`` is dropped by the
+same line, so it is not something R10 introduced; it is reported separately as its own
+finding. It is a legal thing to hand this module either way: a direct caller supplies whatever
+it holds, and a fallback for a store the registry knows no domain for is completed with
+nothing. The caller decides — see ``CheckoutProvider.checkout``, which validates the offer's
+URL only when the offer has one and validates the *provider's* permalink unconditionally.
 
 **Every merchant-controlled value this module puts in a message goes through
 ``redaction.safe_token`` or ``redaction.redact_url``, and that is T-215 pass 3.** The reason
