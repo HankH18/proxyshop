@@ -78,6 +78,7 @@ __all__ = [
     "MAX_ROSTER_ENTRIES",
     "NullSolicitor",
     "bid_window_seconds",
+    "collected_bid_records",
     "configure_auctions",
     "router",
 ]
@@ -269,6 +270,20 @@ class CreateAuctionRequest(BaseModel):
 
 
 class AuctionEntryOut(BaseModel):
+    #: **No ``bid_ref`` here, and its absence is a reported gap rather than an oversight.**
+    #:
+    #: ``entries`` reports every rostered store; ``ranked``, ``excluded`` and
+    #: ``shortlist.slots`` are the only places a bid's reference is published, and an auction
+    #: whose candidates were all excluded has none of the three. So a buyer's agent reading
+    #: ``entries`` alone has no reference to accept with — the "second face" of T-294 that its
+    #: own docstring names. Adding the field here is a one-line change and is NOT made in this
+    #: ticket because ``test_auction.py::test_post_auctions_runs_the_gate_the_fan_out_and_the_
+    #: state_machine`` pins this model's exact key set, and editing a test that is not wrong to
+    #: widen a response is a change that belongs to whoever owns that assertion.
+    #:
+    #: What IS closed is the half that made the missing field matter: the reference published
+    #: in ``ranked``/``shortlist`` now resolves at the accept door, and so does the reference
+    #: the store minted for its own bid — see :func:`collected_bid_records`.
     store_id: str
     tier: int
     fallback: bool
@@ -331,14 +346,25 @@ def configure_auctions(
     machine: AuctionStateMachine | None = None,
     solicitor: Any | None = None,
     eligibility: Any | None = None,
+    bids: Any | None = None,
 ) -> None:
-    """Wire an app's auction dependencies. Anything omitted keeps what is already there."""
+    """Wire an app's auction dependencies. Anything omitted keeps what is already there.
+
+    ``bids`` is the same ``app.state.auction_bids`` book :func:`~..accept.routes.
+    configure_accept` wires, named here as well because the auction is what WRITES it: this
+    route records what it collected and the accept route reads it back. Omitting it is the
+    normal case — :func:`_bid_book` installs an
+    :class:`~..accept.routes.InMemoryAuctionBids` on first use — and it is named only so a
+    deployment that wants the book to outlive one process can hand over its own.
+    """
     if machine is not None:
         app.state.auction_machine = machine
     if solicitor is not None:
         app.state.bid_solicitor = solicitor
     if eligibility is not None:
         app.state.seller_eligibility = eligibility
+    if bids is not None:
+        app.state.auction_bids = bids
 
 
 def _machine(request: Request) -> AuctionStateMachine:
@@ -357,6 +383,45 @@ def _solicitor(request: Request) -> Any:
     return solicitor
 
 
+def _bound_solicitor(
+    request: Request,
+    *,
+    auction_id: str,
+    intent: Any,
+    profile: Any,
+    respond_by: float,
+) -> Any:
+    """This app's solicitor, told which auction it is being asked about — when it can be.
+
+    The solicitor port is ``solicit(store)``: one roster row, and nothing else. That is all an
+    in-process double needs and it is **not** enough for the real outbound client, because the
+    published ``BidRequest`` a store agent answers carries ``{auction_id, intent, profile,
+    respond_by}`` — none of which reaches ``solicit``. Until this hook existed no HTTP
+    solicitor could be written against the port at all, which is a large part of why every
+    deployment ran on ``NullSolicitor`` and every store fell back to its list price.
+
+    ``for_auction`` is therefore OPTIONAL and additive: a solicitor that exposes it is handed
+    the context and returns a view bound to this auction; one that does not — ``NullSolicitor``,
+    every test double in this repository, ``e2e``'s ``HostedAgentSolicitor`` — is used exactly
+    as before. A hook that raised is treated as one that is not there: a client whose binding
+    is broken must not take the auction down, it must fail to bid like any other store.
+    """
+    solicitor = _solicitor(request)
+    bind = getattr(solicitor, "for_auction", None)
+    if not callable(bind):
+        return solicitor
+    try:
+        bound = bind(
+            auction_id=auction_id,
+            intent=intent,
+            profile=profile,
+            respond_by=respond_by,
+        )
+    except Exception:
+        return solicitor
+    return solicitor if bound is None else bound
+
+
 def _eligibility(request: Request) -> Any:
     eligibility = getattr(request.app.state, "seller_eligibility", None)
     if eligibility is None:
@@ -364,6 +429,144 @@ def _eligibility(request: Request) -> Any:
         eligibility = StaticSellerEligibility()
         request.app.state.seller_eligibility = eligibility
     return eligibility
+
+
+def _bind_the_deployment(request: Request) -> None:
+    """Run the composition root once for this app, before anything reads a collaborator.
+
+    ``apps/exchange/src/main.py`` is orchestrator-frozen (B6(iii)), so a deployment cannot be
+    composed inside ``create_app`` — which is exactly why nothing composed it. This is the
+    start-up hook, taken at the top of the request instead, and it binds nothing that is
+    already bound, so a test or a deployment calling ``configure_auctions`` itself still wins.
+
+    A malformed deployment document is a **503**, not a 500 and not a silent fail-closed
+    answer: an exchange told to read a registry it cannot read is misconfigured, and that is a
+    different thing from an exchange nobody has configured. Same status and same reasoning as
+    ``accept/routes.py``'s unregistered ``CHECKOUT_MODE``.
+    """
+    from ..composition import DeploymentConfigurationError, ensure_configured  # noqa: PLC0415
+
+    try:
+        ensure_configured(request.app)
+    except DeploymentConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _bid_book(request: Request) -> Any:
+    """The book this app records an auction's collected bids in.
+
+    Created on first use, exactly as :func:`_machine` creates the state machine, and for the
+    same reason: the auction is the WRITER of this book, so the first ``POST /auctions`` is
+    when it has to exist. The accept route's own accessor installs
+    :class:`~..accept.routes.NoRecordedBids` when it finds nothing — the fail-closed default
+    for a service whose auctions are somebody else's — and this is the door that makes that
+    default unnecessary rather than the one that overrides it: an explicitly wired source is
+    never replaced here.
+    """
+    from ..accept.routes import InMemoryAuctionBids  # noqa: PLC0415 — sibling feature
+
+    book = getattr(request.app.state, "auction_bids", None)
+    if book is None:
+        book = InMemoryAuctionBids()
+        request.app.state.auction_bids = book
+    return book
+
+
+def collected_bid_records(
+    candidates: Sequence[Mapping[str, Any]],
+    entries: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Every bid this auction collected, in the shape ``accept()`` reads.
+
+    ``accept()`` looks a bid up by ``bid_id`` (or ``bid_ref``) and then reads ``store_id``,
+    ``store_domain`` and ``offer`` off it. All four are assembled HERE rather than copied from
+    the store's reply, for the reason ``ranking/candidates.py`` gives at length: two of them
+    decide the accept, and a bid is a document the *store* wrote. ``store_domain`` in
+    particular is the platform registry's answer, never ``bid["store_domain"]`` — a store that
+    supplied both halves of the C10/D22 check would pass its own check (T-169).
+
+    So the records come from the ranking's own projected candidates, which already carry the
+    minted ``bid_id`` and the platform's domain, and are the same rows ``ranked``, ``excluded``
+    and ``shortlist.slots`` name.
+
+    **Only the candidates the ranking found ELIGIBLE are recorded**, and the first draft of
+    this function got that wrong in the expensive direction. It recorded every collected
+    candidate and justified it by claiming "the accept path re-runs R12, the domain check and
+    the offer's mintability itself". **That is false**, and an adversarial pass measured it:
+    :func:`~..accept.gate.accept_offer` re-reads the injected ``SellerEligibility`` source and
+    nothing else. Nothing on the accept path reads ``trust_snapshot`` — ``composition.py`` says
+    in as many words that R12's eligibility and the trust snapshot are two independent reads —
+    so a store the ranking refused was buyable. Driven over HTTP against a deployment whose
+    trust snapshot carries ``"blacklisted": true`` for ``s1``::
+
+        ranked  : [('s2', 'auction-2d54…:s2')]
+        excluded: [{"bid_ref": "auction-2d54…:s1", "store_id": "s1", "exclusion_reasons":
+                    ["blacklisted_store: 's1' is blacklisted and may not participate (R12)"]}]
+        accept 'auction-2d54…:s1' -> 200 {"code": "PSX-FPWZHVZD", "permalink_url": ...}
+
+    and the same 200 for an offer that had already expired and for one that failed a hard
+    constraint. The excluded ``bid_ref`` is published in the 201 body, so the buyer's agent is
+    handed exactly the reference it needs. The book therefore holds what the ranking admitted,
+    and nothing else: **an auction can only be asked to accept a bid it was prepared to show.**
+
+    The cost is named rather than hidden: a candidate the exchange collected and published in
+    ``entries`` but the ranking excluded is refused ``unknown_bid`` — a true statement about
+    the bid *book* and a vague one about the auction. Naming the exclusion at the accept door
+    would be better and needs the reasons carried alongside; refusing it is what matters.
+
+    A **second** record is written for a store that minted its own reference, and only when
+    that reference is unambiguous. A buyer's agent is told a bid's ref by the store that made
+    it (that is the ref ``BidEntry.bid['bid_id']`` carries out of ``collect_bids``), so an
+    exchange that answers only to its own spelling refuses a ref it did in fact collect. The
+    alias is dropped when it collides with anything else in this auction — a minted ref, or
+    another store's alias — because ``_find_bid`` returns the FIRST match, so honouring a
+    colliding ref would let one bidder decide which offer another store's reference accepts.
+    """
+    records: list[dict[str, Any]] = []
+    minted: set[str] = set()
+    for candidate in candidates:
+        # THE line this function turns on. `eligible` is the ranking's own verdict, the same
+        # field `_excluded_out` reads to decide what to report as refused.
+        if not candidate.get("eligible"):
+            continue
+        bid_id = str(candidate.get("bid_id") or "")
+        if not bid_id:
+            continue
+        record: dict[str, Any] = {
+            "bid_id": bid_id,
+            "store_id": str(candidate.get("store_id") or ""),
+            "offer": candidate.get("offer") or {},
+        }
+        domain = candidate.get("store_domain")
+        if domain:
+            record["store_domain"] = str(domain)
+        records.append(record)
+        minted.add(bid_id)
+
+    aliases: dict[str, dict[str, Any]] = {}
+    collided: set[str] = set()
+    by_store = {str(getattr(entry, "store_id", "")): entry for entry in entries}
+    for record in list(records):
+        entry = by_store.get(record["store_id"])
+        bid = getattr(entry, "bid", None)
+        if not isinstance(bid, Mapping):
+            continue
+        claimed = str(bid.get("bid_id") or bid.get("bid_ref") or "").strip()
+        # Bounded for the reason `MAX_IDENTIFIER_LENGTH` exists: this key is chosen by the
+        # bidding store, it is kept for the auction's whole TTL, and a reference is a name.
+        # Without the cap a store could park up to `MAX_BID_RESPONSE_BYTES` of its own text in
+        # the exchange's memory per auction by spelling its bid id at length.
+        if not claimed or len(claimed) > MAX_IDENTIFIER_LENGTH or claimed in minted:
+            continue
+        if claimed in aliases:
+            collided.add(claimed)
+            continue
+        aliases[claimed] = {**record, "bid_id": claimed}
+    for ref in collided:
+        aliases.pop(ref, None)
+
+    records.extend(aliases.values())
+    return records
 
 
 def _entries_out(entries: Sequence[Any]) -> list[AuctionEntryOut]:
@@ -511,6 +714,7 @@ def _refuse_an_oversized_intent(intent: Any) -> None:
 @router.post("/auctions", response_model=CreateAuctionResponse, status_code=201)
 async def create_auction(body: CreateAuctionRequest, request: Request) -> CreateAuctionResponse:
     """Open an auction, gate the roster, fan out with a hard timeout, close, and answer."""
+    _bind_the_deployment(request)
     machine = _machine(request)
     intent = body.intent
     _refuse_an_oversized_intent(intent)
@@ -538,7 +742,9 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
 
     result = solicit_bids(
         roster=roster,
-        solicitor=_solicitor(request),
+        solicitor=_bound_solicitor(
+            request, auction_id=auction_id, intent=intent, profile=body.profile, respond_by=deadline
+        ),
         eligibility=_eligibility(request),
         now=deadline,
         fan_out=parallel_fan_out,
@@ -577,6 +783,18 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     )
     shortlist = ranking["shortlist"]
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)
+
+    # The bids this auction collected, kept where the accept route reads them. Without this
+    # line `POST /auctions` renders `entries` and then DROPS the `BidEntry` list, so
+    # `app.state.auction_bids` stayed on its `NoRecordedBids` default and every accept of a
+    # bid the exchange had itself just published was refused `unknown_bid` (T-294). Recorded
+    # AFTER the ranking because the ranking's own projected candidates are the shape the
+    # accept path reads, minted ref and platform domain included — see
+    # :func:`collected_bid_records` for why nothing here is copied from the store's reply.
+    book = _bid_book(request)
+    recorder = getattr(book, "record", None)
+    if callable(recorder):
+        recorder(auction_id, collected_bid_records(ranking["candidates"], result.entries))
 
     return CreateAuctionResponse(
         auction_id=auction_id,

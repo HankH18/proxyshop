@@ -2160,11 +2160,21 @@ def test_the_recorded_bid_corpus_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-294: POST /auctions collects bids, renders them into `entries`, and DROPS them — "
-        "AuctionRecord has no `bids` field and nothing in the repository calls "
-        "InMemoryAuctionBids.record — so `app.state.auction_bids` keeps its NoRecordedBids "
-        "default and every accept of a bid the exchange itself just returned is refused "
-        "`unknown_bid`; remove this marker with the fix"
+        "T-294 (RESTATED, and the ticket's premise has changed under it). The recording half "
+        "is DONE: POST /auctions now writes what it collected into app.state.auction_bids "
+        "(auction/routes.py::collected_bid_records), and an auction's own shortlist bid mints "
+        "a real code — apps/exchange/tests/test_composition_root.py drives exactly that over a "
+        "real socket. What this node still fails on is its CORPUS, not the bid store: "
+        "`_t294_corpus` wires no trust snapshot and its store agents' offers carry no "
+        "checkout_url, so since T-310 put the ranker on the served path every one of its "
+        "candidates is excluded `blacklist_unreadable` + `off_domain_checkout` and `ranked` "
+        "comes back []. The book holds only candidates the ranking ADMITTED, because recording "
+        "the excluded ones was measured to let a blacklisted store be bought for a live code "
+        "(409 -> 200 with PSX-…), and nothing on the accept path re-reads the trust snapshot. "
+        "So the 200 this node demands is now reachable only through that hole. Closing it "
+        "needs `_t294_corpus` to wire a trust snapshot and emit an on-domain checkout_url — an "
+        "edit to this file, which the fixing lane was not scoped to make; remove this marker "
+        "with that corpus change"
     ),
 )
 def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:

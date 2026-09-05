@@ -63,6 +63,25 @@ services:
       RANK_W_D: "${RANK_W_D:-}"
       RANK_WEIGHTS_VERSION: "${RANK_WEIGHTS_VERSION:-}"
       CHECKOUT_MODE: "${CHECKOUT_MODE:-redirect}"
+      # The composition root (`exchange.composition`). WITHOUT these two lines the container
+      # cannot be configured at all: compose forwards no host variable it does not name, so a
+      # deployment that exported EXCHANGE_DEPLOYMENT would boot an exchange still holding its
+      # five fail-closed defaults — eligibility with no rows, NullSolicitor, an empty trust
+      # snapshot, no registered domains and no bid book — and answer every auction with
+      # `ranked: []` and every accept with `unknown_bid`. That is the defect the module exists
+      # to close, and an unreachable composition root closes nothing.
+      #
+      # `EXCHANGE_DEPLOYMENT` is a path INSIDE the container, so a file one must be mounted
+      # (no volume is declared here: a deployment that wants one adds it in its own override,
+      # and the image is otherwise read-only by design). `EXCHANGE_DEPLOYMENT_JSON` carries
+      # the same document inline and needs no mount, which is why both are forwarded.
+      #
+      # Both default to EMPTY rather than to a document, for the reason PROXYSHOP_ROLE_PASSWORD
+      # and the RANK_W_* block above do: a value here would be a second source of truth. Unset,
+      # `read_deployment` returns None and every fail-closed default stands — an exchange
+      # nobody has configured denies every store rather than quietly admitting any.
+      EXCHANGE_DEPLOYMENT: "${EXCHANGE_DEPLOYMENT:-}"
+      EXCHANGE_DEPLOYMENT_JSON: "${EXCHANGE_DEPLOYMENT_JSON:-}"
     depends_on:
       postgres:
         condition: service_healthy

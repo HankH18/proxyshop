@@ -79,7 +79,9 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
@@ -88,6 +90,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..auction.state import (
     ACCEPTED,
+    AUCTION_TTL_SECONDS,
     TRANSITIONS,
     AuctionStateMachine,
     IllegalAuctionTransition,
@@ -110,6 +113,8 @@ __all__ = [
     "AcceptBidRequest",
     "AcceptDeniedResponse",
     "AcceptedOfferResponse",
+    "DEFAULT_BID_BOOK_CAPACITY",
+    "DEFAULT_BID_BOOK_RECORDS",
     "InMemoryAuctionBids",
     "NoRecordedBids",
     "configure_accept",
@@ -141,24 +146,123 @@ class NoRecordedBids:
     __call__ = bids_for
 
 
+#: How many auctions' bids one process holds at once.
+#:
+#: The same number and the same reasoning as
+#: :data:`~..ranking.serving.DEFAULT_SHORTLIST_CAPACITY`, which bounds the sibling store for
+#: the sibling reason: ``POST /auctions`` is unauthenticated, it now writes one entry here per
+#: request, and a book with no bound is a memory leak anybody can drive by posting in a loop —
+#: against ``apps/exchange/compose.yaml``'s ``mem_limit: 256m``. The TTL is the auction's own
+#: (``auction:{id}``, 15 minutes), so a bid never outlives the auction it belongs to, and the
+#: cap evicts the oldest auction first when a burst arrives inside one window.
+DEFAULT_BID_BOOK_CAPACITY = 512
+
+#: The most bid records the book holds in total, across every auction in it.
+#:
+#: **A cap on auctions is not a cap on memory, and this is the second half of the same bound.**
+#: An auction may carry up to ``MAX_ROSTER_ENTRIES`` (500) candidates, so 512 auctions at the
+#: cap is 256,000 records — measured with ``tracemalloc`` at exactly that shape::
+#:
+#:     write 512 x 500  ->  26.89s, peak 173.8 MB
+#:
+#: of a 256 MiB container, for the container structure alone and before the sibling
+#: ``ShortlistStore`` (also 512) and the auction store. 20,000 records is roughly 14 MB at the
+#: same measurement, and is still 40 concurrent auctions at the roster ceiling or 4,000 at the
+#: size an auction actually has. Oldest auction first, same as the count cap.
+DEFAULT_BID_BOOK_RECORDS = 20_000
+
+
 class InMemoryAuctionBids:
-    """A process-local ``auction_id -> bids`` book, for a deployment (or a test) to fill.
+    """A process-local ``auction_id -> bids`` book, written by ``POST /auctions``.
 
     The shape each bid must have is the shape ``accept()`` reads: ``bid_id`` (or ``bid_ref``),
-    ``store_id``, ``store_domain`` and ``offer``. It is the shape ``BidEntry.bid`` already
-    carries out of ``collect_bids``.
+    ``store_id``, ``store_domain`` and ``offer`` —
+    :func:`~..auction.routes.collected_bid_records` assembles exactly that.
+
+    Bounded in size and in time. It was neither, and that was safe only while nothing wrote to
+    it: an unbounded dict on the request path of an unauthenticated route is a leak with a
+    public handle on it. Both bounds are the auction's own, so this store can never claim to
+    know about an auction the state machine has already forgotten.
     """
 
-    def __init__(self) -> None:
-        self._bids: dict[str, list[Mapping[str, Any]]] = {}
+    def __init__(
+        self,
+        *,
+        capacity: int = DEFAULT_BID_BOOK_CAPACITY,
+        max_records: int = DEFAULT_BID_BOOK_RECORDS,
+        ttl_seconds: float = AUCTION_TTL_SECONDS,
+    ) -> None:
+        self.capacity = max(1, int(capacity))
+        self.max_records = max(1, int(max_records))
+        self.ttl_seconds = float(ttl_seconds)
+        self._bids: OrderedDict[str, tuple[float, list[Mapping[str, Any]]]] = OrderedDict()
 
-    def record(self, auction_id: str, bids: Sequence[Mapping[str, Any]]) -> None:
-        self._bids[str(auction_id)] = [dict(bid) for bid in bids]
+    def record(
+        self,
+        auction_id: str,
+        bids: Sequence[Mapping[str, Any]],
+        *,
+        now: float | None = None,
+    ) -> None:
+        """Keep one auction's collected bids, evicting the oldest when either cap is reached.
 
-    def bids_for(self, auction_id: str) -> Sequence[Mapping[str, Any]]:
-        return tuple(self._bids.get(str(auction_id), ()))
+        Expired rows are swept HERE as well as on read. Read-only expiry bounds staleness and
+        not memory — measured, 512 long-expired auctions sat in the book indefinitely because
+        nobody asked for them — and an auction nobody accepts is the common case, not the
+        exception.
+        """
+        key = str(auction_id)
+        self._bids.pop(key, None)
+        moment = time.time() if now is None else float(now)
+        self._sweep(moment)
+        self._bids[key] = (moment, [deepcopy(dict(bid)) for bid in bids])
+        while len(self._bids) > self.capacity:
+            self._bids.popitem(last=False)
+        # The record cap is checked after the count cap and never evicts the row just written:
+        # an auction whose own bid list exceeds the total budget still gets to be acceptable,
+        # because a book that silently forgot the auction it was just handed would answer
+        # `unknown_bid` for the bid the very same request published.
+        while len(self._bids) > 1 and self._record_count() > self.max_records:
+            self._bids.popitem(last=False)
+
+    def _record_count(self) -> int:
+        return sum(len(records) for _written_at, records in self._bids.values())
+
+    def _sweep(self, now: float) -> None:
+        """Drop every auction whose TTL has passed, so memory follows the TTL too."""
+        expired = [
+            key
+            for key, (written_at, _records) in self._bids.items()
+            if now - written_at >= self.ttl_seconds
+        ]
+        for key in expired:
+            self._bids.pop(key, None)
+
+    def bids_for(self, auction_id: str, *, now: float | None = None) -> Sequence[Mapping[str, Any]]:
+        """One auction's bids, or nothing once its TTL has taken them away.
+
+        ``>=`` rather than ``>``, for the reason ``ShortlistStore.get`` gives: at exactly
+        ``ttl_seconds`` the auction record itself is gone, and this is the one instant this
+        store may not outlive it by.
+
+        Read back as a deep copy. The list is handed straight into ``accept()``, which builds
+        a ``CheckoutRequest`` out of the offer inside it; a caller that mutated what it was
+        given would otherwise rewrite what the next accept on the same auction reads.
+        """
+        entry = self._bids.get(str(auction_id))
+        if entry is None:
+            return ()
+        written_at, bids = entry
+        moment = time.time() if now is None else float(now)
+        if moment - written_at >= self.ttl_seconds:
+            self._bids.pop(str(auction_id), None)
+            return ()
+        return tuple(deepcopy(bid) for bid in bids)
 
     __call__ = bids_for
+
+    def __len__(self) -> int:
+        return len(self._bids)
 
 
 # =====================================================================================
@@ -340,6 +444,21 @@ def _bids_for(request: Request, auction_id: str) -> list[Mapping[str, Any]]:
     return list(reader(auction_id) or ())
 
 
+def _bind_the_deployment(request: Request) -> None:
+    """Run the composition root once for this app. See ``auction/routes.py``'s twin.
+
+    A malformed deployment document is a 503 for the reason every other 503 on this route is
+    one: it is a statement about the DEPLOYMENT, not a decision about this buyer's offer, and
+    dressing it up as one hides it from the operator who can fix it.
+    """
+    from ..composition import DeploymentConfigurationError, ensure_configured  # noqa: PLC0415
+
+    try:
+        ensure_configured(request.app)
+    except DeploymentConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 def _checkout_mode(request: Request) -> str:
     configured = getattr(request.app.state, "checkout_mode", None)
     if configured:
@@ -390,6 +509,13 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     deployment is misconfigured (an unregistered ``CHECKOUT_MODE``, an unusable bid source):
     neither is a decision about this buyer, so neither is dressed up as one.
     """
+    # The deployment's own collaborators, bound once per app. `POST /auctions` takes the same
+    # hook, so in a single-process exchange this is already done; it is taken here as well
+    # because an accept can arrive at a process that never served the auction's creation — two
+    # replicas behind one `RedisAuctionStore` — and that process would otherwise reach the
+    # registered-domain check with nothing wired and refuse a checkout it can vouch for.
+    _bind_the_deployment(request)
+
     machine = _machine(request)
     try:
         record = machine.get(auction_id)
