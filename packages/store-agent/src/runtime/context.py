@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 from contracts.boundary import parse_timestamp
 from contracts.signing import canonical_json
@@ -47,6 +48,118 @@ INTRO_DISCOUNT_KEY = "intro_discount_pct"
 #: ends byte-identical reproduction (S4). When the context states none, the advocate falls back
 #: to the request's own `respond_by`; see :meth:`AuctionContext.offer_expires_at`.
 OFFER_EXPIRES_AT_KEY = "offer_expires_at"
+
+#: The store-context keys that may carry the store's own registered domain, in priority order,
+#: read off the context first and off the approved envelope second.
+#:
+#: **Why the agent needs it at all.** `contracts.Offer.checkout_url` is the field the exchange's
+#: C10/D22 check reads, and an offer that states none is excluded from every shortlist
+#: (`apps/exchange/tests/test_ranking.py::test_an_offer_with_no_checkout_url_is_not_shortlisted`)
+#: — measured end to end as `ranked: []`, every store excluded `off_domain_checkout`. Nothing in
+#: this package used to write the field, so a hosted agent's every bid was unshortlistable.
+#:
+#: **Why it is CONFIGURATION and not a derivation.** The URL's host is compared, by exact
+#: equality, against the domain the *platform* holds for this seller
+#: (`apps/exchange/src/checkout/sellers.py`). A domain this module synthesised — `f"{store_id}
+#: .example.com"`, say — would be a fact no evidence supports, exactly like the invented currency
+#: `AuctionContext.currency` refuses to mint, and it would pass the check only by coincidence of
+#: two independent guesses agreeing. So the merchant states it, once, on the context it already
+#: hands over; when it states none the offer carries no `checkout_url`, which is the legal R10
+#: fallback shape (`apps/exchange/src/checkout/domain.py` calls absent and off-domain different
+#: conditions, and refuses only the second).
+STORE_DOMAIN_KEYS: tuple[str, ...] = ("store_domain", "domain")
+
+#: The characters a DNS label may carry, once the host is lower-cased. Deliberately narrow —
+#: letters, digits and the hyphen — which is exactly a DNS name, covers punycode (``xn--…``) and
+#: an IPv4 literal, and refuses two shapes measured coming out of an earlier draft of
+#: :func:`store_domain_host`:
+#:
+#: * ``[::1]`` — `urlsplit` strips the brackets, so the host came back ``::1`` and the URL built
+#:   on it (``https://::1/cart/…``) had **no parsable host at all**. The offer looked configured
+#:   and the exchange refused it, which is the worst of both.
+#: * ``a b.com`` — a space survived, and `urlsplit` is lenient enough that the platform's own
+#:   host comparison then said *on-domain* about a string no browser can dial.
+_HOST_LABEL_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
+
+#: The schemes a stated domain may wear. A bare host is the normal spelling; ``https://…`` and
+#: ``http://…`` are the two an operator writes by habit and both name the same host. Anything
+#: else — ``ftp://``, ``javascript://``, ``not-a-scheme://`` — is refused rather than having its
+#: authority quietly harvested: a value that was not a web address is a value the merchant did
+#: not mean as one, and silently reading ``evil.tld`` out of ``javascript://evil.tld`` is the
+#: same class of mistake as reading the userinfo out of a userinfo spoof.
+_ACCEPTED_DOMAIN_SCHEMES = frozenset({"", "http", "https"})
+
+
+def _is_dns_label(label: str) -> bool:
+    """One dot-separated component of a host: LDH, and never leading or trailing with a hyphen.
+
+    The hyphen rule is RFC 1035's and it is not pedantry here — ``-a.com`` and ``a-.com`` are
+    not names anybody can register, so a context stating one is a context with a typo in it, and
+    the honest answer is no checkout URL rather than one pointing at a name that cannot resolve.
+    """
+    return (
+        bool(label)
+        and set(label) <= _HOST_LABEL_CHARACTERS
+        and not label.startswith("-")
+        and not label.endswith("-")
+    )
+
+
+def store_domain_host(value: Any) -> str | None:
+    """The bare, lower-cased hostname a checkout URL may be built on, or `None`.
+
+    Accepts what an operator actually writes — ``store-alpha.example.com`` and
+    ``https://store-alpha.example.com`` both yield ``store-alpha.example.com`` — and refuses
+    everything that is not purely a DNS host: a path, a query, a fragment, userinfo, a port, an
+    IPv6 literal, or a character a DNS label cannot carry. Those are refused rather than silently
+    trimmed, because trimming would publish a checkout URL the merchant did not write while still
+    looking configured; a `None` here leaves the offer with no `checkout_url` at all, which is a
+    condition the exchange already reads correctly.
+
+    Lower-cased and de-dotted to the same spelling `checkout/domain.py` normalises the registered
+    domain to, so the two strings the platform compares cannot differ by case or a trailing dot.
+    """
+    if isinstance(value, bool) or value is None:
+        # `str(True)` is `"true"`, which is a syntactically valid host. Excluded explicitly, the
+        # same way `as_number` excludes it, so a boolean flag that landed in the wrong key
+        # cannot become a domain.
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if any(character.isspace() or character < " " or character == "\x7f" for character in text):
+        # `urlsplit` STRIPS ASCII tab, CR and LF before parsing, so `"store.example.com\nX"`
+        # came back as the host `store.example.comx` — a domain the merchant does not own,
+        # published by a value they did not write. This function's contract is refusal, never
+        # silent repair, so the check happens on the RAW text before `urlsplit` can launder it.
+        return None
+    try:
+        parts = urlsplit(text if "//" in text else f"//{text}")
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in _ACCEPTED_DOMAIN_SCHEMES:
+        return None
+    if parts.path.strip("/") or parts.query or parts.fragment:
+        return None
+    try:
+        if parts.username or parts.password or parts.port is not None:
+            return None
+        host = parts.hostname
+    except ValueError:
+        # A port that is not a number, or a bracketed host that does not parse.
+        return None
+    if not host:
+        return None
+    host = host.strip().lower().rstrip(".")
+    labels = host.split(".")
+    if not host or not all(_is_dns_label(label) for label in labels):
+        return None
+    # The round trip, checked rather than assumed: whatever is returned here becomes the
+    # authority of a URL, and the platform compares `urlsplit(url).hostname`. If those two ever
+    # disagree the agent publishes a URL that fails a check it believes it passes.
+    if urlsplit(f"https://{host}/").hostname != host:  # pragma: no cover - defence in depth
+        return None
+    return host
 
 
 def as_mapping(value: Any, what: str) -> dict[str, Any]:
@@ -121,6 +234,10 @@ class AuctionContext:
     respond_by: str
     store_currency: str | None
     stated_offer_expiry: str | None
+    #: The store's own registered domain, normalised by :func:`store_domain_host`, or `None`
+    #: when the merchant stated none. Defaulted so that adding it broke no caller that built an
+    #: `AuctionContext` positionally. See :data:`STORE_DOMAIN_KEYS`.
+    store_domain: str | None = None
 
     @property
     def cluster_id(self) -> str:
@@ -208,6 +325,32 @@ class AuctionContext:
             return self.respond_by
         return None
 
+    def checkout_url_for(
+        self, product_ref: Any, variant_ref: Any = None, *, quantity: int = 1
+    ) -> str | None:
+        """Where a buyer completes this offer, on the store's own registered domain.
+
+        The D22 cart-permalink shape — ``https://<domain>/cart/<variant>:<qty>`` — which is what
+        ``apps/exchange/src/checkout/codes.py::build_cart_permalink`` builds and what the
+        published contract's own example shows. No ``?discount=`` on it: the single-use code is
+        minted by the exchange at accept time, and an agent that appended one would be asserting
+        an authorization nobody granted.
+
+        Variant-scoped when the catalog names a variant (D25: cart permalinks are), and scoped to
+        the product otherwise — a store whose catalog carries no variant ids still gets a URL a
+        browser can be sent to, and the alternative (no URL) costs it the shortlist.
+
+        `None` when the merchant stated no domain, or stated one that is not a bare host. Clock
+        free and RNG free like everything else on this path, so two runs on one context produce
+        the same URL (S4).
+        """
+        if not self.store_domain:
+            return None
+        handle = str(variant_ref if variant_ref else product_ref or "").strip()
+        if not handle:
+            return None
+        return f"https://{self.store_domain}/cart/{quote(handle, safe='')}:{int(quantity)}"
+
     @property
     def is_cold(self) -> bool:
         """R10: the store has learned nothing yet, so the deterministic default applies."""
@@ -266,6 +409,15 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
     envelope = as_mapping(ctx.get("envelope"), "envelope")
     currency = ctx.get("currency")
     stated_expiry = ctx.get(OFFER_EXPIRES_AT_KEY) or envelope.get(OFFER_EXPIRES_AT_KEY)
+    domain = next(
+        (
+            host
+            for source in (ctx, envelope)
+            for key in STORE_DOMAIN_KEYS
+            if (host := store_domain_host(source.get(key))) is not None
+        ),
+        None,
+    )
     return AuctionContext(
         auction_id=str(req.get("auction_id") or ""),
         store_id=str(ctx.get("store_id") or envelope.get("store_id") or ""),
@@ -282,6 +434,7 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
         respond_by=str(req.get("respond_by") or ""),
         store_currency=str(currency) if currency else None,
         stated_offer_expiry=str(stated_expiry) if stated_expiry else None,
+        store_domain=domain,
     )
 
 
@@ -331,6 +484,7 @@ def satisfies(op: str, observed: Any, wanted: Any) -> bool:
 __all__ = [
     "INTRO_DISCOUNT_KEY",
     "OFFER_EXPIRES_AT_KEY",
+    "STORE_DOMAIN_KEYS",
     "AuctionContext",
     "HardConstraint",
     "as_mapping",
@@ -340,4 +494,5 @@ __all__ = [
     "normalized",
     "same_value",
     "satisfies",
+    "store_domain_host",
 ]
