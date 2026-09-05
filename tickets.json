@@ -2882,7 +2882,7 @@
     {
       "id": "T-158",
       "title": "The one-accept-per-auction guard is only as durable as the record handed in. accept() stamps the auction OBJECT it receives. A route that loads an AuctionRecord from RedisAuctionStore, accepts, and does not save it back leaves an unstamped record for the next request; and two concurrent requests reading it can both pass the guard, because the check-then-act window spans the whole provider call including merchant I/O. The durable guard belongs on AuctionStateMachine's already-serialised ACCEPTED transition.",
-      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-2} && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-2} uv run python -m pytest apps/exchange/tests/test_t158_acceptance_claim.py -q",
       "scope": [
         "apps/exchange/src/accept/offer.py (module docstring) + AuctionStateMachine"
       ],
