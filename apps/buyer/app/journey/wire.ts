@@ -162,7 +162,19 @@ export interface RenderedSlot extends ShortlistSlot {
   readonly provenance_labels: readonly string[]
   /** `exchange` | `derived` | `absent` — how the labels got there, not guessed at after. */
   readonly labels_source: string
+  /**
+   * The numeric fields only, because `ShortlistView` takes a `TrustSummary` and that type
+   * is `Record<string, number>`. Use it ONLY for that component; it is a lossy view.
+   */
   readonly trust_summary: TrustSummary
+  /**
+   * Every field of the trust summary, as the service sent it. It exists because the
+   * narrowing above is lossy and this screen may not quietly drop what a service said:
+   * measured, the exchange sends `{"store_id": "demo-woolworks", "available": true,
+   * "score": 0.82}` and only `score` survives `TrustSummary`. `describeTrust` renders this
+   * one, so the two dropped fields are on the page rather than in a type.
+   */
+  readonly trust_fields: Readonly<Record<string, unknown>>
   readonly store_domain: string
 }
 
@@ -226,6 +238,10 @@ function asFiniteNumber(value: unknown, fallback: number): number {
 
 function asArray(value: unknown): readonly unknown[] {
   return Array.isArray(value) ? (value as readonly unknown[]) : []
+}
+
+function asUnknownMap(value: unknown): Readonly<Record<string, unknown>> {
+  return isRecord(value) ? { ...value } : {}
 }
 
 function asNumberMap(value: unknown): Readonly<Record<string, number>> {
@@ -487,9 +503,22 @@ export async function renderShortlist(
       provenance_labels: asArray(row.provenance_labels).filter(isNonEmptyString),
       labels_source: asString(row.labels_source),
       trust_summary: asNumberMap(row.trust_summary),
+      trust_fields: asUnknownMap(row.trust_summary),
       store_domain: asString(row.store_domain),
     }),
   )
+}
+
+/**
+ * Every field of a slot's trust summary, spelled as the service sent it.
+ *
+ * `JSON.stringify` per value rather than `String`, so a boolean `true` and the string
+ * `"true"` do not read identically on the page.
+ */
+export function describeTrust(fields: Readonly<Record<string, unknown>>): string {
+  const entries = Object.entries(fields)
+  if (entries.length === 0) return 'no trust snapshot'
+  return entries.map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(' ')
 }
 
 /** The shortlist `ShortlistView` renders: the service's slots under the auction they name. */

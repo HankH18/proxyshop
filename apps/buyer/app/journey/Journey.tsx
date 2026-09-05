@@ -63,6 +63,7 @@ import {
 import { WhyEmpty } from './WhyEmpty'
 import {
   confirmWithProfile,
+  describeTrust,
   discountCodeFrom,
   explain,
   instrumentFetcher,
@@ -305,6 +306,8 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                 {stage.slots.map((slot) => (
                   <li key={slot.bid_ref} data-testid={`labels-source-${slot.bid_ref}`}>
                     {slot.bid_ref}: labels_source {slot.labels_source}
+                    <br />
+                    trust_summary {describeTrust(slot.trust_fields)}
                   </li>
                 ))}
               </ul>

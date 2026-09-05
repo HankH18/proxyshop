@@ -28,6 +28,7 @@ import {
   RENDER_PATH,
   auctionPath,
   confirmWithProfile,
+  describeTrust,
   detailFromBody,
   discountCodeFrom,
   explain,
@@ -78,7 +79,9 @@ const RENDERED_SLOT = {
   fit_score: 0.88,
   provenance_labels: ['store-confirmed'],
   labels_source: 'exchange',
-  trust_summary: { score: 0.7, confidence: 0.4 },
+  // MEASURED off the running exchange: two of these three are not numbers, and
+  // `TrustSummary` is `Record<string, number>`. The page must still show all three.
+  trust_summary: { store_id: 'demo-woolworks', available: true, score: 0.82 },
   store_domain: '',
 }
 
@@ -265,6 +268,22 @@ describe('the wire the journey owns', () => {
     expect(slots[0]?.auction_id).toBe(AUCTION_ID)
     expect(slots[0]?.labels_source).toBe('exchange')
     expect(slots[0]?.provenance_labels).toEqual(['store-confirmed'])
+    // `trust_summary` is narrowed to the numbers `ShortlistView`'s type demands...
+    expect(slots[0]?.trust_summary).toEqual({ score: 0.82 })
+    // ...and `trust_fields` keeps every field, so nothing the service said is dropped.
+    expect(slots[0]?.trust_fields).toEqual({
+      store_id: 'demo-woolworks',
+      available: true,
+      score: 0.82,
+    })
+  })
+
+  it('spells every trust field the service sent, booleans distinct from strings', () => {
+    expect(describeTrust({ store_id: 'demo-woolworks', available: true, score: 0.82 })).toBe(
+      'store_id="demo-woolworks" available=true score=0.82',
+    )
+    expect(describeTrust({ available: 'true' })).toBe('available="true"')
+    expect(describeTrust({})).toBe('no trust snapshot')
   })
 
   it('names the status when the render is refused', async () => {
@@ -401,7 +420,12 @@ describe('the four beats', () => {
     const label = screen.getByTestId(`label-${BID_REF}`)
     expect(label.textContent).toBe('store-confirmed')
     expect(label.getAttribute('data-tone')).toBe('confirmed')
-    expect(screen.getByTestId(`labels-source-${BID_REF}`).textContent).toContain('exchange')
+    const provenance = screen.getByTestId(`labels-source-${BID_REF}`).textContent ?? ''
+    expect(provenance).toContain('exchange')
+    // The two fields `TrustSummary` cannot carry are on the page anyway.
+    expect(provenance).toContain('store_id="demo-woolworks"')
+    expect(provenance).toContain('available=true')
+    expect(provenance).toContain('score=0.82')
     expect(screen.getByTestId('auction-id').textContent).toContain(AUCTION_ID)
     // Nothing is linkable before the exchange has minted a destination — and the slot's
     // decoy `checkout_url` is never turned into one.
