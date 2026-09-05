@@ -12,16 +12,33 @@
 #
 # ⚠️ IT STILL NEEDS A STORE. A hosted agent process advocates for exactly one store, and the
 # `BidRequest` on the wire does not name one — the exchange chooses which agent to POST to.
-# So the store context is deployment configuration: set STORE_AGENT_CONTEXT to a JSON file
-# holding it (bind-mount the file in), and STORE_AGENT_STORE_DOMAIN to that store's
-# registered domain when the file does not state one. With neither set the agent answers
-# every solicitation `204 store_context_unconfigured`, which is fail-closed and correct — an
-# agent with no approved envelope has no authorization to offer anything, and `collect_bids`
+# So the store context is deployment configuration. With none set the agent answers every
+# solicitation `204 store_context_unconfigured`, which is fail-closed and correct — an agent
+# with no approved envelope has no authorization to offer anything, and `collect_bids`
 # represents a silent store at catalogue list price (R10) — but it is not a store bidding.
 #
-# The domain matters more than it looks: an offer with no `checkout_url` is dropped from every
-# shortlist by the exchange's C10 check, and the agent will not synthesise a host it was not
-# given.
+# To make it bid, an operator adds BOTH halves — the file has to be inside the container, so
+# the env var alone does nothing:
+#
+#     volumes:
+#       - ./fixtures/envelopes/store-alpha.approved.json:/srv/store-context.json:ro
+#     environment:
+#       STORE_AGENT_CONTEXT: /srv/store-context.json
+#       STORE_AGENT_STORE_DOMAIN: store-alpha.example.com
+#
+# There is no default `volumes:` entry on purpose: a default path would mount a store this
+# deployment never approved. The domain matters more than it looks — an offer with no
+# `checkout_url` is dropped from every shortlist by the exchange's C10 check, and the agent
+# will not synthesise a host it was not given.
+#
+# ⚠️ THE HEALTHCHECK BELOW DOES NOT PROVE THE AGENT CAN BID. It probes /openapi.json, which
+# answers 200 whether or not a store context was resolved — so a container whose
+# STORE_AGENT_CONTEXT is a typo reports HEALTHY while every solicitation is a 500. It cannot
+# probe the bid door instead: POSTing a synthetic BidRequest every ten seconds would make the
+# agent answer auctions nobody opened, and the served surface is asserted to be EXACTLY the
+# one operation the contract publishes (T-309), so there is no /healthz to add without
+# breaking that gate. Read "healthy" as "the process is up", never as "the store is bidding";
+# the honest check is one real POST /v1/bid-requests after deploy.
 services:
   store-agent:
     build:

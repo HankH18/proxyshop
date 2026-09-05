@@ -8,10 +8,16 @@ the configuration is what a composition root reaches for by name.
 
 from __future__ import annotations
 
-from .routes import DECLINE_REASON_HEADER, UNCONFIGURED_REASON, router
+from .routes import (
+    DECLINE_REASON_HEADER,
+    UNCONFIGURED_REASON,
+    UNDISCLOSED_REASON,
+    router,
+)
 from .serving import (
     CONTEXT_ENV,
     DOMAIN_ENV,
+    MAX_CONTEXT_BYTES,
     StoreContextError,
     configure_solicitation,
     load_context_from_env,
@@ -22,7 +28,9 @@ __all__ = [
     "CONTEXT_ENV",
     "DECLINE_REASON_HEADER",
     "DOMAIN_ENV",
+    "MAX_CONTEXT_BYTES",
     "UNCONFIGURED_REASON",
+    "UNDISCLOSED_REASON",
     "StoreContextError",
     "configure_solicitation",
     "load_context_from_env",

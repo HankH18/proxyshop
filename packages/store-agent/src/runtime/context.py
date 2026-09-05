@@ -81,6 +81,29 @@ STORE_DOMAIN_KEYS: tuple[str, ...] = ("store_domain", "domain")
 #:   host comparison then said *on-domain* about a string no browser can dial.
 _HOST_LABEL_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")
 
+#: The schemes a stated domain may wear. A bare host is the normal spelling; ``https://…`` and
+#: ``http://…`` are the two an operator writes by habit and both name the same host. Anything
+#: else — ``ftp://``, ``javascript://``, ``not-a-scheme://`` — is refused rather than having its
+#: authority quietly harvested: a value that was not a web address is a value the merchant did
+#: not mean as one, and silently reading ``evil.tld`` out of ``javascript://evil.tld`` is the
+#: same class of mistake as reading the userinfo out of a userinfo spoof.
+_ACCEPTED_DOMAIN_SCHEMES = frozenset({"", "http", "https"})
+
+
+def _is_dns_label(label: str) -> bool:
+    """One dot-separated component of a host: LDH, and never leading or trailing with a hyphen.
+
+    The hyphen rule is RFC 1035's and it is not pedantry here — ``-a.com`` and ``a-.com`` are
+    not names anybody can register, so a context stating one is a context with a typo in it, and
+    the honest answer is no checkout URL rather than one pointing at a name that cannot resolve.
+    """
+    return (
+        bool(label)
+        and set(label) <= _HOST_LABEL_CHARACTERS
+        and not label.startswith("-")
+        and not label.endswith("-")
+    )
+
 
 def store_domain_host(value: Any) -> str | None:
     """The bare, lower-cased hostname a checkout URL may be built on, or `None`.
@@ -96,12 +119,25 @@ def store_domain_host(value: Any) -> str | None:
     Lower-cased and de-dotted to the same spelling `checkout/domain.py` normalises the registered
     domain to, so the two strings the platform compares cannot differ by case or a trailing dot.
     """
-    text = str(value or "").strip()
+    if isinstance(value, bool) or value is None:
+        # `str(True)` is `"true"`, which is a syntactically valid host. Excluded explicitly, the
+        # same way `as_number` excludes it, so a boolean flag that landed in the wrong key
+        # cannot become a domain.
+        return None
+    text = str(value).strip()
     if not text:
+        return None
+    if any(character.isspace() or character < " " or character == "\x7f" for character in text):
+        # `urlsplit` STRIPS ASCII tab, CR and LF before parsing, so `"store.example.com\nX"`
+        # came back as the host `store.example.comx` — a domain the merchant does not own,
+        # published by a value they did not write. This function's contract is refusal, never
+        # silent repair, so the check happens on the RAW text before `urlsplit` can launder it.
         return None
     try:
         parts = urlsplit(text if "//" in text else f"//{text}")
     except ValueError:
+        return None
+    if parts.scheme.lower() not in _ACCEPTED_DOMAIN_SCHEMES:
         return None
     if parts.path.strip("/") or parts.query or parts.fragment:
         return None
@@ -116,7 +152,7 @@ def store_domain_host(value: Any) -> str | None:
         return None
     host = host.strip().lower().rstrip(".")
     labels = host.split(".")
-    if not host or not all(label and set(label) <= _HOST_LABEL_CHARACTERS for label in labels):
+    if not host or not all(_is_dns_label(label) for label in labels):
         return None
     # The round trip, checked rather than assumed: whatever is returned here becomes the
     # authority of a URL, and the platform compares `urlsplit(url).hostname`. If those two ever

@@ -36,7 +36,13 @@ from fastapi import APIRouter, Request, Response
 from ..runtime import Decline, DeclineReason, bid, is_decline
 from .serving import store_context
 
-__all__ = ["DECLINE_REASON_HEADER", "UNCONFIGURED_REASON", "answer_bid_request", "router"]
+__all__ = [
+    "DECLINE_REASON_HEADER",
+    "UNCONFIGURED_REASON",
+    "UNDISCLOSED_REASON",
+    "answer_bid_request",
+    "router",
+]
 
 router = APIRouter(tags=["solicitation"])
 
@@ -99,18 +105,31 @@ def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:
     return answer
 
 
+#: The characters a decline reason may put in a response header. An **allowlist**, because the
+#: first draft screened for latin-1 encodability — which is what raises inside the server — and
+#: therefore let through exactly the two characters that make a header illegal instead:
+#: ``"a\r\nX-Injected: 1"`` passed that check and would have been written verbatim. Nothing in
+#: `DeclineReason` can spell it today (it is an enum of ASCII identifiers) and no injected header
+#: was observed reaching a client, but a guard that exists to be defence in depth has to hold
+#: against the input it was written for.
+_REASON_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
+
+#: What a reason becomes when it cannot be rendered. Never an empty header: an absent reason and
+#: an unrenderable one are different facts.
+UNDISCLOSED_REASON = "undisclosed"
+
+
 def _reason_of(answer: Decline) -> str:
     """The decline's reason as a header-safe token.
 
     ``DeclineReason`` is a `str` enum of ASCII identifiers, so this is a formality on every value
-    the runtime can produce today — but a header value that is not latin-1 encodable raises
-    inside the server rather than at the call site, which would turn a decline into a 500. The
-    fallback keeps the failure mode "a decline with a vague reason", never "a crash".
+    the runtime can produce today. It is here because a header value carrying CR/LF is a response
+    split and one that is not latin-1 encodable raises inside the server — both would turn a
+    decline into something worse than a decline. The fallback keeps the failure mode "a decline
+    with a vague reason", never "a crash" and never "a header the caller wrote".
     """
     reason = getattr(answer, "reason", None)
     token = str(getattr(reason, "value", reason) or DeclineReason.unusable_store_context.value)
-    try:
-        token.encode("latin-1")
-    except UnicodeEncodeError:  # pragma: no cover - unreachable through DeclineReason
-        return "undisclosed"
+    if not token or set(token) - _REASON_CHARACTERS:  # pragma: no cover - not reachable today
+        return UNDISCLOSED_REASON
     return token

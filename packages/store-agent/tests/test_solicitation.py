@@ -50,10 +50,12 @@ from store_agent.solicitation import (
     CONTEXT_ENV,
     DECLINE_REASON_HEADER,
     DOMAIN_ENV,
+    MAX_CONTEXT_BYTES,
     UNCONFIGURED_REASON,
     StoreContextError,
     configure_solicitation,
     load_context_from_env,
+    store_context,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -300,6 +302,22 @@ def test_a_context_that_states_no_domain_mints_no_url_rather_than_guessing() -> 
         pytest.param("store alpha.example.com", id="carries-a-space"),
         pytest.param("store-alpha..example.com", id="empty-label"),
         pytest.param("store_alpha.example.com", id="underscore"),
+        # `urlsplit` STRIPS these before parsing, so an earlier draft turned
+        # "store-alpha.example.com\nX" into the host "store-alpha.example.comx" — a domain the
+        # merchant does not own, published by a value they did not write.
+        pytest.param("store-alpha.example.com\nX", id="newline-then-more-host"),
+        pytest.param("store-alpha\n.example.com", id="newline-inside"),
+        pytest.param("store-alpha\t.example.com", id="tab-inside"),
+        pytest.param("store-alpha\r\n.example.com", id="crlf-inside"),
+        # Any scheme parsed, and the authority after it was harvested regardless.
+        pytest.param("javascript://evil.tld", id="javascript-scheme"),
+        pytest.param("ftp://store-alpha.example.com", id="ftp-scheme"),
+        pytest.param("data://evil.tld", id="data-scheme"),
+        # `str(True)` is "true", a syntactically valid host.
+        pytest.param(True, id="boolean-true"),
+        # RFC 1035: a label may not begin or end with a hyphen, so neither is registrable.
+        pytest.param("-store-alpha.example.com", id="leading-hyphen"),
+        pytest.param("store-alpha-.example.com", id="trailing-hyphen"),
         pytest.param(None, id="unset"),
     ],
 )
@@ -482,10 +500,17 @@ def test_the_environment_domain_never_overrides_one_the_merchant_stated(
         pytest.param("[1, 2, 3]", "must hold a JSON object", id="not-an-object"),
     ],
 )
-def test_a_context_path_that_cannot_be_read_fails_loudly_at_startup(
+def test_a_context_path_that_cannot_be_read_is_refused_when_it_is_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, written: str | None, match: str
 ) -> None:
-    """An unreadable path must not look identical to a store that chose not to bid."""
+    """An unreadable path must not look identical to a store that chose not to bid.
+
+    The name says "when it is resolved" rather than "at startup" because that is what happens:
+    nothing resolves the context at boot — ``main.py`` is frozen and only mounts routers — so a
+    composition root that calls this at startup gets it at startup and the shipped image gets it
+    on the first solicitation. ``test_an_unreadable_context_path_answers_500_and_never_a_204``
+    grades that second case, which the earlier name claimed and no test exercised.
+    """
     path = tmp_path / "store-context.json"
     if written is not None:
         path.write_text(written, encoding="utf-8")
@@ -493,6 +518,53 @@ def test_a_context_path_that_cannot_be_read_fails_loudly_at_startup(
 
     with pytest.raises(StoreContextError, match=match):
         load_context_from_env()
+
+
+def test_a_context_path_that_is_not_a_regular_file_is_refused_before_it_is_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading a FIFO never returns, and a blocked threadpool worker is not a diagnosable state.
+
+    A directory is used as the stand-in: `S_ISREG` is the single check both fail, and a FIFO in a
+    test would hang the suite on the very failure being asserted if the guard regressed — which
+    is the one outcome a regression test must not have.
+    """
+    monkeypatch.setenv(CONTEXT_ENV, str(tmp_path))
+    with pytest.raises(StoreContextError, match="not a regular file"):
+        load_context_from_env()
+
+
+def test_a_context_file_larger_than_the_cap_is_refused_rather_than_read_into_a_256mb_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`compose.yaml` caps the container at 256 MiB; an unbounded read is an OOM, not an error."""
+    path = tmp_path / "store-context.json"
+    with path.open("wb") as handle:
+        handle.truncate(MAX_CONTEXT_BYTES + 1)
+    monkeypatch.setenv(CONTEXT_ENV, str(path))
+
+    with pytest.raises(StoreContextError, match="over the"):
+        load_context_from_env()
+
+
+def test_a_failed_resolution_is_cached_so_the_path_is_read_once_and_not_once_per_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only success used to be remembered, so a typo'd path re-opened the file on every bid.
+
+    On a FIFO that meant blocking a threadpool worker per request instead of once. The identity
+    check is the assertion that matters: the SAME exception object comes back, which is only
+    possible if nothing re-resolved.
+    """
+    monkeypatch.setenv(CONTEXT_ENV, str(tmp_path / "missing.json"))
+    app = create_app()
+
+    with pytest.raises(StoreContextError) as first:
+        store_context(app)
+    with pytest.raises(StoreContextError) as second:
+        store_context(app)
+
+    assert second.value is first.value
 
 
 def test_an_unset_context_variable_is_a_decision_and_not_an_error(

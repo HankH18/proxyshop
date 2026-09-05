@@ -40,11 +40,13 @@ import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 __all__ = [
     "CONTEXT_ENV",
     "DOMAIN_ENV",
+    "MAX_CONTEXT_BYTES",
     "StoreContextError",
     "configure_solicitation",
     "load_context_from_env",
@@ -60,6 +62,16 @@ DOMAIN_ENV = "STORE_AGENT_STORE_DOMAIN"
 #: Set on ``app.state``. Read through :func:`store_context` rather than by name, so "has this app
 #: been configured" is one question with one answer.
 STATE_ATTR = "store_context"
+
+#: Set on ``app.state`` when resolving the context RAISED. Without it the failure was not cached
+#: — only success was — so a container with a typo'd path re-read the file on every single
+#: solicitation, which on a FIFO meant blocking a threadpool worker per request rather than once.
+FAILURE_ATTR = "store_context_error"
+
+#: The largest context file that will be read, in bytes. ``compose.yaml`` caps the container at
+#: 256 MiB, so an unbounded ``read_text`` turns an operator's wrong path — a database dump, a
+#: log — into an OOM kill rather than an error naming the file.
+MAX_CONTEXT_BYTES = 8 * 1024 * 1024
 
 
 class StoreContextError(RuntimeError):
@@ -89,14 +101,27 @@ def configure_solicitation(app: Any, *, context: Mapping[str, Any] | None) -> No
 def store_context(app: Any) -> dict[str, Any] | None:
     """The store context this app bids for, or ``None`` when it has none.
 
-    Resolved once per app and then cached on ``app.state``, so a route does not read the
-    filesystem per request and so an operator changing the environment mid-process does not
-    change what a running agent is authorized to offer half-way through.
+    Resolved once per app and then cached on ``app.state`` — **including when it failed**. A
+    route therefore reads the filesystem at most once per process, and an operator changing the
+    environment mid-process does not change what a running agent is authorized to offer half-way
+    through.
+
+    Caching the failure is not a nicety. Only success used to be remembered, so a container with
+    a typo'd ``STORE_AGENT_CONTEXT`` re-opened the path on every solicitation: a FIFO blocked a
+    threadpool worker per request instead of once, and a permission error re-walked the
+    filesystem forever. The same exception object is re-raised, so the operator sees one story
+    rather than a new one per request.
     """
     state = app.state
     if hasattr(state, STATE_ATTR):
         return getattr(state, STATE_ATTR)
-    resolved = load_context_from_env()
+    if hasattr(state, FAILURE_ATTR):
+        raise getattr(state, FAILURE_ATTR)
+    try:
+        resolved = load_context_from_env()
+    except StoreContextError as failure:
+        setattr(state, FAILURE_ATTR, failure)
+        raise
     setattr(state, STATE_ATTR, resolved)
     return resolved
 
@@ -114,6 +139,24 @@ def load_context_from_env(environ: Mapping[str, str] | None = None) -> dict[str,
     if not raw:
         return None
     path = Path(raw)
+    # `stat` BEFORE `read_text`, and both guards before any byte is read. `read_text` on a FIFO
+    # blocks until a writer appears — forever, on a threadpool worker — and on a large file it
+    # allocates the whole thing inside a 256 MiB container. Neither is a hang or an OOM the
+    # operator can diagnose; both become a StoreContextError naming the path instead.
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise StoreContextError(f"{CONTEXT_ENV}={raw!r} cannot be read: {exc}") from exc
+    if not S_ISREG(stat.st_mode):
+        raise StoreContextError(
+            f"{CONTEXT_ENV}={raw!r} is not a regular file (mode {stat.st_mode:#o}); a directory, "
+            f"a FIFO or a device is not a store context and reading one can never return"
+        )
+    if stat.st_size > MAX_CONTEXT_BYTES:
+        raise StoreContextError(
+            f"{CONTEXT_ENV}={raw!r} is {stat.st_size} bytes, over the {MAX_CONTEXT_BYTES}-byte "
+            f"limit; a store context is an envelope and a catalogue, not a data set"
+        )
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
