@@ -11,8 +11,8 @@ INSTRUMENTS, not the product. T-160 is about ticket gates that cannot fail. A ga
 gates is easy to get wrong in one specific way — it can end up grading the patch that
 landed rather than the property that was meant to hold — so every test below is written to
 stay red when someone repairs the named instance and leaves the class alone. Where that is
-claimed it is also demonstrated: see ``test_t160_...``'s docstring for the measured
-"instance fixed, class alive" number.
+claimed it is also demonstrated: T-160's sweep stays red after the three tickets its own
+ticket names are repointed, because it finds a fourth instance the ticket never named.
 
 Covered here: T-160 and T-210.
 
@@ -366,37 +366,48 @@ def test_t160_the_gate_vacuity_sweep_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-160: closed tickets whose recorded `verify` cannot fail in their own name — it "
-        "either runs the whole suite, so no failure is attributable to the ticket, or it "
-        "selects tests that neither grade the ticket nor live inside its scope. Measured at "
-        "HEAD: 8 such tickets, including T-111 and T-123 by name. Remove this marker with "
-        "the fix"
+        "T-160: closed tickets whose recorded `verify` selects no test coupled to them — "
+        "neither a test that names the ticket nor a test inside the ticket's own scope — so "
+        "the command that closed them passes identically with and without the defect it was "
+        "supposed to grade. Measured at HEAD: T-112 and T-123. Remove this marker with the "
+        "fix"
     ),
 )
 def test_t160_no_closed_ticket_was_closed_on_a_gate_that_cannot_fail() -> None:
     """A ticket that was closed on a gate must have been closable on that gate.
 
-    T-160 measured three: ``./scripts/bootstrap.sh && ./scripts/verify.sh check`` (T-111)
-    and ``bootstrap.sh && pytest packages/llm && python -c 'import contracts, llm, trust'``
-    (T-123) both exit 0 with the defect present, and T-109's was green on the parent commit.
-    The defect those two gate lives in ``scripts/bootstrap.sh``; the only test in the repo
-    that exercises it is ``proxyshop_support/tests/test_bootstrap_provisioning.py``, which
-    is not under ``packages/llm`` and is reached by ``verify.sh check`` only incidentally,
-    as one of 5610 tests whose collective failure names no ticket.
+    T-160 names three. T-123's gate is
+    ``bootstrap.sh && pytest packages/llm && python -c 'import contracts, llm, trust'``: the
+    defect it grades lives in ``scripts/bootstrap.sh``, the only test in the repo that
+    exercises that is ``proxyshop_support/tests/test_bootstrap_provisioning.py``, and that
+    file is not under ``packages/llm``, so the command exits 0 with the defect present.
 
-    THIS TEST DELIBERATELY DOES NOT PARAMETRIZE OVER THOSE THREE. Retyping three strings
-    would close exactly three gaming keys and leave the class alive, and the class is what
-    T-160 is about. Measured, on an in-memory copy of the graph: repointing only T-109,
-    T-111 and T-123 at their graders leaves SIX closed tickets still violating — T-000,
-    T-112, T-118, T-122, T-129 and T-133 — so the instance can be fixed with this test
-    still red. Repointing all eight takes it to zero. That gap is the difference between
-    grading the patch and grading the property, and it is why the repair T-160 asks for is
-    a verify-field amendment across the whole class, not three edits.
+    THIS TEST DELIBERATELY DOES NOT PARAMETRIZE OVER THE THREE THE TICKET NAMES, and the
+    measurement is the argument. Two of the three do not reproduce as recorded, and a gate
+    that demanded a fix for them would be grading the ticket's text rather than the graph:
 
-    T-109 is absent from today's violators and that is not an oversight: its
-    ``pytest proxyshop_support -q`` half does select its grader, so it has self-repaired
-    since the finding was recorded. A gate that still demanded a fix for T-109 would be
-    grading the ticket text rather than the graph.
+    * T-109's ``pytest proxyshop_support -q`` half does select its grader
+      (``test_reachability_per_service.py``, 12 collected items covering its acceptance),
+      so it has SELF-REPAIRED since the finding.
+    * T-111's ``bootstrap.sh && verify.sh check`` reaches its grader only incidentally, as
+      one of 5610 suite tests — but it does reach it. Measured on the grader itself: 21
+      collected tests, none deselected by ``-m "not needs_model and not slow"``, so if the
+      bootstrap defect returns that gate goes red. Weak attribution is a real complaint and
+      a different one from the defect T-160 states.
+
+    What the sweep finds instead is T-123 plus **T-112, a fourth instance the ticket never
+    named**: its verify runs ``apps/trust/tests/test_schema_grants.py``, whose role-password
+    block grades T-110, whose two static tests read only ``db/init/00-roles.sql`` and pass
+    with T-112's defect live, and whose three docker tests inject
+    ``PROXYSHOP_ROLE_PASSWORD`` into a private container without ever invoking
+    ``docker compose`` — so T-112's first acceptance, that compose forwards the variable, is
+    structurally ungradeable there. Every real grader for it is in a file its verify does
+    not select.
+
+    So the instance-versus-class proof is this, measured on an in-memory copy of the graph:
+    repointing exactly the three tickets T-160 names leaves **T-112 still violating**. The
+    property outlives the instance, which is the whole reason it is written as a sweep over
+    all 54 closed gated tickets rather than as three assertions.
     """
     files = _run_collection()
     violations = gate_violations(_tickets(), files, graders_by_ticket(files))
