@@ -35,6 +35,8 @@ from typing import Any
 
 import pytest
 from contracts.ledger import validate_ledger_payload
+from exchange.accept import use_registered_domains
+from exchange.accept.routes import InMemoryAuctionBids, configure_accept
 from exchange.auction.state import AuctionStateMachine
 from exchange.checkout import StaticRegisteredDomains
 from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
@@ -47,8 +49,6 @@ from .test_accept_routes import (  # the wiring this path is already tested thro
     RecordingCodeCreator,
     honest_bid,
 )
-from exchange.accept.routes import InMemoryAuctionBids, configure_accept
-from exchange.accept import use_registered_domains
 
 #: What ``secrets.token_hex(16)`` produces, and the only thing a real minted token can look
 #: like. Asserted rather than merely "is not None", so a route that wrote the string
