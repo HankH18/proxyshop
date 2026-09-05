@@ -1,20 +1,20 @@
 {
-  "frozen_at": "2026-09-04T22:23:16",
-  "amendments": 26,
+  "frozen_at": "2026-09-04T22:37:43",
+  "amendments": 27,
   "files": {
     ".swarm-loop/acceptance/README.md": "650910301dc909eb6fb13bd1fcebabc4766e372e0c08210d08e18d84e42e596e",
     ".swarm-loop/acceptance/conftest.py": "298928bc45944aaaa58dcf39d2d1e7b5515b879c89d7658adae3aff03f7796bf",
     ".swarm-loop/acceptance/run.py": "6897aaaa8257a90e5227c1c196d846b3422098752a718d4771e42cc846dff07d",
     ".swarm-loop/acceptance/test_e1_foundation.py": "4f74f0a98b7684bdabd56abb29e4b9c9a4ebb2331796265a2873611fdb452ef1",
     ".swarm-loop/acceptance/test_e2_ingestion.py": "fca567c99011abcfc235c036d75bdbabb97ab2475d5771495d0530942b6e1558",
-    ".swarm-loop/acceptance/test_e3_exchange.py": "efa7ad99c1363d96ee81f14f3d4cf12e1abf9eabdad9d44ff574c23b064f3f20",
+    ".swarm-loop/acceptance/test_e3_exchange.py": "e7ebeac72d756d5e2b9f7b2cc2bd3eb4831beb1310e65daaf37b503addba317c",
     ".swarm-loop/acceptance/test_e4_store_agent.py": "0b4e92d0fc3ea1baf2d9a38053f583ee37fce520dcd661beb96b49e0cfdd5fb3",
     ".swarm-loop/acceptance/test_e5_merchant.py": "9bb88595444ba09252025c3f3d520f56370863cc8339e4e3efce5f15ca9b95ac",
     ".swarm-loop/acceptance/test_e6_trust.py": "497ff4da42a4c8ad789edab32bd0fc6d992ee686f175218590fdd89b381e2ff8",
     ".swarm-loop/acceptance/test_e7_buyer.py": "9eb36ab742687abaa06f125c6bc73274c4780b4937d1334ce87e98468882da1c",
     ".swarm-loop/acceptance/test_e8_proofs.py": "a7f7fc8e400bb83331fd1aa8020bbf7d9212273de4ede45c8b0f927b2ba8b939",
-    ".swarm-loop/acceptance/test_spec_criteria.py": "47e7bd7a58d05b3855e6a32a06c116b6b42f0f0a57ec4728bf2b3dabb4df43d5",
-    ".swarm-loop/goals.json": "f9dbf2b5cdfaf616ea3f8ddd192fa04b5016d59150b5e7b3d0dcc8aa44debb3c",
+    ".swarm-loop/acceptance/test_spec_criteria.py": "674d9b0020cf4ac9c4044a4e80f25e0a0fdcd9f865e409d942950814cafc451d",
+    ".swarm-loop/goals.json": "1affaee6e2704a2bc9895475e57c3eb7a84e85868707d3e887c888d48ad3f9ab",
     "Makefile": "5667e65a172b98035e56e39d12b5cf44063e29de592cb0f93a91322eacc89c62",
     "scripts/verify.sh": "dea3c2974e02ffcd52e4b0e5c5ccecf3557b32378609805c1ac3752976e94622",
     "scripts/check_verify_contracts.py": "f41ee158357ba9027649c11732044f3c7c167d9777c4403d0735b1d4015dd1e5",
@@ -35,7 +35,7 @@
     "e8_proofs_passing": 8.0
   },
   "goals_canon": "968c4996d90b13565555da6796be7101e63de4db96a152c9af20b9e78cfe728e",
-  "log_seq": 55,
+  "log_seq": 56,
   "metric_defs": {
     "acceptance_pass_rate": {
       "target": 100.0,

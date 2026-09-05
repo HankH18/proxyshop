@@ -449,19 +449,25 @@ RIVAL_DOMAIN = "rival.example.com"
 
 
 def _claim(key, value, source: str = "owner_statement", status: str = "verified") -> dict:
-    """A supporting fact in the E3 shape. `status` is the only evidence R19 may read: a
-    hard constraint is satisfied by a `verified` supporting claim and by nothing else."""
-    return {
-        "key": key,
-        "value": value,
-        "provenance": {
-            "source": source,
-            "ref": f"ref:{key}",
-            "observed_at": T_PAST,
-            "authority_rank": 1,
+    """A supporting fact in the E3 shape, carrying the exchange's own attested verdict on it.
+    `status` is the only evidence R19 may read: a hard constraint is satisfied by a
+    `verified` supporting claim and by nothing else — and, since ESC-020, only when this
+    exchange reached that verdict, never because the claim's author wrote the word."""
+    from apps.exchange.src.ranking.attestation import attest_claim
+
+    return attest_claim(
+        {
+            "key": key,
+            "value": value,
+            "provenance": {
+                "source": source,
+                "ref": f"ref:{key}",
+                "observed_at": T_PAST,
+                "authority_rank": 1,
+            },
         },
-        "status": status,
-    }
+        status=status,
+    )
 
 
 def _intent() -> dict:

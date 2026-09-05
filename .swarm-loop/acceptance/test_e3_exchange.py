@@ -93,17 +93,27 @@ def _strings(node) -> str:
 
 # --- Input builders. Plain stdlib data; no product import at module scope. -----------
 def _claim(key, value, source="owner_statement", status="verified"):
-    return {
-        "key": key,
-        "value": value,
-        "provenance": {
-            "source": source,
-            "ref": f"ref:{key}",
-            "observed_at": T_PAST,
-            "authority_rank": 1,
+    # ESC-020. `status` is a verdict, and a verdict is the EXCHANGE's. It used to be written
+    # onto the claim, where the published `Claim` does not declare it and only a bidder ever
+    # produced it — so a store satisfied any hard constraint by asserting that it had.
+    # `rank()` no longer reads it; the verdict now arrives attested. This builder therefore
+    # asks for the same verdict through the exchange's own door instead of writing the word.
+    # The product import is inside the function, per this directory's module-scope rule.
+    from apps.exchange.src.ranking.attestation import attest_claim
+
+    return attest_claim(
+        {
+            "key": key,
+            "value": value,
+            "provenance": {
+                "source": source,
+                "ref": f"ref:{key}",
+                "observed_at": T_PAST,
+                "authority_rank": 1,
+            },
         },
-        "status": status,
-    }
+        status=status,
+    )
 
 
 def _default_claims():
