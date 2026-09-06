@@ -63,6 +63,46 @@ def test_the_door_stops_mailing_after_the_budget_and_says_when_to_come_back() ->
     assert VICTIM not in refused.text, "the refusal echoed the address it refused"
 
 
+def test_a_spent_budget_and_a_full_service_are_one_answer_on_the_wire() -> None:
+    """The door must not become an oracle over which mailboxes have been asking for links.
+
+    Same reason ``POST /buyer/auth/session`` collapses unknown/expired/already-used into one
+    401. Two different refusals reach this route — "you have had enough" and "the service is
+    full" — and an unauthenticated caller who can tell them apart can read the service's
+    state, and something about a chosen mailbox, straight off the wire. Status, body and the
+    PRESENCE of ``Retry-After`` are therefore identical; only its value differs, which is a
+    deliberate trade recorded at ``_refuse_link``.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.auth.routes import DEFAULT_MAGIC_LINK_RATE_LIMIT
+
+    # (a) the budget: one address, over its limit.
+    client, _service, _delivered, _app = _client()
+    for _ in range(DEFAULT_MAGIC_LINK_RATE_LIMIT + 1):
+        client.post("/buyer/auth/magic-link", json={"email": VICTIM})
+    budget_spent = client.post("/buyer/auth/magic-link", json={"email": VICTIM})
+
+    # (b) the ceiling: fresh addresses, each inside its own budget, against a full table.
+    full = MagicLinkAuth(accounts=InMemoryAccountDirectory(), max_pending=2)
+    crowded, _s, _d, _a = _client(full)
+    for index in range(2):
+        assert (
+            crowded.post(
+                "/buyer/auth/magic-link", json={"email": f"filler-{index}@example.com"}
+            ).status_code
+            == 202
+        )
+    table_full = crowded.post("/buyer/auth/magic-link", json={"email": "overflow@example.com"})
+
+    assert budget_spent.status_code == table_full.status_code == 429
+    assert budget_spent.json() == table_full.json(), (
+        f"the two refusals are distinguishable by body: {budget_spent.text} vs {table_full.text}"
+    )
+    assert ("Retry-After" in budget_spent.headers) == ("Retry-After" in table_full.headers), (
+        "the presence of Retry-After alone says which refusal happened"
+    )
+
+
 def test_the_budget_is_per_address_and_not_a_global_door_closure() -> None:
     """A limiter that refused everyone after one abuser would be the DoS it exists to stop."""
     from buyer_svc.auth.routes import DEFAULT_MAGIC_LINK_RATE_LIMIT

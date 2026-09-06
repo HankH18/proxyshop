@@ -37,6 +37,7 @@ from pydantic import BaseModel, EmailStr, Field
 from ..profile import BuyerProfile, IdentityLeak, publish_profile
 from ..vault import PostgresPseudonymStore, PseudonymVault, normalise_buyer_key
 from .magic_link import (
+    DEFAULT_LINK_TTL,
     AccountDirectory,
     InMemoryAccountDirectory,
     MagicLinkAuth,
@@ -538,6 +539,31 @@ ServiceDep = Annotated[MagicLinkAuth, Depends(get_auth_service)]
 RateLimiterDep = Annotated[MagicLinkRateLimiter, Depends(get_rate_limiter)]
 SessionHeader = Annotated[str | None, Header(alias="X-Buyer-Session")]
 
+#: The one answer ``POST /buyer/auth/magic-link`` gives to every reason it will not mail a
+#: link. Two refusals reach it — this address has spent its budget, and the service's pending
+#: table is full — and they are deliberately one message, for the reason the redeem route
+#: collapses unknown/expired/already-used into one 401: an unauthenticated caller must not be
+#: able to read the service's state off the wire. The distinction is kept in the logs.
+_LINK_REFUSED_DETAIL = "no login link was sent; please try again later"
+
+
+def _refuse_link(retry_after: int, cause: Exception) -> HTTPException:
+    """A 429 that says when to come back and nothing else.
+
+    ``Retry-After`` is on BOTH refusals so that the header's presence cannot be read as
+    "this address in particular has been asking". Its *value* still varies with the reason —
+    a rate-limited caller is told when their own oldest admission ages out — and that is a
+    deliberate trade rather than an oversight: a client that cannot be told when to return
+    retries blindly, which is worse for the service than the residual disclosure, and the
+    residual is "somebody recently requested links for this mailbox", which the caller can
+    only observe after spending the budget themselves.
+    """
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=_LINK_REFUSED_DETAIL,
+        headers={"Retry-After": str(max(1, retry_after))},
+    )
+
 
 class MagicLinkRequest(BaseModel):
     """What a buyer sends to start a login."""
@@ -599,15 +625,8 @@ def request_magic_link(
         # at one entry while twenty live tokens go out.
         limiter.check(str(body.email))
     except MagicLinkRateLimited as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="too many login links have been requested for this address; try again later",
-            # Deliberately the same wording-free shape as the ceiling's answer below. The
-            # route must not become an oracle over which addresses have been asking for
-            # links: "your budget is spent" and "the service is full" are one answer on the
-            # wire, and the service's own logs keep the distinction.
-            headers={"Retry-After": str(exc.retry_after)},
-        ) from exc
+        _log.info("magic-link refused: this address has spent its login-link budget")
+        raise _refuse_link(exc.retry_after, exc) from exc
     try:
         issued = service.request_login(str(body.email))
     except MagicLinkThrottled as exc:
@@ -615,10 +634,12 @@ def request_magic_link(
         # whoever can reach it. At the ceiling the service sheds new requests; it never drops
         # a link somebody is already holding, which would hand an unauthenticated caller a
         # way to cancel a chosen buyer's login.
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="too many login links are pending; please try again shortly",
-        ) from exc
+        #
+        # Answered in exactly the shape the budget refusal above uses, and neither message
+        # names the address. Retry-After is the link TTL: a full pending table drains as the
+        # links in it expire, and nothing shorter is honest.
+        _log.warning("magic-link refused: the pending-link table is at its ceiling")
+        raise _refuse_link(int(DEFAULT_LINK_TTL.total_seconds()), exc) from exc
     return MagicLinkAccepted(expires_at=issued.expires_at)
 
 
