@@ -167,10 +167,28 @@
                   "required": ["accepted", "denial_reason"],
                   "properties": {
                     "accepted": { "type": "boolean" },
-                    "denial_reason": { "type": "string" }
+                    "denial_reason": {
+                      "type": "string",
+                      "description": "A declared refusal code, then either the end of the string or a colon followed by free diagnostic prose. Parse only the token before the first colon; everything after it is for a human and is not part of the contract. The nine codes are `exchange.accept.DENIAL_REASONS` and a refusal whose code this exchange does not declare is re-published as `unspecified` with its prose intact, so a client never sees a tenth token. The exchange writes the separator `\": \"` itself, but it also forwards a refusal VERBATIM when the reason a seller-eligibility source handed it already begins with a declared code, and the parser that decides that (`reasons.denial_code`) splits on a bare `\":\"` and strips the token — so `blacklisted:no space`, `blacklisted : x` and a bare `blacklisted:` are all values this endpoint really returns, and the pattern admits them. The run of blanks before the colon is spelled out by code point rather than as `\\s`, which means three different sets to Python, Rust and ECMAScript and would make this one constraint mean three things (T-115). NOT an `enum`: the served field carries the prose suffix (`checkout_refused: OrphanedOffDomainCheckout: ...`), so enumerating the bare codes would publish a constraint the running service violates — see T-204 in the lane report.",
+                      "pattern": "^(already_accepted|auction_not_acceptable|blacklisted|checkout_refused|unavailable|unknown_bid|unrecordable_acceptance|unroutable_fallback|unspecified)($|[\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]*:)",
+                      "x-vocabulary": [
+                        "already_accepted",
+                        "auction_not_acceptable",
+                        "blacklisted",
+                        "checkout_refused",
+                        "unavailable",
+                        "unknown_bid",
+                        "unrecordable_acceptance",
+                        "unroutable_fallback",
+                        "unspecified"
+                      ]
+                    }
                   }
                 },
-                "example": { "accepted": false, "denial_reason": "blacklist" }
+                "example": {
+                  "accepted": false,
+                  "denial_reason": "blacklisted: fixture:blacklisted"
+                }
               }
             }
           }
