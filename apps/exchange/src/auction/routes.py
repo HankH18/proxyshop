@@ -172,16 +172,33 @@ MAX_IDENTIFIER_LENGTH = 128
 #: the prices in ``checkout/provider.py``, ``discount`` in ``checkout/discounts.py`` — and
 #: nothing else. A key the accept path does not read is a key the book has no reason to hold,
 #: which is the same discipline ``ranking.candidates.CANDIDATE_FIELDS`` applies one layer up.
+#: The set is the INTERSECTION of two lists, and the intersection is the point: every key the
+#: accept and checkout path READS, and every key the published ``Offer`` schema DECLARES.
+#: ``protocol.schema.json``'s ``Offer`` is ``additionalProperties: false`` over
+#: ``bid_offer_id, checkout_url, commitments, currency, delivery_estimate_days, discount,
+#: expires_at, product_ref, total_price, unit_price, variant_ref`` — and nothing on the auction
+#: path validates a bid against it (``validate_bid`` has no call site in ``apps/exchange/src``),
+#: so this whitelist is where that schema is actually enforced for the book.
+#:
+#: **``quantity`` and ``variant_id`` are read by the checkout path and are DELIBERATELY NOT
+#: HERE, because the contract does not declare them.** While the book held ``offer: {}`` that
+#: was moot — ``offer_quantity`` always returned 1 and ``default_permalink`` always built
+#: ``/cart/<variant>:1``. Recording the real offer made it live, and an adversarial pass drove
+#: it: a bid whose ``quantity`` was ``10**9`` was published to the buyer's agent with
+#: ``total_price: 100.0`` and then sent the shopper to
+#: ``…/cart/1:1000000000``, because nothing reconciles ``quantity`` against
+#: ``unit_price``/``total_price`` (T-177's wall in ``collect.py`` reads neither). Honouring an
+#: undeclared, store-written field that multiplies what the shopper buys is not a thing to do
+#: on the strength of nobody having forbidden it. A direct caller of ``checkout()`` may still
+#: pass one; the BOOK does not carry it.
 RECORDED_OFFER_FIELDS: tuple[str, ...] = (
     "checkout_url",
     "currency",
     "discount",
     "expires_at",
     "product_ref",
-    "quantity",
     "total_price",
     "unit_price",
-    "variant_id",
     "variant_ref",
 )
 

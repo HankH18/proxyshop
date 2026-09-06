@@ -758,6 +758,21 @@ def accept(
         # on a fallback the store never spoke at all, so there is no word of its to honour.
         # Empty, that same function refuses (`_usable`), which is why a fallback destination
         # can only ever be the platform's own record.
+        #
+        # T-349 CHANGED WHAT THIS FIELD HOLDS FOR A SERVED BID, and the change is worth
+        # stating because it silently flips a fail-closed posture. `POST /auctions` now
+        # records `store_domain` from the PLATFORM REGISTRY (the projection's answer), not
+        # from `bid["store_domain"]`, so for a bid that came out of the book this is no
+        # longer 'the store's own word' at all. Consequence, measured on the published
+        # four-positional `accept()` surface with NO registry wired anywhere: the accept
+        # now SUCCEEDS where it used to refuse `no registered domain is on file`. That is
+        # arguably the better answer — the host really is the platform's — but it is a
+        # change, and `AcceptResult.domain_verified` still reports False for it with the
+        # old explanation ('the guard compared the store's word to the store's word'),
+        # which is now untrue. NOT reachable over HTTP: `accept/routes.py` installs
+        # `NoRegisteredDomains` as its fail-closed default, so the served path always has
+        # a registry. Reported as an open finding rather than repaired here, because
+        # `domain_verified`'s meaning is a contract question, not a comment.
         store_domain="" if fallback else str(_read(bid, "store_domain") or ""),
         offer=_read(bid, "offer") or {},
         mode=str(mode),
