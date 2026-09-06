@@ -304,9 +304,11 @@ def test_t255_the_is_redeemable_at_probe_is_armed() -> None:
         "the probe's code is not redeemable even on an empty cart, so it grades nothing"
     )
     assert code.is_redeemable_at(_T255_NOW) is True, (
-        "is_redeemable_at answers True for a cart the redemption path rejects — this is the "
-        "narrowing T-255 names, and it is asserted here so the gate's red is about the "
-        "MISSING PARAMETER rather than about this disagreement having evaporated"
+        "the unqualified question — no order-level discount on the cart — must still answer "
+        "True, so the default stayed False and existing single-argument callers kept their "
+        "meaning. Before the repair this same True was the DEFECT, because False was pinned "
+        "and there was no way to ask anything else; it is kept here as the control on the "
+        "default, and the gate below is what grades the parameter"
     )
 
 
