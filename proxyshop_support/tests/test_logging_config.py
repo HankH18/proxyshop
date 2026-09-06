@@ -33,6 +33,7 @@ import subprocess
 import sys
 import textwrap
 import uuid
+from collections.abc import MutableMapping
 from typing import Any
 
 import pytest
@@ -293,11 +294,17 @@ def test_the_request_id_filter_stamps_every_record_it_sees() -> None:
 
     with logging_config.request_id_scope("deadbeef"):
         assert logging_config.RequestIdFilter().filter(record) is True
-    assert record.request_id == "deadbeef"
+    # `type: ignore[attr-defined]` and NOT `getattr(record, "request_id")`: the attribute
+    # genuinely is not on `logging.LogRecord`, which is the whole point — the filter puts it
+    # there. Writing it through `getattr` would type-check by making the expression `Any`,
+    # and would also make the assertion pass if the attribute were missing in a way this
+    # test could not see. The direct access still raises `AttributeError` when the filter
+    # stops stamping, which is the failure this line exists to catch.
+    assert record.request_id == "deadbeef"  # type: ignore[attr-defined]
 
     outside = logging.LogRecord("x", logging.INFO, __file__, 1, "m", None, None)
     logging_config.RequestIdFilter().filter(outside)
-    assert outside.request_id == logging_config.NO_REQUEST_ID
+    assert outside.request_id == logging_config.NO_REQUEST_ID  # type: ignore[attr-defined]
 
 
 def test_the_request_id_scope_restores_the_previous_binding() -> None:
@@ -384,7 +391,14 @@ async def _null_receive() -> dict[str, Any]:  # pragma: no cover - never awaited
     return {"type": "lifespan.startup"}
 
 
-async def _null_send(message: dict[str, Any]) -> None:  # pragma: no cover - never called
+# `MutableMapping[str, Any]`, not `dict[str, Any]`: this is passed as the ASGI `send` of a
+# typed `RequestIdMiddleware`, whose `_Send` is `Callable[[MutableMapping[str, Any]], ...]`.
+# A parameter is contravariant, so a callable that only accepts `dict` is NOT a valid `send`
+# and mypy rejects the call above — which is a real mismatch, not a typing nicety: a `send`
+# annotated `dict` would refuse any ASGI server that hands over a Mapping subclass. The body
+# is `return None` and annotations are strings here (`from __future__ import annotations`),
+# so nothing this function does at runtime changed.
+async def _null_send(message: MutableMapping[str, Any]) -> None:  # pragma: no cover - never called
     return None
 
 
@@ -674,3 +688,77 @@ def test_reset_logging_is_idempotent() -> None:
         """
     )
     assert "RESETS [1, 0]" in completed.stdout
+
+
+# ======================================================================================
+# Added by a second adversarial verifier. Nothing above was modified except the three
+# typing repairs recorded in that commit; everything here is NEW.
+# ======================================================================================
+
+
+def test_a_non_http_scope_is_not_given_a_correlation_id_at_all() -> None:
+    """The half ``test_a_non_http_scope_passes_straight_through`` cannot see.
+
+    That test asserts only that the downstream app was reached with the same scope, and
+    MEASURED, it still passes with the ``scope.get("type") != "http"`` short-circuit deleted:
+    a ``lifespan`` scope then falls into the HTTP path, finds no ``headers``, mints an id,
+    wraps ``send`` — and still calls the app with the same scope, so ``calls == ["lifespan"]``
+    holds either way. Sabotaging the branch to ``== "never"`` left all 48 tests green.
+
+    The thing that actually differs is the binding: a non-HTTP scope must not be given a
+    correlation id, because a ``lifespan`` scope lives for the whole process and a websocket
+    scope for the whole connection, so an id minted there would be stamped on every record
+    either of them ever emits and would correlate unrelated work under one id. This asserts
+    that, and goes red for the same sabotage.
+    """
+    seen: list[str] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        seen.append(logging_config.current_request_id())
+
+    middleware = logging_config.RequestIdMiddleware(app)
+    asyncio.run(middleware({"type": "lifespan"}, _null_receive, _null_send))
+
+    assert seen == [logging_config.NO_REQUEST_ID], (
+        f"a lifespan scope was given the correlation id {seen!r}. A non-HTTP scope outlives "
+        f"any one request — a process lifespan, a whole websocket connection — so an id bound "
+        f"there is stamped on unrelated records for as long as it lasts"
+    )
+
+
+def test_a_websocket_scope_is_passed_through_with_its_send_unwrapped() -> None:
+    """A websocket scope DOES carry headers, so the header loop is not what saves it.
+
+    ``lifespan`` has no ``headers`` key, which makes it a weak witness for the short-circuit:
+    the HTTP path happens to survive a missing key via ``scope.get("headers") or ()``. A
+    websocket scope carries a real ``x-request-id`` header, so if the branch were removed it
+    would be adopted and the id bound — and the messages the app sends would go through the
+    wrapping ``send``. Both are asserted here.
+    """
+    seen: list[str] = []
+    sent: list[dict[str, Any]] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        seen.append(logging_config.current_request_id())
+        await send({"type": "websocket.accept", "headers": []})
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(dict(message))
+
+    middleware = logging_config.RequestIdMiddleware(app)
+    asyncio.run(
+        middleware(
+            {"type": "websocket", "headers": [(b"x-request-id", b"from-the-caller")]},
+            _null_receive,
+            send,
+        )
+    )
+
+    assert seen == [logging_config.NO_REQUEST_ID], (
+        f"a websocket scope adopted the caller's correlation id ({seen!r}); one id would then "
+        f"cover the whole connection instead of one request"
+    )
+    assert sent == [{"type": "websocket.accept", "headers": []}], (
+        f"the websocket message was rewritten on its way out: {sent!r}. Only "
+        f"`http.response.start` may be touched"
+    )
