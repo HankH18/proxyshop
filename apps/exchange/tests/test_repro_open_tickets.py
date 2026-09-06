@@ -374,46 +374,114 @@ def test_t204_a_denial_reason_is_drawn_from_a_declared_vocabulary() -> None:
 
 # =====================================================================================
 # T-158 — the one-accept-per-auction guard is scoped to a Python object, not the auction
+# NON-GRADING. T-158 is graded by apps/exchange/tests/test_t158_acceptance_claim.py.
 # =====================================================================================
 
 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-158: accept() stamps `accepted_bid_ref` on the auction OBJECT it is handed and "
-        "persists nothing, so two requests that each load the same auction record and never "
-        "save it back both pass the one-accept guard and mint two live single-use discount "
-        "codes for one purchase; remove this marker with the fix"
+        "T-158, NON-GRADING REPRODUCTION — the grader is "
+        "apps/exchange/tests/test_t158_acceptance_claim.py, and this node is not it. What it "
+        "shows: with NO claim table wired, accept() falls back to stamping `accepted_bid_ref` "
+        "on the auction OBJECT it was handed, so two requests that each load the same auction "
+        "record and never save it back both clear that fallback and mint two live single-use "
+        "discount codes for one purchase. That fallback is deliberate and documented at "
+        "apps/exchange/src/accept/offer.py:50-56. What this node CANNOT show: it calls "
+        "accept() twice in one interpreter, with no served route, no wired claim table and no "
+        "OS process boundary — so a process-wide in-memory ledger (the remedy an earlier "
+        "version of this docstring wrongly named) turns this node green while the "
+        "cross-process double-spend stays live, which offer.py:52-56 now says in the source "
+        "itself. Keep this marker. Do not remove it to chase a green here, and do not read "
+        "this node's colour as a verdict on T-158 either way; its redness is a true statement "
+        "about the unwired, object-scoped fallback path and nothing more"
     ),
 )
 def test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code() -> None:
-    """One auction must yield one discount code, whichever Python object carries it.
+    """NON-GRADING reproduction of T-158. The grader is ``test_t158_acceptance_claim.py``.
 
-    ``accept()`` takes an auction, a bid id, a code creator and a mode — no store, no state
-    machine — and closes the auction by writing ``accepted_bid_ref`` onto the object in front of
-    it (``apps/exchange/src/accept/offer.py:259-263``, called at ``:532``). The guard that reads
-    it back (``offer.py:449-458``) therefore holds for exactly as long as that one object does.
-    ``offer.py:41-48`` states the limit in prose; this is that paragraph as a gate.
+    Read this paragraph before you touch anything below it. This node is a documentation
+    specimen: it pins the *object-level shape* of T-158 in straight-line, single-interpreter
+    code. It is **not** the gate that decides whether T-158 is fixed.
+    That gate is ``apps/exchange/tests/test_t158_acceptance_claim.py`` — eleven live tests, no
+    xfail and no skip (one carries ``@pytest.mark.docker`` for the Redis path), which drive the
+    real served route through ``create_app``/``TestClient``, race two real OS processes through
+    ``subprocess``/``Popen``, and include a disarm control proving that harness can still
+    reproduce the double-spend when the guard is removed. Judge T-158 there. Judge nothing here.
 
-    Measured at HEAD, one auction id saved once and loaded twice::
+    **The remedy this docstring used to name was wrong, and it is worth being blunt about why.**
+    The old text pointed at ``apps/buyer/svc/src/accept/handoff.py:183-187``, where a module-level
+    ``_LEDGER = AcceptLedger()`` serves as "the process-wide ledger :func:`accept` uses when none
+    is injected", and offered it as the fix. It is not a fix for T-158. A process-wide in-memory
+    ledger cannot distinguish process memory from durable state: it makes *this* node green,
+    because both accepts here happen inside one interpreter and hit the same dictionary — while
+    the actual reported defect, two concurrent accepts in two workers each minting a live
+    single-use code for one purchase, stays wide open, because the second worker's ledger is a
+    different dictionary. So this node is not merely a weak gate; it is satisfiable in the WRONG
+    DIRECTION — green for the unsafe implementation, red for the correct durable one. That is
+    exactly why it kept XFAILing after a correct fix landed: the fix was right and this node was
+    wrong. If you are here because you want this node green, you are about to reintroduce the
+    double-spend. Do not.
+
+    What the node actually exercises, measured on the 37 lines of executable body below this
+    docstring (counting the code only, so that this paragraph's own words cannot skew the
+    count): two calls to ``accept()``, in this interpreter, on two records loaded from one
+    ``InMemoryAuctionStore``. Zero occurrences of ``TestClient``, zero of ``create_app``, zero
+    of ``reserve``, zero of ``claim(``, zero of ``subprocess``, zero of ``Popen``. It therefore
+    never touches the served route, never injects a claim port, and never crosses a process
+    boundary — the three things a durable one-accept guard actually has to survive, and the
+    three things the grader named above does exercise.
+
+    The mechanism it does document — and be careful here, because ``accept()`` has TWO guards
+    today and this node only reaches the weaker one. The durable guard is an at-most-once claim
+    on the auction id, taken **before** the merchant is asked to mint
+    (``apps/exchange/src/accept/offer.py:530-539``; the comment at ``:530`` calls it "THE guard
+    (T-158), and its position in this function is the fix"). The weaker one is a stamp:
+    ``_record_acceptance`` writes ``accepted_bid_ref`` onto whatever object it was handed
+    (``offer.py:291-295``, called at ``:647``) and the read-back at ``offer.py:496-497`` refuses
+    a second accept on that basis — which holds for exactly as long as that one object does.
+
+    This node reaches only the stamp, and that is the whole point of it. It passes ``claims``
+    nowhere, so ``offer.py:535`` resolves the table from ``platform_acceptance_claims()``,
+    nothing is wired process-wide, ``claim_table`` is ``None``, and the object-scoped stamp is
+    all that is left. ``offer.py:50-56`` documents that fallback as deliberate — the result even
+    reports which guard ran, via ``AcceptResult.claim_verified``. So the node's redness is a true
+    statement about ``accept()`` **called with no claim table**; it is not evidence that T-158 is
+    unfixed, and a reader must not take it as such.
+
+    ``offer.py:52-56`` is worth reading before you touch this, because the source now makes this
+    docstring's point independently: a process-lifetime default table "is the wrong one twice
+    over — it is the in-memory ledger that makes an in-process test green while the second
+    uvicorn worker mints the second code", and it also refuses legitimate first accepts once a
+    suite reuses one auction id. Two independent reasons, in the product code, not to do the
+    thing the old version of this docstring recommended.
+
+    ``AuctionRecord`` round-trips through ``InMemoryAuctionStore`` exactly as
+    ``RedisAuctionStore`` does — both call ``AuctionRecord.from_json``
+    (``apps/exchange/src/auction/state.py:183-184``, ``return cls(**json.loads(blob))``) on every
+    ``load`` (``state.py:239-241`` and ``:288-292``; ``:244`` says "Serialise on the way in,
+    exactly like the Redis store"). Two loads are therefore two unstamped records for free, which
+    is the route shape the ticket describes.
+
+    One run's transcript, one auction id saved once and loaded twice — the code literals are
+    random per run, so read the third line, not the first two::
 
         first  accepted: True  code: PSX-YPTECE8K
         second accepted: True  code: PSX-CWGTFNA7
         codes differ   : True
 
     Two complete C11 event trios, two live single-use discounts, one purchase — a discount the
-    seller never agreed to. The control below (the same object twice) proves the guard exists
-    and is object-scoped, so a green here cannot come from the auction being unacceptable.
+    seller never agreed to. The first two assertions are a control: they prove the auction is
+    acceptable at all, so the xfail cannot be coming from the accept being refused outright.
 
-    ``AuctionRecord`` round-trips through ``InMemoryAuctionStore`` exactly as ``RedisAuctionStore``
-    does (``state.py:136-139`` deserialises from JSON on every ``load``), so two loads are two
-    unstamped records for free — which is precisely the route shape the ticket describes.
-
-    The fix has a direct in-repo precedent: ``apps/buyer/svc/src/accept/handoff.py:187`` keeps a
-    process-wide ``AcceptLedger`` that ``accept`` consults when none is injected, so "one auction
-    gets one checkout" survives the object. This test calls ``accept()`` in its deployed
-    four-positional shape on purpose: a seam that must be passed explicitly to be safe leaves
-    every real caller unguarded.
+    The ``xfail(strict=True)`` marker stays. Changing an assertion here to make the node pass
+    would destroy the specimen and prove nothing about the deployment, and the marker is what
+    keeps this file's normal run at its published shape. One honest caveat on "stays", so nobody
+    is ambushed by it: the redness is conditional on nothing having wired a process-wide claim
+    table. This file has no autouse fixture restoring that wiring (the grader does, at
+    ``test_t158_acceptance_claim.py:362``), so a test that calls ``use_acceptance_claims()`` and
+    leaks it would flip this node to XPASS and, under ``strict=True``, to a hard failure. If that
+    ever happens the fix is to isolate the leaking wiring, never to weaken this node.
     """
     from exchange.accept import accept  # noqa: PLC0415
     from exchange.auction.state import CLOSED, AuctionRecord, InMemoryAuctionStore  # noqa: PLC0415
