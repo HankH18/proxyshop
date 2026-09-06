@@ -1,6 +1,6 @@
 {
-  "frozen_at": "2026-09-05T19:02:09",
-  "amendments": 34,
+  "frozen_at": "2026-09-05T19:06:33",
+  "amendments": 35,
   "files": {
     ".swarm-loop/acceptance/README.md": "650910301dc909eb6fb13bd1fcebabc4766e372e0c08210d08e18d84e42e596e",
     ".swarm-loop/acceptance/conftest.py": "298928bc45944aaaa58dcf39d2d1e7b5515b879c89d7658adae3aff03f7796bf",
@@ -8,13 +8,13 @@
     ".swarm-loop/acceptance/test_e1_foundation.py": "b9472072975c441179d7a3b938695d91dced4ffae5d0d5fce724a3c8ca70126a",
     ".swarm-loop/acceptance/test_e2_ingestion.py": "fca567c99011abcfc235c036d75bdbabb97ab2475d5771495d0530942b6e1558",
     ".swarm-loop/acceptance/test_e3_exchange.py": "e7ebeac72d756d5e2b9f7b2cc2bd3eb4831beb1310e65daaf37b503addba317c",
-    ".swarm-loop/acceptance/test_e4_store_agent.py": "2147f504a70e19a71dbe86563dbc9cab311c75558bc835004146850590a082b9",
+    ".swarm-loop/acceptance/test_e4_store_agent.py": "d97e46c5726db07a6d178b1ea36b056efcf071aabc9ccd2cbe0993c68d135d9e",
     ".swarm-loop/acceptance/test_e5_merchant.py": "9bb88595444ba09252025c3f3d520f56370863cc8339e4e3efce5f15ca9b95ac",
     ".swarm-loop/acceptance/test_e6_trust.py": "497ff4da42a4c8ad789edab32bd0fc6d992ee686f175218590fdd89b381e2ff8",
     ".swarm-loop/acceptance/test_e7_buyer.py": "9eb36ab742687abaa06f125c6bc73274c4780b4937d1334ce87e98468882da1c",
     ".swarm-loop/acceptance/test_e8_proofs.py": "a7f7fc8e400bb83331fd1aa8020bbf7d9212273de4ede45c8b0f927b2ba8b939",
     ".swarm-loop/acceptance/test_spec_criteria.py": "674d9b0020cf4ac9c4044a4e80f25e0a0fdcd9f865e409d942950814cafc451d",
-    ".swarm-loop/goals.json": "52b4f90df2e49ba1982b29eb580206f2858c0a83d97ca13b2a301e1932dcf689",
+    ".swarm-loop/goals.json": "8cb566ba313fdbeef879f3864d010517f3c60dbf674a119d08723d1b2ed5c490",
     "Makefile": "5667e65a172b98035e56e39d12b5cf44063e29de592cb0f93a91322eacc89c62",
     "scripts/verify.sh": "a509eef02c766987fee2c6ab253c17b5192487750e4a84bbdaea50796bc98862",
     "scripts/check_verify_contracts.py": "4ff99fd83dd328b3be7b5cef72c63ed7e3bfcef2f102b7f0928ba959789d193e",
@@ -36,7 +36,7 @@
     "e8_proofs_passing": 8.0
   },
   "goals_canon": "968c4996d90b13565555da6796be7101e63de4db96a152c9af20b9e78cfe728e",
-  "log_seq": 67,
+  "log_seq": 68,
   "metric_defs": {
     "acceptance_pass_rate": {
       "target": 100.0,

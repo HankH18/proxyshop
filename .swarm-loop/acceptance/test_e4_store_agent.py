@@ -1240,6 +1240,12 @@ def test_signed_external_bid_is_accepted_and_enqueued_for_verification():
         now=NOW,
         auction_deadline=AUCTION_DEADLINE,
         trust_snapshot=_trust_snapshot_for(payload),
+        # ESC-029: this test calls `receive_bid` DIRECTLY rather than through `_present`,
+        # so it needs the same honest roster the helper supplies. Input completion, not an
+        # assertion change — measured without it, this bid is refused
+        # `price_unreconcilable:offer.unit_price:list_price_unavailable` before the signing
+        # rules it exists to grade are ever reached.
+        list_prices=_roster_for(payload),
     )
     plain = _plain(result)
 
