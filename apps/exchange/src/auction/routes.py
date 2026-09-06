@@ -54,6 +54,7 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .. import redact_addresses
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
 from ..ranking.serving import (
@@ -76,11 +77,14 @@ __all__ = [
     "MAX_HARD_CONSTRAINT_BYTES",
     "MAX_HARD_CONSTRAINTS",
     "MAX_IDENTIFIER_LENGTH",
+    "MAX_RECORDED_OFFER_VALUE_CHARS",
     "MAX_ROSTER_ENTRIES",
+    "RECORDED_OFFER_FIELDS",
     "NullSolicitor",
     "bid_window_seconds",
     "collected_bid_records",
     "configure_auctions",
+    "merged_candidates",
     "router",
 ]
 
@@ -150,6 +154,64 @@ class NullSolicitor:
 #: ``{"field": ..., "op": "gte", "value": ...}``. An identifier is a name, not a document.
 MAX_HARD_CONSTRAINT_BYTES = 16 * 1024
 MAX_IDENTIFIER_LENGTH = 128
+
+#: The offer keys a recorded bid carries into the book, and the ONLY ones.
+#:
+#: **This whitelist is a memory bound, not tidiness, and it was measured.** T-349 put the
+#: store's offer into the book where the book used to hold ``{}``; the offer is a document the
+#: STORE wrote, capped only by ``composition.MAX_BID_RESPONSE_BYTES`` (256 KiB), and
+#: ``InMemoryAuctionBids.record`` deep-copies each record while ``collect_bids`` builds one
+#: entry per roster ROW — so 500 duplicate rows naming one store multiply one fat reply 500
+#: times. Driven at exactly that shape with a 214 KB offer, all of it in one padding field::
+#:
+#:     record whitelisted   ->  book retained 827.4 MiB   (against a 256 MiB container)
+#:     record projected     ->  book retained     0.6 MiB
+#:
+#: The set is every key the accept and checkout path actually READS — ``checkout_url``,
+#: ``expires_at`` and ``quantity`` in ``checkout/codes.py``, ``variant_ref``/``variant_id`` and
+#: the prices in ``checkout/provider.py``, ``discount`` in ``checkout/discounts.py`` — and
+#: nothing else. A key the accept path does not read is a key the book has no reason to hold,
+#: which is the same discipline ``ranking.candidates.CANDIDATE_FIELDS`` applies one layer up.
+#: The set is the INTERSECTION of two lists, and the intersection is the point: every key the
+#: accept and checkout path READS, and every key the published ``Offer`` schema DECLARES.
+#: ``protocol.schema.json``'s ``Offer`` is ``additionalProperties: false`` over
+#: ``bid_offer_id, checkout_url, commitments, currency, delivery_estimate_days, discount,
+#: expires_at, product_ref, total_price, unit_price, variant_ref`` — and nothing on the auction
+#: path validates a bid against it (``validate_bid`` has no call site in ``apps/exchange/src``),
+#: so this whitelist is where that schema is actually enforced for the book.
+#:
+#: **``quantity`` and ``variant_id`` are read by the checkout path and are DELIBERATELY NOT
+#: HERE, because the contract does not declare them.** While the book held ``offer: {}`` that
+#: was moot — ``offer_quantity`` always returned 1 and ``default_permalink`` always built
+#: ``/cart/<variant>:1``. Recording the real offer made it live, and an adversarial pass drove
+#: it: a bid whose ``quantity`` was ``10**9`` was published to the buyer's agent with
+#: ``total_price: 100.0`` and then sent the shopper to
+#: ``…/cart/1:1000000000``, because nothing reconciles ``quantity`` against
+#: ``unit_price``/``total_price`` (T-177's wall in ``collect.py`` reads neither). Honouring an
+#: undeclared, store-written field that multiplies what the shopper buys is not a thing to do
+#: on the strength of nobody having forbidden it. A direct caller of ``checkout()`` may still
+#: pass one; the BOOK does not carry it.
+RECORDED_OFFER_FIELDS: tuple[str, ...] = (
+    "checkout_url",
+    "currency",
+    "discount",
+    "expires_at",
+    "product_ref",
+    "total_price",
+    "unit_price",
+    "variant_ref",
+)
+
+#: The most one recorded offer VALUE may weigh, in characters.
+#:
+#: The whitelist above bounds the number of fields; this bounds their size, because a store
+#: that cannot add a padding key can still put 256 KiB inside ``checkout_url``. A bid carrying
+#: an over-long value is NOT recorded — not truncated, because a truncated checkout URL is a
+#: wrong checkout URL and sending a shopper to one is worse than refusing the bid, and not
+#: silently emptied, because an offer with its URL removed reads as a fallback and would take
+#: the R10 handoff. An unrecorded bid is refused ``unknown_bid``, which is the same fail-closed
+#: direction everything else on this path takes. 4096 is far above any real cart permalink.
+MAX_RECORDED_OFFER_VALUE_CHARS = 4096
 
 
 class RosterEntry(BaseModel):
@@ -458,7 +520,7 @@ def _bind_the_deployment(request: Request) -> None:
     try:
         ensure_configured(request.app)
     except DeploymentConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
 
 def _bid_book(request: Request) -> Any:
@@ -481,6 +543,65 @@ def _bid_book(request: Request) -> Any:
     return book
 
 
+def _recordable_offer(offer: Any) -> dict[str, Any] | None:
+    """``offer`` projected onto :data:`RECORDED_OFFER_FIELDS`, or ``None`` to drop the bid.
+
+    ``None`` means "do not record this bid at all" and is returned when any kept value is
+    longer than :data:`MAX_RECORDED_OFFER_VALUE_CHARS`. See that constant for why dropping
+    beats truncating and beats emptying.
+
+    ``discount`` is the one nested value in the set, so it is projected in turn rather than
+    copied: it is read for a ``type`` and a ``value`` (``checkout/discounts.py``) and a store
+    could otherwise park its padding one level down.
+    """
+    if not isinstance(offer, Mapping):
+        return {}
+    kept: dict[str, Any] = {}
+    for field in RECORDED_OFFER_FIELDS:
+        if field not in offer:
+            continue
+        value = offer[field]
+        if field == "discount" and isinstance(value, Mapping):
+            value = {key: value[key] for key in ("type", "value") if key in value}
+        if isinstance(value, str) and len(value) > MAX_RECORDED_OFFER_VALUE_CHARS:
+            return None
+        if isinstance(value, (Mapping, list, tuple, set)) and len(value) > 64:
+            return None
+        kept[field] = value
+    return kept
+
+
+def merged_candidates(
+    rows: Sequence[Mapping[str, Any]],
+    projected: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """The rank ROW and the candidate PROJECTION for one bid, in a single mapping (T-349).
+
+    Neither half is a superset of the other, which is why this joins rather than swaps.
+    ``rank()``'s row carries ``eligible`` — the ranking's own verdict, and the only thing
+    that decides whether a bid is recorded at all — and carries neither ``offer`` nor
+    ``store_domain``. ``ranking/candidates.py``'s projection carries both and no verdict.
+    Passing the row alone wrote every record with ``offer: {}``; passing the projection
+    alone would record nothing, because it has no ``eligible``.
+
+    **The join lives here rather than inside :func:`collected_bid_records`, and that is a
+    correction rather than a preference.** It was a third parameter on that function
+    first, and the signature is not private: ``test_ranking_served.py`` substitutes a
+    two-argument replacement for it to suppress the ``fallback`` stamp, so a third
+    positional argument broke that substitution with ``TypeError: without_the_flag() takes
+    2 positional arguments but 3 were given``. The test was right and the signature change
+    was wrong: a seam something else wraps is part of the contract. Merging first keeps
+    that seam exactly as it was.
+
+    The ROW wins on any key both carry, so a verdict can never be overwritten by the
+    projection; the projection only fills in what the row does not have. A row with no
+    match is passed through unchanged, so an empty ``projected`` degrades to the old
+    behaviour instead of dropping bids.
+    """
+    by_bid = {str(row.get("bid_id") or ""): row for row in projected if row.get("bid_id")}
+    return [{**by_bid.get(str(row.get("bid_id") or ""), {}), **row} for row in rows]
+
+
 def collected_bid_records(
     candidates: Sequence[Mapping[str, Any]],
     entries: Sequence[Any],
@@ -498,8 +619,8 @@ def collected_bid_records(
     carry the minted ``bid_id`` and the platform's domain, and are the same rows ``ranked``,
     ``excluded`` and ``shortlist.slots`` name.
 
-    **MEASURED DEFECT — they do not, and this paragraph used to assert they did.** The caller
-    below passes ``ranking["candidates"]``, and that is not the projection in
+    **MEASURED DEFECT, NOW REPAIRED (T-349); what follows is the record of it.** The caller
+    used to pass ``ranking["candidates"]`` alone, and that is not the projection in
     ``ranking/candidates.py``: ``ranking/__init__.py`` sets ``"candidates": rows``, the rank-ROW
     projection, whose keys are ``bid_id``, ``components``, ``eligible``, ``exclusion_reasons``,
     ``features``, ``price``, ``provenance_labels``, ``rank_score``, ``store_id``, ``trust``,
@@ -527,16 +648,33 @@ def collected_bid_records(
     * ``default_permalink`` reads ``variant_ref``/``variant_id``/``quantity`` off the offer, so
       the buyer is sent to ``/cart/1:1`` rather than to the ``/cart/77:3`` the store bid.
 
-    **The repair is not the one-line swap it looks like**, which is why it is written down here
-    rather than made in passing: this function gates on ``candidate.get("eligible")``, a key the
-    projection does not carry, so handing it the projected candidates records NOTHING and every
-    accept becomes ``unknown_bid``. The route also has no handle on the projection —
-    ``ranking.serving.rank_auction`` builds it locally and returns only ``rank()``'s output — so
-    a fix has to widen ``rank_auction``'s return or put ``offer``/``store_domain`` on the rank
-    row, and must leave ``_excluded_out``'s argument alone because that one does need the row.
-    Nothing else blocks it: across ``accept/**`` and ``checkout/**`` there is not one read of a
-    rank-row-only key. The defect predates this branch — ``git log -L`` dates the line to
-    ``ec4f2b4``, an ancestor of ``main``.
+    **The repair was not the one-line swap it looked like**, and the paragraph that said so is
+    kept because it is what the repair had to satisfy: this function gates on
+    ``candidate.get("eligible")``, a key the projection does not carry, so handing it the
+    projected candidates ALONE records nothing and every accept becomes ``unknown_bid``. The
+    route also had no handle on the projection — ``ranking.serving.rank_auction`` built it
+    locally and returned only ``rank()``'s output.
+
+    So both halves are joined BEFORE this function is called, by :func:`merged_candidates`,
+    and this function's two-argument signature is unchanged — deliberately, because
+    ``test_ranking_served.py`` substitutes its own two-argument replacement for it and a
+    third parameter broke that substitution. ``rank_auction`` now returns the projection
+    under ``"projected"`` — additive, no existing key changed, so ``_excluded_out``'s
+    argument is untouched because that one does need the row. A caller that merges nothing
+    in gets exactly the old behaviour rather than silently recording nothing.
+
+    MEASURED over the real socket in ``test_composition_root.py``, by spying on this
+    function's return with the repair reverted and restored — the test PASSES either way,
+    which is what made the defect silent::
+
+        reverted:  bid_id='auction-ef75…:s1'  offer_keys=[]  store_domain=None
+        restored:  bid_id='auction-55be…:s1'  offer_keys=['checkout_url', 'commitments',
+                   'currency', 'expires_at', 'product_ref', 'total_price', 'unit_price']
+                   checkout_url='https://s1.example.com/cart/44352913:1'
+                   expires_at='2999-01-01T00:00:00Z'  store_domain='s1.example.com'
+
+    The defect predated this branch — ``git log -L`` dates the line to ``ec4f2b4``, an
+    ancestor of ``main``.
 
     **Only the candidates the ranking found ELIGIBLE are recorded**, and the first draft of
     this function got that wrong in the expensive direction. It recorded every collected
@@ -584,10 +722,15 @@ def collected_bid_records(
         if not bid_id:
             continue
         store_id = str(candidate.get("store_id") or "")
+        offer = _recordable_offer(candidate.get("offer"))
+        if offer is None:
+            # Over-long value: the bid is dropped rather than recorded in a shape that is
+            # either wrong (truncated URL) or misread (missing URL reads as a fallback).
+            continue
         record: dict[str, Any] = {
             "bid_id": bid_id,
             "store_id": store_id,
-            "offer": candidate.get("offer") or {},
+            "offer": offer,
         }
         domain = candidate.get("store_domain")
         if domain:
@@ -869,16 +1012,24 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # accept path reads, minted ref and platform domain included — see
     # :func:`collected_bid_records` for why nothing here is copied from the store's reply.
     #
-    # THE ARGUMENT ON THE NEXT LINE IS THE WRONG OBJECT, and `collected_bid_records`' docstring
-    # carries the measurement. `ranking["candidates"]` is `rank()`'s ROW projection, not
-    # `ranking/candidates.py`'s — it has no `offer` and no `store_domain` — so every record is
-    # written with `offer: {}`. Pre-existing, and it costs every served bid its expiry, its
-    # pre-mint host check and its cart permalink. Fixing it is not a swap of this one argument;
-    # the docstring says what it needs.
+    # BOTH projections are handed over, and that is T-349's repair. `ranking["candidates"]` is
+    # `rank()`'s ROW projection — it carries `eligible`, the verdict that decides whether a bid
+    # is recorded at all, and carries neither `offer` nor `store_domain`. `ranking["projected"]`
+    # is `ranking/candidates.py`'s projection and carries both. Passing the row alone wrote
+    # every record with `offer: {}`, costing each served bid its expiry, its pre-mint host
+    # check and its cart permalink; passing the projection alone would record NOTHING, because
+    # the projection has no `eligible`. `collected_bid_records` joins them on the minted
+    # `bid_id`; its docstring carries the before/after measurement.
     book = _bid_book(request)
     recorder = getattr(book, "record", None)
     if callable(recorder):
-        recorder(auction_id, collected_bid_records(ranking["candidates"], result.entries))
+        recorder(
+            auction_id,
+            collected_bid_records(
+                merged_candidates(ranking["candidates"], ranking.get("projected") or ()),
+                result.entries,
+            ),
+        )
 
     return CreateAuctionResponse(
         auction_id=auction_id,
@@ -900,7 +1051,7 @@ async def read_auction(auction_id: str, request: Request) -> dict[str, Any]:
     try:
         record = _machine(request).get(auction_id)
     except UnknownAuction as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=redact_addresses(exc)) from exc
     return {
         "auction_id": record.auction_id,
         "state": record.state,

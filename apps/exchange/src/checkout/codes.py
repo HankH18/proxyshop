@@ -31,6 +31,8 @@ from urllib.parse import quote
 
 from contracts.boundary import parse_timestamp
 
+from .. import describe
+
 __all__ = [
     "CODE_ALPHABET",
     "CODE_BODY_LENGTH",
@@ -184,7 +186,8 @@ def expiry_epoch(expires_at: Any) -> float:
         return float(expires_at)
     except (TypeError, ValueError) as exc:
         raise UnusableOffer(
-            f"offer expires_at {expires_at!r} is neither an epoch number nor an RFC-3339 "
+            f"offer expires_at {describe(expires_at)} is neither an epoch number nor an "
+            f"RFC-3339 "
             f"instant, so the code's D22 expiry cannot be computed"
         ) from exc
     return parsed.timestamp()
@@ -221,9 +224,9 @@ def offer_quantity(offer: Mapping[str, Any] | None = None) -> int:
     try:
         value = int(quantity)
     except (TypeError, ValueError) as exc:
-        raise UnusableOffer(f"offer quantity {quantity!r} is not a whole number") from exc
+        raise UnusableOffer(f"offer quantity {describe(quantity)} is not a whole number") from exc
     if value < 1:
-        raise UnusableOffer(f"offer quantity {quantity!r} is not a positive quantity")
+        raise UnusableOffer(f"offer quantity {describe(quantity)} is not a positive quantity")
     return value
 
 

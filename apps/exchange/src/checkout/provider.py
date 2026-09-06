@@ -37,6 +37,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
+from .. import describe, describe_exception, redact_addresses
 from ..auction.ledger import build_published_event
 from .codes import (
     assert_offer_is_mintable,
@@ -740,25 +741,22 @@ class CheckoutProvider:
         #    `ranking/candidates.py` now completes a FALLBACK entry's offer with a
         #    checkout_url built from the platform-registered domain it has already looked
         #    up. A doc sweep (edbc422) concluded from that this comparison had started
-        #    running on a shortlisted fallback, and wrote so here. THAT IS FALSE, and it was
-        #    measured false: an absent URL is still the everyday shape of every bid arriving
-        #    at this port, hosted and fallback alike.
+        #    running on a shortlisted fallback, and wrote so here. It was PREMATURE rather
+        #    than wrong: the chain it described was real and broke one file over, and
+        #    T-349 has since joined it up.
         #
-        #    The chain breaks one file over. `auction/routes.py` hands
-        #    `collected_bid_records` the value `ranking["candidates"]`, and that is NOT the
-        #    projection above — `ranking/__init__.py` sets `"candidates": rows`, the rank-ROW
-        #    projection, whose keys are bid_id, components, eligible, exclusion_reasons,
-        #    features, price, provenance_labels, rank_score, store_id, trust, trust_summary
-        #    and verified_hard_fit_count. No `offer`, no `store_domain`. So the book records
-        #    `candidate.get("offer") or {}` -> `{}`. Measured over the HTTP door, one hosted
-        #    bid and one silent store, both shortlisted:
+        #    What used to break it: `auction/routes.py` handed `collected_bid_records` the
+        #    value `ranking["candidates"]`, which is NOT the projection above —
+        #    `ranking/__init__.py` sets `"candidates": rows`, the rank-ROW projection, with
+        #    no `offer` and no `store_domain` — so the book recorded
+        #    `candidate.get("offer") or {}` -> `{}` for a hosted bid and a fallback alike,
+        #    and step 2 had nothing to look at for either. `rank_auction` now also returns
+        #    the projection under `"projected"` and `merged_candidates` joins the two, so a
+        #    served bid arrives here carrying its real `checkout_url` and this comparison
+        #    runs BEFORE the mint. Measured over the HTTP door:
         #
-        #        [{"bid_id": "…:store-a",      "offer": {}, "store_id": "store-a"},
-        #         {"bid_id": "…:store-silent", "offer": {}, "store_id": "store-silent"}]
-        #
-        #    This is PRE-EXISTING and is not R10 damage: the hosted bid's real checkout_url,
-        #    expires_at, variant_ref and quantity are dropped by the same line. Its cost is
-        #    real and is recorded where the fix would go, in `collected_bid_records`.
+        #        {"bid_id": "…:s1", "store_domain": "s1.example.com",
+        #         "offer": {"checkout_url": "https://s1.example.com/cart/44352913:1", …}}
         #
         #    Absent is also reachable for reasons that have nothing to do with that: a direct
         #    caller of `checkout()` can hand over an offer that has none, and
@@ -1080,7 +1078,16 @@ def _usable(domain: Any, request: CheckoutRequest) -> str:
             f"no registered domain is on file for {request.store_id!r}, so there is no host "
             f"a checkout for it could be on (C10/D22)"
         )
-    return str(domain)
+    # A lookup that ANSWERS with an object rather than a domain used to have `str(<object>)`
+    # — its address — carried onward as a "registered domain" and re-rendered with `!r` in
+    # the off-domain message `domain.py` builds. BOTH branches are covered, and the `str`
+    # one is not hypothetical: a registry whose `domain_for` returns `str(self._backend)`
+    # hands back an ordinary `str` that an `isinstance` check waves through, and the address
+    # then reached the 200 body as `https://<object object at 0x…>/cart/1:1` AND the
+    # persisted `checkout_redirect` event. Measured on this branch by an adversarial pass,
+    # and measured leaking at the fork point too — a hole the first version of this line
+    # narrowed rather than closed.
+    return redact_addresses(domain) if isinstance(domain, str) else describe(domain)
 
 
 def domain_is_platform_verified(request: CheckoutRequest) -> bool:
@@ -1137,8 +1144,12 @@ def registered_domain_for(request: CheckoutRequest) -> str:
         domain = lookup(request.store_id)
     except Exception as exc:
         raise OffDomainCheckout(
+            # T-264's own recorded reproduction lands HERE, not on the callability check
+            # above: a `registered_domains` value that is callable and RAISES ON USE
+            # passes that check, and its exception message — or its exception ARGUMENT,
+            # for `KeyError(<object>)` — carries the address the whole way to the 409.
             f"registered domain lookup for {request.store_id!r} failed "
-            f"({type(exc).__name__}: {exc}); refusing to check out against the bid's own "
+            f"({describe_exception(exc)}); refusing to check out against the bid's own "
             f"claim {request.store_domain!r}"
         ) from exc
 

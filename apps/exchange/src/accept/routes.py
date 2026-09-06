@@ -88,6 +88,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from .. import describe_exception, redact_addresses
 from ..auction.state import (
     ACCEPTED,
     AUCTION_TTL_SECONDS,
@@ -169,6 +170,16 @@ DEFAULT_BID_BOOK_CAPACITY = 512
 #: ``ShortlistStore`` (also 512) and the auction store. 20,000 records is roughly 14 MB at the
 #: same measurement, and is still 40 concurrent auctions at the roster ceiling or 4,000 at the
 #: size an auction actually has. Oldest auction first, same as the count cap.
+#:
+#: **THAT PER-RECORD FIGURE WAS TAKEN WHEN A RECORD CARRIED ``offer: {}``, and T-349 changed
+#: what a record holds.** A record now carries the store's offer, so a count cap stopped
+#: being a memory cap on its own: driven at 500 duplicate roster rows naming one store whose
+#: reply carried a 214 KB padding field, this book retained **827.4 MiB** against that same
+#: 256 MiB container. The size half of the bound therefore lives with the record now —
+#: ``auction/routes.py``'s ``RECORDED_OFFER_FIELDS`` whitelist and
+#: ``MAX_RECORDED_OFFER_VALUE_CHARS`` — and the same shape re-measures at **1.5 MiB**, back
+#: within noise of the 1.1 MiB the empty-offer book held. Anyone changing what a record
+#: carries has to re-measure both halves, which is why this paragraph names the probe.
 DEFAULT_BID_BOOK_RECORDS = 20_000
 
 
@@ -407,7 +418,7 @@ def _claims(request: Request) -> Any:
             # refused. Same 503 the unusable bid source gets, for the same reason: dressing a
             # misconfiguration up as a decision about the buyer hides it from the operator,
             # and letting it through would mint on a path with no one-accept guard at all.
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
         request.app.state.acceptance_claims = claims
     return claims
 
@@ -464,7 +475,7 @@ def _bind_the_deployment(request: Request) -> None:
     try:
         ensure_configured(request.app)
     except DeploymentConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
 
 def _checkout_mode(request: Request) -> str:
@@ -505,7 +516,12 @@ def _denied(reason: str) -> JSONResponse:
     parsing ``denial_reason`` never has to handle a token outside
     :data:`~.reasons.DENIAL_REASONS`, and no diagnosis is thrown away to achieve that.
     """
-    text = str(reason).strip()
+    # Redacted here as well as at the two places a reason is BUILT, because this function is
+    # the published surface's last frame and it is reachable with a string neither of them
+    # produced — `_denied` is called directly with `str(result.denial_reason or "")` and with
+    # a locally formatted transition message. A 409 body is the one sink a client reads, so
+    # the invariant is asserted where it is published, not only where it is composed.
+    text = redact_addresses(reason).strip()
     if denial_code(text) is None:
         text = denial_reason(
             DENIAL_UNSPECIFIED, text or "the accept was refused and named no reason"
@@ -549,7 +565,7 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     try:
         record = machine.get(auction_id)
     except UnknownAuction as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=redact_addresses(exc)) from exc
 
     # Asked BEFORE anything is minted: an auction that cannot record its acceptance cannot
     # refuse the second accept either. See the module docstring on what this does not close.
@@ -590,7 +606,7 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     except UnknownCheckoutMode as exc:
         # A deployment misconfiguration, not a decision about this buyer — and the registry's
         # contract is that it never falls back to the simulated path.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
     if not result.accepted:
         return _denied(str(result.denial_reason or ""))
@@ -617,7 +633,8 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
         return _denied(
             denial_reason(
                 DENIAL_AUCTION_NOT_ACCEPTABLE,
-                f"auction {auction_id!r} could not be stamped as accepted ({exc}); the "
+                f"auction {auction_id!r} could not be stamped as accepted "
+                f"({describe_exception(exc)}); the "
                 f"acceptance is not recorded, so no permalink is returned",
             )
         )
