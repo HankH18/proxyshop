@@ -32,23 +32,23 @@ store) reaches the accept path with no ``checkout_url`` at all, and treating its
 spoof refused every fallback bid the exchange had manufactured for itself.
 
 A doc sweep (edbc422) claimed that had changed — that "a shortlisted fallback now arrives
-carrying one". It does not, and the reasoning that produced the claim is half right, which is
-why it is written out here rather than simply deleted. ``ranking/candidates.py`` genuinely
+carrying one". It was premature rather than wrong, and the history is kept because the
+reasoning was right about everything except one argument. ``ranking/candidates.py`` genuinely
 does complete a fallback entry's offer from the platform's ``store_id -> domain`` registry,
-and ``POST /auctions`` genuinely does record the bid book after the ranking. The break is
-between them: the route hands ``collected_bid_records`` the *rank rows*
+and ``POST /auctions`` genuinely does record the bid book after the ranking. What broke the
+chain sat between them: the route handed ``collected_bid_records`` the *rank rows*
 (``ranking/__init__.py`` sets ``"candidates": rows``) rather than that projection, and a rank
-row carries no ``offer`` key and no ``store_domain``, so the bid book the accept path reads
-records ``offer: {}``. Measured on the real composed app over ``TestClient``, one hosted bid
-plus one silent store, both shortlisted::
+row carries no ``offer`` key and no ``store_domain``, so the bid book recorded ``offer: {}``
+for a hosted bid and a fallback alike. T-349 joined them: ``rank_auction`` also returns the
+projection under ``"projected"`` and ``merged_candidates`` merges the two, so a served bid
+now reaches this module carrying its real ``checkout_url``::
 
-    [{"bid_id": "auction-f718bcd6-…:store-a", "offer": {}, "store_id": "store-a"},
-     {"bid_id": "auction-f718bcd6-…:store-silent", "offer": {}, "store_id": "store-silent"}]
+    {"bid_id": "auction-55be…:s1", "store_domain": "s1.example.com",
+     "offer": {"checkout_url": "https://s1.example.com/cart/44352913:1", …}}
 
-An absent URL is therefore the ordinary case at this module's door, not a corner — and it is
-**pre-existing and identical for a hosted bid**, whose real ``checkout_url`` is dropped by the
-same line, so it is not something R10 introduced; it is reported separately as its own
-finding. It is a legal thing to hand this module either way: a direct caller supplies whatever
+An absent URL is therefore no longer the ordinary case at this module's door — it was, for a
+hosted bid and a fallback alike, and that is the state the paragraph above records. It
+remains a REACHABLE case, and this module must keep handling it as one: a direct caller supplies whatever
 it holds, and a fallback for a store the registry knows no domain for is completed with
 nothing. The caller decides — see ``CheckoutProvider.checkout``, which validates the offer's
 URL only when the offer has one and validates the *provider's* permalink unconditionally.

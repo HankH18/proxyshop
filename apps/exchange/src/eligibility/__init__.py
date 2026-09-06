@@ -51,6 +51,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .. import describe, describe_exception
+
 __all__ = [
     "BLACKLISTED",
     "ELIGIBLE",
@@ -172,8 +174,14 @@ def read_eligibility(source: object, store_id: str) -> EligibilityDecision:
             store_id=store_id,
             status=UNAVAILABLE,
             reason=(
+                # `describe_exception`, not `{exc}`: this reason is republished as a
+                # denial reason on an unauthenticated 409 and persisted in a
+                # `policy_event`, and a source that does not know a store raises
+                # `KeyError(<object>)` — whose `str()` simply IS `repr(<object>)`, so
+                # nothing has to quote anything for the address to travel. The class
+                # name and the message both survive; only the address does not.
                 f"unavailable: eligibility read for {store_id} failed "
-                f"({type(exc).__name__}: {exc}); failing closed"
+                f"({describe_exception(exc)}); failing closed"
             ),
         )
 
@@ -191,7 +199,10 @@ def read_eligibility(source: object, store_id: str) -> EligibilityDecision:
             store_id=store_id,
             status=UNAVAILABLE,
             reason=(
-                f"unavailable: eligibility source answered unrecognised status {status!r} "
+                # `describe`: `status` is whatever the injected source put on its
+                # decision, and an object there rendered its address into this reason.
+                f"unavailable: eligibility source answered unrecognised status "
+                f"{describe(status)} "
                 f"for {store_id}; failing closed"
             ),
         )
