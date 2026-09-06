@@ -171,6 +171,8 @@
       "get": {
         "operationId": "getEnvelope",
         "summary": "Read a store's envelope. SEALED — no exchange grant (S7).",
+        "description": "Administrative. Requires the merchant admin bearer token; an unconfigured deployment refuses every caller with 503 rather than serving sealed state anonymously.",
+        "security": [{ "adminBearer": [] }],
         "parameters": [
           { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
@@ -204,14 +206,89 @@
                 "x-example-schema": "Envelope"
               }
             }
+          },
+          "401": {
+            "description": "No bearer token, or the wrong one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": { "error": { "type": "string", "enum": ["unauthorized"] } }
+                },
+                "example": { "error": "unauthorized" }
+              }
+            }
+          },
+          "404": {
+            "description": "No envelope has ever been written for this store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "store_id"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["no-envelope"] },
+                    "store_id": { "type": "string" }
+                  }
+                },
+                "example": { "error": "no-envelope", "store_id": "store-1" }
+              }
+            }
+          },
+          "503": {
+            "description": "The deployment configures no admin token, so the envelope routes refuse every caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "missing"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["admin-api-not-configured"] },
+                    "missing": { "type": "array", "items": { "type": "string" } },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "admin-api-not-configured",
+                  "missing": ["MERCHANT_ADMIN_TOKEN"],
+                  "detail": "the envelope routes refuse every caller until a token is configured"
+                }
+              }
+            }
           }
         }
       },
       "put": {
         "operationId": "putEnvelope",
         "summary": "Replace a store's envelope, creating a new version.",
+        "description": "Administrative, and NOT self-activating. The body is the merchant's *request*: `version` is ignored (it is derived from what is already on file) and `activation: \"active\"` is honoured only when the request also carries an `X-Envelope-Approval` artifact bound to the terms being stored. Without one the new version is written in `shadow` — the edit is not lost — and the call answers 403 `approval-required` naming the missing paperwork (R6/E5).",
+        "security": [{ "adminBearer": [] }],
         "parameters": [
-          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } },
+          {
+            "name": "X-Envelope-Approval",
+            "in": "header",
+            "required": false,
+            "description": "The merchant's recorded written approval of these exact terms, as a JSON object. `envelope_hash` is what binds it: a SHA-256 over the canonical rendering of the seven approved-terms fields plus `version`, so an approval lifted off a different envelope authorizes nothing. `approved_at` must carry a timezone. `note` and `document_ref` are optional; any other key is refused. Required only to move an envelope to `active`; a `shadow` write needs none.",
+            "schema": {
+              "type": "string",
+              "contentMediaType": "application/json",
+              "x-json-schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["approver", "approved_at", "envelope_hash"],
+                "properties": {
+                  "approver": { "type": "string", "minLength": 1 },
+                  "approved_at": { "type": "string", "format": "date-time" },
+                  "envelope_hash": { "type": "string", "minLength": 1 },
+                  "note": { "type": "string" },
+                  "document_ref": { "type": "string" }
+                }
+              }
+            },
+            "example": "{\"approver\": \"Dana Okafor\", \"approved_at\": \"2026-01-05T09:30:00Z\", \"envelope_hash\": \"sha256:1f0c...\", \"document_ref\": \"box://approvals/store-1-v4.pdf\"}"
+          }
         ],
         "requestBody": {
           "required": true,
@@ -234,7 +311,7 @@
         },
         "responses": {
           "200": {
-            "description": "The stored envelope.",
+            "description": "The stored envelope. `activation` is `active` only when a bound approval accompanied the request.",
             "content": {
               "application/json": {
                 "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/Envelope" },
@@ -251,6 +328,120 @@
                 "x-example-schema": "Envelope"
               }
             }
+          },
+          "400": {
+            "description": "The body is not a readable envelope, or `X-Envelope-Approval` is present and is not a JSON object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unparseable-body",
+                        "not-an-envelope",
+                        "unreadable-approval"
+                      ]
+                    },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "unreadable-approval",
+                  "detail": "X-Envelope-Approval must carry a JSON object, got list"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No bearer token, or the wrong one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": { "error": { "type": "string", "enum": ["unauthorized"] } }
+                },
+                "example": { "error": "unauthorized" }
+              }
+            }
+          },
+          "403": {
+            "description": "The body asked for `activation: \"active\"` and no approval artifact bound to these terms accompanied it. The new version IS on file, in `shadow`; nothing was activated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "store_id", "version", "activation"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["approval-required"] },
+                    "store_id": { "type": "string" },
+                    "version": { "type": "integer" },
+                    "activation": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/EnvelopeActivation" },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "approval-required",
+                  "store_id": "store-1",
+                  "version": 4,
+                  "activation": "shadow",
+                  "detail": "no written approval artifact was recorded; an envelope is never activated on anybody's say-so alone (R6)"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The body names another store, or a version already superseded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["wrong-store", "version-went-backwards"] },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": { "error": "wrong-store", "detail": "envelope names store-2" }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body exceeded the 1 MiB cap and was abandoned mid-stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": { "error": { "type": "string", "enum": ["body-too-large"] } }
+                },
+                "example": { "error": "body-too-large" }
+              }
+            }
+          },
+          "503": {
+            "description": "The deployment configures no admin token, so the envelope routes refuse every caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "missing"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["admin-api-not-configured"] },
+                    "missing": { "type": "array", "items": { "type": "string" } },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "admin-api-not-configured",
+                  "missing": ["MERCHANT_ADMIN_TOKEN"],
+                  "detail": "the envelope routes refuse every caller until a token is configured"
+                }
+              }
+            }
           }
         }
       }
@@ -259,6 +450,8 @@
       "post": {
         "operationId": "killStoreAgent",
         "summary": "Kill switch: move the envelope to `killed` immediately.",
+        "description": "Administrative. Needs no approval artifact — stopping is always allowed; only starting requires paperwork.",
+        "security": [{ "adminBearer": [] }],
         "parameters": [
           { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
@@ -279,8 +472,83 @@
                 "example": { "store_id": "store-1", "activation": "killed" }
               }
             }
+          },
+          "401": {
+            "description": "No bearer token, or the wrong one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": { "error": { "type": "string", "enum": ["unauthorized"] } }
+                },
+                "example": { "error": "unauthorized" }
+              }
+            }
+          },
+          "404": {
+            "description": "No envelope has ever been written for this store, so there is nothing to kill.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "store_id"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["no-envelope"] },
+                    "store_id": { "type": "string" }
+                  }
+                },
+                "example": { "error": "no-envelope", "store_id": "store-1" }
+              }
+            }
+          },
+          "409": {
+            "description": "The kill was refused by the envelope store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["kill-refused"] },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": { "error": "kill-refused", "detail": "the envelope is already killed" }
+              }
+            }
+          },
+          "503": {
+            "description": "The deployment configures no admin token, so the envelope routes refuse every caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "missing"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["admin-api-not-configured"] },
+                    "missing": { "type": "array", "items": { "type": "string" } },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "admin-api-not-configured",
+                  "missing": ["MERCHANT_ADMIN_TOKEN"],
+                  "detail": "the envelope routes refuse every caller until a token is configured"
+                }
+              }
+            }
           }
         }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "adminBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The merchant admin token, configured as `MERCHANT_ADMIN_TOKEN`. The envelope routes are SEALED state (C3/S7) and refuse every caller — with 503, not 200 — until it is set."
       }
     }
   }

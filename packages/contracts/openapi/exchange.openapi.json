@@ -167,10 +167,28 @@
                   "required": ["accepted", "denial_reason"],
                   "properties": {
                     "accepted": { "type": "boolean" },
-                    "denial_reason": { "type": "string" }
+                    "denial_reason": {
+                      "type": "string",
+                      "description": "A declared refusal code, optionally followed by `\": \"` and free diagnostic prose. Parse only the token before the first colon; everything after it is for a human and is not part of the contract. The nine codes are `exchange.accept.DENIAL_REASONS` and a refusal whose code this exchange does not declare is re-published as `unspecified` with its prose intact, so a client never sees a tenth token. NOT an `enum`: the served field carries the prose suffix (`checkout_refused: OrphanedOffDomainCheckout: ...`), so enumerating the bare codes would publish a constraint the running service violates — see T-204 in the lane report.",
+                      "pattern": "^(already_accepted|auction_not_acceptable|blacklisted|checkout_refused|unavailable|unknown_bid|unrecordable_acceptance|unroutable_fallback|unspecified)($|: )",
+                      "x-vocabulary": [
+                        "already_accepted",
+                        "auction_not_acceptable",
+                        "blacklisted",
+                        "checkout_refused",
+                        "unavailable",
+                        "unknown_bid",
+                        "unrecordable_acceptance",
+                        "unroutable_fallback",
+                        "unspecified"
+                      ]
+                    }
                   }
                 },
-                "example": { "accepted": false, "denial_reason": "blacklist" }
+                "example": {
+                  "accepted": false,
+                  "denial_reason": "blacklisted: fixture:blacklisted"
+                }
               }
             }
           }
