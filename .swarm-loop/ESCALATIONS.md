@@ -25,7 +25,31 @@ every `escalate`; editing this file by hand changes nothing.</sub>
 
 _None. Nothing is waiting on you._
 
-## RESOLVED (29)
+## RESOLVED (30)
+
+### ESC-030 · harness · `pending_remeasure[7] — ESC-027's ruling rests on a premise that measurement now contradicts` — resolved 2026-09-06T01:10:08
+
+- filed 2026-09-06T01:06:50 (cycle 20)
+- **what was wrong**: Your 2026-09-05 ruling on ESC-027 decided that pending_remeasure=[7] STAYS, and the reason recorded with it was that no honest action could discharge it: "measure cannot be pointed at a past ref, and the only available command would write today's values into cycle 7's row." That premise is false, and I am reporting it rather than acting on it because the flag is the run's terminal signal and the ruling is yours.
+
+MEASURED: `swarmloop.py measure --help` carries `--clears-remeasure N`, documented as "discharge the re-measure debt freeze --amend opened on cycle N using THIS measurement. The row is recorded under --cycle, where it is true; cycle N's historical row is left alone." So `measure --cycle 20 --clears-remeasure 7` measures the tree as it is now, records it at cycle 20 where it is true, and does NOT overwrite cycle 7's historical row. That is precisely the honest discharge the ruling said did not exist, and analyze itself now prints it as the preferred option over `measure --cycle 7`.
+
+I did not establish whether the flag is new or was simply missed on 2026-09-05; either way the option is available today.
+
+WHAT IT CHANGES: cycle 20 measured all 12 metrics at target with every error 0. all_targets_met is withheld solely by this flag. Discharging it would let analyze report all-targets-met, which during the build act with tickets still open means "keep building" and is not itself terminal - but it is the run's completion signal and I will not move it on my own reading of a ruling you made.
+
+NOT BLOCKING. The run continues either way and I am not waiting on this.
+- **proposed** [UNVERIFIED PROPOSAL — nothing checked this against the code]: Authorize discharging the flag with 'measure --cycle 20 --clears-remeasure 7', which records at cycle 20 and leaves cycle 7's historical row untouched — or confirm ESC-027 stands as ruled, in which case say so and I will keep reporting the flag every cycle as you originally directed.
+  - **not checked**: NOT STATED — the escalator did not say what they left unverified; silence here is not a claim of completeness
+- **decision**: GRANTED by Hank, 2026-09-06, in session, verbatim: "I Authorize it." — said in direct reply to the message whose only "Waiting on you" item was ESC-030 and which named the exact resolve command, so it authorizes the discharge and nothing wider.
+
+WHAT WAS AUTHORIZED: discharging pending_remeasure=[7] with `measure --cycle 20 --clears-remeasure 7`. That measures the tree as it stands now and records the row under cycle 20, where it is true; cycle 7's historical row is left byte-untouched. It is NOT `measure --cycle 7`, which would have written today's values into a historical trend point, and that distinction is the whole reason this needed a person.
+
+WHAT THIS SUPERSEDES: ESC-027, ruled 2026-09-05, which decided the flag STAYS. That ruling's recorded reason was that no honest discharge existed — "measure cannot be pointed at a past ref, and the only available command would write today's values into cycle 7's row." The premise was false: `--clears-remeasure N` exists and analyze prints it as the preferred option. ESC-027's DECISION is superseded; its REASONING is not being called wrong on the facts available that day.
+
+WHAT I STILL HAVE NOT CHECKED, stated because the ESC-030 record went in with `not checked: NOT STATED` and that was my omission: whether `--clears-remeasure` postdates the 2026-09-05 ruling or was present and missed. Nothing turns on it for this decision — the flag is available today either way — but it is the difference between "the harness improved" and "the previous session did not read --help", and I did not establish which.
+
+EFFECT ON THE TERMINAL SIGNAL: cycle 20 measured all 12 metrics at target with every error 0, and this flag was the only thing withholding all_targets_met. With it discharged, analyze may now report all-targets-met. During the build act with 118 tickets still open that means KEEP BUILDING; it is not termination, and it will not be reported as such.
 
 ### ESC-029 · frozen-test · `.swarm-loop/acceptance/test_e1_foundation.py + test_e4_store_agent.py — 11 tests whose fixtures predate T-306's rule` — resolved 2026-09-05T19:08:57
 

@@ -4,7 +4,7 @@
   "audit_loops": 3,
   "audit_loops_completed": 0,
   "clean_audit": false,
-  "current_cycle": 19,
+  "current_cycle": 20,
   "autonomy": "approve-cycle-1",
   "push_remote": "when-clean",
   "stall_limit": 3,
@@ -149,6 +149,16 @@
       "changed": true,
       "tracked_files": 809,
       "codebase": "9d9caf18c1b1ff802315eb25e027117d88ee387f447ad918a034898d4723622d"
+    },
+    {
+      "cycle": 20,
+      "head": "e7f8f6c39ee468561a1ab55d7dd4f3dd84c5e02f",
+      "changed": true,
+      "tracked_files": 837,
+      "codebase": "4d3cd9fd92d33eef0443caf209016870376f580cdc14389f64ddbaca12b4d24f",
+      "tickets_total": 305,
+      "tickets_from_findings": 223,
+      "tickets_closed_ledger": 184
     }
   ],
   "created": "2026-08-31T23:23:23",
@@ -161,10 +171,16 @@
     "tickets.json",
     ".swarm-loop/amend-classes.json"
   ],
-  "pending_remeasure": [
-    7
-  ],
   "goal_stall_count": 0,
-  "last_retire_at": "2026-09-04T17:25:33",
-  "lane_slots": 14
+  "last_retire_at": "2026-09-06T01:21:10",
+  "lane_slots": 14,
+  "remeasure_cleared": [
+    {
+      "pending_cycle": 7,
+      "cleared_by_cycle": 20,
+      "at": "2026-09-06T01:17:21"
+    }
+  ],
+  "worktree_root_size_kb": 12698656,
+  "worktree_root_size_at": "2026-09-06T01:21:10"
 }

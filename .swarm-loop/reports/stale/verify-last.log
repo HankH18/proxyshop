@@ -1,0 +1,233 @@
+All checks passed!
+542 files already formatted
+
+╔══╗─────────▶╔╗ ╔╗      ╔╗◀───┐
+╚╣╠╝◀─────┐  ╔╝╚╗║║────▶╔╝╚╗   │
+ ║║   ╔══╦══╦╩╗╔╝║║  ╔╦═╩╗╔╝╔═╦══╗
+ ║║╔══╣╔╗║╔╗║╔╣║ ║║ ╔╬╣╔╗║║ ║│║╔═╝
+╔╣╠╣║║║╚╝║╚╝║║║╚╗║╚═╝║║║║║╚╗║═╣║
+╚══╩╩╩╣╔═╩══╩╝╚═╝╚═══╩╩╝╚╩═╩╩═╩╝
+  └──▶║║                    ▲ 
+      ╚╝────────────────────┘
+
+
+---------
+Contracts
+---------
+
+Analyzed 370 files, 1075 dependencies.
+--------------------------------------
+
+C3/S7: exchange must never import sealed-state or envelope modules KEPT
+D39: only proxyshop_support may construct a Redis client KEPT (36 ignored imports)
+
+Contracts: 2 kept, 0 broken.
+npm warn config init.author.email Use `--init-author-email` instead.
+npm warn config init.author.name Use `--init-author-name` instead.
+Success: no issues found in 313 source files
+npm warn config init.author.email Use `--init-author-email` instead.
+npm warn config init.author.name Use `--init-author-name` instead.
+........................................................................ [  1%]
+........................................................................ [  2%]
+........................................................................ [  3%]
+........................................................................ [  4%]
+........................................................................ [  5%]
+........................................................................ [  6%]
+........xxxxxx.......................................................... [  7%]
+........................................................................ [  9%]
+........................................................................ [ 10%]
+........................................................................ [ 11%]
+........................................................................ [ 12%]
+........................................................................ [ 13%]
+........................................................................ [ 14%]
+........................................................................ [ 15%]
+........................................................................ [ 17%]
+........................................................................ [ 18%]
+........................................................................ [ 19%]
+........................................................................ [ 20%]
+..................................................................x.xx.x [ 21%]
+.x.x.................................................................... [ 22%]
+........................................................................ [ 23%]
+........................................................................ [ 25%]
+........................................................................ [ 26%]
+........................................................................ [ 27%]
+........................................................................ [ 28%]
+........................................................................ [ 29%]
+........................................................................ [ 30%]
+........................................................................ [ 31%]
+........................................................................ [ 33%]
+........................................................................ [ 34%]
+........................................................................ [ 35%]
+...........................xxx.x.x...................................... [ 36%]
+...........................................xxx.x........................ [ 37%]
+........................................................................ [ 38%]
+........................................................................ [ 39%]
+........................................................................ [ 41%]
+........................................................................ [ 42%]
+........................................................................ [ 43%]
+........................................................................ [ 44%]
+........................................................................ [ 45%]
+........................................................................ [ 46%]
+........................................................................ [ 47%]
+........................................................................ [ 49%]
+..............x...xx...x.x.x.x.......................................... [ 50%]
+........................................................................ [ 51%]
+........................................................................ [ 52%]
+........................................................................ [ 53%]
+........................................................................ [ 54%]
+.................................................................x.x.... [ 55%]
+........................................................................ [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 59%]
+........................................................................ [ 60%]
+........................................................................ [ 61%]
+........................................................................ [ 62%]
+..........................................................x....xx.....x. [ 63%]
+x.x.xx.x.x.x.x.x.x.x.................................................... [ 64%]
+........................................................................ [ 66%]
+........................................................................ [ 67%]
+........................................................................ [ 68%]
+........................................................................ [ 69%]
+........................................................................ [ 70%]
+........................................................................ [ 71%]
+........................................................................ [ 72%]
+.....................................x.x................................ [ 74%]
+........................................................................ [ 75%]
+.............x.......................................................... [ 76%]
+........................................................................ [ 77%]
+........................................................................ [ 78%]
+........................................................................ [ 79%]
+........................................................................ [ 80%]
+........................................................................ [ 82%]
+........................................................................ [ 83%]
+..........................................x............................. [ 84%]
+........................................................................ [ 85%]
+........................................................................ [ 86%]
+........................................................................ [ 87%]
+........................................................................ [ 88%]
+........................................................................ [ 90%]
+........................................................................ [ 91%]
+........................................................................ [ 92%]
+........................................................................ [ 93%]
+........................................................................ [ 94%]
+........................................................................ [ 95%]
+........................................................................ [ 96%]
+........................................................................ [ 98%]
+...............xx...x.x................................................. [ 99%]
+....................................................                     [100%]
+=============================== warnings summary ===============================
+apps/buyer/svc/tests/test_repro_open_tickets.py::test_t142_the_published_row_sweep_is_armed
+apps/merchant/svc/tests/test_repro_open_tickets.py::test_t246_some_production_code_reads_the_envelope_activation_decision
+  <unknown>:209: SyntaxWarning: invalid escape sequence '\s'
+
+apps/exchange/tests/test_repro_open_tickets.py::test_the_store_agent_import_closure_probe_is_armed
+apps/exchange/tests/test_repro_open_tickets.py::test_t244_the_external_bid_door_is_reachable_from_a_served_process
+proxyshop_support/tests/test_artifact_copyset.py::test_t301_every_image_copy_set_covers_every_first_party_import_it_ships
+  /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop/services/ingest/src/er/identity.py:209: SyntaxWarning: invalid escape sequence '\s'
+    whitespace to ``\s``, so a title consisting of one zero-width space survives every
+
+proxyshop_support/tests/test_shared_runtime.py::test_worker_redis_selects_the_workers_db_over_the_url[2]
+  /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop/proxyshop_support/tests/test_shared_runtime.py:252: RedisDbCeilingUnknown: Redis at redis://127.0.0.1:1/9 did not answer `CONFIG GET databases`, so the logical-DB ceiling is UNKNOWN and PROXYSHOP_WORKER=2 was NOT confirmed to be isolated. Falling back to the assumed ceiling of 16 (override with $PROXYSHOP_REDIS_DB_COUNT). If this server really has 2 or fewer logical DBs, this client is sharing DB 2 with another worker and their FLUSHDBs will wipe each other mid-run. Confirm with `redis-cli CONFIG GET databases`.
+    return worker_redis("redis://127.0.0.1:1/9", worker=worker)
+
+proxyshop_support/tests/test_shared_runtime.py::test_worker_redis_selects_the_workers_db_over_the_url[3]
+  /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop/proxyshop_support/tests/test_shared_runtime.py:252: RedisDbCeilingUnknown: Redis at redis://127.0.0.1:1/9 did not answer `CONFIG GET databases`, so the logical-DB ceiling is UNKNOWN and PROXYSHOP_WORKER=3 was NOT confirmed to be isolated. Falling back to the assumed ceiling of 16 (override with $PROXYSHOP_REDIS_DB_COUNT). If this server really has 3 or fewer logical DBs, this client is sharing DB 3 with another worker and their FLUSHDBs will wipe each other mid-run. Confirm with `redis-cli CONFIG GET databases`.
+    return worker_redis("redis://127.0.0.1:1/9", worker=worker)
+
+proxyshop_support/tests/test_shared_runtime.py::test_worker_redis_selects_the_workers_db_over_the_url[5]
+  /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop/proxyshop_support/tests/test_shared_runtime.py:252: RedisDbCeilingUnknown: Redis at redis://127.0.0.1:1/9 did not answer `CONFIG GET databases`, so the logical-DB ceiling is UNKNOWN and PROXYSHOP_WORKER=5 was NOT confirmed to be isolated. Falling back to the assumed ceiling of 16 (override with $PROXYSHOP_REDIS_DB_COUNT). If this server really has 5 or fewer logical DBs, this client is sharing DB 5 with another worker and their FLUSHDBs will wipe each other mid-run. Confirm with `redis-cli CONFIG GET databases`.
+    return worker_redis("redis://127.0.0.1:1/9", worker=worker)
+
+proxyshop_support/tests/test_shared_runtime.py::test_worker_redis_namespaces_every_key_shape
+  /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop/proxyshop_support/tests/test_shared_runtime.py:252: RedisDbCeilingUnknown: Redis at redis://127.0.0.1:1/9 did not answer `CONFIG GET databases`, so the logical-DB ceiling is UNKNOWN and PROXYSHOP_WORKER=4 was NOT confirmed to be isolated. Falling back to the assumed ceiling of 16 (override with $PROXYSHOP_REDIS_DB_COUNT). If this server really has 4 or fewer logical DBs, this client is sharing DB 4 with another worker and their FLUSHDBs will wipe each other mid-run. Confirm with `redis-cli CONFIG GET databases`.
+    return worker_redis("redis://127.0.0.1:1/9", worker=worker)
+
+proxyshop_support/tests/test_shared_runtime.py::test_worker_redis_rewrites_keys_in_the_command_it_sends
+  /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop/proxyshop_support/tests/test_shared_runtime.py:252: RedisDbCeilingUnknown: Redis at redis://127.0.0.1:1/9 did not answer `CONFIG GET databases`, so the logical-DB ceiling is UNKNOWN and PROXYSHOP_WORKER=6 was NOT confirmed to be isolated. Falling back to the assumed ceiling of 16 (override with $PROXYSHOP_REDIS_DB_COUNT). If this server really has 6 or fewer logical DBs, this client is sharing DB 6 with another worker and their FLUSHDBs will wipe each other mid-run. Confirm with `redis-cli CONFIG GET databases`.
+    return worker_redis("redis://127.0.0.1:1/9", worker=worker)
+
+proxyshop_support/tests/test_shared_runtime.py::test_worker_redis_refuses_the_banned_global_reset
+  /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop/proxyshop_support/tests/test_shared_runtime.py:252: RedisDbCeilingUnknown: Redis at redis://127.0.0.1:1/9 did not answer `CONFIG GET databases`, so the logical-DB ceiling is UNKNOWN and PROXYSHOP_WORKER=1 was NOT confirmed to be isolated. Falling back to the assumed ceiling of 16 (override with $PROXYSHOP_REDIS_DB_COUNT). If this server really has 1 or fewer logical DBs, this client is sharing DB 1 with another worker and their FLUSHDBs will wipe each other mid-run. Confirm with `redis-cli CONFIG GET databases`.
+    return worker_redis("redis://127.0.0.1:1/9", worker=worker)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+XFAIL packages/contracts/tests/test_repro_open_tickets.py::test_a_provenance_nested_in_a_claim_value_is_not_invisible_to_the_hosted_door - T-161: _source_verdict reads only holder['provenance'], so a seller_asserted block nested inside a hook-provenanced claim's opaque `value` is neither refused on the hosted path nor flagged for verification — measured ok=True, reasons=[], requires_verification=False; remove this marker with the fix
+XFAIL packages/contracts/tests/test_repro_open_tickets.py::test_an_external_submitters_self_asserted_discount_authorisation_is_not_taken_on_trust - T-162: an external submitter's own claim of authorized_discount_pct is admitted clean by validate_bid on the external path (ok=True, reasons=[], requires_verification=False) — the store-agent's hook-ledger guard has no equivalent on this door; remove this marker with the fix
+XFAIL packages/contracts/tests/test_repro_open_tickets.py::test_the_pinned_external_bid_door_is_actually_served - T-190: exchange.openapi.json pins POST /v1/auctions/{auction_id}/bids (operationId submitExternalBid) as the signed external door, and no routes.py in the repo declares it — so validate_external_submission has no production caller and the tightened bid boundary is unreachable from outside; remove this marker with the fix
+XFAIL packages/contracts/tests/test_repro_open_tickets.py::test_the_python_door_enforces_the_date_time_format_the_typescript_door_enforces - T-194: the TypeScript door validates through ajv WITH ajv-formats, so format: date-time is enforced on all eight timestamp fields; the Python door validates through generated pydantic where they are bare str, so it admits provenance.observed_at='not-a-date' with ok=True, reasons=[] where the TS door answers schema_invalid; remove this marker with the fix
+XFAIL packages/contracts/tests/test_repro_open_tickets.py::test_the_published_denial_reason_has_an_enumerated_vocabulary - T-204: exchange.openapi.json types the 409 denial_reason as a bare {'type': 'string'} with no enum, while apps/exchange/src/accept/offer.py formats type(exc).__name__ into it and persists it into a policy_event — a client-visible vocabulary nothing pins; remove this marker with the fix
+XFAIL packages/contracts/tests/test_repro_open_tickets.py::test_the_pinned_merchant_contract_can_express_an_envelope_approval - T-240: merchant.openapi.json's PUT envelope example asks for activation: 'active' while the document declares no approval affordance at all — no header parameter, no approval field on Envelope (additionalProperties: false), and no 403 response — yet the served route refuses exactly that request with 403 approval-required; remove this marker with the fix
+XFAIL packages/store-agent/tests/test_repro_open_tickets.py::test_t175_a_total_price_under_the_envelope_floor_is_refused_like_a_unit_price_is - T-175: `PRICE_FIELD = 'unit_price'` at provenance.py:142, so `_walk` records a priced node only where it reads BOTH `product_ref` and `unit_price`. A dict-built node naming a product and stating only a `total_price` is collected by nothing — `prices` comes back `[]` — so neither the floor wall nor the depth reconciliation ever sees the number, and DESIGN.md:127 publishes `price_value` as a function of exactly that field while the C11 accepted-event payload records it verbatim. Measured: 16 of 16 admitted, against 16 of 16 refused for the identical node with the number spelled `unit_price`; remove this marker with the fix
+XFAIL packages/store-agent/tests/test_repro_open_tickets.py::test_t209_a_null_commitments_list_is_refused_by_the_store_agents_own_door_too - T-209: T-195 regenerated the model with --strict-nullable, so `offer.commitments: null` is now correctly refused `schema_invalid:offer.commitments` at the contracts door. The store agent walks `commitments` with no pydantic gate at all: `_walk`'s first statement is `if node is None: return`, so the null is skipped SILENTLY — not recorded in `unwalkable`, not refused — and a dict-built bid carrying it is admitted by enforce_bid_provenance. The two doors disagree about the same shape; remove this marker with the fix
+XFAIL packages/store-agent/tests/test_repro_open_tickets.py::test_t218_the_two_doors_agree_about_every_field_that_may_not_be_null - T-218: the cause is generic, not specific to commitments. `_walk` short-circuits on ANY None while --strict-nullable made a growing set of fields non-nullable at the pydantic door, so the family is whatever the generator has tightened so far. MEASURED: 9 of the 10 fields the contracts door refuses a null for are ADMITTED by enforce_bid_provenance, with offer.product_ref the only one the two doors agree about. Every future field the generator tightens joins the family and nothing on the store-agent side notices; remove this marker with the fix
+XFAIL packages/store-agent/tests/test_repro_open_tickets.py::test_t280_a_refused_submission_the_door_could_read_is_named_in_its_own_receipt - T-280: the `malformed_submission` refusal for a mapping whose reads fail during `_snapshot` is built by `_refuse(REASON_MALFORMED_SUBMISSION)` with no `payload=`, so the receipt carries no signer_id and no nonce and cannot be tied to the submission it refused. The same file argues the opposite case ninety lines earlier for door_failed_closed — 'without it a genuine internal fault produced a receipt with no identity at all, indistinguishable in a rejection log from an ordinary policy refusal' — and every neighbouring refusal passes payload=. Measured: 6 of 6 anonymous; remove this marker with the fix
+XFAIL packages/store-agent/tests/test_repro_open_tickets.py::test_t220_the_suite_grades_depths_a_reintroduced_bound_could_hide_behind - T-220: the two tests grading 'there is no depth at which a bid stops being checked' parametrize layers as [1, 11, 13, 14, 64] and [1, 13, 14, 64] — values chosen either side of the OLD bound of 12 — so a depth bound re-introduced at 65 or beyond is invisible to the entire suite. The product code is correct; the coverage pins the fix that was made rather than the property that was promised. MEASURED: max depth graded anywhere in the package is 64, while the boundary is demonstrably still checking at 256; remove this marker with the fix
+XFAIL packages/store-agent/tests/test_repro_open_tickets.py::test_t321_each_contract_sweep_helper_has_exactly_one_implementation - T-321: the contract/served sweep helpers exist once per package with nothing enforcing that they agree. They agree today — the arming test measures it — but they have drifted once already (a regex path-normaliser in this package disagreed with the other two on `/a/{b/{c}`), and three implementations of one rule is three things to keep in step. MEASURED: the path normaliser, the published-operations extractor, the served-operations extractor, the divergence message and the contract probe app are each defined in three separate gate files, under two different spellings; remove this marker with the fix
+XFAIL apps/buyer/svc/tests/test_repro_open_tickets.py::test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_the_production_path - T-221: DEFAULT_K_ANONYMITY = 1 (profile/__init__.py:175) is a no-op floor unless PROXYSHOP_BUYER_K_ANONYMITY is set, and build_profile — the ONLY path production takes (magic_link.py:330) — never calls anonymise_cohort or k_anonymity_floor at all, so the generalisation ladder T-138 delivered is unreachable and a rotated pseudonym still publishes a byte-identical tuple; remove this marker with the fix
+XFAIL apps/buyer/svc/tests/test_repro_open_tickets.py::test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session - T-163: InMemorySessionStore.open (auth/sessions.py:170) refuses only on the PSEUDONYM_PREFIX and holds no vault reference at all, so any 'psn-'-prefixed string — including 'psn-' glued onto the buyer's own email — opens a session that authenticates GET /buyer/profile; the pseudonym is a bearer credential whose format is its only proof; remove this marker with the fix
+XFAIL apps/buyer/svc/tests/test_repro_open_tickets.py::test_t165_repeated_unauthenticated_magic_link_requests_are_eventually_refused - T-165: POST /buyer/auth/magic-link is unauthenticated and unmetered — no rate-limit, throttle or backoff symbol exists in auth/routes.py, and the only ceiling (MagicLinkAuth.max_pending, which magic_link.py:248 itself calls 'not a rate limiter') never fires for a repeated address because each request supersedes the last, so 20 requests mail 20 live login tokens to one mailbox with pending_links pinned at 1; remove this marker with the fix
+XFAIL apps/buyer/svc/tests/test_repro_open_tickets.py::test_t140_the_production_login_path_serves_a_profile_that_reflects_the_buyer - T-140: build_auth_service() (auth/routes.py:133-134) decides the vault and nothing else — the word 'accounts' does not appear in that module at all — so production always gets the empty default InMemoryAccountDirectory (magic_link.py:193), and the ONLY non-test writer of a buyer record in the tree is redeem's self.accounts.upsert(email, {'email': email}) (magic_link.py:304). There is no production populator, so a record can never carry anything the login gesture did not already know, and a service rebuilt as a restart would rebuild it has forgotten every buyer; remove this marker with the fix
+XFAIL apps/buyer/svc/tests/test_repro_open_tickets.py::test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_store_table - T-142: publish_profile (profile/__init__.py:1378) is the ONLY writer of app.buyer_accounts and has zero production callers — an AST scan of all 269 non-test modules finds its own def and nothing else — while apps/buyer/compose.yaml:32 already hands the buyer service a PROXYSHOP_PG_DSN_APP that no line of apps/buyer reads. Nothing outside the buyer service references app.buyer_accounts either, so R5's 'the BuyerProfile handed to stores' is handed to nobody: GET /buyer/profile needs an X-Buyer-Session header only the buyer holds; remove this marker with the fix
+XFAIL apps/exchange/tests/test_accept_denials.py::test_t264_an_unusable_registered_domains_source_leaks_no_memory_address - T-264: the landed fix is a CALLABILITY check on registered_domains, and T-264's own recorded reproduction is a value that RAISES ON USE — which passes that check. Measured at HEAD: a lookup raising TypeError, one raising KeyError(<object>), and one ANSWERING with an object all render '<object object at 0x…>' through provider.py:1100-1106 and offer.py:541 into denial_reason, the persisted policy_event and the 409 body. Remove this marker with the fix
+XFAIL apps/exchange/tests/test_accept_denials.py::test_t326_an_unusable_code_creator_leaks_no_memory_address - T-326: providers.py:110 formats f'injected code creator {creator!r} …' — the byte-identical shape T-264 repaired one file over, on the sibling injected argument. Measured at HEAD: accept(..., code_creator=object()) yields 'checkout_refused: CheckoutCreatorError: injected code creator <object object at 0x…> …', persisted in a policy_event and republished verbatim in the 409 body because checkout_refused is a DECLARED code, so _denied never re-labels it. Remove this marker with the fix
+XFAIL apps/exchange/tests/test_accept_denials.py::test_no_injected_collaborators_repr_reaches_any_denial_sink - The property both tickets are instances of, stated once over every collaborator: registered_domains, code_creator, eligibility AND the offer the bidding store wrote. Measured 13 leaking cases of 18 at HEAD, across four f-string sites — checkout/providers.py:110, checkout/provider.py:1103-1105, checkout/codes.py:187+224 and eligibility/__init__.py:175+194 — every one amplified by the pass-through at accept/offer.py:541. A sanitising pass inside reasons.denial_reason() closes twelve of the thirteen; the thirteenth is the BYPASS — accept/gate.py::_denial_reason returns a reason that already names its declared code VERBATIM and never calls denial_reason() at all, so that site needs its own repair. Remove this marker with the fix
+XFAIL apps/exchange/tests/test_accept_denials.py::test_t325_no_tickets_gate_is_selected_only_by_another_tickets_nodes - T-325: amendment 19 repointed T-266 and T-296 at test_t312_* nodes, which are T-312's own tests, and amendment 18 gave T-312 the selector `-k test_t312` — which selects both. Measured at HEAD over all 292 tickets: 33 selectors name a test_t<NNN> node and exactly 2 of them name only ANOTHER ticket's, so fixing T-312 turns T-266's and T-296's gates green while neither ticket is resolved. Remove this marker with the fix
+XFAIL apps/exchange/tests/test_repro_open_tickets.py::test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code - T-158: accept() stamps `accepted_bid_ref` on the auction OBJECT it is handed and persists nothing, so two requests that each load the same auction record and never save it back both pass the one-accept guard and mint two live single-use discount codes for one purchase; remove this marker with the fix
+XFAIL apps/exchange/tests/test_repro_open_tickets.py::test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes - T-312 (exchange half): exchange.main.create_app() serves POST /auctions, GET /auctions/{auction_id} and POST /auctions/{auction_id}/accept, while the published contract declares GET /auctions/{auction_id}/shortlist, POST /internal/outcomes and POST /v1/auctions/{auction_id}/bids — all three measured 404 — and declares nothing at all for the GET /auctions/{auction_id} the app does serve; remove this marker with the fix
+XFAIL apps/exchange/tests/test_repro_open_tickets.py::test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publishes - T-312 (trust half): trust.main.create_app() serves only the six raw-ledger /events operations, while the published contract declares GET /snapshot, GET /stores/{store_id}/trust and POST /feedback/{order_ref} — all three measured 404 — and declares none of the five read-side /events operations the app does serve; remove this marker with the fix
+XFAIL apps/exchange/tests/test_repro_open_tickets.py::test_t270_no_field_of_any_request_can_produce_a_5xx - T-270: a non-finite JSON literal anywhere in an unauthenticated request body returns HTTP 500. pydantic rejects the value correctly, and then FastAPI's request_validation_exception_handler builds a 422 body that ECHOES the offending input back, where json.dumps raises 'Out of range float values are not JSON compliant'. The defect is the error RENDERER, so it fires on fields of every type (str, int, float, dict, list) and on both served POST routes; remove this marker with the fix
+XFAIL apps/exchange/tests/test_repro_open_tickets.py::test_t293_an_unusable_code_creator_does_not_render_a_memory_address - T-293: checkout/providers.py:110 formats an arbitrary injected code creator with `{creator!r}`, so a misconfigured `code_creator` puts a live CPython memory address into the 409 body an unauthenticated caller reads AND into the persisted policy_event. This is T-264's defect on the path T-264 did not cover; the same file already fixed the class for T-215 two lines further down; remove this marker with the fix
+XFAIL apps/exchange/tests/test_repro_open_tickets.py::test_t294_a_bid_the_exchange_just_returned_can_be_accepted - T-294 (RESTATED, and the ticket's premise has changed under it). The recording half is DONE: POST /auctions now writes what it collected into app.state.auction_bids (auction/routes.py::collected_bid_records), and an auction's own shortlist bid mints a real code — apps/exchange/tests/test_composition_root.py drives exactly that over a real socket. What this node still fails on is its CORPUS, not the bid store: `_t294_corpus` wires no trust snapshot and its store agents' offers carry no checkout_url, so since T-310 put the ranker on the served path every one of its candidates is excluded `blacklist_unreadable` + `off_domain_checkout` and `ranked` comes back []. The book holds only candidates the ranking ADMITTED, because recording the excluded ones was measured to let a blacklisted store be bought for a live code (409 -> 200 with PSX-…), and nothing on the accept path re-reads the trust snapshot. So the 200 this node demands is now reachable only through that hole. Closing it needs `_t294_corpus` to wire a trust snapshot and emit an on-domain checkout_url — an edit to this file, which the fixing lane was not scoped to make; remove this marker with that corpus change
+XFAIL apps/exchange/tests/test_repro_open_tickets.py::test_t244_the_external_bid_door_is_reachable_from_a_served_process - T-244: `receive_bid` — the Tier-2 door with six gates that the frozen E4 suite exercises directly — has ZERO production call sites, and the module defining it is not in the import closure of the store agent's own served app (which builds to store_agent + store_agent.main and mounts no routes at all). So e4_store_agent_passing counts a signed-external-bid capability that no running process performs; remove this marker with the fix
+XFAIL apps/merchant/svc/tests/test_repro_open_tickets.py::test_t285_every_ast_parse_in_this_file_goes_through_the_muting_helper - T-285: `_parse` (this file) wraps ast.parse in catch_warnings/simplefilter('ignore', SyntaxWarning) and its docstring names exactly why — services/ingest/src/er/identity.py has \s in a non-raw docstring — but the two call sites it was written to replace (in test_t246 and test_t239) still call ast.parse bare, so the warning is still charged to test_t246_some_production_code_reads_the_envelope_activation_decision. Worse than noise: under -W error::SyntaxWarning CPython raises the escalated warning as a SyntaxError, which the bare site's `except SyntaxError: continue` swallows, silently dropping identity.py from a scan that claims to walk every product file; remove this marker with the fix
+XFAIL apps/merchant/svc/tests/test_repro_open_tickets.py::test_t317_every_route_the_merchant_serves_is_in_its_published_contract - T-317: the merchant serves GET /install, GET /install/callback and GET /install/shops (apps/merchant/svc/src/install/routes.py:145, :173, :248) and none of the three appears in packages/contracts/openapi/merchant.openapi.json. Undeclared served routes are a security and review surface: nothing in the contract review process ever looks at them. test_merchant_hardening.py:413-417 hard-exempts exactly these three while its own docstring justifies only 'the install's own OAuth pair' — /install/shops is an administrative JSON endpoint, not a browser redirect; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t172_an_undeclared_docker_test_is_widened_to_the_whole_stack - T-172: service_markers.services_for widens an item that declares no service to the whole stack, so 8 Postgres-only docker tests — 5 schema-grants, 2 role-password, 1 closed-loopback — are skipped at exit 0 by a Redis-only or neo4j-only outage; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer - T-303 (a): the sim computes snapshot['delistings'] and drops it — no blacklisted or blacklist_expired event is ever handed to trust.events' append seam, so the delisting decision is sealed nowhere an exchange, an auditor or an appeal can read it; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one - T-303 (b): apps/exchange/src/auction/routes.py._eligibility lazily builds an empty StaticSellerEligibility and no product caller ever passes configure_auctions a trust-backed source, so the served exchange denies every store 'static-eligibility' and cannot tell an honest store from a delisted one; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t332_a_delisting_event_never_names_a_store_that_is_not_a_store - T-332: delisting.py guards `store_id is None` but not '' or '   ', while the sibling identity path is normalised, so a blacklisted event naming NO STORE is emitted, validates, appends, and is then invisible to every store_id-filtered read the auditor it exists for would use; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t333_the_delisting_producer_validates_what_it_produces - T-333: apps/trust/src/snapshot/delisting.py builds blacklisted / blacklist_expired ledger events and never calls validate_ledger_payload, while four sibling producing boundaries do — so nothing checks its payloads on the production path, which is how T-332's blank store_id reaches a written row; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t320_a_lapsed_listing_expires_even_when_the_registry_only_answers_lookups - T-320: _lapsed_reasons reads the registry with `list(blacklist)`, so a lookup-only implementation — the shape a Postgres-backed app.seller_blacklist adapter has — yields zero blacklist_expired events and no listing is ever re-opened; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t319_the_status_code_analysis_follows_every_binding_that_carries_the_value - T-319: _names_holding_a_status_code propagates taint only through Assign/AnnAssign/AugAssign/NamedExpr, so a for-loop target, a helper parameter and a with-statement target all keep the dead 503 arm while T-166's gate reports it gone — a live regression guard that passes on the defect it exists to catch; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t319_the_status_code_analysis_does_not_taint_the_object_it_assigns_through - T-319 (over-taint half): _names_holding_a_status_code walks the whole assignment target with ast.walk, so `self.code = response.status_code` taints the bare name `self` and every later `if self.<anything>` reads as a status-code branch; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t289_reordering_the_dsn_precedence_tuple_turns_some_grader_red - T-289: test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one derives its expectation from DEFAULT_DSN_ENV itself, so reordering the tuple reorders the expectation with it and the derived grader that presents itself as the comprehensive precedence defence catches ZERO of sabotage S3a; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t181_some_live_test_opens_a_connection_with_both_dsn_variables_set - T-181: the live connected-principal test clears every DSN variable and sets exactly one, so it defends the OMISSION T-151 filed and never the ORDER — no test anywhere opens a real connection with BOTH the per-role and the generic app DSN set; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t290_the_binding_shim_gate_asserts_on_the_bodies_it_reads - T-290: T-167's gate computes `bodies = {path.read_bytes() for path in copies}` and never asserts on it — the name appears only in a failure message — so the 'nothing enforces that the copies stay identical' half of T-167 is graded by nothing; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t291_the_datastore_fixture_roster_is_derived_and_not_typed - T-291: T-212's _DATASTORE_FIXTURES is a hand-typed frozenset of nine names, so a datastore fixture added later under a new name silently escapes the gate — six already do (events_dsn, events_running, events_service, ledger_roles, ledger_second_database, neo4j_session); remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t275_the_kind_detector_reads_emissions_and_not_prose - T-275: _KIND_EMISSION matches only QUOTED literals, so a fix written in this repo's own ledger-writer house style (kind=LedgerEventKind.blacklisted) leaves the strict gate red forever, while a bare COMMENT or docstring naming the literal turns it green with no code change — both failure directions at once; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t302_every_frozen_ledger_kind_has_something_that_produces_it - T-302: SIX frozen ledger kinds are reserved in every vocabulary and produced by no product code — auction_closed, auction_opened, checkout_redirect, order_fulfilled, policy_event and shown. The auction lifecycle accounts for three of them, so the ledger cannot reconstruct an auction it ran; remove this marker with the fix
+XFAIL apps/trust/tests/test_repro_open_tickets.py::test_t261_the_trust_snapshot_it_publishes_is_actually_served - T-261: T-064's acceptance 3 — the exchange client caches the trust snapshot and refreshes on a version bump — has no server half at all: /snapshot is published in trust.openapi.json and apps/trust/src/main.py mounts no snapshot router, so there is nothing for a client to cache; remove this marker with the fix
+XFAIL services/ingest/tests/test_repro_open_tickets.py::test_t312_ingest_serves_exactly_the_operations_its_contract_publishes - T-312 (ingest half): the published POST /refresh/{store_id} is served by nothing (measured 404) while the six operations ingest.main.create_app() does mount — the er and extraction routers — appear in no contract at all, so the divergence between the served surface and the published one runs in BOTH directions; remove this marker with the fix
+XFAIL services/ingest/tests/test_repro_open_tickets.py::test_t254_the_claim_projection_is_produced_by_the_running_service - T-254: ExtractedClaim.as_claim() — DESIGN's Claim{key, value, provenance}, the projection T-021's objective 'decompose to atomic Claims' names — is called by nothing the running ingest service imports, while its sibling as_attribute() is called from extraction/pipeline.py and reaches the graph; so ingestion writes AttributeValues and the Claim projection is defined but never produced; remove this marker with the fix
+XFAIL services/shopify-stub/tests/test_repro_open_tickets.py::test_the_stub_url_fixture_does_not_turn_a_broken_import_into_a_skip - T-205: the root conftest's shopify_stub_url fixture catches (ImportError, AttributeError) around `__import__('shopify_stub.app')` and calls pytest.skip, so a broken stub import reaches the reporter as a skip rather than an error — and the one test written to 'convert that silent skip into a failure' requests the same fixture and skips with it; remove this marker with the fix
+XFAIL services/sim/tests/test_repro_open_tickets.py::test_t242_run_grades_every_event_its_own_ledger_sink_holds - T-242: run_simulation never reads its own ledger_sink — the conformance report is built from raw_events (the accept path) only, so every event the auction state machine emits is ungraded, including the `accepted` body that is malformed on that path and well-formed on the accept path in the same run; remove this marker with the fix
+XFAIL proxyshop_support/tests/test_repro_observability.py::test_t308_an_info_record_from_a_service_logger_reaches_an_installed_handler - T-308: nothing in apps/, packages/, services/, proxyshop_support/ or scripts/ ever configures application logging — no basicConfig, no dictConfig, no root handler, no structlog (which is a declared dependency with zero importers) — so a freshly-started service process has root handlers=[] at effective level 30. Every INFO call site in the product is dropped before a record is even constructed: the lossy-pixel notice (collector/routes.py:64), the un-minted code (codes/routes.py:133), the envelope that stays in shadow (onboarding/routes.py:154), the webhook handed to the default sink (install/webhooks.py:404) and the recorded feedback (feedback/submission.py:493); remove this marker with the fix
+XFAIL proxyshop_support/tests/test_repro_observability.py::test_t308_every_service_package_has_at_least_one_logging_call_site - T-308: logging exists in exactly two of the seven HTTP-serving packages. Measured files containing a real logging call: buyer_svc 7/34, merchant_svc 5/37, and then exchange 0/42, trust 0/33, ingest 0/37, store_agent 0/20, shopify_stub 0/12 — the auction, the trust scores, the crawl, the bidding agent and the Shopify surface emit nothing at any level, so an operator cannot follow a request through the system at all; remove this marker with the fix
+XFAIL proxyshop_support/tests/test_repro_open_tickets.py::test_t210_lock_contention_and_a_product_defect_do_not_share_an_exit_status - T-210: a run that fails only because another worker held the Neo4j lock exits 1, exactly like a run that failed on a real product defect, so the frozen build_succeeds probe — a zero/non-zero test on `make verify` — records 0 for a machine condition and nothing downstream can tell the two apart. Remove this marker with the fix
+XFAIL proxyshop_support/tests/test_repro_ticket_graph.py::test_t262_no_open_ticket_is_graded_by_a_file_another_ticket_owns - T-262: not-yet-closed tickets graded by a file they cannot write. T-087's verify runs `docs/tests/test_runbook.py`, a path its own scope (`docs/demo/shopify-onboarding-extension.md`) forbids it to create, that sits inside open T-085's `docs/tests/**`, and that no other ticket is graded by — so T-087 cannot write its own grader and would inherit an unearned green from a test another lane wrote. The violator set is MEASURED LIVE and the failure output is the authority on it, deliberately rather than pinning a count here: it read four on this branch's base — T-087 and T-228 by ownership, T-130 and T-134 by whole-suite — and five on main a few commits later, freeze-log amendment 26 having repointed T-158's gate off a `test_repro_*.py` path that the shared-grader allowlist exempts and onto `apps/exchange/tests/test_t158_acceptance_claim.py`, which closed T-030, T-031, T-033 and T-036 own. Remove this marker with the scope amendment
+6263 passed, 1 deselected, 53 xfailed, 11 warnings in 420.01s (0:07:00)
+SELECTION: 1 deselected, 0 skipped  <-  pytest -q -m not needs_model
+           Those tests did NOT run. A green gate is evidence only about what it
+           selected — if your ticket's own acceptance tests are in that count, this
+           gate has not graded them (T-117).
+npm warn config init.author.email Use `--init-author-email` instead.
+npm warn config init.author.name Use `--init-author-name` instead.
+
+ RUN  v4.1.11 /Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop
+
+
+ Test Files  16 passed (16)
+      Tests  870 passed (870)
+   Start at  00:04:37
+   Duration  2.73s (transform 1.07s, setup 1.21s, import 2.38s, tests 4.12s, environment 7.55s)
+
+check_verify_contracts:
+  6 ticket verify path(s) not created yet (expected on a fresh scaffold):
+    T-024  services/ingest/tests/test_refresh.py
+    T-051  apps/merchant/svc/tests/test_collector.py
+    T-083  e2e/test_learning.py
+    T-084  e2e/test_dishonest.py
+    T-086  e2e/test_onboarding.py
+    T-087  docs/tests/test_runbook.py
+  OK: pytest-config, test-path-filter, schema-package, non-empty-test-dir, raw-Redis-client and unique-fixture-name contracts all hold.
+OK: all

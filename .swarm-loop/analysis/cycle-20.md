@@ -1,0 +1,40 @@
+# Cycle 20/102 analysis
+
+Targets met: 12/12
+
+Harness integrity at analysis time: **intact** — every frozen file re-hashed against `.swarm-loop/manifest.json`, which is itself reconciled against the append-only `.swarm-loop/freeze-log.jsonl`.
+
+> **SELECTION TRACKING IS UNAVAILABLE for 12 metric(s): `acceptance_pass_rate`, `acceptance_collected`, `build_succeeds`, `spec_criteria_passing`, `e1_foundation_passing`, `e2_ingestion_passing`, `e3_exchange_passing`, `e4_store_agent_passing`, `e5_merchant_passing`, `e6_trust_passing`, `e7_buyer_passing`, `e8_proofs_passing`.** Read every 'no selection regression' above as NOT MEASURED, never as clean.
+> `measure` parses the metric command's stdout AND stderr together, and records the selected/deselected columns when EITHER carries pytest's summary. These metrics emit it on neither — a frozen wrapper that captures pytest into its own log file and prints only the bare number leaves nothing to parse — so both columns are written empty for them and the regression comparison can never fire for them at any cycle.
+> This is not the same as `0 deselected`: a missing token means zero and IS a baseline; an un-parseable output means UNKNOWN and is not. The deselection backstop is the only one of the three enforcement points that can see a filter added after the freeze — this run has two.
+> **TURNING IT BACK ON NEEDS NO CODE CHANGE HERE, AND NO NEW CHANNEL.** Have the wrapper echo pytest's own summary line to STDERR — `3 passed, 2 deselected in 0.10s` — and keep printing the bare number on stdout. Measured against this module: stdout `0` plus that stderr line records selected=3, deselected=2, and `float(<last stdout line>)` is untouched, so SKILL.md's bare-number contract holds. Never fix it by printing raw pytest to STDOUT — that is the one change that breaks the contract.
+
+Acceptance coverage (the frozen suite vs the ticket graph):
+- graded_ticket_fraction: 12.1%  (37 of 305 ticket(s) carry >=1 frozen test)
+- marked_test_fraction:   100.0%  (120 of 120 scanned test(s) name a ticket; 0 grade nothing in particular)
+- 268 ticket(s) carry NO frozen test at all: T-013, T-024, T-031, T-036, T-054, T-082, T-083, T-084, T-086, T-087, T-100, T-101 …
+
+> **268 TICKET(S) ARE GRADED BY NOBODY BUT THEIR OWN AUTHOR.** ALL TARGETS MET is withheld while this stands.
+> Measured on a real run: the graph grew 44 -> 263 tickets while the frozen suite added ZERO test files, so the graded fraction fell 84% -> 14.1% and 76 tickets closed with no frozen test grading them. A metric at target says the tests that exist pass; it says nothing about the tickets no test names.
+> **The remedy is not an amendment, but it is not unattended either.** Write tests marked `@pytest.mark.ticket("<id>")` under the frozen acceptance path and run `swarmloop.py freeze --extend`, which adds files and metric ids only and refuses any edit to a frozen byte. It requires `--user-authorized`: a minted file is taken on its FILENAME and its module-level code runs at import, so a human reads it first. Pass `--allow-ungraded-tickets` to analyze only once you have decided the gap is acceptable, and say so in the cycle report.
+> Ungraded: T-013, T-024, T-031, T-036, T-054, T-082, T-083, T-084, T-086, T-087, T-100, T-101, T-102, T-103, T-104, T-105, T-106, T-107, T-108, T-109, T-110, T-111, T-112, T-113, T-114, T-115, T-116, T-117, T-118, T-119, T-120, T-121, T-122, T-123, T-124, T-125, T-126, T-127, T-128, T-129 …
+
+> **GOALPOSTS MOVED 36x — this trend is not against a single fixed target.** Last amendment 2026-09-06T00:04:53: 'ESC-028 standing class, verify fields only: 24 tickets repointed from the NO-GATE placeholder at graders that already exist, are merged, and are now measured red.\n\nTHE GRADERS. Each of the 24 is an xfail(strict=True) reproduction its own lane wrote in the house pattern (an arming node plus one or more property nodes) and never wired back into the graph, so the ticket carried the placeholder and could not be dispatched. Files: packages/store-agent, apps/trust, apps/exchange, services/ingest and apps/merchant/svc test_repro_open_tickets.py.\n\nTHE MEASUREMENT, in two passes, because the first was not sufficient. Pass 1 was collect-only over all 299 tickets: 149 pytest-shaped, 143 resolving, 6 naming files that have never existed in git history, 0 collection errors. That proves node ids resolve and nothing more. Pass 2 executed all 25 candidates sequentially on a dedicated free datastore index, one at a time, with the override confirmed to survive the shell and reach the interpreter. 24 exited non-zero as genuine reds with collected node counts matching expectation exactly; none hung; none selected an empty set. red-check over the AMENDED graph then re-measured all 24 against a clean checkout of main: 24 real, 0 VACUOUS, 0 weak, 0 no-gate, 0 SKIPPED.\n\nFOUR OF THE 24 WERE WIDENED BEFORE SEALING, and this is the substantive part rather than a formality. T-244, T-270, T-293 and T-294 each have an arming companion whose NAME does not carry the ticket token, so a -k on the token alone never selected it. As originally proposed those four were single-node gates that could go green by iterating an empty corpus with nothing to catch it, which is the exact failure the arming convention exists to prevent. Each now selects its arming node by name alongside the ticket token, and red-check confirms all four still red.\n\nONE CANDIDATE WAS REFUSED. T-051 exited 0: both of its frozen acceptance nodes pass. Under this grant a gate may never be pointed at a test chosen because it passes, so T-051 is NOT sealed and is recorded instead as a closure candidate, which is the staleness answer this probe exists to produce.\n\nTWO WHOLE CLASSES WERE REFUSED for the same reason, and they are larger than what was accepted. A 46-ticket tier whose ids appear only in prose was rejected: those are green non-xfail regression tests for fixes that already landed, so repointing there converts a placeholder into an instant pass. T-024 and T-084 were rejected individually on the same ground.\n\nADVISORY CARRIED FORWARD, NOT RESOLVED HERE. red-check reports that all 24 gates run a shared per-package reproduction file the ticket does not declare in its owns field, so each gate can move on work its ticket does not own and two such tickets serialise behind a dependency neither declares. That is an ownership-declaration gap, not a gate defect, and it is a scheduling constraint: one lane at a time per shared reproduction file. Separately, all 24 are UNANSWERED for frozen-acceptance gate scope, because no frozen node carries their marker at all.\n\nHarness intact at 18 files before and after; no metric, target, direction, command, acceptance test, product file or dependency touched; no record added or removed; 24 changed lines, every one a verify field.'. Full record: `.swarm-loop/freeze-log.jsonl`.
+
+| metric | verdict | as of | value | target | error | slope/cycle | proj. final error |
+|---|---|---|---|---|---|---|---|
+| acceptance_pass_rate | at_target | cycle 20 | 100 | 100 | 0 | – | – |
+| acceptance_collected | at_target | cycle 20 | 120 | 120 | 0 | – | – |
+| build_succeeds | at_target | cycle 20 | 1 | 1 | 0 | – | – |
+| spec_criteria_passing | at_target | cycle 20 | 8 | 8 | 0 | – | – |
+| e1_foundation_passing | at_target | cycle 20 | 10 | 10 | 0 | – | – |
+| e2_ingestion_passing | at_target | cycle 20 | 8 | 8 | 0 | – | – |
+| e3_exchange_passing | at_target | cycle 20 | 21 | 21 | 0 | – | – |
+| e4_store_agent_passing | at_target | cycle 20 | 20 | 20 | 0 | – | – |
+| e5_merchant_passing | at_target | cycle 20 | 10 | 10 | 0 | – | – |
+| e6_trust_passing | at_target | cycle 20 | 26 | 26 | 0 | – | – |
+| e7_buyer_passing | at_target | cycle 20 | 9 | 9 | 0 | – | – |
+| e8_proofs_passing | at_target | cycle 20 | 8 | 8 | 0 | – | – |
+
+_Note: the stored `error` column disagreed with the current target for acceptance_collected, e3_exchange_passing, e4_store_agent_passing, e6_trust_passing, e8_proofs_passing; every error above is recomputed from `value` against the target in force now, never read from history._
+
