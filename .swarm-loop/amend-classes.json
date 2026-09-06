@@ -5,5 +5,12 @@
     "fields": ["verify"],
     "grant": "ESC-028",
     "reason": "Granted by Hank 2026-09-05 ('Approved. Go for it.') on ESC-028. Repoint a ticket's verify field at a grader that ALREADY EXISTS, is merged, and has been measured. Never to invent a gate, never to point a gate at a test chosen because it passes, and never any other field of the ticket graph. The narrowness is the grant: 143 of 296 tickets carry the NO-GATE placeholder while real graders exist for some of them, which leaves done work unbankable and ready work undispatchable for the same one-line reason. NOTE, because INSIDE must not be read as harmless here: `verify` is not an inert value, it IS the gate red-check executes, so a structurally-INSIDE delta can still be a substantively bad one. INSIDE means only that the delta touched no other field. Every use of this class states the grader it points at and the measurement that shows the grader exists and runs."
+  },
+  "esc-029-status-correction": {
+    "path": "tickets.json",
+    "kind": "json-field-whitelist",
+    "fields": ["status"],
+    "grant": "ESC-029",
+    "reason": "Granted by Hank 2026-09-06 ('if there's anything else that you need overridden, let me know right now', and 'put those in the prompt as well... all of your hopes, dreams, and desires, put them all into a prompt so I can have one agent do all of it'). Correct a ticket's `status` field ONLY where the recorded status is demonstrably FALSE -- specifically, where a ticket is recorded closed while its own defect STILL REPRODUCES on the current tree. Every use must record the MEASUREMENT that proves the defect reproduces: the command run and its output, taken at the head being judged. The status moves to reflect reality, never the reverse. THIS IS NOT PERMISSION TO CLOSE TICKETS, and that is the limit that matters: marking something closed because it looks done is the exact move this class forbids, so a status edit TOWARD closed is outside it however plausible the work looks -- closure is earned through the gate, not through this grant. It touches no other field of the ticket graph. THE LIVE CASE IT WAS GRANTED FOR: T-150 is recorded `status: closed`, yet its node still carries a strict xfail marker and still genuinely fails under `--runxfail` -- a served auction driven end-to-end through `exchange.main.create_app()` puts no event into the trust ledger by any channel. A ticket recorded closed whose defect reproduces is a false green in the ledger itself, which is the one place a false green cannot be caught by re-running the suite."
   }
 }
