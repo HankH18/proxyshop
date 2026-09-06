@@ -650,3 +650,249 @@ def test_an_overflowing_exponent_is_refused_on_the_way_in() -> None:
     # And the finite neighbours must still parse, or the refusal is just a broken parser.
     assert _submission_of(b'{"a":1e308}') == {"a": 1e308}
     assert _submission_of(b'{"a":0.5,"b":-3}') == {"a": 0.5, "b": -3}
+
+
+# =====================================================================================
+# Gaps an adversarial review found in the gates ABOVE, not in the route.
+#
+# Every node below was added because a mutation of shipped production code left the whole
+# file green. They are additions: no assertion above was changed, because none of them was
+# wrong — they were narrow, and a narrow gate that reads as a broad one is how a defect gets
+# reintroduced under a green suite.
+# =====================================================================================
+
+
+def test_an_oversized_store_id_is_bounded_and_not_echoed() -> None:
+    """`store_id` is bounded, and nothing above noticed when the bound was removed.
+
+    Deleting ``"store_id"`` from ``BOUNDED_IDENTIFIERS`` — a bound this door added
+    deliberately — left all eleven earlier nodes GREEN, because none of them ever submitted
+    an oversized one.
+
+    The harm is real and the status code never changes, so no status-only assertion could
+    catch it. `store_id` is interpolated verbatim into ``trust_snapshot_unavailable:<store_id>``
+    and published in ``reasons``. Measured with the bound removed and `signer_id` held short so
+    the surviving bounds could not mask it: a 204,800-character `store_id` produced a 400 whose
+    body was **204,932 bytes**, with ``reasons[0]`` 204,827 characters long. With the bound in
+    place the same request is a 400 of 159 bytes.
+
+    So this asserts the RESPONSE SIZE as well as the reason code — the refusal must not carry
+    the thing it is refusing.
+    """
+    app = _app(records={LOOSE: _Record(roster=_roster(50.0), deadline=time.time() + 300)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    payload = _payload(LOOSE, nonce="store-1", store_id="s" * 204800)
+    response = _submit(client, LOOSE, payload)
+
+    assert response.status_code == 400, f"answered {response.status_code}"
+    assert response.json()["reasons"] == [
+        "malformed_submission:identifier_exceeds_maximum_length"
+    ], f"refused for the wrong reason: {response.json()['reasons']}"
+    assert len(response.content) < 1024, (
+        f"the refusal is {len(response.content)} bytes; it is echoing the oversized store_id "
+        "back rather than refusing it, which is the harm the bound exists to prevent"
+    )
+
+
+def test_configuring_the_replay_memory_survives_a_concurrent_first_request() -> None:
+    """The lock on `configure_external_bids` is real, and nothing above graded it.
+
+    `_nonce_store` takes ``_NONCE_STORE_LOCK`` around its lazy creation, and
+    `configure_external_bids` was changed to write under the SAME lock. Removing that `with`
+    left all eleven earlier nodes green: the concurrency node races first REQUESTS against
+    each other and never races a request against the operator wiring the store, which is the
+    only window this lock closes.
+
+    Driven deterministically rather than by timing luck: a request is parked inside
+    ``NonceStore.__init__`` (so it is mid-creation, holding the lock when the fix is present),
+    the operator's ``configure_external_bids`` call is made from another thread, and only then
+    is the parked request released. Whoever ends up in ``app.state`` is then a fact about the
+    lock, not about the scheduler.
+
+    With the lock, the configure call waits and its store wins. Without it, the configure call
+    lands in the check-then-write window and the lazily-created store overwrites the
+    operator's, which is dropped on the floor — no replay hole in this ordering, but a
+    deployment that wired a durable replay memory silently does not have one.
+    """
+    import store_agent.external.nonces as nonces_module  # noqa: PLC0415
+    from exchange.external_bids.routes import configure_external_bids  # noqa: PLC0415
+
+    app = _app(records={LOOSE: _Record(roster=_roster(50.0), deadline=time.time() + 300)})
+    assert getattr(app.state, "external_bid_nonces", None) is None, (
+        "this node needs the LAZY path; the app already has a replay memory"
+    )
+
+    operator_store = nonces_module.NonceStore()  # built before the patch below
+    entered = threading.Event()
+    release = threading.Event()
+    real_init = nonces_module.NonceStore.__init__
+
+    def parked_init(self: Any) -> None:
+        real_init(self)
+        entered.set()
+        release.wait(10)
+
+    nonces_module.NonceStore.__init__ = parked_init  # type: ignore[method-assign]
+    try:
+        payload = _payload(LOOSE, nonce="cfg-race-1")
+        signature = sign_bid(payload, KEY)
+
+        def submit() -> None:
+            TestClient(app, raise_server_exceptions=False).post(
+                f"/v1/auctions/{LOOSE}/bids",
+                json=payload,
+                headers={"X-ProxyShop-Signature": signature},
+            )
+
+        requester = threading.Thread(target=submit)
+        requester.start()
+        assert entered.wait(10), "the request never reached NonceStore.__init__"
+
+        configurer = threading.Thread(
+            target=lambda: configure_external_bids(app, nonces=operator_store)
+        )
+        configurer.start()
+        time.sleep(0.05)  # let it reach (and, with the fix, block on) the lock
+        release.set()
+        configurer.join(10)
+        requester.join(10)
+    finally:
+        nonces_module.NonceStore.__init__ = real_init  # type: ignore[method-assign]
+        release.set()
+
+    assert app.state.external_bid_nonces is operator_store, (
+        "the operator's replay memory was discarded by a concurrent first request: "
+        "configure_external_bids wrote app.state outside the lock _nonce_store takes, so the "
+        "lazily-created store overwrote it"
+    )
+
+
+def test_a_body_that_is_json_but_not_an_object_is_refused_not_500() -> None:
+    """The 5xx node above is named for a universal property and graded on one family.
+
+    ``test_no_body_this_door_accepts_can_make_it_answer_5xx`` carries three witnesses and all
+    three are deep nesting, so it proves the ``RecursionError`` clause and nothing else.
+    Measured: removing the ``if not isinstance(parsed, dict)`` refusal from ``_submission_of``
+    produces LIVE 500s on ``[1,2,3]``, ``"hello"`` and ``42`` — ``_payload_and_signature``
+    calls ``.get`` on a list, a str, an int — and every one of the eleven nodes stayed green,
+    because each witness dies in ``RecursionError`` long before the ``isinstance`` check.
+
+    A JSON document that is not an object is the other way an anonymous body reaches that
+    line, so it gets its own witnesses here.
+    """
+    client = TestClient(create_app(), raise_server_exceptions=False)
+
+    for raw in (b"[1,2,3]", b'"hello"', b"42", b"true", b"null", b"[]", b"[[1]]", b"-0.5"):
+        response = client.post(
+            "/v1/auctions/a/bids", content=raw, headers={"content-type": "application/json"}
+        )
+        assert response.status_code == 400, (
+            f"body {raw!r} answered {response.status_code}; a JSON document that is not an "
+            "object must be refused, not handed to code that assumes a mapping: "
+            f"{response.text[:200]}"
+        )
+        assert response.json()["reasons"] == ["malformed_submission:body_is_not_a_json_object"], (
+            f"body {raw!r} refused for the wrong reason: {response.json()['reasons']}"
+        )
+
+
+def test_an_oversized_path_auction_id_is_refused_for_being_oversized() -> None:
+    """The existing path-length witness passes for the wrong reason.
+
+    ``test_an_identifier_the_door_retains_is_bounded`` posts a 2000-character path with a
+    payload signed for ``LOOSE``, so ``_reconciled`` answers ``_PATH_MISMATCH`` first and the
+    node's ``status_code == 400`` holds whether or not the length bound exists. Measured:
+    deleting ``if len(path_auction_id) > ceiling`` leaves all eleven nodes green.
+
+    Here the signed ``auction_id`` IS the oversized path, so reconciliation passes and the
+    only thing left that can refuse it is the length — and the reason code is asserted, not
+    just the status.
+    """
+    app = _app(records={LOOSE: _Record(roster=_roster(50.0), deadline=time.time() + 300)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    huge = "a" * 2000
+    response = _submit(client, huge, _payload(huge, nonce="path-len-1"))
+
+    assert response.status_code == 400, f"answered {response.status_code}"
+    assert response.json()["reasons"] == [
+        "malformed_submission:identifier_exceeds_maximum_length"
+    ], (
+        "an oversized path auction_id that MATCHES the signed one was refused for some other "
+        f"reason, so the length bound is not what stopped it: {response.json()['reasons']}"
+    )
+
+
+def test_the_bare_non_finite_tokens_are_refused() -> None:
+    """``parse_constant`` has no witness above; only ``parse_float`` does.
+
+    ``test_an_overflowing_exponent_is_refused_on_the_way_in`` uses ``1e400`` and friends, all
+    of which are caught by ``parse_float``. Measured: deleting
+    ``parse_constant=_refuse_constant`` leaves all eleven nodes green. The bare literals are a
+    different code path in ``json`` and this door refuses both, so both are graded.
+    """
+    from exchange.external_bids.routes import _submission_of, _UnreadableBody  # noqa: PLC0415
+
+    for raw in (
+        b'{"a":NaN}',
+        b'{"a":Infinity}',
+        b'{"a":-Infinity}',
+        b'{"a":[NaN]}',
+        b'{"a":{"b":Infinity}}',
+    ):
+        with pytest.raises(_UnreadableBody):
+            _submission_of(raw)
+
+
+def test_the_submission_ceiling_is_the_value_this_door_documents() -> None:
+    """The streaming node cannot detect a WRONG ceiling, only a wrong mechanism.
+
+    ``test_an_oversized_body_is_refused_without_being_buffered`` derives its tolerance from
+    ``MAX_SUBMISSION_BYTES`` itself, so the constant and the assertion move together.
+    Measured: setting the ceiling to 256 MiB leaves that node green while the app buffers the
+    full 8 MiB body — ``pulled = 128 of 128``, both of its assertions satisfied.
+
+    Pinning the value is the missing half. 256 KiB is the documented bound: a signed bid is a
+    few kilobytes, and the door snapshots whatever it is handed.
+    """
+    from exchange.external_bids.routes import MAX_SUBMISSION_BYTES  # noqa: PLC0415
+
+    assert MAX_SUBMISSION_BYTES == 256 * 1024, (
+        f"the ceiling is {MAX_SUBMISSION_BYTES}; the streaming gate's tolerance is derived "
+        "from this constant, so a change here silently widens that gate too"
+    )
+
+
+def test_a_lone_surrogate_cannot_reach_the_response_renderer() -> None:
+    """Starlette cannot encode a lone surrogate, and caller text reaches its renderer.
+
+    ``JSONResponse.render`` does ``ensure_ascii=False`` then ``.encode("utf-8")``, and a lone
+    surrogate raises ``UnicodeEncodeError`` there — an unauthenticated 500 in the response
+    renderer, the T-270 shape, reached by echoing a caller's own value. A caller writes one as
+    an ordinary ``\\uXXXX`` escape and ``json.loads`` accepts it into a normal ``str``.
+
+    This was NOT live: ``canonical_signing_bytes`` refuses a lone surrogate in any value and
+    any key one layer down. It is closed anyway and graded here, because "safe because
+    something in another package refuses it first" is the reasoning this door has already had
+    to retract twice — once for the overflowing exponent, once for the recursion limit.
+    """
+    from exchange.external_bids.routes import _rejected, _renderable  # noqa: PLC0415
+
+    assert _renderable("x\ud800y") == "x?y"
+    assert _renderable("store-1") == "store-1"
+
+    # The refusal path must be encodable even when the reason quotes caller-chosen text.
+    body = _rejected(["schema_invalid:claims.0.k\ud800"]).body
+    assert b"\\ud800" not in body and body, "the refusal body still carries a lone surrogate"
+
+    app = _app(records={LOOSE: _Record(roster=_roster(50.0), deadline=time.time() + 300)})
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        f"/v1/auctions/{LOOSE}/bids",
+        content=b'{"auction_id":"' + LOOSE.encode() + b'","store_id":"\\ud800"}',
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code < 500, (
+        f"a lone surrogate in the body answered {response.status_code}"
+    )

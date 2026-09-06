@@ -232,10 +232,19 @@ async def _bounded_body(request: Request) -> bytes:
                 raise _UnreadableBody(_OVERSIZED_BODY)
             chunks.append(chunk)
     except ClientDisconnect as exc:
-        # A caller hanging up mid-upload is a fact of the internet, not a bug, and every
-        # sibling route on this app already answers it 4xx/5xx-free. Measured on this door
-        # before the catch: one partial `http.request` followed by `http.disconnect` let
-        # `ClientDisconnect` escape and the app answered 500.
+        # A caller hanging up mid-upload is a fact of the internet, not a bug. Measured on
+        # this door before the catch: one partial `http.request` followed by
+        # `http.disconnect` let `ClientDisconnect` escape and the app answered 500.
+        #
+        # An earlier version of this comment added "and every sibling route on this app
+        # already answers it 4xx/5xx-free". That is false and the commit message that
+        # shipped it contained the table disproving it: `/auctions` and
+        # `/auctions/{id}/accept` answer 400, but `/internal/outcomes` — served by
+        # `policy/routes.py`, the twin this module cites throughout — answers 503, which is
+        # a 5xx. In a module whose convention is that the comment IS the evidence, a comment
+        # contradicted by its own commit is worse than no comment, so it is corrected rather
+        # than deleted. The door's behaviour was always the 400 below; only the claim about
+        # the neighbours was wrong.
         raise _UnreadableBody(_CLIENT_DISCONNECTED) from exc
     return b"".join(chunks)
 
@@ -416,6 +425,28 @@ def _oversized_identifier(payload: Any, path_auction_id: str) -> str | None:
     return None
 
 
+def _renderable(text: Any) -> str:
+    r"""``text`` with anything the response encoder cannot emit replaced.
+
+    Starlette renders with ``ensure_ascii=False`` and then ``.encode("utf-8")``, and a LONE
+    SURROGATE — ``"\ud800"``, which a caller writes as a plain ``\uXXXX`` escape and which
+    ``json.loads`` accepts into a perfectly ordinary ``str`` — makes that encode raise
+    ``UnicodeEncodeError``. That is an unauthenticated 500 in the response renderer, the same
+    SHAPE of defect as T-270 and reached the same way: by echoing a caller's own value.
+
+    Caller-controlled text does reach that renderer, through ``bid_ref`` on the 202 and
+    through reason codes such as ``schema_invalid:claims.0.<key>`` on the 400.
+
+    **It is not live today, and it is closed anyway, for the reason the overflowing-exponent
+    refusal was closed:** the only thing preventing it is ``canonical_signing_bytes``, which
+    refuses a lone surrogate in any value AND any key one layer down. That is a borrowed
+    defence in another package, and "safe because something else happens to refuse it first"
+    is exactly the reasoning this door has twice had to retract. The cost is one pass over a
+    handful of short strings.
+    """
+    return str(text).encode("utf-8", "replace").decode("utf-8", "replace")
+
+
 def _rejected(reasons: list[str], *, indexes: list[int] | None = None) -> JSONResponse:
     """The published ``BidValidationResult``. ``reasons`` is never empty when ``ok`` is false.
 
@@ -427,7 +458,7 @@ def _rejected(reasons: list[str], *, indexes: list[int] | None = None) -> JSONRe
         content={
             "ok": False,
             "path": REFUSAL_PATH,
-            "reasons": reasons or ["malformed_submission"],
+            "reasons": [_renderable(reason) for reason in reasons] or ["malformed_submission"],
             "requires_verification": False,
             "unverified_claim_indexes": list(indexes or ()),
         },
@@ -523,8 +554,10 @@ async def submit_external_bid(
         status_code=202,
         content={
             "accepted": True,
-            "verification_status": str(getattr(receipt, "verification_status", "unverified")),
-            "bid_ref": _bid_ref_of(payload),
+            "verification_status": _renderable(
+                getattr(receipt, "verification_status", "unverified")
+            ),
+            "bid_ref": _renderable_ref(_bid_ref_of(payload)),
         },
     )
 
@@ -543,6 +576,11 @@ def _freshness(request: Request) -> float:
         return float(window)
     except (TypeError, ValueError):
         return DEFAULT_FRESHNESS_WINDOW_SECONDS
+
+
+def _renderable_ref(value: str | None) -> str | None:
+    """:func:`_renderable`, but ``None`` stays ``None`` — the contract publishes a nullable."""
+    return None if value is None else _renderable(value)
 
 
 def _bid_ref_of(payload: Any) -> str | None:
