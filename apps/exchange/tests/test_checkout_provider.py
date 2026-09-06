@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -48,6 +49,7 @@ from exchange.checkout import (
     code_minting_call_sites,
     is_on_domain,
     mint_code,
+    minting_ledger,
     offer_discount_percentage,
     register_provider,
     registered_modes,
@@ -1185,3 +1187,342 @@ def test_a_numeric_string_expiry_still_reads_as_an_epoch(numeric_string: str) ->
     choice: see the basic-format test above for what happens when it goes first.
     """
     assert code_expiry(T_NOW, {"expires_at": numeric_string}) == 1_700_100_000.0
+
+
+# =====================================================================================
+# T-345 — the money path ACCEPTED malformed input instead of refusing it
+#
+# The class the denial-leak sweep structurally could not see, and said so: a case that
+# ACCEPTS has no denial reason to assert on, so every sink assertion in that sweep is
+# vacuous for it. Both halves were measured live at HEAD through `accept()`:
+#
+#   HALF 1 (the code)   creator -> {"code": object()}
+#       accepted=True  denial_reason=None  code='<object object at 0x100c312f0>'
+#       code_created payload={'code': '<object object at 0x100c312f0>', ...}
+#       permalink       '…/cart/1:1?discount=%3Cobject%20object%20at%200x100c312f0%3E'
+#     — a LIVE single-use discount whose spelling is this process's memory layout, handed
+#     to a buyer in a query string and written into a persisted event.
+#
+#   HALF 2 (the money)  offer -> {"unit_price": object()}
+#       accepted=True  denial_reason=None
+#       accepted payload={'offer': {'unit_price': <object object at 0x100c31350>, …}}
+#     — reachable only on the published four-positional `accept()` surface, which skips
+#     collection; the SERVED path already refused it in `auction/collect.py`.
+#
+# `str()` never fails, so "is this a code?" and "is this a price?" were questions nothing
+# asked. Both are asked now, at the contracts boundary, and each gate below is paired with
+# a positive control — a wall that refuses everything satisfies every refusal assertion.
+# =====================================================================================
+#: Codes a merchant may legitimately answer with. NONE of them is D22's own shape, and that
+#: is the point: the merchant mints in its own vocabulary, and a door that pinned a shape
+#: here would refuse the real Shopify adapter's answers. All-numeric, lower case, no `PSX-`
+#: prefix, one character, and the longest the boundary admits.
+HONEST_MERCHANT_CODES = ["90210", "spring-sale", "psx-lower-9021", "a", "0" * 128]
+
+#: Values that are not a code, in the ways that matter differently. `object()` is the
+#: ticket's own reproduction; the mapping is the merchant's WHOLE REPLY handed in where its
+#: `code` field belonged, which stringified would mint a "code" made of braces and quotes.
+UNREADABLE_MERCHANT_CODES = {
+    "a bare object": object(),
+    "bytes": b"PSX-BYTES-01",
+    "an int": 90210,
+    "a float": 1.5,
+    "a bool": True,
+    "the whole reply": {"code": "PSX-NESTED-1"},
+    "a list": ["PSX-LIST-01"],
+    "blank": "   ",
+    "a NUL inside": "PSX-\x00-01",
+    "a C1 control inside": "PSX-\x85-01",
+    "a non-breaking space inside": "PSX-\xa0-01",
+    "longer than the boundary admits": "P" * 129,
+}
+
+
+class JunkCodeCreator:
+    """A merchant ``POST /codes`` client that mints, then describes its code unreadably."""
+
+    def __init__(self, code: Any) -> None:
+        self.code = code
+        self.calls: list[tuple[str, Any]] = []
+
+    def create_code(self, store_id: str, offer_payload: Any) -> dict[str, Any]:
+        self.calls.append((store_id, offer_payload))
+        return {"code": self.code}
+
+    __call__ = create_code
+
+
+def shopify_checkout(creator: Any, offer_payload: dict[str, Any] | None = None) -> Any:
+    """One Shopify checkout through the port, on the domain, with nothing else wrong."""
+    return resolve_provider("shopify").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer=offer_payload if offer_payload is not None else offer(),
+            mode="shopify",
+            code_creator=creator,
+            now=T_NOW,
+        )
+    )
+
+
+# --- the arming tests. Every gate below is worthless if the boundary answers nothing ---
+def test_the_mint_asks_the_boundary_a_question_it_can_actually_answer() -> None:
+    """ARMING, not xfail. Four ways the code gates below could pass while measuring nothing.
+
+    Each is a way the adoption could be present and inert: a boundary that refuses every
+    value (so the positive controls are the real test), one that refuses none (so the
+    refusals are), or one whose reason vocabulary has moved out from under the adapter.
+    """
+    from contracts.boundary import discount_code_reasons, minted_code_reasons  # noqa: PLC0415
+
+    assert discount_code_reasons(object()) == ["code_unusable:code:not_a_string"], (
+        "the boundary no longer refuses T-345's own reproduction value; every refusal "
+        "assertion below now passes for some other reason, or not at all"
+    )
+    assert minted_code_reasons({"code": object()}) == ["code_unusable:code:not_a_string"], (
+        "the reply-level door no longer answers about the ticket's measured reply shape"
+    )
+    assert minted_code_reasons("not a reply at all") == ["code_unusable:code:unreadable_reply"], (
+        "the boundary no longer distinguishes a reply with no code from a non-reply"
+    )
+    for honest in HONEST_MERCHANT_CODES:
+        assert discount_code_reasons(honest) == [], (
+            f"the boundary refuses {honest!r}, an ordinary merchant code — the positive "
+            f"controls below would then be pinning a door that is closed, not open"
+        )
+
+
+def test_the_mint_reads_the_boundarys_own_unreadable_price_verdict() -> None:
+    """ARMING for the price half, and the pin on the one leaf spelling `codes.py` names.
+
+    ``price_reasons`` answers a whole price walk and most of it is about a roster the mint
+    does not hold, so ``assert_offer_is_mintable`` acts on two leaf verdicts by name. They
+    are leaf strings rather than published constants, so this is what makes a rename in the
+    boundary a red test here rather than a gate that quietly stops refusing anything.
+    """
+    from contracts.boundary import price_reasons  # noqa: PLC0415
+
+    unreadable = {**offer(), "unit_price": object()}
+    assert "price_unreconcilable:offer.unit_price:not_a_number" in price_reasons(
+        {"offer": unreadable}
+    ), "the boundary's unreadable-price verdict has moved; codes.py acts on the old spelling"
+
+    negative = {**offer(), "unit_price": -1.0}
+    assert "price_unreconcilable:offer.unit_price:negative" in price_reasons({"offer": negative}), (
+        "the boundary's negative-price verdict has moved; codes.py acts on the old spelling"
+    )
+
+
+# --- HALF 1: the code -----------------------------------------------------------------
+@pytest.mark.parametrize("label", sorted(UNREADABLE_MERCHANT_CODES))
+def test_a_merchant_code_the_exchange_cannot_read_is_refused_not_coerced(label: str) -> None:
+    """The reproduction. ``str()`` succeeds on everything, which is why nothing asked."""
+    creator = JunkCodeCreator(UNREADABLE_MERCHANT_CODES[label])
+    with pytest.raises(CheckoutCreatorError) as raised:
+        shopify_checkout(creator)
+
+    assert creator.calls, f"[{label}] the merchant must actually have been reached"
+    assert "code_unusable:" in str(raised.value), (
+        f"[{label}] the refusal does not carry the boundary's machine-readable verdict: "
+        f"{raised.value}"
+    )
+
+
+@pytest.mark.parametrize("label", sorted(UNREADABLE_MERCHANT_CODES))
+def test_an_unreadable_code_is_refused_BEFORE_it_is_coerced(label: str) -> None:
+    """The ordering IS the fix, and the minting ledger is where it is observable.
+
+    ``str(code)`` is the manufacture being refused, and the first thing the adapter used to
+    do with the merchant's answer was report ``str(code)`` into the port's minting ledger —
+    so one call published the address into the very channel a failure is read out of. An
+    empty ledger is the assertion that no coercion happened anywhere.
+    """
+    creator = JunkCodeCreator(UNREADABLE_MERCHANT_CODES[label])
+    with minting_ledger() as recorded:
+        with pytest.raises(CheckoutCreatorError):
+            shopify_checkout(creator)
+
+    assert recorded == [], (
+        f"[{label}] the unreadable value was coerced and reported as a minted code: {recorded!r}"
+    )
+
+
+@pytest.mark.parametrize("label", sorted(UNREADABLE_MERCHANT_CODES))
+def test_the_refusal_publishes_no_memory_address(label: str) -> None:
+    """T-264's rule on T-345's path: the refused VALUE is the one thing that may not be said.
+
+    This sentence becomes ``denial_reason``, which ``_denied`` republishes verbatim in the
+    409 and ``_refusal_event`` persists. The value being complained about may itself be a
+    live discount, so the diagnostic is the reply's keys, its type, the boundary's reasons
+    and the fingerprint — never the value.
+    """
+    creator = JunkCodeCreator(UNREADABLE_MERCHANT_CODES[label])
+    with pytest.raises(CheckoutCreatorError) as raised:
+        shopify_checkout(creator)
+
+    text = str(raised.value)
+    assert not re.search(r"0x[0-9a-fA-F]{6,}", text), (
+        f"[{label}] the refusal published a memory address: {text!r}"
+    )
+    assert "PSX-NESTED-1" not in text and "PSX-LIST-01" not in text, (
+        f"[{label}] the refusal quoted the merchant's own value back: {text!r}"
+    )
+
+
+def test_a_refused_unreadable_code_is_recorded_rather_than_dropped() -> None:
+    """The consequence half. A merchant that answered has probably already minted.
+
+    Refusing the description does not un-mint the discount, and this refusal cannot carry
+    the code out the way an ``OrphanedCheckoutCode`` does — ``OrphanedCode.code`` is a
+    ``str``, and the only string available is the coercion being refused. So the report goes
+    down the channel built for a record that cannot be made: ids, key NAMES and the
+    fingerprint, never a payload value.
+    """
+    from exchange.auction.ledger import audit_anomalies  # noqa: PLC0415
+
+    seen_before = len(audit_anomalies())
+    creator = JunkCodeCreator(object())
+    with pytest.raises(CheckoutCreatorError) as raised:
+        shopify_checkout(creator)
+
+    recorded = audit_anomalies()[seen_before:]
+    assert len(recorded) == 1, (
+        "a merchant may be holding a live discount this exchange cannot name, and nothing "
+        f"was recorded about it; anomalies since the call were {recorded!r}"
+    )
+    anomaly = recorded[0]
+    assert anomaly.kind == "code_created", (
+        "the record that could not be made is the code_created one; the anomaly must say so"
+    )
+    assert anomaly.where == "ShopifyCheckoutProvider.mint"
+    assert anomaly.context["store_id"] == "store-a"
+    assert anomaly.context["bid_ref"] == "bid-a"
+    assert anomaly.context["auction_id"] == "auction-1"
+    assert anomaly.context["code_reasons"] == ("code_unusable:code:not_a_string",)
+
+    rendered = f"{anomaly.problem} {anomaly.context!r}"
+    assert not re.search(r"0x[0-9a-fA-F]{6,}", rendered), (
+        f"the anomaly published the value it exists to complain about: {rendered!r}"
+    )
+    assert anomaly.context["fingerprint"] in str(raised.value), (
+        "the refusal and the anomaly do not share a join key, so an operator holding the "
+        "client-visible reason cannot find the record of the possibly-live discount"
+    )
+
+
+@pytest.mark.parametrize("honest", HONEST_MERCHANT_CODES)
+def test_the_positive_control_an_ordinary_merchant_code_still_mints(honest: str) -> None:
+    """A gate that refused every merchant answer would satisfy every assertion above.
+
+    None of these is D22's shape and none of them needs to be: the merchant mints in its own
+    vocabulary, and pinning a shape here would refuse the real Shopify adapter's answers.
+    """
+    creator = JunkCodeCreator(honest)
+    result = shopify_checkout(creator)
+    assert result.code == honest
+    assert urlsplit(result.permalink_url).hostname == SELLER_DOMAIN
+
+
+def test_a_code_a_merchant_may_really_have_issued_still_reaches_the_orphan_machinery() -> None:
+    """The carve-out, and the reason it is not a hole — measured, not asserted by fiat.
+
+    ``code_unusable:code:whitespace`` is the one boundary verdict this adapter does not act
+    on alone. A refusal here can never carry its code out, so every code this gate refuses
+    becomes unrecordable and unrevokable — the right price for a value that is not a code,
+    and the wrong one for a string the merchant really wrote, which records perfectly well.
+    ``test_orphaned_code.py::…[plus-encoded-permalink]`` is that case live: a real
+    ``'PSX LIVE 5'`` that must reach the port's host check and come back as a revocable
+    orphan (T-202). What is KEPT is the half that truncates a code downstream.
+    """
+    minted = shopify_checkout(JunkCodeCreator("PSX LIVE 5"))
+    assert minted.code == "PSX LIVE 5", "a printable code with a space must still mint"
+    assert "discount=PSX%20LIVE%205" in minted.permalink_url, (
+        "the code must be carried into the permalink verbatim and encoded, never trimmed"
+    )
+
+    for truncating in ("PSX-1\n", "PSX\t1", "PSX\x0b1", "PSX\xa01"):
+        with pytest.raises(CheckoutCreatorError):
+            shopify_checkout(JunkCodeCreator(truncating))
+
+
+# --- HALF 2: the money ----------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("label", "unit_price"),
+    sorted(
+        {
+            "a bare object": object(),
+            "a string a store wrote": "cheap",
+            "a numeric string": "100.00",
+            "a bool": True,
+            "NaN": float("nan"),
+            "infinity": float("inf"),
+            "negative": -1.0,
+        }.items()
+    ),
+)
+def test_an_unreadable_unit_price_is_refused_before_anything_is_minted(
+    label: str, unit_price: Any
+) -> None:
+    """The direct ``accept()`` surface now refuses what the served path already refused.
+
+    ``auction/collect.py``'s ``_price_is_unreadable`` asks this of every bid it collects,
+    deliberately with no roster term in it. The published four-positional ``accept()``
+    skips collection entirely, so the wall existed on one route to the mint and not the
+    other — and a bid whose ``unit_price`` was an ``object()`` was ACCEPTED, with a real
+    discount minted for it and the object's address written into the persisted event.
+    """
+    creator = RecordingCodeCreator()
+    with pytest.raises(UnusableOffer) as raised:
+        shopify_checkout(creator, {**offer(), "unit_price": unit_price})
+
+    assert creator.calls == [], (
+        f"[{label}] the merchant minted a live code for an offer with no readable price"
+    )
+    assert "price_unreconcilable:offer.unit_price:" in str(raised.value), (
+        f"[{label}] the refusal does not carry the boundary's verdict: {raised.value}"
+    )
+    assert not re.search(r"0x[0-9a-fA-F]{6,}", str(raised.value)), (
+        f"[{label}] the refusal published the address of the value it refused"
+    )
+
+
+@pytest.mark.parametrize("honest", [100.0, 0.01, 12, 1e9, 0.0])
+def test_the_positive_control_an_honest_price_still_completes(honest: Any) -> None:
+    """A gate that refused every price would satisfy every assertion above.
+
+    ``0.0`` is deliberately here: a free item is the ROSTER's refusal to make
+    (``price_unreconcilable:offer.unit_price:not_positive``, which needs a catalog this
+    module does not hold and is not entitled to ask for). The mint judges readability only.
+    """
+    result = shopify_checkout(RecordingCodeCreator(), {**offer(), "unit_price": honest})
+    assert result.code
+    assert urlsplit(result.permalink_url).hostname == SELLER_DOMAIN
+
+
+def test_an_offer_that_states_no_price_at_all_is_not_this_gates_subject() -> None:
+    """T-345 is a PRESENT malformed argument, and says so — it is not T-306/T-307.
+
+    The R10 list-price fallback and every direct caller of the port are entitled to hand it
+    an offer with no price on it, and ``price_reasons`` says ``not_a_number`` about an
+    absent field exactly as it does about an ``object()``. Acting on that would refuse the
+    required starting slice, so the gate reads the field only when the offer states one.
+    """
+    priceless = {k: v for k, v in offer().items() if k != "unit_price"}
+    assert "unit_price" not in priceless
+    assert shopify_checkout(RecordingCodeCreator(), priceless).code
+
+    result = resolve_provider("redirect").checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer={},
+            mode="redirect",
+            now=T_NOW,
+        )
+    )
+    assert result.code.startswith(CODE_PREFIX)

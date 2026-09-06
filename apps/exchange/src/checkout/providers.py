@@ -21,7 +21,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from contracts.boundary import (
+    MINTED_CODE_SITE,
+    REASON_CODE_UNUSABLE,
+    discount_code_reasons,
+    minted_code_reasons,
+)
+
 from .. import describe
+from ..auction.ledger import MalformedLedgerPayload, record_audit_anomaly
 from .codes import code_expiry, mint_code, record_minted_code
 from .provider import (
     CheckoutProvider,
@@ -57,6 +65,134 @@ def _reply_shape(reply: Any) -> str:
         return f"a {type(reply).__name__} (no mapping keys; values not quoted)"
     except Exception:  # pragma: no cover - a hostile reply object must not crash the refusal
         return "an unreadable reply object (values not quoted)"
+
+
+#: ``code_unusable:code:whitespace`` — the ONE boundary verdict this adapter does not act on by
+#: itself, and the only place the exchange's mint declines to follow the contracts door.
+#:
+#: **It is declined because acting on it destroys a revocable discount.** A refusal here cannot
+#: carry the code out: ``OrphanedCode.code`` is a ``str`` and the only string available is
+#: ``str(<the unreadable value>)``, which is the coercion T-345 exists to refuse — so every code
+#: this gate refuses is one the exchange can never record or revoke. That price is right for a
+#: value that is not a code at all (an ``object()``, a mapping, an empty string): there is nothing
+#: to record. It is wrong for a string the merchant really wrote, which records and revokes
+#: perfectly well. ``test_orphaned_code.py::test_no_spelling_of_the_permalink_leaks_the_code
+#: [plus-encoded-permalink]`` is that case measured — a live ``'PSX LIVE 5'`` on an off-domain
+#: permalink, which must reach the port's host check, be refused there, and come back with a
+#: ``code_created`` event and an orphan the caller can revoke (T-202). Refusing it one step earlier
+#: turns that live discount into an unrecorded one, which is the T-157 harm this package is built
+#: around, arriving through a wall meant to prevent harm.
+#:
+#: It is also what the door itself admits everywhere else: any non-blank printable string, in the
+#: merchant's own vocabulary, because pinning a code SHAPE here would refuse the real adapter's
+#: answers. A space is printable and Shopify permits one in a code.
+#:
+#: **The half of the verdict that is kept** is the half that truncates. ``whitespace`` covers the
+#: whole shared trim set, so a ``\n``, a ``\t``, a NUL-adjacent C0 point or a non-breaking space
+#: reports under this one name and nothing else (the boundary's blank test runs BEFORE its control
+#: test, and they are mutually exclusive) — and a newline inside a code turns one code into two
+#: somewhere downstream. ``str.isprintable`` is exactly the line between them: of the entire trim
+#: set, the plain ASCII space is the only printable member, so a code admitted by this carve-out
+#: differs from an ordinary one by spaces and nothing else, and is carried into the permalink
+#: percent-encoded, verbatim, untrimmed.
+_WHITESPACE_CODE_REASON = f"{REASON_CODE_UNUSABLE}:{MINTED_CODE_SITE}:whitespace"
+
+
+def _acted_on(refusals: list[str], code: Any) -> list[str]:
+    """The refusals the mint enforces: every one the boundary gave, bar the carve-out above.
+
+    ``refusals == [reason]`` and not a membership test: the carve-out applies to a code whose
+    ONLY fault is a blank, so a code that is also too long, or that arrived on a reply this door
+    cannot read at all, is refused with its whitespace complaint intact.
+    """
+    if refusals == [_WHITESPACE_CODE_REASON] and isinstance(code, str) and code.isprintable():
+        return []
+    return refusals
+
+
+def _code_refusals(reply: Any, code: Any) -> list[str]:
+    """Every way the boundary refuses to read this reply's code, judged at both readings.
+
+    :func:`contracts.boundary.minted_code_reasons` is the door the contracts boundary publishes
+    for exactly this reply, and it is the one that answers ``unreadable_reply`` — a merchant that
+    sent back a bare string, a list or a number rather than a record at all.
+
+    It is asked about the value it reads for itself, and this adapter is then asked about the value
+    it read for itself, because **the two readings can differ and the one that matters is the one
+    that would be coerced.** :func:`_read` here takes any object exposing ``get`` at its word;
+    ``boundary._get`` reserves ``get`` for a real :class:`~collections.abc.Mapping` and falls back
+    to ``getattr``. A reply that is not a ``Mapping`` but has a ``get`` method — ``HostileReply`` in
+    the frozen suite is precisely that shape — is therefore read one way here and another way
+    there, and a wall that judges a different value from the one the code is minted out of is not a
+    wall. Both verdicts, deduplicated, order preserved.
+    """
+    refused = list(minted_code_reasons(reply))
+    for reason in discount_code_reasons(code):
+        if reason not in refused:
+            refused.append(reason)
+    return _acted_on(refused, code)
+
+
+def _record_unreadable_minted_code(
+    request: CheckoutRequest, provider: str, reply: Any, code: Any, refusals: list[str]
+) -> None:
+    """Record that a merchant may hold a LIVE code this exchange could not read (T-345).
+
+    Refusing the reply is only half the repair, and the other half is why this exists. A merchant
+    that answers ``POST /codes`` at all has almost certainly minted something: the exchange is
+    refusing the *description*, not the discount. That is an orphan by the definition
+    :class:`~.provider.OrphanedCode` is built on — a code that exists in the merchant's system for a
+    checkout that was refused — and dropping the refusal on the floor would restore T-157 through a
+    new door.
+
+    **It cannot be an** :class:`~.provider.OrphanedCheckoutCode`, and the reason is the ticket
+    itself. That exception carries the code out so ``accept()`` can file a ``code_created`` event
+    for it, and ``OrphanedCode.code`` is a ``str``. There is no string here that is not
+    ``str(<unreadable value>)`` — the coercion this whole gate exists to refuse, whose output was
+    measured landing in a persisted event and a ``?discount=`` query as
+    ``'<object object at 0x100c312f0>'``. Manufacturing a code to report the absence of a readable
+    one is the defect wearing a bandage.
+
+    So the report goes down the channel built for a record that cannot be made
+    (:class:`~..auction.ledger.AuditAnomaly`, T-283): ids and key NAMES only, never a payload value.
+    Its own docstring names this exact distinction as its purpose — "the ledger has no
+    ``code_created`` for this checkout" being distinguishable from "no code was ever created" — and
+    that is the whole of what an operator can act on here. The join keys point at the merchant
+    account and the bid; the ``problem`` names the machine-readable refusals and the reply's SHAPE
+    (:func:`_reply_shape`: its type and its keys, never its values, because the value we are
+    complaining about may itself be a live discount).
+
+    ``fingerprint`` is the join, and it is the ONLY thing about the code itself that goes in: it
+    is a one-way hash, it is what every other post-mint refusal in this package correlates on, and
+    it is what matches this anomaly to the ``denial_reason`` the refusal publishes. For a code that
+    is not a string it is a hash of that value's ``str``, which joins the two sides of this one
+    refusal and nothing else — no worse than the ``code:unknown`` it degrades to, and never the
+    value.
+
+    Never raises. It is called from the one region where an exception loses the very thing it was
+    reporting, and it is a report — not the refusal.
+    """
+    try:
+        record_audit_anomaly(
+            # A code-authored call site, never `provider`: an adapter is free to name itself
+            # after anything at all (T-215), and its name goes in the context below where it is
+            # one value among several rather than the label the anomaly is filed under.
+            "ShopifyCheckoutProvider.mint",
+            "code_created",
+            MalformedLedgerPayload(
+                f"the merchant code creator answered {_reply_shape(reply)}, whose code the "
+                f"boundary refuses: {', '.join(refusals)}; no code_created record can be built "
+                f"for this checkout, and the merchant may hold a live discount for it"
+            ),
+            provider=provider,
+            auction_id=request.auction_id,
+            store_id=request.store_id,
+            bid_ref=request.bid_ref,
+            code_reasons=tuple(refusals),
+            fingerprint=code_fingerprint(code),
+        )
+    except Exception:  # pragma: no cover - reporting must never be the thing that fails
+        pass
 
 
 class SimulatedRedirectProvider(CheckoutProvider):
@@ -134,6 +270,57 @@ class ShopifyCheckoutProvider(CheckoutProvider):
             raise CheckoutCreatorError(
                 f"the merchant code creator returned no code for {request.store_id!r}: "
                 f"{_reply_shape(reply)}"
+            )
+
+        # T-345 — IS THIS A CODE? Nothing used to ask, and `str()` never fails, so the answer
+        # was manufactured rather than demanded. Measured through `accept()` at HEAD, a creator
+        # answering `{"code": object()}`::
+        #
+        #     accepted=True  denial_reason=None
+        #     code='<object object at 0x100c312f0>'
+        #     code_created payload={'code': '<object object at 0x100c312f0>', ...}
+        #     permalink 'https://…/cart/1:1?discount=%3Cobject%20object%20at%200x100c312f0%3E'
+        #
+        # — a LIVE single-use discount whose spelling is this process's memory layout, in a
+        # persisted event and in a query string handed to a buyer. Accepting is worse than
+        # leaking here: a wrongly ACCEPTED checkout leaves no denial reason for anyone to read,
+        # which is why the denial-leak sweep that found this could not see the class at all.
+        #
+        # It runs BEFORE the coercion below, and that ordering is the fix — `str(code)` is
+        # exactly the manufacture being refused, and one call to it publishes the address into
+        # the minting ledger the port reads on failure.
+        #
+        # The falsy branch above stays in front of it deliberately: "the merchant answered no
+        # code" and "the merchant answered something that is not one" are different repairs for
+        # an operator (one is a missing field, the other a wrong value), and the first has its
+        # own measured diagnostic and its own frozen refusal shape.
+        refusals = _code_refusals(reply, code)
+        if refusals:
+            # The merchant was reached and answered, so a discount plausibly exists that this
+            # exchange cannot name. Recorded before the raise, for the same reason
+            # `record_minted_code` is called before anything that could raise.
+            _record_unreadable_minted_code(request, self.name, reply, code, refusals)
+            # `_reply_shape` and the boundary's own reason strings, and NOTHING else. This
+            # sentence becomes `denial_reason` through `accept/offer.py`'s checkout handler, so
+            # `_denied` republishes it verbatim in the 409 and `_refusal_event` persists it
+            # (T-326) — and the value being complained about is the one value in the process
+            # that must not be published, since it may be a redeemable discount. The keys, the
+            # type and the machine-readable refusals are the whole diagnostic.
+            #
+            # The FINGERPRINT is the one thing about the code itself that may be published,
+            # and it is required rather than decorative: this refusal is a post-mint one in
+            # every way that matters to an operator, so it carries the same join every other
+            # post-mint refusal in this package carries — the handle that matches this
+            # sentence to the audit anomaly recorded just above. `code_fingerprint` is a
+            # one-way hash and fails closed on a hostile `__str__`; hashing the value for a
+            # correlation token is not the coercion this gate refuses, which is the value
+            # BECOMING the code — it reaches no ledger, no permalink and no event.
+            raise CheckoutCreatorError(
+                f"the merchant code creator answered {_reply_shape(reply)} for "
+                f"{request.store_id!r}, and its code {code_fingerprint(code)} is not one this "
+                f"exchange can read ({', '.join(refusals)}); refusing rather than coercing it "
+                f"— the merchant may hold a live discount for this checkout, recorded as an "
+                f"audit anomaly against the same fingerprint"
             )
 
         # From here the merchant's code EXISTS — so the FIRST thing done with it is to

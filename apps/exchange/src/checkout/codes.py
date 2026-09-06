@@ -29,7 +29,12 @@ from contextvars import ContextVar
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from contracts.boundary import parse_timestamp
+from contracts.boundary import (
+    OFFER_UNIT_PRICE_SITE,
+    REASON_PRICE_UNRECONCILABLE,
+    parse_timestamp,
+    price_reasons,
+)
 
 from .. import describe
 
@@ -230,8 +235,56 @@ def offer_quantity(offer: Mapping[str, Any] | None = None) -> int:
     return value
 
 
+#: The two ``offer.unit_price`` verdicts :func:`_unreadable_unit_price_reasons` acts on.
+#:
+#: :func:`contracts.boundary.price_reasons` answers a whole price walk, and almost everything it
+#: can say is about a ROSTER this module does not hold and is not entitled to ask for. With no
+#: catalog passed, ``price_unreconcilable:offer.unit_price:list_price_unavailable`` comes back for
+#: *every* offer (T-306), and ``price_under_declared_depth:offer.unit_price`` is the auction door's
+#: adjudication of a declared discount (``auction/collect.py``), not the mint's. Acting on either
+#: here would refuse every honest checkout, which is closed rather than fail-closed.
+#:
+#: So the mint reads only the two verdicts that need no catalog at all and are about the VALUE the
+#: offer states: it is not a number (``object()``, ``"cheap"``, ``True``, ``NaN``, ``inf``, absent),
+#: or it is a number no price can be. Both are the boundary's own spelling rather than a second
+#: vocabulary invented here — and because they are leaf strings rather than published constants,
+#: ``test_the_mint_reads_the_boundarys_own_unreadable_price_verdict`` drives the boundary and goes
+#: red if either name moves, so a rename surfaces as a failing test rather than as a gate that
+#: quietly stops refusing anything.
+_UNREADABLE_UNIT_PRICE_WHYS = frozenset({"not_a_number", "negative"})
+
+#: ``price_unreconcilable:offer.unit_price:`` — the site half of the reasons above, composed from
+#: the boundary's published constants so only the leaf ``why`` is spelled here.
+_UNIT_PRICE_REFUSAL_PREFIX = f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_UNIT_PRICE_SITE}:"
+
+
+def _unreadable_unit_price_reasons(offer: Mapping[str, Any] | None) -> list[str]:
+    """The boundary's refusals of this offer's ``unit_price``, as a value. Empty when it is one.
+
+    **Absent is not this gate's subject, and the distinction is T-345's own.** The ticket separates
+    itself from T-306/T-307 in as many words: those were an *absent* argument abstaining, this is a
+    *present* malformed one being accepted. An offer that states no ``unit_price`` is refused by
+    nothing here — the R10 list-price fallback and every direct :func:`accept` caller are entitled
+    to hand the port an offer with no price on it, and ``price_reasons`` says ``not_a_number``
+    about an absent field exactly as it does about ``object()``. Judging the absent case would
+    refuse the required starting slice; judging only the stated one closes the hole the ticket
+    measured.
+
+    ``price_reasons`` never raises, so this never does either.
+    """
+    stated = (offer or {}).get("unit_price")
+    if stated is None:
+        return []
+    return [
+        reason
+        for reason in price_reasons({"offer": offer})
+        if reason.startswith(_UNIT_PRICE_REFUSAL_PREFIX)
+        and reason[len(_UNIT_PRICE_REFUSAL_PREFIX) :] in _UNREADABLE_UNIT_PRICE_WHYS
+    ]
+
+
 def assert_offer_is_mintable(offer: Mapping[str, Any] | None) -> None:
-    """Refuse an offer whose code-shaping fields will not parse, before a code exists.
+    """Refuse an offer whose code-shaping fields — or whose stated price — will not parse.
 
     The order this runs in is the whole point. ``code_expiry`` and the permalink builder are
     both reached *after* the provider has minted — after the merchant's ``POST /codes`` has
@@ -240,9 +293,31 @@ def assert_offer_is_mintable(offer: Mapping[str, Any] | None) -> None:
     and no ``code_created`` event recorded for it: the exchange had handed out a discount it
     had no record of and no way to expire. Validating here makes that unreachable — the
     request is refused with nothing minted anywhere.
+
+    **The price is checked here too, and that is T-345's second half.** This gate is the port's
+    documented pre-mint door and it used to look at ``expires_at`` and ``quantity`` only — the two
+    fields the *code* is built out of — so nothing on the published four-positional
+    :func:`~apps.exchange.src.accept.offer.accept` surface ever asked whether the offer's price was
+    a price. Measured at HEAD, an offer whose ``unit_price`` was a bare ``object()`` came back
+    ``accepted=True, denial_reason=None`` with a real single-use discount minted for it, and the
+    address of that object was written verbatim into the persisted ``accepted`` event::
+
+        payload={'offer': {'unit_price': <object object at 0x100c31350>, ...}}
+
+    The SERVED path already refuses this — ``auction/collect.py``'s ``_price_is_unreadable`` asks
+    the same question of every bid it collects, deliberately with no roster term in it — but the
+    direct accept surface skips collection entirely, so the wall existed on one route to the mint
+    and not on the other. Both now consult the same boundary, which is the point of having one:
+    two doors that disagree about which values are prices is one door with a hole.
     """
     code_expiry(0.0, offer)
     offer_quantity(offer)
+    refused = _unreadable_unit_price_reasons(offer)
+    if refused:
+        raise UnusableOffer(
+            f"offer unit_price {describe((offer or {}).get('unit_price'))} is not a price the "
+            f"exchange can read ({', '.join(refused)}), so this offer cannot be minted"
+        )
 
 
 def build_cart_permalink(
