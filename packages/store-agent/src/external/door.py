@@ -310,6 +310,85 @@ def _freshness_window(value: Any) -> float | None:
     return window
 
 
+@dataclass(frozen=True)
+class _ResolvedEligibility(Mapping):  # type: ignore[type-arg]
+    """The ONE eligibility row this submission's verdict depends on, already read.
+
+    A container this module owns, holding a value read exactly once — the same discipline
+    `_snapshot` applies to the submission itself, and for the same reason. `.get` answers from
+    the value it is holding and never touches the caller's object or hashes the caller's key, so
+    there is nothing left for a second read to answer differently and nothing for a hostile
+    `store_id` to raise from. `row=None` means "this store has no row", which the shared boundary
+    reads as an unavailable eligibility read and denies (R12).
+    """
+
+    key: Any
+    row: Any
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return default if self.row is None else self.row
+
+    def __getitem__(self, key: Any) -> Any:
+        if self.row is None:
+            raise KeyError(key)
+        return self.row
+
+    def __iter__(self) -> Any:
+        return iter(() if self.row is None else (self.key,))
+
+    def __len__(self) -> int:
+        return 0 if self.row is None else 1
+
+
+def _readable_eligibility(trust_snapshot: Any, store_id: Any) -> Mapping[str, Any]:
+    """The eligibility row to judge this store against, read ONCE, in a container we own.
+
+    T-233 settled that an ABSENT snapshot is an empty one rather than a permissive one: the
+    boundary reads a store with no row as an unavailable eligibility read and denies it (R12),
+    which is the right answer for a caller who supplied no eligibility read at all. This extends
+    that decision one step, to the case the same argument covers and the code did not:
+    **a snapshot that raises when it is read is an unavailable eligibility read too.**
+
+    It is not a hypothetical shape. The snapshot arrives from a trust service, and a mapping over
+    a feed that is half-decoded, a cache whose connection has gone, or a shard that is missing
+    all answer a lookup by raising. `contracts.boundary._eligibility_reasons` guards only
+    `TypeError` — the unhashable-`store_id` hazard it was written for — so anything else escaped
+    it, escaped `_receive_bid` entirely, and came back from the outer wrapper as
+    `door_failed_closed`: a refusal that says "the door broke" where the readable equivalent says
+    `trust_snapshot_unavailable:<store_id>` (T-279). The wrapper is the right belt, but it must
+    not be the braces — with it holding this case up, every by-name eligibility gate inside this
+    function could regress and a test asserting only "not accepted" would stay green.
+
+    Answering with an EMPTY row rather than refusing here on the spot is deliberate: it routes
+    the verdict back through the one function that owns R12, so this door and the exchange keep
+    agreeing about what an unavailable read means, and a submission that is ALSO wrong in some
+    other way still collects that door's other reasons instead of being short-circuited by ours.
+
+    **Read once, then hand on what was read — never probe and pass the original.** The first
+    version of this function called `.get` to see whether the snapshot could answer and then gave
+    the shared boundary the caller's object, which reads it a SECOND time. That is a
+    time-of-check/time-of-use gap and an adversarial verifier walked straight through it: a
+    mapping over a feed that answers one row and then loses its connection passes the probe,
+    raises inside `contracts.boundary._eligibility_reasons` (which guards `TypeError` only),
+    escapes `_receive_bid` entirely and comes back `door_failed_closed` — exactly the erosion
+    T-279 is about, moved one read to the right. It also made the door read a caller-supplied
+    mapping twice, so a snapshot whose read has a side effect (a cursor, a pop-on-read cache)
+    answered the boundary differently from the probe.
+
+    Two reads cannot be made safe by guarding both; only one read can. So the row is taken here,
+    once, and everything downstream sees `_ResolvedEligibility` — which also means a `store_id`
+    that cannot be hashed is never used as a dict key again, closing the same escape from the
+    other side.
+    """
+    if trust_snapshot is None:
+        return _ResolvedEligibility(store_id, None)
+    try:
+        row = trust_snapshot.get(store_id)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 - a row that cannot be read is a row that is not there
+        row = None
+    return _ResolvedEligibility(store_id, row)
+
+
 def _work_item(
     submission: dict[str, Any],
     signature: str,
@@ -530,7 +609,26 @@ def _receive_bid(
         return _refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=submitted)
 
     # 3. Key SELECTION, never key trial.
-    secret = keyring_secret(keyring, signer_id, key_id)
+    #
+    #    The lookup is guarded HERE as well as inside `keyring_secret`, and the two guards are
+    #    not redundant: `contracts.signing.keyring_secret` catches `TypeError` only — the
+    #    unhashable-id hazard it was written for — so a keyring backed by anything that can fail
+    #    (a lazy mapping over a key store, a cache that raises when the connection is gone, a
+    #    half-decoded JSON view) escapes it by raising anything else. Measured: a `Mapping` whose
+    #    `.get` raises `RuntimeError`/`ValueError`/`OverflowError` came back `door_failed_closed`
+    #    from the wrapper, where an EMPTY keyring is answered `unknown_signing_key` (T-279).
+    #
+    #    A keyring that cannot be searched has not selected a key, and "no key was selected" is
+    #    exactly what `unknown_signing_key` says. It is the fail-closed answer and it is the same
+    #    answer the readable equivalent gets, so a rejection log cannot tell a broken key store
+    #    from an unknown signer — which is the point: neither one authenticates this submission.
+    #    The keyring is the caller's object, so this is a hazard the door owns, not the shared
+    #    contracts module: broadening the catch there would change a function two other doors
+    #    call.
+    try:
+        secret = keyring_secret(keyring, signer_id, key_id)
+    except Exception:  # noqa: BLE001 - a keyring that cannot be searched selects no key
+        secret = None
     if secret is None:
         return _refuse(REASON_UNKNOWN_SIGNING_KEY, payload=submitted)
     if not verify_signature(submitted, signature, secret):
@@ -580,10 +678,9 @@ def _receive_bid(
     submission["signature"] = signature
     verdict = validate_external_submission(
         submission,
-        # An absent snapshot is an EMPTY snapshot, not a permissive one (T-233). The boundary
-        # reads a store with no row as an unavailable eligibility read and denies it (R12), and
-        # that is the right answer for a caller who supplied no eligibility read at all.
-        trust_snapshot=trust_snapshot if trust_snapshot is not None else {},
+        # An absent snapshot is an EMPTY snapshot, not a permissive one (T-233), and so is one
+        # that cannot be READ — see `_readable_eligibility`.
+        trust_snapshot=_readable_eligibility(trust_snapshot, submitted.get("store_id")),
         now=evaluated_at,
         list_prices=list_prices,
         max_discount_pct=max_discount_pct,

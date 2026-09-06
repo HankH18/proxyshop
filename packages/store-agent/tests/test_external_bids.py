@@ -129,6 +129,47 @@ def _trust_snapshot_for(payload) -> dict:
     return {store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}}
 
 
+def _list_prices_for(payload) -> dict:
+    """The catalog this caller holds for the product the payload names.
+
+    The exact sibling of `_trust_snapshot_for` above, and re-baselined for the same reason one
+    ticket later. An ABSENT `list_prices` used to mean "abstain" at the shared boundary, so these
+    calls passed none and the price wall said nothing. T-306/T-307 closed that — a signed bid
+    awarding itself 85% off was admitted whenever the roster was omitted — so an absent roster
+    now refuses exactly as an explicit empty one does. The roster has not appeared from nowhere;
+    like the eligibility row before it, it has moved to the only place that can honestly assert
+    it: the caller. A test that means to exercise the signature, the nonce, the deadline or the
+    queue must supply the catalog a real caller supplies, or it is measuring the abstention.
+
+    **Nothing here is loosened to achieve that.** The roster is HONEST: it prices the product at
+    exactly what the offer states, so the wall is satisfied because the bid is truthful and not
+    because the wall was told to look away. A bid that lies about its price is still refused —
+    `test_a_price_below_the_roster_floor_is_refused` and the T-156/T-175 gates all rely on it.
+
+    Derived from the payload rather than fixed, because the property tests draw `product_ref`
+    randomly and a hard-coded key would miss every draw. The fixture roster is merged underneath
+    so a payload the door cannot read still meets a caller who holds a catalog — a caller's
+    catalog is a property of the caller, not of the submission it is judging.
+
+    Reads defensively for the same reason `_trust_snapshot_for` does: some callers below hand the
+    door hostile objects on purpose.
+    """
+    roster = {"gate-prod-1": {"list_price": 89.0, "max_discount_pct": 100.0}}
+    try:
+        offer = payload.get("offer")
+        product_ref = offer.get("product_ref")
+        unit_price = offer.get("unit_price")
+    except Exception:  # noqa: BLE001 - a payload whose reads raise is one we price from the fixture
+        return roster
+    if isinstance(product_ref, str) and product_ref and isinstance(unit_price, (int, float)):
+        if not isinstance(unit_price, bool) and float(unit_price) >= 0.0:
+            roster[product_ref] = {
+                "list_price": float(unit_price),
+                "max_discount_pct": 100.0,
+            }
+    return roster
+
+
 def _receive(payload, signature, **kwargs):
     from store_agent.external import NonceStore, receive_bid
 
@@ -137,6 +178,7 @@ def _receive(payload, signature, **kwargs):
     kwargs.setdefault("now", NOW)
     kwargs.setdefault("auction_deadline", DEADLINE)
     kwargs.setdefault("trust_snapshot", _trust_snapshot_for(payload))
+    kwargs.setdefault("list_prices", _list_prices_for(payload))
     keyring = kwargs.pop("keyring", None)
     ring = _keyring() if keyring is None else keyring
     try:
@@ -431,6 +473,7 @@ def test_an_unusable_verification_queue_refuses_before_spending_the_nonce() -> N
         now=NOW,
         auction_deadline=DEADLINE,
         trust_snapshot=_trust_snapshot_for(payload),
+        list_prices=_list_prices_for(payload),
     )
     assert result is None or result.accepted is not True, (
         "a submission that could not be enqueued must not report itself accepted"
@@ -464,6 +507,7 @@ def test_a_queue_that_raises_is_never_reported_as_a_successful_admission() -> No
         now=NOW,
         auction_deadline=DEADLINE,
         trust_snapshot=_trust_snapshot_for(payload),
+        list_prices=_list_prices_for(payload),
     )
     assert queue.attempts == 1, "the door must have genuinely attempted the write exactly once"
     assert result is None or result.accepted is not True, (

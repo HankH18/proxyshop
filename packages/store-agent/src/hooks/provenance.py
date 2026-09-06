@@ -142,6 +142,17 @@ DISCOUNT_FIELD = "discount"
 PRICE_FIELD = "unit_price"
 PRODUCT_FIELD = "product_ref"
 
+#: The field carrying what the offer says the whole thing costs.
+#:
+#: It is NOT a second `PRICE_FIELD` and must not become one. The floor and the reconciliation are
+#: walls on the price of a *unit*, and `total_price` is a price for an unstated number of them —
+#: `Offer` carries no quantity, and the quantity that would relate the two lives in the checkout
+#: path (`apps/exchange/src/checkout/codes.py`), so "is this total right" is not decidable from a
+#: bid alone and this module does not pretend otherwise (T-156 leaves that design question open).
+#:
+#: What IS decidable is the half-line no quantity can reach. See :func:`_total_price_refusal`.
+TOTAL_PRICE_FIELD = "total_price"
+
 #: `Discount.type` values that mean "``value`` is a percentage depth", which is the only form a
 #: hook can authorize: :meth:`~store_agent.hooks.tools.ToolHooks.authorize_discount` reasons in
 #: percent against a cap in percent. Any other discount form is refused rather than guessed at —
@@ -478,6 +489,14 @@ class ClaimMaterial(NamedTuple):
     prices: list[tuple[str, Any, Any]]
     disguises: list[tuple[str, Any]]
     unwalkable: list[tuple[str, str]]
+    #: ``(path, the unit price stated beside it, the total)`` for every priced node that also
+    #: states a `total_price`. A SEPARATE list rather than a fourth column on `prices`, because
+    #: the two are not the same kind of number and are not checked by the same walls: `prices`
+    #: feeds the floor and the depth reconciliation, both of which are about one unit, and a
+    #: total is only ever compared against the unit standing next to it. Appended last so the
+    #: five existing fields keep their positions — `prices` is destructured as a 3-tuple by the
+    #: suite and this must not move under it.
+    totals: list[tuple[str, Any, Any]]
 
 
 def _walk(
@@ -558,6 +577,7 @@ def _walk(
         price = _read(node, PRICE_FIELD)
         if price is not None:
             found.prices.append((f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), price))
+            _record_total(node, path, found)
         _sweep(node, path, found, nested)
         return
 
@@ -576,6 +596,7 @@ def _walk(
         found.prices.append(
             (f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), _read(node, PRICE_FIELD))
         )
+        _record_total(node, path, found)
 
     if _is_sequence(node):
         for index, item in enumerate(node):
@@ -586,6 +607,24 @@ def _walk(
         found.claims.append(node)
     elif isinstance(node, Mapping):
         _sweep(node, path, found, nested)
+
+
+def _record_total(node: Any, path: str, found: ClaimMaterial) -> None:
+    """Record `node`'s `total_price` beside the unit price the walk just collected from it.
+
+    Called from both places :func:`_walk` records a price — the model-shaped branch and the
+    dict-shaped one — because a bid built as a dict can put a priced node under any key it likes
+    and both walls were evadable that way once already.
+
+    The total is recorded ONLY where a unit price was, and that is the honest limit of what this
+    module can say: the relation :func:`_total_price_refusal` checks is between the two numbers,
+    so a node stating a total and no unit has nothing here to be reconciled against. That gap is
+    a live, separately-recorded finding (T-175) rather than an oversight — closing it means
+    deciding what a bare total is a price OF, which is the same open design question.
+    """
+    total = _read(node, TOTAL_PRICE_FIELD)
+    if total is not None:
+        found.totals.append((f"{path}.{TOTAL_PRICE_FIELD}", _read(node, PRICE_FIELD), total))
 
 
 def _sweep(node: Any, path: str, found: ClaimMaterial, seen: frozenset[int]) -> None:
@@ -630,7 +669,7 @@ def collect_claim_material(presented: Any) -> ClaimMaterial:
     being the fail-open all over again. The partial walk is kept — whatever it found is still
     true — and the refusal is recorded on top of it.
     """
-    found = ClaimMaterial([], [], [], [], [])
+    found = ClaimMaterial([], [], [], [], [], [])
     try:
         _walk(presented, "", found)
     except RecursionError:
@@ -932,6 +971,95 @@ def _price_reconciliation_refusal(
     return None
 
 
+def _total_price_refusal(path: str, unit_price: Any, total_price: Any) -> str | None:
+    """Why an offer's `total_price` cannot be a price for the units it is pricing, or `None`.
+
+    `total_price` used to be read by nothing at all in this module — the string appeared once, in
+    a docstring — because `PRICE_FIELD` is `unit_price` and both walls above are walls on a unit.
+    That is not an omission anyone could see from the wall: an offer whose `unit_price` is
+    *exactly* the honest price for a genuinely granted depth, on a catalogued product, inside the
+    cap and above the floor, was admitted with ANY total beneath it. Measured over the approved
+    envelope: 60 of 60 such bids admitted, `price_reasons` silent on every one, the ticket's own
+    example (unit 80.00 behind a real 20% grant on a 100.00 list, total 1.00) among them (T-156).
+
+    It is not a cosmetic field. `apps/exchange/src/ranking/__init__.py` reads
+    ``("total_price", "unit_price", "price")`` in that order — **`total_price` first** — and
+    DESIGN.md publishes ``price_value = clamp((list_price - total_price) / list_price, 0, 1)``.
+    The number no wall checked is the number the published rank formula reads, and the C11
+    accepted-event payload records it verbatim for whatever runs next.
+
+    **The relation, and why it is the only one available.** `Offer` carries no quantity — the
+    quantity that would relate a unit price to a total lives in the checkout path — so this wall
+    cannot say what a total OUGHT to be, and does not try::
+
+        total_price  >=  unit_price        (within PRICE_RECONCILIATION_TOLERANCE)
+
+    Every quantity is at least one, so a total strictly below the price of ONE already-discounted
+    unit is unreachable under every quantity semantics there could be. That makes the refusal
+    quantity-SAFE rather than quantity-blind: it decides nothing about where quantity should
+    enter the bid, it refuses only the half-line no answer to that question can reach. A future
+    bid that learns to carry a quantity passes this unchanged.
+
+    **One-sided, for the same reason** `_price_reconciliation_refusal` is. A total ABOVE one unit
+    is a total for some number of units, and this module has no way to know which — refusing it
+    would be guessing at the design question the ticket says is open.
+
+    `unit_price` is the number recorded beside this total by the same node, not the deepest price
+    in the bid: the pairing is per node, exactly as the discount/price pairing is, so two offers
+    in one bid cannot borrow each other's numbers.
+
+    A total that is not a number at all is refused rather than skipped. `_as_depth` reads NaN and
+    `inf` as "not a number", and it has to: NaN loses every comparison, so a wall built out of
+    comparisons waves it through — which is precisely how `freshness_window_seconds=nan` turned
+    the door's freshness gate decorative. A price wall must not have the same hole. A NUMERIC
+    STRING is not in that class and is accepted: `_as_depth` coerces `"44.10"` through `float()`,
+    which is the same idiom `unit_price` has always used here, so both fields behave alike. The
+    shared `contracts.boundary` refuses a stringly-typed price, so the two doors differ on that
+    shape — recorded because it is measured, not because this wall is the place to change it.
+
+    **The two doors read `unit_price` differently, and this wall inherits the store agent's
+    reading.** `_price_reconciliation_refusal` above treats `unit_price` as the price AFTER the
+    declared discount (`unit >= list * (100 - declared) / 100`); `contracts.boundary` treats it
+    as the price BEFORE, which is why its own total/unit relation is
+    `total >= unit * (100 - declared) / 100` and why that relation is applied only at a NON-ZERO
+    depth — at zero it would degenerate into exactly the claim made here. Under the contracts
+    reading an offer may honestly state `unit_price 49.00 / total_price 44.10` at 10%, and
+    `packages/contracts/openapi/store-agent.openapi.json`'s own 200 example does; this wall
+    refuses that shape, and the shared door admits it.
+
+    That divergence is the design question T-156 says closing it requires, and it is left OPEN
+    rather than silently decided: nothing in the repo currently sends such a bid through this
+    guard — `enforce_bid_provenance`'s only production caller is
+    `store_agent.runtime.bidding`, which emits `total_price = unit_price` — and the full suite is
+    unchanged. It is recorded here so the next reader meets it at the wall rather than in a
+    rejection log.
+
+    Anything the floor wall already refuses about the UNIT — a non-numeric or negative unit price
+    — returns `None` here, so one bad number is reported once and by the wall whose subject it is.
+    """
+    unit = _as_depth(unit_price)
+    if unit is None or unit < 0.0:
+        return None
+    total = _as_depth(total_price)
+    if total is None:
+        return (
+            f"the offer at {path} states a total that is not a number: {total_price!r}. It is the "
+            "field the published rank formula reads first, and a comparison against a value that "
+            "is not a number silently succeeds; refusing rather than admitting it unchecked"
+        )
+    if total < 0.0:
+        return f"the offer at {path} states a negative total ({total})"
+    if total + PRICE_RECONCILIATION_TOLERANCE < unit:
+        return (
+            f"the offer at {path} states a total of {total} while pricing the unit it is a total "
+            f"of at {unit}: an offer cannot cost less in total than ONE of the units it prices, "
+            "at any quantity, because every quantity is at least one. The bid states no "
+            "quantity, so nothing here says what the total ought to be — only that this one is "
+            "unreachable"
+        )
+    return None
+
+
 def _discount_refusal(
     path: str, discount: Any, unspent: list[tuple[float, str]], product_ref: str | None
 ) -> str | None:
@@ -1121,6 +1249,15 @@ def enforce_hook_provenance(
         )
         if reason is not None:
             extras.append(reason)
+    # The total, against the unit standing beside it. A third wall rather than a third question
+    # asked of the second one: the floor and the reconciliation both need the catalog and the
+    # grant to say anything, and this one needs neither — it is the only price relation that is
+    # decidable from the bid alone, which is why it is also the only thing that can be said about
+    # a field the protocol object carries no quantity for. See `_total_price_refusal`.
+    for path, unit, total in found.totals:
+        reason = _total_price_refusal(path, unit, total)
+        if reason is not None:
+            extras.append(reason)
     for path, node in found.disguises:
         # The price fields count as offer material here as well as in `_walk`, or the node that
         # smuggled a price behind a claim's identity would be refused with an empty list of what
@@ -1196,6 +1333,7 @@ __all__ = [
     "PRICE_RECONCILIATION_TOLERANCE",
     "PRICE_FIELD",
     "PRODUCT_FIELD",
+    "TOTAL_PRICE_FIELD",
     "PRODUCT_SCOPED_CLAIM_KEYS",
     "UNKNOWN_OBSERVED_AT",
     "ClaimMaterial",

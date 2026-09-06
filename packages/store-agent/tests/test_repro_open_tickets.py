@@ -575,17 +575,44 @@ def test_t156_the_dishonest_total_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-156: offer.total_price is reconciled against nothing at the store agent's own "
-        "door. packages/store-agent/src/hooks/provenance.py never reads the field at all — the "
-        "string appears once in the whole module, in a docstring at :895, because PRICE_FIELD "
-        "is 'unit_price' — so an offer whose unit_price is the honest price for a genuinely "
-        "granted depth is admitted with ANY total below it. Measured: 60 of 60 admitted; "
-        "remove this marker with the fix"
-    ),
-)
+# ---------------------------------------------------------------------------------------------
+# TEST EDIT, JUSTIFIED — the `xfail(strict=True)` marker that stood here was REMOVED. No
+# assertion below was touched, and no case was dropped from the sweep: it still generates and
+# grades all 60.
+#
+# MARKER REMOVED, verbatim: `@pytest.mark.xfail(strict=True, reason="T-156: offer.total_price is
+# reconciled against nothing at the store agent's own door. packages/store-agent/src/hooks/
+# provenance.py never reads the field at all — the string appears once in the whole module, in a
+# docstring at :895, because PRICE_FIELD is 'unit_price' — so an offer whose unit_price is the
+# honest price for a genuinely granted depth is admitted with ANY total below it. Measured: 60 of
+# 60 admitted; remove this marker with the fix")`
+#
+# WHAT IT CLAIMED: that the assertion below MUST fail — 60 of 60 bids stating a total under one
+# already-discounted unit were admitted. Under `strict=True` the marker is itself an assertion,
+# so leaving it in place once the defect is fixed turns the repair into an XPASS *failure* that
+# reds `make verify`.
+#
+# REQUIREMENT IT ENCODES: T-156, tickets.json. This node is the ticket's recorded `verify`.
+#
+# REVERT CHECK — would the assertion below still pass if I reverted my change? **NO**. MEASURED in
+# this lane, three runs, ONE file swapped (packages/store-agent/src/hooks/provenance.py) and
+# nothing else:
+#   * `git show HEAD:...provenance.py` in place, `--runxfail`: 1 failed — "60 of 60 bids stating
+#     a total_price below one already-discounted unit_price were ADMITTED".
+#   * the same tree, plain run: 1 xfailed, with this marker's reason printed.
+#   * my `_total_price_refusal` + `ClaimMaterial.totals` restored, `--runxfail`: 2 passed.
+# So the XPASS is caused by THIS lane's fix and not by unrelated drift — the failure mode a
+# sibling lane hit, where three of five XPASSing markers had nothing to do with the lane's own
+# change and removing them would have false-closed three open tickets.
+#
+# WHAT IS *NOT* CLOSED, and is deliberately left red elsewhere in this file: the companion
+# finding T-175 — that neither the floor wall nor the depth reconciliation READS `total_price`,
+# so a node stating a total with no unit price beside it is still collected by nothing. The fix
+# below reconciles a total against the unit standing next to it and claims no more than that.
+# See `test_t175_...` below, which is xfail(strict=True) and RED against this same tree.
+#
+# VERDICT: the marker, not the code, was the thing that had become false. Removed.
+# ---------------------------------------------------------------------------------------------
 def test_t156_a_total_price_below_one_unit_price_is_refused_at_the_store_agents_own_door() -> None:
     """An offer cannot cost less in total than one of the units it is pricing.
 
@@ -863,6 +890,19 @@ def _t279_bases() -> list[dict[str, Any]]:
                 "trust_snapshot": {
                     store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}
                 },
+                # The catalog the CALLER holds, priced at exactly what this drawn offer states,
+                # so the price wall is silent because the bid is truthful. Carried on the BASE
+                # rather than derived per call on purpose: a hazard and its benign twin must meet
+                # the SAME catalog, or the reason-token comparison would read a roster difference
+                # as a door difference. An absent roster stopped being the abstention with
+                # T-306/T-307 and now refuses like an empty one — which is what the arming
+                # assertion caught, correctly, rather than going quietly green.
+                "list_prices": {
+                    payload["offer"]["product_ref"]: {
+                        "list_price": unit_price,
+                        "max_discount_pct": 100.0,
+                    }
+                },
             }
         )
     return bases
@@ -885,7 +925,7 @@ def _t279_invoke(entry: Any, base: dict[str, Any], overrides: dict[str, Any]) ->
         "blacklist": None,
         "freshness_window_seconds": T279_FRESHNESS_WINDOW_SECONDS,
         "trust_snapshot": base["trust_snapshot"],
-        "list_prices": None,
+        "list_prices": base["list_prices"],
         "max_discount_pct": None,
     }
     positional = ("payload", "signature", "keyring")
@@ -1299,19 +1339,41 @@ def test_t279_the_hostile_input_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-279: the total `except Exception` at door.py:404 is the only thing holding "
-        "`receive_bid` never-raises up for two whole hazard families. A trust_snapshot whose "
-        "`.get` raises anything but TypeError escapes contracts/boundary.py:958-964, and a "
-        "keyring whose `.get` does the same escapes contracts/signing.py:399-406; both come "
-        "back `door_failed_closed` where the readable equivalent is answered "
-        "`trust_snapshot_unavailable:<store_id>` and `unknown_signing_key`. Every by-name gate "
-        "inside _receive_bid could regress and the suite would stay green; remove this marker "
-        "with the fix"
-    ),
-)
+# ---------------------------------------------------------------------------------------------
+# TEST EDIT, JUSTIFIED — the `xfail(strict=True)` marker that stood here was REMOVED. No
+# assertion below was touched; the marker's own `reason` said "remove this marker with the fix",
+# and this is that removal.
+#
+# MARKER REMOVED, verbatim: `@pytest.mark.xfail(strict=True, reason="T-279: the total `except
+# Exception` at door.py:404 is the only thing holding `receive_bid` never-raises up for two whole
+# hazard families. A trust_snapshot whose `.get` raises anything but TypeError escapes
+# contracts/boundary.py:958-964, and a keyring whose `.get` does the same escapes
+# contracts/signing.py:399-406; both come back `door_failed_closed` where the readable equivalent
+# is answered `trust_snapshot_unavailable:<store_id>` and `unknown_signing_key`. Every by-name
+# gate inside _receive_bid could regress and the suite would stay green; remove this marker with
+# the fix")`
+#
+# WHAT IT CLAIMED: that the assertion below MUST fail — 52 of the sweep's checks were answered by
+# the outer catch-all rather than by name. Under `strict=True` the marker is itself an assertion,
+# and leaving it in place once the defect is fixed turns the repair into an XPASS *failure* that
+# reds `make verify`.
+#
+# REQUIREMENT IT ENCODES: T-279, tickets.json — "the three inner fixes need assertions that see
+# BELOW the wrapper". The gate is the ticket's recorded `verify`.
+#
+# REVERT CHECK — would the assertion below still pass if I reverted my change? **NO**, and that is
+# the whole proof. MEASURED in this lane, three runs, one file swapped and nothing else:
+#   * `git show HEAD:packages/store-agent/src/external/door.py` in place, `--runxfail`:
+#     1 failed — "52 hazard(s) are answered by the total wrapper rather than by name".
+#   * the same tree, plain run: 1 xfailed, with this marker's reason printed.
+#   * my `_readable_eligibility` + guarded `keyring_secret` restored, `--runxfail`: 2 passed.
+# So the XPASS is caused by THIS lane's fix to `door.py` and not by an unrelated drift — the
+# failure mode a sibling lane hit an hour ago, where three of five XPASSing markers had nothing to
+# do with the lane's own change and removing them would have false-closed three open tickets.
+#
+# VERDICT: the marker, not the code, was the thing that had become false. Removed. The assertions
+# it wrapped are unchanged and now grade the repair, which is what they were written to do.
+# ---------------------------------------------------------------------------------------------
 def test_t279_every_hostile_input_is_refused_by_name_not_by_the_catch_all() -> None:
     """The door must answer an input it cannot READ the way it answers one it can.
 
@@ -1393,4 +1455,1300 @@ def test_t279_every_hostile_input_is_refused_by_name_not_by_the_catch_all() -> N
         f"{len(escapes)} hazard(s) are answered by the total wrapper rather than by name:\n  "
         + "\n  ".join(escapes[:24])
         + (f"\n  ... and {len(escapes) - 24} more" if len(escapes) > 24 else "")
+    )
+
+
+# =============================================================================================
+# T-175 — `PRICE_FIELD == 'unit_price'`, so NEITHER price wall ever looks at `total_price`
+#
+# The companion to T-156 with the design citation attached, and it is a DIFFERENT hole. T-156 is
+# about a relation the boundary never checked between two numbers it could both see; this is
+# about a number the boundary never SEES. `_walk` records a priced node only when it reads BOTH
+# `product_ref` and `unit_price` off it, so a node naming a product and stating only a
+# `total_price` is collected by nothing — outside the floor wall and outside the depth
+# reconciliation alike, in a module whose own comments say a dict-built bid may put a priced node
+# under any key it likes.
+#
+# Function-local imports again, for the reason stated at the T-156 header.
+# =============================================================================================
+
+#: MEASURED on `fixtures/envelopes/store-alpha.approved.json`: `ToolHooks.price_floor` answers
+#: 10.00 for `prod-cap` and 95.00 for `prod-floor`, both listing at 100.00. Restated here rather
+#: than probed so a fixture that changes under the sweep turns it RED instead of shrinking it —
+#: the arming test asserts every one of these against the live facade.
+T175_FLOORS: dict[str, float] = {"prod-cap": 10.0, "prod-floor": 95.0}
+
+#: Where in a dict-built bid the priced node sits. Both are reached by `_walk`, by different
+#: routes, and the ticket is about a field being unread rather than a node being unreachable — so
+#: a fix that taught only the `offer` branch to read a total would still leave the sweep's second
+#: half admitted. `offer` is `NESTED_OBJECT_FIELDS`; `quotes.alternate` is the unrecognized-key
+#: path `_sweep` exists to walk.
+T175_PLACEMENTS: tuple[str, ...] = ("offer", "quotes.alternate")
+
+T175_PINNED_SEED = 20260904
+T175_DRAWS_PER_SHAPE = 4
+#: 2 products x 2 placements x 4 drawn prices.
+T175_CASE_COUNT = 16
+
+
+def _t175_cases() -> list[dict[str, Any]]:
+    """Prices strictly under the envelope's own approved floor, drawn per product.
+
+    Under the FLOOR, deliberately, and not merely under the list price: the floor is the wall
+    whose subject a bare price unambiguously is, and `_price_refusal` refuses a unit price there
+    with no grant, no discount and no depth arithmetic involved. That makes the control below —
+    the identical node with the number spelled `unit_price` — refused for a reason that cannot be
+    confused with anything this gate is asking for.
+
+    Half of every draw is pinned (so a failure is reproducible) and half comes from
+    `SystemRandom` (so the sweep cannot be fitted to a constant table), exactly as the T-156 and
+    T-279 sweeps in this file draw.
+    """
+    import random  # noqa: PLC0415
+
+    pinned = random.Random(T175_PINNED_SEED)
+    system = random.SystemRandom()
+    cases: list[dict[str, Any]] = []
+    for product in sorted(T175_FLOORS):
+        floor = T175_FLOORS[product]
+        for placement in T175_PLACEMENTS:
+            for cent in _t156_draw(
+                1, int(round(floor * 100.0)) - 1, pinned, system, T175_DRAWS_PER_SHAPE
+            ):
+                cases.append(
+                    {
+                        "product": product,
+                        "placement": placement,
+                        "floor": floor,
+                        "price": cent / 100.0,
+                    }
+                )
+    return cases
+
+
+def _t175_label(case: dict[str, Any], field: str) -> str:
+    return (
+        f"{case['product']} floor={case['floor']} at .{case['placement']}.{field}={case['price']}"
+    )
+
+
+def _t175_bid(case: dict[str, Any], field: str) -> dict[str, Any]:
+    """A dict-shaped bid stating `case['price']` for `case['product']`, spelled `field`.
+
+    Dict-shaped rather than a `contracts.Bid`, and that is the threat model this module already
+    documents rather than a convenience: `Offer` forbids extra fields and requires its own, so a
+    model-built bid cannot express "a product and a total and no unit at all". A Tier-2 store
+    submits a mapping, and `provenance.py`'s own comment says it "can put
+    ``{"product_ref": ..., "unit_price": ...}`` under any key it likes, where nothing collected
+    it and therefore neither price wall ever saw it".
+
+    `field` is the ONLY difference between the gate's bid and its control. Everything else — the
+    product, the number, the placement, the empty claims and commitments — is byte-identical, so
+    a difference in verdict can only be about which field name the walls read.
+    """
+    priced: dict[str, Any] = {"product_ref": case["product"], field: case["price"]}
+    body: dict[str, Any] = {
+        "auction_id": "auction-t175",
+        "store_id": _t156_fixture()["envelope"]["store_id"],
+        "claims": [],
+        "agent_version": "store-agent/t175-gate",
+        "schema_version": "1.0.0",
+    }
+    if case["placement"] == "offer":
+        priced.update({"currency": "USD", "discount": None, "commitments": []})
+        body["offer"] = priced
+    else:
+        outer, inner = case["placement"].split(".")
+        body["offer"] = {
+            "product_ref": case["product"],
+            "unit_price": float(_t156_fixture()["catalog"][case["product"]]["list_price"]),
+            "currency": "USD",
+            "discount": None,
+            "commitments": [],
+        }
+        body[outer] = {inner: priced}
+    return body
+
+
+def _t175_refusal(bid: dict[str, Any]) -> list[str]:
+    """Every reason `enforce_bid_provenance` gives for `bid`, or `[]` when it admits it."""
+    from store_agent.hooks import HookProvenanceError, enforce_bid_provenance  # noqa: PLC0415
+
+    try:
+        enforce_bid_provenance(bid, _t156_hooks())
+    except HookProvenanceError as exc:
+        return [reason for _, reason in exc.offenders]
+    return []
+
+
+def test_t175_the_unread_total_price_sweep_is_armed() -> None:
+    """Sixteen real cases, sixteen controls that are refused TODAY, and an honest bid still gets
+    in. NOT xfail.
+
+    Five ways the gate below could report green while the defect lived, each closed here:
+
+    1. **The sweep goes quiet.** A loop over zero cases passes. Three sweeps in this repo were
+       found doing exactly that (6->0 of 8, 70->0 of 79, 48->0 of 66). Counted and de-duplicated
+       before anything is concluded.
+    2. **The drawn prices stop being the floor wall's subject.** Every one is asserted to be
+       strictly under the product's floor as the LIVE facade reports it, so a fixture whose
+       floors moved turns this red instead of quietly making the gate about nothing.
+    3. **The refusal machinery is dead.** This is the load-bearing one, and it is what makes the
+       gate's red a measurement rather than an assertion about an absent apparatus: the SAME
+       node, at the SAME placement, with the SAME number spelled `unit_price` instead of
+       `total_price`, must be REFUSED today, naming `unit_price`. Sixteen controls, all sixteen
+       red at HEAD. If BOTH price walls ever stopped refusing under-floor prices, these fail
+       first and the gate below stops being evidence.
+
+       Stated exactly, because an earlier draft of this docstring overclaimed and a verifier
+       caught it: the control proves *a* price wall refused, not that the FLOOR wall did.
+       Disabling the floor wall alone leaves it green, because every drawn price is also far
+       under the honest price for a declared 0% and `_price_reconciliation_refusal` fires with a
+       message carrying the same `.unit_price` path. No draw in this sweep can isolate the two —
+       both roster floors sit under the list price these products carry — and the gate does not
+       need it to. It needs "the identical number one field over IS refused", which is what this
+       measures.
+    4. **The walls refuse everything, or refuse the FIELD.** A fix that refused every dict-built
+       bid would satisfy a gate that only ever looks at dishonest ones — so an honest bid at each
+       placement, at the list price itself, is required to be ADMITTED. And the same is required
+       of an honest bid spelled `total_price`, which is the assertion that separates the repair
+       this ticket asks for from a cheap imitation of it: a `_walk` that simply REFUSED any node
+       naming a product and a bare total would green the gate below while refusing honest
+       traffic. Measured — that exact edit greens the gate and reds this control.
+    5. **The two spellings differ in something other than the field name.** The control bid and
+       the gate bid are asserted to be identical dicts once the one key is renamed.
+    """
+    from store_agent.hooks import ToolHooks  # noqa: PLC0415
+
+    hooks: ToolHooks = _t156_hooks()
+    for product, floor in T175_FLOORS.items():
+        live = hooks.price_floor(product)
+        assert live == floor, (
+            f"the approved envelope now floors {product!r} at {live}, not {floor}; the prices "
+            "this sweep draws are written against the recorded floor and are no longer under it"
+        )
+
+    cases = _t175_cases()
+    assert len(cases) == T175_CASE_COUNT, (
+        f"the sweep generated {len(cases)} cases, not {T175_CASE_COUNT} — it has shrunk, and a "
+        "shrunken sweep proves nothing"
+    )
+    keys = {(case["product"], case["placement"], case["price"]) for case in cases}
+    assert len(keys) == T175_CASE_COUNT, (
+        f"only {len(keys)} of {len(cases)} generated cases are DISTINCT"
+    )
+    assert {case["placement"] for case in cases} == set(T175_PLACEMENTS)
+
+    for case in cases:
+        assert 0.0 < case["price"] < case["floor"], (
+            f"{_t175_label(case, 'unit_price')}: the drawn price is not strictly under the "
+            "product's floor, so the floor wall is not its subject and the control below would "
+            "not be refused for the reason this gate compares against"
+        )
+
+        # 5. One key renamed, and nothing else.
+        gate_bid = _t175_bid(case, "total_price")
+        control_bid = _t175_bid(case, "unit_price")
+        assert json.dumps(gate_bid, sort_keys=True).replace(
+            '"total_price"', '"unit_price"'
+        ) == json.dumps(control_bid, sort_keys=True), (
+            f"{_t175_label(case, 'total_price')}: the gate's bid and its control differ in more "
+            f"than the priced field's name:\n  gate:    {gate_bid}\n  control: {control_bid}"
+        )
+
+        # 3. The control is refused TODAY, by name.
+        reasons = _t175_refusal(control_bid)
+        assert reasons, (
+            f"{_t175_label(case, 'unit_price')}: the identical node spelled `unit_price` was "
+            "ADMITTED. Both price walls have stopped refusing an under-floor price, so the gate "
+            "below can no longer tell 'total_price is unread' from 'nothing is read'"
+        )
+        assert any("unit_price" in reason for reason in reasons), (
+            f"{_t175_label(case, 'unit_price')}: refused, but no reason names unit_price "
+            f"({reasons}); the gate below reads offender text the same way"
+        )
+
+    # 4. An honest bid at each placement still gets in — in BOTH spellings. The `total_price`
+    #    half is what forbids the cheap imitation of this ticket's repair: banning the field
+    #    instead of checking it against the floor.
+    for placement in T175_PLACEMENTS:
+        for product in sorted(T175_FLOORS):
+            listed = float(_t156_fixture()["catalog"][product]["list_price"])
+            case = {
+                "product": product,
+                "placement": placement,
+                "floor": T175_FLOORS[product],
+                "price": listed,
+            }
+            for field in ("unit_price", "total_price"):
+                honest = _t175_bid(case, field)
+                reasons = _t175_refusal(honest)
+                assert reasons == [], (
+                    f"{product} at .{placement}.{field}: an HONEST bid stating the list price "
+                    f"{listed} — above the {T175_FLOORS[product]} floor, at no discount — was "
+                    f"refused {reasons}. A wall that refuses honest bids would satisfy the gate "
+                    "below without reading anything, and a walk that simply REFUSED a node "
+                    "naming a product and a bare total would green the gate while refusing "
+                    "traffic the merchant approved. What the ticket asks for is that the total "
+                    "be CHECKED against the envelope, exactly as the unit price is — not banned"
+                )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-175: `PRICE_FIELD = 'unit_price'` at provenance.py:142, so `_walk` records a priced "
+        "node only where it reads BOTH `product_ref` and `unit_price`. A dict-built node naming "
+        "a product and stating only a `total_price` is collected by nothing — `prices` comes "
+        "back `[]` — so neither the floor wall nor the depth reconciliation ever sees the "
+        "number, and DESIGN.md:127 publishes `price_value` as a function of exactly that field "
+        "while the C11 accepted-event payload records it verbatim. Measured: 16 of 16 admitted, "
+        "against 16 of 16 refused for the identical node with the number spelled `unit_price`; "
+        "remove this marker with the fix"
+    ),
+)
+def test_t175_a_total_price_under_the_envelope_floor_is_refused_like_a_unit_price_is() -> None:
+    """A price the store agent's own walls never read is a price the merchant never approved.
+
+    The relation asserted is the FLOOR's, not a quantity's, and that is what keeps this gate
+    closeable without answering T-156's open design question. Nothing here says what a total
+    ought to be relative to a unit, or how many units a total is for. It says that a number
+    stating what a buyer pays for a catalogued product must be inside the envelope the merchant
+    approved, exactly as the number one field over already is — `apps/exchange/src/ranking`
+    reads `("total_price", "unit_price", "price")` in that order, `total_price` FIRST, so the
+    unread field is the one the published rank formula prefers.
+
+    **Distinct from T-156, and left red on purpose by the lane that fixed T-156.** That repair
+    added `_total_price_refusal`, which reconciles a total against the unit price standing
+    beside it on the same node. It is silent here by construction: these nodes state no unit
+    price at all, so there is nothing for that relation to compare against and
+    `ClaimMaterial.totals` comes back empty. Closing this one means teaching `_walk` that a
+    product plus a total is offer material — the `PRICE_FIELD` the ticket names.
+
+    MEASURED at HEAD (and again after the T-156 repair, unchanged): `collect_claim_material`
+    returns `prices=[]` and `totals=[]` for the `.offer` shape, `enforce_bid_provenance` admits
+    it, and the identical node with `unit_price` in place of `total_price` is refused by BOTH
+    walls — "under the envelope's approved floor of 10.0" and "99.95% off its list price".
+    """
+    cases = _t175_cases()
+    assert len(cases) == T175_CASE_COUNT, (
+        f"the sweep generated {len(cases)} cases, not {T175_CASE_COUNT}; see the arming test"
+    )
+
+    escapes: list[str] = []
+    for case in cases:
+        label = _t175_label(case, "total_price")
+        reasons = _t175_refusal(_t175_bid(case, "total_price"))
+        if not reasons:
+            escapes.append(f"{label}: enforce_bid_provenance ADMITTED it")
+        elif not any("total_price" in reason for reason in reasons):
+            escapes.append(f"{label}: refused, but not about total_price — {reasons}")
+
+    assert not escapes, (
+        f"{len(escapes)} of {len(cases)} bids stating a total_price under the envelope's own "
+        "approved floor for a catalogued product were admitted by the store agent's auditor, "
+        "where the identical node spelling the same number `unit_price` is refused by both "
+        "walls:\n  " + "\n  ".join(escapes)
+    )
+
+
+# =============================================================================================
+# T-209 / T-218 — the contracts boundary was tightened and the store agent's own auditor was not
+#
+# One apparatus, two gates, and ONE arming control named for both — `-k t218` is T-218's own
+# selector and it must select a control that passes, or a red under it could be a collection
+# accident rather than a live defect.
+# T-209 is the named case (`offer.commitments: null`); T-218 is the
+# ticket that says the cause is generic and asks for "a property test asserting the two doors
+# agree on nullability, not six more point fixes". So the family below is DISCOVERED at run time
+# from the contracts door itself rather than written down: every field the pydantic model refuses
+# a `null` for is in it, including the ones a future `--strict-nullable` regeneration adds. That
+# is the structural half of T-218 — "every future field the generator tightens silently joins the
+# family, and nothing on the store-agent side notices" — and a hard-coded list of six would
+# reproduce exactly the defect it is grading.
+#
+# Function-local imports, for the reason stated at the T-156 header.
+# =============================================================================================
+
+#: `now` for the contracts door. Fixed, so the offer's expiry is judged against a constant.
+T209_NOW = "2026-06-01T00:00:00Z"
+
+#: The eligibility row for the base bid's store. The nullability question is about SCHEMA, so
+#: every other wall on that door is satisfied deliberately — a bid refused for eligibility would
+#: be refused with the flipped field too, and the comparison would be measuring nothing.
+T209_SNAPSHOT_SCORE = 0.6
+
+#: Fields the ticket says are in the family. NOT the source of truth — the family is discovered
+#: from the model below — but the arming test requires the discovered set to CONTAIN these, so a
+#: regeneration that quietly widened `commitments` back to optional turns this red instead of
+#: shrinking the sweep to nothing. T-218 says "at least six"; nine were measured.
+T209_EXPECTED_FAMILY = frozenset(
+    {
+        "auction_id",
+        "store_id",
+        "offer",
+        "claims",
+        "agent_version",
+        "schema_version",
+        "offer.commitments",
+        "offer.unit_price",
+        "offer.total_price",
+    }
+)
+
+#: Fields that are genuinely nullable by contract. Both doors must ADMIT a null here, or the
+#: property below would be asking the store agent to refuse honest traffic.
+T209_NULLABLE_CONTROLS = ("pitch_ref", "message", "offer.currency", "offer.variant_ref")
+
+#: The one field in the family both doors ALREADY agree about. It is the negative control: it
+#: proves the store agent's auditor CAN refuse a null-valued field, so the escapes below are a
+#: measurement of which fields it looks at rather than of an auditor that never refuses anything.
+T209_AGREED_CONTROL = "offer.product_ref"
+
+
+def _t209_base() -> dict[str, Any]:
+    """A dict-shaped bid BOTH doors admit. Every value here is load-bearing.
+
+    `product_ref` is on the approved envelope's catalog and `unit_price` is its list price with
+    no discount declared, so the floor wall, the reconciliation and the grant ledger are all
+    satisfied and cannot stand in for the schema question. `claims` and `commitments` are empty
+    for the same reason. `expires_at` is in the future because the shared door fails closed on a
+    missing expiry, which is a refusal that has nothing to do with nullability.
+    """
+    envelope = _t156_fixture()["envelope"]
+    listed = float(_t156_fixture()["catalog"]["prod-cap"]["list_price"])
+    return {
+        "auction_id": "auction-t209",
+        "store_id": envelope["store_id"],
+        "offer": {
+            "product_ref": "prod-cap",
+            "unit_price": listed,
+            "total_price": listed,
+            "currency": "USD",
+            "commitments": [],
+            "expires_at": "2999-01-01T00:00:00Z",
+        },
+        "claims": [],
+        "agent_version": "store-agent/t209-gate",
+        "schema_version": "1.0.0",
+    }
+
+
+def _t209_snapshot() -> dict[str, Any]:
+    store_id = _t156_fixture()["envelope"]["store_id"]
+    return {
+        store_id: {
+            "store_id": store_id,
+            "score": T209_SNAPSHOT_SCORE,
+            "blacklisted": False,
+        }
+    }
+
+
+def _t209_roster() -> dict[str, Any]:
+    """The catalog the exchange holds for the base bid's product, priced from the same fixture.
+
+    The nullability question is about SCHEMA, so every other wall on that door is satisfied
+    deliberately — and since T-306/T-307 an ABSENT `list_prices` is no longer the abstention: it
+    refuses `price_unreconcilable:offer.unit_price:list_price_unavailable` exactly as an empty
+    roster does. Without this the base bid is refused before a single field has been flipped, and
+    the arming test says so rather than the sweep quietly measuring the base's own refusal.
+    """
+    return {
+        "prod-cap": {
+            "list_price": float(_t156_fixture()["catalog"]["prod-cap"]["list_price"]),
+            "max_discount_pct": 100.0,
+        }
+    }
+
+
+def _t209_paths() -> list[str]:
+    """Every field of `Bid`, plus every field of `Offer` as ``offer.<name>``.
+
+    Read off the generated models rather than listed, so a field the schema gains is a field this
+    sweep asks about on its next run. That is the whole of T-218's structural complaint.
+    """
+    from contracts.protocol import Bid, Offer  # noqa: PLC0415
+
+    return [*Bid.model_fields, *(f"offer.{name}" for name in Offer.model_fields)]
+
+
+def _t209_with_none(path: str) -> dict[str, Any]:
+    """`_t209_base()` with exactly one field set to an explicit `None`."""
+    import copy  # noqa: PLC0415
+
+    body = copy.deepcopy(_t209_base())
+    head, _, tail = path.partition(".")
+    if tail:
+        body[head][tail] = None
+    else:
+        body[head] = None
+    return body
+
+
+def _t209_contracts_verdict(body: dict[str, Any]) -> list[str]:
+    """The shared door's reasons for `body`. It never raises."""
+    from contracts.boundary import validate_bid  # noqa: PLC0415
+
+    return list(
+        validate_bid(
+            body,
+            path="hosted",
+            trust_snapshot=_t209_snapshot(),
+            list_prices=_t209_roster(),
+            now=T209_NOW,
+        ).reasons
+    )
+
+
+def _t209_schema_refused(path: str) -> bool:
+    """Whether the CONTRACTS door refuses a null at `path` as a schema violation.
+
+    `schema_invalid:<dotted path>` specifically, not any refusal: `offer.expires_at` is genuinely
+    nullable at the pydantic door and is refused `offer_expiry_missing` by a different wall, and
+    counting that as a nullability divergence would put a field in the family that the generator
+    never tightened.
+    """
+    for reason in _t209_contracts_verdict(_t209_with_none(path)):
+        if str(reason).startswith("schema_invalid") and path in str(reason):
+            return True
+    return False
+
+
+def _t209_store_agent_admits(body: dict[str, Any]) -> bool:
+    """Whether the STORE AGENT's own auditor lets `body` through."""
+    from store_agent.hooks import HookProvenanceError, enforce_bid_provenance  # noqa: PLC0415
+
+    try:
+        enforce_bid_provenance(body, _t156_hooks())
+    except HookProvenanceError:
+        return False
+    return True
+
+
+def _t209_family() -> list[str]:
+    """Every field the contracts door refuses a null for, discovered rather than listed."""
+    return [path for path in _t209_paths() if _t209_schema_refused(path)]
+
+
+def test_t209_t218_the_two_doors_nullability_sweep_is_armed() -> None:
+    """A base both doors admit, a family discovered from the model, and an auditor that can
+    still refuse. NOT xfail.
+
+    Five ways the gates below could report green while the divergence lived:
+
+    1. **The family is empty.** If the discovery probe stopped seeing `schema_invalid` reasons —
+       a regeneration without `--strict-nullable`, a reason string respelled — the property
+       below would iterate nothing and pass. The discovered family is required to contain the
+       nine measured fields by name.
+    2. **The base bid is not admitted.** Every case is the base with ONE field flipped, so if the
+       base were refused, every case would be refused for the base's reason and the sweep would
+       be blind. Both doors are required to admit it.
+    3. **The auditor refuses everything.** A store agent that refused any dict-built bid would
+       satisfy the property without reading a field. The genuinely NULLABLE fields are required
+       to be admitted by both doors.
+    4. **The auditor refuses nothing.** The mirror image, and the one that matters: if
+       `enforce_bid_provenance` could not refuse a null-valued field at all, the escapes below
+       would be an artefact. `offer.product_ref` is the negative control — a field in the family
+       that BOTH doors already refuse today — so the apparatus is proven able to produce the
+       verdict the gate is asking for.
+    5. **The two doors are not being asked about the same document.** The same dict object is
+       handed to both, built once per case.
+    """
+    base = _t209_base()
+    assert _t209_contracts_verdict(base) == [], (
+        f"the base bid is refused by the contracts door {_t209_contracts_verdict(base)}; every "
+        "case below is this bid with one field flipped, so the sweep would be measuring the "
+        "base's refusal rather than the flip"
+    )
+    assert _t209_store_agent_admits(base), (
+        "the base bid is refused by enforce_bid_provenance; every case below would be refused "
+        "for the base's reason and the property would pass without reading a field"
+    )
+
+    paths = _t209_paths()
+    assert len(paths) == len(set(paths)) and len(paths) >= 15, (
+        f"the model fields this sweep asks about are {paths}; that is not the shape of Bid+Offer"
+    )
+
+    family = _t209_family()
+    missing = sorted(T209_EXPECTED_FAMILY - set(family))
+    assert not missing, (
+        f"the contracts door no longer refuses a null at {missing}. Either --strict-nullable was "
+        "dropped from the generator (T-195's fix, packages/contracts/src/codegen.py) or the "
+        "reason spelling moved; the family this property sweeps is discovered from that door, so "
+        "it has just silently shrunk"
+    )
+
+    # 3. Genuinely nullable fields, admitted by BOTH.
+    for path in T209_NULLABLE_CONTROLS:
+        assert path not in family, (
+            f"{path} is documented nullable but the contracts door now refuses a null there; the "
+            "control has become a case"
+        )
+        body = _t209_with_none(path)
+        assert _t209_contracts_verdict(body) == [], (
+            f"{path}: a null in a NULLABLE field was refused by the contracts door "
+            f"{_t209_contracts_verdict(body)}"
+        )
+        assert _t209_store_agent_admits(body), (
+            f"{path}: a null in a NULLABLE field was refused by enforce_bid_provenance; the "
+            "property below would be asking the auditor to refuse honest traffic"
+        )
+
+    # 4. The negative control: one field in the family that BOTH doors already refuse.
+    assert T209_AGREED_CONTROL in family, (
+        f"{T209_AGREED_CONTROL} is no longer refused by the contracts door, so it can no longer "
+        "serve as the control proving the two doors CAN agree"
+    )
+    assert not _t209_store_agent_admits(_t209_with_none(T209_AGREED_CONTROL)), (
+        f"enforce_bid_provenance now ADMITS a null {T209_AGREED_CONTROL}. That was the one field "
+        "in the family the store agent refused, and it is what proved the auditor is able to "
+        "refuse a null-valued field at all — without it the gates below measure nothing"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-209: T-195 regenerated the model with --strict-nullable, so `offer.commitments: null` "
+        "is now correctly refused `schema_invalid:offer.commitments` at the contracts door. The "
+        "store agent walks `commitments` with no pydantic gate at all: `_walk`'s first statement "
+        "is `if node is None: return`, so the null is skipped SILENTLY — not recorded in "
+        "`unwalkable`, not refused — and a dict-built bid carrying it is admitted by "
+        "enforce_bid_provenance. The two doors disagree about the same shape; remove this marker "
+        "with the fix"
+    ),
+)
+def test_t209_a_null_commitments_list_is_refused_by_the_store_agents_own_door_too() -> None:
+    """The named case. `offer.commitments: null` must not be admitted by the auditor that walks it.
+
+    `commitments` is in `CLAIM_BEARING_FIELDS`, so the walk goes looking for claims under it and
+    finds a `None`. Returning on that is the difference between "there are no claims here" and
+    "I could not look", and the boundary's own comment elsewhere insists that difference be said
+    out loud: the `unwalkable` list exists precisely so that "we did not look" is an answer the
+    boundary gives rather than swallows. A null where a list belongs is the same silence with a
+    tighter door one package over now refusing it.
+    """
+    body = _t209_with_none("offer.commitments")
+    assert any(
+        str(reason).startswith("schema_invalid") for reason in _t209_contracts_verdict(body)
+    ), (
+        "the contracts door no longer refuses this shape either, so there is no disagreement "
+        "left to grade; see the arming test"
+    )
+    assert not _t209_store_agent_admits(body), (
+        "enforce_bid_provenance ADMITTED a bid whose offer.commitments is an explicit null, "
+        "which contracts.validate_bid refuses as "
+        f"{_t209_contracts_verdict(body)}. The walk short-circuits on the None and records "
+        "nothing, so the auditor cannot even report that it did not look"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-218: the cause is generic, not specific to commitments. `_walk` short-circuits on ANY "
+        "None while --strict-nullable made a growing set of fields non-nullable at the pydantic "
+        "door, so the family is whatever the generator has tightened so far. MEASURED: 9 of the "
+        "10 fields the contracts door refuses a null for are ADMITTED by enforce_bid_provenance, "
+        "with offer.product_ref the only one the two doors agree about. Every future field the "
+        "generator tightens joins the family and nothing on the store-agent side notices; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t218_the_two_doors_agree_about_every_field_that_may_not_be_null() -> None:
+    """The property, not the six point fixes: whatever the contracts door refuses a null for,
+    the store agent's own auditor must refuse too.
+
+    The family is DISCOVERED from the contracts door on every run, which is the part that makes
+    this a property rather than a longer list. T-218's structural complaint is that a field the
+    generator tightens tomorrow joins the divergence silently; a sweep that enumerated today's
+    six would go on passing through exactly that. This one asks the model.
+
+    It does not require the same REASON from both doors, and deliberately so. The store agent
+    does not speak `schema_invalid` and should not learn to — it is not a schema validator, it is
+    a provenance auditor, and the honest repair is for the walk to record a null where it expected
+    a container instead of returning on it silently. All this asks is that the bid not be
+    ADMITTED.
+
+    MEASURED at HEAD: 9 in the family, 8 of them admitted by `enforce_bid_provenance`, the ninth
+    (`offer.product_ref`) refused by a price wall that happens to need the name.
+    """
+    family = _t209_family()
+    assert family, "the discovered family is empty; see the arming test"
+
+    escapes: list[str] = []
+    for path in family:
+        body = _t209_with_none(path)
+        if _t209_store_agent_admits(body):
+            escapes.append(
+                f"{path}: refused {_t209_contracts_verdict(body)} by the contracts "
+                "door, ADMITTED by enforce_bid_provenance"
+            )
+
+    assert not escapes, (
+        f"{len(escapes)} of {len(family)} fields that may not be null at the contracts door are "
+        "admitted with an explicit null by the store agent's own auditor:\n  "
+        + "\n  ".join(escapes)
+    )
+
+
+# =============================================================================================
+# T-280 — a refusal receipt with no identity
+# =============================================================================================
+
+#: Nesting depths past `door._SNAPSHOT_MAX_DEPTH` (32). `_snapshot` raises `ValueError` on these
+#: and the door answers `malformed_submission` — the one refusal site in the file that passes no
+#: `payload=`. Restated rather than imported so a bound that moves makes the arming test say so.
+T280_DEPTHS: tuple[int, ...] = (33, 34, 36, 40, 48, 64)
+
+T280_SIGNER = "store-external-t280"
+T280_KEY_ID = "key-2026-01"
+T280_SECRET = "gate-secret-t280"
+T280_NOW = "2026-01-01T00:00:05Z"
+T280_DEADLINE = "2026-01-01T00:05:00Z"
+
+
+def _t280_payload(depth: int) -> dict[str, Any]:
+    """A fully valid, correctly signable submission carrying one absurdly nested extra key.
+
+    A PLAIN dict, and that is the whole point of the shape: every read `_refuse` would make is
+    an ordinary dict lookup that cannot fail, so the identity is sitting right there and the
+    receipt's silence about it is the omission and nothing else. A mapping whose reads raise
+    would be refused anonymously by `_refuse`'s own guard no matter what this site passed, and
+    would therefore grade nothing.
+    """
+    node: Any = {"leaf": "kettle"}
+    for level in range(depth):
+        node = {f"layer{level}": node}
+    return {
+        "auction_id": f"auction-t280-{depth}",
+        "store_id": "store-t280",
+        "offer": {
+            "product_ref": "prod-t280",
+            "unit_price": 10.0,
+            "total_price": 10.0,
+            "discount": None,
+            "commitments": [],
+            "expires_at": "2999-01-01T00:00:00Z",
+        },
+        "claims": [],
+        "message": "a submission the door cannot copy",
+        "agent_version": "ext-1.0.0",
+        "schema_version": "1",
+        "signer_id": T280_SIGNER,
+        "key_id": T280_KEY_ID,
+        "issued_at": "2026-01-01T00:00:00Z",
+        "nonce": f"nonce-t280-{depth}",
+        "deep": node,
+    }
+
+
+def _refuse_reads(payload: Any) -> tuple[Any, Any]:
+    """What `door._refuse` would put on the receipt if it were handed `payload`.
+
+    The door's own accessor, not `payload["signer_id"]`: `_refuse` reads through `.get` behind a
+    guard and keeps the value only if it is a `str`. Asking the same way is what makes "the
+    identity was readable" a measurement of the refusal path rather than of the fixture.
+    """
+    from store_agent.external.door import _refuse  # noqa: PLC0415
+
+    receipt = _refuse("probe", payload=payload)
+    return receipt.signer_id, receipt.nonce
+
+
+def _t280_receipt(depth: int, *, signature: Any = None) -> Any:
+    from store_agent.external import NonceStore, receive_bid, sign_bid  # noqa: PLC0415
+
+    payload = _t280_payload(depth)
+    return receive_bid(
+        payload,
+        sign_bid(payload, T280_SECRET) if signature is None else signature,
+        {T280_SIGNER: {T280_KEY_ID: T280_SECRET}},
+        queue=lambda item: None,
+        nonce_store=NonceStore(),
+        now=T280_NOW,
+        auction_deadline=T280_DEADLINE,
+        trust_snapshot={
+            "store-t280": {"store_id": "store-t280", "score": 0.9, "blacklisted": False}
+        },
+    )
+
+
+def test_t280_the_anonymous_receipt_sweep_is_armed() -> None:
+    """Six submissions the door really cannot copy, and a neighbouring refusal that DOES carry
+    identity on the identical payload. NOT xfail.
+
+    Four ways the gate below could report green while the omission lived:
+
+    1. **The sweep reaches a different refusal.** `malformed_submission` is emitted at exactly
+       two sites, and only one of them — the `_snapshot` failure — is this ticket's. Every case
+       is required to come back with that reason and no other, so a submission refused earlier
+       (an incomplete envelope, an unknown key, a stale `issued_at`) cannot be mistaken for it.
+    2. **The identity was never readable.** The payload is a plain dict; its `signer_id` and
+       `nonce` are asserted to be present, non-empty strings, so "the receipt has no identity"
+       cannot be explained by there being none to carry.
+    3. **The receipt cannot carry identity at all.** This is the control that makes the gate a
+       measurement. The SAME payload presented with an empty signature is refused
+       `signature_missing` at a site that DOES pass `payload=`, and that receipt is required to
+       carry both fields today. If `ExternalBidReceipt` ever stopped reporting them, this fails
+       first.
+    4. **The nesting bound moved.** If `_SNAPSHOT_MAX_DEPTH` were raised past these depths the
+       cases would sail through and be ACCEPTED, and a sweep of accepted submissions grades
+       nothing. Requirement 1 catches that.
+    """
+    for depth in T280_DEPTHS:
+        payload = _t280_payload(depth)
+        # The identity is readable BY THE SAME ACCESSOR the refusal path uses — `_refuse` reads
+        # `payload.get(...)` behind a guard, so this asks the payload the way the door would
+        # rather than asserting that two literals written six lines above are strings, which is
+        # what an earlier draft did and could not fail.
+        assert _refuse_reads(payload) == (T280_SIGNER, payload["nonce"]), (
+            f"depth {depth}: reading this submission the way `_refuse` does yields "
+            f"{_refuse_reads(payload)}, not its stated identity. 'The receipt has no identity' "
+            "could then be explained by there being none to carry"
+        )
+
+        receipt = _t280_receipt(depth)
+        assert receipt.accepted is False, f"depth {depth}: the door ADMITTED it: {receipt!r}"
+        assert receipt.reasons == ("malformed_submission",), (
+            f"depth {depth}: refused {receipt.reasons}, not the single malformed_submission this "
+            "gate is about. The case is no longer reaching the _snapshot failure — check whether "
+            "the door's copy bound moved, or whether an earlier gate now refuses this shape"
+        )
+
+    # 3. The neighbouring refusal, on the identical payload, DOES carry identity.
+    control = _t280_receipt(T280_DEPTHS[0], signature="")
+    assert control.reasons == ("signature_missing",), (
+        f"the control was refused {control.reasons}, not signature_missing; it can no longer "
+        "stand for 'a refusal that passes payload='"
+    )
+    assert control.signer_id == T280_SIGNER and control.nonce, (
+        f"the control receipt carries signer_id={control.signer_id!r} nonce={control.nonce!r}. "
+        "A refusal that DOES pass payload= has stopped reporting identity, so the gate below "
+        "would be measuring the receipt rather than the omission"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-280: the `malformed_submission` refusal for a mapping whose reads fail during "
+        "`_snapshot` is built by `_refuse(REASON_MALFORMED_SUBMISSION)` with no `payload=`, so "
+        "the receipt carries no signer_id and no nonce and cannot be tied to the submission it "
+        "refused. The same file argues the opposite case ninety lines earlier for "
+        "door_failed_closed — 'without it a genuine internal fault produced a receipt with no "
+        "identity at all, indistinguishable in a rejection log from an ordinary policy refusal' "
+        "— and every neighbouring refusal passes payload=. Measured: 6 of 6 anonymous; remove "
+        "this marker with the fix"
+    ),
+)
+def test_t280_a_refused_submission_the_door_could_read_is_named_in_its_own_receipt() -> None:
+    """A rejection log entry that cannot be tied to a submission is not a rejection log entry.
+
+    The submissions swept here are plain dicts whose `signer_id` and `nonce` are ordinary
+    strings — the door read them to get this far — and `_refuse`'s own reads are guarded, so
+    handing it the caller's object at this site cannot itself raise. That guarantee is the
+    reason the file gives for passing `payload=` at the `door_failed_closed` site, and it holds
+    here unchanged.
+
+    The sibling site — the not-a-`Mapping` refusal — is deliberately NOT swept. There the object
+    provably is not a mapping, so there is nothing to read and the omission is defensible. This
+    is the one where a submission with a perfectly readable identity is refused anonymously.
+    """
+    escapes: list[str] = []
+    for depth in T280_DEPTHS:
+        receipt = _t280_receipt(depth)
+        if receipt.signer_id != T280_SIGNER or not receipt.nonce:
+            escapes.append(
+                f"depth {depth}: refused {receipt.reasons} with signer_id="
+                f"{receipt.signer_id!r} nonce={receipt.nonce!r}, where the submission states "
+                f"signer_id={T280_SIGNER!r} nonce={_t280_payload(depth)['nonce']!r}"
+            )
+
+    assert not escapes, (
+        f"{len(escapes)} of {len(T280_DEPTHS)} malformed_submission receipts carry no identity, "
+        "so nothing in a rejection log can tie them to the submission they refused:\n  "
+        + "\n  ".join(escapes)
+    )
+
+
+# =============================================================================================
+# T-220 — cycle detection is correct, and its depth ceiling is invisible
+#
+# The product code is RIGHT here and this gate does not ask for it to change. `MAX_SWEEP_DEPTH`
+# is gone, the cycle guard replaced it, and a priced node at depth 200 is refused today. What is
+# wrong is that nothing would NOTICE the bound coming back: the two tests grading "there is no
+# depth at which a bid stops being checked" parametrize layers either side of the OLD bound of
+# 12 and stop at 64, so a bound re-introduced at 65 — or 100, or 400 — is invisible to the whole
+# suite. The ticket's own reproduction is "re-introduce a depth bound of 65 in _walk and run the
+# suite: green".
+#
+# So this gate is about the coverage, and it grades the two parametrizations directly. That does
+# mean a test reading a test file — see the note in the gate's docstring, which is honest about
+# the limit rather than hiding it.
+# =============================================================================================
+
+#: The dotted name pytest gives the sibling module. The hyphen in `store-agent` is why this is
+#: `importlib.import_module` and not an `import` statement — `packages.store-agent...` is not
+#: valid syntax. Under `--import-mode=importlib` (pyproject) with
+#: `consider_namespace_packages = true`, this is the exact key the module is registered under
+#: during collection, so the object read here is the one pytest ran.
+T220_SIBLING = "packages.store-agent.tests.test_price_reconciliation"
+
+#: The two tests whose parametrization is the subject.
+T220_GRADED = (
+    "test_a_priced_node_is_collected_however_deep_the_bid_buries_it",
+    "test_a_claim_is_checked_however_deep_the_bid_buries_it",
+)
+
+#: The depth the parametrizations must reach. FOUR TIMES the deepest value they carry today, so
+#: it is past any bound a lane could plausibly re-introduce while staying far under the only
+#: ceiling that really exists — the interpreter's own recursion limit, which `_walk` meets at
+#: roughly 450-500 layers inside a pytest process. The arming test DRIVES a bid at exactly this
+#: depth and requires it to be refused by the price wall, so this number can never quietly become
+#: one no repair could satisfy: if the stack ever shrank under it, the arming test goes red and
+#: says which depth stopped being reachable, instead of the gate becoming unclosable in silence.
+T220_REQUIRED_DEPTH = 256
+
+#: Depths the arming test drives directly, to show the PROPERTY holds today well past 64 — which
+#: is what makes this a coverage ticket rather than a product one.
+T220_PROBE_DEPTHS = (65, 128, T220_REQUIRED_DEPTH)
+
+
+def _t220_sibling() -> Any:
+    import importlib  # noqa: PLC0415
+
+    return importlib.import_module(T220_SIBLING)
+
+
+def _t220_depths(func: Any) -> list[int]:
+    """The `layers` argvalues a parametrized test actually runs, read off its own marks."""
+    found: list[int] = []
+    for mark in getattr(func, "pytestmark", []):
+        if getattr(mark, "name", None) != "parametrize":
+            continue
+        names, values = mark.args[0], mark.args[1]
+        if "layers" not in str(names).replace(" ", "").split(","):
+            continue
+        found.extend(int(value) for value in values)
+    return found
+
+
+def _t220_buried_bid(module: Any, layers: int) -> dict[str, Any]:
+    """The sibling's own `_buried` helper, so this grades the same construction it does."""
+    return {
+        "offer": {"product_ref": "prod-cap", "discount": None},
+        "claims": [],
+        **module._buried(  # noqa: SLF001 - the helper under discussion is module-private
+            {"product_ref": "prod-cap", "unit_price": 1.0, "total_price": 1.0}, layers
+        ),
+    }
+
+
+def test_t220_the_depth_coverage_reader_is_armed() -> None:
+    """The reader really reads marks, the two tests still exist, and the depth this gate demands
+    is one a repair could actually reach. NOT xfail.
+
+    Five ways the gate below could report green while the ceiling stayed invisible:
+
+    1. **The module does not import**, or the two tests were renamed. Either would make
+       `_t220_depths` return `[]` for a name that no longer exists, and `max([])` would raise
+       rather than assert — but a gate that errors is a gate nobody reads. Both names are
+       resolved here first.
+    2. **The mark reader reads nothing.** A locally-decorated function with KNOWN argvalues is
+       fed to the same reader, so "no depths found" cannot be confused with "no coverage".
+    3. **The reader matches any parametrize.** A second local function parametrized on a
+       different argument is required to yield NO depths, so the reader is selecting on `layers`
+       rather than on "has a parametrize".
+    4. **The demanded depth is unreachable.** This is the one that keeps the gate closeable. The
+       property is DRIVEN at 65, 128 and 256 against the live boundary and required to hold —
+       refused, with the price wall naming `unit_price`. If the interpreter's stack ever stopped
+       accommodating 256 layers, this fails and names the depth, rather than the gate silently
+       becoming impossible to satisfy.
+    5. **The construction drifted.** `_buried` is taken from the sibling module rather than
+       reimplemented, so this arming test and the tests it grades bury a node the same way.
+    """
+    from store_agent.hooks import HookProvenanceError, enforce_bid_provenance  # noqa: PLC0415
+
+    module = _t220_sibling()
+    for name in T220_GRADED:
+        assert hasattr(module, name), (
+            f"{T220_SIBLING} no longer defines {name!r}. The gate below grades that test's depth "
+            "parametrization by name, so a rename silently unhooks it — which is the same class "
+            "of failure the ticket is about"
+        )
+        assert _t220_depths(getattr(module, name)), (
+            f"{name} no longer parametrizes `layers`; the reader found nothing, and a gate that "
+            "reads nothing passes"
+        )
+
+    # 2 + 3. The reader is proven on functions whose argvalues are known here.
+    @pytest.mark.parametrize("layers", [7, 9000])
+    def _control(layers: int) -> None:  # pragma: no cover - never executed, only inspected
+        pass
+
+    @pytest.mark.parametrize("width", [1, 2])
+    def _decoy(width: int) -> None:  # pragma: no cover - never executed, only inspected
+        pass
+
+    assert _t220_depths(_control) == [7, 9000], (
+        "the mark reader cannot see argvalues it is pointed straight at, so an empty result from "
+        "the two real tests would mean nothing"
+    )
+    assert _t220_depths(_decoy) == [], (
+        "the mark reader answers for a parametrize on a different argument, so it is not reading "
+        "`layers` at all"
+    )
+
+    # 5. The construction is the sibling's own.
+    assert module._buried({"x": 1}, 3) == {"layer2": {"layer1": {"layer0": {"x": 1}}}}  # noqa: SLF001
+
+    # 4. The property holds today at every depth this gate demands.
+    for depth in T220_PROBE_DEPTHS:
+        bid = _t220_buried_bid(module, depth)
+        with pytest.raises(HookProvenanceError) as raised:
+            enforce_bid_provenance(bid, _t156_hooks(), product_ref="prod-cap")
+        reasons = " ".join(reason for _, reason in raised.value.offenders)
+        assert "unit_price" in reasons, (
+            f"at depth {depth} the boundary no longer refuses a 1.00 price on a 100.00 product "
+            f"by naming unit_price ({reasons[:200]}). If this is the recursion ceiling, then "
+            f"T220_REQUIRED_DEPTH={T220_REQUIRED_DEPTH} is no longer a depth a repair could add "
+            "to the parametrizations, and the number in this file has to come down before the "
+            "gate below can be closed"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-220: the two tests grading 'there is no depth at which a bid stops being checked' "
+        "parametrize layers as [1, 11, 13, 14, 64] and [1, 13, 14, 64] — values chosen either "
+        "side of the OLD bound of 12 — so a depth bound re-introduced at 65 or beyond is "
+        "invisible to the entire suite. The product code is correct; the coverage pins the fix "
+        "that was made rather than the property that was promised. MEASURED: max depth graded "
+        "anywhere in the package is 64, while the boundary is demonstrably still checking at "
+        "256; remove this marker with the fix"
+    ),
+)
+def test_t220_the_suite_grades_depths_a_reintroduced_bound_could_hide_behind() -> None:
+    """A bound at 65 must not be able to hide from the tests that exist to forbid it.
+
+    The two tests this reads are the only ones in the repo that grade depth through the
+    provenance walk, and both stop at 64 — one layer above the old bound of 12, chosen when 12
+    was the number that mattered. Every claim they make is therefore true only up to 64, while
+    the property they document ("there is no depth at which a bid stops being checked") is
+    unbounded. That gap is the ticket.
+
+    **This gate reads a test file, and that is a real limit worth stating rather than hiding.**
+    The lane rule is that a test may never grade a file inside its own write scope, because an
+    assertion you can satisfy by editing the thing it measures measures nothing. There is no way
+    to honour it here: T-220's recorded location IS
+    `packages/store-agent/tests/test_price_reconciliation.py`, and the defect IS that file's
+    coverage. What keeps this honest is that the repair the gate asks for cannot be faked into
+    existence — the arming test DRIVES the boundary at the demanded depth, so a parametrization
+    extended to 256 has to actually run and actually refuse. Adding the number without the
+    property working would turn the sibling tests red, not this one green.
+
+    One trap for whoever closes it, measured rather than guessed: past roughly 450-500 layers
+    `_walk` meets the interpreter's own recursion limit, `collect_claim_material` catches the
+    `RecursionError`, and the bid is still REFUSED — but with the `unwalkable` reason ("this bid
+    nests deeper than the boundary can walk") instead of the price wall's, so
+    `assert "unit_price" in reasons` goes red there for a correct behaviour. A parametrization
+    pushed to 1000 or 5000 must accept EITHER refusal path. 256 is chosen to sit well inside the
+    price-wall regime, which the arming test re-establishes on every run.
+    """
+    module = _t220_sibling()
+    shortfalls: list[str] = []
+    for name in T220_GRADED:
+        depths = _t220_depths(getattr(module, name))
+        if max(depths) < T220_REQUIRED_DEPTH:
+            shortfalls.append(
+                f"{name} parametrizes layers={depths}, deepest {max(depths)} — a bound "
+                f"re-introduced anywhere above {max(depths)} is invisible to it"
+            )
+
+    assert not shortfalls, (
+        f"{len(shortfalls)} of {len(T220_GRADED)} depth properties stop short of "
+        f"{T220_REQUIRED_DEPTH}, which the arming test just proved the boundary still checks "
+        "at:\n  " + "\n  ".join(shortfalls)
+    )
+
+
+# =============================================================================================
+# T-321 — six contract/served sweep helpers, one implementation per package, nothing enforcing
+# that they agree
+#
+# They agree TODAY — the arming test measures that rather than assuming it. The defect is that
+# nothing makes them: three implementations of one rule, each free to drift, and they HAVE
+# drifted once already (a regex path-normaliser here disagreed with the other two on malformed
+# input). So the gate is about the number of implementations, which is the thing that can be
+# fixed; a gate asserting they currently agree would be green and would grade nothing.
+# =============================================================================================
+
+#: Every gate file that could hold a copy. Eleven files share this name across the repo, not the
+#: three the ticket counts, and the arming test reports the real number — a sweep scoped to
+#: three files would miss a fourth copy appearing tomorrow, which is the same drift the ticket is
+#: about.
+T321_GATE_FILE = "test_repro_open_tickets.py"
+
+#: Every root pytest collects from — `pyproject.toml`'s `testpaths`, in full. It was the four
+#: source roots first, and an adversarial verifier put a twelfth copy in `e2e/` where the scan
+#: could not see it: a file that RUNS in `make verify` and is invisible to the sweep that exists
+#: to count it. The list is the collector's, so it cannot drift from what actually runs.
+T321_ROOTS = (
+    "apps",
+    "packages",
+    "services",
+    "proxyshop_support",
+    "pixel",
+    "fixtures",
+    "e2e",
+    "docs",
+)
+
+#: The six helpers, grouped by ROLE rather than by name, because the copies do not even share
+#: their names: this package spells the normaliser `normalise` and the other two spell it
+#: `_normalise_route`. Grouping by role is what lets the sweep see that they are the same helper
+#: wearing different labels — a sweep keyed on the literal name would report one definition each
+#: and conclude, wrongly, that nothing is duplicated.
+#:
+#: `published_raw` sits with `published_operations` rather than in a role of its own, and that is
+#: a correction rather than a tidy-up: this package split the raw variant into its own function
+#: while the other two express it as the `raw=True` branch of one, so a separate role for it
+#: reported ONE definition of a rule that genuinely exists in three places — the exact near-miss
+#: this table's own comment warns about, committed inside the table. One rule, one role.
+T321_ROLES: dict[str, tuple[str, ...]] = {
+    "path normaliser": ("normalise", "_normalise_route"),
+    "published operations": ("published_operations", "_published_operations", "published_raw"),
+    "served operations": ("served_operations", "_served_operations"),
+    "divergence message": ("divergence", "_operation_divergence"),
+    "contract probe app": ("probe_app_for", "_contract_probe_app"),
+    "operation extractor": ("_operations",),
+}
+
+#: Malformed paths the three copies must agree about. Every one of them is a shape the ORIGINAL
+#: divergence turned on: a brace with no closing brace, a nested brace, an empty parameter. The
+#: regex spelling and the partition spelling gave `/a/{b/{}` and `/a/{}` for the second.
+T321_MALFORMED = (
+    "/a/{b/{c}",
+    "/a/{b",
+    "/a/{}",
+    "/{}/{}",
+    "/a/{b}/{c}",
+    "/stores/{store_id}/trust",
+    "/",
+    "",
+    "/a/}b{/c",
+    "/{a{b}c}",
+)
+
+
+def _t321_gate_files() -> list[Any]:
+    """Every `test_repro_open_tickets.py` under the source roots, sorted."""
+    found: list[Any] = []
+    for root in T321_ROOTS:
+        found.extend(sorted((REPO_ROOT / root).rglob(T321_GATE_FILE)))
+    return [path for path in found if ".venv" not in path.parts and ".pkgroot" not in path.parts]
+
+
+def _t321_definitions(roles: dict[str, tuple[str, ...]] | None = None) -> dict[str, list[str]]:
+    """`{role: [<repo-relative file>::<name>, ...]}` — where each role is DEFINED.
+
+    AST rather than a text search: a name inside a docstring, a comment or a triple-quoted
+    subprocess script is a mention and not a definition, and this repo already has one gate whose
+    call sites live inside a string literal. Only a real `def` at module level counts.
+
+    `roles` is a parameter solely so the arming test can point the same scanner at a name that
+    exists nowhere and require it to come back empty. Every key is pre-seeded with `[]`, so
+    "the role is present in the result" is true whatever the scan found — asserting THAT would
+    be an assertion that cannot fail, which is the shape this parameter exists to avoid.
+    """
+    import ast  # noqa: PLC0415
+
+    roles = T321_ROLES if roles is None else roles
+    aliases = {name: role for role, names in roles.items() for name in names}
+    found: dict[str, list[str]] = {role: [] for role in roles}
+    for path in _t321_gate_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in aliases:
+                found[aliases[node.name]].append(f"{path.relative_to(REPO_ROOT)}::{node.name}")
+    return found
+
+
+def _t321_implementations() -> dict[str, dict[str, Any]]:
+    """`{role: {"<module>.<name>": <function>}}`, resolved by IMPORT rather than by file name.
+
+    This is the measurement the gate grades, and resolving through the module rather than the
+    file is what makes it about *implementations* instead of *definition sites*. An adversarial
+    verifier greened the file-name version by lifting each sibling's private copy into its own
+    new module and importing it back: three implementations still, nothing shared, and a scan
+    that only reads files called `test_repro_open_tickets.py` saw one definition each. An
+    imported name is still a module attribute, so this sees it — and sees that the three
+    attributes are three DIFFERENT functions.
+    """
+    import importlib  # noqa: PLC0415
+
+    resolved: dict[str, dict[str, Any]] = {role: {} for role in T321_ROLES}
+    for path in _t321_gate_files():
+        name = ".".join(path.relative_to(REPO_ROOT).with_suffix("").parts)
+        try:
+            module = importlib.import_module(name)
+        except Exception:  # noqa: BLE001 - a module that will not import has no helper to compare
+            continue
+        for role, aliases in T321_ROLES.items():
+            for alias in aliases:
+                helper = getattr(module, alias, None)
+                if callable(helper):
+                    resolved[role][f"{name}.{alias}"] = helper
+    return resolved
+
+
+def _t321_distinct(functions: dict[str, Any]) -> set[Any]:
+    """How many genuinely different implementations are behind these names.
+
+    Keyed on `__code__`, so three modules that all import ONE shared helper collapse to one
+    entry — which is the arrangement the ticket asks for — while three copies of the same source
+    text stay three, because each `def` compiles to its own code object. Comparing source text
+    would call three identical copies "one"; comparing names would call one shared helper
+    "three".
+    """
+    return {getattr(fn, "__code__", fn) for fn in functions.values()}
+
+
+def test_t321_the_duplicated_helper_scan_is_armed() -> None:
+    """The scanner finds definitions it is pointed at, the copies really exist, and they agree
+    TODAY. NOT xfail.
+
+    Four ways the gate below could report green while the duplication lived:
+
+    1. **The scan finds nothing.** A path root that moved, a file renamed, an AST walk that
+       silently returned `[]` — every one of them makes a "no duplicates" verdict vacuous. The
+       file count and the definition count are asserted first, and this very module is required
+       to be among the files found, defining the normaliser it is pointed straight at.
+    2. **The scan matches everything.** A role whose names appear nowhere is required to resolve
+       to zero definitions, so the scanner is selecting rather than sweeping.
+    3. **A mention is counted as a definition.** The names occur in docstrings and inside a
+       triple-quoted subprocess script elsewhere in the repo. The scan is AST-based and the count
+       it reports is asserted against the module-level `def`s, not against `grep`.
+    4. **The copies have already diverged**, in which case this ticket would be a live bug rather
+       than a missing constraint. Every normaliser found is run over the same corpus of malformed
+       paths and required to AGREE today — which is exactly why nothing has noticed there are
+       three of them.
+    """
+    files = _t321_gate_files()
+    assert len(files) >= 3, (
+        f"only {len(files)} gate file(s) named {T321_GATE_FILE} were found under {T321_ROOTS}; "
+        "the scan has stopped seeing the copies it exists to count"
+    )
+    assert any("store-agent" in str(path) for path in files), (
+        f"the scan did not find this very file among {[str(p) for p in files]}"
+    )
+
+    definitions = _t321_definitions()
+    mine = [entry for entry in definitions["path normaliser"] if "store-agent" in entry]
+    assert mine == ["packages/store-agent/tests/test_repro_open_tickets.py::normalise"], (
+        f"the scanner cannot see the definition it is pointed straight at: {mine}"
+    )
+
+    # 2. The scan SELECTS rather than matches. A role whose name exists nowhere in the repo must
+    #    come back empty, or a "nothing is duplicated" verdict could just be a scanner finding
+    #    nothing at all. This replaced an assertion that could not fail — `_t321_definitions`
+    #    pre-seeds every role with `[]`, so `.get(role) is not None` is true whatever it scanned.
+    decoy = _t321_definitions({"a helper nobody wrote": ("_t321_no_such_helper_anywhere",)})
+    assert decoy == {"a helper nobody wrote": []}, (
+        f"the scanner reported definitions for a name that exists nowhere in the repo: {decoy}. "
+        "It is matching rather than selecting, so the counts the gate below reads are noise"
+    )
+    assert sum(len(entries) for entries in definitions.values()) >= 6, (
+        f"the scan found only {sum(len(e) for e in definitions.values())} helper definitions in "
+        f"{len(files)} gate file(s); it has stopped seeing the copies it exists to count"
+    )
+
+    # 4. The copies AGREE today — which is the whole reason nothing has noticed.
+    implementations = _t321_implementations()
+    normalisers = implementations["path normaliser"]
+    assert len(normalisers) >= 3, (
+        f"only {len(normalisers)} path normaliser(s) could be imported and compared "
+        f"({sorted(normalisers)}); the agreement check below is not covering the copies"
+    )
+    # 5. The gate below counts IMPLEMENTATIONS, so the resolver has to actually resolve. Every
+    #    role must be reachable through an import from at least two of the sweeping packages, or
+    #    a "one implementation" verdict could just be a resolver that found nothing to compare.
+    for role in T321_ROLES:
+        assert len(implementations[role]) >= 2, (
+            f"the {role} resolved through only {len(implementations[role])} module(s) "
+            f"({sorted(implementations[role])}); the gate below would call that unified when it "
+            "is really unreachable"
+        )
+    for path in T321_MALFORMED:
+        answers = {name: helper(path) for name, helper in normalisers.items()}
+        assert len(set(answers.values())) == 1, (
+            f"the copies of the path normaliser already DISAGREE on {path!r}: {answers}. That "
+            "makes T-321 a live divergence rather than a missing constraint, and this arming "
+            "test is the thing that noticed — which is the ticket's point exactly"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-321: the contract/served sweep helpers exist once per package with nothing enforcing "
+        "that they agree. They agree today — the arming test measures it — but they have drifted "
+        "once already (a regex path-normaliser in this package disagreed with the other two on "
+        "`/a/{b/{c}`), and three implementations of one rule is three things to keep in step. "
+        "MEASURED: the path normaliser, the published-operations extractor, the served-operations "
+        "extractor, the divergence message and the contract probe app are each defined in three "
+        "separate gate files, under two different spellings; remove this marker with the fix"
+    ),
+)
+def test_t321_each_contract_sweep_helper_has_exactly_one_implementation() -> None:
+    """One rule, one implementation. Three copies is three chances to drift.
+
+    What this asks for is a single definition site the three gate files import from — not that
+    the three files be merged, and not any particular home. `proxyshop_support` is already on
+    `sys.path` for every one of them and is already imported by at least one; `fixtures` is
+    another importable package. Where it goes is the repairing lane's call. What the gate refuses
+    is the arrangement where the same rule is written down N times and nothing compares them.
+
+    A role, not a name: this package spells the normaliser `normalise` and the other two spell it
+    `_normalise_route`, so a sweep keyed on the literal name would find one definition each and
+    conclude nothing is duplicated. That near-miss is recorded here because it is how this gate
+    could have been written green.
+
+    **It counts IMPLEMENTATIONS, not definition sites, and that is a repair rather than a
+    refinement.** The first version of this gate walked every file named
+    `test_repro_open_tickets.py` with `ast` and counted module-level `def`s. An adversarial
+    verifier greened it without unifying anything: lift each sibling's private copy into a new
+    module of its own — `proxyshop_support/sweep_helpers_exchange.py`,
+    `..._ingest.py` — and import it back. Three implementations still, nothing shared, and a scan
+    keyed on one file name saw one definition each. So the count is now taken on `__code__`
+    identity across the helpers the three modules actually EXPOSE: three modules importing one
+    shared helper collapse to a single code object, three copies of identical source text stay
+    three. Relocation cannot green it, and neither can renaming — the arming test's agreement
+    check stops finding comparable copies and goes red instead.
+
+    Deleting a sibling's sweep rather than sharing one is refused from the other side: the arming
+    test requires every role to resolve through at least two modules.
+
+    MEASURED at HEAD across every `test_repro_open_tickets.py` under pytest's own `testpaths`
+    rather than the three files the ticket names — there are eleven, and a twelfth appearing
+    tomorrow is the same defect.
+    """
+    implementations = _t321_implementations()
+    duplicated = {
+        role: functions
+        for role, functions in implementations.items()
+        if len(_t321_distinct(functions)) > 1
+    }
+    assert not duplicated, (
+        f"{len(duplicated)} of {len(T321_ROLES)} contract-sweep helper roles have more than one "
+        "implementation behind them, with nothing comparing the copies:\n  "
+        + "\n  ".join(
+            f"{role}: {len(_t321_distinct(functions))} distinct implementations behind "
+            f"{sorted(functions)}"
+            for role, functions in sorted(duplicated.items())
+        )
     )
