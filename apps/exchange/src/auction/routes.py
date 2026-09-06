@@ -49,7 +49,7 @@ import json
 import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
-from typing import Any
+from typing import Any, Final
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -81,7 +81,11 @@ __all__ = [
     "MAX_RECORDED_OFFER_ITEMS",
     "MAX_RECORDED_OFFER_VALUE_CHARS",
     "MAX_ROSTER_ENTRIES",
+    "RECORDED_OFFER_ACCEPTED_TYPES",
+    "RECORDED_OFFER_ATOMIC_TYPES",
+    "RECORDED_OFFER_CONTAINER_TYPES",
     "RECORDED_OFFER_FIELDS",
+    "RECORDED_OFFER_TEXT_TYPES",
     "NullSolicitor",
     "bid_window_seconds",
     "collected_bid_records",
@@ -259,6 +263,47 @@ MAX_RECORDED_OFFER_ITEMS = 64
 #: 4 is generous: every value the published ``Offer`` declares is a scalar except ``discount``,
 #: which is one level deep.
 MAX_RECORDED_OFFER_DEPTH = 4
+
+#: The ONLY types a recorded offer may contain, split by how the walk below charges each —
+#: see :func:`_within_the_recorded_offer_budget`. Anything that is not an instance of one of
+#: them is REFUSED.
+#:
+#: **Named here, rather than spelled inline in the walk, because the walk being a WHITELIST is
+#: the property and a property needs an address.** The first version of this bound was a
+#: blacklist — three ``isinstance`` branches and an ``else: continue`` that waved through every
+#: type it had not been told about — and an adversarial pass drove it: ``deque(range(200_000))``
+#: is the same value as the ``list`` one branch up, ``deepcopy`` copies it just the same, and it
+#: was RECORDED. 500 records retained **792.7 MiB** in 54.55s. ``array('q', ...)``, ``UserList``,
+#: ``UserString``, ``memoryview`` and any ordinary object holding a list as an attribute all
+#: rode through the same hole. A blacklist here has to enumerate every copyable type Python
+#: has — including the ones a future release adds; a whitelist has to enumerate the ones a bid
+#: legitimately contains, which is these three tuples plus ``Mapping``.
+#:
+#: **Nothing reachable over HTTP is lost by refusing the rest**, and that is measured rather
+#: than assumed: the production solicitor parses bid replies with ``json.loads``
+#: (``composition.HttpBidSolicitor.solicit``, ``composition.py:820``), whose output is
+#: exactly ``str``/``dict``/``list``/``int``/``float``/``bool``/``None`` — every one of them on
+#: this list. So the refusal branch protects the ``collect_bids`` SEAM, which is public and
+#: which a future in-process solicitor could hand anything, and it fails closed in the same
+#: direction as the rest of this path.
+RECORDED_OFFER_TEXT_TYPES: Final = (str, bytes, bytearray)
+#: Charged one slot per element, at every level.
+RECORDED_OFFER_CONTAINER_TYPES: Final = (list, tuple, set, frozenset)
+#: Charged nothing, because ``deepcopy`` returns these unchanged (``copy._deepcopy_atomic``):
+#: 500 records hold 500 references to one object rather than 500 copies. Measured — a
+#: 4300-digit int recorded into 500 records: book 0.29 MiB, the honest baseline. Their size is
+#: bounded by the reply cap; multiplication, which is what this budget is about, does not happen.
+RECORDED_OFFER_ATOMIC_TYPES: Final = (type(None), bool, int, float, complex)
+#: The union the walk actually accepts, in one name so a gate can derive the hostile set from
+#: it instead of restating it. ``Mapping`` is the abstract one on purpose — ``dict``,
+#: ``OrderedDict``, ``Counter``, ``UserDict`` and any registered mapping are all charged by
+#: slot — and it is the only entry here that is not a concrete class.
+RECORDED_OFFER_ACCEPTED_TYPES: Final[tuple[type, ...]] = (
+    RECORDED_OFFER_TEXT_TYPES
+    + (Mapping,)
+    + RECORDED_OFFER_CONTAINER_TYPES
+    + RECORDED_OFFER_ATOMIC_TYPES
+)
 
 
 class RosterEntry(BaseModel):
@@ -614,7 +659,7 @@ def _within_the_recorded_offer_budget(value: Any, slots_left: int) -> int | None
         item, depth = stack.pop()
         if depth > MAX_RECORDED_OFFER_DEPTH:
             return None
-        if isinstance(item, (str, bytes, bytearray)):
+        if isinstance(item, RECORDED_OFFER_TEXT_TYPES):
             chars_left -= len(item)
             if chars_left < 0:
                 return None
@@ -631,29 +676,20 @@ def _within_the_recorded_offer_budget(value: Any, slots_left: int) -> int | None
             #
             # Same verdict either way; only the work done to reach it differs.
             children: Any = (part for pair in item.items() for part in pair)
-        elif isinstance(item, (list, tuple, set, frozenset)):
+        elif isinstance(item, RECORDED_OFFER_CONTAINER_TYPES):
             children = item
-        elif item is None or isinstance(item, (bool, int, float, complex)):
-            # An IMMUTABLE scalar, and that is the whole reason it costs nothing: `deepcopy`
-            # returns these unchanged (`copy._deepcopy_atomic`), so 500 records hold 500
-            # references to one object rather than 500 copies. Measured — a 4300-digit int
-            # recorded into 500 records: book 0.29 MiB, the honest baseline. Size is bounded
-            # by the reply cap; multiplication, which is what this budget is about, does not
-            # happen.
+        elif isinstance(item, RECORDED_OFFER_ATOMIC_TYPES):
+            # Free, for the reason `RECORDED_OFFER_ATOMIC_TYPES` records.
             continue
         else:
-            # **Anything else is REFUSED, and the list above is a whitelist for that reason.**
-            # An adversarial pass drove the earlier blacklist version of this branch, which
-            # waved through every type it had not been told about: `deque(range(200_000))` is
-            # the same value as the `list` two branches up, `deepcopy` copies it just the
-            # same, and it was RECORDED — 500 records retained 792.7 MiB in 54.55s. So did
-            # `array('q', ...)`, `UserList`, and any object holding a list as an attribute.
-            # A blacklist here has to enumerate every copyable type Python has; a whitelist
-            # has to enumerate the ones a bid legitimately contains, which is this line.
-            # Nothing reachable is lost: the production solicitor parses with `json.loads`
-            # (`composition.HttpBidSolicitor`), whose output is exactly str/dict/list/number/
-            # bool/None. A direct caller of `collect_bids` handing something exotic is
-            # refused, which is the fail-closed direction the rest of this path takes.
+            # **Anything else is REFUSED, and the branches above are a WHITELIST for that
+            # reason** — see `RECORDED_OFFER_ACCEPTED_TYPES` for the measurement that made this
+            # branch a `return None` rather than the `continue` it used to be, and for why
+            # nothing reachable over HTTP is lost by it. This line is graded by
+            # `test_recorded_offer_budget.py::test_a_value_whose_type_is_off_the_accept_list_
+            # is_refused_rather_than_recorded`, which derives its hostile corpus from the
+            # accept-list above rather than naming types, so widening the whitelist moves a
+            # value out of that corpus instead of leaving a test grading a type now allowed.
             return None
         for child in children:
             slots_left -= 1

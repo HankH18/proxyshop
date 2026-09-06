@@ -91,7 +91,9 @@ __all__ = [
     "DEFAULT_BANDIT_STORES",
     "DEFAULT_MAX_OUTCOME_BYTES",
     "InMemoryBanditPosteriors",
+    "RETAINED_IDENTIFIER_FIELDS",
     "configure_outcomes",
+    "identifier_ceiling",
     "router",
 ]
 
@@ -137,6 +139,7 @@ REASON_BODY_NOT_JSON = "body_not_json"
 REASON_BODY_NOT_AN_OBJECT = "body_not_a_json_object"
 REASON_SCHEMA_INVALID = "outcome_schema_invalid"
 REASON_NO_CLUSTER = "outcome_carries_no_cluster"
+REASON_IDENTIFIER_TOO_LONG = "outcome_identifier_too_long"
 
 #: How much of a field path a refusal may quote, and how many. Field paths come from pydantic's
 #: ``loc``, and under ``extra="forbid"`` a ``loc`` is a KEY THE CALLER WROTE — so it is bounded
@@ -413,6 +416,90 @@ def _reported_fields(exc: Exception) -> str:
 
 
 # =====================================================================================
+# Bounding the two caller-chosen names this door KEEPS
+# =====================================================================================
+#: The payload fields whose value :meth:`InMemoryBanditPosteriors.record` retains, in the order
+#: they are charged. Every other field of a ``TrustEventPayload`` is read for this request and
+#: dropped — ``event`` (including its open ``payload`` mapping), ``dim``, ``delta`` and
+#: ``pseudonymous_context.pseudonym`` are all bounded by :data:`DEFAULT_MAX_OUTCOME_BYTES` and
+#: never outlive the call. These two become dict KEYS that live for the life of the process.
+RETAINED_IDENTIFIER_FIELDS: tuple[str, ...] = ("store_id", "pseudonymous_context.cluster_id")
+
+
+def identifier_ceiling() -> int:
+    """The exchange's own ceiling on a caller-chosen identifier, in characters.
+
+    **Imported rather than restated**, for the reason ``auction/routes.py`` gives where it
+    derives ``MAX_ROSTER_ENTRIES`` from ``retrieval.criteria.MAX_CANDIDATE_LIMIT``: a second
+    copy of a number is a number that can drift. ``MAX_IDENTIFIER_LENGTH`` is already what
+    ``RosterEntry.store_id`` holds an unauthenticated caller to at the auction door, and what
+    ``collected_bid_records`` holds a bidding store's own reference to; a store id that this
+    door accepts and that door refuses could never name a store the exchange has rostered.
+
+    Imported INSIDE the function, exactly as :func:`_trust_snapshot` imports
+    ``ranking.serving.trust_snapshot_of`` and for the same reason: ``auction.routes`` is a
+    sibling feature, and this package is imported as a library by the frozen acceptance suite —
+    a module-scope edge would drag the whole auction door in behind it.
+    """
+    from ..auction.routes import MAX_IDENTIFIER_LENGTH  # noqa: PLC0415 - sibling feature
+
+    return MAX_IDENTIFIER_LENGTH
+
+
+def _bounded_identifiers(payload: TrustEventPayload) -> None:
+    """Refuse an outcome whose retained names are longer than an identifier can be.
+
+    **The axis :data:`~exchange.auction.routes.MAX_RECORDED_OFFER_VALUE_CHARS` exists for,
+    reached through a different door.** ``TrustEventPayload.store_id`` carries ``min_length=1``
+    and no maximum — the published schema is shared with the trust service and this route does
+    not own it — so before this check an anonymous caller chose the LENGTH of a string this
+    process keeps. Measured over the served door, 30,000-character names, all answered **204**::
+
+        honest baseline                      1 send    book retained   0.003 MiB
+        store_id at 30,000 chars           256 sends   book retained   7.416 MiB
+        store_id at 30,000 chars          2048 sends   book retained   7.427 MiB
+        cluster_id at 30,000 chars         256 sends   book retained   0.935 MiB
+        both at 30,000 chars               512 sends   book retained   9.852 MiB
+
+    The third line is why this is a bound and not an emergency, and it is written down so the
+    next reader does not overclaim it: ``_stores`` caps at :data:`DEFAULT_BANDIT_STORES` and
+    ``_clusters`` at :data:`DEFAULT_BANDIT_CLUSTERS`, so the growth is flat from 256 sends to
+    2048 and the ceiling is ~10 MiB rather than unbounded. It is still 3,000x the honest book,
+    held by an unauthenticated caller, in a 256 MiB container (``apps/exchange/compose.yaml``)
+    — and both dimensions are keys the caller mints.
+
+    With this check in place all four hostile shapes answer **400** and no posterior book is
+    ever created, so the retained figure is 0.000 MiB; an honest outcome still answers 204 and
+    still retains its 0.003 MiB. A name of exactly the ceiling is accepted — this is a ceiling,
+    not an off-by-one refusal of every long-ish id.
+
+    **Refused, not truncated**, and that is the load-bearing half. Two 30,000-character ids
+    sharing a 128-character prefix are the same key after truncation, so clipping would fold one
+    store's outcome into another store's posterior — a silently wrong learning signal, which is
+    worse than a 400 the trust service can see. Nothing legitimate is refused: an id this long
+    cannot name a store the exchange ever rostered, because ``RosterEntry.store_id`` caps at the
+    same number.
+
+    Neither the value nor any part of it is echoed. Only its LENGTH and the field's own name —
+    a literal from :data:`RETAINED_IDENTIFIER_FIELDS`, never a key the caller wrote.
+    """
+    ceiling = identifier_ceiling()
+    context = payload.pseudonymous_context
+    values = (payload.store_id, context.cluster_id or "")
+    for field, value in zip(RETAINED_IDENTIFIER_FIELDS, values, strict=True):
+        if len(value) > ceiling:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{REASON_IDENTIFIER_TOO_LONG}: {field} is {len(value)} characters and this "
+                    f"exchange's ceiling on an identifier is {ceiling}; the name is kept for the "
+                    "life of the process, so it is refused rather than clipped to a prefix it "
+                    "would share with a different store"
+                ),
+            )
+
+
+# =====================================================================================
 # The route
 # =====================================================================================
 @router.post(
@@ -422,7 +509,12 @@ def _reported_fields(exc: Exception) -> str:
     summary="Trust reports an outcome back to the exchange for the bandit update.",
     responses={
         204: {"description": "Recorded."},
-        400: {"description": "The body is not a TrustEventPayload, or names no cluster."},
+        400: {
+            "description": (
+                "The body is not a TrustEventPayload, names no cluster, or names a store or "
+                "cluster longer than this exchange's identifier ceiling."
+            )
+        },
         503: {"description": "The exchange is misconfigured, or could not record the outcome."},
     },
     # The body is declared REQUIRED and is deliberately NOT re-specified field by field. The
@@ -487,6 +579,8 @@ async def _record_outcome(request: Request) -> Response:
                 f"(fields: {_reported_fields(exc)})"
             ),
         ) from exc
+
+    _bounded_identifiers(payload)
 
     cluster_id = (payload.pseudonymous_context.cluster_id or "").strip()
     if not cluster_id:

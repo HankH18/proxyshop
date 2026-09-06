@@ -32,18 +32,24 @@ from __future__ import annotations
 
 import json
 import sys
+import tracemalloc
+from array import array
+from collections import OrderedDict, UserList, UserString, deque
 from collections.abc import Iterator, Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from exchange.accept import use_registered_domains
-from exchange.accept.routes import configure_accept
+from exchange.accept.routes import InMemoryAuctionBids, configure_accept
 from exchange.auction.routes import (
     MAX_RECORDED_OFFER_DEPTH,
     MAX_RECORDED_OFFER_ITEMS,
     MAX_RECORDED_OFFER_VALUE_CHARS,
+    RECORDED_OFFER_ACCEPTED_TYPES,
     RECORDED_OFFER_FIELDS,
     _recordable_offer,
+    collected_bid_records,
     configure_auctions,
 )
 from exchange.composition import MAX_BID_RESPONSE_BYTES
@@ -501,3 +507,208 @@ def test_a_bytearray_is_charged_as_characters_rather_than_waved_through() -> Non
     """
     assert _recordable_offer({"currency": bytearray(MAX_RECORDED_OFFER_VALUE_CHARS + 1)}) is None
     assert _recordable_offer({"currency": bytearray(8)}) == {"currency": bytearray(8)}
+
+
+# =====================================================================================
+# The accept-list is a WHITELIST — anything not on it is refused
+# =====================================================================================
+#
+# These are the gate for the branch `847c9b6` shipped and never graded. That commit turned the
+# walk's final branch from `else: continue` — a BLACKLIST that waved through every type it had
+# not been told about — into `else: return None`, a whitelist. MEASURED with the commit
+# reverted in a scratch tree: the whole `apps/exchange/tests` suite was 1003 passed / 10
+# xfailed / 0 failed, byte-identical to the baseline, while
+# `_recordable_offer({"currency": deque(range(200_000))})` came back RECORDED with 200,000
+# items. So the repair could regress to the permissive behaviour and nothing anywhere noticed.
+#
+# **What these tests protect, and what they do NOT claim.** No reachable HTTP path can supply a
+# now-refused type: the production solicitor parses every bid reply with `json.loads`
+# (`composition.HttpBidSolicitor.solicit`, `composition.py:820`), whose output is exactly
+# str / dict / list / int / float / bool / None — all of them on the accept-list. So this is a
+# gate against FUTURE regression at a public seam, not the closing of a live hole. `collect_bids`
+# is called with whatever the wired solicitor returns, and `configure_auctions(solicitor=...)`
+# is a supported deployment seam; an in-process solicitor that returns an `array` or a `deque`
+# — or any object holding a list — is the case the whitelist fails closed on.
+
+#: Elements each corpus value carries. Over `MAX_RECORDED_OFFER_ITEMS` on purpose, so that an
+#: on-list container of the same width is refused by the SLOT budget: that keeps the corpus
+#: honest about which bound is doing the work for which value.
+CORPUS_ITEMS = 1024
+
+
+class _HoldsAList:
+    """An ordinary object with a list attribute — a type no blacklist could be written against.
+
+    Constructed HERE rather than taken from the stdlib because that is the whole argument for a
+    whitelist: this class did not exist when the walk was written, `deepcopy` copies its
+    attribute per record exactly as it copies a `list`, and no enumeration of "types to refuse"
+    could ever have named it.
+    """
+
+    def __init__(self, payload: list[int]) -> None:
+        self.payload = payload
+
+
+def _corpus() -> dict[str, Any]:
+    """One shared payload, wrapped every way a caller of ``collect_bids`` could wrap it.
+
+    Both halves matter. The on-list wrappers are what make the partition below non-vacuous —
+    without them a whitelist narrowed to nothing would satisfy the assertions trivially — and
+    the off-list ones are the vectors.
+    """
+    payload = list(range(CORPUS_ITEMS))
+    text = "x" * CORPUS_ITEMS
+    return {
+        "list": payload,
+        "tuple": tuple(payload),
+        "set": set(payload),
+        "frozenset": frozenset(payload),
+        "dict": dict.fromkeys(payload, 0),
+        "OrderedDict": OrderedDict.fromkeys(payload, 0),
+        "str": text,
+        "bytes": text.encode(),
+        "bytearray": bytearray(CORPUS_ITEMS),
+        "int": 10**CORPUS_ITEMS,
+        "float": 1.5,
+        "complex": complex(1, 2),
+        "None": None,
+        "bool": True,
+        "deque": deque(payload),
+        "array": array("q", payload),
+        "UserList": UserList(payload),
+        "UserString": UserString(text),
+        "memoryview": memoryview(bytearray(CORPUS_ITEMS)),
+        "range": range(CORPUS_ITEMS),
+        "SimpleNamespace": SimpleNamespace(payload=payload),
+        "object holding a list": _HoldsAList(payload),
+    }
+
+
+def _partitioned() -> tuple[dict[str, Any], dict[str, Any]]:
+    """The corpus split BY THE ACCEPT-LIST THE SOURCE USES, never by a list restated here.
+
+    This is the difference between gating the class and gating one type. Naming ``deque`` in an
+    assertion would grade exactly ``deque``; deriving the hostile half from
+    :data:`RECORDED_OFFER_ACCEPTED_TYPES` grades "not on the accept-list", so a fifth exotic
+    container needs no test change — and widening the whitelist on purpose moves that value into
+    the accepted half rather than leaving a test failing on a type the code now allows.
+    """
+    corpus = _corpus()
+    accepted = {
+        name: value
+        for name, value in corpus.items()
+        if isinstance(value, RECORDED_OFFER_ACCEPTED_TYPES)
+    }
+    refused = {name: value for name, value in corpus.items() if name not in accepted}
+    return accepted, refused
+
+
+def test_the_off_accept_list_corpus_is_armed() -> None:
+    """The partition has to be non-empty on BOTH sides or the gate below proves nothing.
+
+    A whitelist widened to ``object`` would empty the hostile half and every assertion in
+    :func:`test_a_value_whose_type_is_off_the_accept_list_is_refused_rather_than_recorded`
+    would pass over an empty loop. A whitelist narrowed to nothing would empty the accepted
+    half and make the refusals meaningless. Both are asserted against here rather than assumed.
+    """
+    accepted, refused = _partitioned()
+    assert len(accepted) >= 8, f"the accept-list matched almost nothing: {sorted(accepted)}"
+    assert len(refused) >= 5, (
+        "every wrapper in the corpus is now on the accept-list, so the gate below iterates "
+        f"over nothing; accepted={sorted(accepted)}"
+    )
+    # The archetype has to be in the hostile half, or the corpus drifted away from the defect.
+    assert "object holding a list" in refused
+
+
+def test_a_value_whose_type_is_off_the_accept_list_is_refused_rather_than_recorded() -> None:
+    """The property `847c9b6` established: not on the accept-list means refused, not waved past.
+
+    Reverting that commit — restoring ``else: continue`` — records every one of these instead,
+    and every one of them is a value ``InMemoryAuctionBids.record`` would then ``deepcopy``
+    once per roster row.
+    """
+    _accepted, refused = _partitioned()
+    recorded = {name: _recordable_offer({"currency": value}) for name, value in refused.items()}
+    leaked = {name: kept for name, kept in recorded.items() if kept is not None}
+    assert not leaked, (
+        "these types are not on `RECORDED_OFFER_ACCEPTED_TYPES` and were recorded anyway, "
+        f"which is the blacklist behaviour: {sorted(leaked)}"
+    )
+
+    # Positive control, in the same test so a blanket-refusing `_recordable_offer` cannot pass
+    # it: an ON-list value of a size the budgets allow still comes back recorded.
+    assert _recordable_offer({"currency": ["USD"]}) == {"currency": ["USD"]}
+
+
+def test_an_off_accept_list_value_is_refused_at_every_depth_a_bid_can_reach_it() -> None:
+    """Burying the wrapper does not buy anything either — the same discipline as the slot budget.
+
+    A repair that checked only the outermost value would pass the test above and leave the
+    hole one level down, which is exactly how the bound this file was written for failed.
+    ``discount`` is included by name because :func:`_recordable_offer` re-projects it, so it is
+    the one field whose value is rebuilt after the caller wrote it.
+    """
+    _accepted, refused = _partitioned()
+    for name, value in refused.items():
+        for depth in range(1, MAX_RECORDED_OFFER_DEPTH):
+            buried: Any = value
+            for _ in range(depth):
+                buried = [buried]
+            assert _recordable_offer({"currency": buried}) is None, (
+                f"{name} evaded the accept-list at depth {depth}"
+            )
+        assert _recordable_offer({"discount": {"type": value, "value": 0}}) is None, (
+            f"{name} evaded the accept-list through the `discount` projection"
+        )
+
+
+#: Roster rows and element count for the multiplication measurement below. Small enough that a
+#: RED run costs ~13 MiB rather than the 792.7 MiB the defect was first measured at, wide
+#: enough that the two verdicts are an order of magnitude apart.
+OFF_LIST_ROWS = 32
+OFF_LIST_WIDTH = 50_000
+
+
+def test_an_off_accept_list_container_does_not_multiply_through_the_bid_book() -> None:
+    """The consequence, in RETAINED BYTES, the way T-349's own gate grades this path.
+
+    Refusal is the mechanism; what it buys is that ``InMemoryAuctionBids.record``'s ``deepcopy``
+    never runs over a container the walk did not charge. Measured here at 32 rows x 50,000
+    elements, over the ``collected_bid_records`` -> ``record`` seam the served route uses:
+
+        blacklist (``else: continue``)    -> 32 records, book grew  12.62 MiB
+        whitelist (``else: return None``) ->  0 records, book grew   0.00 MiB
+
+    Asserted on the allocation the ``record`` call itself retains, so the corpus built before it
+    is not counted and the number is the book's own growth.
+    """
+    payload = list(range(OFF_LIST_WIDTH))
+    candidates = [
+        {
+            "eligible": True,
+            "bid_id": f"bid-{index}",
+            "store_id": STORE_ID,
+            # Its OWN deque per row, exactly as 32 separate solicitor replies would be, so the
+            # `deepcopy` in `record` is not the only copy and the cost is not understated.
+            "offer": {"currency": deque(payload)},
+        }
+        for index in range(OFF_LIST_ROWS)
+    ]
+    records = collected_bid_records(candidates, [])
+
+    book = InMemoryAuctionBids()
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        book.record("auction-off-list", records)
+        grew = tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+    mib = grew / (1024 * 1024)
+
+    assert records == [], (
+        f"{len(records)} bids carrying an off-accept-list container were recorded; each is "
+        "deep-copied once per roster row"
+    )
+    assert mib < 1.0, f"the book grew {mib:.2f} MiB on bids that should never have been recorded"
