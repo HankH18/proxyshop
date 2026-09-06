@@ -36,8 +36,38 @@ _CONTRACTS = pathlib.Path(__file__).resolve().parents[1]
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
+#: The exchange's own catalog for `make_offer()`'s product: `prod-1` lists at 49.00 — the price
+#: the shared fixture offer charges — and the merchant approved up to 25% on it, deeper than any
+#: depth these reproductions declare. An HONEST row, in other words: it refuses nothing here.
+#:
+#: **This roster is load-bearing and it is not decoration (T-306).** Before T-306 an absent
+#: `list_prices` meant "abstain" and `_check` passed none, so the price wall was silent and the
+#: only thing that could refuse a bid in this file was the defect the test was written about.
+#: An absent roster is now the EMPTY roster, which refuses EVERY bid with
+#: `price_unreconcilable:offer.unit_price:list_price_unavailable` — and three reproductions here
+#: assert nothing stronger than `ok is False or requires_verification is True`, so all three
+#: would XPASS on that unrelated refusal while the holes they name stayed wide open.
+#:
+#: Measured on this tree with `_check` unarmed, after the T-306 fix and with `--runxfail`:
+#: `test_a_provenance_nested_in_a_claim_value...` (T-161),
+#: `test_an_external_submitters_self_asserted_discount_authorisation...` (T-162) and
+#: `test_the_python_door_enforces_the_date_time_format...` (T-194) all PASSED, and under
+#: `xfail(strict=True)` that is an XPASS — a red suite whose only documented cure is deleting the
+#: marker, which would have falsely closed three open tickets in one commit. T-337's text says
+#: the T-306 fix "must also remove FIVE xfail markers"; that is wrong, and this constant is why.
+#: Arming the helper silences the price wall so the defect under test is once again the only
+#: thing in the tree that can refuse these bids.
+_HONEST_ROSTER: dict[str, Any] = {"prod-1": {"list_price": 49.0, "max_discount_pct": 25.0}}
+
+
 def _check(bid: Any, path: str) -> Any:
-    return validate_bid(bid, path=path, trust_snapshot=make_snapshot_table(), now=NOW)
+    return validate_bid(
+        bid,
+        path=path,
+        trust_snapshot=make_snapshot_table(),
+        now=NOW,
+        list_prices=_HONEST_ROSTER,
+    )
 
 
 # =============================================================================================
@@ -870,18 +900,38 @@ def _verdict(result: Any) -> tuple:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-306: boundary.py's `if list_prices is None: return None, []` (in _authorized_depth "
-        "and _roster_list_price) makes the ABSENT roster more permissive than an explicit "
-        "empty one on the money path — measured, a bid charging 15.00 for a 100.00 product is "
-        "ok=True reasons=[] with list_prices omitted and ok=False "
-        "['price_unreconcilable:offer.discount:authorized_depth_unavailable', "
-        "'price_unreconcilable:offer.unit_price:list_price_unavailable'] with list_prices={}; "
-        "remove this marker with the fix"
-    ),
-)
+# T-306 — FIXED, marker removed here. JUSTIFY-TEST-EDIT for the deletion, which is a test edit
+# like any other. The marker read:
+#
+#     @pytest.mark.xfail(
+#         strict=True,
+#         reason=(
+#             "T-306: boundary.py's `if list_prices is None: return None, []` (in "
+#             "_authorized_depth and _roster_list_price) makes the ABSENT roster more permissive "
+#             "than an explicit empty one on the money path — measured, a bid charging 15.00 for "
+#             "a 100.00 product is ok=True reasons=[] with list_prices omitted and ok=False "
+#             "['price_unreconcilable:offer.discount:authorized_depth_unavailable', "
+#             "'price_unreconcilable:offer.unit_price:list_price_unavailable'] with "
+#             "list_prices={}; remove this marker with the fix"
+#         ),
+#     )
+#
+# What it claimed: this door does not yet hold the property below. That is no longer true, and
+# under `strict=True` leaving it would turn a repaired defect into a RED suite — the marker
+# cannot outlive the bug by design, and its own text says to delete it with the fix.
+#
+# CAUSATION PROVEN BEFORE DELETING, because "it passes now" is not the same claim as "my change
+# is why". Measured in this worktree: with the three carve-outs re-introduced verbatim in
+# `boundary.py` (`if list_prices is None: return None, []` in `_authorized_depth` and
+# `_roster_list_price`, and `authorized = depth if list_prices is None else 0.0` plus the
+# `list_prices is not None` guard in `_price_reasons`), this test and T-307's returned to
+# `2 xfailed`, and 14 tests across this package went red. Restoring the fix returned both to
+# passing. Nothing else in the tree moved between those two runs.
+#
+# THREE OTHER MARKERS IN THIS FILE ALSO XPASSED UNDER THE FIX AND ARE DELIBERATELY STILL HERE —
+# T-161, T-162 and T-194. They XPASSed coincidentally, on the price wall's unrelated refusal of
+# a bid `_check` used to send with no roster; see `_HONEST_ROSTER` at the top of this file. They
+# are not fixed and their markers stay.
 def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_one() -> None:
     """Omission is the case that happens by accident, so it must not be the permissive one.
 
@@ -905,7 +955,7 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
     roster at the Tier-2 door — "Pass the roster here or that choice is the only list price
     anybody checks" — not the door confessing to this asymmetry. The no-roster abstention is
     documented as a deliberate opt-in, and existing tests pin it
-    (`test_boundary_dual_path.py::test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price`,
+    (`test_boundary_dual_path.py::test_the_wall_answers_one_identical_refusal_to_every_spelling_of_no_roster`,
     `test_boundary_price_roster.py::test_the_cap_is_never_consulted_without_a_roster`). So this
     gate is a claim that the OPT-IN ITSELF is the defect on the money path, and closing it is a
     deliberate behaviour change with a measured blast radius — not the correction of an
@@ -1119,17 +1169,28 @@ def test_t306_an_absent_list_prices_roster_is_indistinguishable_from_an_empty_on
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-307: `max_discount_pct` supplied WITHOUT `list_prices` is never read — "
-        "boundary.py's `if list_prices is None: return None, []` in _authorized_depth returns "
-        "before the ceiling is consulted, so the authorization ceiling is inert whenever the "
-        "roster is absent. Measured: a bid declaring 85% and carrying its own list_price claim "
-        "is ok=True reasons=[] under max_discount_pct=20.0 with no roster, and ok=False with "
-        "list_prices={} and the same ceiling; remove this marker with the fix"
-    ),
-)
+# T-307 — FIXED, marker removed here. JUSTIFY-TEST-EDIT for the deletion. The marker read:
+#
+#     @pytest.mark.xfail(
+#         strict=True,
+#         reason=(
+#             "T-307: `max_discount_pct` supplied WITHOUT `list_prices` is never read — "
+#             "boundary.py's `if list_prices is None: return None, []` in _authorized_depth "
+#             "returns before the ceiling is consulted, so the authorization ceiling is inert "
+#             "whenever the roster is absent. Measured: a bid declaring 85% and carrying its own "
+#             "list_price claim is ok=True reasons=[] under max_discount_pct=20.0 with no "
+#             "roster, and ok=False with list_prices={} and the same ceiling; remove this marker "
+#             "with the fix"
+#         ),
+#     )
+#
+# Same grounds as T-306's above, same causation proof (both returned to `xfailed` together when
+# the carve-outs were re-introduced, and to passing when the fix was restored), and the same
+# `strict=True` reason why leaving it is not the safe option. The ceiling is now read whether or
+# not a roster is passed; `test_boundary_price_roster.py::
+# test_the_cap_is_consulted_even_when_no_roster_is_passed` and the two `a_call_wide_ceiling_...`
+# rows in the shared parity corpus assert that property outside this file, in both languages, so
+# deleting this marker does not leave the requirement resting on a gate nobody runs.
 def test_t307_a_supplied_discount_ceiling_is_not_inert_when_the_roster_is_absent() -> None:
     """A ceiling the door does not read is not a ceiling.
 

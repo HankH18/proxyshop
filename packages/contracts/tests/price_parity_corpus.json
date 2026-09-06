@@ -22,6 +22,24 @@
     "`path` and `now` apply to every case; the trust snapshot is each suite's `make_snapshot_table()`",
     "/ `makeSnapshotTable()`, which is why every bid names `store-1`.",
     "",
+    "T-306/T-307 \u2014 THE ABSENT ROSTER IS THE EMPTY ROSTER, and seven rows here were re-baselined",
+    "for it. `list_prices: null` used to mean 'abstain': the wall read the bid's own `list_price`",
+    "claim and said nothing when there was none. That made the argument a caller FORGETS more",
+    "permissive than the argument a caller passes empty, on the money path \u2014 measured, a bid",
+    "charging 15.00 for a product the exchange prices at 100.00 was `ok: true, reasons: []` with",
+    "the roster omitted and refused with the roster spelled `{}`. `no_list_price_carried` was the",
+    "row that pinned it, in both languages. Every null-roster row now carries the refusals the",
+    "empty roster always carried, `an_empty_roster_answers_exactly_as_an_absent_one` holds the two",
+    "spellings against each other, and the two `a_call_wide_ceiling_...` rows pin T-307: a",
+    "`max_discount_pct` supplied without a roster is READ, in both directions, so a ceiling of 0",
+    "refuses a declared 20% and a ceiling of 20 does not.",
+    "",
+    "Two rows kept their verdicts and gained a roster instead \u2014 `honest_price` and",
+    "`total_under_the_stated_unit_price`. Both are named for something only a caller that CAN",
+    "price the product ever reaches (an admission, and the total relation, which runs only at a",
+    "non-zero authorized depth); left on a null roster they would have gone on passing while",
+    "measuring `list_price_unavailable` instead of their own subject.",
+    "",
     "THE FLOOR (T-278). The `below_price_floor` rows at the end of this table are the gate for the",
     "T-250 fix. That fix replaced an exact `price == 0` equality with a threshold \u2014 the floor is",
     "`max(list_price * 0.001, 0.01)` \u2014 because an equality against zero has exactly one satisfying",
@@ -38,7 +56,7 @@
   "cases": [
     {
       "name": "charges_under_the_carried_list_price",
-      "why": "the bid states its own list price and then charges 85% off behind a 20% declaration",
+      "why": "the bid states its own list price and then charges 85% off behind a 20% declaration. The two `price_unreconcilable` reasons are T-306's: a caller passing no roster is told it cannot price what it admits, and cannot authorize the depth either. The original `price_under_declared_depth` still fires and still comes from the CARRIED claim \u2014 nothing here supplied a list price but the bid \u2014 so this row still pins WHERE the list price is read from. It no longer pins the DEPTH half: with no roster `authorized` is 0, so 15.00 is refused against the full 100.00, exactly as an honest 80.00 would be, and the row cannot tell whether the declared 20% was honoured at all. `a_carried_claim_is_measured_against_the_full_list_price_with_no_roster` is what carries that now \u2014 it charges 85.00, which the two bounds disagree about",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -83,12 +101,14 @@
       "max_discount_pct": null,
       "ok": false,
       "reasons": [
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable",
         "price_under_declared_depth:offer.unit_price"
       ]
     },
     {
       "name": "total_under_the_stated_unit_price",
-      "why": "the quantity-safe relation: no catalog needed, a total can only ever exceed one discounted unit",
+      "why": "a 20% discount off a stated 100.00 cannot produce a total of 15.00 under any reading of `total_price`. THE ROSTER IS NEW HERE AND THE VERDICT IS NOT (T-306): this relation runs only at a NON-ZERO authorized depth, and after T-306 an absent roster authorizes zero, so the row was measuring `list_price_unavailable` instead of the total relation it is named for. The roster agrees with nothing the bid says; it restores the row's subject",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -129,7 +149,12 @@
         "signature": "sig-deadbeef",
         "schema_version": "1.0.0"
       },
-      "list_prices": null,
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 20.0
+        }
+      },
       "max_discount_pct": null,
       "ok": false,
       "reasons": [
@@ -238,7 +263,7 @@
     },
     {
       "name": "ambiguous_list_price",
-      "why": "two claims naming two list prices let a bid choose which wall it is measured against",
+      "why": "two list_price claims naming different numbers: the bid does not get to pick which wall it is measured against. The `ambiguous_list_price` refusal is unchanged; the two around it are T-306's, because this caller passes no roster",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -293,12 +318,14 @@
       "max_discount_pct": null,
       "ok": false,
       "reasons": [
-        "price_unreconcilable:offer.unit_price:ambiguous_list_price"
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:ambiguous_list_price",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
       ]
     },
     {
       "name": "unreadable_list_price",
-      "why": "a claim that says 'here is the list price' and states no number is unreadable, not absent",
+      "why": "a bid does not get to disable the wall by making its own evidence unreadable. The `unreadable_list_price` refusal is unchanged; the two around it are T-306's, because this caller passes no roster",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -343,12 +370,14 @@
       "max_discount_pct": null,
       "ok": false,
       "reasons": [
-        "price_unreconcilable:offer.unit_price:unreadable_list_price"
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:unreadable_list_price",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
       ]
     },
     {
       "name": "honest_price",
-      "why": "the positive control: 20% off 100.00 is 80.00 and it is admitted",
+      "why": "20% off a carried 100.00 is 80.00, and the bid charges exactly that \u2014 the positive control for this whole table, since a door that refused everything would satisfy every rejection row in it. THE ROSTER IS NEW HERE AND THE VERDICT IS NOT (T-306): an absent roster is now the empty roster, which refuses every bid for `list_price_unavailable`, so the admission this row exists to pin is only reachable from a caller that can price the product. The roster AGREES with the carried claim at 100.00, so nothing about the arithmetic changed",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -389,14 +418,19 @@
         "signature": "sig-deadbeef",
         "schema_version": "1.0.0"
       },
-      "list_prices": null,
+      "list_prices": {
+        "prod-1": {
+          "list_price": 100.0,
+          "max_discount_pct": 20.0
+        }
+      },
       "max_discount_pct": null,
       "ok": true,
       "reasons": []
     },
     {
       "name": "no_list_price_carried",
-      "why": "the abstention, pinned on BOTH doors: with no roster they must be blind to the same thing, or the seller picks the blinder one",
+      "why": "THE ROW THAT ENCODED THE DEFECT, re-baselined by T-306. It read `ok: true, reasons: []` for a bid declaring 20%, charging 15.00 and carrying no list_price claim \u2014 the abstention, pinned in both languages. It was not a requirement: the identical call with `list_prices: {}` was refused, so the argument nobody passed was the permissive one, on the money path. The bid is untouched; only the verdict it earns has changed, and it now says what the wall actually knows \u2014 this caller cannot price the product and cannot authorize the depth",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -439,8 +473,11 @@
       },
       "list_prices": null,
       "max_discount_pct": null,
-      "ok": true,
-      "reasons": []
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
+      ]
     },
     {
       "name": "roster_catches_the_bid_that_stayed_silent",
@@ -1303,8 +1340,8 @@
       "reasons": []
     },
     {
-      "name": "a_zero_price_with_no_roster_is_unchanged",
-      "why": "the floor is roster-conditional: with no roster passed every verdict stays byte-identical, which is the whole backward-compatibility story of the T-177 roster",
+      "name": "a_zero_price_with_no_roster_is_refused_by_the_roster_it_lacks",
+      "why": "an offer of 0.00 declaring no discount at all. The FLOOR is still dead code here and that is still the point of the row \u2014 the floor keys off `rostered`, never off a carried claim, so with no roster it cannot fire and the refusal below is not it. What changed under T-306 is one layer up: the caller that cannot price the product is refused for that, which is why this row is no longer named `..._is_unchanged`",
       "bid": {
         "auction_id": "auc-1",
         "store_id": "store-1",
@@ -1326,8 +1363,10 @@
       },
       "list_prices": null,
       "max_discount_pct": null,
-      "ok": true,
-      "reasons": []
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
+      ]
     },
     {
       "name": "a_thousandth_of_a_dollar_is_below_the_proportional_floor",
@@ -1733,6 +1772,260 @@
       "ok": false,
       "reasons": [
         "price_under_declared_depth:offer.unit_price"
+      ]
+    },
+    {
+      "name": "an_empty_roster_answers_exactly_as_an_absent_one",
+      "why": "T-306's property, as a corpus row rather than a claim in a docstring. This is the `no_list_price_carried` payload with `list_prices: {}` instead of null, and the two rows must carry byte-identical reason lists: omission is the call a caller makes by FORGETTING, so it may never be the permissive one",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 15.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 20.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 15.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "claims": [
+          {
+            "key": "free_returns",
+            "value": "30 days",
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0"
+      },
+      "list_prices": {},
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
+      ]
+    },
+    {
+      "name": "a_call_wide_ceiling_of_zero_binds_with_no_roster",
+      "why": "T-307. `max_discount_pct: 0` is a caller saying 'I authorize no discount at all', and it used to be dropped on the floor in silence whenever the roster was absent \u2014 the early return sat BEFORE the ceiling was read. The `discount_over_authorized_depth` reason is the whole assertion: it can only appear if the ceiling was consulted",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 15.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 20.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 15.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "claims": [
+          {
+            "key": "free_returns",
+            "value": "30 days",
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0"
+      },
+      "list_prices": null,
+      "max_discount_pct": 0.0,
+      "ok": false,
+      "reasons": [
+        "discount_over_authorized_depth:offer.discount",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
+      ]
+    },
+    {
+      "name": "a_call_wide_ceiling_that_covers_the_declared_depth_with_no_roster",
+      "why": "T-307's other direction, and the one that stops the row above from passing for the wrong reason: the SAME bid under a ceiling of 20 earns no `discount_over_authorized_depth`, because 20% declared against 20% authorized is authorized. A ceiling that is never read would answer identically to both, so the pair distinguishes 'read and satisfied' from 'not read'. The bid is still refused \u2014 there is no list price to measure 15.00 against \u2014 which is T-306, not T-307",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 15.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 20.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 15.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "claims": [
+          {
+            "key": "free_returns",
+            "value": "30 days",
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0"
+      },
+      "list_prices": null,
+      "max_discount_pct": 20.0,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
+      ]
+    },
+    {
+      "name": "a_carried_claim_is_measured_against_the_full_list_price_with_no_roster",
+      "why": "T-337's THIRD SITE, and the only row in this table that can see it. The other two sites of the T-306 repair are `authorizedDepth` and `rosterListPrice`; the third is the `authorized` fallback in `priceReasonsFor` / `_price_reasons`, which used to read `authorized = listPrices === undefined ? depth : 0` and so handed the offer its OWN declared depth back as its bound whenever the roster was absent \u2014 the self-granting cap the whole walk exists to end. Every other no-roster row in this table is blind to it, because they all charge far enough under list to be refused at BOTH bounds: `charges_under_the_carried_list_price` charges 15.00, which is under 100.00 and under 80.00 alike, so the verdict is identical either way. This row sits BETWEEN the two bounds on purpose \u2014 a carried list price of 100.00, a declared 20%, charging 85.00. Against the full list price (authorized 0, correct) 85.00 is an undercut and is REFUSED; against the depth the offer granted itself (authorized 20) the bound is 80.00 and 85.00 is ADMITTED. Measured: restoring that one ternary in `boundary.ts` left all 867 vitest tests and all 55 corpus rows green, so the divergence this corpus exists to prevent was invisible to it in exactly the place it matters most",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 85.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 20.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 85.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "claims": [
+          {
+            "key": "list_price",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0"
+      },
+      "list_prices": null,
+      "max_discount_pct": null,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable",
+        "price_under_declared_depth:offer.unit_price"
+      ]
+    },
+    {
+      "name": "a_call_wide_ceiling_is_read_at_a_zero_declared_depth_with_no_roster",
+      "why": "THE FOURTH SITE. `_price_reasons` / `priceReasonsFor` reads the cap twice \u2014 once for a declared depth and once, in the `else`, for a declared ZERO \u2014 and the T-306 repair had to remove a `list_prices is not None` / `listPrices !== undefined` guard from BOTH. A per-site mutation sweep found the zero-depth one ungraded in both languages: reverting it alone left 910 pytest and 173 vitest green. Nothing else in this table can see it, because the two behaviours only diverge when a caller supplies a call-wide `max_discount_pct`, supplies NO roster, and meets an offer declaring no discount at all \u2014 every other row misses at least one of the three. Here the offer declares 0%, carries a list price of 100.00 and charges 85.00 under a ceiling of 20: reading the ceiling authorizes 20, the bound is 80.00 and 85.00 clears it, so the ONLY reason is the missing roster. Not reading it leaves `authorized` at zero, measures 85.00 against the full 100.00 and adds `price_under_declared_depth:offer.unit_price` \u2014 so the absence of that reason is the whole assertion. Note the direction: this mutant is stricter, not looser. It refuses an honest bid rather than admitting a dishonest one, which is the closed-rather-than-fail-closed defect this walk names elsewhere, and it is still a divergence between the two doors",
+      "bid": {
+        "auction_id": "auc-1",
+        "store_id": "store-1",
+        "offer": {
+          "product_ref": "prod-1",
+          "variant_ref": "44352913",
+          "unit_price": 85.0,
+          "currency": "USD",
+          "discount": {
+            "type": "percentage",
+            "value": 0.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          },
+          "commitments": [],
+          "total_price": 85.0,
+          "expires_at": "2999-01-01T00:00:00Z",
+          "checkout_url": "https://store-one.example.com/cart/44352913:1"
+        },
+        "claims": [
+          {
+            "key": "list_price",
+            "value": 100.0,
+            "provenance": {
+              "source": "owner_statement",
+              "ref": "envelope:store-1:v3#commitment-2",
+              "observed_at": "2026-01-01T00:00:00Z",
+              "authority_rank": 1
+            }
+          }
+        ],
+        "message": null,
+        "agent_version": "store-agent/1.0.0",
+        "signature": "sig-deadbeef",
+        "schema_version": "1.0.0"
+      },
+      "list_prices": null,
+      "max_discount_pct": 20.0,
+      "ok": false,
+      "reasons": [
+        "price_unreconcilable:offer.unit_price:list_price_unavailable"
       ]
     }
   ]

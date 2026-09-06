@@ -105,8 +105,11 @@ PERCENTAGE_DISCOUNT_TYPES: frozenset[str] = frozenset({"percentage", "percent", 
 #: `get_product_fact(product_ref, "list_price")` is the hook that mints it, so a hosted bid can
 #: only carry a list price the catalog actually published. It is the only list price the boundary
 #: can see when the caller supplies no roster — the boundary holds no catalog of its own, and
-#: inventing a lookup it cannot perform would be worse than saying so. It is also the SAME key a
-#: `list_prices` roster row may spell its number under, so one name means one thing on both sides.
+#: inventing a lookup it cannot perform would be worse than saying so. Since T-306 a caller
+#: supplying no roster is refused by `list_price_unavailable` anyway, so this claim no longer
+#: decides such a bid on its own; it still decides the contradiction check against a roster that
+#: IS readable. It is also the SAME key a `list_prices` roster row may spell its number under, so
+#: one name means one thing on both sides.
 LIST_PRICE_CLAIM_KEY = "list_price"
 
 #: The `list_prices` roster row key naming the deepest percentage discount the caller AUTHORIZES
@@ -626,17 +629,31 @@ def _authorized_depth(
        rather than a column;
     3. nothing — and nothing is a REFUSAL, not a default. `(None, [reason])`.
 
-    `(None, [])` — abstain, the legacy contract — only when the caller passed no roster at all.
-    That is the whole of the backward-compatibility story: a caller that supplies no catalog is
-    told nothing new and behaves exactly as it did.
+    **There is no abstention for an ABSENT roster, and removing that carve-out is T-306/T-307.**
+    This used to open `if list_prices is None: return None, []`, described here as "abstain, the
+    legacy contract … the whole of the backward-compatibility story". Measured on this door, that
+    made the argument nobody passed MORE permissive than the argument passed empty: a bid charging
+    15.00 for a product the exchange prices at 100.00 while declaring 20% — 85% off behind a 20%
+    authorization — was `ok=True reasons=()` with `list_prices` omitted and refused with
+    `price_unreconcilable:offer.unit_price:list_price_unavailable` under `list_prices={}`. Omission
+    is the call a caller makes by FORGETTING, so the accident was the one that paid, and this is
+    T-233's shape one argument over — on the money path.
+
+    Worse (T-307), that early return sat BEFORE the cap is read at all, so a caller setting
+    `max_discount_pct=0` — "I authorize no discount" — and forgetting the roster had its ceiling
+    dropped on the floor with nothing in the verdict saying so. The two arguments together ARE the
+    price wall, and omitting one disarmed both rather than failing closed on the missing input.
+
+    So an absent roster is now exactly an empty one, and `None` is not special anywhere in this
+    walk: `_roster_row` already answers `_NO_ROW` for anything that is not a `Mapping`, so the
+    omitted call and the `{}` call are indistinguishable to the byte. The cost is the DELIBERATE
+    behaviour change T-306 asks for — a caller that passes no catalog is now told it cannot price
+    what it admits, exactly as an empty catalog is — not a widened refusal nobody chose.
 
     Fail-closed here costs less than it looks. It bites only an offer that DECLARES a non-zero
     depth (a zero depth authorizes itself: it takes nothing off), and its consequence is that the
     offer is measured against the full list price. A store may still bid at or above list.
     """
-    if list_prices is None:
-        return None, []
-
     site = OFFER_DISCOUNT_SITE
     row = _roster_row(offer, list_prices)
     raw = None if row is _NO_ROW else _get(_record(row), MAX_DISCOUNT_ROSTER_KEY)
@@ -654,19 +671,23 @@ def _authorized_depth(
 def _roster_list_price(offer: Any, list_prices: Any) -> tuple[float | None, list[str]]:
     """The list price the EXCHANGE holds for this offer's product, and why it could not be read.
 
-    `(None, [])` — abstain — only when the caller passed no roster at all. That is the whole of
-    the backward compatibility story: every caller that does not opt in keeps the claim-only
-    behaviour it had, including the deliberate abstention `_price_reasons` documents.
+    **There is no abstention for an ABSENT roster** (T-306). This used to open
+    `if list_prices is None: return None, []` — "the whole of the backward compatibility story" —
+    and that sentence was the fail-open: it made FORGETTING the argument more permissive than
+    passing it empty, on the one door where the difference is money. The roster is read the same
+    way whether it is absent, `None` or `{}`, so a caller that supplies no catalog is told exactly
+    what a caller supplying an empty one is told.
 
-    Once a roster IS passed, it is evidence, and every way of failing to read it is a refusal:
+    A roster is evidence, and every way of failing to read it is a refusal:
 
     * the roster does not price this product — `list_price_unavailable`;
     * it prices it with something that is not a non-negative finite number —
       `unreadable_roster_list_price`.
 
-    Neither degrades back to the abstention. A caller supplying a roster is asserting it can
-    price what it admits, and "the roster has never heard of this `product_ref`" is exactly the
-    string an attacker would put there if silence still worked.
+    Neither degrades back to silence. A caller reaching this door is asserting it can price what
+    it admits, and "the roster has never heard of this `product_ref`" is exactly the string an
+    attacker would put there if silence still worked — as is the argument an attacker's caller
+    never passed at all.
 
     A row may be the number itself or a record spelling it under `list_price`, so a caller
     holding catalog rows does not have to unwrap them into a shape this door invented. The
@@ -674,9 +695,6 @@ def _roster_list_price(offer: Any, list_prices: Any) -> tuple[float | None, list
     wire, so an unhashable key or a `get` that raises is an unavailable read — never a 500 at
     the public boundary, the same property `_eligibility_reasons` holds for `store_id`.
     """
-    if list_prices is None:
-        return None, []
-
     site = OFFER_UNIT_PRICE_SITE
     unavailable = [f"{REASON_PRICE_UNRECONCILABLE}:{site}:{ROSTER_LIST_PRICE_UNAVAILABLE}"]
     row = _roster_row(offer, list_prices)
@@ -730,8 +748,9 @@ def _price_reasons(
     declared and whatever cap authorized it (`not_positive`). Every other relation here is
     satisfied by an authorized 100 — `listed * (100 - 100) / 100` is 0.00 — so without the floor
     the deepest cap a caller can write is a free item, which is exactly what was measured through
-    `POST /auctions`. It is conditioned on the roster, so with no roster passed it is dead code and
-    every legacy verdict is unchanged.
+    `POST /auctions`. It is conditioned on a roster that PRICES the product, so a caller passing no
+    roster — or one that does not price this product — never reaches it; that caller is refused one
+    relation earlier, by `list_price_unavailable`.
 
     **Where the list price comes from, and why that was the whole attack.** The first relation
     originally had ONE source of a list price: the `list_price` claim the bid carries. That made
@@ -749,21 +768,41 @@ def _price_reasons(
     from somewhere else, and reading past it would restore the very move this closes one step
     over — inflate the stated list price until 15.00 looks like 20% off.
 
-    **What this still cannot do, said plainly.** With NO roster passed the first relation
-    abstains exactly as it always did. That abstention is what `list_prices` exists to let a
-    caller close, and it is left in place rather than removed because refusing every discounted
-    offer that omits the claim would refuse most honest bids from callers holding no catalog —
-    that is not fail-closed, it is closed. A caller that CAN price its products should pass the
-    roster; a caller that cannot is measured by the second relation alone and should know it.
+    **THE ABSENT ROSTER IS THE EMPTY ROSTER (T-306/T-307), and this paragraph used to say the
+    opposite.** It read: "With NO roster passed the first relation abstains exactly as it always
+    did … it is left in place rather than removed because refusing every discounted offer that
+    omits the claim would refuse most honest bids from callers holding no catalog — that is not
+    fail-closed, it is closed." That opt-in was documented, deliberate and pinned by tests, and it
+    was still the defect: it made the argument a caller forgets MORE permissive than the argument
+    a caller passes empty. Measured on this walk before the change — a hook-minted 20% grant, an
+    offer charging 15.00 for a product the exchange prices at 100.00, carrying no `list_price`
+    claim::
+
+        validate_bid(bid, ...)                   -> ok=True   reasons=()
+        validate_bid(bid, ..., list_prices={})   -> ok=False  reasons=(
+            'price_unreconcilable:offer.discount:authorized_depth_unavailable',
+            'price_unreconcilable:offer.unit_price:list_price_unavailable')
+
+    Nothing about the second call is stricter than the first except that the caller said something.
+    A default that reads which arguments were supplied to decide how permissive to be is the T-233
+    fail-open with a different key, and this one is on the money path. So `None` is normalised to
+    the empty roster at every one of the three sites that could see it — `_authorized_depth`,
+    `_roster_list_price`, and the `authorized` fallback below — and `price_reasons(bid)` now
+    answers exactly what `price_reasons(bid, list_prices={})` answers, for every bid.
+
+    **What that costs, said plainly, because it is not small.** A caller holding no catalog no
+    longer gets the claim-only walk; it gets `price_unreconcilable:offer.unit_price:
+    list_price_unavailable` on every offer. That is a deliberate behaviour change, not a widened
+    refusal that crept in: a door that cannot price what it admits is not entitled to admit it, and
+    the caller that CAN price its products was always supposed to pass the roster — see
+    `validate_external_submission`, which calls this "the door it matters most on".
 
     **The depth these relations use is the AUTHORIZED one, not the declared one** — see
-    `_authorized_depth`. Both are written against ``authorized``, which equals ``depth`` exactly
-    when no roster was passed, so every no-roster verdict is unchanged to the byte. With a roster
-    the declared depth stops being self-granting: it is refused above the cap, and the price is
-    measured against what the caller authorized. At an authorized zero the second relation
-    switches off for the same reason it does at a declared zero — ``total >= unit`` is a claim
-    about quantity, not about a discount — and the first relation, now measuring against the full
-    list price, is the one carrying the refusal.
+    `_authorized_depth`. Both are written against ``authorized``, and the declared depth is never
+    self-granting: it is refused above the cap, and the price is measured against what the caller
+    authorized. At an authorized zero the second relation switches off for the same reason it does
+    at a declared zero — ``total >= unit`` is a claim about quantity, not about a discount — and
+    the first relation, now measuring against the full list price, is the one carrying the refusal.
     """
     record = _record(offer)
     if record is None:
@@ -790,18 +829,24 @@ def _price_reasons(
         return reasons
 
     # The depth the offer declared is paperwork; the depth the CALLER authorized is the bound.
-    # They are the same number whenever no roster was passed, which is what keeps every existing
-    # verdict byte-identical. A zero depth needs no authorization — it takes nothing off — so the
-    # cap is not even consulted for one, and a caller with a roster but no envelope keeps the
-    # undiscounted half of its traffic behaving exactly as before.
+    # A zero depth needs no authorization — it takes nothing off — so the cap is not even
+    # consulted for one, and a caller with a roster but no envelope keeps the undiscounted half of
+    # its traffic behaving exactly as before.
+    #
+    # T-337's third site. Normalising only `_authorized_depth` and `_roster_list_price` leaves the
+    # fail-open ALIVE here, because `authorized = depth if list_prices is None else 0.0` restores
+    # the abstention one layer up: the omitted roster hands the offer its own declared depth back
+    # as the bound, which is the self-granting cap `_authorized_depth` exists to end. Measured on
+    # the T-306 property at seed 20260904, a two-site repair diverges at draw 3 through this line.
+    # There is no `list_prices is None` branch left in this walk.
     authorized = depth
     if depth > 0.0:
         cap, cap_reasons = _authorized_depth(record, list_prices, max_discount_pct)
         reasons.extend(cap_reasons)
         if cap is None:
-            # `list_prices is None` is the abstention; anything else here is a roster that could
-            # not authorize this depth, and an unauthorized depth authorizes nothing.
-            authorized = depth if list_prices is None else 0.0
+            # A roster that could not authorize this depth, and an unauthorized depth authorizes
+            # nothing. An ABSENT roster is one of those rosters now (T-306), not an exemption.
+            authorized = 0.0
         else:
             if depth > cap:
                 reasons.append(f"{REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH}:{OFFER_DISCOUNT_SITE}")
@@ -809,8 +854,9 @@ def _price_reasons(
             # is authorized (`authorize_discount` grants at `max_discount_pct` and denies above
             # it), and a cent of currency slack has no meaning applied to percentage points.
             authorized = min(depth, cap)
-    elif list_prices is not None:
-        # NO depth declared, and a roster to check against. The price is still a depth — an
+    else:
+        # NO depth declared, and a roster to check against — and after T-306 there is ALWAYS a
+        # roster to check against, because an absent one is an empty one. The price is still a depth — an
         # implicit one — and 15.00 for a 100.00 product is an 85% discount however the paperwork
         # is spelled. So when the roster STATES what is authorized, the undeclared price is
         # measured against that, exactly as a declared one is. Without this the caller's own cap
@@ -1028,21 +1074,21 @@ def validate_bid(
             `validate_bid` is also used to judge already-extracted `Bid` objects that never
             carried an envelope.
         list_prices: the caller's OWN catalog, `{product_ref: 100.0}` or
-            `{product_ref: {"list_price": 100.0}}`. Pass it and the price wall stops depending on
-            the bid volunteering what it is discounting from — the one move that defeated it, and
-            the only one an emitter did not have to forge anything to make. Omit it and the wall
-            reads the bid's `list_price` claim alone, abstaining when there is none, exactly as
-            before; every existing caller is unaffected. **A roster you pass is evidence**: a
-            product it cannot price refuses (`price_unreconcilable:offer.unit_price:
-            list_price_unavailable`) rather than falling back to that abstention, so pass a
-            roster only if it covers what you are willing to admit. A row may also name
-            `max_discount_pct` — the deepest discount you authorize for that product — and
-            without one, an offer declaring a non-zero depth is refused rather than measured
-            against a depth it chose for itself.
+            `{product_ref: {"list_price": 100.0}}`. It is what makes the price wall stop depending
+            on the bid volunteering what it is discounting from — the one move that defeated it,
+            and the only one an emitter did not have to forge anything to make. **A roster is
+            evidence, and OMITTING it is not a way to be judged more gently** (T-306): a product
+            the roster cannot price refuses with `price_unreconcilable:offer.unit_price:
+            list_price_unavailable`, and so does passing no roster at all, because `None` is the
+            empty roster here. Pass a roster that covers everything you are willing to admit. A
+            row may also name `max_discount_pct` — the deepest discount you authorize for that
+            product — and without one, an offer declaring a non-zero depth is refused rather than
+            measured against a depth it chose for itself.
         max_discount_pct: a caller-wide ceiling, in percentage points, for a caller holding one
             approved number rather than a per-product column. A roster row's own
-            `max_discount_pct` beats it. Read only when a roster is passed: on its own it would
-            be a cap with no list price to apply it to.
+            `max_discount_pct` beats it. It is read whether or not a roster is passed (T-307): a
+            ceiling that binds only in the presence of a second argument is a ceiling a caller can
+            lose by forgetting, and this one used to be dropped on the floor in silence.
 
     Returns:
         `BidValidationResult` — `ok`, the `path` it was judged on, `reasons` (non-empty exactly

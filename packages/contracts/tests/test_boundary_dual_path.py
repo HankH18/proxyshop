@@ -38,12 +38,36 @@ BOTH_PATHS = (HOSTED_PATH, EXTERNAL_PATH)
 
 _DEFAULT = object()
 
+#: What the exchange's OWN catalog says about `make_offer()`'s product: `prod-1` lists at 49.00 —
+#: exactly the price the shared fixture offer charges — and the merchant approved discounts up to
+#: 25% on it, which is deeper than any depth a fixture bid in this file declares through `check()`.
+#:
+#: WHY THE HELPER PASSES A ROSTER AT ALL, since it never used to (T-306). `check()` called
+#: `validate_bid` with no `list_prices`, and an absent roster USED TO MEAN "abstain": the price
+#: wall reported nothing at all, so every test in this file measured only the thing it was written
+#: about. An absent roster is now the EMPTY roster and refuses every offer with
+#: `price_unreconcilable:offer.unit_price:list_price_unavailable`, so a helper that goes on passing
+#: nothing turns a file about provenance, expiry and trust into a file about the price wall — 70
+#: tests failing on a reason none of them names. Handing the door the catalog restores each test's
+#: SUBJECT rather than relaxing anything: the roster prices the fixture product truthfully and
+#: authorizes more depth than the fixtures declare, so no price reason can fire unless the test is
+#: about prices, and every price test in this file supplies its own roster explicitly.
+FIXTURE_ROSTER: dict[str, Any] = {"prod-1": {"list_price": 49.0, "max_discount_pct": 25.0}}
 
-def check(bid, path, snapshot=_DEFAULT, now=NOW):
-    # A sentinel, not `None`: `None` is itself a case under test (an unavailable snapshot read),
-    # and a `None`-means-default helper would quietly turn that test into the happy path.
+#: The catalog the T-177 price tests below are written against: `prod-1` lists at 100.00 with 20%
+#: approved. It agrees with the 100.00 the same bids carry as a `list_price` claim, so the roster
+#: is not a second, contradicting wall — the reconciliation those tests assert is the one they
+#: always asserted.
+LIST_100_ROSTER: dict[str, Any] = {"prod-1": {"list_price": 100.0, "max_discount_pct": 20.0}}
+
+
+def check(bid, path, snapshot=_DEFAULT, now=NOW, list_prices=_DEFAULT):
+    # A sentinel, not `None`: `None` is itself a case under test (an unavailable snapshot read,
+    # and since T-306 an empty price roster), and a `None`-means-default helper would quietly turn
+    # those tests into the happy path.
     table = make_snapshot_table() if snapshot is _DEFAULT else snapshot
-    return validate_bid(bid, path=path, trust_snapshot=table, now=now)
+    roster = FIXTURE_ROSTER if list_prices is _DEFAULT else list_prices
+    return validate_bid(bid, path=path, trust_snapshot=table, now=now, list_prices=roster)
 
 
 # --- R8 / R18: the path-sensitive half ----------------------------------------------------
@@ -245,7 +269,13 @@ def test_validate_bid_accepts_a_model_as_well_as_a_mapping() -> None:
 
     model = Bid.model_validate(make_bid())
     assert (
-        validate_bid(model, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW).ok
+        validate_bid(
+            model,
+            path=HOSTED_PATH,
+            trust_snapshot=make_snapshot_table(),
+            now=NOW,
+            list_prices=FIXTURE_ROSTER,
+        ).ok
         is True
     )
 
@@ -441,7 +471,9 @@ def test_an_unsigned_submission_is_rejected_at_the_external_door() -> None:
 
     # Control: the identical bid with the envelope on it is admitted, so this is not
     # "reject every external submission".
-    control = validate_external_submission(_signed(), trust_snapshot=make_snapshot_table(), now=NOW)
+    control = validate_external_submission(
+        _signed(), trust_snapshot=make_snapshot_table(), now=NOW, list_prices=FIXTURE_ROSTER
+    )
     assert control.ok is True, control.reasons
 
 
@@ -493,6 +525,7 @@ def test_the_external_door_still_applies_the_whole_r8_r18_table() -> None:
         _signed(claims=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))]),
         trust_snapshot=make_snapshot_table(),
         now=NOW,
+        list_prices=FIXTURE_ROSTER,
     )
     assert flagged.ok is True, flagged.reasons
     assert flagged.requires_verification is True
@@ -820,13 +853,25 @@ def test_the_walk_reaches_the_offer_through_a_pydantic_model_too() -> None:
     model = Bid.model_validate(
         make_bid(offer=make_offer(commitments=[make_claim("spf", 30, dict(ASSERTED_PROVENANCE))]))
     )
-    result = validate_bid(model, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW)
+    result = validate_bid(
+        model,
+        path=HOSTED_PATH,
+        trust_snapshot=make_snapshot_table(),
+        now=NOW,
+        list_prices=FIXTURE_ROSTER,
+    )
     assert result.ok is False, "the offer walk does not survive attribute access"
     assert "hosted_non_hook_provenance:offer.commitments[0]:seller_asserted" in list(result.reasons)
 
     clean = Bid.model_validate(make_bid())
     assert (
-        validate_bid(clean, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW).ok
+        validate_bid(
+            clean,
+            path=HOSTED_PATH,
+            trust_snapshot=make_snapshot_table(),
+            now=NOW,
+            list_prices=FIXTURE_ROSTER,
+        ).ok
         is True
     )
 
@@ -931,7 +976,7 @@ def test_a_bid_may_not_charge_more_off_than_the_depth_it_declares(path: str) -> 
         claims=[list_price_claim(100.0), make_claim("authorized_discount_pct", 20.0)],
         offer=priced_offer(15.0, 15.0),
     )
-    result = check(bid, path)
+    result = check(bid, path, list_prices=LIST_100_ROSTER)
     assert result.ok is False, "a 20% grant licensed an 85% discount"
     assert "price_under_declared_depth:offer.unit_price" in list(result.reasons), result.reasons
 
@@ -941,7 +986,9 @@ def test_a_bid_may_not_charge_more_off_than_the_depth_it_declares(path: str) -> 
         claims=[list_price_claim(100.0), make_claim("authorized_discount_pct", 20.0)],
         offer=priced_offer(80.0, 80.0),
     )
-    assert check(honest, path).ok is True, check(honest, path).reasons
+    assert check(honest, path, list_prices=LIST_100_ROSTER).ok is True, check(
+        honest, path, list_prices=LIST_100_ROSTER
+    ).reasons
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
@@ -959,7 +1006,7 @@ def test_the_list_price_is_read_from_offer_commitments_too(path: str) -> None:
             discount={"type": "percentage", "value": 20.0, "provenance": dict(HOOK_PROVENANCE)},
         ),
     )
-    result = check(bid, path)
+    result = check(bid, path, list_prices=LIST_100_ROSTER)
     assert result.ok is False, "relocating the list price into the offer defeated the price wall"
     assert "price_under_declared_depth:offer.unit_price" in list(result.reasons)
 
@@ -970,13 +1017,16 @@ def test_the_total_may_not_undercut_the_depth_the_offer_declares(path: str) -> N
     semantics of `total_price` are undecided: `Offer` carries no quantity, but every quantity is
     at least one, so a total can only ever be LARGER than one discounted unit. A 20% discount off
     a stated 100.00 cannot produce a total of 15.00 under any reading of the field."""
-    result = check(make_bid(offer=priced_offer(100.0, 15.0)), path)
+    result = check(make_bid(offer=priced_offer(100.0, 15.0)), path, list_prices=LIST_100_ROSTER)
     assert result.ok is False
     assert "price_under_declared_depth:offer.total_price" in list(result.reasons), result.reasons
 
     # Control: the honest total for that depth, and a total for a LARGER quantity, both admit.
     for total in (80.0, 240.0):
-        assert check(make_bid(offer=priced_offer(100.0, total)), path).ok is True
+        assert (
+            check(make_bid(offer=priced_offer(100.0, total)), path, list_prices=LIST_100_ROSTER).ok
+            is True
+        )
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
@@ -985,7 +1035,8 @@ def test_the_price_wall_is_one_sided(path: str) -> None:
     nothing there for a wall about authorization to refuse, and refusing it would turn every
     rounding-up into an outage."""
     generous = make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(95.0, 95.0))
-    assert check(generous, path).ok is True, check(generous, path).reasons
+    verdict = check(generous, path, list_prices=LIST_100_ROSTER)
+    assert verdict.ok is True, verdict.reasons
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
@@ -993,12 +1044,17 @@ def test_a_rounded_price_a_fraction_of_a_cent_under_the_exact_one_still_admits(p
     """19.99 less an honest 15% is 16.9915 and no bid states that: money is quoted to the cent,
     so the honest rounded price sits under the exact one. A wall tightened to the float would
     refuse almost every real product."""
+    # The roster AGREES with the carried claim at 19.99 and authorizes the 15% declared, so the
+    # only thing left deciding these two verdicts is the cent of tolerance this test is named for.
+    roster = {"prod-1": {"list_price": 19.99, "max_discount_pct": 15.0}}
     bid = make_bid(claims=[list_price_claim(19.99)], offer=priced_offer(16.99, 16.99, depth=15.0))
-    assert check(bid, path).ok is True, check(bid, path).reasons
+    assert check(bid, path, list_prices=roster).ok is True, check(
+        bid, path, list_prices=roster
+    ).reasons
 
     # ...and one cent of slack is all there is: a whole currency unit under still refuses.
     over = make_bid(claims=[list_price_claim(19.99)], offer=priced_offer(15.99, 15.99, depth=15.0))
-    assert check(over, path).ok is False
+    assert check(over, path, list_prices=roster).ok is False
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
@@ -1013,12 +1069,20 @@ def test_a_depth_the_boundary_cannot_read_is_refused_rather_than_skipped(path: s
         (priced_offer(15.0, 15.0, depth="20"), "offer.discount:depth_not_a_number"),
         (priced_offer(15.0, 15.0, depth=True), "offer.discount:depth_not_a_number"),
     ):
-        result = check(make_bid(claims=[list_price_claim(100.0)], offer=offer), path)
+        result = check(
+            make_bid(claims=[list_price_claim(100.0)], offer=offer),
+            path,
+            list_prices=LIST_100_ROSTER,
+        )
         assert result.ok is False, (offer, path)
         assert any(needle in reason for reason in result.reasons), (needle, list(result.reasons))
 
     # Control: the same offer with a depth the door CAN read, priced honestly, is admitted.
-    ok = check(make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(80.0, 80.0)), path)
+    ok = check(
+        make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(80.0, 80.0)),
+        path,
+        list_prices=LIST_100_ROSTER,
+    )
     assert ok.ok is True, ok.reasons
 
 
@@ -1029,17 +1093,25 @@ def test_a_zero_discount_needs_no_reconciliation_but_still_answers_to_the_list_p
     """A discount that takes nothing off prices out at the price itself — so a bid declaring 0%
     and charging under its own carried list price is a discount that entered through no hook at
     all, and is refused."""
+    # `UNAUTHORIZING_100` prices the product and authorizes nothing on it, which is what makes
+    # "answers to the LIST price" the literal bound here: with a cap on the row, a zero-depth
+    # offer would be measured against the cap instead and 85.00 would admit.
+    unauthorizing_100 = {"prod-1": 100.0}
     under = make_bid(
         claims=[list_price_claim(100.0)],
         offer=priced_offer(60.0, 60.0, depth=0.0),
     )
-    assert check(under, path).ok is False
-    assert "price_under_declared_depth:offer.unit_price" in list(check(under, path).reasons)
+    assert check(under, path, list_prices=unauthorizing_100).ok is False
+    assert "price_under_declared_depth:offer.unit_price" in list(
+        check(under, path, list_prices=unauthorizing_100).reasons
+    )
 
     at_list = make_bid(
         claims=[list_price_claim(100.0)], offer=priced_offer(100.0, 100.0, depth=0.0)
     )
-    assert check(at_list, path).ok is True, check(at_list, path).reasons
+    assert check(at_list, path, list_prices=unauthorizing_100).ok is True, check(
+        at_list, path, list_prices=unauthorizing_100
+    ).reasons
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
@@ -1047,7 +1119,7 @@ def test_an_illegible_or_contradictory_list_price_is_refused_not_read_past(path:
     """A bid does not get to disable the wall by making its own evidence unreadable, and it does
     not get to pick which wall it is measured against by carrying two list prices."""
     unreadable = make_bid(claims=[list_price_claim("n/a")], offer=priced_offer(15.0, 15.0))
-    result = check(unreadable, path)
+    result = check(unreadable, path, list_prices=LIST_100_ROSTER)
     assert result.ok is False
     assert any("unreadable_list_price" in reason for reason in result.reasons), result.reasons
 
@@ -1055,7 +1127,7 @@ def test_an_illegible_or_contradictory_list_price_is_refused_not_read_past(path:
         claims=[list_price_claim(100.0), list_price_claim(120.0)],
         offer=priced_offer(80.0, 80.0),
     )
-    result = check(ambiguous, path)
+    result = check(ambiguous, path, list_prices=LIST_100_ROSTER)
     assert result.ok is False
     assert any("ambiguous_list_price" in reason for reason in result.reasons), result.reasons
 
@@ -1064,34 +1136,94 @@ def test_an_illegible_or_contradictory_list_price_is_refused_not_read_past(path:
         claims=[list_price_claim(100.0), list_price_claim(100.0)],
         offer=priced_offer(80.0, 80.0),
     )
-    assert check(twice, path).ok is True, check(twice, path).reasons
+    assert check(twice, path, list_prices=LIST_100_ROSTER).ok is True, check(
+        twice, path, list_prices=LIST_100_ROSTER
+    ).reasons
 
 
 @pytest.mark.parametrize("path", BOTH_PATHS)
-def test_the_wall_abstains_deliberately_when_the_bid_carries_no_list_price(path: str) -> None:
-    """THE DOCUMENTED GAP, pinned so it cannot be mistaken for coverage.
+def test_the_wall_answers_one_identical_refusal_to_every_spelling_of_no_roster(path: str) -> None:
+    """THE DOCUMENTED GAP — CLOSED BY T-306, and this test is the record of that.
 
-    The boundary holds no catalog. A bid that declares a depth and carries no `list_price` claim
-    gives the first relation no number to be a percentage OF, and it reports nothing rather than
-    inventing a lookup it cannot do. Such a bid is measured by the `total_price` relation alone,
-    which is why the offer below — 20% off, charging 15.00, internally consistent — is admitted.
+    Renamed with the assertions. It was `test_the_wall_abstains_deliberately_when_the_bid_
+    carries_no_list_price`, and after the rewrite that name said the opposite of what the
+    body asserts: the wall does not abstain, it refuses and names the input it lacks. Its
+    TypeScript peer was renamed in the same lane, so leaving this one would have left the two
+    doors' test names disagreeing about one property — the exact drift the shared corpus
+    exists to prevent.
 
-    Closing this needs a list price the EXCHANGE supplies from its own roster — which is now the
-    `list_prices` parameter, pinned in `test_boundary_price_roster.py`. This test is what says
-    the roster is OPT-IN: with none passed the abstention is still exactly here, unchanged, and
-    every assertion below is the one it was written with. Removing the abstention outright rather
-    than giving callers a way to close it would not be fail-closed, it would be closed:
-    `make_offer()` itself declares 10% and carries no list price, as does every honest bid in
-    this suite.
+    JUSTIFY-TEST-EDIT. Two assertions here were REPLACED, not relaxed. They were::
+
+        silent = make_bid(offer=priced_offer(15.0, 15.0))
+        result = check(silent, path)               # `check` passed NO roster
+        assert result.ok is True, result.reasons
+        assert not any(reason.startswith("price_") for reason in result.reasons)
+
+    * **What they claimed about the product.** A bid declaring a 20% discount, charging 15.00,
+      carrying no `list_price` claim and reaching a door that was handed no roster is ADMITTED,
+      and the price wall says nothing at all about it.
+    * **The requirement they encoded, and where it came from.** `e1a66b5` ("put the price wall on
+      the validating door") introduced them as the deliberate boundary of that wall: the door
+      holds no catalog, so with no list price from anywhere the first relation had no number to be
+      a percentage of. The docstring called the abstention the opt-in property "this whole
+      parameter rests on".
+    * **Would this test still be wrong if the source change were reverted?** YES. Revert
+      `boundary.py` to the abstention and the assertion goes green again — and it is still false,
+      because it was never a statement about a MISSING list price. `price_reasons(bid,
+      list_prices={})` refused the identical bid the whole time it was in the tree. The assertion
+      pinned "the caller said nothing" as strictly more permissive than "the caller said it holds
+      no catalog", which is a claim about which ARGUMENTS were supplied, not about the bid. That
+      is T-306: an omission is the call a caller makes by forgetting, so the accident was the one
+      that paid, on the money path.
+    * **Independent proof the code is right.** `test_repro_open_tickets.py::test_t306_...` and
+      `::test_t307_...` were written as reproductions (`fbc4636`) and failed against the old
+      behaviour; they pass now. Neither was authored here and neither compares against anything
+      this file controls.
+    * **Blast radius.** The same contract was asserted by `boundary.test.ts` ("abstains
+      deliberately with no list price carried"), by `price_parity_corpus.json`'s
+      `no_list_price_carried` row (in both languages at once), and by three assertions in
+      `test_boundary_price_roster.py`. All are changed in this same commit; none is deleted.
+
+    What is asserted instead is the contract T-306 requires, which is STRICTLY STRONGER: the
+    door answers a bid the same way whether the roster is omitted, spelled `None`, or spelled
+    `{}` — and that answer is a refusal that NAMES the missing input.
     """
     silent = make_bid(offer=priced_offer(15.0, 15.0))
-    result = check(silent, path)
-    assert result.ok is True, result.reasons
-    assert not any(reason.startswith("price_") for reason in result.reasons)
+
+    # Byte-identical across all three spellings of "no roster" — the argument OMITTED, the
+    # argument spelled `None`, the argument spelled `{}`. This is the property, and it is asserted
+    # before the verdict itself so a future change cannot satisfy it by making all three
+    # permissive again without also flipping the refusal below.
+    table = make_snapshot_table()
+    omitted = validate_bid(silent, path=path, trust_snapshot=table, now=NOW)
+    verdicts = [omitted] + [check(silent, path, list_prices=spelling) for spelling in (None, {})]
+    assert len({(v.ok, tuple(v.reasons)) for v in verdicts}) == 1, [
+        list(v.reasons) for v in verdicts
+    ]
+
+    result = verdicts[0]
+    assert result.ok is False, "an omitted roster was more permissive than an empty one"
+    assert list(result.reasons) == [
+        "price_unreconcilable:offer.discount:authorized_depth_unavailable",
+        "price_unreconcilable:offer.unit_price:list_price_unavailable",
+    ], list(result.reasons)
+
+    # ...and the abstention is gone rather than moved: a caller that CAN price the product still
+    # gets the ordinary arithmetic, and the same silent bid is refused by the wall it underprices
+    # rather than by the missing roster.
+    priced = check(silent, path, list_prices=LIST_100_ROSTER)
+    assert priced.ok is False
+    assert list(priced.reasons) == ["price_under_declared_depth:offer.unit_price"], list(
+        priced.reasons
+    )
 
     # And the moment the bid DOES say what it is discounting from, the same offer refuses.
     assert (
-        check(make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(15.0, 15.0)), path).ok
+        check(
+            make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(15.0, 15.0)),
+            path,
+            list_prices=LIST_100_ROSTER,
+        ).ok
         is False
     )
 
@@ -1169,6 +1301,47 @@ def test_the_corpus_still_covers_every_case_the_hand_copied_table_pinned() -> No
     } <= set(PRICE_PARITY_BY_NAME)
 
 
+def test_the_corpus_keeps_the_two_rows_that_grade_the_third_and_fourth_sites() -> None:
+    """The T-306 repair has FOUR sites, and two of them are graded by ONE corpus row each.
+
+    `_authorized_depth` and `_roster_list_price` are caught by many tests. The other two — the
+    `authorized` fallback for a declared depth, and the cap read in the zero-depth `else` — are
+    caught by exactly the two rows named below, in both languages, and by nothing else. Both were
+    added only after a per-site mutation sweep found them ungraded: reverting either site alone
+    left the whole suite green in one or both languages, so the fix could have been undone with
+    no test noticing.
+
+    Every other guard in this file survives deleting them. Measured on a corpus with both rows
+    removed: 40 cases, 11 ok, 29 not-ok — `len >= 20`, `ok >= 5`, `not_ok >= 12`, the eight
+    hand-copied names and `floor_rows >= 5` ALL still pass. So this assertion is the only thing
+    standing between those two rows and a silent deletion that reopens both fail-opens, which is
+    the same job the hand-copied-names test above does for its own eight.
+
+    Names, not counts, and deliberately: a count is satisfied by any replacement row, and the
+    property here is that these SPECIFIC witnesses survive. Each charges 85.00, which is above
+    one bound and below the other depending on which site is broken — that is what makes them
+    discriminating, and a row that merely restored the count would not be.
+    """
+    graders = {
+        # site 3 — `authorized` must not fall back to the offer's own declared depth.
+        "a_carried_claim_is_measured_against_the_full_list_price_with_no_roster",
+        # site 4 — the call-wide ceiling must be read at a declared zero depth too.
+        "a_call_wide_ceiling_is_read_at_a_zero_declared_depth_with_no_roster",
+    }
+    missing = graders - set(PRICE_PARITY_BY_NAME)
+    assert not missing, (
+        f"the corpus rows that grade the price wall's third and fourth sites are gone: {missing}. "
+        "Deleting them re-opens T-306's fail-open with the suite green; see this test's docstring."
+    )
+    for name in graders:
+        case = PRICE_PARITY_BY_NAME[name]
+        assert case["list_prices"] is None, (name, "must judge a caller that passed NO roster")
+        assert case["bid"]["offer"]["unit_price"] == 85.0, (
+            name,
+            "85.00 is the price the two bounds disagree about; another price cannot discriminate",
+        )
+
+
 def test_the_corpus_pins_the_price_floor_in_both_directions() -> None:
     """T-278 — the gate for T-250's fix, and the reason it is IN the shared corpus.
 
@@ -1235,7 +1408,13 @@ def test_the_price_walk_survives_attribute_access_and_hostile_offers() -> None:
     model = Bid.model_validate(
         make_bid(claims=[list_price_claim(100.0)], offer=priced_offer(15.0, 15.0))
     )
-    result = validate_bid(model, path=HOSTED_PATH, trust_snapshot=make_snapshot_table(), now=NOW)
+    result = validate_bid(
+        model,
+        path=HOSTED_PATH,
+        trust_snapshot=make_snapshot_table(),
+        now=NOW,
+        list_prices=LIST_100_ROSTER,
+    )
     assert result.ok is False, "the price walk does not survive attribute access"
     assert "price_under_declared_depth:offer.unit_price" in list(result.reasons)
 
