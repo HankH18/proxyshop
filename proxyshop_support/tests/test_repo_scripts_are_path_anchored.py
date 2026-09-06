@@ -27,6 +27,8 @@ import importlib.abc
 import importlib.util
 import sys
 import types
+from collections.abc import Sequence
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 
 import pytest
@@ -37,23 +39,35 @@ DECOY_ANSWER = ["THIS-ANSWER-CAME-FROM-THE-DECOY"]
 TARGET = "check_verify_contracts"
 
 
-class _DecoyFinder(importlib.abc.MetaPathFinder):
-    """A meta_path finder that claims ``TARGET``. It runs BEFORE ``sys.path`` is consulted."""
+class _DecoyFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """A meta_path finder AND loader that claims ``TARGET``.
+
+    This is the layer that makes the difference between a real repair and a cosmetic one.
+    A ``sys.modules`` purge plus ``sys.path.insert(0, ...)`` defeats the other two hijacks
+    but NOT this one: ``sys.meta_path`` is consulted before ``sys.path`` is looked at at
+    all, so the only thing that survives it is naming the file.
+
+    Its signatures match ``MetaPathFinderProtocol`` exactly. The first draft typed them
+    ``object`` and mypy — not any test — caught that it therefore was not a finder at all.
+    """
 
     def __init__(self, module: types.ModuleType) -> None:
         self.module = module
 
-    def find_spec(self, fullname: str, path: object = None, target: object = None) -> object:
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None = None,
+        target: types.ModuleType | None = None,
+    ) -> ModuleSpec | None:
         if fullname != TARGET:
             return None
-        spec = importlib.util.spec_from_loader(fullname, loader=None)
-        assert spec is not None
-        return spec
+        return importlib.util.spec_from_loader(fullname, self)
 
-    def create_module(self, spec: object) -> types.ModuleType:  # pragma: no cover
+    def create_module(self, spec: ModuleSpec) -> types.ModuleType:
         return self.module
 
-    def exec_module(self, module: types.ModuleType) -> None:  # pragma: no cover
+    def exec_module(self, module: types.ModuleType) -> None:
         return None
 
 
@@ -101,6 +115,22 @@ def test_t252_the_hijack_is_armed(hijacked: Path) -> None:
         "the decoy did not win the bare-name import, so this file's hijack has stopped "
         "working and the assertions below prove nothing"
     )
+
+    # …and again with the sys.modules entry gone, so the META_PATH layer is what wins.
+    # Without this the fixture's third hijack would be untested decoration, and a repair
+    # that merely purged sys.modules before re-importing would look sufficient when it is
+    # not: meta_path is consulted before sys.path is read.
+    del sys.modules[TARGET]
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        import check_verify_contracts as still_decoy  # noqa: PLC0415
+    finally:
+        sys.path.pop(0)
+    assert still_decoy._fixture_names(Path("anything.py")) == DECOY_ANSWER, (
+        "a sys.modules purge plus `sys.path.insert(0, scripts)` reached the real script, "
+        "so the meta_path hijack is not biting and this file over-claims what it proves"
+    )
+
     assert (SCRIPTS / f"{TARGET}.py").is_file(), (
         f"{SCRIPTS / f'{TARGET}.py'} does not exist, so there is no real script to grade"
     )

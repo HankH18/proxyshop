@@ -57,12 +57,28 @@ condition below must hold and each one fails CLOSED:
 Registering it
 --------------
 Not automatic on purpose: a plugin that installs itself by import is a plugin nobody can
-find when it misbehaves. One line in the root ``conftest.py``::
+find when it misbehaves. In the root ``conftest.py`` — which is itself a pytest plugin, so
+every ``pytest_*`` name in its namespace becomes a hook::
 
-    from proxyshop_support.lock_exit_status import pytest_sessionfinish  # noqa: F401
+    from proxyshop_support.lock_exit_status import (  # noqa: F401
+        pytest_collectreport,
+        pytest_exception_interact,
+        pytest_runtest_logreport,
+        pytest_sessionfinish,
+        pytest_sessionstart,
+    )
 
-or, for a single run, ``pytest -p proxyshop_support.lock_exit_status`` — which is how
-``proxyshop_support/tests/test_lock_exit_status.py`` grades it end to end.
+**All five, and that is not tidiness.** Importing ``pytest_sessionfinish`` alone gives a
+re-stamp with an empty tally, which by construction never fires — a wiring that looks
+right, imports cleanly, passes every lint, and does nothing. Measured, with a real held
+lock and a scratch conftest: all five imported gives ``green 0 / contention 77 / defect 1 /
+both 1``; ``pytest_sessionfinish`` alone gives ``contention 1``, i.e. the defect unchanged.
+None of the five collides with a hook the root conftest already defines
+(``pytest_configure``, ``pytest_collection_modifyitems``).
+
+For a single run, ``pytest -p proxyshop_support.lock_exit_status`` registers the whole
+module — which is how ``proxyshop_support/tests/test_lock_exit_status.py`` grades it end to
+end without touching a file outside this package.
 """
 
 from __future__ import annotations
