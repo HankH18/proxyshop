@@ -20,6 +20,7 @@ no container RAM and the pytest socket guard permits it.
 from __future__ import annotations
 
 import asyncio
+import copy
 import gzip
 import json
 from collections.abc import Iterator
@@ -139,7 +140,18 @@ class StorefrontStub:
         self.password = password
         self.robots = robots
         self.robots_status = robots_status
-        self.products = list(DEFAULT_PRODUCTS if products is None else products)
+        # DEEP copy, not `list(...)`. A shallow copy duplicates the outer list and SHARES
+        # every product dict, and `test_signed_fetch.py` mutates one in place
+        # (`stub.products[0]["variants"][0]["price"] = "139.95"`) to make a re-crawl see
+        # changed content. That mutation used to reach the module-level DEFAULT_PRODUCTS and
+        # stay there for the rest of the session, so this whole directory's green depended on
+        # collection order: measured at the time of this change, reversing collection order
+        # gave `2 failed, 560 passed` — test_signed_fetch's own
+        # `test_the_adapter_ingests_an_open_storefront` (129.95 read back as 139.95) and
+        # test_catalog_mcp's cross-adapter equivalence check, which reads DEFAULT_PRODUCTS
+        # directly. A suite whose result depends on the order it happens to run in is not
+        # measuring what it claims to measure.
+        self.products = copy.deepcopy(DEFAULT_PRODUCTS if products is None else products)
         self.requests: list[tuple[str, str, dict[str, str]]] = []
         self.unlocked_sessions: set[str] = set()
         self.slow_chunk_seconds = 0.3
