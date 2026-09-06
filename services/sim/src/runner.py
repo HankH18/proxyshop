@@ -157,6 +157,9 @@ class SimulationRun:
     head_hash: str
     chain_ok: bool
     caught_at: int | None
+    #: Every published-payload-shape deviation in EITHER of the run's two ledger streams —
+    #: the accept path's and the auction state machine's sink. Grading only the first is
+    #: T-242, and it hid the very deviations the state machine has been shipping.
     ledger_contract_problems: tuple[tuple[str, str], ...] = ()
     snapshot: dict[str, Any] = field(default_factory=dict)
 
@@ -419,6 +422,15 @@ def ledger_contract_problems(events: Iterable[Mapping[str, Any]]) -> list[tuple[
     real accept path and then checking its output against the real contract is exactly the
     kind of cross-system disagreement a simulator exists to find, so the run carries the
     report rather than swallowing it.
+
+    **Feed this EVERY stream the run produced, not the convenient one.** A run emits ledger
+    events down two independent paths — ``exchange.accept`` and the ``AuctionStateMachine``'s
+    own ``LedgerRecorder`` — and for a long time :func:`run_simulation` graded only the first
+    (T-242). Half a ledger validated is not a validated ledger: the unvalidated half is where
+    ``auction_opened`` and ``auction_closed`` have been shipping without their published
+    ``roster_size`` / ``shortlist_size`` the whole time, unreported by the one component whose
+    job is to report exactly that. Nothing about this function chose the narrower stream; its
+    caller did, and the caller is where the fix lives.
     """
     from contracts.ledger import validate_ledger_payload
 
@@ -699,6 +711,15 @@ def run_simulation(
             )
         )
 
+    # T-242. The run emits ledger events down TWO paths and used to grade one: ``raw_events``
+    # is fed only from ``exchange.accept`` (step 4 above), while every ``auction_opened`` /
+    # ``auction_closed`` / ``accepted`` the state machine emits goes to ``ledger_sink`` and was
+    # read by nothing. Both streams are the run's own ledger, so both are graded. This is
+    # separate from ``raw_events`` on purpose: the sink is NOT appended to the hash chain and
+    # is NOT scanned for minted codes — folding it into ``raw_events`` would double-count the
+    # record rather than widen the audit.
+    all_ledger_events = [*raw_events, *ledger_sink.events]
+
     verdict = event_store.verify()
     final_as_of = episode_instant(manifest, max(last, FIRST_OBSERVED_EPISODE))
     snapshot = build_snapshot(
@@ -724,7 +745,7 @@ def run_simulation(
         head_hash=str(verdict.get("head_hash") or ""),
         chain_ok=bool(verdict.get("ok")),
         caught_at=caught_at,
-        ledger_contract_problems=tuple(ledger_contract_problems(raw_events)),
+        ledger_contract_problems=tuple(ledger_contract_problems(all_ledger_events)),
         snapshot=snapshot,
     )
 

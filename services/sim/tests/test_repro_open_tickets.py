@@ -6,7 +6,7 @@ Same mechanism as the other ``test_repro_open_tickets.py`` files: one
 ``1 failed``. ``strict=True`` turns the eventual repair into an XPASS *failure*, so whoever
 fixes the defect must delete the marker.
 
-Covered here: T-242.
+Covered here: T-242, T-265.
 
 Nothing in this file touches product source.
 """
@@ -14,7 +14,7 @@ Nothing in this file touches product source.
 from __future__ import annotations
 
 import random
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -202,16 +202,12 @@ def test_t242_the_ledger_sink_probe_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-242: run_simulation never reads its own ledger_sink — the conformance report is "
-        "built from raw_events (the accept path) only, so every event the auction state "
-        "machine emits is ungraded, including the `accepted` body that is malformed on that "
-        "path and well-formed on the accept path in the same run; remove this marker with "
-        "the fix"
-    ),
-)
+# FIXED — the ``xfail(strict=True)`` marker that stood here was removed with the repair, not
+# around it. ``run_simulation`` now grades ``[*raw_events, *ledger_sink.events]``
+# (services/sim/src/runner.py). CAUSATION PROVEN, not assumed: reverting that single
+# expression to ``ledger_contract_problems(raw_events)`` and changing nothing else returns
+# this test to ``xfailed`` (measured: ``1 passed, 2 deselected, 1 xfailed``); restoring it
+# returns it to a pass. No assertion in this test's body was touched.
 def test_t242_run_grades_every_event_its_own_ledger_sink_holds(
     sim_manifest: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -276,3 +272,141 @@ def test_t242_run_grades_every_event_its_own_ledger_sink_holds(
         "excludes kinds already present in raw_events, or that filters the state machine's "
         f"kinds out, lands exactly here. Example: {sorted(real - reported)[0]}"
     )
+
+
+# =====================================================================================
+# T-265 — the confinement guard whitelists, BY NAME, the one defect it was written for,
+#          so it is green whether that defect is live or repaired
+# =====================================================================================
+#
+# ``services/sim/tests/test_simulation.py``'s
+# ``test_no_kind_other_than_code_created_deviates_from_its_published_payload`` asserts::
+#
+#     deviating = {kind for kind, _ in sim_run.ledger_contract_problems}
+#     assert deviating <= {"code_created"}
+#
+# ``<=`` PERMITS ``code_created`` to deviate. The guard therefore returns the same verdict
+# whether T-235 is live or repaired, which is what makes it uncitable as a guard for T-235 —
+# the carve-out-with-no-exercising-case shape.
+#
+# Measured at HEAD from this worktree: ``run.ledger_contract_problems`` is EMPTY — zero
+# problems, so ``deviating`` is ``set()``. ``code_created`` no longer deviates at all (see
+# ``apps/exchange/src/auction/ledger.py``'s own docstring on T-235), which means the carve-out
+# has been dead for some time and the guard could not tell. That is the finding, demonstrated
+# rather than argued: an allowlist entry whose subject has gone away, still being honoured.
+#
+# The gate EXECUTES the guard against a stand-in run rather than reading its source. Reading
+# it would be grading a file inside this lane's own write scope, which measures nothing; and
+# T-265's subject IS a test, so there is nothing else to drive.
+#
+# What this gate forbids, deliberately:
+#   * leaving ``<=`` alone                       -> still passes on a deviating code_created
+#   * widening to ``<= {"code_created", ...}``   -> ditto; a widened allowlist is the cheap
+#                                                   move once T-242 folds the sink in
+#   * ``== {"code_created"}``                    -> passes here, but reds the guard against
+#                                                   the real run, so make verify catches it
+# Only an EXACT set naming the deviations that are actually live turns this green, and such a
+# set expires by itself the moment any one of them is repaired.
+
+
+def _simulation_module() -> Any:
+    """``services/sim/tests/test_simulation.py``, preferring the copy pytest already loaded.
+
+    Under the ticket's own gate only this file is collected, so the fallback load is the
+    normal path; under ``make verify`` the module is already in ``sys.modules`` and
+    re-executing it would be a side effect nobody asked for.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    target = Path(__file__).resolve().with_name("test_simulation.py")
+    for module in list(sys.modules.values()):
+        filename = getattr(module, "__file__", None)
+        if filename and Path(filename).resolve() == target:
+            return module
+
+    spec = importlib.util.spec_from_file_location("_t265_simulation_probe", target)
+    assert spec is not None and spec.loader is not None, target
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The guard under test, by the name the ticket records.
+_CONFINEMENT_GUARD = "test_no_kind_other_than_code_created_deviates_from_its_published_payload"
+
+
+class _StandInRun:
+    """The one attribute the confinement guard reads off a run."""
+
+    def __init__(self, problems: Sequence[tuple[str, str]]) -> None:
+        self.ledger_contract_problems = tuple(problems)
+
+
+def _problem(kind: str, key: str) -> tuple[str, str]:
+    """A ``(kind, problem)`` pair in ``ledger_contract_problems``' own spelling."""
+    return (kind, f"{kind!r} payload is missing published key {key!r}")
+
+
+def test_t265_the_confinement_guard_probe_is_armed(sim_run: Any) -> None:
+    """Not xfail, and the separation is why it exists.
+
+    Under ``xfail(strict=True)`` ANY exception in the graded body reports ``xfailed``, which
+    is green — so a probe that could no longer find or call the guard would be
+    indistinguishable from the defect. Everything that must hold for the red below to mean
+    "the guard is blind" is asserted here, where it fails in its own name.
+    """
+    guard = getattr(_simulation_module(), _CONFINEMENT_GUARD, None)
+    assert callable(guard), (
+        f"{_CONFINEMENT_GUARD} is no longer defined in test_simulation.py; T-265's subject "
+        "has moved and this gate must be re-derived against wherever it went"
+    )
+
+    # It is satisfiable by the real run. A guard that reds against the system it grades would
+    # make the assertion below meaningless — every input would raise.
+    guard(sim_run)
+
+    # And it is a live assertion, not a no-op: a kind nobody has ever excused reds it.
+    with pytest.raises(AssertionError):
+        guard(_StandInRun([_problem("bid_received", "store_id")]))
+
+    # The one-variable comparison the gate below depends on. The stand-in it builds carries
+    # ``code_created`` and NOTHING ELSE, so if code_created were also deviating in the real
+    # run the gate would be comparing the guard against its own live input and its red would
+    # mean nothing. Asserted here, un-xfailed, so that state fails in its own name.
+    live = {kind for kind, _ in sim_run.ledger_contract_problems}
+    assert "code_created" not in live, (
+        "code_created deviates in the real run again, so the gate below is no longer a "
+        "one-variable comparison; re-derive it against whatever kind is now unexercised"
+    )
+
+
+# FIXED — the ``xfail(strict=True)`` marker that stood here was removed with the repair. The
+# guard in test_simulation.py now asserts an EXACT set instead of ``deviating <=
+# {"code_created"}``. CAUSATION PROVEN by three measured tree shapes, with the T-242 runner
+# fix held constant in all three:
+#   assert deviating == KNOWN_DEVIATING_LEDGER_KINDS          -> this test passes
+#   assert deviating <= {"code_created"}                      -> back to xfailed
+#   assert deviating <= {"code_created", <the two auction kinds>}  -> back to xfailed
+# The third shape matters most: widening the allowlist is the cheap move a lane reaches for
+# once T-242 makes the auction path visible, and it is rejected here while leaving every other
+# test green. No assertion in this test's body was touched.
+def test_t265_the_confinement_guard_notices_its_whitelisted_kind_deviating() -> None:
+    """A guard that cannot see its own carve-out's subject is not guarding it.
+
+    The stand-in run reports exactly what T-235 looked like while it was live, and NOTHING
+    ELSE: ``code_created`` missing a published key. The guard must reject it. If it accepts
+    it, the guard's verdict is independent of whether ``code_created`` conforms, which is the
+    whole finding.
+
+    The stand-in deliberately carries no other problem. An earlier draft of this gate folded
+    the real run's live deviations in alongside; measured, that made the ORIGINAL ``<=
+    {"code_created"}`` assertion satisfy this gate the moment T-242 landed, because the folded
+    auction-path kinds broke the subset on their own and ``code_created`` never had to be
+    looked at. One variable, or the gate grades the wrong thing.
+    """
+    guard = getattr(_simulation_module(), _CONFINEMENT_GUARD)
+
+    with pytest.raises(AssertionError):
+        guard(_StandInRun([_problem("code_created", "code")]))
