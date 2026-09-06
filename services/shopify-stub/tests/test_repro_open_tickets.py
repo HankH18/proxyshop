@@ -15,7 +15,8 @@ indistinguishable from the defect it is meant to detect — and under the ticket
 make the red meaningful therefore live in the control, where they fail in their own name
 during ``make verify``.
 
-Covered here: T-205, T-253, T-255.
+Covered here: T-205 (**FIXED** — its marker was removed with the repair, so it is now a live
+regression guard rather than a reproduction), T-253, T-255.
 
 **Read the T-205 docstring below before treating its recorded blast radius as fact.** The
 swallow it names is real and is reproduced here; the consequence it states — that 219 stub
@@ -76,24 +77,42 @@ def _with_broken_stub_import() -> Iterator[None]:
 
 
 # =============================================================================================
-# T-205 — the root `shopify_stub_url` fixture turns an ImportError into a skip
+# T-205 — the root `shopify_stub_url` fixture turned an ImportError into a skip. FIXED.
 # =============================================================================================
+#
+# The `xfail(strict=True)` marker that stood here was removed WITH the repair, not around it:
+# `conftest.py`'s `shopify_stub_url` no longer wraps `__import__("shopify_stub.app")` in
+# `except (ImportError, AttributeError): pytest.skip(...)`, so a broken entry point reaches
+# the reporter as an error in its own name. This test is now a LIVE regression guard and must
+# fail in its own name if the swallow ever returns. Not one assertion in its body was touched.
+#
+# WHAT ESTABLISHED THE DEFECT IS GONE, measured rather than argued, all on this branch:
+#   * before the change the gate was RED — "Failed: the fixture converted an ImportError into
+#     a skip: services/shopify-stub does not expose `shopify_stub.app:app` yet (synthetic
+#     transitive breakage in shopify_stub.app)";
+#   * after it, the gate passes, and reinstating ONLY the `try`/`except pytest.skip` on a
+#     scratch copy outside the repo returns it to `1 failed` in 0.14s — no hang;
+#   * the `finally: pytest.fail("the synthetic import breakage never fired")` arm and the
+#     `assert fixture is not None` positive control are both still reachable, so a probe that
+#     stopped working fails here instead of reading as a pass.
+#
+# BLAST RADIUS, RE-MEASURED (the record's "219 stub tests silently green" is wrong, and so is
+# the 513 an earlier lane recorded — the tree has grown). With a real `ModuleNotFoundError`
+# planted inside `shopify_stub.app` on a scratch copy of this tree:
+#   * `pytest services/shopify-stub` collects 521 tests and dies rc=4 at
+#     `tests/_fixtures_stub.py:26`, which imports the stub at module scope. Loudly red, and it
+#     never reaches the fixture at all;
+#   * `pytest proxyshop_support/tests/test_shared_runtime.py -k shopify_stub_url` reported
+#     `1 passed`, rc=0 — that test catches `pytest.skip.Exception` and returns, so the swallow
+#     did not even show as an `s`. It showed as a PASS.
+# So the true cost was ONE silently-green test, not a silent suite — and "silently green" is
+# literal here, which is worse than the record claimed even as the count is far smaller.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-205: the root conftest's shopify_stub_url fixture catches (ImportError, "
-        "AttributeError) around `__import__('shopify_stub.app')` and calls pytest.skip, so a "
-        "broken stub import reaches the reporter as a skip rather than an error — and the one "
-        "test written to 'convert that silent skip into a failure' requests the same fixture "
-        "and skips with it; remove this marker with the fix"
-    ),
-)
 def test_the_stub_url_fixture_does_not_turn_a_broken_import_into_a_skip() -> None:
     """A skip is not a pass, but it is scored like one.
 
-    ``conftest.py``'s ``shopify_stub_url`` fixture reads::
+    ``conftest.py``'s ``shopify_stub_url`` fixture USED TO READ (T-205, now repaired)::
 
         try:
             module = __import__("shopify_stub.app", fromlist=["app"])
@@ -101,30 +120,33 @@ def test_the_stub_url_fixture_does_not_turn_a_broken_import_into_a_skip() -> Non
         except (ImportError, AttributeError) as exc:
             pytest.skip(f"services/shopify-stub does not expose `shopify_stub.app:app` yet ({exc})")
 
-    That was right while the stub was a scaffold and wrong now that it is a service: the
-    condition it was written for — T-013 has not landed yet — has been false for a long time,
-    and what remains is a fixture that answers "the stub is broken" with the same word it
+    That was right while the stub was a scaffold and wrong once it was a service: the
+    condition it was written for — T-013 has not landed yet — had been false for a long time,
+    and what was left was a fixture that answered "the stub is broken" with the same word it
     answers "the stub does not exist yet". ``test_stub_contract.py``'s
     ``test_the_root_fixture_serves_a_working_stub`` says in its own docstring that it "does the
     work the fixture declines to" — but it requests that same fixture, so when the fixture
-    skips, it skips too, and the only test guarding the pinned entry point guards nothing.
+    skipped, it skipped too, and the only test guarding the pinned entry point guarded nothing.
+    The ``try`` is gone; both exceptions now reach the reporter in their own name.
 
     **Two things in T-205's text are wrong and the record should say so.** The line numbers
-    are stale (the fixture is at ``conftest.py:439-462``, not 417-421), and the blast radius is
-    not 219 tests: ``services/shopify-stub`` collects **513** tests, and making
-    ``shopify_stub.app`` unimportable does NOT turn them green — ``_fixtures_stub.py:26`` and
-    ``test_stub_contract.py:32`` both import the stub at module scope, so the directory dies as
-    a collection error, ``rc=4``, loudly red. Exactly **two** tests in the repository request
-    this fixture, and the second (``proxyshop_support/tests/test_shared_runtime.py:786``,
-    ``test_shopify_stub_url_fixture_is_wired_to_the_stub``)
-    catches the skip deliberately. So the true cost of the swallow is one silent test, not a
-    silent suite.
+    are stale (the fixture is at ``conftest.py:439``, not 417-421), and the blast radius is
+    not 219 tests: ``services/shopify-stub`` collects **521** tests on this tree (an earlier
+    lane measured 513; it has grown since), and making ``shopify_stub.app`` unimportable does
+    NOT turn them green — ``_fixtures_stub.py:26`` and ``test_stub_contract.py:32`` both import
+    the stub at module scope, so the directory dies as a collection error, ``rc=4``, loudly
+    red. Exactly **two** tests in the repository request this fixture, and the second
+    (``proxyshop_support/tests/test_shared_runtime.py:788``,
+    ``test_shopify_stub_url_fixture_is_wired_to_the_stub``) catches the skip deliberately —
+    measured with the entry point genuinely broken, it reported ``1 passed``, rc=0, so the
+    swallow did not even surface as an ``s``. The true cost was one silently-*passing* test,
+    not a silent suite.
 
-    It is still worth closing, because the shape is the one T-159 names and because the
-    fixture's skip is the last thing standing between a broken entry point and a green report
-    for the test that exists to check it. Note for whoever fixes it: raising instead of
-    skipping does **not** break ``test_shared_runtime.py:786`` — that test's skip branch is
-    already dead, since the import succeeds today and it simply asserts the yielded URL.
+    It was worth closing because the shape is the one T-159 names and because the fixture's
+    skip was the last thing standing between a broken entry point and a green report for the
+    test that exists to check it. Raising instead of skipping does **not** break
+    ``test_shared_runtime.py:788`` — that test's skip branch was already dead, since the import
+    succeeds today and it simply asserts the yielded URL.
 
     ``pytest.raises(ImportError)`` cannot express this: ``Skipped`` is not caught by
     ``pytest.raises``, so it propagates and the test that was written to catch the swallow is
