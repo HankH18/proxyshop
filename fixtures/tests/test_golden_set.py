@@ -672,6 +672,45 @@ def test_every_pitch_tagged_with_a_gate_really_carries_that_gates_case() -> None
             GATE_CONTENT_CHECKS[canonical](pitch)
 
 
+def test_no_pitch_names_a_gate_the_registry_cannot_grade() -> None:
+    """A gate name the registry does not know is graded by NOTHING — the T-131 hole, one level up.
+
+    The two guards above both run registry-first and neither ever reads the gate strings the
+    golden set actually carries. `test_every_eval_gate_has_a_content_grader` compares
+    `set(GATE_CONTENT_CHECKS)` to `set(EVAL_GATES)` — two hardcoded dicts in this file, so it
+    is true or false before the golden set is even opened. `test_every_pitch_tagged_with_a_
+    gate_really_carries_that_gates_case` iterates `EVAL_GATES.items()` and looks only for
+    pitches matching a KNOWN alias. A gate in neither is therefore invisible to both.
+
+    Measured, on the approved set with every digest re-pinned so the seal could not mask it:
+    appending `"hallucinated_citation"` to `gp-001`'s `gates` left the whole golden-set suite
+    GREEN — zero failures in this module. That is precisely the defect T-131 was raised for
+    ("a gate that survives deletion of the thing it gates is not grading anything"), surviving
+    in the one place the earlier fix could not see: it hardened every gate the registry knows
+    and said nothing about a gate the registry does not.
+
+    Direction matters. This reads data -> registry, the opposite of its two neighbours, so a
+    reviewer who adds a case to the golden set and forgets the grader gets a red instead of a
+    pitch that advertises a trap nothing checks.
+    """
+    known = {_token(alias) for aliases in EVAL_GATES.values() for alias in aliases}
+    ungraded = sorted(
+        {
+            f"{pitch['pitch_id']}:{gate}"
+            for pitch in PITCHES
+            for gate in pitch["gates"]
+            if _token(gate) not in known
+        }
+    )
+    assert not ungraded, (
+        f"the golden set tags {ungraded} with a gate name no grader in GATE_CONTENT_CHECKS "
+        "covers, so those pitches are graded by their LABEL and by nothing else — the exact "
+        "shape T-131 exists to refuse. Either register the gate in EVAL_GATES with a content "
+        "grader beside it, or spell it as one of the canonical aliases: "
+        f"{sorted(known)}"
+    )
+
+
 def test_the_claim_splitting_case_carries_an_indistinguishable_pair() -> None:
     """The hardest splitting case: two atoms on the SAME key with opposite truth values.
 
