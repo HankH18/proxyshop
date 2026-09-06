@@ -6,7 +6,7 @@ Same mechanism as the other ``test_repro_open_tickets.py`` files: one
 ``1 failed``. ``strict=True`` turns the eventual repair into an XPASS *failure*, so whoever
 fixes the defect must delete the marker.
 
-Covered here: T-242.
+Covered here: T-242, T-265.
 
 Nothing in this file touches product source.
 """
@@ -14,7 +14,7 @@ Nothing in this file touches product source.
 from __future__ import annotations
 
 import random
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -24,24 +24,37 @@ import pytest
 #          where the defect class the sim exists to catch actually lives
 # =====================================================================================
 #
-# ``sim.runner.run_simulation`` builds ``ledger_sink = InMemoryLedgerSink()``
-# (services/sim/src/runner.py:559), wires it into the auction state machine (:560), and then
-# never reads it: the run's conformance report is ``ledger_contract_problems(raw_events)``
-# (:727), and ``raw_events`` is appended only from the accept path (:661). So the 36 events
-# the state machine emits in a default run — including three published bodies that
-# ``apps/exchange/src/auction/ledger.py:134-139`` documents as wrong in its own docstring —
-# are graded by nothing at all.
+# STATUS: FIXED. ``run_simulation`` now grades ``[*raw_events, *ledger_sink.events]``
+# (services/sim/src/runner.py:721, reported at :748) and the xfail marker below is gone.
 #
-# The heart of the finding is that ``accepted`` is emitted CORRECTLY on the accept path and
-# INCORRECTLY on the auction path IN THE SAME RUN — the identical one-kind-two-bodies defect
-# the sim successfully catches for ``code_created``. It catches that one only because the
-# stream it inspects happens to contain it.
+# WHAT THE DEFECT WAS. ``run_simulation`` built ``ledger_sink = InMemoryLedgerSink()``, wired
+# it into the auction state machine, and then never read it: the run's conformance report was
+# ``ledger_contract_problems(raw_events)``, and ``raw_events`` is appended only from the
+# accept path. So the 36 events the state machine emits in a default run were graded by
+# nothing at all.
 #
-# This is written as a randomised property, not as a probe for the four known deviations,
-# and that choice is the whole design. The deviations are somebody else's ticket, so a lane
-# could satisfy an example by repairing ``apps/exchange/src/auction/state.py``'s three bodies
-# and leave the simulation exactly as blind. What is asserted instead is that the run reports
-# EVERY published-shape problem the sink holds, wherever in the stream it sits:
+# TWO THINGS THE ORIGINAL HEADER ASSERTED ARE FALSE ON THIS TREE, and they are corrected here
+# rather than left standing — a comment that has outlived its subject is the same shape as the
+# T-265 carve-out this file also gates. Both were re-measured on this branch:
+#
+#   * "``accepted`` is emitted CORRECTLY on the accept path and INCORRECTLY on the auction
+#     path IN THE SAME RUN … the heart of the finding" — NO. ``accepted`` is clean on both
+#     paths. ``apps/exchange/src/auction/ledger.py`` says so in its own docstring: "``accepted``
+#     used to be listed beside them and was the one that did **not** belong there … Both keys
+#     are now written by ``AuctionStateMachine.accept``." There is no ``accepted`` pair.
+#   * "three published bodies that ledger.py documents as wrong" / "the four known deviations"
+#     — NO. TWO. The sink holds 36 events (12 ``auction_opened``, 12 ``auction_closed``, 12
+#     ``accepted``) and ``ledger_contract_problems(sink.events)`` returns exactly two problems:
+#     ``auction_opened`` missing ``roster_size`` and ``auction_closed`` missing
+#     ``shortlist_size``. Neither is on ``accepted``.
+#
+# The blindness was exactly as recorded. Its payload had shrunk before this lane arrived.
+#
+# The gate is written as a randomised property, not as a probe for the known deviations, and
+# that choice is the whole design. The deviations are somebody else's ticket, so a lane could
+# satisfy an example by repairing ``apps/exchange/src/auction/state.py`` and leave the
+# simulation exactly as blind. What is asserted instead is that the run reports EVERY
+# published-shape problem the sink holds, wherever in the stream it sits:
 #
 #   (A) every problem in the synthetic events the spy injects, and
 #   (B) every problem in the sink's OWN real events.
@@ -50,10 +63,9 @@ import pytest
 # Without it the gate cannot tell "the runner reads the whole sink" from "the runner reads a
 # filtered slice of it" — and the cheap filtered slice is not hypothetical: folding the sink
 # in turns the neighbouring guard in test_simulation.py red, so a lane under pressure has an
-# obvious move in excluding kinds already present in ``raw_events``, which kills exactly the
-# ``accepted`` pair that is the point of the ticket.
+# obvious move in excluding kinds already present in ``raw_events``.
 #
-# Measured, on scratch copies of runner.py and state.py — every one of these stays RED:
+# Measured by an earlier lane on scratch copies — every one of these stays RED:
 #   exclude kinds already in raw_events      A_missing 6,  B_missing 2
 #   fold in only sink.events[:11]  (prefix)  A_missing 30
 #   fold in only sink.events[-11:] (suffix)  A_missing 36
@@ -61,7 +73,13 @@ import pytest
 #   snapshot the sink mid-episode-loop       A_missing 3
 #   repair state.py, leave the runner alone  A_missing 44  <- variant, not instance
 # and the honest fix -- ``ledger_contract_problems(raw_events + ledger_sink.events)`` --
-# takes it to A_missing 0, B_missing 0, i.e. XPASS.
+# takes it to A_missing 0, B_missing 0.
+#
+# (A) AND (B) BOTH READ ONLY SINK CONTENT, so neither can tell "grades both streams" from
+# "grades only the sink" — dropping the accept path from the fold leaves this whole file
+# green, because the accept path happens to emit no deviation today. That hole is closed by
+# ``test_t242_both_ledger_streams_reach_the_published_shape_validator`` below, which watches
+# the validator itself.
 
 #: Synthetic events injected ahead of the first real emit. Randomised so a fold that keeps
 #: ``events[:K]`` cannot be tuned against a fixed head size.
@@ -202,16 +220,12 @@ def test_t242_the_ledger_sink_probe_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-242: run_simulation never reads its own ledger_sink — the conformance report is "
-        "built from raw_events (the accept path) only, so every event the auction state "
-        "machine emits is ungraded, including the `accepted` body that is malformed on that "
-        "path and well-formed on the accept path in the same run; remove this marker with "
-        "the fix"
-    ),
-)
+# FIXED — the ``xfail(strict=True)`` marker that stood here was removed with the repair, not
+# around it. ``run_simulation`` now grades ``[*raw_events, *ledger_sink.events]``
+# (services/sim/src/runner.py). CAUSATION PROVEN, not assumed: reverting that single
+# expression to ``ledger_contract_problems(raw_events)`` and changing nothing else returns
+# this test to ``xfailed`` (measured: ``1 passed, 2 deselected, 1 xfailed``); restoring it
+# returns it to a pass. No assertion in this test's body was touched.
 def test_t242_run_grades_every_event_its_own_ledger_sink_holds(
     sim_manifest: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -276,3 +290,244 @@ def test_t242_run_grades_every_event_its_own_ledger_sink_holds(
         "excludes kinds already present in raw_events, or that filters the state machine's "
         f"kinds out, lands exactly here. Example: {sorted(real - reported)[0]}"
     )
+
+
+def test_t242_both_ledger_streams_reach_the_published_shape_validator(
+    sim_manifest: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every event of BOTH streams is handed to ``validate_ledger_payload``, not just one.
+
+    The randomised sweep above reads only sink content, so it cannot distinguish the honest
+    fold from one that grades the SINK ALONE and drops the accept path — measured, that
+    substitution leaves this entire file and the whole ``services/sim`` suite green, because
+    the accept path emits no deviation today. Nothing would notice until it did.
+
+    So this watches the validator rather than the report: it counts what
+    ``ledger_contract_problems`` actually submitted for grading and compares that, kind for
+    kind, against the two streams the run produced. Not xfail — it is a live guard on the
+    repaired behaviour, and it must fail in its own name if the fold ever narrows again.
+    """
+    import sys
+    from collections import Counter
+
+    import contracts.ledger as ledger_module
+    from sim.runner import run_simulation
+
+    submitted: list[str] = []
+    real_validate = ledger_module.validate_ledger_payload
+
+    def watching(kind: str, payload: Any) -> Any:
+        # Only calls made from inside the run's conformance report count. The exchange also
+        # validates at its own PRODUCING boundary (``build_published_event``), and counting
+        # those would let a missing stream hide behind them.
+        caller = sys._getframe(1).f_code.co_name
+        if caller == "ledger_contract_problems":
+            submitted.append(str(kind))
+        return real_validate(kind, payload)
+
+    monkeypatch.setattr(ledger_module, "validate_ledger_payload", watching)
+
+    sink_cls, instances = _spy_sink([], 0)
+    monkeypatch.setattr("exchange.auction.InMemoryLedgerSink", sink_cls)
+
+    run = run_simulation(sim_manifest, int(sim_manifest["seed"]))
+
+    assert len(instances) == 1, f"expected one ledger sink in the run, saw {len(instances)}"
+    sink = instances[0]
+    assert sink.events, "the auction state machine emitted nothing; this grades nothing"
+    assert run.events, "the accept path emitted nothing; this grades nothing"
+    assert submitted, (
+        "ledger_contract_problems submitted no event at all to validate_ledger_payload — "
+        "either the report is not being built or the frame filter above is stale"
+    )
+
+    accept_path = Counter(str(event.get("kind")) for event in run.events)
+    auction_path = Counter(str(event.get("kind")) for event in sink.events)
+    graded = Counter(submitted)
+    assert graded == accept_path + auction_path, (
+        "the run graded a different stream from the one it produced.\n"
+        f"  accept path emitted: {dict(sorted(accept_path.items()))}\n"
+        f"  auction sink emitted: {dict(sorted(auction_path.items()))}\n"
+        f"  actually graded:      {dict(sorted(graded.items()))}\n"
+        f"  missing from grading: {dict(sorted(((accept_path + auction_path) - graded).items()))}"
+    )
+
+    # And the separation runner.py promises in the same breath: the sink is NOT folded into
+    # the hash-chained record, so the minted-code scan still sees the accept path only.
+    assert len(run.codes) == accept_path["code_created"], (
+        f"the run reported {len(run.codes)} minted codes for "
+        f"{accept_path['code_created']} accept-path code_created events; the sink has been "
+        "folded into raw_events, which double-counts the record rather than widening the audit"
+    )
+
+
+# =====================================================================================
+# T-265 — the confinement guard whitelists, BY NAME, the one defect it was written for,
+#          so it is green whether that defect is live or repaired
+# =====================================================================================
+#
+# ``services/sim/tests/test_simulation.py``'s
+# ``test_no_kind_other_than_code_created_deviates_from_its_published_payload`` asserts::
+#
+#     deviating = {kind for kind, _ in sim_run.ledger_contract_problems}
+#     assert deviating <= {"code_created"}
+#
+# ``<=`` PERMITS ``code_created`` to deviate. The guard therefore returns the same verdict
+# whether T-235 is live or repaired, which is what makes it uncitable as a guard for T-235 —
+# the carve-out-with-no-exercising-case shape.
+#
+# Measured at HEAD from this worktree: ``run.ledger_contract_problems`` is EMPTY — zero
+# problems, so ``deviating`` is ``set()``. ``code_created`` no longer deviates at all (see
+# ``apps/exchange/src/auction/ledger.py``'s own docstring on T-235), which means the carve-out
+# has been dead for some time and the guard could not tell. That is the finding, demonstrated
+# rather than argued: an allowlist entry whose subject has gone away, still being honoured.
+#
+# The gate EXECUTES the guard against a stand-in run rather than reading its source. Reading
+# it would be grading a file inside this lane's own write scope, which measures nothing; and
+# T-265's subject IS a test, so there is nothing else to drive.
+#
+# What this gate forbids, deliberately:
+#   * leaving ``<=`` alone                       -> still passes on a deviating code_created
+#   * widening to ``<= {"code_created", ...}``   -> ditto; a widened allowlist is the cheap
+#                                                   move once T-242 folds the sink in
+#   * ``== {"code_created"}``                    -> passes here, but reds the guard against
+#                                                   the real run, so make verify catches it
+# Only an EXACT set naming the deviations that are actually live turns this green, and such a
+# set expires by itself the moment any one of them is repaired.
+
+
+def _simulation_module() -> Any:
+    """``services/sim/tests/test_simulation.py``, preferring the copy pytest already loaded.
+
+    Under the ticket's own gate only this file is collected, so the fallback load is the
+    normal path; under ``make verify`` the module is already in ``sys.modules`` and
+    re-executing it would be a side effect nobody asked for.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    target = Path(__file__).resolve().with_name("test_simulation.py")
+    for module in list(sys.modules.values()):
+        filename = getattr(module, "__file__", None)
+        if filename and Path(filename).resolve() == target:
+            return module
+
+    spec = importlib.util.spec_from_file_location("_t265_simulation_probe", target)
+    assert spec is not None and spec.loader is not None, target
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The guard under test, by the name the ticket records.
+_CONFINEMENT_GUARD = "test_no_kind_other_than_code_created_deviates_from_its_published_payload"
+
+
+class _StandInRun:
+    """The one attribute the confinement guard reads off a run."""
+
+    def __init__(self, problems: Sequence[tuple[str, str]]) -> None:
+        self.ledger_contract_problems = tuple(problems)
+
+
+def _problem(kind: str, key: str) -> tuple[str, str]:
+    """A ``(kind, problem)`` pair in ``ledger_contract_problems``' own spelling."""
+    return (kind, f"{kind!r} payload is missing published key {key!r}")
+
+
+def _live_deviating_kinds(run: Any) -> set[str]:
+    """The kinds actually deviating in a real run — the set the guard must accept exactly."""
+    return {kind for kind, _ in run.ledger_contract_problems}
+
+
+def test_t265_the_confinement_guard_probe_is_armed(sim_run: Any) -> None:
+    """Not xfail, and the separation is why it exists.
+
+    Under ``xfail(strict=True)`` ANY exception in the graded body reports ``xfailed``, which
+    is green — so a probe that could no longer find or call the guard would be
+    indistinguishable from the defect. Everything that must hold for the red below to mean
+    "the guard is blind" is asserted here, where it fails in its own name.
+    """
+    guard = getattr(_simulation_module(), _CONFINEMENT_GUARD, None)
+    assert callable(guard), (
+        f"{_CONFINEMENT_GUARD} is no longer defined in test_simulation.py; T-265's subject "
+        "has moved and this gate must be re-derived against wherever it went"
+    )
+
+    # It is satisfiable by the real run. A guard that reds against the system it grades would
+    # make the assertion below meaningless — every input would raise.
+    guard(sim_run)
+
+    # And it is a live assertion, not a no-op: a kind nobody has ever excused reds it.
+    with pytest.raises(AssertionError):
+        guard(_StandInRun([_problem("bid_received", "store_id")]))
+
+    # The one-variable comparison the gate below depends on. The stand-in it builds carries
+    # ``code_created`` and NOTHING ELSE, so if code_created were also deviating in the real
+    # run the gate would be comparing the guard against its own live input and its red would
+    # mean nothing. Asserted here, un-xfailed, so that state fails in its own name.
+    live = _live_deviating_kinds(sim_run)
+    assert "code_created" not in live, (
+        "code_created deviates in the real run again, so the gate below is no longer a "
+        "one-variable comparison; re-derive it against whatever kind is now unexercised"
+    )
+    # The neighbour sweep below needs something to perturb. An empty live set makes its
+    # removal and swap clauses vacuous, and a vacuous clause in a test about vacuous clauses
+    # is not a joke this file gets to make.
+    assert len(live) >= 2, (
+        f"the run reports {len(live)} deviating ledger kinds ({sorted(live)}); the gate's "
+        "neighbour sweep needs at least two to perturb. If the auction path was repaired "
+        "upstream this gate must be RE-DERIVED against whatever still deviates — do not "
+        "delete the sweep"
+    )
+
+
+# FIXED — the ``xfail(strict=True)`` marker that stood here was removed with the repair. The
+# guard in test_simulation.py now asserts an EXACT set instead of ``deviating <=
+# {"code_created"}``. CAUSATION PROVEN by three measured tree shapes, with the T-242 runner
+# fix held constant in all three:
+#   assert deviating == KNOWN_DEVIATING_LEDGER_KINDS          -> this test passes
+#   assert deviating <= {"code_created"}                      -> back to xfailed
+#   assert deviating <= {"code_created", <the two auction kinds>}  -> back to xfailed
+# The third shape matters most: widening the allowlist is the cheap move a lane reaches for
+# once T-242 makes the auction path visible, and it is rejected here while leaving every other
+# test green. No assertion in this test's body was touched.
+def test_t265_the_confinement_guard_notices_its_whitelisted_kind_deviating(sim_run: Any) -> None:
+    """A guard that cannot see its own carve-out's subject is not guarding it.
+
+    The stand-in run reports exactly what T-235 looked like while it was live, and NOTHING
+    ELSE: ``code_created`` missing a published key. The guard must reject it. If it accepts
+    it, the guard's verdict is independent of whether ``code_created`` conforms, which is the
+    whole finding.
+
+    The stand-in deliberately carries no other problem. An earlier draft of this gate folded
+    the real run's live deviations in alongside; measured, that made the ORIGINAL ``<=
+    {"code_created"}`` assertion satisfy this gate the moment T-242 landed, because the folded
+    auction-path kinds broke the subset on their own and ``code_created`` never had to be
+    looked at. One variable, or the gate grades the wrong thing.
+    """
+    guard = getattr(_simulation_module(), _CONFINEMENT_GUARD)
+
+    with pytest.raises(AssertionError):
+        guard(_StandInRun([_problem("code_created", "code")]))
+
+    # And the guard must accept EXACTLY the live set — no neighbour of it. Without these the
+    # gate grades only "code_created is no longer excused", and a one-character revert to
+    # ``deviating <= KNOWN_DEVIATING_LEDGER_KINDS`` — the very allowlist shape T-265 exists to
+    # forbid, recreated one level up — passes it with the whole suite green. Measured; that is
+    # the substitution an adversarial verifier found, and each clause below kills one operator:
+    #   removal     kills ``<=``   (a repaired deviation would leave a stale entry forever)
+    #   addition    kills ``>=``   (a brand-new deviating kind would be permitted)
+    #   swap        kills ``len(deviating) == 2`` and any other cardinality-only check
+    live = sorted(_live_deviating_kinds(sim_run))
+    novel = "bid_received"
+    neighbours = {
+        f"one fewer: {sorted(set(live) - {live[0]})}": set(live) - {live[0]},
+        f"one more: {sorted({*live, novel})}": {*live, novel},
+        f"one swapped: {sorted({*live[1:], novel})}": {*live[1:], novel},
+    }
+    for label, kinds in neighbours.items():
+        with pytest.raises(AssertionError, match="deviating"):
+            guard(_StandInRun([_problem(kind, "some-published-key") for kind in sorted(kinds)]))
+            pytest.fail(f"the guard accepted a set that is not the live one — {label}")

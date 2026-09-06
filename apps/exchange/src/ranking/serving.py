@@ -290,10 +290,21 @@ def rank_auction(
         registered_domains=registered_domains,
     )
     candidates = attest_candidates(candidates, catalog=catalog, product_refs=product_refs)
-    return rank(
+    ranked = rank(
         candidates,
         intent,
         trust_snapshot,
         {"now": float(now), "auction_id": auction_id},
         weights=weights,
     )
+    # `projected`, ADDITIVE, and it is the repair for T-349. `rank()` answers with its own
+    # ROW projection under `"candidates"` — `bid_id`, `eligible`, `rank_score`, the trust
+    # summary — and that row carries neither `offer` nor `store_domain`. Both are on the
+    # candidates built above, and both are read by the ACCEPT path, so a caller that only
+    # ever saw `rank()`'s output had no way to record a bid the accept door could use: every
+    # recorded bid was written with `offer: {}`, which cost it its expiry, its pre-mint host
+    # check and its cart permalink. This function is the only place that holds both, so it
+    # is the only place that can hand both over. Nothing is removed and no existing key
+    # changes, so `_excluded_out(ranking["candidates"])` — which genuinely does want the row
+    # — is untouched.
+    return {**ranked, "projected": list(candidates)}

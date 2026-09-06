@@ -332,13 +332,22 @@ def test_the_python_door_enforces_the_date_time_format_the_typescript_door_enfor
 # =============================================================================================
 
 
+# The marker below is KEPT, and its text was corrected rather than removed. The assertion is
+# untouched; only the `reason` prose changed, because it named bytes that have since moved
+# (T-267 replaced the `"blacklist"` example, and the schema is no longer bare). Keeping a
+# strict-xfail whose stated reason is false is how a gate stops being readable evidence.
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-204: exchange.openapi.json types the 409 denial_reason as a bare {'type': 'string'} "
-        "with no enum, while apps/exchange/src/accept/offer.py formats type(exc).__name__ into "
-        "it and persists it into a policy_event — a client-visible vocabulary nothing pins; "
-        "remove this marker with the fix"
+        "T-204: exchange.openapi.json still declares NO `enum` on the 409 denial_reason. It "
+        "now carries a `description`, a `pattern` pinning the nine declared codes and an "
+        "`x-vocabulary` listing them (T-267's lane), but this gate asks for `enum` "
+        "specifically and an `enum` cannot be published truthfully while the served field "
+        "carries the `'<code>: <prose>'` shape apps/exchange/src/accept/reasons.py builds — "
+        "enumerating the bare codes would publish a constraint every real 409 violates. "
+        "Closing this needs the SERVICE to publish a bare code (or a second field), which is "
+        "outside packages/contracts; see the contracts-api lane's NEEDS. Remove this marker "
+        "with that fix, not before"
     ),
 )
 def test_the_published_denial_reason_has_an_enumerated_vocabulary() -> None:
@@ -352,15 +361,32 @@ def test_the_published_denial_reason_has_an_enumerated_vocabulary() -> None:
     (``OrphanedOffDomainCheckout``, ``UnusableDiscount``, and a doubled
     ``"OrphanedCheckoutCode: <Original>: …"``) without anything noticing.
 
-    What the pinned document says about that field today, verbatim::
+    What the pinned document said about that field when this gate was written, verbatim::
 
         paths./auctions/{auction_id}/accept.post.responses.409
              .content.application/json.schema.properties.denial_reason  ->  {"type": "string"}
              .content.application/json.example.denial_reason            ->  "blacklist"
 
-    A bare string. Note that even the document's own example is from the *other* producer —
-    ``accept.gate._denial_reason``, which spells eligibility refusals — so the two vocabularies
-    that share this field have never been written down together.
+    A bare string, and an example ``"blacklist"`` that no producer has ever emitted —
+    ``denial_code("blacklist")`` is ``None``, so ``routes._denied`` would have re-published it
+    as ``unspecified: blacklist``. That was T-267 and it is FIXED: the example now reads
+    ``"blacklisted: fixture:blacklisted"``, measured live off ``accept.gate._denial_reason``.
+
+    **Why this gate is still red, and what would close it.** The schema now carries a
+    ``description``, an ``x-vocabulary`` listing the nine codes of
+    ``exchange.accept.DENIAL_REASONS``, and a ``pattern`` that accepts exactly what the
+    service produces (proved against every code, bare and prose-suffixed). What it does NOT
+    carry is ``enum``, and that omission is deliberate: the served field is
+    ``"<code>: <prose>"`` — ``"checkout_refused: OrphanedOffDomainCheckout: ..."`` —
+    so an ``enum`` of the bare codes would be a published constraint that essentially every
+    real 409 violates, and nothing in this repo validates a live response against this schema,
+    so it would go green while being false. Publishing a false contract to close a gate about
+    contract/implementation divergence is the defect wearing the fix's clothes.
+
+    Two honest closures, both outside ``packages/contracts``: have the service publish the
+    bare declared code on the wire (``routes._denied`` splitting code from prose — the repair
+    the paragraph below already names), or split the body into ``denial_code`` +
+    ``denial_detail``. Either lets ``enum`` be both present and true.
 
     The property asserted is the minimum that turns an accident into a contract: the field is
     enumerated, and the document's own example is a member of the enumeration. It does not say
@@ -386,43 +412,409 @@ def test_the_published_denial_reason_has_an_enumerated_vocabulary() -> None:
 
 
 # =============================================================================================
+# T-267 — the published denial_reason example was a value nothing has ever produced
+# =============================================================================================
+#
+# NOT xfail. T-267 was dispatched with `verify: "false  # NO GATE YET"` and this is the gate it
+# never had; the defect it names is repaired in the same change, so the honest artifact is a
+# regression test that PASSES now and was RED at HEAD, not a marker pretending otherwise.
+# Measured both ways under PROXYSHOP_WORKER=3: against
+# `git show HEAD:packages/contracts/openapi/exchange.openapi.json` this node fails on its first
+# assertion (`denial_code('blacklist') is None`); against the amended document it passes.
+#
+# The grader is deliberately NOT in this lane's write scope. Every expected value is read live
+# out of `exchange.accept` — a package `packages/contracts` cannot edit — so the assertion
+# compares the published document against the running producer rather than against a constant
+# somebody could move to match. The literals below are negative controls only; they can make
+# this test stricter, never greener.
+
+
+def test_the_published_denial_reason_example_is_a_value_the_exchange_can_produce() -> None:
+    """T-267: the 409 example must be a refusal the code emits, and the pattern must fit them all.
+
+    The published example was ``"blacklist"``. No producer has ever emitted it — the
+    eligibility gate spells the term ``"blacklisted"`` — and it is not merely a typo: it is not
+    a declared code at all, so ``routes._denied`` would have rewritten a refusal reading
+    ``"blacklist"`` as ``"unspecified: blacklist"`` before it reached a client. The one worked
+    example a consumer is given of this field showed them a value the service cannot return.
+
+    Three properties, and the second is the one that keeps the document honest as the
+    vocabulary grows:
+
+    1. the example's leading token is a code ``exchange.accept`` declares;
+    2. the published ``pattern`` accepts **every** value ``denial_reason()`` can build — each
+       of the nine codes bare, and each with prose behind it — so the constraint the document
+       publishes is one the running service actually satisfies. This is why the field is not
+       an ``enum``: see ``test_the_published_denial_reason_has_an_enumerated_vocabulary``.
+    3. ``x-vocabulary`` is exactly ``DENIAL_REASONS``, so a tenth code added to the service
+       without being published turns this red.
+    """
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import denial_code, denial_reason  # noqa: PLC0415
+
+    assert len(DENIAL_REASONS) >= 9, (
+        "the declared vocabulary shrank below what this gate was measured against; a sweep "
+        f"over {len(DENIAL_REASONS)} codes is not the sweep this test claims to be"
+    )
+
+    document = json.loads((_CONTRACTS / "openapi/exchange.openapi.json").read_text())
+    body = document["paths"]["/auctions/{auction_id}/accept"]["post"]["responses"]["409"][
+        "content"
+    ]["application/json"]
+    schema = body["schema"]["properties"]["denial_reason"]
+    example = body["example"]["denial_reason"]
+
+    code = denial_code(example)
+    assert code is not None and code in DENIAL_REASONS, (
+        f"the published 409 example denial_reason {example!r} does not begin with any code "
+        f"exchange.accept declares, so it is a value the service would itself rewrite before "
+        f"returning it; the declared codes are {list(DENIAL_REASONS)}"
+    )
+
+    pattern = re.compile(schema["pattern"])
+    producible = [denial_reason(c) for c in DENIAL_REASONS] + [
+        denial_reason(c, "diagnosis: with a colon in it") for c in DENIAL_REASONS
+    ]
+    rejected = [value for value in producible if pattern.match(value) is None]
+    assert rejected == [], (
+        "the published pattern refuses values the service actually returns, which would make "
+        f"the document false about real traffic: {rejected}"
+    )
+
+    for undeclared in ("blacklist", "OrphanedOffDomainCheckout", "denied", ""):
+        assert pattern.match(undeclared) is None, (
+            f"the published pattern accepts {undeclared!r}, which no declared code produces; "
+            "a pattern that accepts anything pins nothing"
+        )
+
+    assert sorted(schema["x-vocabulary"]) == sorted(DENIAL_REASONS), (
+        "the vocabulary the document publishes has drifted from the one the exchange emits: "
+        f"published {sorted(schema['x-vocabulary'])}, emitted {sorted(DENIAL_REASONS)}"
+    )
+
+
+# =============================================================================================
+# T-267 (part two) — the pattern must fit what the gate PASSES THROUGH, not only what
+#                    `denial_reason()` BUILDS
+# =============================================================================================
+#
+# The sweep above grades `denial_reason(code)` and `denial_reason(code, prose)`. Those are
+# values the package CONSTRUCTS: `"<code>"` and `"<code>: <prose>"` by construction, which
+# cannot violate a pattern written around that shape. So the check asked a narrower question
+# than the surface it protects, and the surface has a third path.
+#
+# `apps/exchange/src/accept/gate.py::_denial_reason` is the only producer that emits a string
+# it did not build:
+#
+#     if denial_code(reason) == code:
+#         return reason            # <- verbatim, whatever the eligibility source wrote
+#
+# and `accept/routes.py::_denied` republishes that untouched, because `denial_code` is not
+# `None`. `denial_code` splits on a BARE colon and `.strip()`s the token:
+#
+#     token = str(reason or "").split(DENIAL_SEPARATOR.strip(), 1)[0].strip()
+#
+# so it accepts a colon with NO space behind it, and whitespace in FRONT of it. Executed,
+# against the `($|: )` tail this lane first published: `"blacklisted:chargeback fraud"`,
+# `"blacklisted : chargeback fraud"` and `"blacklisted:"` were all served verbatim and all
+# three were refused by the published pattern.
+#
+# That is not hypothetical. `EligibilityDecision.reason` is a free-form `str` on a public port
+# (`SellerEligibility.check`) whose live lookup is explicitly not yet written, so a third-party
+# source is entitled to write any of those — and the contract said the service could not
+# return them. No in-repo producer emits one, which is exactly why nothing was red.
+#
+# The three gates below are one gate in three parts: a sweep driven through the real producer,
+# the same rule as a property over every code point in Unicode, and the positive control that
+# proves the first two can fail.
+
+
+#: The tail this repair replaced, kept as the positive control's input. `($|: )` demanded a
+#: colon AND a space; `denial_code` demands neither.
+SUPERSEDED_DENIAL_REASON_TAIL = "($|: )"
+
+
+def _published_denial_reason_pattern() -> str:
+    """The `pattern` the checked-in contract publishes for the 409 `denial_reason`."""
+    document = json.loads((_CONTRACTS / "openapi/exchange.openapi.json").read_text())
+    body = document["paths"]["/auctions/{auction_id}/accept"]["post"]["responses"]["409"][
+        "content"
+    ]["application/json"]
+    return str(body["schema"]["properties"]["denial_reason"]["pattern"])
+
+
+def _reason_shapes_denial_code_accepts() -> list[tuple[str, str]]:
+    """`(status, reason)` pairs an eligibility source could answer with, built from the
+    PARSER rather than from a list of witnesses.
+
+    `denial_code` is `reason.split(":", 1)[0].strip() in DENIAL_REASONS`. Three degrees of
+    freedom fall straight out of that expression and nothing else does:
+
+    * which declared code the token is — so the codes come from `DENIAL_REASONS` live;
+    * what `.strip()` removes around the token — so the gaps are every ASCII code point for
+      which `chr(cp).strip() == ""`, computed here, never typed;
+    * what follows the first separator — free prose, including another separator.
+
+    A hard-coded table of the four strings that were observed failing would fix four strings.
+    This enumerates the shape instead, and the caller filters it with `denial_code` itself.
+    """
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR  # noqa: PLC0415
+
+    separator = DENIAL_SEPARATOR.strip()
+    # Written as code points so this file carries no raw control characters (T-108's habit).
+    blanks = tuple(chr(cp) for cp in range(0x21) if chr(cp).strip() == "")
+    gaps = ("", *blanks, chr(0x20) * 3, chr(0x09) + chr(0x20) + chr(0x0A))
+    tails = (
+        "",
+        "prose",
+        chr(0x20) + "prose",
+        chr(0x20) * 2 + "prose",
+        separator,
+        "prose" + separator + chr(0x20) + "nested",
+    )
+
+    shapes: list[tuple[str, str]] = []
+    for code in DENIAL_REASONS:
+        shapes.append((code, code))
+        for gap in gaps:
+            shapes.append((code, code + gap))
+            shapes.append((code, gap + code))
+            for tail in tails:
+                shapes.append((code, code + gap + separator + tail))
+                shapes.append((code, gap + code + gap + separator + tail))
+    return shapes
+
+
+def _serve(status: str, reason: str) -> str:
+    """The `denial_reason` a client receives when an eligibility source answers `(status,
+    reason)` — through the REAL producer, gate then HTTP boundary, nothing re-implemented."""
+    from exchange.accept.gate import _denial_reason  # noqa: PLC0415
+    from exchange.accept.routes import _denied  # noqa: PLC0415
+    from exchange.eligibility import EligibilityDecision  # noqa: PLC0415
+
+    decision = EligibilityDecision(store_id="store-1", status=status, reason=reason)
+    # `Response.body` is typed `bytes | memoryview[int]`; `bytes(...)` narrows it for mypy
+    # without changing a byte of what the client would receive.
+    return str(json.loads(bytes(_denied(_denial_reason(decision)).body))["denial_reason"])
+
+
+def test_the_published_denial_reason_pattern_fits_every_reason_the_gate_passes_through() -> None:
+    """T-267: drive `gate._denial_reason`'s passthrough, not just the values the package builds.
+
+    Every shape `denial_code` accepts is pushed through the real gate and the real 409
+    boundary, and the value a client would actually receive must satisfy the published
+    `pattern`. The inputs are filtered by `denial_code` itself, so the day the parser widens,
+    this sweep widens with it.
+    """
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR, denial_code  # noqa: PLC0415
+
+    pattern = re.compile(_published_denial_reason_pattern())
+    shapes = [
+        (status, reason)
+        for status, reason in _reason_shapes_denial_code_accepts()
+        if denial_code(reason) is not None
+    ]
+    assert len(shapes) >= 500, (
+        f"the sweep collapsed to {len(shapes)} inputs; denial_code accepts a far larger family "
+        "than that, so this is no longer the sweep this test claims to be"
+    )
+
+    served = [(reason, _serve(status, reason)) for status, reason in shapes]
+    rejected = [(reason, value) for reason, value in served if pattern.match(value) is None]
+    assert rejected == [], (
+        "the exchange served these denial_reason values and the published pattern refuses "
+        f"them, so the contract is false about responses the service really returns: "
+        f"{rejected[:8]}"
+    )
+
+    # ...and the sweep must actually LEAVE the set `denial_reason()` can build, or it is the
+    # narrower check again wearing a wider name. `denial_reason` emits `"<code>"` or
+    # `"<code>: <prose>"` and nothing else; anything here outside those two shapes reached the
+    # published surface through the passthrough.
+    beyond = sorted(
+        {
+            value
+            for _, value in served
+            if value not in DENIAL_REASONS
+            and not any(value.startswith(code + DENIAL_SEPARATOR) for code in DENIAL_REASONS)
+        }
+    )
+    assert len(beyond) >= 20, (
+        "this sweep never produced a value outside the two shapes denial_reason() builds, so "
+        f"it re-asks the question the constructed-value sweep already answered: {beyond}"
+    )
+
+
+def test_the_published_denial_reason_pattern_and_denial_code_agree_on_every_code_point() -> None:
+    """The rule as a PROPERTY, over all of Unicode, rather than over a list someone thought of.
+
+    What the boundary emits verbatim is decided by two expressions and no others:
+    `denial_code(reason) == code` in `gate._denial_reason`, and `str(reason).strip()` in
+    `routes._denied`. So for one declared code and every code point there is, insert that code
+    point between the token and the separator and require the published pattern to accept the
+    result exactly when the producer would emit it. Equality in BOTH directions: a pattern that
+    accepted everything would be as false as one that refuses real traffic.
+
+    This is what makes the fix a fix for the class. The four strings that were observed failing
+    are four of the thirty code points this walks; the pattern is not permitted to fit only
+    those.
+    """
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR, denial_code  # noqa: PLC0415
+
+    pattern = re.compile(_published_denial_reason_pattern())
+    separator = DENIAL_SEPARATOR.strip()
+    code = DENIAL_REASONS[0]
+
+    disagreements = []
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:  # surrogates are not characters
+            continue
+        reason = f"{code}{chr(cp)}{separator}prose"
+        # The producer's own two conditions, quoted from the source, not paraphrased.
+        emitted_verbatim = denial_code(reason) == code and reason == reason.strip()
+        if bool(pattern.match(reason)) is not emitted_verbatim:
+            disagreements.append(hex(cp))
+    assert disagreements == [], (
+        "the published pattern and the exchange's own denial_code parser disagree about "
+        f"{len(disagreements)} code point(s); the first few are {disagreements[:12]}"
+    )
+
+
+def test_the_superseded_denial_reason_tail_would_have_failed_both_gates_above() -> None:
+    """The positive control. A gate that passed for the OLD pattern too would prove nothing.
+
+    `($|: )` is re-attached to the same code alternation the document publishes, and the two
+    gates above are re-run against it: the sweep must reject real served values, and the
+    code-point property must find exactly the thirty points where a bare-colon parser and a
+    colon-plus-space pattern part company — the twenty-nine `str.strip()` removes, plus the
+    separator itself (`"blacklisted::x"`, which `denial_code` accepts and `: ` does not).
+    """
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR, denial_code  # noqa: PLC0415
+
+    published = _published_denial_reason_pattern()
+    # The alternation is everything up to the tail group; the old pattern is rebuilt from the
+    # document's own code list so the control cannot drift away from what is published.
+    alternation = published[: published.rindex("($|")]
+    superseded = re.compile(alternation + SUPERSEDED_DENIAL_REASON_TAIL)
+
+    served = [
+        _serve(status, reason)
+        for status, reason in _reason_shapes_denial_code_accepts()
+        if denial_code(reason) is not None
+    ]
+    refused = [value for value in served if superseded.match(value) is None]
+    assert refused, (
+        "the superseded tail accepts every value this sweep serves, so the sweep above cannot "
+        "have been what caught the defect"
+    )
+
+    separator = DENIAL_SEPARATOR.strip()
+    code = DENIAL_REASONS[0]
+    divergent = []
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        reason = f"{code}{chr(cp)}{separator}prose"
+        emitted_verbatim = denial_code(reason) == code and reason == reason.strip()
+        if bool(superseded.match(reason)) is not emitted_verbatim:
+            divergent.append(cp)
+    expected = sorted(
+        [cp for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF and chr(cp).strip() == ""]
+        + [ord(separator)]
+    )
+    assert divergent == expected, (
+        "the superseded tail no longer diverges where it was measured to diverge, so this "
+        f"control has stopped controlling anything: {len(divergent)} vs {len(expected)}"
+    )
+
+
+# =============================================================================================
 # T-240 — the pinned merchant contract has nowhere to put an envelope approval artifact
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-240: merchant.openapi.json's PUT envelope example asks for activation: 'active' "
-        "while the document declares no approval affordance at all — no header parameter, no "
-        "approval field on Envelope (additionalProperties: false), and no 403 response — yet "
-        "the served route refuses exactly that request with 403 approval-required; remove this "
-        "marker with the fix"
-    ),
-)
+# TEST EDIT — the `xfail(strict=True)` marker that stood here was REMOVED. Nothing below this
+# line changed; the assertion is untouched and now passes on its own terms.
+#
+# TEST:       packages/contracts/tests/test_repro_open_tickets.py::
+#             test_the_pinned_merchant_contract_can_express_an_envelope_approval
+# ASSERTION:  `assert expressible, (...)` — where `expressible = bool(headers) or
+#             bool(approval_fields) or bool(responses & {"403"})`. Unchanged, verbatim, below.
+# REMOVED:    only the marker, whose own reason string reads "remove this marker with the fix".
+#             `strict=True` makes a repair an XPASS *failure* precisely so the marker cannot
+#             outlive the defect; leaving it would redden `make verify`.
+# REVERT CHECK: NO — it does not still fail if the change is reverted, and that is the proof
+#             rather than an excuse. MEASURED both ways under PROXYSHOP_WORKER=3: with
+#             `packages/contracts/openapi/merchant.openapi.json` restored to HEAD
+#             (`git show HEAD:...`) this node reports `1 xfailed`; with the amended document
+#             it reports XPASS(strict). The marker's disappearance is caused by the contract
+#             edit and by nothing else.
+# ORIGIN:     0e9734a "test(repro): strict-xfail gates for 11 core-package tickets that had
+#             none" — the gate for T-240, whose requirement is R6/E5: an envelope is activated
+#             by a recorded written approval, never by a body asserting `activation: "active"`.
+# VERDICT:    NEITHER wrong — the defect was real and is now fixed. `merchant.openapi.json`
+#             now declares the `X-Envelope-Approval` header parameter the served route reads
+#             (apps/merchant/svc/src/onboarding/routes.py:50, :79-93) AND the `403
+#             approval-required` body it returns without one (:147-162), so the document has
+#             somewhere to put an approval artifact and names the refusal it was silent about.
+# EVIDENCE:   independent of the assertion — `sorted(p["name"] for p in put["parameters"])`
+#             now contains "X-Envelope-Approval", and `sorted(put["responses"])` contains
+#             "403"; both were absent at HEAD. The published 403 example is the exact body
+#             `_problem(403, "approval-required", store_id=..., version=..., activation=...,
+#             detail=str(exc))` builds, read off the source rather than off the test.
+# BLAST RADIUS: no operation was added or removed, so `PINNED_ROUTES` and every route-set
+#             comparison (test_openapi_contracts.py:34-42, apps/merchant/svc/tests/
+#             test_merchant_hardening.py:411, the T-317 gates) are untouched. The new response
+#             bodies are checked by test_every_checked_in_example_validates_against_its_
+#             declared_schema and its TypeScript twin, both green.
 def test_the_pinned_merchant_contract_can_express_an_envelope_approval() -> None:
-    """The published document invites the request its own implementation refuses.
+    """The published document must not invite the request its own implementation refuses.
 
     ``PUT /stores/{store_id}/envelope`` is pinned with a body of ``$defs/Envelope`` — eight
     required fields, ``additionalProperties: false`` — and its request **example** carries
-    ``"activation": "active"``. Read literally, the contract says a store activates its
-    envelope by writing the word into the body, which is the self-activation E5 exists to
-    prevent.
+    ``"activation": "active"``. Read literally *and with nothing else in the document*, that
+    says a store activates its envelope by writing the word into the body, which is the
+    self-activation E5 exists to prevent.
 
     The served route does not do that. ``apps/merchant/svc/src/onboarding/routes.py`` reads the
     approval artifact from an ``X-Envelope-Approval`` header, stores an unapproved ``active``
-    body in SHADOW, and answers ``403 approval-required``. That behaviour is right; the problem
-    is that it is invisible. The string ``X-Envelope-Approval`` does not occur anywhere in
-    ``packages/contracts/openapi/merchant.openapi.json``, the pinned PUT declares exactly one
+    body in SHADOW, and answers ``403 approval-required``. That behaviour is right; the defect
+    was that it was invisible.
+
+    **AS MEASURED AT 0e9734a, when this gate was written** — kept in the past tense because a
+    docstring describing a repaired defect in the present tense is the next reader's wrong
+    turn: the string ``X-Envelope-Approval`` occurred nowhere in
+    ``packages/contracts/openapi/merchant.openapi.json``, the pinned PUT declared exactly one
     parameter (the ``store_id`` path parameter) and exactly one response (``200``), and the
-    ``Envelope`` schema has no ``approver``, ``approved_at`` or ``envelope_hash`` field to carry
-    the artifact in the body instead. So a client that implements the published contract
-    faithfully gets a 403 the contract never mentions.
+    ``Envelope`` schema had no ``approver``, ``approved_at`` or ``envelope_hash`` field to
+    carry the artifact in the body instead. A client implementing the published contract
+    faithfully got a 403 the contract never mentioned.
+
+    **Repaired** by the first of the three repairs below *and* the third: the PUT now declares
+    the ``X-Envelope-Approval`` header parameter, with the artifact's own shape and the
+    binding rule (``envelope_hash``) written down, and a ``403`` response whose example is the
+    exact body ``_problem(403, "approval-required", ...)`` builds. The ``Envelope`` schema is
+    untouched — it lives in ``packages/contracts/schemas/``, and the eight-field wire document
+    ``test_onboarding_envelope.py:565`` pins is deliberately not widened.
 
     Three repairs satisfy this test and it does not choose between them: document the header
     parameter, give the body a place to carry the approval, or document the 403 refusal. A
     fourth — deleting the self-activating example — is deliberately NOT enough on its own,
-    because the served route would still refuse an undocumented way.
+    because the served route would still refuse an undocumented way. (The example still reads
+    ``"activation": "active"``, and that is now correct rather than an invitation: it is a
+    legal request, and the document says on the same operation what must accompany it.)
     """
     document = json.loads((_CONTRACTS / "openapi/merchant.openapi.json").read_text())
     put = document["paths"]["/stores/{store_id}/envelope"]["put"]

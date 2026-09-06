@@ -44,6 +44,7 @@ from .reasons import (
     denial_code,
     denial_reason,
     describe,
+    redact_addresses,
 )
 
 __all__ = ["accept_offer"]
@@ -72,7 +73,15 @@ def _denial_reason(decision: EligibilityDecision) -> str:
     if not reason:
         return code
     if denial_code(reason) == code:
-        return reason
+        # THE BYPASS, and why it is redacted HERE rather than only in `denial_reason`. A
+        # source that answers `unavailable` with prose that already begins `"unavailable: …"`
+        # takes this branch and its sentence is returned VERBATIM — `denial_reason` is never
+        # called, so a sanitiser installed only there closes the sibling shape below and
+        # leaves this one live. That asymmetry is exactly what T-327 records: the pair
+        # distinguishes "no sanitiser" from "sanitiser bypassed", and the whole point of the
+        # branch is to keep the source's own words, which is precisely when the source's own
+        # `<object object at 0x…>` travels with them.
+        return redact_addresses(reason)
     return denial_reason(code, reason)
 
 
