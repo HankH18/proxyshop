@@ -394,8 +394,8 @@ _TAXONOMY_TOKENS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: Rungs of the generalisation ladder, finest (0) to fully suppressed. Rung 0 **is**
-#: :func:`build_buckets` — the default release — and each rung widens exactly one facet,
+#: Rungs of the generalisation ladder, finest (0) to fully suppressed. Rung 0 emits what
+#: :func:`build_buckets` emits — the default release — and each rung widens exactly one facet,
 #: highest-entropy first, so a record is never made to give up two things when giving up one
 #: would have put it in a crowd::
 #:
@@ -431,9 +431,47 @@ IDENTITY_ACCOUNT_KEYS: tuple[str, ...] = (
 )
 
 #: Below this length a value is too short to be a meaningful identifier and matching on it
-#: produces noise ("OR" would collide with a region code). Identity values shorter than this
-#: are not leak-checked; nothing in the allowlist can emit one anyway.
-_MIN_LEAKABLE = 4
+#: produces noise. Identity values shorter than this are not leak-checked.
+#:
+#: **Three, not four** (T-197). At four, a short name was not merely under-weighted, it was
+#: invisible: ``first_name='Ann'``, ``last_name='Lee'`` and an order category of ``"ann lee
+#: gear"`` published ``['ann-lee-gear']`` with the backstop reporting clean, because neither
+#: fragment ever entered the haystack. A three-letter name is still the buyer's name.
+#:
+#: The constant gates four places and they must agree: what :func:`_identity_sources` records,
+#: what :func:`_identity_fragments_in_slug` counts, what rule 3 of
+#: :func:`_exempt_category_slugs` will accept as a merchandise token, and which fragments
+#: :func:`identity_leaks` searches for in slug space. A fragment tracked on one side and
+#: ignored on the other is how a slug becomes newly exempt without anybody deciding it should.
+#:
+#: The old value's stated reason for four was a collision with the region bucket. That reason
+#: is real, but it was attached to the wrong thing — see :data:`_MIN_LEAKABLE_BY_BUCKET`, which
+#: is where it now lives, because it is a fact about one bucket's alphabet and not about what
+#: counts as an identifier anywhere else.
+_MIN_LEAKABLE = 3
+
+#: Buckets whose own vocabulary forces a *higher* floor than :data:`_MIN_LEAKABLE`.
+#:
+#: ``region`` is the only one, and it is not an exemption by another name — it is the same
+#: length argument the global floor used to carry, applied where it is actually true.
+#: :func:`coarsen_region` accepts alphabetic parts of **two or three** characters and refuses
+#: everything else (``part.isalpha() and 2 <= len(part) <= 3``), so every string this bucket
+#: can hold is an ISO-shaped code: ``US``, ``US-OR``, ``GB-ENG``, ``BEN``. A fragment short
+#: enough to sit inside one is therefore colliding with the code's alphabet, not being
+#: disclosed by it — and ``region`` has no per-value exemption at all, so a collision there
+#: refuses the buyer permanently, for as long as their name and their country both stay what
+#: they are.
+#:
+#: Measured, and this is why the number is 4 rather than 3: at 3 the buyer surnamed **Eng** in
+#: ``GB-ENG`` is refused, and so are Ben in ``BEN``, Pan in ``PAN``, Nam in ``NAM``, Lao in
+#: ``LAO`` and Che in ``CHE`` — all ordinary surnames, all permanently locked out of their own
+#: profile. Four keeps every two- and three-letter code out of this bucket's haystack while
+#: leaving the shortest real names trackable in every other bucket, which is what T-197 asked
+#: for. A genuine disclosure through ``region`` — a postal code, a street, a city — cannot be
+#: shorter than four characters and is unaffected: ``coarsen_region`` refuses anything with a
+#: digit in it, so a postal code can only reach this bucket through a rewired coarsener, and
+#: it is still found.
+_MIN_LEAKABLE_BY_BUCKET: dict[str, int] = {"region": 4}
 
 #: Identity keys that name a **person or an account** rather than a place. A merchandising
 #: slug whose token spells one of these is not a coincidence — nobody's shop sells
@@ -465,6 +503,10 @@ _MAX_INCIDENTAL_FRAGMENTS = 1
 
 _REGION_SEPARATORS = re.compile(r"[-_/,\s]+")
 _SLUG_STRIP = re.compile(r"[^a-z0-9]+")
+
+#: Everything that is not a digit. Used by :func:`_identity_sources` to record a number's
+#: digits with its grouping dropped — see the note on regrouping there (T-198).
+_NON_DIGIT = re.compile(r"\D+")
 
 
 class IdentityLeak(AssertionError):
@@ -697,11 +739,19 @@ def generalise_region(region: str | None) -> str | None:
     return region.split("-", 1)[0].strip() or None
 
 
-def build_buckets(account: Mapping[str, Any]) -> ProfileBuckets:
-    """The five coarse facets, each from its own coarsener. No other account key is read.
+def _coarsen(account: Mapping[str, Any]) -> ProfileBuckets:
+    """Rung 0, with no backstop — the raw output of the five coarseners.
 
-    This is rung 0 of the ladder and the default release: no k-anonymity floor is applied,
-    per SPEC §Non-goals. :func:`anonymise_cohort` is where a configured floor is spent.
+    Private. Together with :func:`_buckets_at_level`, which wraps it, these are the only two
+    bucket-producing paths in this module that are not behind :func:`identity_leaks`, and both
+    are private. They exist so :func:`anonymise_cohort` can build every rung of a record before
+    anyone decides which rung is released: a record whose rung 0 leaks may still be released,
+    clean, at rung 3, and refusing it while merely *considering* rung 0 would be a refusal
+    about a value no store was ever going to be shown.
+
+    Every PUBLIC entry point checks what it is about to emit — :func:`build_buckets`,
+    :func:`buckets_at_level`, :func:`anonymise_cohort`, :func:`build_profile` and
+    :func:`build_profiles`. If you add a sixth, guard it; that omission is the whole of T-164.
     """
     return ProfileBuckets(
         budget_band=coarsen_budget_band(account),
@@ -710,6 +760,39 @@ def build_buckets(account: Mapping[str, Any]) -> ProfileBuckets:
         region=coarsen_region(account.get("region")),
         first_time=not _orders(account),
     )
+
+
+def _refuse_if_leaking(emitted: Any, account: Mapping[str, Any]) -> None:
+    """Raise :class:`IdentityLeak` if ``emitted`` carries any identity value of ``account``.
+
+    The one line every public bucket-producing entry point runs before it returns (T-164). The
+    refusal is :func:`_leak_report`'s, so it names account keys and never values, wherever it
+    is raised from.
+    """
+    leaked = identity_leaks(emitted, account)
+    if leaked:
+        raise _leak_report(account, leaked)
+
+
+def build_buckets(account: Mapping[str, Any]) -> ProfileBuckets:
+    """The five coarse facets, each from its own coarsener. No other account key is read.
+
+    This is rung 0 of the ladder and the default release: no k-anonymity floor is applied,
+    per SPEC §Non-goals. :func:`anonymise_cohort` is where a configured floor is spent.
+
+    Raises:
+        IdentityLeak: an identity value from ``account`` reached the buckets. **This is a
+            public entry point, so it is behind the R5 backstop** (T-164). It was not, and the
+            asymmetry was a trap rather than a live defect: ``build_profile`` refused an
+            account whose own order category spelled its surname while ``build_buckets``
+            published ``['reyes-gear']`` for the same account, and the only thing keeping that
+            off a store was that nothing yet called it. T-142 wires ``publish_profile``; a
+            caller that sourced its buckets here instead of from ``build_profile`` would have
+            bypassed the backstop entirely and nothing would have said so.
+    """
+    buckets = _coarsen(account)
+    _refuse_if_leaking(buckets, account)
+    return buckets
 
 
 # --------------------------------------------------------------------------------------
@@ -748,7 +831,35 @@ def k_anonymity_floor(env: Mapping[str, str] | None = None) -> int:
 
 
 def buckets_at_level(account: Mapping[str, Any], level: int) -> ProfileBuckets:
-    """The five facets, generalised to ``level`` of the ladder. Rung 0 is :func:`build_buckets`.
+    """The five facets, generalised to ``level`` of the ladder, behind the R5 backstop.
+
+    Raises:
+        ValueError: ``level`` is not an integer rung in ``0..BOTTOM_LEVEL``.
+        IdentityLeak: the buckets at ``level`` carry an identity value from ``account``.
+
+    This is the THIRD public bucket-emitting entry point, and T-164 named only two. It is
+    guarded anyway, because the argument the ticket makes about the other two is exactly as
+    true here: it is public, it is in ``__all__``, it returns a ``ProfileBuckets`` that
+    ``BuyerProfile`` accepts, and at rung 0 it returns the account's own free text. Measured
+    before it was guarded: ``buckets_at_level(account, 0)`` on the contaminated fixture
+    returned ``category_affinity=['running-shoes',
+    'gift-for-dana-reyes-44-alder-way-portland-97205']`` and that value went through
+    ``BuyerProfile`` into ``publish_profile`` and out to ``app.buyer_accounts`` with no refusal
+    anywhere, while ``build_buckets``, ``build_profile`` and ``anonymise_cohort`` all refused
+    the same account. That asymmetry did not exist before T-164's fix — rung 0 used to be
+    ``build_buckets`` and inherited its guard — so guarding the other two without this one
+    would have *created* the hole it was closing.
+
+    The ladder itself is built through :func:`_buckets_at_level`, which is unguarded, so
+    :func:`anonymise_cohort` can still consider a rung it does not release.
+    """
+    buckets = _buckets_at_level(account, level)
+    _refuse_if_leaking(buckets, account)
+    return buckets
+
+
+def _buckets_at_level(account: Mapping[str, Any], level: int) -> ProfileBuckets:
+    """The rung itself, with no backstop — see :func:`buckets_at_level` for the public one.
 
     The rungs are the table on :data:`BOTTOM_LEVEL`. They are *monotone*: every facet at rung
     ``n+1`` is at least as coarse as the same facet at rung ``n``, which is what makes
@@ -761,7 +872,7 @@ def buckets_at_level(account: Mapping[str, Any], level: int) -> ProfileBuckets:
     if not isinstance(level, int) or isinstance(level, bool) or not 0 <= level <= BOTTOM_LEVEL:
         raise ValueError(f"generalisation level must be 0..{BOTTOM_LEVEL}, got {level!r}")
     if level == 0:
-        return build_buckets(account)
+        return _coarsen(account)
     if level >= BOTTOM_LEVEL:
         return ProfileBuckets(
             budget_band=None,
@@ -850,6 +961,13 @@ def anonymise_cohort(
         ValueError: ``k`` is below 1, or a floor above 1 was asked of a release with fewer
             than ``k`` accounts — which no generalisation can satisfy, and saying so is
             better than returning something that merely looks anonymous.
+        IdentityLeak: an identity value from one of the ``accounts`` survived into the buckets
+            released for it. **This is a public entry point, so it is behind the R5 backstop**
+            (T-164) — see :func:`build_buckets` for why an unguarded one is a trap. The check
+            is made against what this function actually **releases**, not against rung 0: a
+            record whose rung-0 buckets carry a fragment may be released, clean, three rungs
+            up, and refusing it for a value no store would have been shown would be a
+            generalisation ladder that punishes the buyer it just protected.
     """
     floor = k_anonymity_floor() if k is None else k
     if floor < 1:
@@ -867,7 +985,7 @@ def anonymise_cohort(
         )
 
     ladder = [
-        [buckets_at_level(account, level) for level in range(BOTTOM_LEVEL + 1)]
+        [_buckets_at_level(account, level) for level in range(BOTTOM_LEVEL + 1)]
         for account in records
     ]
     levels = [0] * len(records)
@@ -907,7 +1025,10 @@ def anonymise_cohort(
         for index in min(movable, key=len):
             levels[index] = BOTTOM_LEVEL
 
-    return [ladder[index][level] for index, level in enumerate(levels)]
+    released = [ladder[index][level] for index, level in enumerate(levels)]
+    for account, buckets in zip(records, released, strict=True):
+        _refuse_if_leaking(buckets, account)
+    return released
 
 
 # --------------------------------------------------------------------------------------
@@ -926,6 +1047,34 @@ def _identity_sources(account: Mapping[str, Any]) -> dict[str, set[str]]:
     what a bare set of strings cannot give them: ``"dana"`` reached by way of ``first_name``
     is a name, and ``"park"`` reached by way of ``address`` is a place, and the two earn
     different answers from the backstop.
+
+    Two normalisations are recorded beside the value as written, both closing a channel a
+    fragment escaped through while the backstop reported clean (T-198):
+
+    * **digits alone.** ``identity_leaks`` searches verbatim and in slug space, and a number
+      *regrouped* rather than repunctuated is neither: the phone ``"555-0100"`` reaches a
+      profile as ``gift-5550100-gear`` and no comparison in either space finds it. Which
+      digits of a phone number are the phone number is the question the ticket left open, and
+      the answer taken here is the conservative one — **all of them, in order, separators
+      dropped** — because that is the only grouping-independent reading of a number, and it is
+      exactly the transformation that hid it. Recorded under the key that contributed it, so
+      the refusal still names ``phone`` rather than some synthetic ``phone_digits``.
+    * **the email domain, word by word — except its last label.** The local part was already
+      split and the domain was added whole, so ``reyes-family@example.com`` was refused and
+      ``x@reyes-family.example`` — the same two words, one character to the right — rode out.
+      The asymmetry was the defect, and splitting the domain removes it.
+
+      The **final DNS label is dropped**, and that is not a detail. It is the one label nobody
+      chooses: every ``.com`` account would otherwise contribute the fragment ``"com"``, which
+      is inside the taxonomy tokens ``comics`` and ``computer``; every ``.org`` account would
+      contribute ``"org"``, inside ``organic`` and ``organizers``. Because
+      :data:`_MAX_INCIDENTAL_FRAGMENTS` is 1 and rule 5 of :func:`_exempt_category_slugs`
+      charges that budget over the whole published list, one universal fragment plus one real
+      collision withdraws the exemption for *every* slug on the account. Measured, before this
+      was dropped: Cook buying ``cookware`` **and** ``computers`` was refused, and so was
+      ``espresso.fan@example.com`` buying ``espresso`` and ``comics`` — the module's own two
+      canonical coincidences, broken by one extra ordinary order. The words to the left of the
+      last label are the ones a buyer can pick, and they are the ones a vanity domain spells.
     """
     found: dict[str, set[str]] = {}
 
@@ -934,19 +1083,31 @@ def _identity_sources(account: Mapping[str, Any]) -> dict[str, set[str]]:
         if len(text) >= _MIN_LEAKABLE:
             found.setdefault(text, set()).add(key)
 
+    def add_digits(text: str, key: str) -> None:
+        """The value's digits with every separator dropped — see the docstring."""
+        digits = _NON_DIGIT.sub("", text)
+        if digits != text.strip().casefold():
+            add(digits, key)
+
     for key in IDENTITY_ACCOUNT_KEYS:
         value = account.get(key)
         if not isinstance(value, str) or not value.strip():
             continue
         add(value, key)
+        add_digits(value, key)
         for word in re.split(r"[\s,]+", value):
             add(word, key)
+            add_digits(word, key)
         if key == "email" and "@" in value:
             local, _, domain = value.partition("@")
             add(local, key)
             add(domain, key)
             for word in re.split(r"[.\-_+]+", local):
                 add(word, key)
+            # Every label but the last: the TLD is the one part of an address nobody picks.
+            for label in domain.split(".")[:-1]:
+                for word in re.split(r"[\-_+]+", label):
+                    add(word, key)
     return found
 
 
@@ -1023,9 +1184,29 @@ _CLOSED_VOCABULARY: frozenset[str] = frozenset(
 #: The same vocabulary, split by the bucket that can actually emit each label — because a
 #: label is only unremarkable in the bucket whose coarsener owns it. ``"footwear"`` turning up
 #: in ``region`` is not a taxonomy label, it is a coarsener that was rewired, and holding it
-#: out of the haystack account-wide meant the backstop could not say so. Buckets absent here
-#: (``region``, ``first_time``) have no fixed vocabulary at all, so nothing in them is ever
-#: incidental.
+#: out of the haystack account-wide meant the backstop could not say so.
+#:
+#: ``category_affinity`` is deliberately **not** here (T-199), and it is the one bucket whose
+#: exemption could not be justified the way the other two are. The justification is *"these
+#: values are chosen by a coarsener from a fixed table, never copied out of the account"*.
+#: That is true of ``budget_band`` and ``frequency_tier`` at every rung. It is true of
+#: ``category_affinity`` only above the default floor, where :func:`taxonomy_affinity` picks
+#: the label; at rung 0 — the default release, and the only release production makes — the
+#: bucket carries the account's **own** ``orders[].category`` slugs verbatim. Roughly eleven
+#: common English words are taxonomy labels, so a buyer whose surname is Home buying ``home``
+#: published their surname and the backstop skipped the value without looking at it.
+#:
+#: Removing the entry does not refuse the coincidence, it just stops exempting it unread:
+#: :func:`_exempt_category_slugs` is the exemption that bucket already has, it is earned per
+#: slug rather than handed over per label, and it is the one that knows the difference between
+#: Cook buying ``cookware`` and Home buying ``home``. A generalised release is unaffected in
+#: practice for the same reason — a taxonomy label that collides with nothing on the account
+#: is matched, found in nothing, and reported as nothing.
+#:
+#: Buckets absent here (``category_affinity``, ``region``, ``first_time``) have no *unconditional*
+#: vocabulary exemption. ``category_affinity`` has a conditional one instead, applied in
+#: :func:`identity_leaks` against :data:`_TAXONOMY_LABELS`: a label is incidental only when it is
+#: not also one of this account's own order slugs.
 _BUCKET_VOCABULARY: dict[str, frozenset[str]] = {
     "budget_band": frozenset(
         {label for _low, _high, label in BUDGET_BANDS}
@@ -1035,8 +1216,10 @@ _BUCKET_VOCABULARY: dict[str, frozenset[str]] = {
     "frequency_tier": frozenset(
         {tier for _ceiling, tier in FREQUENCY_TIERS} | set(COARSE_FREQUENCY_TIERS)
     ),
-    "category_affinity": frozenset(CATEGORY_TAXONOMY),
 }
+
+#: The closed taxonomy, as a set, for the conditional ``category_affinity`` exemption above.
+_TAXONOMY_LABELS: frozenset[str] = frozenset(CATEGORY_TAXONOMY)
 
 
 def _is_merchandising_slug(slug: str) -> bool:
@@ -1166,7 +1349,6 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
     """
     sources = _identity_sources(account)
     naming = {value for value, keys in sources.items() if keys & _NAMING_IDENTITY_KEYS}
-    beyond_email = {value for value, keys in sources.items() if keys - {"email"}}
 
     exempt: set[str] = set()
     for slug in _account_category_slugs(account):
@@ -1175,7 +1357,17 @@ def _exempt_category_slugs(account: Mapping[str, Any]) -> set[str]:
         tokens = slug.split("-")
         if any(token in naming for token in tokens):
             continue
-        disqualifying = beyond_email if len(tokens) == 1 else set(sources)
+        # Rule 3's leniency for a ONE-TOKEN slug is "a collision with something the buyer is
+        # not" — and that is the judgement `_NAMING_IDENTITY_KEYS` already encodes for rule 2:
+        # a *person* is never a coincidence, a *place* routinely is. It used to be spelled
+        # `beyond_email`, which admitted `espresso.fan@` buying `espresso` and refused the
+        # buyer on **Home** Farm Road buying `home` — a place word, exactly the Park Lane
+        # collision this whole function exists to admit. That refusal was invisible until
+        # T-199 stopped exempting taxonomy labels wholesale; the blanket exemption had been
+        # covering it for the eleven labels, and for nothing else. Naming keys still
+        # disqualify, which is what keeps the buyer *surnamed* Home refused — by rule 2, one
+        # line above, before this is even reached.
+        disqualifying = naming if len(tokens) == 1 else set(sources)
         if not any(len(token) >= _MIN_LEAKABLE and token not in disqualifying for token in tokens):
             continue
         if len(_identity_fragments_in_slug(slug, sources)) > _MAX_INCIDENTAL_FRAGMENTS:
@@ -1244,17 +1436,36 @@ def identity_leaks(profile: Any, account: Mapping[str, Any]) -> list[str]:
     # Each bucket value is searched on its own. Joining them first made a fragment able to
     # match across the seam between two unrelated values, which is a leak report about a
     # string no bucket ever held.
+    own_slugs = _account_category_slugs(account)
     leaked: set[str] = set()
     for bucket, text in _bucket_texts(body):
         folded = text.strip().casefold()
         if folded in _BUCKET_VOCABULARY.get(bucket or "", frozenset()):
             continue
-        if bucket == "category_affinity" and folded in exempt_slugs:
+        if bucket == "category_affinity" and (
+            folded in exempt_slugs
+            # A taxonomy label is incidental exactly when the coarsener really did choose it
+            # from the fixed table rather than copying it off the account — which is true of
+            # every generalised release and false at rung 0 for a buyer whose own slug spells
+            # the label. That distinction is the whole of T-199, and it is narrower than the
+            # blanket `_BUCKET_VOCABULARY` entry it replaces in both directions: `last_name`
+            # "Home" buying `home` is still reported (the label IS this account's own slug),
+            # and a cohort released at k > 1 as `['home']` off orders for `bedding`,
+            # `cookware` and `lighting` is still admitted — where the blanket removal failed
+            # the ENTIRE release because one buyer's email local part was `home@`.
+            or (folded in _TAXONOMY_LABELS and folded not in own_slugs)
+        ):
             continue
+        # `region`'s alphabet forces a higher floor than the rest — see _MIN_LEAKABLE_BY_BUCKET.
+        floor = _MIN_LEAKABLE_BY_BUCKET.get(bucket or "", _MIN_LEAKABLE)
         haystack = text.casefold()
-        leaked |= {value for value in fragments if value in haystack}
+        leaked |= {value for value in fragments if len(value) >= floor and value in haystack}
         slugged_text = _slug(text)
-        leaked |= {value for value, slugged in slugged_fragments.items() if slugged in slugged_text}
+        leaked |= {
+            value
+            for value, slugged in slugged_fragments.items()
+            if len(slugged) >= floor and slugged in slugged_text
+        }
     if isinstance(pseudonym, str):
         name = pseudonym.casefold()
         leaked |= {

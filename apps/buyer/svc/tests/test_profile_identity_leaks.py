@@ -124,9 +124,42 @@ def test_the_backstop_reports_every_fragment_that_rode_out_in_a_slug() -> None:
     could be made to refuse for some unrelated reason, and the point of the ticket is that
     the detector itself could not see into ``category_affinity``.
     """
-    from buyer_svc.profile import build_buckets, identity_leaks
+    from buyer_svc.profile import (
+        IdentityLeak,
+        build_buckets,
+        coarsen_budget_band,
+        coarsen_categories,
+        coarsen_frequency_tier,
+        coarsen_region,
+        identity_leaks,
+    )
 
-    profile = {"pseudonym": PSEUDONYM, "buckets": build_buckets(CONTAMINATED).model_dump()}
+    # T-164 CHANGED THE SETUP OF THIS TEST, and this comment is the record of why.
+    #
+    # The buckets used to be obtained as `build_buckets(CONTAMINATED)`. `build_buckets` is a
+    # public bucket-emitting entry point and now runs the R5 backstop itself, so on a
+    # deliberately contaminated account it raises instead of returning — which is the whole of
+    # T-164 and is asserted here rather than worked around.
+    #
+    # THE ASSERTION BELOW IS UNTOUCHED. What this test measures is the detector, not the
+    # builder: its own docstring says so ("the builder could be made to refuse for some
+    # unrelated reason, and the point of the ticket is that the detector itself could not see
+    # into `category_affinity`"). So the rung-0 buckets are now assembled from the five public
+    # per-facet coarseners — the same values `build_buckets` computes, by the same functions,
+    # in the same order — and `identity_leaks` is asked about those. Building them here rather
+    # than borrowing them from a guarded entry point makes the test measure strictly less
+    # apparatus than it did, which is the right direction for a detector test.
+    with pytest.raises(IdentityLeak):
+        build_buckets(CONTAMINATED)
+
+    buckets = {
+        "budget_band": coarsen_budget_band(CONTAMINATED),
+        "category_affinity": coarsen_categories(CONTAMINATED),
+        "frequency_tier": coarsen_frequency_tier(CONTAMINATED),
+        "region": coarsen_region(CONTAMINATED["region"]),
+        "first_time": not CONTAMINATED["orders"],
+    }
+    profile = {"pseudonym": PSEUDONYM, "buckets": buckets}
     leaked = identity_leaks(profile, CONTAMINATED)
     assert set(SMUGGLED) <= set(leaked), (
         f"the buyer's name, street and postal code reached {profile['buckets']} and the "

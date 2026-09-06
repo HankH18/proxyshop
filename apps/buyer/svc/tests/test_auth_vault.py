@@ -1144,6 +1144,16 @@ def test_the_identity_backstop_admits_an_address_word_inside_a_category_slug() -
     # And the other half of the same defect: the bucket values were concatenated before the
     # search, so a fragment could match across the seam between two values — reporting a
     # leak of a string no bucket ever held. Searching each value on its own removes it.
+    #
+    # UNCHANGED THROUGH T-197, and it took two tries to leave it alone. T-197 lowers the
+    # identity floor from four characters to three, which briefly made "ana" — a word of this
+    # buyer's `full_name` — visible inside `region` and turned this into `== ["ana"]`. That
+    # was the wrong repair: `region` can only ever hold what `coarsen_region` emits, which is
+    # ISO codes of two and three letters, so a three-character fragment matching in there is
+    # colliding with the code's alphabet, not being disclosed by it — and it would have locked
+    # the buyer surnamed Eng out of `GB-ENG` permanently. The floor for this one bucket
+    # therefore stays at four (`_MIN_LEAKABLE_BY_BUCKET`), and this assertion is right exactly
+    # as it was originally written.
     seam = {"full_name": "Ana  Bo", "email": "ab@example.com", "orders": []}
     assert (
         identity_leaks(
