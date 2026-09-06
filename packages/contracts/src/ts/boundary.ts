@@ -92,6 +92,25 @@ export const LIST_PRICE_CLAIM_KEY = "list_price";
 export const MAX_DISCOUNT_ROSTER_KEY = "max_discount_pct";
 
 /**
+ * The claim keys that state a discount AUTHORISATION — a permission somebody granted — rather
+ * than a fact about the product. The Python peer's `DISCOUNT_AUTHORISATION_CLAIM_KEYS`, same
+ * two names: `authorized_discount_pct` is what the hosted `authorize_discount` hook mints, and
+ * `max_discount_pct` is the policy `Envelope`'s own spelling of the same number.
+ */
+const DISCOUNT_AUTHORISATION_CLAIM_KEYS: ReadonlySet<string> = new Set([
+  "authorized_discount_pct",
+  MAX_DISCOUNT_ROSTER_KEY,
+]);
+
+/** How far into a claim's opaque `value` the nested walks descend, and how many nodes they
+ * look at on the way. `Claim.value` is caller-shaped data, so a walk over it must terminate on
+ * a deeply nested or very wide payload as surely as on a flat one. Same numbers as the Python
+ * peer, deliberately: two doors that give up at different depths admit different bids.
+ */
+const NESTED_PROVENANCE_MAX_DEPTH = 6;
+const NESTED_PROVENANCE_MAX_NODES = 512;
+
+/**
  * Slack when reconciling a stated price against the price its declared depth prices out at, as
  * an absolute amount of currency rather than a float epsilon. Money is quoted to the cent, so an
  * honest rounded price sits a fraction of a cent under the exact one and a wall tightened to the
@@ -137,6 +156,22 @@ export const REASON_PRICE_UNRECONCILABLE = "price_unreconcilable";
  * fixable by repricing.
  */
 export const REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH = "discount_over_authorized_depth";
+/**
+ * An external submission states its OWN discount authorisation at a claim-bearing site the
+ * verification queue has no address for. At `bid.claims` the same statement is admitted and
+ * flagged by index; everywhere else there is no index to flag, and a permission slip nobody is
+ * ever asked to check is what this door must not mint. Kept apart from `unverifiable_claim_site`,
+ * which is about a non-hook SOURCE at such a site.
+ */
+export const REASON_UNVERIFIED_DISCOUNT_AUTHORISATION = "unverified_discount_authorisation";
+/**
+ * The walk over a claim's opaque `value` ran out of depth or of node budget before it had seen
+ * all of it, so this door cannot say the value carries no laundered provenance — only that it
+ * did not get that far. Refused on BOTH paths, like `schema_invalid`. Fail-closed because
+ * padding is free to whoever wrote the value: measured, 511 sibling containers ahead of the
+ * block, or one wrapper more than the depth bound, spent the budget before the walk reached it.
+ */
+export const REASON_CLAIM_VALUE_UNWALKABLE = "claim_value_unwalkable";
 
 /**
  * `price_unreconcilable` suffixes for the caller-supplied roster, named rather than spelled inline
@@ -326,21 +361,240 @@ export function parseTimestamp(value: unknown): Date | undefined {
  *
  * `addressable` is R18's admit-and-flag, available at `bid.claims` ONLY — see `offerClaimReasons`.
  */
-function sourceVerdict(
-  holder: unknown,
+/**
+ * The code points the shared trim removes. Spelled out rather than delegated to
+ * `String.prototype.trim()`, because that is NOT the same function as Python's `str.strip()`:
+ * Python strips the C0 separators U+001C–U+001F and U+0085, which `trim` does not, and `trim`
+ * strips U+FEFF, which Python does not. The set below is the UNION of the two, which is also the
+ * fail-closed choice — a source or a key recognisable only after trimming is one the walk would
+ * otherwise pass straight over. Identical, code point for code point, to the Python peer's
+ * `_TRIMMED_CODE_POINTS`.
+ */
+const TRIMMED_CODE_POINTS: ReadonlySet<string> = new Set([
+  "\u0009", "\u000a", "\u000b", "\u000c", "\u000d",
+  "\u001c", "\u001d", "\u001e", "\u001f",
+  "\u0020", "\u0085", "\u00a0", "\u1680",
+  "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005",
+  "\u2006", "\u2007", "\u2008", "\u2009", "\u200a",
+  "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff",
+]);
+
+/** `text` with the shared trim set stripped from both ends. The Python peer's `_trimmed`. */
+function trimmed(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && TRIMMED_CODE_POINTS.has(text.charAt(start))) start += 1;
+  while (end > start && TRIMMED_CODE_POINTS.has(text.charAt(end - 1))) end -= 1;
+  return text.slice(start, end);
+}
+
+/** A declared provenance source as a comparable string, and never a thrown exception. */
+function sourceText(raw: unknown): string {
+  try {
+    if (raw === null || raw === undefined) return "";
+    return trimmed(String(raw));
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Compare two keys by CODE POINT, which is how Python orders strings.
+ *
+ * `Array.prototype.sort`'s default compares UTF-16 code units, so an astral character sorts
+ * before U+E000–U+FFFF there and after it in Python. That is a different traversal order, and a
+ * different traversal order under a node budget is a different verdict — the defect this
+ * comparator exists to remove, not a tidiness preference.
+ */
+function compareByCodePoint(a: string, b: string): number {
+  const left = [...a];
+  const right = [...b];
+  const shared = Math.min(left.length, right.length);
+  for (let i = 0; i < shared; i += 1) {
+    const delta = (left[i]!.codePointAt(0) ?? 0) - (right[i]!.codePointAt(0) ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return left.length - right.length;
+}
+
+/**
+ * The entries of `node` in a CANONICAL order, when it is a container the nested walks may descend
+ * into. `undefined` for everything else — a string, a number, a boolean, a null.
+ *
+ * **Object entries are sorted by key.** Not tidiness: `Object.entries` hoists integer-like keys to
+ * the front in ascending numeric order while Python walks `dict.items()` in insertion order, so
+ * under a node budget that decides WHICH entries get seen the two doors reached different
+ * verdicts on identical bytes — measured, an object of 512 keys with the provenance block written
+ * first and 511 integer-like keys behind it was ADMITTED here and REFUSED by the Python door, and
+ * the same object with the keys the other way round reversed which door was fooled. Sorting makes
+ * the traversal canonical so the budget cuts both walks off at the same place.
+ *
+ * `isArray` travels with the entries because it decides the breadcrumb (`[0]` versus `.key`) and
+ * because a key check is a key check only on an object.
+ */
+function walkEntries(
+  node: unknown,
+): {entries: Array<[string, unknown]>; isArray: boolean} | undefined {
+  if (Array.isArray(node)) {
+    return {entries: node.map((child, index) => [String(index), child]), isArray: true};
+  }
+  const record = readRecord(node);
+  if (record === undefined) return undefined;
+  // `Object.entries` is own-and-enumerable, so a `__proto__`-shaped payload cannot smuggle a key
+  // in here the way it did through the eligibility read `readOwn` exists for.
+  const entries = Object.entries(record);
+  entries.sort((left, right) => compareByCodePoint(left[0], right[0]));
+  return {entries, isArray: false};
+}
+
+/**
+ * The provenance source `block` DECLARES, when it is a provenance block at all.
+ *
+ * `undefined` for everything else, and that is the whole of the answer to "would this reject
+ * legitimate structured values?". A record is read as provenance only when its `source` is a
+ * member of the protocol's own closed vocabulary. A value carrying
+ * `{provenance: "scraped it off their site"}`, or `{provenance: {source: "our CRM"}}`, is caller
+ * data and stays caller data. The Python peer's `_declared_provenance_source`.
+ */
+function declaredProvenanceSource(block: unknown): string | undefined {
+  const record = readRecord(block);
+  if (record === undefined) return undefined;
+  const source = sourceText(readOwn(record, "source"));
+  if (HOOK_PROVENANCE_SOURCES.has(source) || NON_HOOK_PROVENANCE_SOURCES.has(source)) {
+    return source;
+  }
+  return undefined;
+}
+
+/**
+ * Every provenance block reachable AT `block` — the record itself, or a list of them.
+ *
+ * The list arm is not generosity, it is a measured hole: a walk that recognised only a record
+ * under the key `provenance` was defeated by writing `{provenance: [<block>]}`, one bracket
+ * further out, and the laundered `seller_asserted` went back to being invisible. `Claim.value` is
+ * `unknown`, so the wrapper is free; the recogniser has to look through it.
+ */
+function declaredProvenanceSources(block: unknown, path: string): Array<[string, string]> {
+  const single = declaredProvenanceSource(block);
+  if (single !== undefined) return [[path, single]];
+  if (!Array.isArray(block)) return [];
+  const found: Array<[string, string]> = [];
+  block.forEach((element, index) => {
+    const source = declaredProvenanceSource(element);
+    if (source !== undefined) found.push([`${path}[${index}]`, source]);
+  });
+  return found;
+}
+
+/**
+ * Every protocol-shaped provenance block buried inside a claim's opaque `value` (T-161).
+ *
+ * Returns `[label, source]` pairs whose label is the breadcrumb the reason names the site by —
+ * `0.value.provenance`, `offer.commitments[0].value.grants[1].provenance` — so a refusal points at
+ * the key the block was written under rather than at the claim as a whole. Bounded in depth and in
+ * node count: the thing walked is caller data, and a walk over caller data that can be made not to
+ * terminate is a denial of service wearing a wall's clothes.
+ */
+function nestedProvenanceSources(
+  value: unknown,
+  label: string,
+): {found: Array<[string, string]>; truncated: boolean} {
+  const found: Array<[string, string]> = [];
+  let budget = NESTED_PROVENANCE_MAX_NODES;
+  let truncated = false;
+
+  const visit = (node: unknown, path: string, depth: number): void => {
+    const walk = walkEntries(node);
+    // Not a container at all — a string, a number, a boolean. Nothing was skipped.
+    if (walk === undefined) return;
+    if (depth > NESTED_PROVENANCE_MAX_DEPTH || budget <= 0) {
+      truncated = true;
+      return;
+    }
+    budget -= 1;
+    for (const [key, child] of walk.entries) {
+      const childPath = walk.isArray ? `${path}[${key}]` : `${path}.${key}`;
+      if (!walk.isArray && key === "provenance") {
+        const nested = declaredProvenanceSources(child, childPath);
+        if (nested.length > 0) {
+          // Judged here. Descending INTO a block already being judged would report the same
+          // statement twice under two labels.
+          found.push(...nested);
+          continue;
+        }
+      }
+      visit(child, childPath, depth + 1);
+    }
+  };
+
+  visit(value, `${label}.value`, 0);
+  return {found, truncated};
+}
+
+/** Does `value` state a discount authorisation anywhere inside it? (T-162.) */
+function mentionsDiscountAuthorisation(value: unknown): boolean {
+  let budget = NESTED_PROVENANCE_MAX_NODES;
+
+  const visit = (node: unknown, depth: number): boolean => {
+    if (depth > NESTED_PROVENANCE_MAX_DEPTH || budget <= 0) return false;
+    const walk = walkEntries(node);
+    if (walk === undefined) return false;
+    budget -= 1;
+    for (const [key, child] of walk.entries) {
+      if (!walk.isArray && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) return true;
+      if (visit(child, depth + 1)) return true;
+    }
+    return false;
+  };
+
+  return visit(value, 0);
+}
+
+/** Is `claim` a statement about what the exchange PERMITS, rather than about the product? */
+function assertsDiscountAuthorisation(claim: unknown): boolean {
+  const record = readRecord(claim);
+  if (record === undefined) return false;
+  const key = readOwn(record, "key");
+  if (typeof key === "string" && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) return true;
+  return mentionsDiscountAuthorisation(readOwn(record, "value"));
+}
+
+/**
+ * T-162. A submitted claim of one's OWN discount authority is not evidence of the authority.
+ *
+ * `authorized_discount_pct` decides how far below list a bid may price. On the hosted path a grant
+ * of that depth had to survive `store_agent/hooks/provenance.py`, which holds the hook ledger and
+ * the approved envelope. The external path meets no such wall — this door holds no ledger — so the
+ * only thing it could judge about such a claim was the shape of the `provenance` block sitting
+ * next to it, and an external submitter writes that block too.
+ *
+ * Flagged rather than refused at `bid.claims`: R18 already says an external agent may assert
+ * freely there, and the addressable channel exists so an assertion can be admitted AND routed to
+ * verification. At the sites with no index to flag it is refused instead.
+ */
+function authorisationVerdict(
+  claim: unknown,
   path: BidPathName,
   label: string,
   addressable: boolean,
 ): {reasons: string[]; needsVerification: boolean} {
-  const record = readRecord(holder);
-  const provenance = readRecord(record?.["provenance"]);
-  if (record === undefined || record["provenance"] === null || record["provenance"] === undefined) {
-    return {reasons: [`${REASON_CLAIM_WITHOUT_PROVENANCE}:${label}`], needsVerification: false};
+  if (path !== EXTERNAL_PATH || !assertsDiscountAuthorisation(claim)) {
+    return {reasons: [], needsVerification: false};
   }
-  const source = String(provenance?.["source"] ?? "").trim();
-  if (source === "") {
-    return {reasons: [`${REASON_CLAIM_PROVENANCE_EMPTY_SOURCE}:${label}`], needsVerification: false};
-  }
+  if (addressable) return {reasons: [], needsVerification: true};
+  return {
+    reasons: [`${REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:${label}`],
+    needsVerification: false,
+  };
+}
+
+/** The R8/R18/S5 table for ONE declared provenance source. */
+function verdictForSource(
+  source: string,
+  path: BidPathName,
+  label: string,
+  addressable: boolean,
+): {reasons: string[]; needsVerification: boolean} {
   if (HOOK_PROVENANCE_SOURCES.has(source)) return {reasons: [], needsVerification: false};
   if (NON_HOOK_PROVENANCE_SOURCES.has(source)) {
     if (path === HOSTED_PATH) {
@@ -364,6 +618,50 @@ function sourceVerdict(
   };
 }
 
+function sourceVerdict(
+  holder: unknown,
+  path: BidPathName,
+  label: string,
+  addressable: boolean,
+): {reasons: string[]; needsVerification: boolean} {
+  const record = readRecord(holder);
+  const provenance = readRecord(record?.["provenance"]);
+  if (record === undefined || record["provenance"] === null || record["provenance"] === undefined) {
+    return {reasons: [`${REASON_CLAIM_WITHOUT_PROVENANCE}:${label}`], needsVerification: false};
+  }
+  const source = sourceText(provenance === undefined ? undefined : readOwn(provenance, "source"));
+  if (source === "") {
+    return {reasons: [`${REASON_CLAIM_PROVENANCE_EMPTY_SOURCE}:${label}`], needsVerification: false};
+  }
+
+  const verdict = verdictForSource(source, path, label, addressable);
+  const reasons = [...verdict.reasons];
+  let needsVerification = verdict.needsVerification;
+
+  // T-161. `Claim.value` is `unknown`, so a claim can carry a whole SECOND provenance block inside
+  // its value, and a door that judged only the block hanging directly off the holder was defeated
+  // by writing the evidence one level down. The verdict is the STRICTEST over the holder's own
+  // source and every nested one: a claim is judged by where it came from, never by which field —
+  // or which depth — it was written at. Mirrors the Python peer exactly; the two doors may not
+  // disagree about what one payload is.
+  const nestedWalk = nestedProvenanceSources(readOwn(record, "value"), label);
+  for (const [nestedLabel, nestedSource] of nestedWalk.found) {
+    const nested = verdictForSource(nestedSource, path, nestedLabel, addressable);
+    reasons.push(...nested.reasons);
+    needsVerification = needsVerification || nested.needsVerification;
+  }
+
+  // The walk stopped early, so "no laundered provenance in here" is not something this door
+  // measured — it is something it ran out of budget before measuring. Refuse rather than admit on
+  // the strength of a look that did not finish.
+  if (nestedWalk.truncated) {
+    reasons.push(`${REASON_CLAIM_VALUE_UNWALKABLE}:${label}`);
+    needsVerification = false;
+  }
+
+  return {reasons, needsVerification};
+}
+
 /**
  * Per-claim provenance verdicts over one list of claims.
  *
@@ -385,7 +683,13 @@ function claimProvenanceReasons(
     const label = site === undefined ? String(index) : `${site}[${index}]`;
     const verdict = sourceVerdict(claim, path, label, site === undefined);
     reasons.push(...verdict.reasons);
-    if (verdict.needsVerification) unverified.push(index);
+
+    // T-162, judged separately from the source because it is a different question: the source
+    // says where the statement came from, this says what the statement is ABOUT.
+    const authorisation = authorisationVerdict(claim, path, label, site === undefined);
+    reasons.push(...authorisation.reasons);
+
+    if (verdict.needsVerification || authorisation.needsVerification) unverified.push(index);
   });
 
   return {reasons, unverified};

@@ -75,15 +75,25 @@ def _check(bid: Any, path: str) -> Any:
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-161: _source_verdict reads only holder['provenance'], so a seller_asserted block "
-        "nested inside a hook-provenanced claim's opaque `value` is neither refused on the "
-        "hosted path nor flagged for verification — measured ok=True, reasons=[], "
-        "requires_verification=False; remove this marker with the fix"
-    ),
-)
+# TEST EDIT — the `xfail(strict=True)` marker that stood here was REMOVED, and nothing else in
+# this node changed. No assertion was touched: the two below are byte-identical to the ones the
+# marker was written around.
+#
+#   `assert control.ok is False` — the positive control: the same seller_asserted block written
+#   at the TOP level must still be refused on the hosted path.
+#   `assert result.ok is False or result.requires_verification is True` — the nested block must
+#   not be admitted clean.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No — it would be RIGHT and RED, which
+# is what it was for. Reverting `_source_verdict`'s nested walk in a scratch copy outside the
+# repo returned this node to `AssertionError: ... admitted clean: ok=True reasons=[]
+# requires_verification=False`, the verbatim text of the reproduction. The marker was removed
+# because the defect is gone, not because the test was.
+#
+# MEASUREMENT that established the defect is gone: `_source_verdict` now takes the STRICTEST
+# verdict over the holder's own provenance and every protocol-shaped provenance block nested in
+# its opaque `value` (`_nested_provenance_sources`), so the payload below answers
+# `ok=False, reasons=['hosted_non_hook_provenance:0.value.provenance:seller_asserted']`.
 def test_a_provenance_nested_in_a_claim_value_is_not_invisible_to_the_hosted_door() -> None:
     """Wrapping the evidence one level down must not launder it.
 
@@ -137,15 +147,22 @@ def test_a_provenance_nested_in_a_claim_value_is_not_invisible_to_the_hosted_doo
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-162: an external submitter's own claim of authorized_discount_pct is admitted "
-        "clean by validate_bid on the external path (ok=True, reasons=[], "
-        "requires_verification=False) — the store-agent's hook-ledger guard has no equivalent "
-        "on this door; remove this marker with the fix"
-    ),
-)
+# TEST EDIT — the `xfail(strict=True)` marker that stood here was REMOVED. The single assertion
+# below is untouched:
+#
+#   `assert result.ok is False or result.requires_verification is True` — an external submission
+#   stating its own discount authorisation may not be admitted with nothing said.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No. Reverting the `_authorisation_verdict`
+# call in `_claim_provenance_reasons` in a scratch copy outside the repo returned this node to
+# `AssertionError: an external submission stating its own discount authorisation was admitted
+# with nothing said: ok=True reasons=[] requires_verification=False unverified_claim_indexes=[]`.
+#
+# MEASUREMENT that established the defect is gone: on the external path a claim naming
+# `authorized_discount_pct` or `max_discount_pct` — as its key or anywhere inside its value — is
+# now routed to verification by index, so the payload below answers `ok=True,
+# requires_verification=True, unverified_claim_indexes=[0]`. The test's own docstring names that
+# as one of the two repairs it accepts.
 def test_an_external_submitters_self_asserted_discount_authorisation_is_not_taken_on_trust() -> (
     None
 ):
@@ -285,16 +302,25 @@ def test_the_pinned_external_bid_door_is_actually_served() -> None:
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-194: the TypeScript door validates through ajv WITH ajv-formats, so format: "
-        "date-time is enforced on all eight timestamp fields; the Python door validates "
-        "through generated pydantic where they are bare str, so it admits provenance."
-        "observed_at='not-a-date' with ok=True, reasons=[] where the TS door answers "
-        "schema_invalid; remove this marker with the fix"
-    ),
-)
+# TEST EDIT — the `xfail(strict=True)` marker that stood here was REMOVED. Both assertions are
+# untouched:
+#
+#   `assert observed_at.get("format") == "date-time"` — the positive control: the published
+#   bundle must still declare the format this test says was unenforced.
+#   `assert result.ok is False` — the Python door must refuse a timestamp the bundle declares
+#   invalid and the TypeScript door already refuses.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No. Reverting the
+# `_date_time_format_reasons` call in `validate_bid` in a scratch copy outside the repo returned
+# this node to `AssertionError: the Python door admitted a provenance timestamp the published
+# schema declares invalid and the TypeScript door refuses: ok=True reasons=[]`.
+#
+# MEASUREMENT that established the defect is gone: `validate_bid` now walks the `format: date-time`
+# positions the bundle declares and that a `Bid` can reach — every `provenance.observed_at`,
+# `offer.expires_at`, and `issued_at` on a signed submission — with `_is_rfc3339_date_time`, which
+# mirrors `ajv-formats`' own grammar rather than a stricter reading, so the two doors admit the
+# same set. The payload below answers `ok=False,
+# reasons=['schema_invalid:claims.0.provenance.observed_at']`.
 def test_the_python_door_enforces_the_date_time_format_the_typescript_door_enforces() -> None:
     """One bid, two doors, two answers — and the wire format is the thing they disagree about.
 

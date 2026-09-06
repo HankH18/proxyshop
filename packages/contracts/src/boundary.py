@@ -56,6 +56,7 @@ its verdict is the R8/R18/S5 table and nothing more. Use `validate_external_subm
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -122,6 +123,42 @@ LIST_PRICE_CLAIM_KEY = "list_price"
 #: chooses, which is the whole defect this closes.
 MAX_DISCOUNT_ROSTER_KEY = "max_discount_pct"
 
+#: The claim keys that state a discount AUTHORISATION — a permission somebody granted —
+#: rather than a fact about the product. `authorized_discount_pct` is what the hosted
+#: `authorize_discount` hook mints, and `max_discount_pct` is the policy `Envelope`'s own
+#: spelling of the same number (the roster key above); one name means one thing on both sides
+#: of the wall, so both are read here.
+#:
+#: They matter on the EXTERNAL path only (T-162). A hosted claim of this shape had to come out
+#: of `store_agent/hooks/provenance.py`, which holds the hook ledger and the approved envelope
+#: and refuses a depth that was never granted. A Tier-2 store never meets that wall, and this
+#: door holds no ledger of its own — so a submission asserting its own authorisation is not
+#: evidence of the authorisation, and it may not be admitted as settled fact. See
+#: `_authorisation_verdict`.
+DISCOUNT_AUTHORISATION_CLAIM_KEYS: frozenset[str] = frozenset(
+    {"authorized_discount_pct", MAX_DISCOUNT_ROSTER_KEY}
+)
+
+#: How far into a claim's opaque `value` the nested-provenance walk descends, and how many
+#: nodes it will look at on the way. `Claim.value` is typed `Any`, so it is caller-shaped data
+#: and a walk over it has to terminate on a deeply nested or very wide payload as surely as it
+#: terminates on a flat one. Both limits are far above any real claim value and far below
+#: anything that costs measurable time.
+NESTED_PROVENANCE_MAX_DEPTH = 6
+NESTED_PROVENANCE_MAX_NODES = 512
+
+#: The `format: date-time` positions of `packages/contracts/schemas/protocol.schema.json` that
+#: are REACHABLE FROM A BID, by the object that declares them. The bundle declares eight in
+#: all; the other five hang off `Intent`, `BidRequest`, `LedgerEvent`, `TrustDimensionState`
+#: and the bare `SigningEnvelope`, none of which a `Bid` contains, so this door never sees
+#: them. Listed rather than derived for the same reason `HOOK_PROVENANCE_SOURCES` is: the
+#: bundle is the source of truth and the test reads it as its own positive control, so a
+#: field added to the schema and not to this tuple shows up as a red gate rather than as
+#: silence.
+PROVENANCE_DATE_TIME_FIELDS: tuple[str, ...] = ("observed_at",)
+OFFER_DATE_TIME_FIELDS: tuple[str, ...] = ("expires_at",)
+SUBMISSION_DATE_TIME_FIELDS: tuple[str, ...] = ("issued_at",)
+
 #: Slack when reconciling a stated price against the price its declared depth prices out at, as
 #: an absolute amount of currency rather than a float epsilon. Money is quoted to the cent, so
 #: 19.99 less an honest 15% is 16.9915 and the honest rounded price sits a fraction of a cent
@@ -169,6 +206,28 @@ REASON_PRICE_UNRECONCILABLE = "price_unreconcilable"
 #: rejection log needs to be able to tell "your arithmetic is wrong" from "you awarded yourself
 #: a discount nobody approved", because only one of those is fixable by repricing.
 REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH = "discount_over_authorized_depth"
+#: An external submission states its OWN discount authorisation at a claim-bearing site the
+#: verification queue has no address for. At `bid.claims` the same statement is admitted and
+#: flagged (R18's admit-and-flag, by index); everywhere else there is no index to flag, and a
+#: permission slip nobody is ever asked to check is exactly what this door must not mint. Kept
+#: apart from `unverifiable_claim_site`, which is about a non-hook SOURCE at such a site: a
+#: seller reading its rejection log needs to tell "you asserted this yourself" from "you
+#: granted yourself a permission", because they are different repairs.
+REASON_UNVERIFIED_DISCOUNT_AUTHORISATION = "unverified_discount_authorisation"
+#: The walk over a claim's opaque `value` ran out of depth or of node budget before it had
+#: seen all of it, so this door cannot say the value carries no laundered provenance — it can
+#: only say it did not get that far. Refused on BOTH paths, like `schema_invalid`: it is not a
+#: statement about who is speaking, it is the wall reporting that it could not finish looking.
+#:
+#: Fail-closed here is not a preference, it is the difference between a wall and a decoration.
+#: Measured: with truncation silent, 511 sibling containers written ahead of the block — or one
+#: wrapper more than `NESTED_PROVENANCE_MAX_DEPTH` around it — spent the budget before the walk
+#: reached it, and a `seller_asserted` provenance went straight back to being invisible to the
+#: hosted door. Padding is free to an attacker, so a bound that fails OPEN is a bound that
+#: publishes its own bypass. It is the same rule R12 applies to an unavailable eligibility
+#: read, and the same one `authorized_depth_unavailable` applies to a roster that cannot
+#: price what it admits.
+REASON_CLAIM_VALUE_UNWALKABLE = "claim_value_unwalkable"
 
 #: `price_unreconcilable` suffixes for the exchange-supplied roster, named rather than spelled
 #: inline so a caller can match on them without pattern-matching a sentence. A roster is EVIDENCE
@@ -375,6 +434,387 @@ def parse_timestamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+#: ECMAScript's `\s`, spelled out code point by code point.
+#:
+#: It is NOT Python's `\s`, and the difference is load-bearing here: Python's matches the C0
+#: separators U+001C–U+001F and U+0085, which ECMAScript's does not, and ECMAScript's matches
+#: U+FEFF, which Python's does not. `ajv-formats` splits a `date-time` on `/t|\s/i`, so this set
+#: decides which strings the OTHER door reads as a date and a time — and a Python `\s` here would
+#: make the two doors disagree about the separator itself. Same reasoning as T-115's, which
+#: spells the published `denial_reason` pattern's run of blanks by code point for this exact
+#: reason.
+_JS_WHITESPACE = (
+    "\t\n\v\f\r \xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+#: `ajv-formats`' `DATE_TIME_SEPARATOR`, which is `/t|\s/i` — a `t` in either case, or one of the
+#: code points above. The separator is SPLIT on rather than matched, which is why a value with a
+#: second separator anywhere in it (a trailing newline, say) is refused: the split must yield
+#: exactly two parts.
+_DATE_TIME_SEPARATOR = re.compile("[tT" + re.escape(_JS_WHITESPACE) + "]")
+
+#: `ajv-formats`' `DATE` and `TIME`, transcribed. `[0-9]` rather than `\d` because JavaScript's
+#: `\d` is ASCII-only while Python's is every Unicode decimal digit — `٢٠٢٦-٠١-٠١T٠٠:٠٠:٠٠Z` is a
+#: date to one and not to the other. `\Z` rather than `$` because Python's `$` also matches just
+#: before a trailing newline and JavaScript's does not.
+_DATE_SHAPE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})\Z")
+_TIME_SHAPE = re.compile(
+    r"^(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2}):(?P<second>[0-9]{2}(?:\.[0-9]+)?)"
+    r"(?:(?P<zulu>[Zz])|(?P<sign>[+-])(?P<tz_hour>[0-9]{2})(?::?(?P<tz_minute>[0-9]{2}))?)?\Z"
+)
+
+_DAYS_IN_MONTH = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
+def _is_leap_year(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def _is_rfc3339_date(text: str) -> bool:
+    """`ajv-formats`' `date`, transcribed: the shape, then a real day of a real month."""
+    match = _DATE_SHAPE.match(text)
+    if match is None:
+        return False
+    year, month, day = int(match[1]), int(match[2]), int(match[3])
+    if not 1 <= month <= 12 or day < 1:
+        return False
+    days = 29 if (month == 2 and _is_leap_year(year)) else _DAYS_IN_MONTH[month - 1]
+    return day <= days
+
+
+def _is_rfc3339_time(text: str) -> bool:
+    """`ajv-formats`' `time(str, strictTimeZone=true)`, transcribed.
+
+    Three details that are easy to get wrong and that were each measured wrong before this:
+
+    * **the offset is range-checked.** `+24:00`, `+00:60`, `+99:99` and `+9999` are all shapes a
+      regex admits and `ajv` refuses (`tzH > 23 || tzM > 59`).
+    * **the leap second is judged in UTC, not locally.** `23:59:60` is only a leap second at
+      Greenwich; `18:59:60-05:00` is the same instant and is equally valid, while
+      `23:59:60+01:00` is not a leap second at all. `ajv` converts to UTC and then asks whether
+      the result is the last minute of a day, and so does this.
+    * **the seconds are a real number, not an integer** — `00.5` — because the fraction is part of
+      the grammar and the comparison `sec < 60` is made against it.
+    """
+    match = _TIME_SHAPE.match(text)
+    if match is None:
+        return False
+
+    hour, minute = int(match["hour"]), int(match["minute"])
+    second = float(match["second"])
+
+    # `date-time` always carries an offset; a bare local time is a `time`, not a `date-time`.
+    if match["zulu"] is None and match["sign"] is None:
+        return False
+
+    tz_sign = -1 if match["sign"] == "-" else 1
+    tz_hour = int(match["tz_hour"] or 0)
+    tz_minute = int(match["tz_minute"] or 0)
+    if tz_hour > 23 or tz_minute > 59:
+        return False
+
+    if hour <= 23 and minute <= 59 and second < 60:
+        return True
+
+    utc_minute = minute - tz_minute * tz_sign
+    utc_hour = hour - tz_hour * tz_sign - (1 if utc_minute < 0 else 0)
+    return utc_hour in (23, -1) and utc_minute in (59, -1) and second < 61
+
+
+def _is_rfc3339_date_time(text: str) -> bool:
+    """Is `text` a value the published `format: date-time` admits?
+
+    Deliberately NOT `parse_timestamp`. That one is the EXPIRY reader and it is lenient on
+    purpose — epoch seconds, a naive wall clock, a `datetime` object — because its question is
+    "what instant is this". This one's question is "is this string the wire format the bundle
+    publishes", and the two answers differ exactly where T-194 lives: `parse_timestamp` reads
+    `2026-01-01T00:00:00` happily, and the published schema, ajv, and therefore the TypeScript
+    door do not.
+
+    **This is a transcription of `ajv-formats`' `date_time`, not an independent reading of RFC
+    3339, and that is the point.** The TypeScript door runs `addFormats(new Ajv2020(...))`, so
+    `ajv-formats` IS the published behaviour; a stricter grammar here would refuse timestamps the
+    other door admits, which is T-194's own defect with the doors swapped. A first attempt at
+    this predicate did exactly that, and 23 of 68 corpus strings disagreed across the doors — in
+    both directions — until it was replaced by this transcription.
+
+    The split-then-check shape is `ajv`'s own: ``str.split(/t|\\s/i)`` must yield exactly two parts,
+    which is what refuses a value carrying a second separator such as a trailing newline.
+    """
+    parts = _DATE_TIME_SEPARATOR.split(text)
+    return len(parts) == 2 and _is_rfc3339_date(parts[0]) and _is_rfc3339_time(parts[1])
+
+
+#: The code points a shared trim removes — spelled out one by one rather than delegated to
+#: `str.strip()` and `String.prototype.trim()`, because those two are NOT the same function.
+#: Python strips every code point `str.isspace()` calls whitespace, which includes the C0
+#: separators U+001C–U+001F and U+0085; ECMAScript's `trim` strips neither, and strips U+FEFF,
+#: which Python does not. So `"seller_asserted\u001c"` was one string to one door and a different
+#: string to the other — the two doors reading one payload differently, which is the whole defect
+#: class T-194 names. The set below is the UNION of the two, which is also the fail-closed
+#: choice: a source or a key that is only recognisable after trimming is one this door would
+#: otherwise walk straight past.
+#:
+#: Same reasoning as T-115's, which spells the published `denial_reason` pattern's run of blanks
+#: by code point instead of as `\s` for exactly this reason.
+_TRIMMED_CODE_POINTS = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _trimmed(text: str) -> str:
+    """`text` with the shared trim set stripped from both ends. The TypeScript peer's `trimmed`."""
+    return text.strip(_TRIMMED_CODE_POINTS)
+
+
+def _source_text(raw: Any) -> str:
+    """A declared provenance source as a comparable string, and NEVER a raised exception.
+
+    The expression this replaces — `str(getattr(raw, "value", raw) or "").strip()` — has three
+    ways to run arbitrary caller code: `getattr` on an object with a `__getattr__` trap, `or`
+    on an object whose `__bool__` raises, and `str` on one whose `__str__` raises. Each of them
+    turned "this bid is refused" into a 500 at the public boundary, which is the one observable
+    this module exists to keep distinct — `validate_bid` never raises on bad input, and a helper
+    that can is a helper that breaks that promise on someone else's behalf.
+    """
+    try:
+        return _trimmed(str(getattr(raw, "value", raw) or ""))
+    except Exception:  # noqa: BLE001 - a source that cannot be read is a source not stated
+        return ""
+
+
+def _key_text(key: Any) -> str:
+    """A container key as a breadcrumb segment, and NEVER a raised exception.
+
+    `f"{path}.{key}"` is not a formatting convenience when `key` came off the wire; it is a call
+    to `key.__format__`. A mapping key whose `__format__` or `__str__` raises escaped the walk
+    and came out of `validate_bid` as a 500. Measured: a claim value of
+    `{<key whose __format__ raises>: {"provenance": {...}}}` raised `RuntimeError` through
+    `_nested_provenance_sources`.
+    """
+    try:
+        return str(key)
+    except Exception:  # noqa: BLE001 - a key that cannot be read names nothing
+        return "<unreadable>"
+
+
+def _declared_provenance_source(block: Any) -> str | None:
+    """The provenance source `block` DECLARES, when it is a provenance block at all.
+
+    `None` for everything else, and that is the whole of the answer to "would this reject
+    legitimate structured values?". A mapping is only read as provenance when its `source` is a
+    member of the protocol's own closed vocabulary — one of the six hook sources or
+    `seller_asserted`. A value carrying `{"provenance": "scraped it off their site"}`, or
+    `{"provenance": {"source": "our CRM"}}`, is caller data and stays caller data; only a payload
+    wearing the vocabulary this door judges by is judged by it.
+    """
+    if not isinstance(block, Mapping):
+        return None
+    source = _source_text(_get(block, "source"))
+    if source in HOOK_PROVENANCE_SOURCES or source in NON_HOOK_PROVENANCE_SOURCES:
+        return source
+    return None
+
+
+def _declared_provenance_sources(block: Any, path: str) -> list[tuple[str, str]]:
+    """Every provenance block reachable AT `block` — the mapping itself, or a list of them.
+
+    The list arm is not generosity, it is a hole that was measured: a walk that recognised only a
+    mapping under the key `provenance` was defeated by writing `{"provenance": [<block>]}`, one
+    bracket further out, and the laundered `seller_asserted` went straight back to being
+    invisible. `Claim.value` is `Any`, so the wrapper is free; the recogniser has to look through
+    it. Anything that is neither a provenance mapping nor a list containing one answers `[]` and
+    is walked as ordinary caller data.
+    """
+    single = _declared_provenance_source(block)
+    if single is not None:
+        return [(path, single)]
+    if isinstance(block, Mapping) or isinstance(block, (str, bytes, bytearray)):
+        return []
+    if not isinstance(block, Sequence):
+        return []
+    try:
+        entries = list(enumerate(block))
+    except Exception:  # noqa: BLE001 - a list that cannot be read stated nothing
+        return []
+    found: list[tuple[str, str]] = []
+    for index, element in entries:
+        source = _declared_provenance_source(element)
+        if source is not None:
+            found.append((f"{path}[{index}]", source))
+    return found
+
+
+def _walk_entries(node: Any) -> tuple[list[tuple[str, Any]], bool] | None:
+    """`node`'s entries as `(key_text, child)` pairs in a CANONICAL order, or `None`.
+
+    `None` for anything the nested walks may not descend into — a string, a number, a boolean,
+    anything that is neither a mapping nor a sequence.
+
+    **Mapping entries are sorted by key.** Not tidiness: the two doors iterate one object in
+    different orders. Python walks `dict.items()` in insertion order; JavaScript's
+    `Object.entries` hoists integer-like keys to the front in ascending numeric order. Under a
+    node budget that decides WHICH entries get seen, a different order is a different verdict —
+    measured, an object of 512 keys with the provenance block written first and 511 integer-like
+    keys behind it was REFUSED by this door and ADMITTED by the TypeScript one, and the same
+    object with the keys the other way round reversed which door was fooled. Sorting by the key's
+    text makes the traversal canonical, so the budget cuts both walks off at the same place. The
+    TypeScript peer sorts by code point to match Python's own string ordering.
+
+    Sequence entries keep index order, which both languages already agree on.
+    """
+    if isinstance(node, Mapping):
+        try:
+            items = list(node.items())
+        except Exception:  # noqa: BLE001 - a mapping that cannot be read stated nothing
+            return None
+        try:
+            return sorted(((_key_text(k), v) for k, v in items), key=lambda kv: kv[0]), True
+        except Exception:  # noqa: BLE001 - entries that cannot be read state nothing
+            return None
+    if isinstance(node, (str, bytes, bytearray)) or not isinstance(node, Sequence):
+        return None
+    try:
+        return [(str(index), child) for index, child in enumerate(node)], False
+    except Exception:  # noqa: BLE001 - a sequence that cannot be read stated nothing
+        return None
+
+
+def _nested_provenance_sources(value: Any, label: str) -> tuple[list[tuple[str, str]], bool]:
+    """Every protocol-shaped provenance block buried inside a claim's opaque `value`.
+
+    Returns `(label, source)` pairs, where the label is the breadcrumb the reason string names
+    the site by — `0.value.provenance`, `offer.commitments[0].value.grants[1].provenance` — so a
+    refusal points at the exact key the block was written under rather than at the claim as a
+    whole.
+
+    Bounded in depth and in node count (`NESTED_PROVENANCE_MAX_DEPTH`,
+    `NESTED_PROVENANCE_MAX_NODES`): the thing being walked is caller-shaped data, and a walk over
+    caller-shaped data that can be made not to terminate is a denial of service wearing a wall's
+    clothes. Nothing raises out of here for the same reason `_get` never raises — a value that
+    cannot be read is a value that stated nothing.
+    """
+    found: list[tuple[str, str]] = []
+    budget = NESTED_PROVENANCE_MAX_NODES
+    truncated = False
+
+    def visit(node: Any, path: str, depth: int) -> None:
+        nonlocal budget, truncated
+        if _walk_entries(node) is None:
+            # Not a container at all — a string, a number, a boolean. Nothing was skipped.
+            return
+        if depth > NESTED_PROVENANCE_MAX_DEPTH or budget <= 0:
+            truncated = True
+            return
+        entries, is_mapping = _walk_entries(node) or ([], False)
+        budget -= 1
+        for key, child in entries:
+            child_path = f"{path}.{key}" if is_mapping else f"{path}[{key}]"
+            if is_mapping and key == "provenance":
+                nested = _declared_provenance_sources(child, child_path)
+                if nested:
+                    found.extend(nested)
+                    # Judged here. Descending INTO a block already being judged would report the
+                    # same statement twice under two labels.
+                    continue
+            visit(child, child_path, depth + 1)
+
+    visit(value, f"{label}.value", 0)
+    return found, truncated
+
+
+def _mentions_discount_authorisation(value: Any) -> bool:
+    """Does `value` state a discount authorisation anywhere inside it?
+
+    Same bounded walk as `_nested_provenance_sources`, same reason: `Claim.value` is `Any`, so
+    the permission can be written at the top (`{"authorized_discount_pct": 25.0}`) or one
+    wrapper down (`{"policy": {"max_discount_pct": 25.0}}`), and a check that read only the top
+    would be defeated by the same one-keystroke move this module has already been defeated by
+    twice.
+    """
+    budget = NESTED_PROVENANCE_MAX_NODES
+
+    def visit(node: Any, depth: int) -> bool:
+        nonlocal budget
+        if depth > NESTED_PROVENANCE_MAX_DEPTH or budget <= 0:
+            return False
+        walk = _walk_entries(node)
+        if walk is None:
+            return False
+        entries, is_mapping = walk
+        budget -= 1
+        for key, child in entries:
+            if is_mapping and _trimmed(key) in DISCOUNT_AUTHORISATION_CLAIM_KEYS:
+                return True
+            if visit(child, depth + 1):
+                return True
+        return False
+
+    return visit(value, 0)
+
+
+def _asserts_discount_authorisation(claim: Any) -> bool:
+    """Is `claim` a statement about what the exchange PERMITS, rather than about the product?"""
+    key = _get(claim, "key")
+    if isinstance(key, str) and _trimmed(key) in DISCOUNT_AUTHORISATION_CLAIM_KEYS:
+        return True
+    return _mentions_discount_authorisation(_get(claim, "value"))
+
+
+def _authorisation_verdict(
+    claim: Any, path: str, label: str, *, addressable: bool
+) -> tuple[list[str], bool]:
+    """T-162. A submitted claim of one's OWN discount authority is not evidence of the authority.
+
+    `authorized_discount_pct` is the number that decides how far below list a bid may price. On
+    the hosted path a grant of that depth had to survive `store_agent/hooks/provenance.py`, which
+    holds the hook ledger and the approved envelope and refuses a depth that was never granted.
+    The external path meets no such wall — this door holds no ledger, no envelope and no catalog
+    — so the only thing it could judge about such a claim was the shape of the `provenance` block
+    sitting next to it, and an external submitter writes that block too. Measured before this:
+    `make_claim("policy", {"authorized_discount_pct": 25.0}, HOOK_PROVENANCE)` came back
+    `ok=True, reasons=[], requires_verification=False` on the external path — a permission slip
+    the submitter wrote for itself, admitted as settled fact with nobody told to look at it.
+
+    The verdict is the weakest one that closes that, and it is deliberately NOT a refusal at
+    `bid.claims`: R18 already says an external agent may assert freely there, and the addressable
+    channel exists precisely so an assertion can be admitted AND routed to verification. So the
+    claim is flagged, by index, exactly like a `seller_asserted` one. At the sites with no index
+    to flag it is refused instead, for the same reason `_offer_claim_reasons` refuses there.
+
+    Hosted claims are untouched. This is not a second opinion about the hook ledger; it is the
+    door that has no ledger declining to pretend it does.
+    """
+    if path != EXTERNAL_PATH or not _asserts_discount_authorisation(claim):
+        return [], False
+    if addressable:
+        return [], True
+    return [f"{REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:{label}"], False
+
+
+def _verdict_for_source(
+    source: str, path: str, label: str, *, addressable: bool
+) -> tuple[list[str], bool]:
+    """The R8/R18/S5 table for ONE declared provenance source. (reasons, needs_verification)."""
+    if source in HOOK_PROVENANCE_SOURCES:
+        return [], False
+    if source in NON_HOOK_PROVENANCE_SOURCES:
+        if path == HOSTED_PATH:
+            # R8/S5. A hosted agent cannot mint this source through any hook, so its presence
+            # means the statement did not come from one.
+            return [f"{REASON_HOSTED_NON_HOOK_PROVENANCE}:{label}:{source}"], False
+        if addressable:
+            # R18. Admitted, but it goes to verification before it is shown as fact.
+            return [], True
+        return [f"{REASON_UNVERIFIABLE_CLAIM_SITE}:{label}:{source}"], False
+
+    return [f"{REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE}:{label}:{source}"], False
+
+
 def _source_verdict(
     holder: Any, path: str, label: str, *, addressable: bool
 ) -> tuple[list[str], bool]:
@@ -398,24 +838,40 @@ def _source_verdict(
     if provenance is None:
         return [f"{REASON_CLAIM_WITHOUT_PROVENANCE}:{label}"], False
 
-    raw_source = _get(provenance, "source")
-    source = str(getattr(raw_source, "value", raw_source) or "").strip()
+    source = _source_text(_get(provenance, "source"))
     if not source:
         return [f"{REASON_CLAIM_PROVENANCE_EMPTY_SOURCE}:{label}"], False
 
-    if source in HOOK_PROVENANCE_SOURCES:
-        return [], False
-    if source in NON_HOOK_PROVENANCE_SOURCES:
-        if path == HOSTED_PATH:
-            # R8/S5. A hosted agent cannot mint this source through any hook, so its presence
-            # means the statement did not come from one.
-            return [f"{REASON_HOSTED_NON_HOOK_PROVENANCE}:{label}:{source}"], False
-        if addressable:
-            # R18. Admitted, but it goes to verification before it is shown as fact.
-            return [], True
-        return [f"{REASON_UNVERIFIABLE_CLAIM_SITE}:{label}:{source}"], False
+    reasons, needs_verification = _verdict_for_source(source, path, label, addressable=addressable)
 
-    return [f"{REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE}:{label}:{source}"], False
+    # T-161. `Claim.value` is typed `Any`, so a claim can carry a whole SECOND provenance block
+    # inside its value, and a door that judged only the block hanging directly off the holder was
+    # defeated by writing the evidence one level down: a hook-provenanced claim whose value was
+    # `{"provenance": <seller_asserted>}` came back `ok=True, reasons=[]` on the hosted path,
+    # while the identical block at the top level was refused out of hand. Same evidence, same
+    # bid, same door; only the key it was written under changed — which is T-135's field-name
+    # defect wearing a nested shape, and the same answer applies: a claim is judged by where it
+    # came from, never by which field it was written in.
+    #
+    # The verdict is therefore the STRICTEST over the holder's own source and every nested one.
+    # `_nested_provenance_sources` recognises only a block wearing the protocol's own closed
+    # source vocabulary, so a legitimate structured value carries on through untouched.
+    nested_sources, truncated = _nested_provenance_sources(_get(holder, "value"), label)
+    for nested_label, nested_source in nested_sources:
+        nested_reasons, nested_needs = _verdict_for_source(
+            nested_source, path, nested_label, addressable=addressable
+        )
+        reasons.extend(nested_reasons)
+        needs_verification = needs_verification or nested_needs
+
+    # The walk stopped early, so "no laundered provenance in here" is not something this door
+    # measured — it is something it ran out of budget before measuring. Refuse rather than admit
+    # on the strength of a look that did not finish; padding is free to whoever wrote the value.
+    if truncated:
+        reasons.append(f"{REASON_CLAIM_VALUE_UNWALKABLE}:{label}")
+        needs_verification = False
+
+    return reasons, needs_verification
 
 
 def _claim_provenance_reasons(
@@ -455,7 +911,17 @@ def _claim_provenance_reasons(
             claim, path, label, addressable=site is None
         )
         reasons.extend(claim_reasons)
-        if needs_verification:
+
+        # T-162. Judged separately from the source, because it is a different question: the
+        # source says where the statement came from, and this says what the statement is ABOUT.
+        # A claim of one's own authorisation is a claim about the exchange's permissions rather
+        # than about the product, and this door holds no ledger to check it against.
+        auth_reasons, needs_authorisation = _authorisation_verdict(
+            claim, path, label, addressable=site is None
+        )
+        reasons.extend(auth_reasons)
+
+        if needs_verification or needs_authorisation:
             unverified.append(index)
 
     return reasons, unverified
@@ -502,6 +968,91 @@ def _offer_claim_reasons(offer: Any, path: str) -> list[str]:
             discount, path, OFFER_DISCOUNT_SITE, addressable=False
         )
         reasons.extend(discount_reasons)
+
+    return reasons
+
+
+def _date_time_format_reasons(
+    bid: Any,
+    offer: Any,
+    *,
+    require_signing_envelope: bool,
+    already_reported: set[str] | None = None,
+) -> list[str]:
+    """T-194. The `format: date-time` the published bundle declares, enforced on THIS door too.
+
+    The two doors were not running the same schema check. `packages/contracts/src/ts/schemas.ts`
+    builds its validator as `addFormats(new Ajv2020(...))`, so every `format: date-time` in
+    `schemas/protocol.schema.json` is checked there. This door's schema step is
+    `model.model_validate(...)` against `generated/python/protocol.py`, where all eight of those
+    fields are typed as a bare `str` — datamodel-code-generator does not carry the `format`
+    keyword into the annotation, so pydantic never sees it. Measured on one payload:
+
+        claim.provenance.observed_at = "not-a-date"
+        python -> ok=True   reasons=[]
+        node   -> ok=false  reasons=["schema_invalid:claims.0.provenance.observed_at: ..."]
+
+    Two doors that admit different documents are not one contract, and the half that admits more
+    is the half a Tier-2 submitter picks.
+
+    Walked STRUCTURALLY, at the positions the schema declares, rather than by hunting field names
+    through the payload. `Claim.value` is typed `Any` and is caller-shaped data: a value that
+    happens to carry a key called `created_at` is not a protocol timestamp, and refusing it would
+    be inventing a constraint the bundle does not publish — the same defect as the one being
+    closed, pointed the other way.
+
+    Reported as `schema_invalid:<dotted path>` because that IS the schema check, spelled the way
+    the pydantic step above already spells a location (`offer.commitments.0.provenance`). The
+    ajv message text after the location was never a cross-language contract, and the parity table
+    in `test_boundary_dual_path.py` filters `schema_invalid` reasons out for exactly that reason.
+    """
+    reasons: list[str] = []
+    reported = already_reported or set()
+
+    def check(holder: Any, prefix: str, fields: tuple[str, ...]) -> None:
+        if holder is None:
+            return
+        for field in fields:
+            value = _get(holder, field)
+            # Strings only. `format` is a string-valued keyword in JSON Schema, so a number or a
+            # null here is the model's business and reporting it twice would mislabel it.
+            if not isinstance(value, str) or _is_rfc3339_date_time(value):
+                continue
+            # An empty prefix means the field sits on the bid itself. Spelled `issued_at` rather
+            # than `<root>.issued_at` because that is how the pydantic step spells a root-level
+            # location, and one field reported under two spellings is a second vocabulary nobody
+            # agreed to.
+            location = f"{prefix}.{field}" if prefix else field
+            if location in reported:
+                # The model already refused this exact field. Saying so again in the same words
+                # is not a second finding.
+                continue
+            reasons.append(f"{REASON_SCHEMA_INVALID}:{location}")
+
+    def check_claims(claims: Any, prefix: str) -> None:
+        if isinstance(claims, (str, bytes)) or not isinstance(claims, Sequence):
+            return
+        try:
+            walk = list(enumerate(claims))
+        except Exception:  # noqa: BLE001 - a list that cannot be read is not a list of claims
+            return
+        for index, claim in walk:
+            check(
+                _get(claim, "provenance"),
+                f"{prefix}.{index}.provenance",
+                PROVENANCE_DATE_TIME_FIELDS,
+            )
+
+    check_claims(_get(bid, "claims"), "claims")
+    check(offer, "offer", OFFER_DATE_TIME_FIELDS)
+    check_claims(_get(offer, "commitments"), "offer.commitments")
+    check(
+        _get(_get(offer, "discount"), "provenance"),
+        "offer.discount.provenance",
+        PROVENANCE_DATE_TIME_FIELDS,
+    )
+    if require_signing_envelope:
+        check(bid, "", SUBMISSION_DATE_TIME_FIELDS)
 
     return reasons
 
@@ -1114,9 +1665,18 @@ def validate_bid(
     #    the four envelope fields as schema violations — the mirror image of admitting a bid
     #    that has none of them.
     model = SignedBidSubmission if require_signing_envelope else Bid
+    #: The locations the model itself already complained about. A field the generated model has
+    #: refused does not also need the format walk's opinion: `observed_at=""` violates the
+    #: bundle's `minLength` AND its `format`, and reporting one field twice under the byte-
+    #: identical reason is a mislabelling, not a second finding — the same rule the price walk
+    #: states for `not_positive` and `below_price_floor`.
+    model_invalid_locations: set[str] = set()
     try:
         model.model_validate(_as_plain(bid))
     except ValidationError as exc:
+        model_invalid_locations = {
+            ".".join(str(part) for part in error["loc"]) for error in exc.errors()[:8]
+        }
         reasons.append(
             f"{REASON_SCHEMA_INVALID}:"
             + ";".join(
@@ -1127,11 +1687,24 @@ def validate_bid(
     except Exception:  # noqa: BLE001 - anything unparseable is simply not a Bid
         reasons.append(REASON_SCHEMA_INVALID)
 
+    #    ...and the half of the schema the generated model cannot express. `format: date-time`
+    #    is declared on eight fields of the published bundle and enforced by the TypeScript door;
+    #    the generated pydantic models type every one of them as a bare `str`, so it was enforced
+    #    on one door only (T-194). Path-insensitive, like every other schema question.
+    offer = _get(bid, "offer")
+    reasons.extend(
+        _date_time_format_reasons(
+            bid,
+            offer,
+            require_signing_envelope=require_signing_envelope,
+            already_reported=model_invalid_locations,
+        )
+    )
+
     # 2. Provenance, at EVERY claim-bearing site. Path-sensitive: this is the whole of R8/R18.
     #    `bid.claims` is not the only place a claim can be written down — the Offer is inside the
     #    bid boundary and carries `commitments` and a provenance-stamped `discount` — and a walk
     #    that covers one site is not an exclusivity property, it is a naming convention.
-    offer = _get(bid, "offer")
     claim_reasons, unverified = _claim_provenance_reasons(_get(bid, "claims"), path)
     reasons.extend(claim_reasons)
     reasons.extend(_offer_claim_reasons(offer, path))
@@ -1215,6 +1788,7 @@ __all__ = [
     "PRICE_RECONCILIATION_TOLERANCE",
     "REASON_CLAIM_PROVENANCE_EMPTY_SOURCE",
     "REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE",
+    "REASON_CLAIM_VALUE_UNWALKABLE",
     "REASON_CLAIM_WITHOUT_PROVENANCE",
     "REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH",
     "REASON_HOSTED_NON_HOOK_PROVENANCE",
@@ -1230,6 +1804,7 @@ __all__ = [
     "REASON_TRUST_SNAPSHOT_UNAVAILABLE",
     "REASON_UNKNOWN_PATH",
     "REASON_UNVERIFIABLE_CLAIM_SITE",
+    "REASON_UNVERIFIED_DISCOUNT_AUTHORISATION",
     "ROSTER_LIST_PRICE_CONTRADICTED",
     "ROSTER_LIST_PRICE_UNAVAILABLE",
     "ROSTER_LIST_PRICE_UNREADABLE",
