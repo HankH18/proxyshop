@@ -714,3 +714,225 @@ def test_feedback_match_evidence_can_never_lower_the_derived_floor(e6_as_of, e6_
 
     assert before == 5
     assert after == before, "one piece of buyer feedback demoted an established store"
+
+
+# ======================================================================================
+# T-320 / T-332 / T-333 -- the delisting seam, against the registry shapes it will meet
+# ======================================================================================
+class _LookupOnlyBlacklist:
+    """A registry that answers a keyed read and refuses iteration, counting both.
+
+    Not a strawman: this is the shape a Postgres-backed adapter over ``app.seller_blacklist``
+    has. That table is queried by ``business_identity``, and "materialise every row into this
+    process" is not what an adapter over it does -- so ``list(...)`` on it raises.
+    """
+
+    def __init__(self, inner: Blacklist) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    def lookup(self, business_identity: str) -> Any:
+        self.calls += 1
+        return self._inner.lookup(business_identity)
+
+
+def test_a_lapsed_listing_expires_against_a_registry_that_only_answers_lookups(e6_as_of):
+    """T-320. The expiry path is the only route back OFF the blacklist, and it needed iteration.
+
+    ``_lapsed_reasons`` read the registry with ``list(blacklist)`` inside a bare ``except``,
+    which made "this registry cannot be iterated" indistinguishable from "nothing has lapsed":
+    both produced no events. The direction was fail-closed -- the store stayed delisted rather
+    than being wrongly released -- so it was a coverage gap and not a security hole. It was
+    still a defect, because a store whose listing has expired was never re-listed and the only
+    signal was silence.
+
+    The expiry must also carry the reason the listing was OPENED with, not this module's own
+    ``trust_score_below_threshold``: ``blacklist_expired``'s published body is
+    ``(store_id, reason_code)``, and stamping the wrong reason on it files a false record of
+    why a delisting ended -- which is precisely what an appeal reads.
+    """
+    from apps.trust.src.snapshot.delisting import BLACKLIST_EXPIRED_KIND, delisting_events
+
+    inner = Blacklist()
+    inner.add(
+        business_identity="bad-co",
+        reason_code="manual_review",
+        status="active",
+        expires_at="2025-01-01T00:00:00Z",
+    )
+    registry = _LookupOnlyBlacklist(inner)
+    with pytest.raises(TypeError):
+        list(registry)
+
+    entry = {
+        "store_id": "s-lapsed",
+        "business_identity": "bad-co",
+        "score": 0.9,
+        "blacklisted": True,
+    }
+    events = delisting_events([entry], blacklist=registry, as_of=e6_as_of)
+
+    assert [event["kind"] for event in events] == [BLACKLIST_EXPIRED_KIND], (
+        f"a lapsed listing produced {events or 'nothing at all'} against a registry that "
+        f"answers lookups but not iteration, so the store stays delisted forever purely "
+        f"because of how its registry is implemented"
+    )
+    assert events[0]["payload"]["reason_code"] == "manual_review", (
+        "the expiry carries this module's own reason instead of the one the listing was "
+        "opened with, which files a false record of why the delisting ended"
+    )
+
+
+def test_the_registry_is_asked_about_each_store_exactly_once(e6_as_of):
+    """The cost invariant T-320's fix had to keep, measured on the shape it costs most on.
+
+    ``build_snapshot`` has two readers of the same rows: ``is_blacklisted`` once per store,
+    and the delisting seam, which needs each listing's status and expiry. The obvious repair
+    for T-320 -- ask ``lookup`` again per store -- doubles every read against a Postgres
+    table. ``_ReadOnceRegistry`` memoises the first reader's answers so the second is served
+    from them, which is why the expiry path works against a lookup-only registry at NO extra
+    read rather than at twice the reads.
+
+    Asserted as EQUALITY on purpose. ``>= 3`` would be satisfied by the doubling this exists
+    to prevent, and "the registry was consulted" is already pinned elsewhere; the claim here
+    is specifically "and not twice".
+    """
+    registry = _LookupOnlyBlacklist(Blacklist())
+    snapshot = build_snapshot(
+        [_store("s-1", "bi-1"), _store("s-2", "bi-2"), _store("s-3", "bi-3")],
+        blacklist=registry,
+        as_of=e6_as_of,
+    )
+
+    assert len(snapshot["stores"]) == 3
+    assert registry.calls == 3, (
+        f"the registry was read {registry.calls} times for three stores. Two readers inside "
+        f"one snapshot must share one answer per identity, or the delisting seam doubles "
+        f"every read against app.seller_blacklist."
+    )
+
+
+def test_a_snapshot_reads_one_answer_per_identity_even_when_the_registry_is_flaky(e6_as_of):
+    """The cached answer is the SAME answer, so one snapshot cannot contradict itself.
+
+    A registry that answered differently on a second read within one snapshot could report a
+    store blocked for ``blacklisted`` and clear for the expiry rule, in one served object.
+    Caching the first answer -- failures included -- is what makes a snapshot internally
+    consistent, and it is the fail-closed direction: the second reader inherits the first
+    reader's "unknown" rather than getting a second chance to release the store.
+    """
+
+    class _FlakyBlacklist:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def lookup(self, business_identity: str) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("pool exhausted")
+            raise AssertionError(
+                "the registry was read a second time for the same identity inside one "
+                "snapshot, so the two readers can disagree about the same store"
+            )
+
+    registry = _FlakyBlacklist()
+    snapshot = build_snapshot([_store("s-1", "bi-1")], blacklist=registry, as_of=e6_as_of)
+
+    assert snapshot["stores"]["s-1"]["blacklisted"] is True, "an unreadable registry must block"
+    assert registry.calls == 1
+    assert snapshot["delistings"] == [], (
+        "a store whose registry read failed produced a delisting decision anyway; an unknown "
+        "is a refusal, not an expiry"
+    )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_a_delisting_never_names_a_store_that_is_not_a_store(blank, e6_as_of):
+    """T-332. A blacklisting nobody can find is a blacklisting that did not happen.
+
+    ``delisting.py`` guarded ``store_id is None`` and stopped, while ``business_identity_of``
+    beside it does ``str(v).strip() or None``. So a blank id passed the guard and survived
+    every layer below -- ``validate_ledger_payload`` is presence-only for this field,
+    ``normalise_event`` accepts it, ``append`` writes the row.
+
+    The harm is not abstract: ``store.read(store_id=...)``, ``read_events(store_id=...)`` and
+    ``GET /events?store_id=`` all match on equality, so a delisting recorded against ``''``
+    is returned by none of them. And ``event_id`` is ``f"{kind}:{store_id}:{moment}"``, so
+    every blank-store delisting at one instant collapses onto ONE idempotency key.
+    """
+    from apps.trust.src.snapshot.delisting import delisting_events
+
+    entry = {
+        "store_id": blank,
+        "business_identity": "bad-co",
+        "score": 0.01,
+        "blacklisted": False,
+    }
+    assert delisting_events([entry], blacklist=Blacklist(), as_of=e6_as_of) == [], (
+        f"a store id of {blank!r} produced a delisting event that names no store"
+    )
+
+    # The control: the identical entry with a real store id DOES produce one, so the
+    # assertion above is measuring the guard and not a scenario that emits nothing anyway.
+    named = delisting_events(
+        [{**entry, "store_id": "s-real"}], blacklist=Blacklist(), as_of=e6_as_of
+    )
+    assert [event["payload"]["store_id"] for event in named] == ["s-real"]
+
+
+def test_a_delisting_body_is_validated_before_it_leaves_this_module(e6_as_of):
+    """T-333. The producing boundary that leaked is the one that did not validate.
+
+    Four sibling boundaries call ``validate_ledger_payload`` on the way out
+    (``exchange/auction/ledger.py``, ``merchant/svc/src/codes/ledger.py``,
+    ``buyer/svc/src/feedback/submission.py``, ``exchange/retrieval/fit.py``). This one did
+    not, so the only validation its events ever received lived in a test -- applied to events
+    the test itself constructed, which is a different object from the one production emits.
+
+    Graded by REMOVING a published key from what the module builds rather than by asserting
+    the call exists: an assertion that the validator is called can be satisfied by calling it
+    and ignoring the result.
+    """
+    from apps.trust.src.snapshot import delisting as module
+
+    entry = {
+        "store_id": "s-bad",
+        "business_identity": "bad-co",
+        "score": 0.01,
+        "blacklisted": False,
+    }
+    assert module.delisting_events([entry], blacklist=Blacklist(), as_of=e6_as_of), (
+        "the sub-threshold store no longer produces a blacklisting, so the refusal below "
+        "would be measuring the wrong absence"
+    )
+
+    # `_event` is the producing helper every delisting goes through, so it is where the
+    # validation has to sit. Handed a body missing a key its kind publishes, it must refuse
+    # rather than return an event the ledger will not accept.
+    complete = {
+        "store_id": "s-bad",
+        "reason_code": module.TRUST_SCORE_REASON_CODE,
+        "source": module.DELISTING_SOURCE,
+        "expires_at": None,
+    }
+    accepted = module._event(
+        module.BLACKLISTED_KIND, store_id="s-bad", as_of=e6_as_of, payload=dict(complete)
+    )
+    assert accepted["payload"] == complete, (
+        "a body that IS the published one was altered or refused, so this gate would be red "
+        "against a correct producer"
+    )
+
+    for dropped in ("reason_code", "source", "expires_at"):
+        partial = {key: value for key, value in complete.items() if key != dropped}
+        with pytest.raises(module.MalformedDelistingPayload) as refusal:
+            module._event(
+                module.BLACKLISTED_KIND, store_id="s-bad", as_of=e6_as_of, payload=partial
+            )
+        assert dropped in str(refusal.value), (
+            f"the refusal does not name the missing key {dropped!r}: {refusal.value}"
+        )
+        assert "s-bad" in str(refusal.value), (
+            "the refusal does not name the store it refused, so an operator reading it "
+            "cannot tell which decision went unrecorded"
+        )
