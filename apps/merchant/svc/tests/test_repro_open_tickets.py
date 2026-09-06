@@ -359,9 +359,12 @@ def test_t246_some_production_code_reads_the_envelope_activation_decision() -> N
     reads_the_accessor: list[str] = []
     consumes_an_envelope: list[str] = []
     for path in _product_python_files():
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:  # pragma: no cover - a product file that will not parse
+        # T-285: through `_parse`, not a bare `ast.parse`. The inline `except SyntaxError:
+        # continue` this replaces was not equivalent — under `-W error::SyntaxWarning` the
+        # identity.py:209 warning is raised AS a SyntaxError, so the bare site dropped that
+        # file from a scan that claims to walk every product file and still reported a pass.
+        tree = _parse(path)
+        if tree is None:  # pragma: no cover - a product file that will not parse
             continue
         if path not in definition_sites and "is_live" in _referenced_names(tree):
             reads_the_accessor.append(str(path.relative_to(REPO_ROOT)))
@@ -452,7 +455,11 @@ def test_t239_the_envelope_version_store_has_a_durability_seam() -> None:
     drivers: list[str] = []
     sealed_sql: list[str] = []
     for path in sorted(ENVELOPE_PKG.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # T-285: through `_parse`. This site never swallowed anything — a bare `ast.parse`
+        # here would have raised — so the added assertion keeps that loudness rather than
+        # letting `_parse`'s `None` return quietly skip an envelope module.
+        tree = _parse(path)
+        assert tree is not None, f"fixture error: {path} does not parse"
         drivers += [m for m in _imports_matching(tree, "") if m.split(".")[0] in DB_DRIVERS]
         sealed_sql += [
             f"{path.name}: {literal[:60]!r}"
@@ -674,21 +681,6 @@ def test_t285_the_syntax_warning_helper_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-285: `_parse` (this file) wraps ast.parse in catch_warnings/simplefilter('ignore', "
-        "SyntaxWarning) and its docstring names exactly why — services/ingest/src/er/"
-        "identity.py has \\s in a non-raw docstring — but the two call sites it was written "
-        "to replace (in test_t246 and test_t239) still call ast.parse bare, so the warning is "
-        "still charged to "
-        "test_t246_some_production_code_reads_the_envelope_activation_decision. Worse than "
-        "noise: under -W error::SyntaxWarning CPython raises the escalated warning as a "
-        "SyntaxError, which the bare site's `except SyntaxError: continue` swallows, silently "
-        "dropping identity.py from a scan that claims to walk every product file; remove this "
-        "marker with the fix"
-    ),
-)
 def test_t285_every_ast_parse_in_this_file_goes_through_the_muting_helper() -> None:
     """The helper is only a fix if the call sites use it.
 
