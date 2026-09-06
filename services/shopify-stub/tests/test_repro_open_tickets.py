@@ -322,14 +322,9 @@ def test_t255_is_redeemable_at_agrees_with_the_live_rejection_path() -> None:
     code = _t255_code()
     for cart_has_order_discount in (False, True):
         expected = (
-            code.rejection(
-                now=_T255_NOW, cart_has_order_discount=cart_has_order_discount
-            )
-            is None
+            code.rejection(now=_T255_NOW, cart_has_order_discount=cart_has_order_discount) is None
         )
-        observed = code.is_redeemable_at(
-            _T255_NOW, cart_has_order_discount=cart_has_order_discount
-        )
+        observed = code.is_redeemable_at(_T255_NOW, cart_has_order_discount=cart_has_order_discount)
         assert observed is expected, (
             f"with cart_has_order_discount={cart_has_order_discount!r} the redemption path "
             f"says redeemable={expected} and is_redeemable_at says {observed}. The helper "

@@ -364,9 +364,7 @@ def test_is_redeemable_at_agrees_with_rejection_on_every_cart_state() -> None:
             expected = (
                 code.rejection(now=NOW, cart_has_order_discount=cart_has_order_discount) is None
             )
-            observed = code.is_redeemable_at(
-                NOW, cart_has_order_discount=cart_has_order_discount
-            )
+            observed = code.is_redeemable_at(NOW, cart_has_order_discount=cart_has_order_discount)
             assert observed is expected, (
                 f"{label!r} with cart_has_order_discount={cart_has_order_discount!r}: "
                 f"rejection says redeemable={expected}, is_redeemable_at says {observed}"
