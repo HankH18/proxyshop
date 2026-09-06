@@ -485,6 +485,7 @@ def _bid_book(request: Request) -> Any:
 def collected_bid_records(
     candidates: Sequence[Mapping[str, Any]],
     entries: Sequence[Any],
+    projected: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Every bid this auction collected, in the shape ``accept()`` reads.
 
@@ -499,8 +500,8 @@ def collected_bid_records(
     carry the minted ``bid_id`` and the platform's domain, and are the same rows ``ranked``,
     ``excluded`` and ``shortlist.slots`` name.
 
-    **MEASURED DEFECT — they do not, and this paragraph used to assert they did.** The caller
-    below passes ``ranking["candidates"]``, and that is not the projection in
+    **MEASURED DEFECT, NOW REPAIRED (T-349); what follows is the record of it.** The caller
+    used to pass ``ranking["candidates"]`` alone, and that is not the projection in
     ``ranking/candidates.py``: ``ranking/__init__.py`` sets ``"candidates": rows``, the rank-ROW
     projection, whose keys are ``bid_id``, ``components``, ``eligible``, ``exclusion_reasons``,
     ``features``, ``price``, ``provenance_labels``, ``rank_score``, ``store_id``, ``trust``,
@@ -528,16 +529,32 @@ def collected_bid_records(
     * ``default_permalink`` reads ``variant_ref``/``variant_id``/``quantity`` off the offer, so
       the buyer is sent to ``/cart/1:1`` rather than to the ``/cart/77:3`` the store bid.
 
-    **The repair is not the one-line swap it looks like**, which is why it is written down here
-    rather than made in passing: this function gates on ``candidate.get("eligible")``, a key the
-    projection does not carry, so handing it the projected candidates records NOTHING and every
-    accept becomes ``unknown_bid``. The route also has no handle on the projection —
-    ``ranking.serving.rank_auction`` builds it locally and returns only ``rank()``'s output — so
-    a fix has to widen ``rank_auction``'s return or put ``offer``/``store_domain`` on the rank
-    row, and must leave ``_excluded_out``'s argument alone because that one does need the row.
-    Nothing else blocks it: across ``accept/**`` and ``checkout/**`` there is not one read of a
-    rank-row-only key. The defect predates this branch — ``git log -L`` dates the line to
-    ``ec4f2b4``, an ancestor of ``main``.
+    **The repair was not the one-line swap it looked like**, and the paragraph that said so is
+    kept because it is what the repair had to satisfy: this function gates on
+    ``candidate.get("eligible")``, a key the projection does not carry, so handing it the
+    projected candidates ALONE records nothing and every accept becomes ``unknown_bid``. The
+    route also had no handle on the projection — ``ranking.serving.rank_auction`` built it
+    locally and returned only ``rank()``'s output.
+
+    So both halves are passed and JOINED here on the minted ``bid_id``: the rank ROW decides
+    eligibility, the PROJECTION supplies ``offer`` and ``store_domain``. ``rank_auction`` now
+    returns the projection under ``"projected"`` — additive, no existing key changed, so
+    ``_excluded_out``'s argument is untouched because that one does need the row.
+    ``projected`` defaults to empty and each record falls back to the row, so a caller that
+    passes nothing behaves exactly as before instead of silently recording nothing.
+
+    MEASURED over the real socket in ``test_composition_root.py``, by spying on this
+    function's return with the repair reverted and restored — the test PASSES either way,
+    which is what made the defect silent::
+
+        reverted:  bid_id='auction-ef75…:s1'  offer_keys=[]  store_domain=None
+        restored:  bid_id='auction-55be…:s1'  offer_keys=['checkout_url', 'commitments',
+                   'currency', 'expires_at', 'product_ref', 'total_price', 'unit_price']
+                   checkout_url='https://s1.example.com/cart/44352913:1'
+                   expires_at='2999-01-01T00:00:00Z'  store_domain='s1.example.com'
+
+    The defect predated this branch — ``git log -L`` dates the line to ``ec4f2b4``, an
+    ancestor of ``main``.
 
     **Only the candidates the ranking found ELIGIBLE are recorded**, and the first draft of
     this function got that wrong in the expensive direction. It recorded every collected
@@ -573,6 +590,12 @@ def collected_bid_records(
     colliding ref would let one bidder decide which offer another store's reference accepts.
     """
     by_store = {str(getattr(entry, "store_id", "")): entry for entry in entries}
+    # The two halves, joined on the minted `bid_id`. `candidates` is `rank()`'s ROW
+    # projection and is where `eligible` lives — the ranking's own verdict, and the only
+    # thing that decides whether a bid is recorded at all. `projected` is
+    # `ranking/candidates.py`'s projection and is where `offer` and `store_domain` live.
+    # Neither is a superset of the other, which is why the join exists rather than a swap.
+    by_bid = {str(row.get("bid_id") or ""): row for row in projected if row.get("bid_id")}
 
     records: list[dict[str, Any]] = []
     minted: set[str] = set()
@@ -585,12 +608,16 @@ def collected_bid_records(
         if not bid_id:
             continue
         store_id = str(candidate.get("store_id") or "")
+        # The projection where there is one, the row where there is not. Falling back to
+        # the row rather than skipping keeps a caller that passes no projection working
+        # exactly as before instead of silently recording nothing.
+        source: Mapping[str, Any] = by_bid.get(bid_id, candidate)
         record: dict[str, Any] = {
             "bid_id": bid_id,
             "store_id": store_id,
-            "offer": candidate.get("offer") or {},
+            "offer": source.get("offer") or {},
         }
-        domain = candidate.get("store_domain")
+        domain = source.get("store_domain")
         if domain:
             record["store_domain"] = str(domain)
         # Carried so the accept door can tell a price a STORE quoted from one the exchange
@@ -870,16 +897,23 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # accept path reads, minted ref and platform domain included — see
     # :func:`collected_bid_records` for why nothing here is copied from the store's reply.
     #
-    # THE ARGUMENT ON THE NEXT LINE IS THE WRONG OBJECT, and `collected_bid_records`' docstring
-    # carries the measurement. `ranking["candidates"]` is `rank()`'s ROW projection, not
-    # `ranking/candidates.py`'s — it has no `offer` and no `store_domain` — so every record is
-    # written with `offer: {}`. Pre-existing, and it costs every served bid its expiry, its
-    # pre-mint host check and its cart permalink. Fixing it is not a swap of this one argument;
-    # the docstring says what it needs.
+    # BOTH projections are handed over, and that is T-349's repair. `ranking["candidates"]` is
+    # `rank()`'s ROW projection — it carries `eligible`, the verdict that decides whether a bid
+    # is recorded at all, and carries neither `offer` nor `store_domain`. `ranking["projected"]`
+    # is `ranking/candidates.py`'s projection and carries both. Passing the row alone wrote
+    # every record with `offer: {}`, costing each served bid its expiry, its pre-mint host
+    # check and its cart permalink; passing the projection alone would record NOTHING, because
+    # the projection has no `eligible`. `collected_bid_records` joins them on the minted
+    # `bid_id`; its docstring carries the before/after measurement.
     book = _bid_book(request)
     recorder = getattr(book, "record", None)
     if callable(recorder):
-        recorder(auction_id, collected_bid_records(ranking["candidates"], result.entries))
+        recorder(
+            auction_id,
+            collected_bid_records(
+                ranking["candidates"], result.entries, ranking.get("projected") or ()
+            ),
+        )
 
     return CreateAuctionResponse(
         auction_id=auction_id,

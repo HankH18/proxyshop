@@ -131,7 +131,7 @@ DEFAULT_BANDIT_CLUSTERS = 32
 DEFAULT_EXPLORATION_FLOOR = 0.0
 
 #: Refusal codes. Prose is safe to publish (nothing here interpolates a caller's value except
-#: field NAMES, and those are swept by :func:`~..safe_text.redact_addresses` and truncated).
+#: field NAMES, and those are swept by :func:`~exchange.redact_addresses` and truncated).
 REASON_BODY_TOO_LARGE = "body_too_large"
 REASON_BODY_NOT_JSON = "body_not_json"
 REASON_BODY_NOT_AN_OBJECT = "body_not_a_json_object"

@@ -971,12 +971,16 @@ def test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publi
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-266: measured on 2026-09-05 — the exchange serves 4 operations while "
-        "packages/contracts/openapi/exchange.openapi.json publishes 5. Published but NOT "
-        "served: POST /internal/outcomes and POST /v1/auctions/{auction_id}/bids. Served but "
-        "NOT published: GET /auctions/{auction_id}. A published path a service does not "
-        "answer is a promise the platform is already making to clients; remove this marker "
-        "with the fix"
+        "T-266: the exchange's served surface is not the one its contract publishes. Filed "
+        "at 4 served against 5 published; RE-MEASURED on this branch after POST "
+        "/internal/outcomes was served, it is 5 against 5 and still divergent — published "
+        "but NOT served: POST /v1/auctions/{auction_id}/bids; served but NOT published: GET "
+        "/auctions/{auction_id}. Each remaining half needs a file apps/exchange does not "
+        "own: serving the bid door turns packages/contracts/tests/test_repro_open_tickets"
+        "::test_the_pinned_external_bid_door_is_actually_served into an XPASS(strict) "
+        "failure, and publishing the auction read needs PINNED_ROUTES in both languages "
+        "plus DESIGN.md. A published path a service does not answer is a promise the "
+        "platform is already making to clients; remove this marker with the fix"
     ),
 )
 def test_t266_the_exchange_serves_exactly_the_operations_its_contract_publishes() -> None:

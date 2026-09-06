@@ -117,7 +117,7 @@ DENIAL_REASONS: tuple[str, ...] = (
     DENIAL_UNSPECIFIED,
 )
 
-# `describe` and `redact_addresses` are IMPORTED from `exchange.safe_text` and re-exported
+# `describe` and `redact_addresses` are IMPORTED from the `exchange` package root and re-exported
 # here, where every caller already looks for them. They used to be defined in this module,
 # which put them out of reach of the two packages that leak hardest: `accept.reasons` imports
 # from `eligibility`, so `eligibility` importing back would be a cycle, and `checkout` has no

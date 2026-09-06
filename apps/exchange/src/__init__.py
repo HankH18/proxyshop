@@ -59,15 +59,17 @@ __all__ = [
     "redact_addresses",
 ]
 
-#: A process address as anything downstream would recognise it — and as the accept-path gate
-#: ``apps/exchange/tests/test_accept_denials.py`` looks for it. Six hex digits rather than
-#: two so an ordinary ``0x1f`` in prose is not mangled.
+#: What a leaked address LOOKS like — the definition ``apps/exchange/tests/test_accept_denials``
+#: greps the three sinks with. It is the DETECTOR, deliberately not the eraser; see
+#: :func:`redact_addresses` for why erasing every match of this was measured to be worse than
+#: the leak it closed.
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{6,}")
 
 #: CPython's default ``__repr__``: ``<object object at 0x…>``, ``<Foo at 0x…>``, and the
-#: dotted ``<module.Foo object at 0x…>`` a nested class produces. The class name is kept —
-#: it is the half an operator can act on — and only the address is dropped.
-_DEFAULT_REPR = re.compile(r"<([A-Za-z_][\w.]*)(?: object)? at 0x[0-9a-fA-F]+>")
+#: dotted ``<module.Foo object at 0x…>`` a nested class produces. ``0[xX]`` because a
+#: collaborator formatting with ``{:#X}`` produces the same leak in the same shape. The class
+#: name is kept — it is the half an operator can act on — and only the address is dropped.
+_DEFAULT_REPR = re.compile(r"<([A-Za-z_][\w.]*)(?: object)? at 0[xX][0-9a-fA-F]+>")
 
 #: Values whose ``repr`` is information rather than an address. Everything else is described
 #: by its type — see :func:`describe`.
@@ -75,17 +77,35 @@ _REPR_IS_SAFE: tuple[type, ...] = (str, bytes, bool, int, float, complex, type(N
 
 
 def redact_addresses(text: Any) -> str:
-    """``text`` with every process address removed, and every type name kept.
+    """``text`` with every DEFAULT ``__repr__`` collapsed to its type name.
 
-    Applied at the boundary where a denial reason is built or republished, this is what makes
-    "no reason ever renders an object's default ``repr``" a property of the package rather
-    than a property of the particular f-strings someone has audited. It is intentionally
-    total: the collaborator's *own* exception message is redacted too, because a registry
-    raising ``TypeError(f"the backend {object()!r} is unreachable")` leaks an address the
-    exchange never quoted and republishes verbatim.
+    ``<object object at 0x104e0a170>`` becomes ``<object>``. It reaches a collaborator's *own*
+    exception message too, which is the point: ``str(KeyError(obj))`` simply **is**
+    ``repr(obj)``, so a registry that does not know a store leaks an address the exchange never
+    quoted and republishes verbatim.
+
+    **It collapses that shape and nothing else, and the narrowing is a measured correction.**
+    The first version of this function also erased every match of :data:`ADDRESS` anywhere in
+    the string, on the theory that more erasure is safer. An adversarial pass measured what
+    that cost, and it was not small: ``auction_id`` is a path parameter and ``bid_ref`` a body
+    field, so an ordinary refusal naming a client's own id came out as ``unknown_bid: auction
+    'auction-1' carries no bid 'bid-0x<redacted>'`` — and ``bid-0xDEADBEEF12`` and
+    ``bid-0xabcdef0123`` then produced the BYTE-IDENTICAL reason. That inverts the very
+    property this repair exists to restore: T-264's complaint is that the same refusal renders
+    differently every run so nothing downstream can group two of them, and blanket erasure
+    made two DIFFERENT refusals group as one. It also blanked the value out of ``offer
+    quantity '0xdeadbeef' is not a whole number``, telling an operator a value was bad and not
+    which value.
+
+    So the erasure is aimed at the shape that is never legitimate — a default ``repr`` — and
+    leaves text a client wrote alone. What this does NOT close is a collaborator that renders
+    its own address in some other spelling: ``id(self)`` in base ten, a bare ``104988b30``, an
+    octal. Those are real and they are reported rather than papered over; there is no textual
+    rule that erases them without erasing prices, timestamps and ids too. Closing them means
+    not republishing a collaborator's message at all, which is a different decision from the
+    one T-264, T-326, T-293 and T-327 asked for, and a bigger one.
     """
-    collapsed = _DEFAULT_REPR.sub(lambda match: f"<{match.group(1)}>", str(text))
-    return ADDRESS.sub("0x<redacted>", collapsed)
+    return _DEFAULT_REPR.sub(lambda match: f"<{match.group(1)}>", str(text))
 
 
 def describe(value: Any) -> str:
@@ -93,8 +113,9 @@ def describe(value: Any) -> str:
 
     Values whose ``repr`` carries meaning keep it; anything else is named by its type, which
     is the part an operator actually needs ("you passed a ``StaticSellerEligibility`` where a
-    version string belongs"). A scalar's ``repr`` is still swept for an address, because a
-    ``str`` whose *content* is an address is a value a caller can post.
+    version string belongs"). A scalar's ``repr`` is still swept, but only for the default-
+    ``repr`` SHAPE — so ``describe('0xC0FFEE12')`` is unchanged, which it was not before the
+    narrowing described on :func:`redact_addresses`.
     """
     if isinstance(value, _REPR_IS_SAFE):
         return redact_addresses(repr(value))

@@ -37,7 +37,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
-from .. import describe, describe_exception
+from .. import describe, describe_exception, redact_addresses
 from ..auction.ledger import build_published_event
 from .codes import (
     assert_offer_is_mintable,
@@ -1081,10 +1081,16 @@ def _usable(domain: Any, request: CheckoutRequest) -> str:
             f"no registered domain is on file for {request.store_id!r}, so there is no host "
             f"a checkout for it could be on (C10/D22)"
         )
-    # `describe`, not `str(...)`. A lookup that ANSWERS with an object rather than a
-    # domain used to have `str(<object>)` — its address — carried onward as a "registered
-    # domain" and re-rendered with `!r` in the off-domain message `domain.py` builds.
-    return describe(domain) if not isinstance(domain, str) else domain
+    # A lookup that ANSWERS with an object rather than a domain used to have `str(<object>)`
+    # — its address — carried onward as a "registered domain" and re-rendered with `!r` in
+    # the off-domain message `domain.py` builds. BOTH branches are covered, and the `str`
+    # one is not hypothetical: a registry whose `domain_for` returns `str(self._backend)`
+    # hands back an ordinary `str` that an `isinstance` check waves through, and the address
+    # then reached the 200 body as `https://<object object at 0x…>/cart/1:1` AND the
+    # persisted `checkout_redirect` event. Measured on this branch by an adversarial pass,
+    # and measured leaking at the fork point too — a hole the first version of this line
+    # narrowed rather than closed.
+    return redact_addresses(domain) if isinstance(domain, str) else describe(domain)
 
 
 def domain_is_platform_verified(request: CheckoutRequest) -> bool:
