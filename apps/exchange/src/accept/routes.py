@@ -76,6 +76,7 @@ single-use discount is discovering it too late.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -85,7 +86,10 @@ from copy import deepcopy
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict
 
 from .. import describe_exception, redact_addresses
@@ -118,11 +122,112 @@ __all__ = [
     "DEFAULT_BID_BOOK_RECORDS",
     "InMemoryAuctionBids",
     "NoRecordedBids",
+    "RenderableJSONResponse",
+    "RenderableValidationErrorRoute",
     "configure_accept",
+    "renderable_validation_detail",
     "router",
 ]
 
-router = APIRouter(tags=["accept"])
+
+# =====================================================================================
+# Rendering a validation failure that quotes a number JSON cannot spell (T-270)
+# =====================================================================================
+#
+# `POST /auctions/{auction_id}/accept` carries this defect too, not only `POST /auctions`:
+# measured on merged main, all 24 accept cases in the T-270 corpus answered 500. A body
+# spelling `NaN`, `Infinity` or `1e400` is accepted by `json.loads`, rejected by pydantic,
+# and then ECHOED back inside FastAPI's stock 422, which starlette serialises with
+# `allow_nan=False` and cannot encode. The 500 is in the error renderer, so it belongs to
+# every door that declares a pydantic request model rather than to any one field.
+#
+# DUPLICATED FROM `auction/routes.py` ON PURPOSE, for the reason `policy/routes.py:326`
+# gives for its own twin of this problem and `_bind_the_deployment` is duplicated between
+# this module and `auction/routes.py`: each feature package owns its own door, and a
+# thirty-line renderer is not worth a new cross-feature import edge — especially one that
+# would make `exchange.accept.routes` (imported FIRST by `main.py`'s sorted glob) pull the
+# whole auction module in behind it. The long-form rationale — why a route class rather
+# than an exception handler, and why the value is rendered rather than refused — is in
+# `auction/routes.py` above its copy and is not repeated here.
+
+
+def renderable_validation_detail(errors: Any) -> list[Any]:
+    """``errors`` with every non-finite float replaced by the string JSON would have spelt.
+
+    The walk is delegated to ``json`` because ``input`` is the caller's own body and its depth
+    is caller-chosen; a hand-rolled recursion would fault on exactly the input this exists to
+    render. Anything still unrenderable falls back to field paths without their values, so the
+    422 keeps a non-empty per-field ``detail`` list rather than degrading to a 5xx.
+    """
+    try:
+        encoded = jsonable_encoder(errors)
+        round_tripped = json.loads(
+            json.dumps(encoded, allow_nan=True), parse_constant=lambda token: token
+        )
+    except (ValueError, TypeError, RecursionError):
+        round_tripped = None
+    if isinstance(round_tripped, list) and round_tripped:
+        return round_tripped
+    fallback = [
+        {
+            "type": str(error.get("type", "value_error")),
+            "loc": [str(part) for part in (error.get("loc") or ())],
+            "msg": redact_addresses(error.get("msg", "this value could not be validated")),
+        }
+        for error in (errors or ())
+        if isinstance(error, Mapping)
+    ]
+    return fallback or [
+        {"type": "value_error", "loc": ["body"], "msg": "the request body could not be read"}
+    ]
+
+
+class RenderableJSONResponse(JSONResponse):
+    """A :class:`JSONResponse` that can still be encoded when the body quotes ``inf``/``nan``.
+
+    The rejected value is not the only way a non-finite float reaches the renderer: a value
+    that VALIDATES and is echoed back hits the same ``allow_nan=False`` encode. The fast path
+    is starlette's own; only a body that would otherwise have raised takes the second pass.
+    See the fuller note on the twin in ``auction/routes.py``.
+    """
+
+    def render(self, content: Any) -> bytes:
+        try:
+            return super().render(content)
+        except ValueError:
+            readable = json.loads(
+                json.dumps(content, allow_nan=True), parse_constant=lambda token: token
+            )
+            return super().render(readable)
+
+
+class RenderableValidationErrorRoute(APIRoute):
+    """An :class:`APIRoute` whose 422 is always serialisable (T-270).
+
+    Only :class:`RequestValidationError` is intercepted; an unhandled bug still becomes a 500,
+    which is what keeps this from being the blanket refusal the ticket's gate rejects.
+    """
+
+    def get_route_handler(self) -> Any:
+        handler = super().get_route_handler()
+
+        async def render_validation_errors_safely(request: Request) -> Any:
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                return RenderableJSONResponse(
+                    status_code=422,
+                    content={"detail": renderable_validation_detail(exc.errors())},
+                )
+
+        return render_validation_errors_safely
+
+
+router = APIRouter(
+    tags=["accept"],
+    route_class=RenderableValidationErrorRoute,
+    default_response_class=RenderableJSONResponse,
+)
 
 #: The environment variable D23 names for the checkout mode, read once per request so a
 #: deployment can change it without a code change. :func:`configure_accept` overrides it.

@@ -1666,18 +1666,23 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-270: a non-finite JSON literal anywhere in an unauthenticated request body returns "
-        "HTTP 500. pydantic rejects the value correctly, and then FastAPI's "
-        "request_validation_exception_handler builds a 422 body that ECHOES the offending "
-        "input back, where json.dumps raises 'Out of range float values are not JSON "
-        "compliant'. The defect is the error RENDERER, so it fires on fields of every type "
-        "(str, int, float, dict, list) and on both served POST routes; remove this marker "
-        "with the fix"
-    ),
-)
+# T-270 FIXED — marker removed because `xfail(strict=True)` makes this node STRICTLY HARDER to
+# satisfy, not easier: with the defect gone it must now PASS rather than merely reproduce.
+#
+# What established that, measured in this worktree on 2026-09-06 at worker index 10:
+#   * BEFORE, on a clean e7f8f6c: `1 failed` — "188 of 232 unauthenticated requests were
+#     answered 5xx", across both probed apps and both POST routes.
+#   * AFTER, the same command: `2 passed` (this node and its armer).
+#   * CAUSATION, in a scratch copy of the tree outside the repo: reverting ONLY
+#     `route_class=RenderableValidationErrorRoute` on the two routers — no test file touched —
+#     returns the node to `1 failed` with the same 5xx census. The route class is the cause.
+#
+# The repair is `RenderableValidationErrorRoute` on `exchange.auction.routes.router` and on
+# `exchange.accept.routes.router`: the non-finite value is RENDERED into the 422 as the JSON
+# token it was spelt with, quoted as a string, rather than echoed as a float no encoder can
+# emit. The 422 contract this file asserts two paragraphs below is what forced that shape —
+# a blanket 400 also removes the 5xx and was rejected here for destroying the per-field
+# `detail` list.
 def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
     """Nothing an anonymous caller can write may make the exchange answer 5xx.
 

@@ -191,6 +191,31 @@ SOURCE_UNASSIGNED = "unassigned"
 _WORD = re.compile(r"[a-z0-9]+")
 
 
+def _constraints_of(value: Any) -> tuple[Any, ...]:
+    """``value`` as a tuple of hard constraints; ``()`` when it is not a collection at all.
+
+    ``assign_cluster`` promises in its own docstring that it "never raises on a malformed
+    intent", because "a cluster assignment that raised would turn a bad hard constraint into a
+    500 on a route that has a 422 for it". ``tuple(fields.get("hard_constraints") or ())`` did
+    not keep that promise: ``intent`` is annotated ``dict[str, Any]`` on ``POST /auctions``, so
+    a scalar there is ACCEPTED by validation and reaches this line, where ``tuple(1e400)``
+    raises ``TypeError: 'float' object is not iterable`` and an anonymous caller gets a 500
+    (T-270 — measured on both the freshly built app and the served ``exchange.main:app``).
+
+    Only the raising case changes. A falsy value still yields ``()`` and every iterable is
+    still passed to ``tuple`` unchanged — including a bare ``str``, which this deliberately
+    does NOT re-interpret as a single constraint: that is a separate judgement about what a
+    caller meant, and making it here would silently alter an input the function already
+    accepts today.
+    """
+    if not value:
+        return ()
+    try:
+        return tuple(value)
+    except TypeError:
+        return ()
+
+
 def _fields(obj: Any) -> Mapping[str, Any]:
     """Read a protocol object as a mapping, whether it arrived as one or as a model.
 
@@ -594,7 +619,7 @@ def assign_cluster(intent: Any, catalogue: Any) -> ClusterAssignment:
 
     raw_category = fields.get("category")
     category = None if raw_category is None else canonical_text(str(raw_category))
-    constraints = tuple(fields.get("hard_constraints") or ())
+    constraints = _constraints_of(fields.get("hard_constraints"))
     # Folded ONCE, outside the loop. See :func:`_haystack`.
     haystack = _haystack(str(fields.get("query") or ""))
 
