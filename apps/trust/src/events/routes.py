@@ -30,13 +30,56 @@ the same ``event_id`` carrying *different* content. Collapsing the two would lea
 retrying a delivery it already made unable to tell "you already sent this, all is well"
 from "you have two different events under one id", which is the difference between a
 successful retry and silent data loss.
+
+Nothing on this router is authenticated
+---------------------------------------
+There is not one ``Depends`` in ``apps/trust``, and ``apps/trust/compose.yaml`` publishes the
+port. Every bound below therefore has to hold against a caller who has supplied no
+credential and is not going to stop:
+
+* **What one request may send** -- :data:`MAX_EVENT_BODY_BYTES`, enforced by
+  :class:`_BoundedBodyRoute` while the body is still arriving, plus
+  :data:`MAX_IDENTIFIER_LENGTH` on the four identifiers the caller chooses (T-366). The
+  ledger is append-only and its ``BEFORE UPDATE OR DELETE ... ENABLE ALWAYS`` trigger makes
+  eviction impossible, so a byte admitted here is a byte kept forever.
+* **What CHARACTERS those identifiers may carry** -- :func:`_refuse_unrenderable_identifier`.
+  Length was bounded and the character set was not, and ``Location`` is built by
+  interpolating ``event_id``: an ``event_id`` outside Latin-1 raised ``UnicodeEncodeError``
+  *after* the row had committed, and one carrying CR/LF or NUL made uvicorn drop the
+  connection with no response at all -- both after the un-evictable row was already written.
+* **What one request may make a LATER request cost** -- :func:`_unreplayable_field`. A
+  payload naming a ``dim`` and a ``type`` is projected into a trust observation by
+  ``replay?snapshots=true``; a ``dim``, ``type``, ``weight`` or ``observed_at`` the scorer
+  cannot interpret made that endpoint raise out of the scorer forever, because the row
+  cannot be evicted. 148 bytes, unauthenticated, permanent.
+* **What one request may cost to answer** -- every whole-chain read pages through
+  :data:`~.store.LEDGER_SCAN_CHUNK`, every response is bounded by
+  :data:`~.store.MAX_RESPONSE_EVENT_BYTES` as well as by ``limit``, and the one fold that is
+  proportional to the ledger rather than to a page (``replay?snapshots=true``) refuses past
+  :data:`MAX_SNAPSHOT_REPLAY_EVENTS` (T-364).
+
+What a refusal here looks like
+------------------------------
+Every refusal carries ``{"error", "message"}`` and **never the offending input**: a refusal
+that quotes what it refused is an amplifier with better manners.
+
+It is **not** true that every failure here is a 4xx, and this paragraph used to claim it
+was. :func:`_refuse` maps :class:`~.errors.StoreUnavailable` and
+:class:`~.errors.ChainForked` to ``503`` and :class:`~.errors.BrokenChain` to ``500`` on
+purpose -- those say something about the ledger, not about the request. What IS true, and
+what the sentence was reaching for, is the narrower claim worth holding: **no input a
+caller can send may produce a 5xx.** That claim was measured false twice (the two bullets
+above), which is why it is now a claim with gates behind it rather than a comment.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
 from .errors import (
@@ -48,11 +91,20 @@ from .errors import (
     StoreUnavailable,
     UnknownEventKind,
 )
-from .store import LEDGER_EVENT_KINDS, append
+from .store import LEDGER_EVENT_KINDS, append, normalise_event
 
-__all__ = ["DEFAULT_EVENT_PAGE", "MAX_EVENT_PAGE", "EventIn", "router", "store_for"]
-
-router = APIRouter(prefix="/events", tags=["ledger"])
+__all__ = [
+    "BOUNDED_IDENTIFIERS",
+    "DEFAULT_EVENT_PAGE",
+    "MAX_EVENT_BODY_BYTES",
+    "MAX_EVENT_PAGE",
+    "MAX_IDENTIFIER_LENGTH",
+    "MAX_SNAPSHOT_REPLAY_EVENTS",
+    "UNRENDERABLE_IDENTIFIER_CHARACTERS",
+    "EventIn",
+    "router",
+    "store_for",
+]
 
 #: How many events a read returns when the caller does not say. **A default is not a
 #: nicety here, it is the only cap that binds.** ``limit`` was previously
@@ -72,7 +124,164 @@ DEFAULT_EVENT_PAGE = 1_000
 
 #: The most a caller may ask for in one response, even explicitly. Unchanged from the
 #: ceiling that was already declared; what changed is that it is no longer the *only* one.
+#:
+#: It bounds ROWS, which is not the same as bounding bytes -- see
+#: :data:`~.store.MAX_RESPONSE_EVENT_BYTES`, which bounds the other half.
 MAX_EVENT_PAGE = 10_000
+
+#: The most one ``POST /events`` body may weigh, refused while it is still ARRIVING.
+#:
+#: There was no cap of any kind (T-366). ``payload`` is ``dict[str, Any]``, checked only for
+#: being a JSON object, and written verbatim into ``jsonb``; measured, single payloads of
+#: 1M, 10M and 50M characters all returned ``201``, and three of them took the table to
+#: 77 MB. What makes that permanent rather than merely rude is the schema: an append-only
+#: ``BEFORE UPDATE OR DELETE`` trigger declared ``ENABLE ALWAYS`` means nothing can evict a
+#: row, ``TRUNCATE`` is refused by a foreign key, and the growth measured linear at ~34 KB
+#: of table per anonymous request.
+#:
+#: 64 KiB is the tighter of the two body caps this repo already ships on unauthenticated
+#: doors -- ``exchange.policy.routes.DEFAULT_MAX_OUTCOME_BYTES`` and
+#: ``buyer.composition.MAX_DEPLOYMENT_BYTES`` are both 64 KiB, while
+#: ``exchange.external_bids.routes.MAX_SUBMISSION_BYTES`` is 256 KiB. The tighter one,
+#: deliberately: those doors' bytes are transient and these are not. A ``LedgerEvent`` is a
+#: fact about one commerce action; 64 KiB is orders of magnitude above every kind in
+#: :data:`~.store.LEDGER_EVENT_KINDS` and far below "somebody is using the ledger as a disk".
+MAX_EVENT_BODY_BYTES = 64 * 1024
+
+#: The ceiling on a caller-chosen identifier: ``event_id``, ``auction_id``, ``store_id``,
+#: ``order_ref`` and the ``Idempotency-Key`` header.
+#:
+#: The same number ``exchange.auction.routes.MAX_IDENTIFIER_LENGTH`` already holds for "a
+#: string some caller picked", restated rather than imported because ``trust`` and
+#: ``exchange`` are separate deployables and an import edge between two services to share a
+#: constant costs more than the duplication does.
+#:
+#: Not decoration: all four columns are INDEXED (``commerce_events_idempotency_key_key`` is
+#: UNIQUE), so past roughly 2,691 characters Postgres refuses the row with
+#: ``ProgramLimitExceeded`` -- and ``psycopg.errors.ProgramLimitExceeded`` is a subclass of
+#: ``OperationalError``, so :func:`~.pg.classify_connection_error` turned a malformed
+#: unauthenticated request into ``503 store_unavailable``: a 5xx, blaming the datastore for
+#: the caller's input. Between 128 and 2,691 characters the row was simply accepted, forever.
+MAX_IDENTIFIER_LENGTH = 128
+
+#: The identifiers this door bounds. Every one of them is chosen by the caller, indexed by
+#: the ledger, and interpolated into at least one refusal message.
+BOUNDED_IDENTIFIERS = ("event_id", "auction_id", "store_id", "order_ref")
+
+#: Characters a caller-chosen identifier may not carry, because a response header cannot
+#: carry them: the C0 controls (which includes CR, LF and NUL), DEL, and the C1 controls.
+#:
+#: The ceiling above bounds an identifier's LENGTH and said nothing about its CHARACTER SET,
+#: and ``Location`` is built by interpolating ``event_id`` into an f-string. Two measured
+#: consequences, both reachable unauthenticated and both leaving the row committed:
+#:
+#: * an ``event_id`` outside Latin-1 -- ``"заказ-1"``, CJK, an emoji -- raised
+#:   ``UnicodeEncodeError: 'latin-1' codec can't encode`` inside Starlette's header
+#:   assignment, *after* the append had already succeeded. The caller was told ``500`` (the
+#:   write failed) while the ledger held the row forever, and the retry 500ed too because
+#:   the idempotent-replay path sets the same header. ``"café-1"`` (U+00E9, inside Latin-1)
+#:   returned ``201``, so the boundary was exactly the header codec.
+#: * an ``event_id`` carrying ``\r\n``, a bare ``\n`` or ``\x00`` is *encodable* and is not
+#:   a legal header value: uvicorn dropped the connection with no response at all -- the
+#:   client saw ``RemoteProtocolError``, not even a status -- and the row still committed.
+#:
+#: So the guard is BOTH halves, and the control-character half is not redundant. This is the
+#: same lesson ``store_agent.solicitation.routes._REASON_CHARACTERS`` records: a screen for
+#: Latin-1 encodability alone passes ``"a\r\nX-Injected: 1"`` verbatim.
+UNRENDERABLE_IDENTIFIER_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+#: The longest ledger ``replay?snapshots=true`` will fold before refusing.
+#:
+#: Every other whole-chain answer is bounded by a page (:data:`~.store.LEDGER_SCAN_CHUNK`),
+#: because verification is a fold that keeps nothing. Rebuilding snapshots is not: it
+#: projects every event that carries a ``dim`` and a ``type`` into a trust observation and
+#: holds all of them at once, so its cost is proportional to the ledger no matter how the
+#: rows are read. Measured with ``tracemalloc``: 193 bytes per observation for the projection
+#: alone, call it ~400 with the event strings each observation retains, so 100,000 is roughly
+#: 40 MiB against the ``mem_limit: 256m`` in ``apps/trust/compose.yaml`` -- headroom for the
+#: scorer's own state and for the request that arrives while this one is running.
+#:
+#: Past it the answer is a 422 naming both numbers, not a slow 503 and not a snapshot of a
+#: prefix: a snapshot rebuilt from part of the ledger is a snapshot of a ledger that does not
+#: exist, and D17/S3 compare it against the served one bit for bit.
+MAX_SNAPSHOT_REPLAY_EVENTS = 100_000
+
+_TOO_LARGE = (
+    "a LedgerEvent body may be at most {cap} bytes. The ledger is append-only -- an "
+    "`ENABLE ALWAYS` trigger refuses UPDATE and DELETE -- so an accepted byte is kept "
+    "forever, and this door is unauthenticated. Send a smaller payload."
+)
+
+_INCOMPLETE_BODY = (
+    "the request body never finished arriving: the connection closed part-way through it. "
+    "Nothing was appended. Re-send the event."
+)
+
+
+async def _receive_bounded_body(request: Request) -> None:
+    """Read the body, refusing it the moment it crosses :data:`MAX_EVENT_BODY_BYTES`.
+
+    STREAMED AND COUNTED, not buffered and then measured. ``await request.body()`` -- which
+    is what FastAPI does before any dependency, any validator and any handler on this module
+    runs -- pulls whatever arrives before anything can object, so a length check afterwards
+    bounds the REFUSAL and not the MEMORY. That ordering is also why this cannot be a
+    ``Depends``: by the time a dependency is solved the body is already in the process.
+
+    The bytes are cached on the request as ``_body``, which is exactly where
+    ``Request.body()`` looks first, so FastAPI's own parsing and validation run unchanged on
+    a body this function has already vetted -- and ``EventIn``'s error shapes are untouched.
+    """
+    from starlette.requests import ClientDisconnect  # noqa: PLC0415 - only needed here
+
+    if hasattr(request, "_body"):  # already read (a re-entered handler); nothing to bound
+        return
+
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_EVENT_BODY_BYTES:
+                # The offending chunk is dropped rather than kept: at most one window past
+                # the cap is ever held, and none of it is echoed back.
+                raise HTTPException(
+                    413,
+                    {
+                        "error": "body_too_large",
+                        "message": _TOO_LARGE.format(cap=MAX_EVENT_BODY_BYTES),
+                        "max_bytes": MAX_EVENT_BODY_BYTES,
+                    },
+                )
+            chunks.append(chunk)
+    except ClientDisconnect as exc:
+        # A caller hanging up mid-upload is a fact of the internet, not a server fault, and
+        # `ClientDisconnect` is not a `ValueError` -- an `except ValueError` written for
+        # malformed bodies does not catch it and it reaches the client as a 500.
+        raise HTTPException(400, {"error": "incomplete_body", "message": _INCOMPLETE_BODY}) from exc
+    request._body = b"".join(chunks)
+
+
+class _BoundedBodyRoute(APIRoute):
+    """Every route on this router, with its request body bounded before FastAPI reads it.
+
+    A route class rather than middleware, because middleware installed by
+    :func:`~.service.create_events_app` would not be there in production: the service runs
+    through the frozen ``trust.main.create_app``, which globs ``*/routes.py`` and mounts the
+    ``router`` object it finds. The bound has to travel with the router, so it lives on the
+    router.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def bounded(request: Request) -> Response:
+            await _receive_bounded_body(request)
+            return await handler(request)
+
+        return bounded
+
+
+router = APIRouter(prefix="/events", tags=["ledger"], route_class=_BoundedBodyRoute)
 
 
 class EventIn(BaseModel):
@@ -146,6 +355,285 @@ def _refuse(exc: EventServiceError) -> HTTPException:
     return HTTPException(500, {"error": "ledger_error", "message": str(exc)})
 
 
+def _refuse_long_identifier(field: str, value: Any) -> None:
+    """Refuse a caller-chosen identifier longer than :data:`MAX_IDENTIFIER_LENGTH`.
+
+    The refusal reports the field and the two numbers and **not the value**: this exists
+    because a 30,000-character identifier was previously admitted (or, past the btree limit,
+    turned into a ``503``), and a refusal that quoted it back would trade one amplifier for
+    a politer one.
+    """
+    if not isinstance(value, str) or len(value) <= MAX_IDENTIFIER_LENGTH:
+        return
+    raise HTTPException(
+        422,
+        {
+            "error": "identifier_too_long",
+            "field": field,
+            "length": len(value),
+            "max_length": MAX_IDENTIFIER_LENGTH,
+            "message": (
+                f"{field} is {len(value)} characters; the ceiling is "
+                f"{MAX_IDENTIFIER_LENGTH}. Every identifier on a LedgerEvent is indexed, "
+                f"so an unbounded one is refused by Postgres itself past the btree entry "
+                f"limit -- as an outage-shaped 503 rather than as the bad request it is."
+            ),
+        },
+    )
+
+
+def _refuse_unrenderable_identifier(field: str, value: Any) -> None:
+    """Refuse a caller-chosen identifier a response header could not carry.
+
+    Length was bounded (:func:`_refuse_long_identifier`) and the character set was not, and
+    ``post_event`` builds ``Location`` by interpolating ``event_id``. See
+    :data:`UNRENDERABLE_IDENTIFIER_CHARACTERS` for the two measured 5xx paths that closes.
+
+    **Why all four identifiers and not only ``event_id``.** Only ``event_id`` reaches a
+    header today. But the ledger is append-only under an ``ENABLE ALWAYS`` trigger, so the
+    rows admitted today are permanent, and the guard that would matter is the one that was
+    in place *before* somebody interpolates ``store_id`` into a header. A control character
+    in an indexed identifier is never a thing a caller meant, and the cost of refusing it is
+    a 422 the caller can act on; the cost of admitting it is a row nobody can delete.
+
+    The refusal names the field and the *class* of the problem and **never the value** --
+    the same rule the length ceiling follows, and doubly so here, where echoing the value
+    would mean writing the caller's control characters into this process's response.
+    """
+    if not isinstance(value, str):
+        return
+    if UNRENDERABLE_IDENTIFIER_CHARACTERS.search(value):
+        reason, why = (
+            "control_character",
+            "carries a control character (C0, DEL or C1). A header value cannot hold one: "
+            "CR/LF is a response split and uvicorn answers such a response by closing the "
+            "connection with no status at all, which it did -- after the append had "
+            "committed to an append-only table",
+        )
+    else:
+        try:
+            value.encode("latin-1")
+        except UnicodeEncodeError:
+            reason, why = (
+                "not_latin_1",
+                "is outside Latin-1. HTTP header values are Latin-1 on the wire, and this "
+                "route reports the created event in `Location: /events/{event_id}`, so such "
+                "an identifier raised UnicodeEncodeError *after* the row had already been "
+                "written -- telling the caller the write failed while the ledger kept it "
+                "forever",
+            )
+        else:
+            return
+    raise HTTPException(
+        422,
+        {
+            "error": "identifier_not_renderable",
+            "field": field,
+            "reason": reason,
+            "message": (
+                f"{field} {why}. Identifiers on a LedgerEvent must be renderable into a "
+                f"response header: Latin-1 encodable and free of control characters."
+            ),
+        },
+    )
+
+
+#: Which payload field the trust replay choked on, per exception the scorer raises. The
+#: scorer's own messages are excellent and cannot be forwarded: they interpolate the
+#: offending value (``f"{name!r} is not one of the six trust dimensions"``), and a payload
+#: field is caller-controlled and may be tens of kilobytes. So the exception is turned into
+#: a field NAME here, and this route writes its own message from server-owned vocabulary.
+_UNREPLAYABLE_TIMESTAMP_FIELD = "observed_at"
+
+
+def _unreplayable_field(body: Mapping[str, Any]) -> str | None:
+    """Which field makes ``body`` un-replayable, or ``None`` when the replay can read it.
+
+    ``GET /events/replay?snapshots=true`` projects every event whose payload names a ``dim``
+    and a ``type`` into a trust observation (``trust.ledger.replay.observations_from_events``)
+    and folds it with ``trust.scoring.score``. Both vocabularies are CLOSED and both raise
+    rather than drop -- deliberately, because an observation type nobody weighted would
+    otherwise score a dishonest store as a clean one. Nothing on the write path checked
+    either, so 148 bytes of legal-looking JSON
+
+        {"event_id": "e2", "ts": "...", "kind": "feedback", "store_id": "s-1",
+         "payload": {"dim": "price_honored", "type": "positive"}}
+
+    returned ``201`` and made every subsequent snapshot replay a ``500`` -- permanently,
+    because the ledger's ``BEFORE UPDATE OR DELETE ... ENABLE ALWAYS`` trigger means the row
+    cannot be evicted. Four fields reach the scorer and all four were unchecked: ``dim``,
+    ``type``, ``weight`` and ``observed_at``.
+
+    **The check is the reader, run over one event.** It projects with the reader's own
+    projection and folds with the reader's own scorer, then throws the numbers away. That is
+    the point: a hand-written copy of "the six dimensions and the seven types" in this file
+    would be a second vocabulary free to drift from the one the replay actually uses, and
+    the drift would show up as exactly this defect again. Nothing here decides a score
+    (D49); it decides only whether a score is *computable*, which is a property of the door.
+
+    Why not :func:`contracts.ledger.validate_ledger_payload`, which ``claims/routes.py``
+    calls: it answers a different question and is neither sufficient nor necessary for this
+    one. Not sufficient -- ``{"matched_pitch": true, "reason": "x", "dim": "bogus",
+    "type": "positive"}`` satisfies the published ``feedback`` shape (extra keys are allowed
+    by design) and still bricks the replay. Not necessary -- it would refuse ``{"n": 1}``,
+    which replays perfectly well, and refusing it here would contradict the rule
+    ``packages/contracts/src/ledger.py`` states in its own header: the shape check belongs at
+    the PRODUCING boundary, and the ledger must stay lossless so that a vendor body with an
+    unexpected key is recorded rather than dropped. ``claims/routes.py`` IS a producer -- it
+    builds the payload it validates. ``POST /events`` is the store's door, and what a store's
+    door owes is that what it admits can still be read back.
+
+    Returns:
+        The name of the offending payload field, or ``None``. Returns ``None`` when the
+        scorer is not importable at all: in that configuration ``replay?snapshots=true``
+        already answers ``503 scorer_unavailable`` rather than ``500``, so there is no 5xx
+        to prevent, and refusing every write because the scorer is absent would take the
+        ledger down for a reason that is not the caller's.
+    """
+    try:  # noqa: PLC0415 - lazy for the same reason `get_replay`'s import is lazy
+        from ..ledger import observations_from_events
+        from ..scoring import (
+            InvalidObservationWeight,
+            UnknownObservationType,
+            UnknownTrustDimension,
+            score,
+        )
+    except ImportError:
+        return None
+
+    observations = observations_from_events([body])
+    if not observations:
+        return None
+    try:
+        # `as_of` is the event's own normalised `ts`, so the fold is well defined and the
+        # only thing that can raise is the event. The snapshot is discarded.
+        score(observations, as_of=body.get("ts"))
+    except UnknownTrustDimension:
+        return "dim"
+    except UnknownObservationType:
+        return "type"
+    except InvalidObservationWeight:
+        return "weight"
+    except ValueError:
+        # `trust.scoring.engine._parse_instant` on an unparseable `payload.observed_at`.
+        return _UNREPLAYABLE_TIMESTAMP_FIELD
+    except LookupError:  # pragma: no cover - the scorer documents no other LookupError
+        return "payload"
+    return None
+
+
+def _permitted_values(field: str) -> list[str] | None:
+    """The closed vocabulary a refusal may quote for ``field``. Server-owned, never input."""
+    try:  # noqa: PLC0415 - the scorer is optional; see `_unreplayable_field`
+        from ..scoring import OBSERVATION_WEIGHTS, TRUST_DIMENSIONS
+    except ImportError:  # pragma: no cover - unreachable once the scorer is importable
+        return None
+    if field == "dim":
+        return sorted(TRUST_DIMENSIONS)
+    if field == "type":
+        return sorted(OBSERVATION_WEIGHTS)
+    return None
+
+
+_UNREPLAYABLE_ADVICE = {
+    "dim": "`dim` must name one of the closed six trust dimensions (D53).",
+    "type": "`type` must be an observation type with a published weight.",
+    "weight": (
+        "`weight` is a RELATIVE multiplier in [0.0, 1.0] scaling the published weight of "
+        "`type` -- not the published weight itself. R14: one report cannot outvote the "
+        "network, so a weight above one is refused rather than clamped."
+    ),
+    _UNREPLAYABLE_TIMESTAMP_FIELD: (
+        "`observed_at` must be an RFC-3339 instant. Trust decay is a function of it, so an "
+        "unparseable one cannot be silently read as 'now' without making the replay differ "
+        "from the serve."
+    ),
+    "payload": "the payload cannot be projected into a trust observation.",
+}
+
+
+def _refuse_unreplayable_ledger(store: Any, exc: BaseException) -> HTTPException:
+    """A ``422`` naming the stored row the trust scorer cannot interpret.
+
+    The write path refuses such payloads now, but this is the OTHER half of that fix and it
+    is the half that matters to anybody already running the service: the ledger's
+    ``BEFORE UPDATE OR DELETE ... ENABLE ALWAYS`` trigger means a row admitted before the
+    guard existed cannot be updated, deleted or truncated away. Left alone, every
+    ``replay?snapshots=true`` on such a deployment is a ``500`` forever, and a ``500`` is
+    indistinguishable from the service being down.
+
+    **What this does NOT do is skip the row and serve a number.** Both closed vocabularies
+    raise rather than drop precisely so that a behaviour nobody weighted cannot score as a
+    clean record, and a snapshot folded over "the events we could read" is a snapshot of a
+    ledger that does not exist -- the same reason ``MAX_SNAPSHOT_REPLAY_EVENTS`` refuses
+    rather than snapshotting a prefix. So the endpoint still declines to produce snapshots
+    over a poisoned ledger. What changes is that it declines *legibly*: a 4xx that says the
+    stored data is un-interpretable and names the row, instead of a 5xx that says nothing
+    and blames the server.
+
+    The offending row is located by a second pass with :func:`_unreplayable_field`, the same
+    predicate the door uses, so the two cannot disagree about what "poison" means. That pass
+    costs a walk of the ledger -- paid only on a ledger that is already broken, bounded by
+    the :data:`MAX_SNAPSHOT_REPLAY_EVENTS` check that has already run above, and stopping at
+    the first offender.
+    """
+    seq: Any = None
+    event_id: Any = None
+    field: str | None = None
+    try:
+        for stored in store.iter_events():
+            found = _unreplayable_field(stored)
+            if found is not None:
+                seq, event_id, field = stored.get("seq"), stored.get("event_id"), found
+                break
+    except EventServiceError:  # pragma: no cover - the read that just succeeded, failing
+        pass
+
+    if isinstance(event_id, str):
+        # Rows written before the T-366 ceiling can be arbitrarily long; a diagnosis is not
+        # a licence to echo one back. Post-fix identifiers are 128 characters at most.
+        event_id = event_id[:MAX_IDENTIFIER_LENGTH]
+
+    return HTTPException(
+        422,
+        {
+            "error": "unreplayable_ledger",
+            "seq": seq,
+            "event_id": event_id,
+            "field": field,
+            "reason": type(exc).__name__,
+            "message": (
+                "this ledger holds an event whose payload the trust scorer cannot interpret, "
+                "so it has no snapshot to replay. Such an event is refused at the door now; "
+                "this one predates that guard, and the append-only trigger means it cannot "
+                "be deleted through this service. Verification (snapshots=false) is "
+                "unaffected and stays available. The offending row is named above; repairing "
+                "it is a datastore operation, not an API one."
+            ),
+        },
+    )
+
+
+def _refuse_unreplayable_payload(field: str) -> HTTPException:
+    """A ``422`` for a payload the replay could not later interpret. Quotes no input."""
+    detail: dict[str, Any] = {
+        "error": "unreplayable_payload",
+        "field": field,
+        "message": (
+            f"this payload names both `dim` and `type`, so GET /events/replay?snapshots=true "
+            f"will project it into a trust observation -- and the trust scorer cannot "
+            f"interpret its `{field}`. {_UNREPLAYABLE_ADVICE[field]} The ledger is "
+            f"append-only under a `BEFORE UPDATE OR DELETE ... ENABLE ALWAYS` trigger, so "
+            f"accepting this event would make every later snapshot replay a 500 that nothing "
+            f"could ever clear."
+        ),
+    }
+    permitted = _permitted_values(field)
+    if permitted is not None:
+        detail["permitted"] = permitted
+    return HTTPException(422, detail)
+
+
 @router.post("", response_model=None, status_code=201, summary="Append one ledger event")
 def post_event(
     request: Request,
@@ -163,6 +651,19 @@ def post_event(
     when the id was already in the chain. ``Idempotent-Replay: true`` marks the second case
     for a caller that would rather read a header than a status code.
     """
+    # Length first, and mismatch second. Both messages below quote an identifier back at
+    # the caller, so the ceiling has to bind before anything is interpolated -- otherwise
+    # refusing a 30,000-character event_id would echo 30,000 characters.
+    _refuse_long_identifier("Idempotency-Key", idempotency_key)
+    for field in BOUNDED_IDENTIFIERS:
+        _refuse_long_identifier(field, getattr(event, field, None))
+
+    # Character set second, for the same ordering reason and one more: an identifier
+    # carrying CR/LF must not reach the `!r` interpolation in the mismatch message below.
+    _refuse_unrenderable_identifier("Idempotency-Key", idempotency_key)
+    for field in BOUNDED_IDENTIFIERS:
+        _refuse_unrenderable_identifier(field, getattr(event, field, None))
+
     if idempotency_key is not None and idempotency_key != event.event_id:
         raise HTTPException(
             422,
@@ -178,8 +679,26 @@ def post_event(
         )
 
     store = store_for(request)
+    body = event.model_dump()
+
+    # Normalised HERE, and appended below unchanged. `store.append` normalises again -- the
+    # rule stays "one normalisation, in `normalise_event`" (D16) and this call does not
+    # become a second one -- but the poison check has to see the body that will actually be
+    # stored, not the one that arrived: `ts` is the fallback `observed_at`, and it is the
+    # canonicaliser that turns a caller's RFC-3339 spelling into the instant the scorer
+    # reads. Doing this before the append is the whole point: a poison row cannot be
+    # deleted afterwards, so the only place it can be stopped is before it exists.
     try:
-        outcome = append(store, event.model_dump())
+        normalised = normalise_event(body)
+    except EventServiceError as exc:
+        raise _refuse(exc) from exc
+
+    unreplayable = _unreplayable_field(normalised)
+    if unreplayable is not None:
+        raise _refuse_unreplayable_payload(unreplayable)
+
+    try:
+        outcome = append(store, body)
     except EventServiceError as exc:
         raise _refuse(exc) from exc
 
@@ -226,13 +745,10 @@ def get_events(
     """
     store = store_for(request)
     try:
-        # One row past the page: present means there is more, absent means this is all.
-        window = store.read(after_seq=after_seq, store_id=store_id, limit=limit + 1)
+        events, truncated = store.read_page(after_seq=after_seq, store_id=store_id, limit=limit)
     except EventServiceError as exc:
         raise _refuse(exc) from exc
 
-    truncated = len(window) > limit
-    events = window[:limit]
     return {
         "events": events,
         "count": len(events),
@@ -297,18 +813,31 @@ def get_replay(
     nothing and read as a pass.
 
     **What is capped and what is not.** ``limit`` bounds the events this endpoint
-    *serialises*, because an uncapped one put the entire append-only history into a single
-    response body -- the same unbounded-response hole ``GET /events`` had. It does **not**
-    bound what was verified or what was folded: ``ok``, ``reason``, ``length``,
-    ``head_hash``, ``stream_hash`` and any ``snapshots`` are computed over every event in
-    the ledger, before the page is cut, because those five numbers are the evidence this
-    endpoint exists to produce and a stream hash over a page is a hash of something nobody
-    asked about. ``events_truncated`` / ``events_returned`` / ``next_after_seq`` say which
-    slice of that verified stream came back, and ``after_seq`` walks the rest.
+    *serialises*. It does **not** bound what was verified or what was folded: ``ok``,
+    ``reason``, ``length``, ``head_hash``, ``stream_hash`` and any ``snapshots`` are computed
+    over every event in the ledger, because those five numbers are the evidence this endpoint
+    exists to produce and a stream hash over a page is a hash of something nobody asked
+    about. ``events_truncated`` / ``events_returned`` / ``next_after_seq`` say which slice of
+    that verified stream came back, and ``after_seq`` walks the rest.
+
+    That sentence used to be a *half*-truth, and the half it left out was the defect. The
+    events were serialised by the page and **loaded** in full: the store answered with one
+    unbounded ``read_events(connection)``, so an 8-byte anonymous GET made the process
+    allocate proportionally to everything ever written -- 525 MiB on the measured ledger,
+    inside a 256 MiB container. Verification now walks the chain in windows of
+    :data:`~.store.LEDGER_SCAN_CHUNK` and keeps two events, so "computed over every event"
+    is still exactly true and no longer costs every event.
+
+    ``snapshots=true`` is the one fold that cannot be paged -- an observation per qualifying
+    event, all live at once -- so it carries its own ceiling,
+    :data:`MAX_SNAPSHOT_REPLAY_EVENTS`, and refuses past it rather than allocating.
     """
     store = store_for(request)
     try:
-        report = store.replay()
+        # The store verifies every event through a paged reader and hands back ONE page of
+        # them. `limit` used to bound only the slicing, which happened after the whole
+        # ledger was already a list of Python dicts (T-364).
+        report = store.replay(after_seq=after_seq, limit=limit, include_events=include_events)
     except EventServiceError as exc:
         raise _refuse(exc) from exc
 
@@ -325,28 +854,43 @@ def get_replay(
                     ),
                 },
             )
+        length = int(report.get("length") or 0)
+        if length > MAX_SNAPSHOT_REPLAY_EVENTS:
+            raise HTTPException(
+                422,
+                {
+                    "error": "ledger_too_long_to_replay",
+                    "message": (
+                        f"rebuilding snapshots folds every one of this ledger's {length} "
+                        f"events into trust observations and holds all of them at once, "
+                        f"and this door is unauthenticated; the ceiling is "
+                        f"{MAX_SNAPSHOT_REPLAY_EVENTS}. Verification "
+                        f"(snapshots=false) is paged and stays available at any length."
+                    ),
+                    "length": length,
+                    "max_length": MAX_SNAPSHOT_REPLAY_EVENTS,
+                },
+            )
         from ..ledger import replay as ledger_replay
 
         try:
             # The WHOLE stream, before any paging: a snapshot rebuilt from a page is a
-            # snapshot of a ledger that does not exist.
-            report["snapshots"] = ledger_replay(report["events"], as_of=as_of)
+            # snapshot of a ledger that does not exist. Streamed rather than listed, so what
+            # is held is the observations (which the ceiling above bounds) and not the raw
+            # events as well.
+            report["snapshots"] = ledger_replay(store.iter_events(), as_of=as_of)
         except ModuleNotFoundError as exc:
             raise HTTPException(503, {"error": "scorer_unavailable", "message": str(exc)}) from exc
+        except EventServiceError as exc:
+            raise _refuse(exc) from exc
+        except (LookupError, ValueError) as exc:
+            # A row the scorer cannot interpret. The write path refuses these now, but a
+            # ledger written before that fix already holds them and CANNOT be repaired
+            # through this service -- the append-only trigger refuses UPDATE and DELETE -- so
+            # guarding only the door would leave every such deployment permanently 500ing.
+            raise _refuse_unreplayable_ledger(store, exc) from exc
         report["as_of"] = as_of
 
-    if not include_events:
-        report.pop("events", None)
-        return report
-
-    replayed: list[dict[str, Any]] = list(report.get("events") or [])
-    remaining = [row for row in replayed if int(row.get("seq") or 0) > after_seq]
-    page = remaining[:limit]
-    report["events"] = page
-    report["events_returned"] = len(page)
-    report["events_truncated"] = len(page) < len(remaining)
-    report["next_after_seq"] = int(page[-1]["seq"]) if page else after_seq
-    report["limit"] = limit
     return report
 
 

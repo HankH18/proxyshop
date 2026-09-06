@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -158,7 +158,7 @@ class _BoundedBodyRoute(APIRoute):
     not the allocation.
     """
 
-    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
 
         async def bounded(request: Request) -> Response:

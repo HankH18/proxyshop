@@ -51,8 +51,14 @@ from .errors import (
     InvalidEvent,
     StoreUnavailable,
 )
-from .integrity import anchored_report
-from .store import AppendOutcome, normalise_event
+from .integrity import anchored_scan_report
+from .store import (
+    LEDGER_SCAN_CHUNK,
+    MAX_RESPONSE_EVENT_BYTES,
+    AppendOutcome,
+    bounded_page,
+    normalise_event,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import psycopg
@@ -440,11 +446,78 @@ class PostgresEventStore:
             rows = read_events(connection, event_id=event_id, limit=1)
         return rows[0] if rows else None
 
+    def iter_events(self, *, after_seq: int = 0) -> Iterator[dict[str, Any]]:
+        """The chain, oldest first, read in windows of :data:`LEDGER_SCAN_CHUNK` rows.
+
+        This is the bounded reader every whole-chain answer goes through (T-364). The caller
+        sees one event at a time and the process never holds more than one window, so the
+        cost of "verify the ledger" stops being a function of how much has ever been written
+        to it. It opens **one** connection for the whole walk and closes it when the
+        generator is exhausted or collected.
+        """
+        with self._connection() as connection:
+            yield from self._scan(connection, after_seq=after_seq)
+
+    def _scan(
+        self,
+        connection: psycopg.Connection,
+        *,
+        after_seq: int = 0,
+        store_id: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Page the chain off ``connection``, ``LEDGER_SCAN_CHUNK`` rows per round trip.
+
+        ``seq`` is a ``bigserial`` on an append-only table, so paging on it is stable in a way
+        an ``OFFSET`` would not be: rows are never rewritten or deleted (the ``BEFORE UPDATE
+        OR DELETE ... ENABLE ALWAYS`` trigger sees to that), and a row that lands mid-walk
+        lands at the tail, behind the cursor, where the next window picks it up in order.
+        A rolled-back append leaves a hole in the sequence, which ``seq > %s ORDER BY seq``
+        steps over without noticing.
+        """
+        after = after_seq
+        while True:
+            window = read_events(
+                connection, after_seq=after, store_id=store_id, limit=LEDGER_SCAN_CHUNK
+            )
+            if not window:
+                return
+            yield from window
+            after = int(window[-1]["seq"])
+            if len(window) < LEDGER_SCAN_CHUNK:
+                return
+
+    def read_page(
+        self,
+        *,
+        after_seq: int = 0,
+        store_id: str | None = None,
+        limit: int | None = None,
+        max_bytes: int = MAX_RESPONSE_EVENT_BYTES,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """One page of the chain and whether there is more: see :func:`~.store.bounded_page`.
+
+        Bounded twice over, and both bounds are load-bearing. ``limit`` is the caller's, and
+        is what ``GET /events`` publishes; ``max_bytes`` is the one the caller cannot raise,
+        because ``MAX_EVENT_PAGE`` rows of the largest event the door accepts is far more
+        than the container holds.
+        """
+        with self._connection() as connection:
+            return bounded_page(
+                self._scan(connection, after_seq=after_seq, store_id=store_id),
+                limit=limit,
+                max_bytes=max_bytes,
+            )
+
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
         """Every event, oldest first. Read from the ledger on every access -- there is no
-        cache, which is what makes the replay endpoint a replay rather than a recital."""
-        return tuple(self.read())
+        cache, which is what makes the replay endpoint a replay rather than a recital.
+
+        **Materialises the whole chain, and is therefore not on any request path.** Use
+        :meth:`iter_events` (bounded) or :meth:`read_page` (bounded and paged) anywhere a
+        caller who is not holding the ledger's size in their hand can reach.
+        """
+        return tuple(self.iter_events())
 
     @property
     def head_hash(self) -> str:
@@ -467,40 +540,85 @@ class PostgresEventStore:
             return chain_anchor(connection)
 
     def stream_hash(self) -> str:
-        """The stream's identity, recomputed from every row's content."""
-        with self._connection() as connection:
-            return _stream_hash(read_events(connection))
+        """The stream's identity, recomputed from every row's content.
 
-    def _read_with_anchor(self) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-        """The rows and the commitment, read on **one** connection in that order.
-
-        Two connections, or two round trips a write could slip between, would compare the
-        length of one stream against the anchor of another and report a truncation that
-        never happened.
+        Folded over :meth:`iter_events`, so it reads every event and holds a window of them.
         """
-        with self._connection() as connection:
-            events = read_events(connection)
-            try:
-                anchor: dict[str, Any] | None = chain_anchor(connection)
-            except LedgerError:
-                anchor = None
-        return events, anchor
+        return _stream_hash(self.iter_events())
+
+    @staticmethod
+    def _anchor_or_none(connection: psycopg.Connection) -> dict[str, Any] | None:
+        """``ledger.chain_head``, or ``None`` when the commitment row is gone.
+
+        One row, one index probe -- the anchor is the cheap half of a verification and the
+        only half whose cost does not depend on the ledger.
+        """
+        try:
+            return chain_anchor(connection)
+        except LedgerError:
+            return None
+
+    def _anchored_report(self, connection: psycopg.Connection) -> dict[str, Any]:
+        """The verification report, computed over a bounded scan of ``connection``.
+
+        Anchor first, then the scan, both on one connection. The order is not free of races
+        and never was: an append that commits while the chain is being walked makes the rows
+        and the recorded count disagree by one, and ``verify_chain`` reports that as
+        ``truncated``. That was true of the previous single-statement read as well (which
+        read the rows and *then* the anchor, and so disagreed in the other direction), it is
+        a read of a moving ledger rather than a defect in either, and it is self-correcting
+        on the next call.
+        """
+        anchor = self._anchor_or_none(connection)
+        return anchored_scan_report(lambda: self._scan(connection), anchor)
 
     def verify(self) -> dict[str, Any]:
-        """Verify the links **and** the anchor, and name the link that broke."""
-        return anchored_report(*self._read_with_anchor())
+        """Verify the links **and** the anchor, and name the link that broke.
 
-    def replay(self) -> dict[str, Any]:
-        """The whole chain, replayed from the ledger: verification plus every event.
+        Every event is verified; **no** event is retained. That combination is the whole
+        point of T-364: before it, this method answered an 8-byte unauthenticated GET by
+        materialising the entire append-only history, which on the measured ledger peaked at
+        525 MiB inside a 256 MiB container.
+        """
+        with self._connection() as connection:
+            return self._anchored_report(connection)
+
+    def replay(
+        self,
+        *,
+        after_seq: int = 0,
+        limit: int | None = None,
+        include_events: bool = True,
+        max_bytes: int = MAX_RESPONSE_EVENT_BYTES,
+    ) -> dict[str, Any]:
+        """The whole chain, replayed from the ledger: verification plus a page of events.
 
         Nothing here is remembered between calls -- the events come out of Postgres on
         every request. That is the property that makes this a replay: an endpoint serving a
         list it had been holding in memory since the write would reproduce the writer's
         state, not the ledger's, and would go on doing so after the ledger was emptied.
+
+        **Verified in full, serialised by the page.** ``ok``, ``reason``, ``length``,
+        ``head_hash`` and ``stream_hash`` are computed over every event, because those are
+        the evidence this call exists to produce and a stream hash over a page is a hash of
+        something nobody asked about. The events themselves come back as one
+        :func:`~.store.bounded_page`, with ``events_truncated`` / ``next_after_seq`` saying
+        which slice of the verified stream that was. Both halves used to be one list: the
+        docstring on ``GET /events/replay`` said ``limit`` bounded what was serialised and it
+        did -- after every row had already been pulled into memory.
         """
-        events, anchor = self._read_with_anchor()
-        report = anchored_report(events, anchor)
-        report["events"] = events
+        with self._connection() as connection:
+            report = self._anchored_report(connection)
+            if not include_events:
+                return report
+            page, more = bounded_page(
+                self._scan(connection, after_seq=after_seq), limit=limit, max_bytes=max_bytes
+            )
+        report["events"] = page
+        report["events_returned"] = len(page)
+        report["events_truncated"] = more
+        report["next_after_seq"] = int(page[-1]["seq"]) if page else after_seq
+        report["limit"] = limit
         return report
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics

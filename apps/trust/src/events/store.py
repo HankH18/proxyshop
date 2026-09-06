@@ -41,8 +41,9 @@ out of the list and the anchor still says how many there were, so
 from __future__ import annotations
 
 import copy
+import json
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,11 +60,84 @@ from .integrity import anchored_report, verify_stream
 
 __all__ = [
     "LEDGER_EVENT_KINDS",
+    "LEDGER_SCAN_CHUNK",
+    "MAX_RESPONSE_EVENT_BYTES",
     "AppendOutcome",
     "InMemoryEventStore",
     "append",
+    "bounded_page",
     "normalise_event",
 ]
+
+#: How many rows a whole-chain read pulls out of the ledger per round trip (T-364).
+#:
+#: Verifying or replaying the chain has to *see* every event and has to *hold* almost none
+#: of them, so the reads that answer ``GET /events/verify`` and ``GET /events/replay`` walk
+#: the ledger in windows of this many rows instead of asking for all of it at once. Measured
+#: before the change, on a 4,000-row / 2 MB synthetic ledger:
+#: ``PostgresEventStore.verify()`` issued a single unbounded ``read_events(connection)`` and
+#: peaked at 6.0 MB -- three times the ledger -- to return a report of a few hundred bytes.
+#: On the ledger the sweep measured (77 MB, 515 rows) the same call peaked at 525 MiB
+#: against a ``mem_limit: 256m`` container.
+#:
+#: A hundred, because the number trades round trips against the largest window that can be
+#: in memory at once, and the second half of that product is now bounded too: T-366 caps one
+#: event's body at :data:`~.routes.MAX_EVENT_BODY_BYTES`, so a window is at most
+#: ``100 * 64 KiB = 6.4 MiB`` of payload text even in the worst case a caller can construct,
+#: while a ledger of any size still costs one round trip per hundred rows.
+LEDGER_SCAN_CHUNK = 100
+
+#: The most serialised event text one response body will carry, whatever ``limit`` says.
+#:
+#: ``MAX_EVENT_PAGE`` bounds a page in ROWS, which is not a bound in BYTES: ten thousand rows
+#: of the largest event the door now accepts is 640 MiB in a single response, two and a half
+#: times the container. So a page also stops on bytes -- and reports ``truncated``, because a
+#: short page that claims to be complete is the exact lie ``GET /events`` was fixed to stop
+#: telling. Four mebibytes is the number this repo already uses for "the most one response
+#: may carry" (``buyer.composition.MAX_EXCHANGE_RESPONSE_BYTES``,
+#: ``exchange.composition.MAX_DEPLOYMENT_BYTES``).
+#:
+#: It is measured over ``json.dumps`` of the rows, which is a lower bound on the parsed
+#: Python objects behind them (roughly two to three times larger) rather than an estimate of
+#: them -- the point is that the number cannot grow with the ledger, not that it predicts
+#: the allocator.
+MAX_RESPONSE_EVENT_BYTES = 4 * 1024 * 1024
+
+
+def bounded_page(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    limit: int | None = None,
+    max_bytes: int = MAX_RESPONSE_EVENT_BYTES,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Take a page off ``rows``, bounded by row count **and** serialised size.
+
+    Args:
+        rows: the stream, lazily. Only what is taken is ever materialised, so passing a
+            generator over a paged database read is what keeps this bounded.
+        limit: the most rows to return, or ``None`` for "as many as the byte budget allows".
+        max_bytes: the most serialised event text to return. The first row is always taken
+            even if it is over budget on its own -- refusing to return a single stored event
+            would make part of the ledger permanently unreadable, and the row is already
+            bounded by the cap that let it be written.
+
+    Returns:
+        ``(page, more)``. ``more`` is ``True`` when the source had at least one further row,
+        whichever bound stopped the page -- which is what lets the caller report
+        ``truncated`` honestly instead of inferring it from ``len(page) == limit``.
+    """
+    page: list[dict[str, Any]] = []
+    used = 0
+    for row in rows:
+        if limit is not None and len(page) >= limit:
+            return page, True
+        size = len(json.dumps(row, default=str))
+        if page and used + size > max_bytes:
+            return page, True
+        page.append(dict(row))
+        used += size
+    return page, False
+
 
 #: The frozen ``LedgerEvent`` kind vocabulary (C11/D24). Thirteen from DESIGN §Interfaces
 #: plus the five D24 added in T-010, and no others.
@@ -306,6 +380,37 @@ class InMemoryEventStore:
         ]
         return rows if limit is None else rows[:limit]
 
+    def iter_events(self, *, after_seq: int = 0) -> Iterator[dict[str, Any]]:
+        """The chain, oldest first, **one event at a time** -- the streaming twin of
+        :attr:`events`.
+
+        The whole chain is in this process's memory by construction, so nothing here is
+        cheaper than :attr:`events`; it exists so that a caller written against the Postgres
+        store's bounded scan (:meth:`~.pg.PostgresEventStore.iter_events`) works unchanged
+        against this one.
+        """
+        with self._lock:
+            rows = list(self._events)
+        for row in rows:
+            if int(row.get("seq", 0)) > after_seq:
+                yield copy.deepcopy(row)
+
+    def read_page(
+        self,
+        *,
+        after_seq: int = 0,
+        store_id: str | None = None,
+        limit: int | None = None,
+        max_bytes: int = MAX_RESPONSE_EVENT_BYTES,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """One page of the chain and whether there is more: see :func:`bounded_page`."""
+        rows = (
+            row
+            for row in self.iter_events(after_seq=after_seq)
+            if store_id is None or row.get("store_id") == store_id
+        )
+        return bounded_page(rows, limit=limit, max_bytes=max_bytes)
+
     def get(self, event_id: str) -> dict[str, Any] | None:
         """One event by its ``event_id``, or ``None``."""
         with self._lock:
@@ -324,10 +429,30 @@ class InMemoryEventStore:
         """
         return anchored_report(list(self.events), self.anchor)
 
-    def replay(self) -> dict[str, Any]:
-        """The whole chain: the verification report plus every event, in order."""
+    def replay(
+        self,
+        *,
+        after_seq: int = 0,
+        limit: int | None = None,
+        include_events: bool = True,
+        max_bytes: int = MAX_RESPONSE_EVENT_BYTES,
+    ) -> dict[str, Any]:
+        """The verification report over the **whole** chain, plus one page of events.
+
+        The split is the point (T-364): ``ok``, ``length``, ``head_hash`` and ``stream_hash``
+        are computed over every event because they are the evidence this call exists to
+        produce, while the events handed back are a bounded page. ``events_truncated`` says
+        which of the two the caller is looking at.
+        """
         report = self.verify()
-        report["events"] = list(self.events)
+        if not include_events:
+            return report
+        page, more = self.read_page(after_seq=after_seq, limit=limit, max_bytes=max_bytes)
+        report["events"] = page
+        report["events_returned"] = len(page)
+        report["events_truncated"] = more
+        report["next_after_seq"] = int(page[-1]["seq"]) if page else after_seq
+        report["limit"] = limit
         return report
 
     # -- the write --------------------------------------------------------------------

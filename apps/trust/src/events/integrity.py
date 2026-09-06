@@ -19,11 +19,22 @@ wraps the verifier and adds the two things that make a failure actionable:
 It adds no verification of its own. Every ``ok`` in the returned mapping is
 :func:`trust.ledger.verify_chain`'s ``ok``; a second opinion about integrity, computed
 here, is the one thing this module must never grow.
+
+Two ways in, one verifier
+-------------------------
+:func:`verify_stream` / :func:`anchored_report` take the stream as a **list** and are what
+an in-memory caller wants. :func:`verify_scan` / :func:`anchored_scan_report` take a
+**rewindable scan** -- a callable handing back a fresh iterator -- and never hold more than
+two events at a time, which is what lets the Postgres store verify a ledger larger than the
+container it runs in (T-364). Both pairs delegate to the same
+:func:`trust.ledger.verify_chain` and the same :func:`describe_break_at`, so "the ledger
+verifies" still means exactly one thing; ``apps/trust/tests/test_events_dos_surface.py``
+asserts the two reports are equal key for key on an intact chain *and* on a tampered one.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 from ..ledger import (
@@ -34,7 +45,19 @@ from ..ledger import (
     verify_chain,
 )
 
-__all__ = ["anchored_report", "describe_break", "verify_stream"]
+__all__ = [
+    "anchored_report",
+    "anchored_scan_report",
+    "describe_break",
+    "describe_break_at",
+    "verify_scan",
+    "verify_stream",
+]
+
+#: A callable that hands back a **fresh** iterator over the whole stream, in order. Not an
+#: iterator: a report needs at most two passes (the links, and -- only when the chain does
+#: not verify -- the recomputed stream hash), and an iterator can only be walked once.
+Scan = Callable[[], Iterator[Mapping[str, Any]]]
 
 #: What each ``verify_chain`` reason actually means, in the caller's terms.
 _REASON_MEANINGS = {
@@ -93,6 +116,34 @@ def describe_break(
         ``anchor_missing`` and ``empty`` are all reported at an index past the last event,
         because the thing that is wrong is what is *absent*. ``detail`` is always a
         sentence, including for an intact chain.
+
+    This is the *indexed* front door: it resolves ``broken_at`` against a stream it is
+    holding and hands the two events that matter to :func:`describe_break_at`, which is
+    where the wording lives. A caller that streamed the chain and no longer has the list
+    calls that function directly.
+    """
+    index = report.get("broken_at")
+    if report.get("ok") or not isinstance(index, int) or not (0 <= index < len(events)):
+        return describe_break_at(None, None, report)
+    return describe_break_at(events[index], events[index - 1] if index > 0 else None, report)
+
+
+def describe_break_at(
+    row: Mapping[str, Any] | None,
+    predecessor: Mapping[str, Any] | None,
+    report: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    """``(broken_event, detail)`` from the offending event and its predecessor alone.
+
+    Args:
+        row: the event ``report["broken_at"]`` points at, or ``None`` when the break is one
+            no event in the stream can be blamed for (``truncated``, ``head_mismatch``,
+            ``anchor_missing``, ``empty``) or when the chain is intact.
+        predecessor: the event before it, or ``None`` at index 0.
+        report: what ``verify_chain`` returned.
+
+    Two events is all a break description ever needed, which is what makes a verifier that
+    holds the whole stream and one that holds a page produce the identical sentence.
     """
     reason = report.get("reason")
     verified = int(report.get("verified") or 0)
@@ -104,13 +155,11 @@ def describe_break(
 
     meaning = _REASON_MEANINGS.get(str(reason), "the chain did not verify")
     index = report.get("broken_at")
-    if not isinstance(index, int) or not (0 <= index < len(events)):
+    if row is None or not isinstance(index, int):
         return None, (
             f"ledger chain NOT intact after {verified} event(s): reason={reason} -- {meaning}"
         )
 
-    row = events[index]
-    predecessor = events[index - 1] if index > 0 else None
     expected_prev = (
         GENESIS_HASH if predecessor is None else str(predecessor.get("event_hash") or "")
     )
@@ -243,5 +292,138 @@ def anchored_report(
     report["anchor"] = dict(anchor)
     report["anchor_ok"] = bool(
         len(events) == length and (length == 0 or report["stream_hash"] == str(anchor["head_hash"]))
+    )
+    return report
+
+
+# ======================================================================================
+# The same two reports, over a stream nobody is holding (T-364)
+# ======================================================================================
+class _TwoEventWindow:
+    """An iterable that remembers only the **last two** events that went past it.
+
+    That is the entire state a break description needs (see :func:`describe_break_at`), so a
+    verifier wrapping its source in one of these can walk a ledger of any length at constant
+    cost. ``count`` is how many events have been yielded, which is what ``length`` means once
+    the source is exhausted.
+    """
+
+    def __init__(self, rows: Iterator[Mapping[str, Any]] | Iterable[Mapping[str, Any]]) -> None:
+        self._rows = iter(rows)
+        self.count = 0
+        self.previous: Mapping[str, Any] | None = None
+        self.current: Mapping[str, Any] | None = None
+
+    def __iter__(self) -> Iterator[Mapping[str, Any]]:
+        for row in self._rows:
+            self.previous, self.current = self.current, row
+            self.count += 1
+            yield row
+
+    def drain(self) -> int:
+        """Consume whatever is left, counting it. Returns the stream's full length.
+
+        ``verify_chain`` stops at the first broken link, so without this the reported
+        ``length`` would be "how far verification got" rather than "how long the stream is"
+        -- two different numbers that the list-based :func:`verify_stream` never had to tell
+        apart, and that ``anchor_ok`` compares against the recorded count.
+        """
+        for _ in self._rows:
+            self.count += 1
+        return self.count
+
+
+def verify_scan(
+    scan: Scan,
+    *,
+    expected_length: int | None = None,
+    expected_head: str | None = None,
+    allow_empty: bool = False,
+) -> dict[str, Any]:
+    """:func:`verify_stream`, computed without ever holding the stream.
+
+    Args:
+        scan: a callable returning a **fresh** iterator over the whole stream, in order.
+        expected_length / expected_head / allow_empty: exactly as :func:`verify_stream`.
+
+    Returns:
+        The same keys :func:`verify_stream` returns, with the same values.
+
+    **Why ``stream_hash`` costs a second pass only when the chain is broken.** On a chain
+    that verifies, ``verify_chain`` has already *done* the ``stream_hash`` fold: at every
+    event it asserts ``compute_event_hash(prev, event) == stored_event_hash`` and then sets
+    ``prev`` to that digest, which is the identical recurrence
+    :func:`trust.ledger.stream_hash` runs -- so the head it returns IS the recomputed stream
+    hash, and taking it from there is a reading of the verifier's own work rather than a
+    second opinion about it. When the chain does **not** verify the two genuinely differ
+    (verification stops at the break; the stream hash folds on regardless), so that case
+    walks the ledger a second time. It is the rare case, and it is still bounded.
+    """
+    window = _TwoEventWindow(scan())
+    report: dict[str, Any] = dict(
+        verify_chain(
+            window,
+            expected_length=expected_length,
+            expected_head=expected_head,
+            allow_empty=allow_empty,
+        )
+    )
+
+    # `verify_chain` stops ON the offending event, so when it names an index it is the last
+    # one the window saw. Anything else -- `truncated`, `head_mismatch`, `empty` -- is
+    # reported at an index PAST the stream, which is the case `describe_break_at` handles by
+    # being handed no row at all.
+    index = report.get("broken_at")
+    row: Mapping[str, Any] | None = None
+    predecessor: Mapping[str, Any] | None = None
+    if not report["ok"] and isinstance(index, int) and index == window.count - 1:
+        row, predecessor = window.current, window.previous
+
+    length = window.drain()
+    broken, detail = describe_break_at(row, predecessor, report)
+
+    report["length"] = length
+    report["expected_length"] = expected_length
+    report["expected_head"] = expected_head
+    if report["ok"]:
+        report["stream_hash"] = report["head_hash"]
+    else:
+        try:
+            report["stream_hash"] = stream_hash(scan())
+        except CanonicalisationError:
+            report["stream_hash"] = None
+    report["broken_event"] = None if broken is None else dict(broken)
+    report["detail"] = detail
+    return report
+
+
+def anchored_scan_report(scan: Scan, anchor: Mapping[str, Any] | None) -> dict[str, Any]:
+    """:func:`anchored_report`, over a scan rather than a list. Same report, bounded cost.
+
+    The anchor is read once, by the caller, and is O(1) -- it is a single row in
+    ``ledger.chain_head``. Everything expensive is the scan, and the scan is paged.
+    """
+    if anchor is None:
+        report = verify_scan(scan)
+        report["anchor"] = None
+        report["anchor_ok"] = False
+        if report["ok"]:
+            report["ok"] = False
+            report["reason"] = "anchor_missing"
+            report["broken_at"] = report["length"]
+            _, report["detail"] = describe_break_at(None, None, report)
+        return report
+
+    length = int(anchor["length"])
+    report = verify_scan(
+        scan,
+        expected_length=length,
+        expected_head=str(anchor["head_hash"]) if length else None,
+        allow_empty=length == 0,
+    )
+    report["anchor"] = dict(anchor)
+    report["anchor_ok"] = bool(
+        report["length"] == length
+        and (length == 0 or report["stream_hash"] == str(anchor["head_hash"]))
     )
     return report
