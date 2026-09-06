@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlunsplit
 
 from ..adapters.hashing import HASH_PREFIX, content_hash, snapshot_ref
 from ..adapters.netguard import safe_split
