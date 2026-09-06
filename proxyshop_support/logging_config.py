@@ -37,11 +37,17 @@ every "is logging configured" grep and shows an operator precisely nothing. The 
 installed here writes to a real stream (``sys.stderr`` by default, so stdout stays clean for
 programs that pipe it), and ``$PROXYSHOP_LOG_FILE`` adds a real file alongside it.
 
-**Correlation ids.** ``$PROXYSHOP_LOG_FORMAT=json`` emits one JSON object per line for an
-aggregator, and every record — text or JSON — carries a ``request_id`` field maintained in a
+**Correlation ids, and the fact that they are attacker-controlled.**
+``$PROXYSHOP_LOG_FORMAT=json`` emits one JSON object per line for an aggregator, and every
+record — text or JSON — carries a ``request_id`` field maintained in a
 :class:`~contextvars.ContextVar`. :class:`RequestIdMiddleware` is a plain ASGI middleware
 (no framework import) that mints or adopts one per request and echoes it in the response
-header, so a request can be followed across services by grepping one id.
+header, so a request can be followed across services by grepping one id. An incoming
+``X-Request-ID`` is a header a caller chose, and it lands in two dangerous places at once —
+a response header and every log line — so it is validated by :func:`sanitise_request_id`
+and DISCARDED if it does not conform. An earlier draft adopted it verbatim, which was
+response-header splitting on the way out (uvicorn does not validate header values) and log
+forging on the way in; see that function for the measurements.
 
 **Why the standard library and not ``structlog``.** ``structlog`` is a declared dependency
 with zero importers, and it is tempting to reach for it here. It is not what is broken:
@@ -67,6 +73,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, MutableMapping
@@ -79,8 +86,10 @@ __all__ = [
     "FILE_ENV",
     "FORMAT_ENV",
     "LEVEL_ENV",
+    "MAX_REQUEST_ID_LENGTH",
     "OWNED_BY",
     "REQUEST_ID_HEADER",
+    "REQUEST_ID_PATTERN",
     "JsonFormatter",
     "RequestIdFilter",
     "RequestIdMiddleware",
@@ -91,6 +100,7 @@ __all__ = [
     "request_id_scope",
     "reset_logging",
     "resolve_level",
+    "sanitise_request_id",
 ]
 
 #: Read when ``configure_logging(level=...)`` is not given one. A name (``"debug"``) or a
@@ -120,6 +130,16 @@ REQUEST_ID_HEADER = "x-request-id"
 #: placeholder rather than ``None`` so the text format stays column-aligned.
 NO_REQUEST_ID = "-"
 
+#: The only shape a correlation id arriving from OUTSIDE this system may have. Generous
+#: enough for every id format anyone actually sends — uuid (hyphens), hex, ULID, W3C
+#: traceparent, a ``svc:1234`` or ``user@host`` label — and deliberately excluding CR, LF and
+#: every other control character. See :func:`sanitise_request_id` for why that matters.
+REQUEST_ID_PATTERN = re.compile(r"\A[A-Za-z0-9._:@+-]{1,128}\Z")
+
+#: Length bound, restated for the failure message. A 100 kB header echoed back into every
+#: response and every log line is a denial-of-service in its own right.
+MAX_REQUEST_ID_LENGTH = 128
+
 _TEXT_FORMAT = "%(asctime)s %(levelname)-8s %(name)s [%(request_id)s] %(message)s"
 _DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 
@@ -141,8 +161,41 @@ def new_request_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def sanitise_request_id(value: str | None) -> str | None:
+    """``value`` if it is safe to trust as a correlation id, else ``None``.
+
+    Anything arriving from outside this system MUST go through here first, because a
+    correlation id is echoed into a response header AND interpolated into every log line,
+    so an unchecked one is two injections at once. Measured against an earlier draft that
+    adopted the header verbatim:
+
+    * ``x-request-id: abc\\r\\nSet-Cookie: admin=1`` produced a response header value
+      containing CRLF. uvicorn's httptools protocol does not validate header values, so that
+      is response-header splitting — the attacker sets a cookie on the victim's browser.
+    * the same value produced a log line that ended mid-record and was followed by a
+      complete, attacker-authored ``CRITICAL`` line, in exactly the aggregator this module
+      exists to feed. A forged audit line is worse than no audit line.
+    * a 100 000-byte id was adopted and echoed in full, on every response and every record.
+
+    Non-conforming ids are DISCARDED rather than scrubbed, and the caller mints a fresh one.
+    Scrubbing would keep attacker-chosen text in the logs (safe, but still theirs) and would
+    silently correlate two different requests if two hostile ids scrubbed to the same string.
+    Losing correlation for a caller whose id is not in :data:`REQUEST_ID_PATTERN` is the
+    cheaper failure, and the pattern is wide enough that no ordinary format is affected.
+    """
+    if value is None:
+        return None
+    candidate = value.strip()
+    return candidate if REQUEST_ID_PATTERN.fullmatch(candidate) else None
+
+
 def bind_request_id(value: str | None = None) -> Token[str]:
     """Bind ``value`` (or a fresh id) as the current correlation id.
+
+    ``value`` is trusted as given: this is the in-process entry point, for code binding an
+    id it chose itself. Anything derived from a request, a header, a queue message or a
+    database column must be passed through :func:`sanitise_request_id` first —
+    :class:`RequestIdMiddleware` does exactly that at the HTTP boundary.
 
     Returns the :class:`~contextvars.Token` needed to restore the previous value. Prefer
     :func:`request_id_scope`, which cannot leak the binding.
@@ -272,10 +325,13 @@ def configure_logging(
     if existing and not force:
         return False
 
-    for handler in existing:
-        root.removeHandler(handler)
-        handler.close()
-
+    # BUILD FIRST, SWAP LAST. Three of the steps below can raise — an unparseable level, an
+    # unknown format, and a FileHandler whose path is a directory or is unwritable — and an
+    # earlier draft removed and CLOSED the working handlers before any of them ran. Measured:
+    # `configure_logging(force=True, fmt="yaml")` on a correctly-configured process raised
+    # and left `root.handlers == []` at level 30, i.e. a failed RELOAD turned the process
+    # permanently dark. That is this module's own defect walking back in through the one
+    # path meant to repair it, so nothing is torn down until the replacement exists.
     resolved = resolve_level(level)
     formatter = _build_formatter(fmt)
 
@@ -288,6 +344,11 @@ def configure_logging(
         handler.setFormatter(formatter)
         handler.addFilter(RequestIdFilter())
         setattr(handler, OWNED_BY, True)
+
+    for handler in existing:
+        root.removeHandler(handler)
+        handler.close()
+    for handler in handlers:
         root.addHandler(handler)
 
     # The ROOT level, not a per-handler one. A handler at INFO under a root still at WARNING
@@ -345,7 +406,11 @@ class RequestIdMiddleware:
         incoming = None
         for key, value in scope.get("headers") or ():
             if key.lower() == self.header:
-                incoming = value.decode("latin-1", "replace").strip() or None
+                # SANITISE, never adopt. The value is attacker-controlled: unchecked it is
+                # response-header splitting on the way out and a forged log line on the way
+                # in. `sanitise_request_id` returns None for anything non-conforming, and
+                # `request_id_scope(None)` then mints a fresh id.
+                incoming = sanitise_request_id(value.decode("latin-1", "replace"))
                 break
 
         with request_id_scope(incoming) as request_id:

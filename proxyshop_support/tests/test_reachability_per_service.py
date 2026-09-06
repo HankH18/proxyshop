@@ -279,8 +279,13 @@ def test_a_single_service_outage_does_not_skip_the_other_services_tests(
     assert redis_outcome == "skipped", outcomes
     assert "redis" in redis_message
 
-    # A test that names no service and requests no datastore fixture still needs
-    # everything, so it is still skipped. That is the behaviour being narrowed, not lost.
+    # A test that names all three services still needs all three, so any one of them being
+    # down still skips it. That is the behaviour T-109 narrowed and T-172 did not lose: the
+    # skip mechanism is untouched, only the way an item SAYS it needs everything changed —
+    # this probe declares the three explicitly now instead of declaring nothing and being
+    # widened. (This comment used to read "a test that names no service ... is still
+    # skipped", which stopped being true when T-172 made silence a refusal; the assertion
+    # below never moved.)
     assert outcomes["test_probe_whole_stack"][0] == "skipped", outcomes
 
 
@@ -335,3 +340,110 @@ def test_a_redis_outage_does_not_skip_a_bare_marked_postgres_fixture_test(
     assert outcome == "passed", (
         f"a Redis outage skipped a Postgres-fixture test: {outcome} {message!r}"
     )
+
+
+# --------------------------------------------------------------------------------------
+# 5. T-172: an item that declares nothing must STOP THE SESSION, end to end
+# --------------------------------------------------------------------------------------
+
+#: A single bare-marked item. Written into ``tmp_path`` and never into the repo: a file like
+#: this sitting anywhere under ``testpaths`` would abort every other run in the tree, and
+#: several workers share this checkout's siblings.
+_UNDECLARED_PROBE = """\
+import pytest
+
+
+@pytest.mark.docker
+def test_declares_no_service() -> None:
+    pass
+"""
+
+_DECLARED_PROBE = """\
+import pytest
+
+
+@pytest.mark.docker("postgres")
+def test_declares_postgres() -> None:
+    pass
+"""
+
+
+def _run_root_conftest(tmp_path: Path, source: str, name: str) -> subprocess.CompletedProcess[str]:
+    """Collect one generated module through the REAL root ``conftest.py``.
+
+    ``-p conftest`` registers the repo's own root conftest as a plugin, so this exercises the
+    actual ``pytest_collection_modifyitems`` hook rather than a re-implementation of it. The
+    module itself lives outside the repo, which is what makes generating a *bare*-marked item
+    safe here.
+    """
+    probe = tmp_path / name
+    probe.write_text(source, encoding="utf-8")
+    roots = os.pathsep.join([str(REPO_ROOT), str(REPO_ROOT / ".pkgroot")])
+    inherited = os.environ.get("PYTHONPATH")
+    env = dict(
+        os.environ,
+        PYTHONPATH=f"{roots}{os.pathsep}{inherited}" if inherited else roots,
+    )
+    env.setdefault("PROXYSHOP_WORKER", "1")
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(probe),
+            "-p",
+            "conftest",
+            "-p",
+            "no:cacheprovider",
+            "--no-header",
+            "-q",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_an_undeclared_docker_item_stops_the_session_rather_than_being_widened(
+    tmp_path: Path,
+) -> None:
+    """T-172, as an end-to-end consequence rather than a property of ``services_for``.
+
+    This exists because converting ``_service_skip_probe.py``'s ``test_probe_whole_stack``
+    from a bare mark to an explicit three-service one removed the repo's only live example
+    of the undeclared case. Without something here, ``conftest.py``'s
+    ``except ValueError: raise pytest.UsageError(...)`` is unpinned: replacing that handler
+    with "log it and widen to the whole stack" restores T-172 in full, and MEASURED, every
+    other test in this file and the T-172 repro gate both stay green while it does. This is
+    the assertion that goes red for that edit.
+
+    The exit status is the claim. ``pytest.UsageError`` is exit 4 — the session refused to
+    run — as opposed to 0 (ran, or silently skipped) or 1 (ran and failed).
+    """
+    refused = _run_root_conftest(tmp_path, _UNDECLARED_PROBE, "test_t172_undeclared_probe.py")
+    combined = refused.stdout + refused.stderr
+
+    assert refused.returncode == 4, (
+        f"a bare @pytest.mark.docker item did not stop the session: pytest exited "
+        f"{refused.returncode}, not 4 (UsageError). An undeclared item that is quietly "
+        f"widened to the whole stack is the T-172 defect.\n{combined}"
+    )
+    assert "declares no compose service" in combined, (
+        f"the session stopped, but not for the documented reason, so this test is not "
+        f"measuring what it claims:\n{combined}"
+    )
+    assert "test_declares_no_service" in combined, (
+        f"the refusal does not name the offending item, so an author cannot act on it:\n{combined}"
+    )
+
+    # POSITIVE CONTROL. Without this, a harness that could not run pytest at all — a bad
+    # PYTHONPATH, a missing plugin, an unset PROXYSHOP_WORKER — would also exit non-zero and
+    # read as the refusal above.
+    accepted = _run_root_conftest(tmp_path, _DECLARED_PROBE, "test_t172_declared_probe.py")
+    assert accepted.returncode == 0, (
+        f"the control probe, which declares postgres, did not run cleanly either — so the "
+        f"exit 4 above is the harness, not the refusal:\n{accepted.stdout}\n{accepted.stderr}"
+    )
+    assert "1 passed" in accepted.stdout, accepted.stdout

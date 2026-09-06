@@ -386,3 +386,291 @@ async def _null_receive() -> dict[str, Any]:  # pragma: no cover - never awaited
 
 async def _null_send(message: dict[str, Any]) -> None:  # pragma: no cover - never called
     return None
+
+
+# ======================================================================================
+# Everything below was ADDED after an adversarial review of this file found the gaps it
+# names. Nothing above was changed: the review's one worry about the existing middleware
+# test — that it "pins verbatim adoption" — turned out not to bite, because the id it pins
+# (b"from-the-caller") conforms to REQUEST_ID_PATTERN and is adopted exactly as before.
+# ======================================================================================
+
+
+# --------------------------------------------------------------------------------------
+# the correlation id is attacker-controlled: two injections, one value
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "raw"),
+    [
+        ("crlf-header-splitting", b"abc\r\nSet-Cookie: admin=1\r\nX-Injected: yes"),
+        ("bare-lf-log-forging", b"real\n2026-01-01 CRITICAL security [-] FORGED LINE"),
+        ("bare-cr", b"real\roverwritten"),
+        ("nul", b"real\x00tail"),
+        ("tab", b"real\ttail"),
+        ("space", b"two words"),
+        ("oversize", b"x" * 100_000),
+        ("just-over-the-bound", b"y" * (logging_config.MAX_REQUEST_ID_LENGTH + 1)),
+        ("empty", b""),
+        ("whitespace-only", b"   "),
+    ],
+)
+def test_a_hostile_incoming_request_id_is_discarded_not_adopted(label: str, raw: bytes) -> None:
+    """A header value is chosen by the caller and lands in a response header AND a log line.
+
+    Measured against the first draft of this module, which adopted it verbatim: the
+    `crlf-header-splitting` case produced a response header value containing CR LF — that is
+    response-header splitting, and uvicorn's httptools protocol does not validate header
+    values — and the `bare-lf-log-forging` case produced a truncated record followed by a
+    complete, attacker-authored CRITICAL line in the aggregator this module exists to feed.
+    """
+    seen: list[str] = []
+    app = logging_config.RequestIdMiddleware(_echo_app(seen))
+    sent = _drive(app, {"type": "http", "headers": [(b"x-request-id", raw)]})
+
+    bound = seen[0]
+    echoed = dict(sent[0]["headers"])[b"x-request-id"]
+
+    assert bound != raw.decode("latin-1", "replace"), (
+        f"[{label}] the caller's value was adopted verbatim as the correlation id"
+    )
+    assert logging_config.REQUEST_ID_PATTERN.fullmatch(bound), (
+        f"[{label}] the bound id {bound!r} is not a safe correlation id"
+    )
+    assert echoed == bound.encode(), f"[{label}] header {echoed!r} != bound id {bound!r}"
+    # The specific properties that make the two injections impossible, stated separately so
+    # a regression names which one came back.
+    for forbidden in (b"\r", b"\n", b"\x00", b"\t", b" "):
+        assert forbidden not in echoed, f"[{label}] {forbidden!r} survived into the header"
+    assert len(bound) <= logging_config.MAX_REQUEST_ID_LENGTH, f"[{label}] id is unbounded"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"0123456789abcdef",
+        b"3fa85f64-5717-4562-b3fc-2c963f66afa6",
+        b"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        b"svc:1234",
+        b"user@host",
+        b"a.b_c+d-e",
+        b"x" * logging_config.MAX_REQUEST_ID_LENGTH,
+    ],
+)
+def test_an_ordinary_incoming_request_id_is_still_adopted(raw: bytes) -> None:
+    """The guard must not cost correlation for any id format anyone actually sends.
+
+    Discarding is the right answer for a hostile value only if benign values survive — a
+    pattern that rejected uuids or W3C traceparents would silently break tracing everywhere
+    and would read, in the logs, exactly like the guard working.
+    """
+    seen: list[str] = []
+    app = logging_config.RequestIdMiddleware(_echo_app(seen))
+    _drive(app, {"type": "http", "headers": [(b"x-request-id", raw)]})
+    assert seen == [raw.decode()], f"{raw!r} was rejected but is a legitimate correlation id"
+
+
+def test_sanitise_request_id_is_reusable_and_answers_none_for_anything_unsafe() -> None:
+    """Exposed because the HTTP header is not the only untrusted source of an id."""
+    assert logging_config.sanitise_request_id(None) is None
+    assert logging_config.sanitise_request_id("  padded  ") == "padded"
+    assert logging_config.sanitise_request_id("a\r\nb") is None
+    assert logging_config.sanitise_request_id("") is None
+    assert logging_config.sanitise_request_id("x" * 129) is None
+
+
+# --------------------------------------------------------------------------------------
+# the keyword arguments. Every behavioural test above drives the ENVIRONMENT, so without
+# these five a parameter could be a no-op and the file would stay green.
+# --------------------------------------------------------------------------------------
+
+
+def test_the_level_argument_beats_the_environment() -> None:
+    info, warning = _sentinel(), _sentinel()
+    completed = _run(
+        f"""
+        logging_config.configure_logging(level="WARNING")
+        log = logging.getLogger("probe.arg.level")
+        log.info("%s", {info!r})
+        log.warning("%s", {warning!r})
+        """,
+        **{logging_config.LEVEL_ENV: "DEBUG"},
+    )
+    assert warning in completed.stderr
+    assert info not in completed.stderr, "level= was ignored in favour of the environment"
+
+
+def test_the_stream_argument_redirects_delivery() -> None:
+    sentinel = _sentinel()
+    completed = _run(
+        f"""
+        logging_config.configure_logging(stream=sys.stdout)
+        logging.getLogger("probe.arg.stream").info("%s", {sentinel!r})
+        """
+    )
+    assert sentinel in completed.stdout, "stream= was ignored"
+    assert sentinel not in completed.stderr
+
+
+def test_the_log_file_argument_beats_the_environment(tmp_path: Any) -> None:
+    sentinel = _sentinel()
+    chosen, ignored = tmp_path / "chosen.log", tmp_path / "ignored.log"
+    _run(
+        f"""
+        logging_config.configure_logging(log_file={str(chosen)!r})
+        logging.getLogger("probe.arg.file").info("%s", {sentinel!r})
+        logging.shutdown()
+        """,
+        **{logging_config.FILE_ENV: str(ignored)},
+    )
+    assert chosen.is_file() and sentinel in chosen.read_text(encoding="utf-8")
+    assert not ignored.exists(), "log_file= was ignored in favour of the environment"
+
+
+def test_the_fmt_argument_beats_the_environment() -> None:
+    sentinel = _sentinel()
+    completed = _run(
+        f"""
+        logging_config.configure_logging(fmt="json")
+        logging.getLogger("probe.arg.fmt").info("%s", {sentinel!r})
+        """,
+        **{logging_config.FORMAT_ENV: "text"},
+    )
+    line = next(line for line in completed.stderr.splitlines() if sentinel in line)
+    assert json.loads(line)["message"] == sentinel, "fmt= was ignored"
+
+
+def test_force_replaces_the_handlers_instead_of_returning_false() -> None:
+    sentinel = _sentinel()
+    completed = _run(
+        f"""
+        logging_config.configure_logging(level="WARNING")
+        again = logging_config.configure_logging(level="DEBUG", force=True)
+        print("AGAIN " + json.dumps([again, len(logging.getLogger().handlers)]))
+        logging.getLogger("probe.force").info("%s", {sentinel!r})
+        """
+    )
+    assert "AGAIN [true, 1]" in completed.stdout, (
+        f"force=True did not reinstall exactly one handler:\n{completed.stdout}"
+    )
+    assert sentinel in completed.stderr, "force=True did not apply the new level"
+
+
+def test_a_failed_force_leaves_the_working_handlers_in_place() -> None:
+    """The reload path must not be able to turn a working process dark.
+
+    Measured against an earlier draft, which removed AND CLOSED the installed handlers
+    before building the replacements: `configure_logging(force=True, fmt="yaml")` raised and
+    left `root.handlers == []` at level 30 — this module's own defect, walking back in
+    through the one path meant to repair it.
+    """
+    before, after = _sentinel(), _sentinel()
+    completed = _run(
+        f"""
+        logging_config.configure_logging()
+        logging.getLogger("probe.reload").info("%s", {before!r})
+        try:
+            logging_config.configure_logging(fmt="yaml", force=True)
+        except ValueError as exc:
+            print("RAISED " + type(exc).__name__)
+        logging.getLogger("probe.reload").info("%s", {after!r})
+        print("HANDLERS " + json.dumps(len(logging.getLogger().handlers)))
+        """
+    )
+    assert "RAISED ValueError" in completed.stdout
+    assert before in completed.stderr
+    assert "HANDLERS 1" in completed.stdout, (
+        f"a failed reload tore down the working handler:\n{completed.stdout}"
+    )
+    assert after in completed.stderr, (
+        "a failed reload left the process permanently dark — the record emitted after it "
+        "reached nothing"
+    )
+
+
+def test_a_failed_force_on_an_unusable_log_file_also_keeps_the_handlers(tmp_path: Any) -> None:
+    """The same property for the other way the swap can raise: an unopenable file sink."""
+    before, after = _sentinel(), _sentinel()
+    directory = tmp_path / "not-a-file"
+    directory.mkdir()
+    completed = _run(
+        f"""
+        logging_config.configure_logging()
+        logging.getLogger("probe.reload.file").info("%s", {before!r})
+        try:
+            logging_config.configure_logging(log_file={str(directory)!r}, force=True)
+        except OSError as exc:
+            print("RAISED " + type(exc).__name__)
+        logging.getLogger("probe.reload.file").info("%s", {after!r})
+        print("HANDLERS " + json.dumps(len(logging.getLogger().handlers)))
+        """
+    )
+    assert "RAISED " in completed.stdout
+    assert before in completed.stderr and after in completed.stderr
+    assert "HANDLERS 1" in completed.stdout
+
+
+# --------------------------------------------------------------------------------------
+# formatter properties the module docstring claims
+# --------------------------------------------------------------------------------------
+
+
+def test_the_text_format_carries_the_correlation_id_too() -> None:
+    """Only the JSON path pinned this, so `[%(request_id)s]` could have been deleted."""
+    sentinel = _sentinel()
+    completed = _run(
+        f"""
+        logging_config.configure_logging()
+        with logging_config.request_id_scope("textid42"):
+            logging.getLogger("probe.textid").info("%s", {sentinel!r})
+        """
+    )
+    line = next(line for line in completed.stderr.splitlines() if sentinel in line)
+    assert "textid42" in line, f"the text format dropped the correlation id: {line!r}"
+
+
+def test_the_json_format_renders_a_traceback_into_the_same_object() -> None:
+    """A traceback as trailing free text does not survive an aggregator that splits lines."""
+    sentinel = _sentinel()
+    completed = _run(
+        f"""
+        logging_config.configure_logging()
+        try:
+            raise RuntimeError({sentinel!r})
+        except RuntimeError:
+            logging.getLogger("probe.exc").exception("boom", stack_info=True)
+        """,
+        **{logging_config.FORMAT_ENV: "json"},
+    )
+    line = next(line for line in completed.stderr.splitlines() if sentinel in line)
+    record = json.loads(line)
+    assert record["message"] == "boom"
+    assert sentinel in record["exc_info"], "exc_info was not rendered into the JSON object"
+    assert record["stack_info"], "stack_info was not rendered into the JSON object"
+
+
+def test_an_unknown_log_format_is_refused_rather_than_silently_text() -> None:
+    """Same reasoning as the level: a misconfigured sink must not read as a working one."""
+    completed = _run(
+        """
+        try:
+            logging_config.configure_logging(fmt="yaml")
+        except ValueError as exc:
+            print("REFUSED " + str(exc))
+        print("HANDLERS " + json.dumps(len(logging.getLogger().handlers)))
+        """
+    )
+    assert "REFUSED " in completed.stdout and "is not a log format" in completed.stdout
+    assert "HANDLERS 0" in completed.stdout, "a refused format still installed a handler"
+
+
+def test_reset_logging_is_idempotent() -> None:
+    completed = _run(
+        """
+        logging_config.configure_logging()
+        print("RESETS " + json.dumps([logging_config.reset_logging(),
+                                      logging_config.reset_logging()]))
+        """
+    )
+    assert "RESETS [1, 0]" in completed.stdout
