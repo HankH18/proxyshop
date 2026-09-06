@@ -150,6 +150,20 @@ def _offer(expires_at: str = _NOT_EXPIRED) -> dict:
     }
 
 
+#: The catalog `_offer` is written against: `prod-1` lists at the 49.00 the offer itself
+#: carries, with a 25% ceiling that is deeper than the 10% the offer declares. So the price
+#: wall stays SILENT and each test below is refused only for its own subject.
+#:
+#: ADDED BY AMENDMENT (ESC-029), and it completes an INPUT — it changes no assertion. These
+#: tests were written when an absent `list_prices` meant "abstain", so they passed no roster
+#: and the wall never fired. T-306 made the absent roster REFUSE, because a signed bid
+#: awarding itself 85% off was being admitted whenever the roster was omitted. Without this
+#: the wall refuses these bids before they reach the provenance, expiry and blacklist rules
+#: they exist to grade, and every `ok is True` control below fails for a reason it never
+#: meant to test.
+_FIXTURE_ROSTER = {"prod-1": {"list_price": 49.0, "max_discount_pct": 25.0}}
+
+
 def _bid(claims, store_id: str = "store-1", expires_at: str = _NOT_EXPIRED) -> dict:
     return {
         "auction_id": "auc-1",
@@ -590,14 +604,14 @@ def test_hosted_bid_with_a_seller_asserted_claim_is_rejected():
     from packages.contracts import validate_bid
 
     asserted = _bid([_claim("spf", 30, _ASSERTED_PROVENANCE)])
-    rejected = validate_bid(asserted, path="hosted", trust_snapshot=_trust_snapshot())
+    rejected = validate_bid(asserted, path="hosted", trust_snapshot=_trust_snapshot(), list_prices=_FIXTURE_ROSTER)
     assert _get(rejected, "ok") is False
     assert list(_get(rejected, "reasons")), "a rejection must say why it rejected"
 
     # Control: the same bid with a hook-provenanced claim is admitted on the hosted path,
     # so the test cannot pass by rejecting everything.
     hooked = _bid([_claim("spf", 30, _HOOK_PROVENANCE)])
-    admitted = validate_bid(hooked, path="hosted", trust_snapshot=_trust_snapshot())
+    admitted = validate_bid(hooked, path="hosted", trust_snapshot=_trust_snapshot(), list_prices=_FIXTURE_ROSTER)
     assert _get(admitted, "ok") is True, _get(admitted, "reasons")
 
 
@@ -608,7 +622,7 @@ def test_external_bid_with_the_same_claim_is_admitted_and_flagged_unverified():
     from packages.contracts import validate_bid
 
     asserted = _bid([_claim("spf", 30, _ASSERTED_PROVENANCE)])
-    result = validate_bid(asserted, path="external", trust_snapshot=_trust_snapshot())
+    result = validate_bid(asserted, path="external", trust_snapshot=_trust_snapshot(), list_prices=_FIXTURE_ROSTER)
     assert _get(result, "ok") is True, _get(result, "reasons")
     assert _get(result, "requires_verification") is True
 
@@ -617,7 +631,7 @@ def test_external_bid_with_the_same_claim_is_admitted_and_flagged_unverified():
     hooked = validate_bid(
         _bid([_claim("spf", 30, _HOOK_PROVENANCE)]),
         path="external",
-        trust_snapshot=_trust_snapshot(),
+        trust_snapshot=_trust_snapshot(), list_prices=_FIXTURE_ROSTER,
     )
     assert _get(hooked, "ok") is True, _get(hooked, "reasons")
     assert _get(hooked, "requires_verification") is False
@@ -636,7 +650,7 @@ def test_a_claim_with_no_provenance_is_rejected_on_every_path():
 
     for path in ("hosted", "external"):
         for bid in (no_provenance, empty_source):
-            result = validate_bid(bid, path=path, trust_snapshot=_trust_snapshot())
+            result = validate_bid(bid, path=path, trust_snapshot=_trust_snapshot(), list_prices=_FIXTURE_ROSTER)
             assert _get(result, "ok") is False, (
                 f"unprovenanced claim admitted on path={path}: {bid['claims']}"
             )
@@ -647,7 +661,7 @@ def test_a_claim_with_no_provenance_is_rejected_on_every_path():
         ok = validate_bid(
             _bid([_claim("spf", 30, _HOOK_PROVENANCE)]),
             path=path,
-            trust_snapshot=_trust_snapshot(),
+            trust_snapshot=_trust_snapshot(), list_prices=_FIXTURE_ROSTER,
         )
         assert _get(ok, "ok") is True, _get(ok, "reasons")
 
@@ -663,11 +677,11 @@ def test_expired_or_blacklisted_bids_reject_on_both_paths():
     blacklisted = _bid([_claim("spf", 30, _HOOK_PROVENANCE)], store_id="store-bad")
 
     for path in ("hosted", "external"):
-        expired_result = validate_bid(expired, path=path, trust_snapshot=snapshot)
+        expired_result = validate_bid(expired, path=path, trust_snapshot=snapshot, list_prices=_FIXTURE_ROSTER)
         assert _get(expired_result, "ok") is False, f"expired offer admitted on path={path}"
         assert list(_get(expired_result, "reasons"))
 
-        blacklist_result = validate_bid(blacklisted, path=path, trust_snapshot=snapshot)
+        blacklist_result = validate_bid(blacklisted, path=path, trust_snapshot=snapshot, list_prices=_FIXTURE_ROSTER)
         assert _get(blacklist_result, "ok") is False, (
             f"blacklisted store admitted on path={path}"
         )
@@ -675,7 +689,7 @@ def test_expired_or_blacklisted_bids_reject_on_both_paths():
 
         # Control: unexpired offer from a non-blacklisted store is admitted on this path.
         live = validate_bid(
-            _bid([_claim("spf", 30, _HOOK_PROVENANCE)]), path=path, trust_snapshot=snapshot
+            _bid([_claim("spf", 30, _HOOK_PROVENANCE)]), path=path, trust_snapshot=snapshot, list_prices=_FIXTURE_ROSTER
         )
         assert _get(live, "ok") is True, _get(live, "reasons")
 

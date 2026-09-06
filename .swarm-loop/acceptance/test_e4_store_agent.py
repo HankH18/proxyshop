@@ -1159,6 +1159,36 @@ def _trust_snapshot_for(payload) -> dict:
     return {store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}}
 
 
+def _roster_for(payload):
+    """An HONEST price roster for whatever product this payload actually offers.
+
+    ADDED BY AMENDMENT (ESC-029). It completes an INPUT and changes no assertion.
+
+    These door tests were written when an absent `list_prices` meant "abstain", so they
+    passed no roster and the price wall stayed silent while each test measured its own
+    subject — signing, nonce replay, key rotation, the freshness window. T-306 made the
+    absent roster REFUSE, because a signed bid awarding itself 85% off was being admitted
+    whenever the roster was omitted. Without a roster the wall now refuses these bids with
+    `price_unreconcilable:offer.unit_price:list_price_unavailable` before they ever reach
+    the signing rules they exist to grade.
+
+    Derived from the payload rather than hard-coded, because `_external_payload` takes
+    `unit_price` as a parameter and callers vary it: a fixed roster would be dishonest for
+    any test that passed a different price, and dishonest in the direction that refuses.
+    Listing at exactly the offered unit price with no discount declared means the wall has
+    nothing to object to, which is the silence these tests were written under.
+
+    It is applied BEFORE `kwargs.update(extra)`, so any test that wants to exercise the
+    price wall itself can still pass an explicit `list_prices=` and win.
+    """
+    offer = payload.get("offer") or {}
+    ref = offer.get("product_ref")
+    unit = offer.get("unit_price")
+    if ref is None or unit is None:
+        return {}
+    return {ref: {"list_price": unit, "max_discount_pct": 25.0}}
+
+
 def _present(receive_bid, payload, signature, *, nonce_store, keyring=None, now=NOW,
              auction_deadline=AUCTION_DEADLINE, **extra):
     """Offer one bid at the door. Returns (accepted, plain_result, queue)."""
@@ -1169,6 +1199,7 @@ def _present(receive_bid, payload, signature, *, nonce_store, keyring=None, now=
         now=now,
         auction_deadline=auction_deadline,
         trust_snapshot=_trust_snapshot_for(payload),
+        list_prices=_roster_for(payload),
     )
     kwargs.update(extra)
     ring = _keyring() if keyring is None else keyring
