@@ -422,16 +422,23 @@ def test_the_elected_primary_binding_shim_has_exactly_one_home() -> None:
     bodies = {path.read_bytes() for path in copies}
     real_files = {path.resolve() for path in copies}
 
-    # T-290 FIX, and the assertion this gate was missing. `bodies` was computed here and
-    # reached nothing but an f-string, so T-167's SECOND half — "nothing enforces that the
-    # copies stay identical" — was graded by no assertion at all. It is stated first because
-    # divergence is the more dangerous of the two states: two copies that AGREE are a
-    # maintenance smell, while two that have drifted are the module-identity bug back in one
-    # feature package and not the others, which is the failure T-167 was filed for.
+    # T-290 FIX. `bodies` was computed here and reached nothing but an f-string, so T-167's
+    # SECOND half — "nothing enforces that the copies stay identical" — was NAMED by no
+    # assertion at all. It is stated first because divergence is the more dangerous of the two
+    # states: two copies that AGREE are a maintenance smell, while two that have drifted are
+    # the module-identity bug back in one feature package and not the others, which is the
+    # failure T-167 was filed for.
     #
-    # Vacuous today, deliberately: the shim was hoisted to `_shared/_binding.py`, so `copies`
-    # holds one path and one body. That is the point — it has to be here BEFORE a fourth copy
-    # reappears, or the copy arrives and nothing says the bodies drifted.
+    # What it buys is the ERROR MESSAGE, not additional coverage, and this comment used to
+    # claim otherwise. It cannot fail independently of `len(real_files) <= 1` below: paths are
+    # resolved before counting, so one real file means one body, i.e. `len(real_files) <= 1`
+    # already implies `len(bodies) == 1`. Enumerated over every arrangement this glob can
+    # produce — two real files differing, two identical, a real file plus a symlink, a single
+    # file, four real files differing, four symlinks — there is no case where `bodies` reds
+    # and `real_files` stays green. A fourth REAL copy reds `real_files` on its own; a fourth
+    # copy that is a SYMLINK leaves `bodies` at one. So this assertion's job is to fire FIRST
+    # in the dangerous arrangement and report it as DRIFT, instead of the more generic "the
+    # shim exists as N independent files" the assertion below would have reported.
     assert len(bodies) <= 1, (
         f"the binding shim exists as {len(copies)} paths holding {len(bodies)} DIFFERENT "
         f"bodies ({[str(p.relative_to(REPO_ROOT)) for p in copies]}). A fix applied to one "
@@ -4497,6 +4504,25 @@ def test_t291_the_derived_fixture_roster_is_armed() -> None:
         f"derivation has lost its seed: {sorted(seeds)}"
     )
     derived = _t291_datastore_fixtures()
+
+    # The two checks above read `_t291_fixture_graph`, which a broken CLOSURE leaves entirely
+    # intact, and the subset check below has the derivation on BOTH sides — `_DATASTORE_FIXTURES`
+    # IS `frozenset(_t291_datastore_fixtures())` — so an empty roster is a subset of itself and
+    # satisfies it trivially. This is therefore the check that actually reds. Measured: with the
+    # closure inside `_t291_datastore_fixtures` broken so it returns `{}` and `_t291_fixture_graph`
+    # untouched, this test, the T-291 repro below and T-212's marker gate were ALL green at exit 0
+    # — the gate passing vacuously because `requested & _DATASTORE_FIXTURES` matches nothing.
+    #
+    # The two names are chosen to catch both shapes of that break. `worker_database` is a seed, so
+    # it survives anything short of the roster emptying entirely; `ledger_migrated` reaches the
+    # guard only through the closure WALK, so it disappears the moment the walk stops working and
+    # the roster truncates to its seeds. Both are fixtures T-212's gate is written against.
+    unreached = sorted({"worker_database", "ledger_migrated"} - set(derived))
+    assert not unreached, (
+        f"the derivation no longer reaches {unreached}; it returned {sorted(derived)}. An empty "
+        f"or truncated roster makes T-212's marker gate pass by matching nothing, so a broken "
+        f"derivation has to red HERE — that gate cannot report it."
+    )
     assert _DATASTORE_FIXTURES <= set(derived), (
         f"the hand-typed roster names fixtures the derivation cannot reach: "
         f"{sorted(_DATASTORE_FIXTURES - set(derived))}. The two disagree in the direction "
@@ -4814,6 +4840,14 @@ def test_t261_the_snapshot_route_sweep_is_armed() -> None:
 # app with NOTHING injected on `app.state`, and reads the seeded score and listing back
 # through the ledger writer's own trust_rw connection. Delete `snapshot/routes.py` and this
 # gate goes red again with `/snapshot` back among the published-and-unserved paths.
+#
+# FIXED HERE MEANS THE SERVER HALF, and nothing wider. T-261's subject is T-064's acceptance
+# 3 — "the exchange client caches the trust snapshot and refreshes it on a version bump" — and
+# the client, the cache and the version-bump refresh are all still unbuilt:
+# `git grep 'SNAPSHOT_VERSION' -- . ':(exclude)apps/trust'` returns nothing, so no code outside
+# this app so much as names the value it would cache on. What this gate grades, and all it
+# grades, is that the route the client would call now exists and boots. Read no ticket-level
+# closure into a green here.
 def test_t261_the_trust_snapshot_it_publishes_is_actually_served() -> None:
     """A snapshot nobody can fetch cannot be cached, and cannot be refreshed on a bump.
 

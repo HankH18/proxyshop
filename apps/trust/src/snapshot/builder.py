@@ -70,9 +70,14 @@ __all__ = [
     "store_entry",
 ]
 
-#: The served snapshot's shape version. The exchange client caches on it and refreshes when
-#: it changes: a cache keyed on nothing serves a five-dimension snapshot forever after the
-#: sixth dimension lands, and every ranking decision made from it is quietly stale.
+#: The served snapshot's shape version — what the exchange client caches on and refreshes
+#: against. SPECIFIED, not built: that client is T-064's acceptance 3, and T-261 landed the
+#: SERVER half only. ``GET /snapshot`` serves this value as ``ETag`` and
+#: ``X-Trust-Snapshot-Version``, and nothing outside ``apps/trust`` reads it —
+#: ``git grep SNAPSHOT_VERSION -- . ':(exclude)apps/trust'`` returns nothing. The constant is
+#: here for the reason the cache is specified at all: a cache keyed on nothing serves a
+#: five-dimension snapshot forever after the sixth dimension lands, and every ranking decision
+#: made from it is quietly stale.
 SNAPSHOT_VERSION = "trust-snapshot-1.0.0"
 
 #: Observation types that count towards a *clean* episode. A negative outcome does not make
