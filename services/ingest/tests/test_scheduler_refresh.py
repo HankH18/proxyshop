@@ -461,7 +461,17 @@ def test_the_default_refresh_does_both_sections(refresh_client: Any) -> None:
     assert any(path.startswith(("/policies/", "/pages/")) for path in attempted), (
         f"the policy pages were not read: {sorted(attempted)}"
     )
-    assert sessions.opened >= 1, "neither half reached the graph write path"
+    # NOT `sessions.opened >= 1`, which the products half satisfies on its own and which
+    # therefore said nothing about the policies half. Measured: a policies-only refresh
+    # against this stub opens ZERO sessions, because the stub's fallthrough HTML yields no
+    # claims and `to_upserts` is empty. So the honest evidence that the policies half RAN is
+    # that it recorded page digests in its own ledger.
+    from ingest.scheduler import routes as _routes  # noqa: PLC0415
+
+    assert sessions.opened >= 1, "the products half did not reach the graph write path"
+    assert _routes.ingestor_for("store-1").ledger.hashes, (
+        "the policies half recorded no page digest, so the default refresh ran only half"
+    )
 
 
 def test_a_refresh_for_a_store_nobody_registered_is_a_404(refresh_client: Any) -> None:
@@ -766,10 +776,21 @@ def test_the_routers_module_state_does_not_leak_out_of_this_file() -> None:
     leaked += [f"ingestor:{sid}" for sid in routes._ingestors]
 
     assert not leaked, f"this file leaked router module state out of itself: {leaked}"
-    assert routes.runner.registry is routes.registry, (
-        "the runner is pointing at a registry a fixture built, not the module's own"
-    )
-    assert routes.runner.session_factory is not None, (
-        "a fixture left the runner's session factory swapped out for its capture double"
+
+    # Identity against the IMPORTED default, not `is not None`. The first version of this line
+    # said `is not None`, and an adversarial verifier showed it could never fail: the fixture's
+    # substitute is a `_SessionFactory()`, which is also not None — so a teardown that never
+    # restored the factory passed the guard whose own message said it caught exactly that.
+    # An assertion that cannot fail is worse than no assertion, because it reads as coverage.
+    from ingest.scheduler.catalog import graph_session  # noqa: PLC0415
+
+    assert routes.runner.session_factory is graph_session, (
+        f"a fixture left the runner's session factory swapped out: "
+        f"{routes.runner.session_factory!r}"
     )
     assert routes.runner.policy is None, "a fixture left its SSRF posture on the runner"
+    assert routes.runner.budget is None, "a fixture left its crawl budget on the runner"
+    # The dropped assertion, recorded rather than silently deleted: `runner.registry is
+    # registry` was also here and also could not fail — they are the same object from import
+    # and every fixture assigns the same one back, so the identity had no way to break. It
+    # measured nothing and is gone.

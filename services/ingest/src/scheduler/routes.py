@@ -36,6 +36,7 @@ guarantee observable across two calls to a running service.
 
 from __future__ import annotations
 
+import logging
 from threading import Lock
 from typing import Any
 
@@ -64,6 +65,8 @@ __all__ = [
     "runner",
 ]
 
+_log = logging.getLogger(__name__)
+
 router = APIRouter(tags=["ingest", "scheduler"])
 
 #: The two things a refresh can re-read. ``products`` is the catalog (C6's adapter seam);
@@ -80,6 +83,11 @@ SECTIONS: tuple[str, ...] = (PRODUCTS, POLICIES)
 #: without re-reading the environment.
 registry_warnings: list[str] = []
 registry = StoreRegistry.from_env(warnings=registry_warnings)
+for _problem in registry_warnings:
+    # Logged, not merely collected. Held only in a module list, a skipped store was invisible:
+    # `/refresh/{id}` answered 404 with no hint that the entry had been REJECTED rather than
+    # never configured, which is the difference between a typo and a missing deployment step.
+    _log.warning("ingest store configuration: %s", _problem)
 
 #: The process-wide refresh runner. Module state on purpose — see the module docstring.
 runner = CatalogRefreshRunner(registry=registry)
@@ -164,6 +172,19 @@ def _provenance_of(report: CatalogRefreshReport | None, store_id: str) -> dict[s
     }
 
 
+def _log_warnings(store_id: str, section: str, warnings: Any) -> None:
+    """Surface what a refresh could not read.
+
+    The published 202 is ``additionalProperties: false`` and carries no warnings field, so
+    without this there is NO channel at all: a refresh that read 0 of 6 policy pages returned
+    a response byte-identical to one that read all 6. Changing the contract is a decision for
+    whoever owns it; logging what happened is not, and silence is the one option that is
+    certainly wrong.
+    """
+    for warning in warnings or ():
+        _log.warning("refresh store=%s section=%s: %s", store_id, section, warning)
+
+
 @router.post("/refresh/{store_id}", status_code=202)
 def refresh_store_catalog(store_id: str, payload: RefreshRequest | None = None) -> dict[str, Any]:
     """Re-crawl and re-extract one store's catalog and policy pages.
@@ -222,6 +243,10 @@ def refresh_store_catalog(store_id: str, payload: RefreshRequest | None = None) 
             # reach the graph the same way, including failing the same way when it is
             # unreachable.
             runner.apply(ingestor.to_upserts(policy_report))
+            _log_warnings(target.store_id, "policies", policy_report.warnings)
+
+    if report is not None:
+        _log_warnings(target.store_id, "products", report.warnings)
 
     job_id = report.job_id if report is not None else f"crawl-{store_id}-policies"
     return {

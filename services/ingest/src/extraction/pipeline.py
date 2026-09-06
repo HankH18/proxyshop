@@ -312,6 +312,10 @@ class PolicyPageFetcher:
         seen = dict(known_hashes or {})
         client = self._client or SafeHTTPClient(policy=policy, user_agent=self.user_agent)
         ledger = CrawlLedger(budget or CrawlBudget())
+        # Coerced before anything reads it as text. `safe_split` accepts any object, so a
+        # caller passing None, an int or bytes survived it and then died on `.endswith` one
+        # line further down — the guard below only covered the shapes that ARE strings.
+        base_url = str(base_url or "")
         split = safe_split(base_url)
         if split is None:
             # `urlsplit("http://[")` raises, and `base_url` is caller-supplied: it arrives in

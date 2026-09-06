@@ -32,6 +32,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from ..adapters.hashing import HASH_PREFIX, content_hash, snapshot_ref
+from ..adapters.netguard import safe_split
 from ..graph.model import SOURCE_CLASSES, AttributeValue, Source
 
 __all__ = [
@@ -200,7 +201,12 @@ def _parts_from_ref(ref: str) -> tuple[str, str]:
     if match is None:
         return ("", "")
     path = match.group("path") or "/"
-    split = urlsplit(f"//{match.group('authority')}{path}")
+    # `_SNAPSHOT_RE` happily matches an authority containing `[`, and `urlsplit` raises on it.
+    # A ref is provenance: failing to read one back must not raise out of whatever is holding
+    # it. Latent today (no route feeds a caller-supplied ref here), which is when it is cheap.
+    split = safe_split(f"//{match.group('authority')}{path}")
+    if split is None:
+        return ("", "")
     query = split.query
     url = urlunsplit(("https", split.netloc, split.path or "/", query, ""))
     digest = _text(match.group("digest"))
