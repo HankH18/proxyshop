@@ -903,7 +903,18 @@ def get_event(request: Request, event_id: str) -> dict[str, Any]:
     except EventServiceError as exc:
         raise _refuse(exc) from exc
     if found is None:
+        # The echoed id is CUT to the ceiling the write door enforces. `event_id` here is a
+        # PATH parameter, so neither `_refuse_long_identifier` nor
+        # `_refuse_unrenderable_identifier` has run on it -- this was the one refusal on the
+        # module that quoted an unbounded caller string back, which contradicts the rule
+        # this module's own docstring states. It goes into a JSON body and never a header,
+        # so it was never a 5xx; it was just an echo nobody had bounded. An id longer than
+        # the ceiling cannot name a stored event anyway, because no such row can exist.
         raise HTTPException(
-            404, {"error": "unknown_event", "message": f"no event with event_id {event_id!r}"}
+            404,
+            {
+                "error": "unknown_event",
+                "message": f"no event with event_id {event_id[:MAX_IDENTIFIER_LENGTH]!r}",
+            },
         )
     return {"event": found}

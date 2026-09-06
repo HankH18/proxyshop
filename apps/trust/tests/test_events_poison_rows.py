@@ -577,6 +577,54 @@ def test_a_ledger_that_already_holds_a_poison_row_answers_a_4xx_naming_the_row()
     )
 
 
+@pytest.mark.parametrize(("field", "payload"), POISON_PAYLOADS, ids=[f for f, _ in POISON_PAYLOADS])
+def test_no_pre_existing_poison_row_of_any_class_makes_the_reader_a_5xx(
+    field: str, payload: dict[str, Any]
+) -> None:
+    """Every class of stored poison, graded on the ONE property the read path owes: not a 5xx.
+
+    Deliberately weaker than the gate above, and deliberately separate from it. That one
+    asserts the refusal NAMES the row, which it can only do by re-running the write path's
+    predicate -- so it goes red when the *write* guard is stubbed as well, and its evidence
+    is therefore shared. This one asserts only that the caller gets a bounded 4xx answer
+    instead of ``Internal Server Error``, which is a property of the read path's `except`
+    clause alone. Stub that clause and all four of these go red; stub anything else and they
+    stay green.
+
+    All four classes, because the read path catches ``(LookupError, ValueError)`` and the
+    four defects arrive as three different exception types across both branches of that
+    tuple -- a narrower catch would still pass a single-class gate.
+    """
+    store = InMemoryEventStore()
+    append(
+        store,
+        {
+            "event_id": f"poison-{field}",
+            "ts": AS_OF,
+            "kind": "feedback",
+            "store_id": "s-1",
+            "payload": payload,
+        },
+    )
+    assert store.length == 1, "the fixture did not seal its poison row into the ledger"
+
+    with _client_for(store) as client:
+        response = client.get("/events/replay", params={"snapshots": "true", "as_of": AS_OF})
+
+    assert response.status_code < 500, (
+        f"a stored payload whose {field!r} the scorer cannot read answered "
+        f"{response.status_code}. The row cannot be deleted -- the ledger's ENABLE ALWAYS "
+        f"trigger refuses UPDATE and DELETE -- so a 5xx here is permanent, and permanent "
+        f"'Internal Server Error' is indistinguishable from the service being down"
+    )
+    assert response.status_code == 422, f"unexpected status: {response.status_code}"
+    assert response.json()["detail"]["error"] == "unreplayable_ledger", response.text[:300]
+    assert len(response.content) < 4_096, (
+        f"the refusal was {len(response.content):,} bytes; a diagnosis is not a licence to "
+        f"echo the stored payload back"
+    )
+
+
 def test_verification_stays_available_over_a_ledger_that_cannot_be_snapshotted() -> None:
     """One un-replayable row must not take the evidence endpoint down.
 
