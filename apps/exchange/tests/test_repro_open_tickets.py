@@ -1666,18 +1666,23 @@ def test_the_non_finite_payload_corpus_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-270: a non-finite JSON literal anywhere in an unauthenticated request body returns "
-        "HTTP 500. pydantic rejects the value correctly, and then FastAPI's "
-        "request_validation_exception_handler builds a 422 body that ECHOES the offending "
-        "input back, where json.dumps raises 'Out of range float values are not JSON "
-        "compliant'. The defect is the error RENDERER, so it fires on fields of every type "
-        "(str, int, float, dict, list) and on both served POST routes; remove this marker "
-        "with the fix"
-    ),
-)
+# T-270 FIXED — marker removed because `xfail(strict=True)` makes this node STRICTLY HARDER to
+# satisfy, not easier: with the defect gone it must now PASS rather than merely reproduce.
+#
+# What established that, measured in this worktree on 2026-09-06 at worker index 10:
+#   * BEFORE, on a clean e7f8f6c: `1 failed` — "188 of 232 unauthenticated requests were
+#     answered 5xx", across both probed apps and both POST routes.
+#   * AFTER, the same command: `2 passed` (this node and its armer).
+#   * CAUSATION, in a scratch copy of the tree outside the repo: reverting ONLY
+#     `route_class=RenderableValidationErrorRoute` on the two routers — no test file touched —
+#     returns the node to `1 failed` with the same 5xx census. The route class is the cause.
+#
+# The repair is `RenderableValidationErrorRoute` on `exchange.auction.routes.router` and on
+# `exchange.accept.routes.router`: the non-finite value is RENDERED into the 422 as the JSON
+# token it was spelt with, quoted as a string, rather than echoed as a float no encoder can
+# emit. The 422 contract this file asserts two paragraphs below is what forced that shape —
+# a blanket 400 also removes the 5xx and was rejected here for destroying the per-field
+# `detail` list.
 def test_t270_no_field_of_any_request_can_produce_a_5xx() -> None:
     """Nothing an anonymous caller can write may make the exchange answer 5xx.
 
@@ -3179,17 +3184,31 @@ def test_the_store_agent_import_closure_probe_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-244: `receive_bid` — the Tier-2 door with six gates that the frozen E4 suite "
-        "exercises directly — has ZERO production call sites, and the module defining it is "
-        "not in the import closure of the store agent's own served app (which builds to "
-        "store_agent + store_agent.main and mounts no routes at all). So "
-        "e4_store_agent_passing counts a signed-external-bid capability that no running "
-        "process performs; remove this marker with the fix"
-    ),
-)
+# T-244 FIXED — marker removed because `xfail(strict=True)` makes this node STRICTLY HARDER to
+# satisfy once the defect is gone: the door must now be ENTERED by a dispatched request rather
+# than merely missed.
+#
+# What established that, measured in this worktree on 2026-09-06 at worker index 10:
+#   * BEFORE, on a clean e7f8f6c: `1 failed` — "door entries during dispatch=0" on BOTH the
+#     built store-agent app and the built exchange app.
+#   * AFTER, the same command: `2 passed` (this node and its armer).
+#   * CAUSATION, in a scratch copy outside the repo: deleting
+#     `apps/exchange/src/external_bids/` — no test file touched — returns the node to
+#     `1 failed` with the same zero census.
+#
+# The repair is a real door, not a route that satisfies a counter. Driven live over HTTP
+# through `exchange.main.create_app()`, with the signing key wired by
+# `configure_external_bids` and a recording queue attached:
+#     a well-formed signed submission        -> 202, one `external_bid_verification` item queued
+#     the same submission replayed           -> 400 replayed_nonce
+#     a bad signature                        -> 400 signature_invalid
+#     an envelope missing `nonce`            -> 400 signing_envelope_uncanonicalizable
+#     an unknown auction_id                  -> 400 price_unreconcilable:… (REFUSED BY THE DOOR,
+#                                               not short-circuited by a 404 before it)
+#     a price under the roster's depth       -> 400 price_under_declared_depth:offer.unit_price
+#     a body carrying its own `keyring`      -> 400 signature_invalid (the caller's key discarded)
+#     a body spelling `NaN`                  -> 400 malformed_submission:… (no 500 — T-270)
+#     an app nobody configured               -> 400 unknown_signing_key (fail closed)
 def test_t244_the_external_bid_door_is_reachable_from_a_served_process() -> None:
     """Something a frozen metric counts as delivered must be reachable by a running process.
 

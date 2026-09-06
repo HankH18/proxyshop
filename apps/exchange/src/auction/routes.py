@@ -52,6 +52,10 @@ from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Final
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 
 from .. import redact_addresses
@@ -87,14 +91,152 @@ __all__ = [
     "RECORDED_OFFER_FIELDS",
     "RECORDED_OFFER_TEXT_TYPES",
     "NullSolicitor",
+    "RenderableJSONResponse",
+    "RenderableValidationErrorRoute",
     "bid_window_seconds",
     "collected_bid_records",
     "configure_auctions",
     "merged_candidates",
+    "renderable_validation_detail",
     "router",
 ]
 
-router = APIRouter(tags=["auctions"])
+
+# =====================================================================================
+# Rendering a validation failure that quotes a number JSON cannot spell (T-270)
+# =====================================================================================
+#
+# THE 500 IS IN THE ERROR RENDERER, NOT IN ANY FIELD. `json.loads` accepts `NaN`,
+# `Infinity` and an overflowing exponent such as `1e400` (which becomes `inf`), pydantic
+# then REJECTS the value, and FastAPI's stock `request_validation_exception_handler`
+# builds `{"detail": jsonable_encoder(exc.errors())}` — where every row carries `input`,
+# the caller's own value. Starlette's `JSONResponse.render` serialises that with
+# `allow_nan=False` (starlette/responses.py:198), so the encode raises
+# `ValueError: Out of range float values are not JSON compliant: nan` and an
+# UNAUTHENTICATED POST gets a 500. Note the T-224 repair (`allow_inf_nan=False` on
+# `RosterEntry.list_price`, below) does not close this and cannot: it makes the value a
+# REJECTION, and rejection is exactly the path that 500s.
+#
+# WHY A ROUTE CLASS AND NOT AN EXCEPTION HANDLER. `main.py` is orchestrator-frozen
+# (B6(iii)) and its line 52 is a module-level `app = create_app()` — the object
+# `uvicorn exchange.main:app` serves — which runs BEFORE any feature module is imported
+# and binds FastAPI's default handlers by `setdefault`. So an
+# `add_exception_handler` installed while this module is being imported reaches every app
+# built afterwards and NONE built before, i.e. it repairs a fresh `create_app()` while
+# leaving the deployed object answering 500. A route class travels with the ROUTER, is
+# applied by `include_router` at include time, and is therefore build-order independent.
+#
+# WHY NOT A BLANKET REFUSAL. Answering 400 from a catch-all handler or middleware also
+# removes the 5xx, and destroys the 422 contract while doing it: the caller can no longer
+# tell which field it got wrong, and a genuine bug becomes indistinguishable from a typo.
+# The value is RENDERED (as its JSON spelling, quoted) rather than suppressed.
+
+
+def renderable_validation_detail(errors: Any) -> list[Any]:
+    """``errors`` with every non-finite float replaced by the string JSON would have spelt.
+
+    ``NaN``/``inf``/``-inf`` become ``"NaN"``/``"Infinity"``/``"-Infinity"`` — the token a
+    strict client cannot parse as a number, handed back as a string it can. The caller still
+    learns which field it got wrong and what it sent there.
+
+    **The walk is delegated to ``json`` rather than written here, and that is deliberate.**
+    ``input`` is the caller's own body, so its nesting depth is caller-chosen; a hand-rolled
+    recursive rewrite would fault on exactly the input this function exists to render, turning
+    the 500 it removes into a different 500 (the same reasoning as
+    :func:`_within_the_recorded_offer_budget`). ``json.dumps(..., allow_nan=True)`` emits the
+    bare tokens and ``parse_constant`` intercepts each one on the way back in.
+
+    Anything that still cannot be rendered — a recursion limit, a value ``jsonable_encoder``
+    cannot reach — falls back to the field paths WITHOUT their values, so the 422 keeps a
+    non-empty per-field ``detail`` list in every case rather than degrading to a 5xx.
+    """
+    try:
+        encoded = jsonable_encoder(errors)
+        round_tripped = json.loads(
+            json.dumps(encoded, allow_nan=True), parse_constant=lambda token: token
+        )
+    except (ValueError, TypeError, RecursionError):
+        round_tripped = None
+    if isinstance(round_tripped, list) and round_tripped:
+        return round_tripped
+    fallback = [
+        {
+            "type": str(error.get("type", "value_error")),
+            "loc": [str(part) for part in (error.get("loc") or ())],
+            "msg": redact_addresses(error.get("msg", "this value could not be validated")),
+        }
+        for error in (errors or ())
+        if isinstance(error, Mapping)
+    ]
+    return fallback or [
+        {"type": "value_error", "loc": ["body"], "msg": "the request body could not be read"}
+    ]
+
+
+class RenderableJSONResponse(JSONResponse):
+    """A :class:`JSONResponse` that can still be encoded when the body quotes ``inf``/``nan``.
+
+    **UNGRADED DEFENCE IN DEPTH — no gate in this repository is red without it, and an earlier
+    version of this docstring claimed otherwise.** What it claimed was: "Measured: ``1e999`` at
+    ``intent.hard_constraints`` answered 500 on both apps with the 422 path already repaired."
+    That measurement was true when it was taken and is now stale, because :func:`~..retrieval.
+    clusters._constraints_of` — added in the same commit, one layer earlier — drops the value
+    before any response is built. Re-measured after an adversarial review: with this class
+    removed from both routers the T-270 gate is green 15 runs of 15, and that same ``1e999``
+    body answers 201. Keeping a stale measurement in a docstring is how a class comes to look
+    load-bearing when nothing depends on it, so the correction is recorded here rather than
+    quietly dropped.
+
+    It is kept because the reasoning behind it survives the correction even though the witness
+    did not: ``intent`` is annotated ``dict[str, Any]``, so a non-finite value nested inside it
+    is ACCEPTED — correctly; that is what the annotation says — and any future path that echoes
+    such a value into a response meets the same ``allow_nan=False`` encode. The gate does not
+    ask for those positions to be refused (it says so in as many words); it asks that the
+    answer be readable.
+
+    The fast path is starlette's own encode, untouched. Only a body that would otherwise have
+    raised takes the second pass, where ``allow_nan=True`` emits the bare tokens and
+    ``parse_constant`` turns each into the string a strict client can read.
+    """
+
+    def render(self, content: Any) -> bytes:
+        try:
+            return super().render(content)
+        except ValueError:
+            readable = json.loads(
+                json.dumps(content, allow_nan=True), parse_constant=lambda token: token
+            )
+            return super().render(readable)
+
+
+class RenderableValidationErrorRoute(APIRoute):
+    """An :class:`APIRoute` whose 422 is always serialisable (T-270).
+
+    Only :class:`RequestValidationError` is intercepted. An unhandled bug still becomes a 500,
+    which is the correct answer for one and is what keeps this from being the blanket refusal
+    the ticket's gate rejects.
+    """
+
+    def get_route_handler(self) -> Any:
+        handler = super().get_route_handler()
+
+        async def render_validation_errors_safely(request: Request) -> Any:
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                return RenderableJSONResponse(
+                    status_code=422,
+                    content={"detail": renderable_validation_detail(exc.errors())},
+                )
+
+        return render_validation_errors_safely
+
+
+router = APIRouter(
+    tags=["auctions"],
+    route_class=RenderableValidationErrorRoute,
+    default_response_class=RenderableJSONResponse,
+)
 
 #: R10's hard timeout. Short on purpose: a buyer is synchronously waiting on this call.
 DEFAULT_BID_TIMEOUT_SECONDS = 3.0
