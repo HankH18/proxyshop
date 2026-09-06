@@ -450,17 +450,36 @@ def test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session(
 # ======================================================================================
 # T-165 — the unauthenticated magic-link endpoint has no rate limit of any kind
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-165: POST /buyer/auth/magic-link is unauthenticated and unmetered — no "
-        "rate-limit, throttle or backoff symbol exists in auth/routes.py, and the only "
-        "ceiling (MagicLinkAuth.max_pending, which magic_link.py:248 itself calls 'not a "
-        "rate limiter') never fires for a repeated address because each request supersedes "
-        "the last, so 20 requests mail 20 live login tokens to one mailbox with "
-        "pending_links pinned at 1; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-165 is fixed. justify-test-edit, recorded at the removal site.
+#
+# QUOTED, the marker that was here:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-165: POST /buyer/auth/magic-link is unauthenticated and unmetered — no "
+#         "rate-limit, throttle or backoff symbol exists in auth/routes.py, and the only "
+#         "ceiling (MagicLinkAuth.max_pending, which magic_link.py:248 itself calls 'not a "
+#         "rate limiter') never fires for a repeated address because each request supersedes "
+#         "the last, so 20 requests mail 20 live login tokens to one mailbox with "
+#         "pending_links pinned at 1; remove this marker with the fix"))
+#
+# WHAT IT ENCODED: the presence of the defect, per this file's convention (module docstring,
+# line 10: "the marker cannot outlive the bug"). It is not a requirement — the requirement is
+# the assertion body, which is untouched.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No. MEASURED: with
+# auth/routes.py alone put back to its contents at 8242046 (the T-163 commit, i.e. this
+# file's only other change already in place), this file reports `8 passed, 4 xfailed` with
+# THIS node among the xfailed and T-140, T-142 and T-221 still xfailed alongside it. Restore
+# routes.py and this is the only node that flips. The XPASS is caused by the limiter and by
+# nothing else.
+#
+# THE FIX IT NAMES: MagicLinkRateLimiter (auth/routes.py) now charges every
+# POST /buyer/auth/magic-link against a per-address budget — five links per fifteen minutes
+# by default, overridable per deployment — and the route answers 429 with a Retry-After when
+# it is spent. It sits in FRONT of MagicLinkAuth.request_login rather than inside it,
+# because the memory ceiling and the mailbox budget are two different properties: the
+# thousand-call assertion in test_auth_vault.py's
+# test_pending_links_do_not_accumulate_for_an_unauthenticated_caller still holds, and still
+# passes.
 def test_t165_repeated_unauthenticated_magic_link_requests_are_eventually_refused() -> None:
     """One caller cannot mail an unbounded number of login tokens into one mailbox."""
     from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth  # noqa: PLC0415

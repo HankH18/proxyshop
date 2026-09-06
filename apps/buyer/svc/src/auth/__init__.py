@@ -41,8 +41,8 @@ from .sessions import (
     Session,
     SessionError,
     SessionExpired,
-    SessionStore,
     SessionsExhausted,
+    SessionStore,
     UnissuedPseudonym,
     UnknownSession,
 )

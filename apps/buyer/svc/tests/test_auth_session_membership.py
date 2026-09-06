@@ -155,7 +155,7 @@ def test_magic_link_auth_binds_its_own_vault_into_whatever_store_it_was_handed()
     now = {"t": datetime(2026, 3, 1, 12, 0, tzinfo=UTC)}
     store = InMemorySessionStore(clock=lambda: now["t"], ttl=timedelta(hours=1))
     vault = PseudonymVault()
-    service = MagicLinkAuth(vault=vault, sessions=store)
+    MagicLinkAuth(vault=vault, sessions=store)
 
     assert store.vault is vault, "MagicLinkAuth did not bind its vault into the store it got"
     with pytest.raises(UnissuedPseudonym):

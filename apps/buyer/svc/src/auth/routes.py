@@ -24,27 +24,39 @@ need the mailbox, and the whole scheme would be an open door.
 from __future__ import annotations
 
 import logging
+import math
 import os
-from datetime import datetime
+import threading
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 
 from ..profile import IdentityLeak
-from ..vault import PostgresPseudonymStore, PseudonymVault
+from ..vault import PostgresPseudonymStore, PseudonymVault, normalise_buyer_key
 from .magic_link import MagicLinkAuth, MagicLinkError, MagicLinkThrottled
 from .sessions import SessionError
 
 _log = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_MAGIC_LINK_RATE_LIMIT",
+    "DEFAULT_MAGIC_LINK_RATE_SUBJECTS",
+    "DEFAULT_MAGIC_LINK_RATE_WINDOW",
+    "MAGIC_LINK_RATE_LIMIT_ENV",
+    "MAGIC_LINK_RATE_WINDOW_ENV",
     "VAULT_DSN_ENV",
     "WORKER_COUNT_ENVS",
+    "MagicLinkRateLimited",
+    "MagicLinkRateLimiter",
     "ProcessLocalStateUnsafe",
     "auth_service",
     "build_auth_service",
+    "build_rate_limiter",
     "get_auth_service",
+    "get_rate_limiter",
     "router",
     "set_auth_service",
 ]
@@ -60,11 +72,177 @@ VAULT_DSN_ENV = "PROXYSHOP_PG_DSN_VAULT"
 #: names, not invented ones: uvicorn and gunicorn both read ``WEB_CONCURRENCY``.
 WORKER_COUNT_ENVS = ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS")
 
+#: How many login links one address may be mailed inside :data:`DEFAULT_MAGIC_LINK_RATE_WINDOW`.
+#: A buyer who mistypes, loses the mail and retries needs a handful; nobody needs twenty.
+DEFAULT_MAGIC_LINK_RATE_LIMIT = 5
+
+#: The window that budget is measured over. Deliberately longer than
+#: :data:`~buyer_svc.auth.magic_link.DEFAULT_LINK_TTL` (fifteen minutes), so a refused caller
+#: cannot simply wait for their own links to expire and start again at full budget.
+DEFAULT_MAGIC_LINK_RATE_WINDOW = timedelta(minutes=15)
+
+#: Ceiling on the number of addresses the limiter tracks at once. The limiter's own table is
+#: sized by whoever can reach the unauthenticated route, so it needs a bound for exactly the
+#: reason the pending-link table does — a limiter that fixes flooding by growing without
+#: limit has moved the denial of service rather than closed it.
+DEFAULT_MAGIC_LINK_RATE_SUBJECTS = 100_000
+
+#: Deployment overrides. A limiter whose numbers cannot be changed without a release is one a
+#: deployment under attack cannot tighten, and one a load test cannot loosen.
+MAGIC_LINK_RATE_LIMIT_ENV = "PROXYSHOP_BUYER_MAGIC_LINK_RATE_LIMIT"
+MAGIC_LINK_RATE_WINDOW_ENV = "PROXYSHOP_BUYER_MAGIC_LINK_RATE_WINDOW_SECONDS"
+
 _service: MagicLinkAuth | None = None
+_limiter_lock = threading.Lock()
 
 
 class ProcessLocalStateUnsafe(RuntimeError):
     """The deployment asks for more workers than this service's state model can survive."""
+
+
+class MagicLinkRateLimited(RuntimeError):
+    """This address has been mailed as many login links as its budget allows (T-165).
+
+    Distinct from :class:`~buyer_svc.auth.magic_link.MagicLinkThrottled`, which reports that
+    the service's *memory* ceiling was met, and which
+    ``magic_link.py`` itself documents as "not a rate limiter". The two answer the same 429
+    and mean different things: throttled is "the service is full", limited is "you, in
+    particular, have had enough".
+
+    Carries ``retry_after`` in whole seconds so the route can answer with the header a
+    well-behaved client already knows how to obey. It never carries the address.
+    """
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(f"this address has reached its login-link budget; retry in {retry_after}s")
+        self.retry_after = retry_after
+
+
+class MagicLinkRateLimiter:
+    """A per-address budget on the unauthenticated magic-link door.
+
+    Why this is not in :class:`~buyer_svc.auth.magic_link.MagicLinkAuth`
+    -------------------------------------------------------------------
+    ``request_login`` already bounds the *table* of unredeemed links, and it does so by
+    superseding: a new link for an address drops that address's outstanding one. That is
+    correct — a re-requested link must kill the one that may have been intercepted — and it
+    is precisely why the memory ceiling structurally cannot see this abuse. Twenty requests
+    for one mailbox leave ``pending_links`` at 1 while twenty live tokens land in it.
+
+    Making ``request_login`` itself refuse would conflate two properties that must both hold
+    and are not the same one: *the table stays small however many times one address asks*
+    (asserted by ``test_pending_links_do_not_accumulate_for_an_unauthenticated_caller``, a
+    thousand calls for one address, all of which must succeed) and *the door in front of it
+    stops mailing after a handful*. So the budget lives at the door, which is also where
+    ``magic_link.py`` says it belongs: "a deployment still wants one in front of the route".
+
+    What it counts
+    --------------
+    Admissions, not attempts. A refused caller becomes admissible again as soon as their
+    oldest admission ages out of the window, which is what makes ``Retry-After`` a real
+    number rather than an invitation to a hammering loop that never recovers.
+
+    The subject is the address, normalised through
+    :func:`~buyer_svc.vault.normalise_buyer_key`, because the mailbox is the thing being
+    protected and ``Dana@Example.com`` reaches the same one as ``dana@example.com``. It is
+    kept **only** as a key here and never logged; the limiter answers "how many" and holds
+    nothing else about the buyer.
+
+    What it is not
+    --------------
+    Process-local, like everything else in this service's state model — see
+    :class:`ProcessLocalStateUnsafe`, which already refuses a multi-worker configuration
+    outright. Behind several replicas each would keep its own budget and the effective limit
+    would be ``replicas × limit``; closing that needs the shared store T-165's other half
+    names, and the refusal above is what keeps this honest in the meantime.
+    """
+
+    def __init__(
+        self,
+        *,
+        limit: int = DEFAULT_MAGIC_LINK_RATE_LIMIT,
+        window: timedelta = DEFAULT_MAGIC_LINK_RATE_WINDOW,
+        max_subjects: int = DEFAULT_MAGIC_LINK_RATE_SUBJECTS,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if limit < 1:
+            raise ValueError("a magic-link budget of less than one link refuses every login")
+        if window <= timedelta(0):
+            raise ValueError("a rate-limit window must be a positive duration")
+        if max_subjects < 1:
+            raise ValueError("a limiter that tracks no addresses is not a limiter")
+        self._limit = limit
+        self._window = window
+        self._max_subjects = max_subjects
+        self._clock = clock if clock is not None else _utcnow
+        self._hits: dict[str, list[datetime]] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def limit(self) -> int:
+        """Links per address per :attr:`window`."""
+        return self._limit
+
+    @property
+    def window(self) -> timedelta:
+        """The span the budget is measured over."""
+        return self._window
+
+    @property
+    def tracked(self) -> int:
+        """How many addresses currently hold a live admission. Bounded; see the class."""
+        with self._lock:
+            return len(self._hits)
+
+    def _forget_stale(self, now: datetime) -> None:
+        """Drop every admission that has left the window, and every address left empty.
+
+        The caller holds ``_lock``. Sweeping on the request keeps the cost proportional to
+        the work being asked for rather than needing a timer, exactly as
+        ``MagicLinkAuth._forget_stale`` and ``InMemorySessionStore._forget_expired`` do.
+        """
+        cutoff = now - self._window
+        empty = []
+        for subject, hits in self._hits.items():
+            live = [hit for hit in hits if hit > cutoff]
+            if live:
+                self._hits[subject] = live
+            else:
+                empty.append(subject)
+        for subject in empty:
+            del self._hits[subject]
+
+    def check(self, email: str) -> None:
+        """Charge one login link to ``email``'s budget, or refuse.
+
+        Raises:
+            MagicLinkRateLimited: the address has spent its budget, or the limiter is
+                holding as many addresses as it may and this is a new one. New subjects are
+                shed rather than tracked ones evicted, for the same reason ``request_login``
+                sheds: evicting the oldest would let an unauthenticated caller clear a chosen
+                victim's budget — and, worse, their own — on demand.
+            ValueError: ``email`` is not usable as a key. Unreachable from the route, whose
+                ``EmailStr`` has already refused an empty body.
+        """
+        subject = normalise_buyer_key(email)
+        now = self._clock()
+        with self._lock:
+            self._forget_stale(now)
+            hits = self._hits.get(subject)
+            if hits is None and len(self._hits) >= self._max_subjects:
+                raise MagicLinkRateLimited(self._retry_after(now, [now]))
+            if hits is not None and len(hits) >= self._limit:
+                raise MagicLinkRateLimited(self._retry_after(now, hits))
+            self._hits.setdefault(subject, []).append(now)
+
+    def _retry_after(self, now: datetime, hits: list[datetime]) -> int:
+        """Whole seconds until the oldest admission leaves the window. At least one."""
+        freed = min(hits) + self._window
+        return max(1, math.ceil((freed - now).total_seconds()))
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def _configured_worker_count() -> tuple[str, int] | None:
@@ -158,7 +336,72 @@ def get_auth_service() -> MagicLinkAuth:
     return auth_service()
 
 
+def _positive_int_from_env(name: str) -> int | None:
+    """A deployment override, or ``None`` when it is unset or unusable.
+
+    An unparseable or non-positive value is ignored with a log line rather than crashing the
+    boot: the failure mode of a typo'd rate limit must not be a service that will not start,
+    and it must not silently be "no limit" either. The default stands.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _log.warning("%s=%r is not an integer; keeping the default", name, raw)
+        return None
+    if value < 1:
+        _log.warning("%s=%r is not positive; keeping the default", name, raw)
+        return None
+    return value
+
+
+def build_rate_limiter() -> MagicLinkRateLimiter:
+    """The limiter this process puts in front of ``POST /buyer/auth/magic-link``.
+
+    Reads :data:`MAGIC_LINK_RATE_LIMIT_ENV` and :data:`MAGIC_LINK_RATE_WINDOW_ENV` so a
+    deployment can tighten or loosen the budget without a release; unset, it is
+    :data:`DEFAULT_MAGIC_LINK_RATE_LIMIT` links per :data:`DEFAULT_MAGIC_LINK_RATE_WINDOW`.
+    """
+    limit = _positive_int_from_env(MAGIC_LINK_RATE_LIMIT_ENV)
+    seconds = _positive_int_from_env(MAGIC_LINK_RATE_WINDOW_ENV)
+    return MagicLinkRateLimiter(
+        limit=limit if limit is not None else DEFAULT_MAGIC_LINK_RATE_LIMIT,
+        window=(
+            timedelta(seconds=seconds) if seconds is not None else DEFAULT_MAGIC_LINK_RATE_WINDOW
+        ),
+    )
+
+
+def get_rate_limiter(request: Request) -> MagicLinkRateLimiter:
+    """FastAPI dependency: the limiter belonging to the application serving this request.
+
+    Held on ``app.state`` rather than in a module global on purpose. The budget is a property
+    of one running service, and a module global would make every application built in a
+    process — every ``create_app()`` in a test session, every app a future embedder mounts —
+    share one table, so an unrelated caller's history could refuse a login. A deployment
+    boots one app (``buyer_svc.main.app``), so the production reading is unchanged.
+
+    Override this in tests to pin a clock or a budget, exactly as with
+    :func:`get_auth_service`.
+    """
+    state = request.app.state
+    limiter = getattr(state, "magic_link_rate_limiter", None)
+    if limiter is None:
+        # `def` endpoints run in a threadpool, so two first requests really do arrive at
+        # once; without the lock they would build two limiters and one would be discarded
+        # along with whatever it had already counted.
+        with _limiter_lock:
+            limiter = getattr(state, "magic_link_rate_limiter", None)
+            if limiter is None:
+                limiter = build_rate_limiter()
+                state.magic_link_rate_limiter = limiter
+    return limiter
+
+
 ServiceDep = Annotated[MagicLinkAuth, Depends(get_auth_service)]
+RateLimiterDep = Annotated[MagicLinkRateLimiter, Depends(get_rate_limiter)]
 SessionHeader = Annotated[str | None, Header(alias="X-Buyer-Session")]
 
 
@@ -211,7 +454,26 @@ def _require_session_header(session_id: str | None) -> str:
     response_model=MagicLinkAccepted,
     summary="Send a single-use login link to a buyer's mailbox",
 )
-def request_magic_link(body: MagicLinkRequest, service: ServiceDep) -> MagicLinkAccepted:
+def request_magic_link(
+    body: MagicLinkRequest, service: ServiceDep, limiter: RateLimiterDep
+) -> MagicLinkAccepted:
+    try:
+        # T-165. Charged BEFORE the link is minted, because the resource being protected is
+        # the buyer's mailbox rather than this process's memory: a link that is issued and
+        # then refused has already been mailed. `MagicLinkAuth.max_pending` cannot stand in
+        # for this — a repeated address supersedes its own pending link, so the table stays
+        # at one entry while twenty live tokens go out.
+        limiter.check(str(body.email))
+    except MagicLinkRateLimited as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too many login links have been requested for this address; try again later",
+            # Deliberately the same wording-free shape as the ceiling's answer below. The
+            # route must not become an oracle over which addresses have been asking for
+            # links: "your budget is spent" and "the service is full" are one answer on the
+            # wire, and the service's own logs keep the distinction.
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
     try:
         issued = service.request_login(str(body.email))
     except MagicLinkThrottled as exc:
