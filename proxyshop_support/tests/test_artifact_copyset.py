@@ -173,6 +173,7 @@ from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1973,4 +1974,355 @@ def test_t314_the_shopify_stub_image_is_not_declared_unbuilt_by_its_own_compose_
         f"{present!r}, and docs/demo/starting-slice.md "
         f"{'DOES' if routed else 'does not'} route an operator to "
         f"`docker compose --profile e2e up -d shopify-stub` as step 1 of the demo"
+    )
+
+
+# =====================================================================================
+# T-334 — the static checker's blind spot is CIRCULAR: removing a COPY removes the
+#         evidence that it is missing
+# =====================================================================================
+#
+# :func:`_unwired_for` computes ``wired[name] = package_wiring(spec, name)[0]`` for EVERY
+# first-party package (one line), and then reports a package only if some module the image
+# still ships was found importing it. So the verdict for a package nothing imports any more
+# is computed and thrown away.
+#
+# That is not a hypothetical gap, it is a closed loop. ``claim_verification``'s only
+# module-scope importer inside the trust image's shipped tree is
+# ``packages/verification/__init__.py:47`` — a file the ``COPY`` under test is what ships.
+# Delete the COPY and the importer goes with it, so the checker has nothing to hang the
+# report on and says the image is fine.
+#
+# Measured at HEAD on the real ``apps/trust/Dockerfile``, sabotaged in memory (drop both
+# ``COPY packages/verification/...`` lines, keep ``ln -s ... /app/.pkgroot/claim_verification``):
+#
+#     _unwired_for(sabotaged)                              -> {}          SILENT
+#     package_wiring(sabotaged, "claim_verification")      -> (False, "no COPY covers packages/verification/src/")
+#     shipped modules importing claim_verification          -> none
+#     the file's own suite on the sabotaged spec            -> 10 passed
+#
+# Two refinements to the ticket record, both measured:
+#
+# * The record says the fix is "one rule over the dangling-symlink branch at :428". Line 428
+#   is docstring prose, and the dangling-link branch (the ``return False, "... the link
+#   dangles"`` inside :func:`package_wiring`'s link loop) is not what produces this verdict —
+#   ``copies_directory(spec, provider) is None`` returns ``no COPY covers …`` several
+#   branches earlier and the link loop is never reached. The rule belongs over
+#   :func:`_unwired_for`'s use of ``wired``, not over that branch.
+# * The record says "the real-image control DID catch this sabotage". The
+#   container-shaped runtime control in this file does NOT: on the sabotaged tree it
+#   reports the same two pre-existing failures it reports at baseline and adds none,
+#   because ``apps/trust/src/verification/__init__.py`` resolves the package through a PEP
+#   562 ``__getattr__`` that no static or import-time probe triggers. The ONLY thing in the
+#   repo that catches it is ``apps/trust/tests/test_repro_open_tickets.py::
+#   test_the_trust_image_copy_set_can_resolve_the_claim_verifier``, which asks for the
+#   ATTRIBUTE. So this blind spot is guarded by exactly one test, in one lane, for one
+#   package — and 23 witnesses across 8 of the 9 images have the same shape.
+#
+# The property below is stated over the CLAIM the image makes rather than over what
+# survives in it: an image whose build puts a package's name on one of its own sys.path
+# roots is claiming to provide that package, and a claim that ``package_wiring`` already
+# says is false must be reported whether or not a surviving module still imports it.
+
+
+def _t334_covers(source: str, repo_relative: str) -> bool:
+    """Whether a ``COPY`` source path contains ``repo_relative``."""
+    src = source.rstrip("/")
+    return repo_relative == src or repo_relative.startswith(f"{src}/")
+
+
+def _t334_drop_copies(text: str, sources: frozenset[str]) -> str:
+    """``text`` with every ``COPY`` line naming one of ``sources`` removed.
+
+    Only ``COPY`` lines, and only ones whose source token matches exactly — a ``RUN`` that
+    mentions the same path, or the ``ln -s`` this sabotage must PRESERVE, is left alone.
+    The removal is never trusted on line count; every caller re-parses the result and
+    asserts on the parsed spec instead.
+    """
+    kept = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("COPY ") and any(
+            re.search(rf"(?:^|\s){re.escape(source)}(?:\s|$)", stripped) for source in sources
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _t334_witnesses() -> list[dict[str, Any]]:
+    """Every (image, package) pair with the circular shape, DERIVED — never named here.
+
+    A witness needs all four of:
+
+    1. the image resolves the package today (``package_wiring`` -> True), so the sabotage
+       is a real regression rather than a pre-existing hole;
+    2. the name is put on one of the image's own ``sys.path`` roots by an ``ln -s`` — this
+       is the CLAIM the property is about, and it is what survives the sabotage;
+    3. some module the image ships imports the package — the evidence the checker currently
+       depends on;
+    4. there are ``COPY`` lines covering both the provider directory and every one of those
+       importers, so removing them removes the provider AND the evidence together.
+
+    Deriving it is what keeps the fix honest: a repair that special-cased ``trust`` or
+    ``claim_verification`` would still be red on the other seven images. Nothing in this
+    function reads a report, so the witness set does not move when the defect is fixed.
+    """
+    providers = first_party_packages()
+    names = frozenset(providers)
+    found: list[dict[str, Any]] = []
+    for label, spec in sorted(images().items()):
+        importers: dict[str, set[str]] = {}
+        for module_path in sorted(shipped_sources(spec)):
+            for site in import_sites(module_path, names):
+                importers.setdefault(site.package, set()).add(site.module_path)
+        for package in sorted(importers):
+            if not package_wiring(spec, package)[0]:
+                continue
+            claims = [
+                link
+                for _target, link in spec.links
+                if any(
+                    link.rstrip("/") == f"{root.rstrip('/')}/{package}" for root in spec.path_roots
+                )
+            ]
+            if not claims:
+                continue
+            provider = providers[package]
+            doomed = frozenset(
+                source
+                for source, _dest in _real_copies(spec)
+                if _t334_covers(source, provider)
+                or any(_t334_covers(source, module) for module in importers[package])
+            )
+            if not doomed:
+                continue
+            found.append(
+                {
+                    "label": label,
+                    "package": package,
+                    "provider": provider,
+                    "doomed": doomed,
+                    "claims": tuple(claims),
+                    "importers": tuple(sorted(importers[package])),
+                }
+            )
+    return found
+
+
+def _t334_claimed(spec: ImageSpec) -> dict[str, str]:
+    """``{package: the sys.path entry the build creates for it}`` — the image's CLAIMS.
+
+    A build that runs ``ln -s <target> <root>/<pkg>``, where ``<root>`` is one of the
+    image's own ``sys.path`` roots, is asserting that ``import <pkg>`` will work inside the
+    image. That assertion is what this gate holds the checker to, and it is deliberately
+    independent of whether any module survives to make the import — which is the circular
+    question that made the checker quiet in the first place.
+    """
+    claimed: dict[str, str] = {}
+    for package in sorted(first_party_packages()):
+        for _target, link in spec.links:
+            if any(link.rstrip("/") == f"{root.rstrip('/')}/{package}" for root in spec.path_roots):
+                claimed[package] = link
+                break
+    return claimed
+
+
+def _t334_blind_spots(spec: ImageSpec) -> dict[str, str]:
+    """``{package: why}`` for every package this spec CLAIMS, fails to wire, and no longer
+    imports — i.e. every package the current checker is structurally unable to report.
+
+    Computed from :func:`package_wiring`, :func:`_t334_claimed` and :func:`import_sites`
+    only, never from a report, so it reads the same before and after the fix this gate
+    asks for. A selection step that moved with the fix would leave the gate with nothing to
+    grade the moment it went green.
+    """
+    names = frozenset(first_party_packages())
+    blind: dict[str, str] = {}
+    for package, _link in _t334_claimed(spec).items():
+        wired, why = package_wiring(spec, package)
+        if wired:
+            continue
+        if any(
+            site.package == package
+            for module_path in sorted(shipped_sources(spec))
+            for site in import_sites(module_path, names)
+        ):
+            continue  # a surviving importer: the checker sees this one the ordinary way
+        blind[package] = why
+    return blind
+
+
+def _t334_sabotaged(witness: dict[str, Any]) -> ImageSpec | None:
+    """The witness's image with the COPYs removed, or ``None`` if the sabotage is not usable.
+
+    Rejected: a sabotage that did not actually unwire the witness package; one that left a
+    module still importing it (then the checker sees it the ordinary way and there is no
+    blind spot to grade); one that removed the ``ln -s`` CLAIM along with the COPY, leaving
+    nothing to hold the image to; and one that emptied the image outright.
+
+    Collateral damage is deliberately NOT rejected. A ``COPY apps/buyer/svc/src/`` that has
+    to go because it holds the only importer also unwires ``buyer_svc``, and an earlier
+    draft threw those witnesses away — which cut the derivable set from eleven to two and,
+    worse, narrowed the property to one package per image. The property below is stated
+    over :func:`_t334_blind_spots` instead, so a collaterally unwired package is simply one
+    more claim the report has to name rather than a reason to discard the case.
+    """
+    label = witness["label"]
+    package = witness["package"]
+    text = (REPO_ROOT / label).read_text(encoding="utf-8")
+    sabotaged = parse_dockerfile_text(
+        _t334_drop_copies(text, witness["doomed"]), f"{label}/t334-sabotaged"
+    )
+    if not shipped_sources(sabotaged):
+        return None
+    if not all(claim in {link for _target, link in sabotaged.links} for claim in witness["claims"]):
+        return None
+    if package not in _t334_blind_spots(sabotaged):
+        return None
+    return sabotaged
+
+
+@lru_cache(maxsize=1)
+def _t334_cases() -> tuple[tuple[dict[str, Any], ImageSpec], ...]:
+    """The witnesses whose sabotage is usable, paired with the sabotaged spec."""
+    cases = []
+    for witness in _t334_witnesses():
+        sabotaged = _t334_sabotaged(witness)
+        if sabotaged is not None:
+            cases.append((witness, sabotaged))
+    return tuple(cases)
+
+
+def test_t334_the_circular_blind_spot_witnesses_are_armed() -> None:
+    """Not xfail, and not decoration: the gate below is worthless without every clause here.
+
+    Under ``xfail(strict=True)`` ANY exception in the graded body reads as ``xfailed``,
+    i.e. green — so a derivation that had stopped producing witnesses would be
+    indistinguishable from the defect being fixed. Everything this control asserts is
+    computed from :func:`package_wiring`, :func:`shipped_sources` and :func:`import_sites`
+    and NEVER from a report, so it passes identically before and after the fix.
+    """
+    cases = _t334_cases()
+    assert len(cases) >= 8, (
+        f"only {len(cases)} circular witnesses could be derived from this repo. The "
+        f"derivation has stopped working (or the images changed shape), and the gate below "
+        f"would report on almost nothing: {[(w['label'], w['package']) for w, _s in cases]}"
+    )
+    assert len({witness["label"] for witness, _spec in cases}) >= 5, (
+        "the witnesses come from too few images, so a fix that special-cased one image "
+        f"could satisfy the gate: {sorted({w['label'] for w, _s in cases})}"
+    )
+    assert len({witness["package"] for witness, _spec in cases}) >= 3, (
+        "every witness is the same package, so a fix keyed on that name would satisfy the "
+        f"gate: {sorted({w['package'] for w, _s in cases})}"
+    )
+
+    # Every real image is clean today. Without this, the gate could be "satisfied" by a
+    # checker that reports every package on every image, which reports nothing at all.
+    for label, spec in sorted(images().items()):
+        assert not _t334_blind_spots(spec), (
+            f"{label} already claims a package it does not wire, at HEAD, with no importer "
+            f"left to notice: {_t334_blind_spots(spec)}. The gate below cannot tell that "
+            f"from the sabotage it makes."
+        )
+
+    for witness, sabotaged in cases:
+        label, package = witness["label"], witness["package"]
+        where = f"{label} / {package}"
+
+        # The baseline really is clean — otherwise the sabotage proves nothing.
+        text = (REPO_ROOT / label).read_text(encoding="utf-8")
+        baseline = parse_dockerfile_text(text, f"{label}/t334-control")
+        wired, why = package_wiring(baseline, package)
+        assert wired, f"{where}: the image does not resolve {package!r} even at HEAD ({why})"
+        assert package not in _unwired_for(baseline), (
+            f"{where}: the checker already reports {package!r} on the UNSABOTAGED image, "
+            f"so the two halves of it disagree and nothing below is interpretable"
+        )
+
+        # The sabotage removed COPYs and nothing else: the CLAIM survived it.
+        for claim in witness["claims"]:
+            assert claim in {link for _target, link in sabotaged.links}, (
+                f"{where}: the sabotage removed the `ln -s ... {claim}` as well as the "
+                f"COPY, so the image no longer claims to provide {package!r} and there is "
+                f"nothing left to grade"
+            )
+        assert shipped_sources(sabotaged), (
+            f"{where}: the sabotage emptied the image; it is over-broad, not surgical"
+        )
+
+        # THE ANSWER IS ALREADY COMPUTED. This is the ticket's central claim, asserted.
+        sabotaged_wired, sabotaged_why = package_wiring(sabotaged, package)
+        assert not sabotaged_wired, f"{where}: the sabotage did not unwire {package!r}"
+        assert sabotaged_why, f"{where}: package_wiring gave no reason to report"
+
+        # …and the evidence the checker currently needs is gone with the COPY. This is the
+        # circularity itself, and it is what makes the gate below non-trivial.
+        names = frozenset(first_party_packages())
+        survivors = [
+            str(site)
+            for module_path in sorted(shipped_sources(sabotaged))
+            for site in import_sites(module_path, names)
+            if site.package == package
+        ]
+        assert not survivors, (
+            f"{where}: a shipped module still imports {package!r} after the sabotage, so "
+            f"the checker can see it the ordinary way and this is not a blind-spot "
+            f"witness: {survivors}"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-334: _unwired_for reports a package only if some SHIPPED module still imports "
+        "it, so deleting the COPY deletes the importer and the checker goes silent about "
+        "the very package it just computed a False wiring verdict for. The answer is "
+        "already computed at _unwired_for's `wired = {...}` line and no test consumes it. "
+        "Remove this marker with the fix"
+    ),
+)
+def test_t334_an_image_that_claims_a_package_is_graded_when_the_copy_takes_its_importer() -> None:
+    """Every derived witness, not one: a special case for ``trust`` must not satisfy this.
+
+    The property, stated over the image's CLAIM rather than over its survivors: if the
+    build puts ``<pkg>`` on one of the image's own ``sys.path`` roots, the image is
+    claiming to provide it, and a claim that :func:`package_wiring` already answers ``False``
+    must appear in the report. Whether a surviving module still imports it is exactly the
+    circular question that made the checker quiet.
+
+    The fix is a few lines at the end of :func:`_unwired_for`, reusing the ``wired`` dict it
+    already builds: for any package some ``ln -s``/``COPY`` lands on a ``spec.path_roots``
+    entry and whose ``wired[name]`` is False, ``unwired.setdefault(name, [])``. The return
+    contract already tolerates an empty site tuple and ``_static_failure_report`` already
+    prints ``package_wiring``'s reason. Simulated against this repo: all 9 real images stay
+    ``{}`` (no new failures, and the positive control's ``repaired == baseline`` round trip
+    still holds), and every derived sabotage becomes reported.
+    """
+    cases = _t334_cases()
+    assert cases, "no witnesses — the armed control above says why this is a failure"
+    silent = []
+    for witness, sabotaged in cases:
+        missed = sorted(set(_t334_blind_spots(sabotaged)) - set(_unwired_for(sabotaged)))
+        if missed:
+            reasons = _t334_blind_spots(sabotaged)
+            silent.append(
+                f"  {witness['label']}, after dropping {sorted(witness['doomed'])}: the "
+                f"image still claims "
+                + ", ".join(f"{name!r} ({reasons[name]})" for name in missed)
+                + f" — but the only shipped importer(s) of {witness['package']!r} "
+                f"{list(witness['importers'])} went with the COPY, so the report said nothing"
+            )
+    assert not silent, (
+        "the static copy-set checker is SILENT about a package the image still claims to "
+        "provide, for "
+        + f"{len(silent)} of {len(cases)} derived witnesses, and in every one of them it "
+        "had ALREADY computed the failing verdict and thrown it away:\n"
+        + "\n".join(silent)
+        + "\n\nRemoving a COPY removes the importer that was the evidence the COPY was "
+        "needed, so the checker grades a smaller image and finds it consistent. Repair: at "
+        "the end of `_unwired_for`, also report any package whose name the build puts on a "
+        "`spec.path_roots` entry and whose `wired[...]` entry — already computed on the "
+        "line above the loop — is False."
     )
