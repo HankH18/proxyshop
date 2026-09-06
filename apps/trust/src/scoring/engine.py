@@ -25,7 +25,7 @@ observation type        weight    what it means
                                   dominant effect is on coverage and confidence (D53/R19)
 ``ambiguous``           0.0       decides nothing: ZERO mean movement, coverage only
 ``contradicted``        2.0       the catalog or the transaction says otherwise
-``mismatch_return``     1.5       the buyer said it matched and then returned it
+``mismatch_return``     1.5       the buyer reports a mismatch and returns the item
 ``severe_policy``       3.0       an advertised policy refused outright
 ======================  ========  =========================================================
 

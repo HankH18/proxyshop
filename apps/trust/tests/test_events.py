@@ -1159,10 +1159,36 @@ def test_the_in_memory_and_postgres_writers_agree_on_the_stream_hash(
 def test_replay_with_snapshots_names_the_missing_scorer_rather_than_returning_nothing(
     events_client: Any,
 ) -> None:
-    """T-062 owns the arithmetic (D49). Until it lands, the answer is a 503 that says so.
+    """T-062 owns the arithmetic (D49), and T-062 HAS LANDED, so the answer is a 200.
 
     An empty mapping would compare equal to nothing and read as a pass, which is exactly the
     failure the ledger's replay seam raises rather than returns.
+
+    JUSTIFY-TEST-EDIT (T-166). This test used to branch on its own subject's status::
+
+        if response.status_code == 503:
+            assert response.json()["detail"]["error"] == "scorer_unavailable"
+            assert "T-062" in response.json()["detail"]["message"]
+        else:  # T-062 has landed; the seam must then actually produce snapshots
+            assert response.status_code == 200, response.text
+            assert "s-1" in response.json()["snapshots"]
+
+    *What the removed arm encoded*: "while the scorer package does not exist,
+    ``/events/replay?snapshots=true`` must refuse with 503 ``scorer_unavailable`` and name
+    T-062, rather than return an empty mapping that reads as a pass."
+
+    *Would this test still be wrong if my change were reverted?* **Yes.** The two deleted
+    assertions are unreachable at HEAD for a reason that has nothing to do with this edit:
+    T-062 landed a real scorer, so the seam can no longer answer 503 and the arm never
+    executes. A conditional test covers only the arm it took, so half of this test had
+    silently stopped grading anything — the same vacuity class as T-159/T-160. Reverting
+    this edit restores the dead branch, not the coverage. The precondition the removed arm
+    was written against ("the scorer is absent") is no longer a state this system can be in,
+    so the requirement it encoded expired with T-062 rather than being weakened here.
+
+    *Nothing was loosened.* The surviving assertions are the 200 arm's, unchanged, now run
+    unconditionally instead of only when the other arm was not taken — strictly more is
+    graded after this edit than before it.
     """
     _post(events_client, _obs_event("ev-1", "s-1", "price_honored", "verified"))
 
@@ -1171,12 +1197,8 @@ def test_replay_with_snapshots_names_the_missing_scorer_rather_than_returning_no
     assert missing_as_of.json()["detail"]["error"] == "as_of_required"
 
     response = events_client.get("/events/replay", params={"snapshots": "true", "as_of": AS_OF})
-    if response.status_code == 503:
-        assert response.json()["detail"]["error"] == "scorer_unavailable"
-        assert "T-062" in response.json()["detail"]["message"]
-    else:  # T-062 has landed; the seam must then actually produce snapshots
-        assert response.status_code == 200, response.text
-        assert "s-1" in response.json()["snapshots"]
+    assert response.status_code == 200, response.text
+    assert "s-1" in response.json()["snapshots"]
 
 
 # ======================================================================================
