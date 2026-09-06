@@ -144,7 +144,12 @@ def test_a_datastore_that_cannot_be_reached_is_a_503_with_the_documented_body() 
         )
 
 
-@pytest.mark.docker
+# T-172: no `docker` mark. This test's DSN points at a port it just closed itself, so it
+# needs no compose service at all — exactly like its sibling
+# `test_a_datastore_that_cannot_be_reached_is_a_503_with_the_documented_body` above, which
+# has never carried the mark. It was marked `docker` with no argument, which the whole-stack
+# fallback then read as "needs Postgres and Neo4j and Redis", so a Redis blip skipped a test
+# that cannot touch Redis. Declaring a service would be a lie; dropping the mark is the fix.
 def test_an_unreachable_dsn_fails_fast_rather_than_blocking_on_the_pool() -> None:
     """A real DSN pointing at a dead port: bounded wait, 503, no 30-second stall.
 

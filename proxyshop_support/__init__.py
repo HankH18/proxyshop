@@ -22,6 +22,12 @@ belongs to no feature package:
 ``fixture_loader``
     The ``tests/_fixtures_*.py`` auto-discovery used by every per-directory ``conftest.py``,
     so a worker adds fixtures in a file it owns and never edits a shared conftest.
+``logging_config``
+    T-308's single place application logging is configured. Nothing in the repo configured
+    it before, so a started service had ``root.handlers == []`` at level ``WARNING`` and
+    every INFO call site in the product was dropped before a record was built. Importing
+    this module changes nothing; a service calls ``configure_logging()`` on its startup
+    path. Also carries the per-request correlation id (``RequestIdMiddleware``).
 ``neo4j_lock``
     D37's cross-worker ``flock`` on ``/tmp/proxyshop-neo4j.lock``.
 ``reachability``
@@ -31,7 +37,8 @@ belongs to no feature package:
 ``service_markers``
     The rule that turns one collected item into the set of compose services it needs — an
     explicit ``@pytest.mark.docker("postgres")`` argument, else the datastore fixtures it
-    requests, else the whole stack.
+    requests. An item that declares neither is **refused**, not widened to the whole stack
+    (T-172): silence about a dependency must not read as depending on everything.
 """
 
 __all__ = [
@@ -39,6 +46,7 @@ __all__ = [
     "embedding",
     "fixture_loader",
     "llm_double",
+    "logging_config",
     "neo4j_lock",
     "reachability",
     "redis_client",

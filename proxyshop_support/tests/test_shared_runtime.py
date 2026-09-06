@@ -786,15 +786,51 @@ def test_serve_binds_an_ephemeral_port_and_answers() -> None:
 
 
 def test_shopify_stub_url_fixture_is_wired_to_the_stub(request: pytest.FixtureRequest) -> None:
-    """Until T-013 ships ``shopify_stub.app:app`` the fixture must SKIP, never error.
+    """The pinned entry point exists and the fixture yields a working URL for it.
 
-    Requesting it here is the only thing in the repo that proves the fixture is importable
-    and that its skip path is a skip. Once T-013 lands, this turns into a live check that
-    the agreed entry point exists.
+    Requesting it here is the only thing outside ``services/shopify-stub`` that drives the
+    fixture at all. It used to say "until T-013 ships ``shopify_stub.app:app`` the fixture
+    must SKIP, never error" — T-205 inverted that ruling: a broken entry point must reach
+    the reporter instead of being converted into a skip, because a skipped datastore test
+    is indistinguishable from a passing one in the frozen metrics.
+
+    **The ``except`` arm below is a live guard, not dead code, and it is deliberately a
+    ``fail``.** T-205's repair is in the root ``conftest.py``'s fixture, which this file does
+    not own and cannot see; whether it is present depends on merge order. So the property is
+    enforced from the *consumer* side, where it holds either way. Measured, with the stub's
+    ``app`` attribute renamed and separately with ``shopify_stub.app`` made unimportable:
+
+        body                          T-205 in conftest    outcome
+        this one (fail on skip)       no                   1 failed   <- red
+        this one (fail on skip)       yes                  1 failed   <- red
+        bare assert, no try/except    no                   1 skipped  <- SILENT GREEN
+        bare assert, no try/except    yes                  1 failed
+        the pre-T-205 body            no                   1 passed   <- SILENT GREEN
+
+    The third and fifth rows are why this is not simplified to the one-line assertion: until
+    T-205's fixture change merges, dropping the guard turns a genuinely broken entry point
+    back into an exit-0 pass, which is the exact defect T-205 exists to remove. Once that
+    change has landed everywhere, this arm becomes unreachable and can be deleted — but it
+    stays red rather than green in the meantime, so nothing is lost by leaving it.
     """
+    # REPLACED ASSERTION (T-205, consumer side). This arm used to read:
+    #     except pytest.skip.Exception as skipped:
+    #         assert "shopify_stub.app:app" in str(skipped)
+    #         return
+    # i.e. "a skip whose message names the entry point is a PASS" — scaffolding from before
+    # T-013 shipped the entry point. Measured on this branch's base: with the entry point
+    # genuinely broken, that path reported `1 passed` at exit 0. It encoded the defect as the
+    # contract. Revert question: it fails for the same reason with this change reverted, so
+    # the test was wrong independently of anything here. `shopify_stub.app:app` is a live
+    # FastAPI instance today, so the skip it was written to tolerate can no longer be
+    # legitimate. The final assertion below is untouched.
     try:
         base_url = request.getfixturevalue("shopify_stub_url")
     except pytest.skip.Exception as skipped:
-        assert "shopify_stub.app:app" in str(skipped)
-        return
+        pytest.fail(
+            f"the `shopify_stub_url` fixture SKIPPED instead of yielding a URL: {skipped}. "
+            f"`shopify_stub.app:app` is a shipped entry point, so a skip here means it is "
+            f"broken and the fixture swallowed the ImportError/AttributeError rather than "
+            f"letting it reach the reporter (T-205). A skip is exit 0 and reads as a pass."
+        )
     assert base_url.startswith("http://127.0.0.1:")

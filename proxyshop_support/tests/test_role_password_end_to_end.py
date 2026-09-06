@@ -480,7 +480,7 @@ def _point_the_connect_side_at(monkeypatch, host_port: str, role_password: str |
         monkeypatch.setenv(ROLE_PASSWORD_ENV, role_password)
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
 def test_a_non_default_role_password_seeds_and_connects_end_to_end(
     worker_index: int, monkeypatch
 ) -> None:
@@ -528,7 +528,7 @@ def test_a_non_default_role_password_seeds_and_connects_end_to_end(
             )
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
 def test_a_fresh_volume_with_no_variable_still_connects_on_the_dev_default(
     worker_index: int, monkeypatch
 ) -> None:

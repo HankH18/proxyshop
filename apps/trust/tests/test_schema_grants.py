@@ -1706,7 +1706,7 @@ def test_db_init_holds_no_password_literal_beyond_the_documented_dev_default() -
     )
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
 def test_a_fresh_volume_init_keeps_a_non_default_role_password(worker_index: int) -> None:
     """T-110 acceptance 2, on a real fresh volume rather than on the file's text.
 
@@ -1734,7 +1734,7 @@ def test_a_fresh_volume_init_keeps_a_non_default_role_password(worker_index: int
             )  # fmt: skip
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
 def test_a_fresh_volume_init_without_the_variable_keeps_the_documented_dev_default(
     worker_index: int,
 ) -> None:
@@ -1752,7 +1752,7 @@ def test_a_fresh_volume_init_without_the_variable_keeps_the_documented_dev_defau
             )  # fmt: skip
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
 def test_re_running_db_init_by_hand_never_resets_a_live_role_password(worker_index: int) -> None:
     """The else-branch, which is the half that actually shipped broken.
 
@@ -1870,7 +1870,7 @@ def test_the_login_probe_refuses_to_guess_when_only_loopback_exists(tmp_path: Pa
     assert "no routable address" in picked.stderr
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
 def test_the_login_probe_still_authenticates_on_a_multi_homed_container(
     worker_index: int,
 ) -> None:
@@ -2003,7 +2003,7 @@ def _role_attributes(container: str, settings: dict[str, str]) -> dict[str, dict
     return attributes
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
 def test_re_running_db_init_normalises_role_attributes_that_have_drifted(
     worker_index: int,
 ) -> None:

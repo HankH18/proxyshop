@@ -1794,15 +1794,6 @@ def test_t172_the_docker_corpus_sweep_is_armed(tmp_path: Any) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-172: service_markers.services_for widens an item that declares no service to the "
-        "whole stack, so 8 Postgres-only docker tests — 5 schema-grants, 2 role-password, 1 "
-        "closed-loopback — are skipped at exit 0 by a Redis-only or neo4j-only outage; remove "
-        "this marker with the fix"
-    ),
-)
 def test_t172_an_undeclared_docker_test_is_widened_to_the_whole_stack(tmp_path: Any) -> None:
     """A test that needs one store must not be silenced by a different store being down.
 

@@ -39,9 +39,17 @@ def test_probe_redis_only() -> None:
     """Skips only when Redis is unreachable."""
 
 
-@pytest.mark.docker
+@pytest.mark.docker("postgres", "neo4j-bolt", "redis")
 def test_probe_whole_stack() -> None:
-    """No service named and no datastore fixture requested: the whole stack is required."""
+    """Every service named explicitly: the whole stack is required.
+
+    The mark used to be bare, on T-109's reading that "declared nothing" meant "needs
+    everything". T-172 removed that fallback — silence is now refused at collection — so
+    an item that genuinely needs all three has to say all three. What this probe measures
+    is unchanged and is still the non-goal T-109 recorded: an item needing the whole stack
+    skips as soon as *any* one endpoint is down. Both callers in
+    ``test_reachability_per_service.py`` still expect exactly that, and neither moved.
+    """
 
 
 @pytest.mark.docker
