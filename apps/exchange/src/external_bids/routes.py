@@ -102,16 +102,27 @@ MAX_SUBMISSION_BYTES = 256 * 1024
 #: `"external"`, which is the dual-path boundary's name for this side.
 REFUSAL_PATH = "external"
 
-#: The caller-chosen strings this door retains or interpolates, and therefore bounds.
-#: `nonce` and `signer_id` are kept in an eviction-free replay memory for the auction's
-#: lifetime, `key_id` reaches the queued work item, and `auction_id` arrives in the URL.
-BOUNDED_IDENTIFIERS = ("signer_id", "key_id", "nonce")
+#: The caller-chosen IDENTIFIERS this door bounds, alongside the path's `auction_id`.
+#: `nonce` and `signer_id` are kept in a replay memory for the auction's lifetime, `key_id`
+#: reaches the queued work item, and `store_id` is interpolated verbatim into refusals such as
+#: `trust_snapshot_unavailable:<store_id>` — the package already bounds it on `RosterEntry`
+#: (`auction/routes.py:488`) for that reason.
+#:
+#: WHAT THIS DOES NOT BOUND, said plainly because an earlier version of this comment claimed
+#: to cover "the caller-chosen strings this door retains" and did not: `message`,
+#: `agent_version`, `schema_version` and the `claims` list are part of the SUBMISSION, which
+#: is snapshotted into the queued work item by design. They are bounded only by
+#: :data:`MAX_SUBMISSION_BYTES`, and deliberately so — truncating a bid's contents would
+#: change what was signed. Measured: a 100 KB `message` is admitted and queues a ~106 KB item.
+BOUNDED_IDENTIFIERS = ("signer_id", "key_id", "nonce", "store_id")
 
 _UNREADABLE_BODY = "malformed_submission:body_is_not_a_json_object"
 _OVERSIZED_BODY = "malformed_submission:body_exceeds_maximum_size"
 _NON_FINITE_NUMBER = "malformed_submission:body_carries_a_non_finite_number"
 _PATH_MISMATCH = "malformed_submission:auction_id_does_not_match_the_path"
 _OVERSIZED_IDENTIFIER = "malformed_submission:identifier_exceeds_maximum_length"
+_DEEPLY_NESTED_BODY = "malformed_submission:body_nests_deeper_than_this_door_will_parse"
+_CLIENT_DISCONNECTED = "malformed_submission:the_body_never_finished_arriving"
 
 #: Guards the lazy creation of the replay memory — see :func:`_nonce_store`.
 _NONCE_STORE_LOCK = threading.Lock()
@@ -153,13 +164,28 @@ def configure_external_bids(
     ``auction/routes.py`` installs its bid book — a deployment that needs replay memory to
     outlive one process hands its own over here.
 
+    **That default store never forgets, and nothing in this tree purges it.**
+    :meth:`~store_agent.external.nonces.NonceStore.purge_expired` has no production caller, so
+    while each nonce's LENGTH is bounded (:data:`BOUNDED_IDENTIFIERS`) the COUNT is not:
+    measured, 200 admitted bids retain 200 entries and 74,504 bytes, with ``retain_until``
+    populated and never consulted. It takes a valid signing key to grow, so it is a channel
+    open to an admitted seller rather than to an anonymous caller, and closing it is an
+    eviction policy for ``NonceStore`` — a decision belonging to whoever owns that class and
+    the durable ``app.bid_nonces`` port it documents as its real implementation, not something
+    to improvise from this door. Reported rather than papered over.
+
     ``queue`` receives the verification work item for an ADMITTED submission. Admitted is not
     trusted: the seller-asserted claims are queued rather than believed (R18).
     """
     if keyring is not None:
         app.state.external_bid_keyring = keyring
     if nonces is not None:
-        app.state.external_bid_nonces = nonces
+        # Under the SAME lock the lazy path takes. Without it an operator's store could be
+        # written into the window between `_nonce_store`'s check and its own write and then
+        # silently overwritten by the store it was configuring away — no replay hole, but the
+        # deployment's own replay memory would be dropped on the floor.
+        with _NONCE_STORE_LOCK:
+            app.state.external_bid_nonces = nonces
     if queue is not None:
         app.state.external_bid_queue = queue
     if freshness_window_seconds is not None:
@@ -168,6 +194,20 @@ def configure_external_bids(
 
 def _refuse_constant(token: str) -> Any:
     raise _UnreadableBody(_NON_FINITE_NUMBER)
+
+
+def _finite_float(text: str) -> float:
+    """Every JSON float, refused if converting it overflows to an infinity.
+
+    ``parse_constant`` fires only on the bare tokens ``NaN``/``Infinity``/``-Infinity``.
+    ``1e400`` is an ordinary RFC-8259 number that becomes ``inf`` during conversion and
+    reaches nothing that would object — this door's docstring claimed to refuse it "exactly as
+    policy/routes.py does" while admitting it, and the twin has had this half all along.
+    """
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise _UnreadableBody(_NON_FINITE_NUMBER)
+    return value
 
 
 async def _bounded_body(request: Request) -> bytes:
@@ -181,13 +221,22 @@ async def _bounded_body(request: Request) -> bytes:
     docstring is where the distinction is written down; this door's comment claimed "refused
     unread" while doing the opposite.
     """
+    from starlette.requests import ClientDisconnect  # noqa: PLC0415 - only needed here
+
     chunks: list[bytes] = []
     size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > MAX_SUBMISSION_BYTES:
-            raise _UnreadableBody(_OVERSIZED_BODY)
-        chunks.append(chunk)
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_SUBMISSION_BYTES:
+                raise _UnreadableBody(_OVERSIZED_BODY)
+            chunks.append(chunk)
+    except ClientDisconnect as exc:
+        # A caller hanging up mid-upload is a fact of the internet, not a bug, and every
+        # sibling route on this app already answers it 4xx/5xx-free. Measured on this door
+        # before the catch: one partial `http.request` followed by `http.disconnect` let
+        # `ClientDisconnect` escape and the app answered 500.
+        raise _UnreadableBody(_CLIENT_DISCONNECTED) from exc
     return b"".join(chunks)
 
 
@@ -199,9 +248,22 @@ def _submission_of(raw: bytes) -> dict[str, Any]:
     response that echoes it — the T-270 failure, on a door that has a refusal for it.
     """
     try:
-        parsed = json.loads(raw.decode("utf-8"), parse_constant=_refuse_constant)
+        parsed = json.loads(
+            raw.decode("utf-8"), parse_constant=_refuse_constant, parse_float=_finite_float
+        )
     except _UnreadableBody:
         raise
+    except RecursionError as exc:
+        # NOT COVERED BY `ValueError`, WHICH IS THE WHOLE DEFECT. `RecursionError` is a
+        # `RuntimeError`, so a deeply nested body escaped this function and the ASGI app
+        # entirely: measured, `b"[" * 9994 + b"]" * 9994` — 19,988 bytes, 7.6% of this door's
+        # ceiling, unauthenticated, no signature needed — answered HTTP 500 while every
+        # sibling route on the same app answered 400. Reading the body by hand is what keeps
+        # T-270's echoing 422 renderer off this route; it also opted out of the blanket
+        # body-parse guard FastAPI gives a route that declares a model, and that guard has to
+        # be replaced rather than merely dropped. `policy/routes.py`'s `_json_object` — the
+        # twin this module names — has always had this clause.
+        raise _UnreadableBody(_DEEPLY_NESTED_BODY) from exc
     except (UnicodeDecodeError, ValueError) as exc:
         raise _UnreadableBody(_UNREADABLE_BODY) from exc
     if not isinstance(parsed, dict):
