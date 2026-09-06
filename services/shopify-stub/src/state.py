@@ -20,10 +20,11 @@ from __future__ import annotations
 import itertools
 import secrets
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
+from shopify_stub import codes as codes_module
 from shopify_stub.codes import DiscountCode, RejectionReason
 from shopify_stub.permalink import _assert_bare_host
 
@@ -509,5 +510,19 @@ class StubState:
         self.__init__(keep)  # type: ignore[misc]
 
     def now(self) -> datetime:
-        """The stub's clock. Honours ``time_machine`` freezing in tests."""
-        return datetime.now(UTC)
+        """The stub's clock. Honours ``time_machine`` freezing in tests.
+
+        Delegates to :func:`shopify_stub.codes.utc_now` rather than reading
+        ``datetime.now(UTC)`` here (T-253). That function documents itself as "the stub's
+        single wall-clock read", and until this call existed the claim was simply false: it
+        had zero callers repo-wide while THIS method — which every live clock read in the
+        stub goes through (``app.py``, ``orders.py``, ``webhooks.py``) — reached for
+        ``datetime.now`` independently, the exact thing the docstring says no module does.
+
+        Looked up through the module rather than imported by name on purpose: a
+        ``from ... import utc_now`` would bind at import time, so overriding
+        ``shopify_stub.codes.utc_now`` — the override the docstring promises the control
+        plane and tests — would not reach this call site and the invariant would still be a
+        claim rather than a fact.
+        """
+        return codes_module.utc_now()

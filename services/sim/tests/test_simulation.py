@@ -350,26 +350,59 @@ def test_the_platform_derives_the_offer_integrity_attacks_from_the_event_stream_
         )
 
 
+#: The ledger kinds that are KNOWN to deviate from the body ``contracts.ledger`` publishes,
+#: each one somebody else's open ticket and outside this lane's ownership:
+#:
+#:   auction_opened   omits ``roster_size``     -- apps/exchange/src/auction/state.py
+#:   auction_closed   omits ``shortlist_size``  -- apps/exchange/src/auction/state.py
+#:
+#: ``apps/exchange/src/auction/ledger.py``'s own docstring names both and explains why they
+#: are reported rather than raised. This is an EXACT set, not an allowlist: see the guard
+#: below for why the difference is the whole point.
+KNOWN_DEVIATING_LEDGER_KINDS = frozenset({"auction_opened", "auction_closed"})
+
+
 def test_no_kind_other_than_code_created_deviates_from_its_published_payload(
     sim_run: Any,
 ) -> None:
     """Guards the payload contract that ``contracts.ledger`` publishes and nobody enforces.
 
-    ``code_created`` is a KNOWN deviation and is reported by this lane rather than fixed
-    here: ``apps/exchange/src/checkout/provider.py`` writes ``{checkout_token,
-    discount_code}`` on the success path while ``contracts.ledger.LEDGER_PAYLOAD_SHAPES``
-    publishes ``(code, permalink_url, expires_at)`` — and the orphan path in
-    ``apps/exchange/src/accept/offer.py`` writes the published body, so the same repository
-    emits one kind two ways. That file is outside this lane's ownership.
+    Any kind drifting from its published body is new, and this turns red for it — and every
+    kind on the known list must STILL be drifting, so a repair upstream turns this red too
+    and forces the entry out.
 
-    This asserts the deviation is *confined*: any OTHER kind drifting from its published
-    body is new, and this turns red for it. It also stays green when ``code_created`` is
-    repaired, which is the point of naming the exception rather than pinning the count.
+    **T-265 — why this assertion changed, and why the change is a strengthening.** It used
+    to read::
+
+        assert deviating <= {"code_created"}
+
+    ``<=`` *permits* ``code_created`` to deviate. It encoded a contract violation as
+    acceptable and supplied no case that exercised it, so the guard returned the same verdict
+    whether T-235 was live or repaired — and could never be cited as a guard for the defect
+    it named. Its own docstring said as much and called it the point: "It also stays green
+    when ``code_created`` is repaired." That is precisely the blindness. Measured on this
+    branch, ``code_created`` had ALREADY been repaired (``run.ledger_contract_problems``
+    reported zero deviating kinds at HEAD) and this test noticed nothing, in either
+    direction, for however long that had been true.
+
+    Would the old assertion still be wrong if the T-242 runner change were reverted? Yes —
+    ``set() <= {"code_created"}`` passes at HEAD and would pass identically with
+    ``code_created`` malformed. ``test_repro_open_tickets.py``'s
+    ``test_t265_the_confinement_guard_notices_its_whitelisted_kind_deviating`` demonstrates
+    that against the un-fixed tree.
+
+    The replacement asserts the exact set. It is strictly stronger than ``<=`` in both
+    directions: a new deviation reds it, AND a repaired one reds it, so no entry can outlive
+    its subject the way ``code_created``'s did.
     """
     deviating = {kind for kind, _ in sim_run.ledger_contract_problems}
-    assert deviating <= {"code_created"}, (
-        "a ledger kind other than the known code_created deviation no longer matches its "
-        f"published payload shape: {sorted(deviating - {'code_created'})}"
+    assert deviating == KNOWN_DEVIATING_LEDGER_KINDS, (
+        "the set of ledger kinds deviating from their published payload shape is not the "
+        f"known one. Newly deviating: {sorted(deviating - KNOWN_DEVIATING_LEDGER_KINDS)}. "
+        f"No longer deviating: {sorted(KNOWN_DEVIATING_LEDGER_KINDS - deviating)} — if that "
+        "second list is non-empty the deviation was REPAIRED upstream and its entry must be "
+        "deleted from KNOWN_DEVIATING_LEDGER_KINDS, which is the whole reason this is an "
+        "exact set rather than an allowlist (T-265)."
     )
 
 
