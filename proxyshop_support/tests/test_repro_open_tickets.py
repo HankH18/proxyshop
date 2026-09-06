@@ -1004,18 +1004,20 @@ def test_t210_the_lock_attribution_sweep_is_armed() -> None:
             holder.wait(timeout=30)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-210: a run that fails only because another worker held the Neo4j lock exits 1, "
-        "exactly like a run that failed on a real product defect, so the frozen "
-        "build_succeeds probe — a zero/non-zero test on `make verify` — records 0 for a "
-        "machine condition and nothing downstream can tell the two apart. Remove this "
-        "marker with the fix"
-    ),
-)
 def test_t210_lock_contention_and_a_product_defect_do_not_share_an_exit_status() -> None:
     """Three outcomes, three exit statuses. That is the whole property.
+
+    THE MARKER IS GONE BECAUSE THE DEFECT IS CLOSED. `proxyshop_support/lock_exit_status.py` had
+    carried the whole mechanism -- exit status 77 and its four fail-closed evidence conditions --
+    since it was written, while the root `conftest.py` imported nothing from it, so a run that
+    failed only because another worker held the Neo4j lock exited 1 exactly like a run that failed
+    on a real product defect, and the frozen `build_succeeds` probe recorded 0 for a machine
+    condition. The remaining work was never the mechanism; it was registering its hooks.
+
+    Note for whoever touches this next: registering `pytest_sessionfinish` ALONE is a wiring that
+    looks right and does nothing -- the module's own docstring says so, and it is measured: the
+    full hook set gives green 0 / contention 77 / defect 1, while sessionfinish alone leaves
+    contention at 1. Verified here under `--runxfail` before this marker was removed.
 
     The metric this defect corrupts is a zero/non-zero test on a child process, so the
     exit status is the ONLY channel that counts, and the property is stated on it alone.

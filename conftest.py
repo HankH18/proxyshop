@@ -24,6 +24,16 @@ What this file guarantees for every pytest run in the repo:
   one-second Redis blip skipped all 47 of them — T-011's whole S7 role-isolation gate —
   and the run exited 0 with nothing red. A skipped datastore test is indistinguishable
   from a passing one in the frozen metrics, which is what made that silent.
+* **T-210** — a run whose ONLY failure was cross-worker Neo4j lock contention (D37) exits
+  **77** instead of 1, so an orchestrator reading the child process can tell a machine
+  condition from a product defect without a human. Fail-closed: any unexplained failing
+  report, any non-lock failure, or a status other than pytest's 1 leaves the status alone.
+  See :mod:`proxyshop_support.lock_exit_status`; the registration is the five-name import
+  below and the comment beside it says why all five are required. **Honest limit**:
+  ``build_succeeds`` is ``if make verify; then echo 1; else echo 0; fi``, which reads
+  zero-versus-non-zero and never the value, so 77 is still a zero there — this is machine
+  triage, not a cure for the false zeros already in ``history.csv``. The cure is
+  scheduler-level (never measure concurrently with a lane that touches the graph).
 * ``@pytest.mark.needs_model`` tests skip unless ``PROXYSHOP_ALLOW_MODEL=1``. D18 keeps
   ``torch``/``sentence-transformers`` uninstalled by default, so those tests cannot pass
   here; ``make verify`` additionally deselects them with ``-m "not needs_model"``.
@@ -68,6 +78,41 @@ from proxyshop_support import reachability, service_markers
 from proxyshop_support.clock import EPOCH, ManualClock
 from proxyshop_support.embedding import EMBEDDING_DIM, hash_embed
 from proxyshop_support.llm_double import LLMDouble
+
+# T-210 — register the lock-contention exit status plugin. This file IS a pytest plugin, so
+# every ``pytest_*`` name in its namespace is a hook; these five imports are the whole of the
+# registration and each one is load-bearing, which is why they are spelled out rather than
+# star-imported:
+#
+#   pytest_sessionstart        starts a fresh tally for this session;
+#   pytest_exception_interact  classifies each failure by its real exception — the ONLY
+#                              place a Neo4jLockTimeout is positively identified, so without
+#                              it ``lock_timeouts`` stays 0 and the re-stamp never fires;
+#   pytest_runtest_logreport   counts every failing report, including ones no classifier saw
+#                              — without it ``failing_reports`` stays 0, condition 4
+#                              (failing_reports == lock_timeouts) is false, and again nothing
+#                              fires;
+#   pytest_collectreport       folds collection errors into that same count, so an
+#                              unexplained failure alongside a lock timeout STOPS the
+#                              re-stamp instead of being invisible to it;
+#   pytest_sessionfinish       does the re-stamp itself, and is worthless alone.
+#
+# That last clause is the trap the module's docstring names and this lane re-measured on
+# this checkout: importing ``pytest_sessionfinish`` by itself gives an empty tally, so
+# ``is_lock_contention_only`` is false by construction — a wiring that imports cleanly,
+# lints cleanly, and leaves contention exiting 1. Measured here against a real held flock,
+# green / contention / defect / (contention+defect): all five give 0 / 77 / 1 / 1, while
+# sessionfinish alone gives 0 / 1 / 1 / 1, i.e. the defect untouched. Do not trim this list.
+#
+# None of the five collides with a hook defined below (``pytest_configure``,
+# ``pytest_collection_modifyitems``).
+from proxyshop_support.lock_exit_status import (  # noqa: F401
+    pytest_collectreport,
+    pytest_exception_interact,
+    pytest_runtest_logreport,
+    pytest_sessionfinish,
+    pytest_sessionstart,
+)
 from proxyshop_support.neo4j_lock import neo4j_flock, reset_graph
 from proxyshop_support.postgres import ensure_worker_database, role_dsn
 from proxyshop_support.redis_client import WorkerRedis, worker_redis

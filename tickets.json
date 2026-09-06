@@ -2480,7 +2480,7 @@
         "3. A valid-signature body that cannot be parsed returns 400, never 5xx",
         "4. Every fix carries a test that fails without it"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} ./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-11} uv run python -m pytest apps/merchant/svc/tests -q",
       "refs": [
         "T-050 lane adversarial verifier, 2026-09-02",
         "orchestrator-verified items marked inline"
@@ -4628,7 +4628,7 @@
     {
       "id": "T-266",
       "title": "THE SERVED EXCHANGE IS MISSING FOUR PUBLISHED PATHS, NOT ONE. create_app().openapi() answers only ['/auctions', '/auctions/{auction_id}'] while packages/contracts declares five. Three absences belong to scheduled tickets (T-032 shortlist, T-044 external bids); the fourth, /auctions/{auction_id}/accept, is the one the earlier T-176 adjudication records as owned by nobody, and is now gated as T-170. Recording the full count because the ticket graph currently describes this as a single missing path.",
-      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-8} && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-8} && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k test_t266_the_exchange_serves_exactly_the_operations_its_contract_publishes",
       "scope": [
         "apps/exchange/src/main.py"
       ],
@@ -4718,7 +4718,7 @@
     {
       "id": "T-272",
       "title": "_tier SILENTLY DOWNGRADES WELL-FORMED INPUT, and the line it replaced did not. _number excludes bool and str by design, so tier '2' -> 0, tier '1' -> 0, tier True -> 0 and tier Decimal('2') -> 0, where the deleted int(rostered.get('tier', 1)) answered 2, 1, 1 and 2. Tier 0 means 'no bidding agent', so a LEGITIMATE BID IS DISCARDED AND THE BUYER PAYS LIST: executed through collect_bids, tier='2' with a valid 80.00 bid returns fallback=True, reason='tier_0_no_agent', unit_price=100.0. Not reachable through the HTTP door because pydantic coerces first, so it bites the library callers: orchestration/solicitation.py:199, services/sim/src/runner.py, and .swarm-loop/acceptance/test_e3_exchange.py.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} uv run python -m pytest apps/exchange/tests/test_repro_verifier_findings.py -k t272 -q",
       "scope": [
         "apps/exchange/src/auction/collect.py"
       ],
@@ -4733,7 +4733,7 @@
     {
       "id": "T-273",
       "title": "_price_is_unreadable TURNS A GOOD BID INTO A 0.00 FALLBACK on a roster row with no list_price. _number(offer.get('total_price')) is None when the key is simply ABSENT, not malformed. Measured on the library path: PRE, an offer of {unit_price: 80.0} was admitted at 80.0; POST, the same offer returns fallback=True with unit_price 0.0 and reasons ['...offer.total_price:not_a_number', '...offer.unit_price:unreadable_roster_list_price']. So an 80.00 bid is replaced by a RANKABLE 0.00, and the reason mislabels an OFFER site with a ROSTER-side cause -- the exact double-reporting the module docstring says FALLBACK_REASONS was split apart to end.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} uv run python -m pytest apps/exchange/tests/test_repro_verifier_findings.py -k t273 -q",
       "scope": [
         "apps/exchange/src/auction/collect.py"
       ],
@@ -4778,7 +4778,7 @@
     {
       "id": "T-276",
       "title": "AN UNTESTED CHEAP-PRODUCT BAND, where the floor refuses everything. _price_floor(0.01) == 0.01, so a product listed at one cent CANNOT BE DISCOUNTED AT ALL. Measured through the real door: list 0.01 with a declared 10% off under a 100% cap is refused; list 0.02 with a declared 60% off is refused. Closed rather than fail-closed, which is the direction this wall's own positive controls exist to catch.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} uv run python -m pytest apps/exchange/tests/test_repro_verifier_findings.py -k t276 -q",
       "scope": [
         "apps/exchange/src/auction/collect.py"
       ],
@@ -4793,7 +4793,7 @@
     {
       "id": "T-277",
       "title": "A CONDITIONAL ASSERTION THAT NOW NEVER EXERCISES ITS OWN CASE. test_t224_a_roster_row_that_prices_nothing_cannot_mint_a_free_offer keeps an if-201-else-assert-422 shape, and since Field(gt=0.0) landed it always takes the 422 arm -- so the free-item half of the test never executes. This is T-166's own defect class (a conditional test that silently stopped covering the case it was written for) carried forward into the test written to close T-224.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} uv run python -m pytest apps/exchange/tests/test_repro_verifier_findings.py -k t277 -q",
       "scope": [
         "apps/exchange/tests/test_repro_untrusted_roster.py"
       ],
@@ -4868,7 +4868,7 @@
     {
       "id": "T-282",
       "title": "MalformedLedgerPayload IS NOT RE-EXPORTED, so `from exchange.auction import MalformedLedgerPayload` raises ImportError while every sibling in the same module resolves. apps/exchange/src/auction/ledger.py:51 defines the class and lists it in that module's own __all__ at :39, but apps/exchange/src/auction/__init__.py's `from .ledger import (...)` block at :39-45 pulls only InMemoryLedgerSink, LedgerRecorder, LedgerSink, UnknownLedgerEventKind and build_event -- it was not updated when build_published_event and MalformedLedgerPayload were added by the T-158/T-235 lane -- and the package __all__ at :64-100 omits both. MEASURED: `from exchange.auction import MalformedLedgerPayload` -> ImportError: cannot import name 'MalformedLedgerPayload' from 'exchange.auction'; `from exchange.auction import UnknownLedgerEventKind` -> OK. The in-repo convention is the other way: the merchant's peer package re-exports its identically-named class at apps/merchant/svc/src/codes/__init__.py:62 and :112. Any caller that wants to catch the exception build_published_event raises has to reach past the package into .ledger, which is the import surface the package __init__ exists to prevent.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} uv run python -m pytest apps/exchange/tests/test_repro_ledger_gates.py -k t282 -q",
       "scope": [
         "apps/exchange/src/auction/__init__.py"
       ],
@@ -5648,7 +5648,7 @@
     {
       "id": "T-334",
       "title": "T-301'S BLIND SPOT IS CIRCULAR: REMOVING A COPY REMOVES THE EVIDENCE THAT IT IS MISSING. _unwired_for reports a package only if some SHIPPED module statically imports it. claim_verification's sole column-0 importer is packages/verification/__init__.py:47 \u2014 a file the COPY under test is what ships. So deleting the COPY deletes the importer, and the checker reports nothing wrong. Measured on a sabotaged trust spec: _unwired_for -> [] (silent) while package_wiring(..., 'claim_verification') -> (False, 'no COPY covers packages/verification/src/'). THE ANSWER IS ALREADY COMPUTED AND NO TEST CONSUMES IT. The fix is one rule over the dangling-symlink branch at :428 that already derives it. Note the real-image control DID catch this sabotage, and the T-193 probe did \u2014 only the static checker went quiet.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-9} uv run python -m pytest proxyshop_support/tests/test_artifact_copyset.py -k t334 -q",
       "scope": [
         "proxyshop_support/tests/test_artifact_copyset.py"
       ],

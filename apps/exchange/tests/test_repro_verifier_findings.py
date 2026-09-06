@@ -288,16 +288,6 @@ def test_t271_both_halves_of_the_price_floor_have_a_pinned_magnitude(
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-272: _tier reads the roster with _number, which excludes str by design, so a row "
-        "carrying tier '2' reads as tier 0 — 'no bidding agent' — and a store's legitimate 80.00 "
-        "bid is discarded in favour of the 100.00 list price. The line it replaced, "
-        "int(rostered.get('tier', 1)), answered 2. Unreachable through HTTP because pydantic "
-        "coerces first, so it bites the library callers; remove this marker with the fix"
-    ),
-)
 def test_t272_a_tier_written_as_a_string_does_not_discard_a_legitimate_bid() -> None:
     """A silent downgrade that costs the buyer money, on input nobody would call malformed.
 
@@ -342,16 +332,6 @@ def test_t272_a_tier_written_as_a_string_does_not_discard_a_legitimate_bid() -> 
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-273: _price_is_unreadable answers True when `total_price` is simply ABSENT rather than "
-        "malformed, so on a roster row carrying no list_price an 80.00 offer is refused and "
-        "replaced by a fallback priced at 0.00 — a rankable free item that wins every ranking "
-        "there is — and the refusal is reported at an OFFER site with a ROSTER-side cause "
-        "(offer.unit_price:unreadable_roster_list_price); remove this marker with the fix"
-    ),
-)
 def test_t273_an_offer_stating_only_a_unit_price_is_not_turned_into_a_rankable_zero() -> None:
     """The wall against a free item mints one, on the row that gives it nothing to compare to.
 
@@ -404,17 +384,24 @@ def test_t273_an_offer_stating_only_a_unit_price_is_not_turned_into_a_rankable_z
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-276: _price_floor(0.01) == 0.01, so a product the roster lists at one cent cannot be "
-        "discounted at all — a bid declaring 10% off under an authorized cap of 100% is refused "
-        "and the store falls back to list. Closed rather than fail-closed, which is the direction "
-        "this wall's positive controls exist to catch; remove this marker with the fix"
-    ),
-)
 def test_t276_a_product_listed_at_a_cent_can_still_be_bid_on() -> None:
     """The absolute half of the floor swallows its own band.
+
+    THE MARKER IS GONE BECAUSE THE DEFECT IS CLOSED, in
+    ``packages/contracts/src/boundary.py`` rather than here. The floor is the boundary's to set --
+    T-250 moved the threshold there precisely so the door and the boundary cannot drift onto two
+    different floors -- so suppressing the refusal at the collector would have re-opened that
+    drift rather than closing this. ``ABSOLUTE_FLOOR_MAX_FRACTION`` now clamps the ABSOLUTE half
+    of the floor to a share of the roster's own list price, applied inside the ``max`` and never
+    outside it, so the clamp can never lower the floor on an expensive product.
+
+    The constant is 2%, and it is pinned from BOTH sides rather than chosen: from above by this
+    very node, which requires 0.008 admitted on a 0.02 listing and so forbids a clamp over 40%;
+    and from below by the shared corpus, which asserts ``price_floor(0.50)`` is EXACTLY
+    ``MINIMUM_PAYABLE_AMOUNT`` and still refuses 0.005 there -- 0.01 is 2% of 0.50, so any clamp
+    under 2% would bind on that row and admit the half cent those cases refuse. The admissible
+    window is [2%, 40%] and the fix takes the strictest end, leaving ``price_floor`` identical to
+    its pre-T-276 self for every listing at or above half a dollar.
 
     :func:`~exchange.auction.collect._price_floor` drops the absolute half where the roster lists
     the product *below* one minor unit, precisely so a catalog pricing something at 0.005 is not
@@ -456,16 +443,6 @@ def test_t276_a_product_listed_at_a_cent_can_still_be_bid_on() -> None:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-277: test_t224_a_roster_row_that_prices_nothing_cannot_mint_a_free_offer has kept an "
-        "if-201-else-422 shape since Field(gt=0.0) landed, so its free-item arm never executes "
-        "and nothing covers the case it was written for. The case is still live at the library "
-        "door: collect_bids on a row carrying list_price 0.0 with a silent store mints a rankable "
-        "0.00 offer; remove this marker with the fix"
-    ),
-)
 def test_t277_a_zero_priced_roster_row_cannot_mint_a_free_offer_at_the_library_door() -> None:
     """The dead branch's subject, at the layer where it is still reachable.
 

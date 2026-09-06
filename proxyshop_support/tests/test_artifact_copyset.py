@@ -144,9 +144,11 @@ false green — so the choice here is still the right one.
   see a fix is worthless, and the trust lane's equivalent gate was found XPASSing against a
   live defect for exactly that reason.
 
-Every defect test is ``@pytest.mark.xfail(strict=True)``: a normal run reports ``xfailed``
-and ``make verify`` stays green, the ticket's gate runs ``--runxfail -k <name>`` and gets a
-real red, and ``strict=True`` means whoever fixes the defect must delete the marker.
+A defect test lands here as ``@pytest.mark.xfail(strict=True)``: a normal run reports
+``xfailed`` and ``make verify`` stays green, the ticket's gate runs ``--runxfail -k <name>``
+and gets a real red, and ``strict=True`` means whoever fixes the defect must delete the
+marker. There are none left in this file — T-334 was the last, and its marker went with the
+repair, so every node here now grades live.
 
 Nothing in this file touches a Dockerfile, a compose fragment or any product source. This
 lane writes gates, not fixes.
@@ -173,7 +175,6 @@ from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
-import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -459,6 +460,42 @@ def package_wiring(spec: ImageSpec, package: str) -> tuple[bool, str]:
     return False, f"{provider}/ is copied but nothing puts {package!r} on PYTHONPATH"
 
 
+def path_root_claims(spec: ImageSpec) -> dict[str, str]:
+    """``{package: the sys.path entry the build creates for it}`` — the image's own CLAIMS.
+
+    A build that lands ``<pkg>`` on one of the image's ``sys.path`` roots — by an ``ln -s``
+    into ``.pkgroot`` (how most images do it) or by a ``COPY`` destination (how
+    ``services/shopify-stub/Dockerfile``, which has no ``ln -s`` at all, does it) — is
+    asserting that ``import <pkg>`` works inside the image. That assertion stands whether or
+    not any module survives to make the import, which is exactly why :func:`_unwired_for`
+    needs it: see T-334, where deleting a ``COPY`` deleted the package's only importer and
+    took the evidence that the ``COPY`` was needed away with it.
+
+    Deliberately the mirror of :func:`package_wiring`'s conditions 2 and 3: this asks only
+    *does the build put the NAME there*, never *does anything back it up*. Keeping the two
+    apart is what lets a report be raised from a verdict that is already computed.
+
+    ``_real_copies``, not ``spec.copies``: a ``COPY`` whose source is not in the build
+    context fails ``docker build`` outright, so it claims nothing — it just breaks, and
+    :func:`test_the_repo_has_images_and_first_party_packages_to_grade` is what reports that.
+    """
+    roots = tuple(root.rstrip("/") for root in spec.path_roots)
+    claimed: dict[str, str] = {}
+    for package in sorted(first_party_packages()):
+        wanted = {f"{root}/{package}" for root in roots}
+        for _source, destination in _real_copies(spec):
+            if destination.rstrip("/") in wanted:
+                claimed[package] = destination
+                break
+        if package in claimed:
+            continue
+        for _target, link in spec.links:
+            if link.rstrip("/") in wanted:
+                claimed[package] = link
+                break
+    return claimed
+
+
 @lru_cache(maxsize=1)
 def dockerignore_patterns() -> tuple[str, ...]:
     """The repo's ``.dockerignore`` patterns — what the build context does NOT contain."""
@@ -646,17 +683,57 @@ def unwired_first_party_imports(label: str) -> dict[str, tuple[ImportSite, ...]]
 
 
 def _static_failure_report(label: str) -> str:
-    spec = images()[label]
-    lines = [f"{label}: the shipped tree imports first-party packages the image does not ship."]
-    for package, sites in unwired_first_party_imports(label).items():
+    """Why this image is unsound, package by package.
+
+    An entry with NO import sites is not an empty report, it is the T-334 shape: the image
+    puts the name on a ``sys.path`` root and cannot back the claim up, and the module that
+    used to import it went out of the image with the very ``COPY`` that is missing. It is
+    spelled out rather than printed as "0 sites and 0 sites", which read like a bug in the
+    report and invited exactly the shrug that kept this class of defect alive.
+    """
+    return _failure_report_for(images()[label], label, unwired_first_party_imports(label))
+
+
+def _failure_report_for(
+    spec: ImageSpec, label: str, unwired: dict[str, tuple[ImportSite, ...]]
+) -> str:
+    """The report proper, over a spec and a report rather than a repo label.
+
+    Split out so the claim-only branch below can be RENDERED by a test. Every real image is
+    clean, so that branch would otherwise first run on the day it actually matters — and a
+    reporting path that has never executed is how a checker crashes, or says nothing useful,
+    at exactly the moment it finally has something to say.
+    """
+    claims = path_root_claims(spec)
+    lines = [f"{label}: the image cannot resolve first-party packages it ships or claims."]
+    for package, sites in unwired.items():
         _, why = package_wiring(spec, package)
         fatal = [s for s in sites if s.module_scope]
         lazy = [s for s in sites if not s.module_scope]
-        lines.append(
-            f"  {package!r}: {why} — {len(fatal)} module-scope site(s) (fatal at import) "
-            f"and {len(lazy)} indented site(s) (lazy, possibly swallowed)"
-        )
-        lines.extend(f"      {site}" for site in sites)
+        if sites:
+            lines.append(
+                f"  {package!r}: {why} — {len(fatal)} module-scope site(s) (fatal at import) "
+                f"and {len(lazy)} indented site(s) (lazy, possibly swallowed)"
+            )
+            lines.extend(f"      {site}" for site in sites)
+        elif package in claims:
+            lines.append(
+                f"  {package!r}: {why} — the build puts {package!r} on this image's "
+                f"sys.path at {claims[package]}, so the image CLAIMS to provide it; no "
+                f"module it still ships imports it, which is what the missing COPY took "
+                f"away rather than evidence that nothing needs it"
+            )
+        else:
+            # Unreachable from _unwired_for, which only adds a site-less entry for a
+            # package it found in path_root_claims. Rendered rather than raised anyway:
+            # this took a KeyError under a mutation of _unwired_for, and a report that
+            # dies while explaining a failure destroys the report for every OTHER package
+            # in it. The report is the last thing that should have a way to go quiet.
+            lines.append(
+                f"  {package!r}: {why} — reported with no import site and no sys.path "
+                f"claim, which this checker has no rule that produces: treat the REPORT as "
+                f"suspect before acting on this line"
+            )
     return "\n".join(lines)
 
 
@@ -1543,7 +1620,28 @@ def test_the_static_copy_set_checker_detects_a_fix_and_a_regression() -> None:
 
 
 def _unwired_for(spec: ImageSpec) -> dict[str, tuple[ImportSite, ...]]:
-    """The static check for ANY spec, including ones synthesised by the positive control."""
+    """The static check for ANY spec, including ones synthesised by the positive control.
+
+    Two independent reasons to report a package, and the second one is T-334's repair:
+
+    1. **A shipped module imports it** and ``wired`` says the image cannot resolve it. Every
+       such import site is listed, so :func:`_static_failure_report` can separate the fatal
+       module-scope ones from the lazy indented ones.
+    2. **The image CLAIMS it** — :func:`path_root_claims` — and ``wired`` says the same
+       thing. No import site is needed, and none is invented; the entry carries an empty
+       site tuple, which the return contract has always allowed.
+
+    Rule 1 alone is circular, which is what made this checker go quiet exactly when it
+    mattered: a package's only importer is usually inside the very ``COPY`` that provides
+    it, so deleting the ``COPY`` deletes the evidence that it was needed and the checker
+    grades a smaller image and finds it consistent. The verdict was never missing — the
+    ``wired`` line above computes it for EVERY first-party package, and rule 1 threw away
+    the ones no survivor happened to import. Rule 2 consumes them.
+
+    It reports a CLAIM, not an absence: a package this image never puts on a ``sys.path``
+    root is not this image's business and stays unreported however absent it is. That is
+    the difference between a checker and a list of everything the repo contains.
+    """
     packages = frozenset(first_party_packages())
     wired = {name: package_wiring(spec, name)[0] for name in packages}
     unwired: dict[str, list[ImportSite]] = {}
@@ -1551,6 +1649,9 @@ def _unwired_for(spec: ImageSpec) -> dict[str, tuple[ImportSite, ...]]:
         for site in import_sites(module_path, packages):
             if not wired[site.package]:
                 unwired.setdefault(site.package, []).append(site)
+    for package in path_root_claims(spec):
+        if not wired[package]:
+            unwired.setdefault(package, [])
     return {package: tuple(sites) for package, sites in sorted(unwired.items())}
 
 
@@ -2312,16 +2413,6 @@ def test_t334_the_circular_blind_spot_witnesses_are_armed() -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-334: _unwired_for reports a package only if some SHIPPED module still imports "
-        "it, so deleting the COPY deletes the importer and the checker goes silent about "
-        "the very package it just computed a False wiring verdict for. The answer is "
-        "already computed at _unwired_for's `wired = {...}` line and no test consumes it. "
-        "Remove this marker with the fix"
-    ),
-)
 def test_t334_an_image_that_claims_a_package_is_graded_when_the_copy_takes_its_importer() -> None:
     """Every derived witness, not one: a special case for ``trust`` must not satisfy this.
 
@@ -2331,13 +2422,18 @@ def test_t334_an_image_that_claims_a_package_is_graded_when_the_copy_takes_its_i
     must appear in the report. Whether a surviving module still imports it is exactly the
     circular question that made the checker quiet.
 
-    The fix is a few lines at the end of :func:`_unwired_for`, reusing the ``wired`` dict it
-    already builds: for any package some ``ln -s``/``COPY`` lands on a ``spec.path_roots``
-    entry and whose ``wired[name]`` is False, ``unwired.setdefault(name, [])``. The return
-    contract already tolerates an empty site tuple and ``_static_failure_report`` already
-    prints ``package_wiring``'s reason. Simulated against this repo: all 9 real images stay
-    ``{}`` (no new failures, and the positive control's ``repaired == baseline`` round trip
-    still holds), and every derived sabotage becomes reported.
+    CLOSED. :func:`_unwired_for` now consumes the verdict it was already computing: after
+    the import-site loop, any package :func:`path_root_claims` finds on a ``spec.path_roots``
+    entry whose ``wired[name]`` is False gets ``unwired.setdefault(name, [])`` — the empty
+    site tuple the return contract always allowed. The strict ``xfail`` that named this
+    defect was removed with the repair, which is why this node grades rather than xfails.
+
+    Measured after the repair rather than simulated: all 9 real images still report ``{}``,
+    the positive control's ``repaired == baseline`` round trip still holds, and every one of
+    the 11 derived sabotages is now reported. The rule is over the CLAIM, so it stays quiet
+    about a package the image never puts on a ``sys.path`` root — see
+    :func:`test_t334_a_package_the_image_never_claims_stays_unreported`, which is the
+    negative control that keeps this from degenerating into "report everything absent".
     """
     cases = _t334_cases()
     assert cases, "no witnesses — the armed control above says why this is a failure"
@@ -2364,4 +2460,147 @@ def test_t334_an_image_that_claims_a_package_is_graded_when_the_copy_takes_its_i
         "the end of `_unwired_for`, also report any package whose name the build puts on a "
         "`spec.path_roots` entry and whose `wired[...]` entry — already computed on the "
         "line above the loop — is False."
+    )
+
+
+def _t334_withdraw_claims(text: str, claims: tuple[str, ...]) -> str:
+    """``text`` with each ``ln -s`` link path in ``claims`` renamed out of the package namespace.
+
+    Renamed, not deleted. These links live inside a backslash-continued ``RUN`` chain, and
+    deleting the LAST line of one leaves the line above it ending in a ``\\`` that swallows
+    the instruction beneath it — the exact failure :func:`_instructions` documents. A control
+    that silently removes a whole ``COPY`` on the way past is not a control, it is a second
+    defect wearing one's clothes. Renaming keeps the chain intact and withdraws exactly one
+    thing: the image no longer puts that package's NAME on a ``sys.path`` root.
+    """
+    for claim in claims:
+        text = re.sub(rf"{re.escape(claim)}(?![\w.-])", f"{claim}__withdrawn", text)
+    return text
+
+
+def test_t334_a_package_the_image_never_claims_stays_unreported() -> None:
+    """The negative control for the rule above: it reports a CLAIM, not an absence.
+
+    The cheap way to pass the gate above is to report every first-party package an image
+    cannot resolve. That checker would be red on all eleven sabotages and would also be
+    useless — nine images times twelve packages of noise, in which a real finding is a
+    rounding error. So the rule has to be shown to STAY QUIET on the same sabotage with one
+    thing changed: the ``ln -s`` that put the name on the path is withdrawn, so the image
+    stops claiming the package. Nothing else moves — the ``COPY`` is still gone, the package
+    is still unresolvable, no shipped module still imports it.
+
+    Both halves are asserted on the SAME spec, which is what makes this a control rather
+    than a second opinion: ``package_wiring`` still says False (so the report is silent by
+    the rule, not because the defect evaporated) and the package is absent from the report.
+
+    The last clause states the invariant in general: the report never names a package that
+    the image neither claims nor ships an importer for. That is the property a
+    report-everything checker fails and this one must not.
+    """
+    cases = _t334_cases()
+    assert cases, "no witnesses — the armed control above says why this is a failure"
+    names = frozenset(first_party_packages())
+    checked: list[str] = []
+    for witness, sabotaged in cases:
+        label, package = witness["label"], witness["package"]
+        where = f"{label} / {package}"
+
+        text = (REPO_ROOT / label).read_text(encoding="utf-8")
+        unclaimed = parse_dockerfile_text(
+            _t334_withdraw_claims(_t334_drop_copies(text, witness["doomed"]), witness["claims"]),
+            f"{label}/t334-unclaimed",
+        )
+        assert shipped_sources(unclaimed), (
+            f"{where}: withdrawing the claim emptied the image, so the parse was damaged "
+            f"rather than the claim withdrawn"
+        )
+        assert package not in path_root_claims(unclaimed), (
+            f"{where}: the withdrawal did not remove the claim — {package!r} is still on a "
+            f"sys.path root at {path_root_claims(unclaimed)[package]}, so this control is "
+            f"not testing what it says it is"
+        )
+
+        # Nothing else moved: still unresolvable, still no surviving importer.
+        wired, why = package_wiring(unclaimed, package)
+        assert not wired, (
+            f"{where}: withdrawing the claim made {package!r} resolvable ({why}), so the "
+            f"silence below would prove nothing"
+        )
+        survivors = [
+            str(site)
+            for module_path in sorted(shipped_sources(unclaimed))
+            for site in import_sites(module_path, names)
+            if site.package == package
+        ]
+        assert not survivors, f"{where}: a shipped module still imports {package!r}: {survivors}"
+
+        assert package not in _unwired_for(unclaimed), (
+            f"{where}: the checker reports {package!r} on an image that does NOT claim it. "
+            f"It is unresolvable ({why}) and no shipped module imports it — this image "
+            f"simply has nothing to do with it, and a checker that names it here names "
+            f"every absent package on every image, which is the same as naming none: "
+            f"{sorted(_unwired_for(unclaimed))}"
+        )
+
+        # The invariant, on the reporting spec: every name in the report is there because
+        # the image claims it or because something it ships imports it.
+        imported = {
+            site.package
+            for module_path in sorted(shipped_sources(sabotaged))
+            for site in import_sites(module_path, names)
+        }
+        grounded = set(path_root_claims(sabotaged)) | imported
+        assert set(_unwired_for(sabotaged)) <= grounded, (
+            f"{where}: the report names a package this image neither claims nor imports: "
+            f"{sorted(set(_unwired_for(sabotaged)) - grounded)}"
+        )
+        checked.append(where)
+
+    assert len(checked) >= 8, (
+        f"only {len(checked)} withdrawals were usable, so the negative control grades "
+        f"almost nothing: {checked}"
+    )
+    assert len({c.split(" / ")[0] for c in checked}) >= 5, (
+        f"the negative control covers too few images to rule out an image-specific fix: "
+        f"{sorted({c.split(' / ')[0] for c in checked})}"
+    )
+
+
+def test_t334_the_report_says_why_a_claim_only_failure_is_a_failure() -> None:
+    """The claim-only entry has to READ as a finding, not as an empty row.
+
+    :func:`_unwired_for` now reports a package with no import sites at all, which is a shape
+    the report never had to render before. Every real image is clean, so without this the
+    branch would first execute on the day a real image breaks — and a reporting path whose
+    first run is its production run is how a checker crashes, or prints "0 sites and 0
+    sites", exactly when it finally has something to say.
+
+    Asserted on content, not on formatting: the package, the ``sys.path`` entry that carries
+    the claim, and ``package_wiring``'s own reason all have to appear, because those three
+    are what tell a reader which COPY to restore.
+    """
+    cases = _t334_cases()
+    assert cases, "no witnesses — the armed control above says why this is a failure"
+    rendered = 0
+    for witness, sabotaged in cases:
+        label, package = witness["label"], witness["package"]
+        report = _unwired_for(sabotaged)
+        if report.get(package) != ():
+            continue  # this witness reports the package with sites; not the branch under test
+        text = _failure_report_for(sabotaged, label, report)
+        _, why = package_wiring(sabotaged, package)
+        claim = path_root_claims(sabotaged)[package]
+        for needed in (label, repr(package), claim, why):
+            assert needed in text, (
+                f"{label} / {package}: the claim-only report omits {needed!r}, so it names a "
+                f"failure without saying what to restore:\n{text}"
+            )
+        assert "0 module-scope site(s)" not in text, (
+            f"{label} / {package}: the claim-only entry rendered as an empty site count, "
+            f"which reads as a bug in the report rather than a finding:\n{text}"
+        )
+        rendered += 1
+    assert rendered >= 8, (
+        f"only {rendered} of {len(cases)} witnesses exercised the claim-only report branch, "
+        f"so it is still substantially unrendered"
     )

@@ -228,6 +228,31 @@ export const MINIMUM_PAYABLE_AMOUNT = 0.01;
 export const PRICE_FLOOR_FRACTION = 0.001;
 
 /**
+ * ...and the CEILING on the absolute half, expressed the only way a fixed amount can be bounded
+ * against a product whose list price it knows nothing about: as a share of that list price.
+ *
+ * THE DEFECT IT EXISTS TO CLOSE (T-276). The absolute half is a flat 0.01, so on a cheap product
+ * it is not a floor under the discount, it is the whole discount. On a row the roster lists at
+ * exactly 0.01 the flat half IS the list price, so every price under list was under the floor and
+ * the product could not be bid on at all; at 0.02 it was half the list price, and a bid declaring
+ * an authorized 60% off was refused by the floor alone. That is the same "refuses everything"
+ * failure the drop below one minor unit was written to avoid, one cent higher up — closed rather
+ * than fail-closed, which is the direction this wall's positive controls exist to catch.
+ *
+ * WHY 2% AND NOT THE 1% THAT BOUNDS THE PROPORTIONAL HALF. The two are bounded by different
+ * assertions and land on different numbers; reusing the proportional ceiling here would break a
+ * standing test. This one is pinned from BOTH sides: from above by the exchange's
+ * `test_t276_a_product_listed_at_a_cent_can_still_be_bid_on`, which requires 0.008 admitted on a
+ * 0.02 listing (so the clamp cannot exceed 40% of list); and from below by the shared price-parity
+ * corpus and `test_the_corpus_pins_the_price_floor_in_both_directions`, which assert that
+ * `priceFloor(0.50)` is EXACTLY `MINIMUM_PAYABLE_AMOUNT` and that 0.005 on a 0.50 listing is still
+ * `below_price_floor` — 0.01 is 2% of 0.50, so any clamp under 2% would bind on that row, lower
+ * its floor and admit the half cent those cases refuse. The admissible window is [2%, 40%] and
+ * this takes the STRICTEST end of it. Identical to the Python peer's constant.
+ */
+export const ABSOLUTE_FLOOR_MAX_FRACTION = 0.02;
+
+/**
  * The lowest number that is still a price for a product the roster lists at `listed`.
  *
  * Both halves at once — the larger of the proportional floor and one minor currency unit — because
@@ -238,14 +263,23 @@ export const PRICE_FLOOR_FRACTION = 0.001;
  * not describing a giveaway, and a floor above its own list price would refuse every bid on it —
  * closed rather than fail-closed.
  *
+ * ...and between those two regimes the absolute half is CLAMPED, by `ABSOLUTE_FLOOR_MAX_FRACTION`,
+ * to a share of the roster's own list price. Dropping it at one minor unit and applying it in full
+ * one hundredth of a cent later left a band — `[0.01, 0.50)` — where a flat cent was most or all
+ * of the product's price, and at exactly 0.01 it WAS the price. T-276. The clamp is applied to the
+ * absolute half only and never to the proportional one: `Math.min` inside the `Math.max`, not
+ * outside it, so no arrangement of the constants can use this ceiling to lower the floor on an
+ * expensive product.
+ *
  * The line-for-line peer of `price_floor` in `contracts/boundary.py`. The two doors must round the
  * same way or the shared price-parity corpus reports a divergence, which is exactly what it is for.
  */
 export function priceFloor(listed: number): number {
-  const proportional = listed * PRICE_FLOOR_FRACTION;
-  return listed >= MINIMUM_PAYABLE_AMOUNT
-    ? Math.max(proportional, MINIMUM_PAYABLE_AMOUNT)
-    : proportional;
+  const absolute =
+    listed >= MINIMUM_PAYABLE_AMOUNT
+      ? Math.min(MINIMUM_PAYABLE_AMOUNT, listed * ABSOLUTE_FLOOR_MAX_FRACTION)
+      : 0.0;
+  return Math.max(listed * PRICE_FLOOR_FRACTION, absolute);
 }
 
 export interface TrustSnapshotRow {

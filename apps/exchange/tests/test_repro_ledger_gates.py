@@ -193,18 +193,6 @@ def test_the_auction_re_export_probe_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-282: apps/exchange/src/auction/__init__.py's `from .ledger import (...)` block at "
-        ":39-45 pulls only InMemoryLedgerSink, LedgerRecorder, LedgerSink, "
-        "UnknownLedgerEventKind and build_event, and the package __all__ at :64-100 omits the "
-        "rest, so MalformedLedgerPayload, build_published_event and published_body — all three "
-        "in exchange.auction.ledger.__all__ at :35-44 — raise ImportError from "
-        "exchange.auction while UnknownLedgerEventKind, defined in the same module, resolves; "
-        "remove this marker with the fix"
-    ),
-)
 def test_t282_the_auction_package_re_exports_every_name_its_ledger_module_publishes() -> None:
     """The package's import surface must carry what the module it wraps publishes.
 

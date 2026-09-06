@@ -2240,3 +2240,131 @@ def test_one_unwalkable_claim_value_is_reported_once_not_once_per_walk() -> None
     assert len(result.reasons) == len(set(result.reasons)), (
         f"one claim, one unfinished value, and the same reason logged twice: {result.reasons}"
     )
+
+
+# =============================================================================================
+# T-276 — a product the roster lists at one cent could not be bid on at all
+# =============================================================================================
+
+
+def test_t276_the_absolute_half_of_the_price_floor_cannot_eat_a_cheap_products_whole_range() -> (
+    None
+):
+    """The floor's absolute half was a flat cent, so on a cheap product it WAS the price.
+
+    ``price_floor`` takes the larger of a proportional half (0.1% of list) and an absolute half
+    (one minor currency unit), and drops the absolute half only where the roster lists the
+    product BELOW one minor unit. That drop was written precisely so a catalog pricing something
+    at 0.005 is not refused every bid on it — but it stopped one hundredth of a cent too early.
+    At exactly ``0.01`` the drop does not apply, ``max(1e-05, 0.01)`` IS the list price, and every
+    price under list is under the floor. Measured on this door before the repair::
+
+        price_reasons(bid 0.009, roster {list 0.01, max_discount_pct 100})
+          -> ['price_unreconcilable:offer.unit_price:below_price_floor',
+              'price_unreconcilable:offer.total_price:below_price_floor']
+
+    Closed rather than fail-closed — the direction this wall's positive controls exist to catch,
+    and the same "refuses everything" failure the drop was written to avoid.
+
+    THIS GATE IS BEHAVIOURAL AND ACCEPTS EVERY DEFENSIBLE REPAIR. It does not name a formula or a
+    constant: it asks that a cheap product keep a usable range, and — in the same breath, because
+    a floor is only a floor if it still refuses something — that every price the wall refuses
+    today stay refused. The controls are not decoration. A repair that simply deleted the
+    absolute half, or lowered it globally, satisfies the first assertion and fails the rest:
+    0.005 on a 5.00 product and the half cent on a 0.50 one are exactly the prices
+    ``MINIMUM_PAYABLE_AMOUNT`` exists to refuse, and they are what stops "give the cheap band a
+    range" from becoming "open the floor everywhere".
+
+    The 0.50 row is the sharpest of them. The shared price-parity corpus pins that listing in
+    BOTH directions — ``a_half_cent_is_below_the_absolute_floor_on_a_cheap_product`` refuses
+    0.005 there and ``a_price_exactly_at_the_absolute_floor_is_admitted`` admits 0.01 — so the
+    floor on a 0.50 product is pinned to exactly one cent by two standing cases, and a repair
+    that lowers it is not a repair, it is a second defect wearing this ticket's number.
+    """
+    from contracts import boundary  # noqa: PLC0415
+
+    def refused(listed: float, priced: float) -> bool:
+        bid = {
+            "auction_id": "auc-1",
+            "store_id": "store-1",
+            "offer": {"product_ref": "prod-1", "unit_price": priced, "total_price": priced},
+        }
+        reasons = boundary.price_reasons(
+            bid,
+            list_prices={"prod-1": {"list_price": listed, "max_discount_pct": 100.0}},
+        )
+        below = [r for r in reasons if r.endswith(boundary.ROSTER_PRICE_BELOW_FLOOR)]
+        assert below == reasons, (listed, priced, reasons)
+        return bool(below)
+
+    # THE DEFECT. A product listed at one cent, and a bid a cent's worth of authorized depth
+    # below it. Nothing but the floor can refuse this: the roster authorizes 100%.
+    assert not refused(0.01, 0.009), (
+        "a product the roster lists at 0.01 cannot be bid on at all — every price under list is "
+        f"under the floor, which is {boundary.price_floor(0.01)}"
+    )
+    # ...and one cent higher up, where the flat half was still half the product's price.
+    assert not refused(0.02, 0.008), (
+        "a bid declaring an authorized 60% off a 0.02 listing was refused by the floor alone; "
+        f"the floor there is {boundary.price_floor(0.02)}"
+    )
+
+    # THE CONTROLS — every price the wall refused before this ticket, still refused. Without
+    # these the assertions above are satisfied by deleting the floor.
+    assert refused(100.0, 0.001), "T-223's measured attack: a tenth of a cent on a 100.00 product"
+    assert refused(1_000_000.0, 999.0), "the proportional half, on a listing where it dominates"
+    assert refused(5.0, 0.005), "T-271: half a cent on a five-dollar product"
+    assert refused(0.5, 0.005), "the corpus's own half cent on a 0.50 listing"
+
+    # ...and their positive controls, so the wall is not merely refusing everything.
+    assert not refused(100.0, 1.0), "R10 pins an undeclared 1.00 on an uncapped 100.00 as ADMITTED"
+    assert not refused(1_000_000.0, 1001.0), "T-271's upper pair"
+    assert not refused(5.0, 0.02), "T-271's upper pair"
+    assert not refused(0.5, 0.01), "the corpus admits exactly one cent on a 0.50 listing"
+    assert not refused(0.005, 0.004), "the sub-cent listing keeps its dropped absolute half"
+
+    # The 0.50 crossover, stated as the equality the corpus and `test_boundary_dual_path.py`
+    # already pin, because it is the assertion any clamp on the absolute half must not move.
+    assert boundary.price_floor(0.5) == boundary.MINIMUM_PAYABLE_AMOUNT
+    assert boundary.price_floor(100.0) == 0.1
+    assert boundary.price_floor(0.005) < boundary.MINIMUM_PAYABLE_AMOUNT
+
+    # The floor never rises above the list price it guards — the invariant whose violation IS
+    # this ticket, asserted across the whole cheap band rather than at the two points above.
+    listed = 0.001
+    while listed <= 1_000_000.0:
+        assert boundary.price_floor(listed) < listed, (
+            f"the floor on a product listed at {listed} is {boundary.price_floor(listed)}, at or "
+            "above its own list price, so no bid under list can ever be admitted"
+        )
+        listed *= 1.05
+
+
+def test_t276_the_typescript_door_carries_the_same_floor_arithmetic() -> None:
+    """T-278's lesson, applied to this ticket: a floor fixed in one language is not fixed.
+
+    ``price_floor`` and ``priceFloor`` are peers, and the T-250 threshold they both implement
+    shipped to Python first and sat unguarded in TypeScript until the shared parity corpus was
+    built. The corpus drives whole bids and so covers the VERDICTS; this asserts the narrower
+    thing the corpus cannot see, which is that the two files agree on the constants the floor is
+    made of. A repair applied to ``boundary.py`` alone leaves this red.
+    """
+    from contracts import boundary  # noqa: PLC0415
+
+    source = (_CONTRACTS / "src" / "ts" / "boundary.ts").read_text(encoding="utf-8")
+
+    for name, value in (
+        ("MINIMUM_PAYABLE_AMOUNT", boundary.MINIMUM_PAYABLE_AMOUNT),
+        ("PRICE_FLOOR_FRACTION", boundary.PRICE_FLOOR_FRACTION),
+        ("ABSOLUTE_FLOOR_MAX_FRACTION", boundary.ABSOLUTE_FLOOR_MAX_FRACTION),
+    ):
+        declared = [
+            line.strip()
+            for line in source.splitlines()
+            if line.startswith(f"export const {name} =")
+        ]
+        assert len(declared) == 1, f"boundary.ts does not declare {name} exactly once: {declared}"
+        assert declared[0] == f"export const {name} = {value};", (
+            f"the two doors disagree about {name}: python has {value!r}, boundary.ts has "
+            f"{declared[0]!r}"
+        )

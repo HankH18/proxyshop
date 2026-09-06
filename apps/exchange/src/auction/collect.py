@@ -390,7 +390,25 @@ class BidEntry:
 
     @property
     def unit_price(self) -> float:
-        return float(self.offer.get("unit_price", 0.0))
+        """What this entry offers to charge, or ``inf`` where there is no price to read.
+
+        ``float(self.offer.get("unit_price", 0.0))`` — the read this replaced — answered **0.00**
+        for an offer stating no price at all, and 0.00 is not a neutral default on a price: it is
+        the cheapest number there is, so an absent price won every ranking it reached instead of
+        losing them (T-277). ``inf`` is the same absence in the fail-CLOSED direction — a price
+        nothing can pay — and it is the direction the rest of this module already fails in.
+        Nothing downstream is asked to order on it either: ``ranking._price_of`` drops a
+        non-finite price from the published tie-break rather than comparing against it, and
+        ``routes._entries_out`` reads the offer's own field rather than this property.
+
+        A price the exchange cannot READ is the same absence, and used to be worse than one:
+        ``float("cheap")`` raised ``ValueError`` from this property, out of the middle of an
+        auction every other store was bidding in (T-224). It cannot arrive here on an admitted
+        bid — :func:`_price_is_unreadable` refuses one — and this property no longer depends on
+        that staying true.
+        """
+        priced = _number(self.offer.get("unit_price"))
+        return math.inf if priced is None else priced
 
 
 def fallback_expires_at(deadline: float) -> str | None:
@@ -450,21 +468,49 @@ def _list_price_bid(
     seller registry, which this pure function has no handle on and must not be given one. It is
     resolved one layer out, in ``ranking.candidates``, where the registry lookup already happens
     for every candidate.
+
+    **A row that prices the product at nothing mints no price and no expiry** (T-277). ``list_price
+    0.0`` is a caller stating, legibly, that the product is free, and minting an offer from that
+    statement published a rankable 0.00 with no bid involved at all — the free item
+    ``RosterEntry.list_price``'s ``Field(gt=0.0)`` closed at the HTTP door, still live one caller
+    down. ``orchestration/solicitation.py``, ``services/sim/src/runner.py`` and the frozen
+    ``test_e3_exchange.py`` all call :func:`collect_bids` directly, and this module's own docstring
+    says a repair living only in a request model is one a second caller does not get. The door's
+    reasoning is the reasoning here: *a caller that cannot price a product cannot auction it*. So
+    the store is still REPRESENTED — R10 is not negotiable and the entry is built either way — but
+    what it is represented by is not an offer: no price for a ranking to prefer, and no
+    ``expires_at``, which ``ranking.filters.expiry_reason`` already fails closed on. A negative
+    list price goes the same way, for the same reason and one sign further.
+
+    ABSENT and UNREADABLE list prices keep their historical ``0.0`` — pinned by
+    ``test_repro_untrusted_roster.py``'s ``test_t224_an_unreadable_roster_value_cannot_raise_out_of
+    _the_collector_either`` and ``test_an_unreadable_roster_list_price_keeps_the_price_wall_on``,
+    the second of which pins it explicitly so the present/absent distinction cannot collapse. They
+    are the same free item downstream and this repair does not reach them; that residue is
+    reported with the ticket rather than closed by widening a rule past the assertions that hold
+    it in place.
     """
     listed = _number(entry.get("list_price"))
-    list_price = 0.0 if listed is None else listed
+    offer: dict[str, Any] = {
+        "product_ref": entry.get("product_ref"),
+        "currency": entry.get("currency", "USD"),
+        # R10: a fallback is a real, rankable offer, so it has to be able to show it is
+        # live. This instant is the auction's, never a store's.
+        "expires_at": fallback_expires_at(deadline),
+    }
+    if listed is not None and listed <= 0.0:
+        # The roster prices the product at nothing. There is no offer to mint, so none is: an
+        # unpriced, undated entry is refused by every filter downstream, where a 0.00 would have
+        # been preferred by every one of them.
+        offer["expires_at"] = None
+    else:
+        list_price = 0.0 if listed is None else listed
+        offer["unit_price"] = list_price
+        offer["total_price"] = list_price
     return {
         "auction_id": auction_id,
         "store_id": str(entry["store_id"]),
-        "offer": {
-            "product_ref": entry.get("product_ref"),
-            "unit_price": list_price,
-            "total_price": list_price,
-            "currency": entry.get("currency", "USD"),
-            # R10: a fallback is a real, rankable offer, so it has to be able to show it is
-            # live. This instant is the auction's, never a store's.
-            "expires_at": fallback_expires_at(deadline),
-        },
+        "offer": offer,
         # R10/R18/R19: a fallback carries no asserted claims. It is catalog data, so it can
         # never be the evidence that satisfies a hard constraint.
         "claims": [],
@@ -659,14 +705,35 @@ def _price_is_unreadable(offer: Any) -> bool:
     This adds nothing on a row that prices its product above zero — :func:`_priced_at_nothing`
     already returns ``True`` for every case here — so it changes behaviour only on the rows whose
     list price is missing, zero or itself unreadable, which is exactly T-224's surface.
+
+    **STATED-BUT-UNREADABLE, not merely "not a number I can read off ``.get``"** (T-273). The
+    question is about what the store WROTE, and ``_number(None)`` is ``None`` for a key that was
+    never sent — which is not the same statement as a key sent unreadably. Reading the two as one
+    made an offer of ``{"unit_price": 80.0}`` unreadable on account of the ``total_price`` it
+    never claimed to state, so on a roster row carrying no ``list_price`` the exchange judged an
+    honest 80.00 bid, the boundary refused it for a fault of the ROSTER's
+    (``offer.unit_price:unreadable_roster_list_price`` — an offer site named for a roster-side
+    cause, the double-reporting :data:`FALLBACK_REASONS` was split apart to end), and the store
+    fell back to a list price the row does not carry: **a rankable 0.00, which wins every ranking
+    there is.** The wall against a free item minted one. So a price the offer does not state is
+    not a price the exchange cannot read, and it is presence-not-readability again —
+    :func:`_states_an_authorized_depth`'s own rule, and :func:`_priced_at_nothing`'s, applied to
+    the third field on the same wall.
+
+    An offer stating NO price at all is still unreadable, and for the reason directly above: the
+    walk below would find :attr:`BidEntry.unit_price`'s ``0.0`` default and rank it. "States no
+    price" and "is not a record at all" are the same fact about an offer, and neither is a bid.
     """
     if not isinstance(offer, Mapping):
         return True
-    return any(_number(offer.get(site)) is None for site in ("unit_price", "total_price"))
+    stated = [offer[site] for site in ("unit_price", "total_price") if site in offer]
+    if not stated:
+        return True
+    return any(_number(price) is None for price in stated)
 
 
 def _tier(rostered: Mapping[str, Any]) -> int:
-    """This row's tier, fail-closed — T-224's shape a third time.
+    """This row's tier, fail-closed — T-224's shape a third time, corrected by T-272.
 
     ``int(rostered.get("tier", 1))`` raises on ``tier: "one"`` (``ValueError``) and on
     ``tier: inf`` (``OverflowError``), out of the middle of :func:`collect_bids` and therefore out
@@ -674,8 +741,36 @@ def _tier(rostered: Mapping[str, Any]) -> int:
     the exchange cannot read is answered the way every other unreadable claim in this module is:
     it does not establish one. That is tier 0 — represented, at list price, never dropped — which
     is R10's own degradation rather than a hole.
+
+    **Unreadable and "spelled differently" are not the same claim, and reading the roster with**
+    :func:`_number` **collapsed them** (T-272). ``_number`` excludes ``str`` on purpose, and the
+    reason it gives is about PRICES: ``"0"`` is a string a seller wrote, not an amount of money. A
+    tier is neither a price nor the seller's — it is the caller's own roster row, and every caller
+    that assembles one out of JSON, a CSV column or a database driver produces ``tier: "2"``. That
+    read as tier 0, "no bidding agent", so the store's answer was never looked at and its
+    legitimate bid was replaced by the catalog price. Measured on this module::
+
+        roster tier "2", store bids 80.00  ->  fallback=True  tier_0_no_agent  unit_price=100.00
+        roster tier  2 , store bids 80.00  ->  fallback=False                  unit_price= 80.00
+
+    One pair of quotes, and the buyer pays twenty dollars more. The line this replaced,
+    ``int(rostered.get("tier", 1))``, answered 2. Nothing reaches it through ``POST /auctions``
+    — ``RosterEntry.tier`` is an ``int``, so pydantic coerces first — which is exactly why it
+    survived: it is reachable only by the library callers this module's docstring names, and a
+    repair that lives in a request model is one they do not get.
+
+    So a tier SPELLED as a number is read as that number, and everything :func:`_number` refuses
+    for a reason stays refused whichever side of the quotes it is written on: ``"one"``
+    establishes no tier, and neither do ``"inf"``, ``"nan"``, ``True`` or ``[1]``.
     """
-    number = _number(rostered.get("tier", 1))
+    stated = rostered.get("tier", 1)
+    if isinstance(stated, str):
+        try:
+            stated = float(stated)
+        except (TypeError, ValueError):
+            # A tier nobody can read is not a tier. Fail closed, exactly as before.
+            return 0
+    number = _number(stated)
     return 0 if number is None else int(number)
 
 

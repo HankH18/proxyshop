@@ -287,6 +287,49 @@ MINIMUM_PAYABLE_AMOUNT = 0.01
 #: the floor and the roster's own cap remains the caller's word.
 PRICE_FLOOR_FRACTION = 0.001
 
+#: ...and the CEILING on the absolute half, expressed the only way a fixed amount can be bounded
+#: against a product whose list price it knows nothing about: as a share of that list price.
+#:
+#: **The defect it exists to close (T-276).** The absolute half is a flat 0.01, so on a cheap
+#: product it is not a floor under the discount, it is the whole discount. On a row the roster
+#: lists at exactly 0.01 the flat half IS the list price, so every price under list was under the
+#: floor and the product could not be bid on at all; at 0.02 it was half the list price, and a bid
+#: declaring an authorized 60% off was refused by the floor alone. That is the same "refuses
+#: everything" failure the drop below one minor unit was written to avoid, one cent higher up —
+#: closed rather than fail-closed, which is the direction this wall's positive controls exist to
+#: catch. Measured at HEAD before this constant existed::
+#:
+#:     price_reasons(bid 0.009, roster {list 0.01, max_discount_pct 100})
+#:       -> ['price_unreconcilable:offer.unit_price:below_price_floor',
+#:           'price_unreconcilable:offer.total_price:below_price_floor']
+#:
+#: **Why 2% and not the 1% that bounds the proportional half.** The two are bounded by different
+#: assertions and land on different numbers; reusing the proportional ceiling here would break a
+#: standing test. This one is pinned from BOTH sides:
+#:
+#: * From ABOVE by ``apps/exchange/tests/test_repro_verifier_findings.py::
+#:   test_t276_a_product_listed_at_a_cent_can_still_be_bid_on``, which requires 0.008 admitted on
+#:   a 0.02 listing — so the clamp cannot exceed 40% of list.
+#: * From BELOW by the shared corpus and by
+#:   ``test_boundary_dual_path.py::test_the_corpus_pins_the_price_floor_in_both_directions``,
+#:   which assert that ``price_floor(0.50)`` is EXACTLY ``MINIMUM_PAYABLE_AMOUNT`` and that 0.005
+#:   on a 0.50 listing is still ``below_price_floor``. 0.01 is 2% of 0.50, so any clamp under 2%
+#:   would bind on that row, lower its floor and admit the half cent those cases refuse.
+#:
+#: The admissible window is therefore [2%, 40%] and this takes the STRICTEST end of it: the floor
+#: stays exactly as high as every standing assertion allows, and the clamp binds only strictly
+#: below the 0.50 listing the corpus already pins as the crossover.
+#:
+#: **The blast radius, measured** — every listing from 1e-06 to 1e+09 in 1% steps, new floor
+#: against old. The floor is never HIGHER than it was, at any listing, so no price this wall
+#: admitted before is refused now; and it differs at all only on ``[0.01, 0.50)``. Both ends of
+#: that band are already covered by other tests and both are untouched: a 0.005 listing keeps its
+#: dropped absolute half (``test_repro_untrusted_roster.py`` admits 0.004 there, and 0.005 is
+#: below one minor unit so the clamp is not even reached), and every listing from 0.50 up —
+#: which is every OTHER listing any test in either language uses — gets a floor identical to its
+#: pre-T-276 self.
+ABSOLUTE_FLOOR_MAX_FRACTION = 0.02
+
 
 def price_floor(listed: float) -> float:
     """The lowest number that is still a price for a product the roster lists at `listed`.
@@ -300,6 +343,15 @@ def price_floor(listed: float) -> float:
     bid on it — closed rather than fail-closed, which is the failure mode this wall's positive
     controls exist to catch.
 
+    ...and between those two regimes the absolute half is CLAMPED, by
+    :data:`ABSOLUTE_FLOOR_MAX_FRACTION`, to a share of the roster's own list price. Dropping it
+    at one minor unit and applying it in full one hundredth of a cent later left a band —
+    ``[0.01, 0.50)`` — where a flat cent was most or all of the product's price, and at exactly
+    0.01 it WAS the price. T-276. The clamp is applied to the absolute half only and never to the
+    proportional one: `min` inside the `max`, not outside it, so no arrangement of the constants
+    can use this ceiling to lower the floor on an expensive product, which is the failure the
+    R10 assertion in `PRICE_FLOOR_FRACTION`'s docstring bounds from the other direction.
+
     Public because it is the SHARED number. The exchange's own door
     (`apps/exchange/src/auction/collect.py`) reaches the floor a second time, to decide whether it
     holds anything to judge an undeclared bid against at all, and it calls THIS function to get
@@ -307,10 +359,10 @@ def price_floor(listed: float) -> float:
     are two things to keep in step, and a floor that differs between the shared boundary and the
     door in front of it is the same defect this one replaced, wearing a different number.
     """
-    floor = listed * PRICE_FLOOR_FRACTION
+    absolute = 0.0
     if listed >= MINIMUM_PAYABLE_AMOUNT:
-        floor = max(floor, MINIMUM_PAYABLE_AMOUNT)
-    return floor
+        absolute = min(MINIMUM_PAYABLE_AMOUNT, listed * ABSOLUTE_FLOOR_MAX_FRACTION)
+    return max(listed * PRICE_FLOOR_FRACTION, absolute)
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -1830,6 +1882,7 @@ def validate_external_submission(
 
 
 __all__ = [
+    "ABSOLUTE_FLOOR_MAX_FRACTION",
     "BID_PATHS",
     "EXTERNAL_PATH",
     "HOOK_PROVENANCE_SOURCES",

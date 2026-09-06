@@ -40,8 +40,11 @@ from .ledger import (
     InMemoryLedgerSink,
     LedgerRecorder,
     LedgerSink,
+    MalformedLedgerPayload,
     UnknownLedgerEventKind,
     build_event,
+    build_published_event,
+    published_body,
 )
 from .state import (
     ACCEPTED,
@@ -88,13 +91,16 @@ __all__ = [
     "InMemoryLedgerSink",
     "LedgerRecorder",
     "LedgerSink",
+    "MalformedLedgerPayload",
     "RedisAuctionStore",
     "UnknownAuction",
     "UnknownLedgerEventKind",
     "ask_store",
     "build_event",
+    "build_published_event",
     "collect_bids",
     "fan_out_pool",
     "parallel_fan_out",
+    "published_body",
     "sequential_fan_out",
 ]
