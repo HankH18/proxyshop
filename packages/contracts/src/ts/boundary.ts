@@ -102,13 +102,22 @@ const DISCOUNT_AUTHORISATION_CLAIM_KEYS: ReadonlySet<string> = new Set([
   MAX_DISCOUNT_ROSTER_KEY,
 ]);
 
-/** How far into a claim's opaque `value` the nested walks descend, and how many nodes they
- * look at on the way. `Claim.value` is caller-shaped data, so a walk over it must terminate on
- * a deeply nested or very wide payload as surely as on a flat one. Same numbers as the Python
- * peer, deliberately: two doors that give up at different depths admit different bids.
+/**
+ * How deep into a claim's opaque `value` the walk descends, and how many entries it will read on
+ * the way. Same numbers as the Python peer, deliberately: two doors that give up in different
+ * places admit different bids.
+ *
+ * **Both are deliberately generous.** The walk fails CLOSED, so a bound is not a place where
+ * laundering gets through — it is a place where an HONEST bid gets refused. A first attempt at 6
+ * and 512 refused documents already in this repo: a recorded Shopify Admin response nests 13
+ * deep, `merchant.openapi.json` 12, and a merchant's 512-row structured shipping table was
+ * refused end to end. Depth is not the denial-of-service lever — a chain N deep is N entries, and
+ * the entry budget bounds that — so it costs nothing to put it far past any real document. The
+ * entry budget bounds TOTAL WORK rather than containers entered, because a walk that enters few
+ * containers can still read and sort millions of children.
  */
-const NESTED_PROVENANCE_MAX_DEPTH = 6;
-const NESTED_PROVENANCE_MAX_NODES = 512;
+export const CLAIM_VALUE_MAX_DEPTH = 64;
+export const CLAIM_VALUE_MAX_ENTRIES = 65536;
 
 /**
  * Slack when reconciling a stated price against the price its declared depth prices out at, as
@@ -353,7 +362,17 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
  * doors, on the eligibility gate specifically.
  */
 function readOwn(table: Record<string, unknown>, key: string): unknown {
-  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+  // ...and NEVER throws. `table[key]` on a wire-shaped object is a call into caller code: a
+  // getter that throws turned "this bid is refused" into a 500 at the public door, which is the
+  // one observable this module exists to keep distinct. The Python peer's `_get` has caught this
+  // since it was written; this door did not, and a `{get source() { throw }}` payload escaped
+  // through `declaredProvenanceSource` on both paths. A field that cannot be read is a field the
+  // bid did not state.
+  try {
+    return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -452,36 +471,6 @@ function compareByCodePoint(a: string, b: string): number {
 }
 
 /**
- * The entries of `node` in a CANONICAL order, when it is a container the nested walks may descend
- * into. `undefined` for everything else — a string, a number, a boolean, a null.
- *
- * **Object entries are sorted by key.** Not tidiness: `Object.entries` hoists integer-like keys to
- * the front in ascending numeric order while Python walks `dict.items()` in insertion order, so
- * under a node budget that decides WHICH entries get seen the two doors reached different
- * verdicts on identical bytes — measured, an object of 512 keys with the provenance block written
- * first and 511 integer-like keys behind it was ADMITTED here and REFUSED by the Python door, and
- * the same object with the keys the other way round reversed which door was fooled. Sorting makes
- * the traversal canonical so the budget cuts both walks off at the same place.
- *
- * `isArray` travels with the entries because it decides the breadcrumb (`[0]` versus `.key`) and
- * because a key check is a key check only on an object.
- */
-function walkEntries(
-  node: unknown,
-): {entries: Array<[string, unknown]>; isArray: boolean} | undefined {
-  if (Array.isArray(node)) {
-    return {entries: node.map((child, index) => [String(index), child]), isArray: true};
-  }
-  const record = readRecord(node);
-  if (record === undefined) return undefined;
-  // `Object.entries` is own-and-enumerable, so a `__proto__`-shaped payload cannot smuggle a key
-  // in here the way it did through the eligibility read `readOwn` exists for.
-  const entries = Object.entries(record);
-  entries.sort((left, right) => compareByCodePoint(left[0], right[0]));
-  return {entries, isArray: false};
-}
-
-/**
  * The provenance source `block` DECLARES, when it is a provenance block at all.
  *
  * `undefined` for everything else, and that is the whole of the answer to "would this reject
@@ -493,136 +482,173 @@ function walkEntries(
 function declaredProvenanceSource(block: unknown): string | undefined {
   const record = readRecord(block);
   if (record === undefined) return undefined;
-  const source = sourceText(readOwn(record, "source"));
+  const raw = readOwn(record, "source");
+  // A STRING, because `Provenance.source` is a string enum in the published bundle. It also
+  // removes a measured cross-door split: `String(["seller_asserted"])` is `"seller_asserted"`
+  // here and `str(["seller_asserted"])` is `"['seller_asserted']"` in Python, so a source written
+  // as a one-element list was a provenance block to one door and caller data to the other.
+  if (typeof raw !== "string") return undefined;
+  const source = sourceText(raw);
   if (HOOK_PROVENANCE_SOURCES.has(source) || NON_HOOK_PROVENANCE_SOURCES.has(source)) {
     return source;
   }
   return undefined;
 }
 
+/** A container that exists and could not be READ. Distinct from "not a container at all". */
+const UNREADABLE = Symbol("unreadable container");
+
 /**
- * Every provenance block reachable AT `block` — the record itself, or a list of them.
+ * How many entries `node` has: a number, `undefined` for a non-container, or `UNREADABLE`.
  *
- * The list arm is not generosity, it is a measured hole: a walk that recognised only a record
- * under the key `provenance` was defeated by writing `{provenance: [<block>]}`, one bracket
- * further out, and the laundered `seller_asserted` went back to being invisible. `Claim.value` is
- * `unknown`, so the wrapper is free; the recogniser has to look through it.
+ * Length and nothing else, so the walk can decline a node it cannot afford WITHOUT paying to read
+ * and sort it first. A bound that costs more to enforce than the payload it is bounding is a
+ * denial of service of its own.
  */
-function declaredProvenanceSources(block: unknown, path: string): Array<[string, string]> {
-  const single = declaredProvenanceSource(block);
-  if (single !== undefined) return [[path, single]];
-  if (!Array.isArray(block)) return [];
-  const found: Array<[string, string]> = [];
-  block.forEach((element, index) => {
-    const source = declaredProvenanceSource(element);
-    if (source !== undefined) found.push([`${path}[${index}]`, source]);
-  });
-  return found;
+function containerLength(node: unknown): number | undefined | typeof UNREADABLE {
+  try {
+    if (Array.isArray(node)) return node.length;
+    const record = readRecord(node);
+    if (record === undefined) return undefined;
+    // Counted own keys, stopping one past what the budget could spend — NOT
+    // `Object.keys(record).length`, which allocates the whole key array for an object the walk is
+    // about to decline. Measured: a one-million-key object cost 153 ms here and 0.0 ms in Python,
+    // for the same verdict. `Array.length` is already O(1), so only the object arm needs this.
+    let counted = 0;
+    for (const key in record) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+      counted += 1;
+      if (counted > CLAIM_VALUE_MAX_ENTRIES) break;
+    }
+    return counted;
+  } catch {
+    return UNREADABLE;
+  }
 }
 
 /**
- * Every protocol-shaped provenance block buried inside a claim's opaque `value` (T-161).
+ * `node`'s entries as `[keyText, child]` pairs in a CANONICAL order, or `UNREADABLE`.
  *
- * Returns `[label, source]` pairs whose label is the breadcrumb the reason names the site by —
- * `0.value.provenance`, `offer.commitments[0].value.grants[1].provenance` — so a refusal points at
- * the key the block was written under rather than at the claim as a whole. Bounded in depth and in
- * node count: the thing walked is caller data, and a walk over caller data that can be made not to
- * terminate is a denial of service wearing a wall's clothes.
+ * **Object entries are sorted by key.** `Object.entries` hoists integer-like keys to the front
+ * while Python walks `dict.items()` in insertion order, so under a budget that decides WHICH
+ * entries get seen the two doors reached different verdicts on identical bytes. Sorting by code
+ * point — which is Python's own string ordering — makes the traversal canonical.
  */
-function nestedProvenanceSources(
+function containerEntries(
+  node: unknown,
+): {entries: Array<[string, unknown]>; isArray: boolean} | typeof UNREADABLE {
+  try {
+    // At most one entry more than the budget can spend, in both arms. The affordability probe
+    // above asks the container how big it is, and the container is the caller's object: one that
+    // understates its size made the walk read it in full while the probe waved it through.
+    const cap = CLAIM_VALUE_MAX_ENTRIES + 1;
+    if (Array.isArray(node)) {
+      const taken = node.slice(0, cap);
+      return {entries: taken.map((child, index) => [String(index), child]), isArray: true};
+    }
+    const record = readRecord(node);
+    if (record === undefined) return UNREADABLE;
+    // Own-and-enumerable only, so a `__proto__`-shaped payload cannot smuggle a key in here the
+    // way it did through the eligibility read `readOwn` exists for.
+    const entries: Array<[string, unknown]> = [];
+    for (const key in record) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+      entries.push([key, readOwn(record, key)]);
+      if (entries.length >= cap) break;
+    }
+    entries.sort((left, right) => compareByCodePoint(left[0], right[0]));
+    return {entries, isArray: false};
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+/**
+ * ONE bounded walk over a claim's opaque `value`, answering both questions it raises.
+ *
+ * **One walk, because two walks drifted.** T-161's walk and T-162's walk started as separate
+ * traversals over the same value with the same budget and spent it at different rates — the
+ * provenance walk stops AT a recognised block, the authorisation walk descended into it — so a
+ * measured 255-payload-wide window admitted an external submission carrying
+ * `authorized_discount_pct` with nothing said. Two budgets over one value are two things to keep
+ * in step.
+ *
+ * **A provenance block is recognised WHEREVER it is found**, not only under a key spelled
+ * `provenance`. Each earlier version keyed off the wrapper shape and each was defeated by
+ * changing it — a shape list is a blocklist and the attacker picks the shape.
+ * `declaredProvenanceSource` fires only on the protocol's own closed source vocabulary, which is
+ * what makes recognising by shape safe.
+ *
+ * Iterative, and truncation is set ONLY where something was actually skipped: a non-empty
+ * container the walk declined to enter, or one it could not read. An empty object or array at any
+ * depth, and a scalar at any depth, hid nothing and say so.
+ */
+function walkClaimValue(
   value: unknown,
   label: string,
-): {found: Array<[string, string]>; truncated: boolean} {
+): {found: Array<[string, string]>; mentionsAuthorisation: boolean; truncated: boolean} {
   const found: Array<[string, string]> = [];
-  let budget = NESTED_PROVENANCE_MAX_NODES;
+  let mentionsAuthorisation = false;
   let truncated = false;
+  let budget = CLAIM_VALUE_MAX_ENTRIES;
 
-  const visit = (node: unknown, path: string, depth: number): void => {
-    const walk = walkEntries(node);
-    // Not a container at all — a string, a number, a boolean. Nothing was skipped.
-    if (walk === undefined) return;
-    if (depth > NESTED_PROVENANCE_MAX_DEPTH || budget <= 0) {
-      truncated = true;
-      return;
+  const stack: Array<[unknown, string, number]> = [[value, `${label}.value`, 0]];
+  while (stack.length > 0) {
+    const [node, path, depth] = stack.pop()!;
+
+    const source = declaredProvenanceSource(node);
+    if (source !== undefined) {
+      found.push([path, source]);
+      // ...and the walk KEEPS GOING through it. Stopping here turned the recogniser into a
+      // TERMINATOR: because a block is recognised by shape, adding one key —
+      // `{source: "network", x: {provenance: <seller_asserted>}}` — made the wrapper itself a
+      // recognised and perfectly innocent block, and everything under it became an unwalked
+      // region. That one keystroke reopened T-161 and T-162 on both doors with both suites green.
     }
-    budget -= 1;
-    for (const [key, child] of walk.entries) {
-      const childPath = walk.isArray ? `${path}[${key}]` : `${path}.${key}`;
-      if (!walk.isArray && key === "provenance") {
-        const nested = declaredProvenanceSources(child, childPath);
-        if (nested.length > 0) {
-          // Judged here. Descending INTO a block already being judged would report the same
-          // statement twice under two labels.
-          found.push(...nested);
-          continue;
-        }
+
+    const length = containerLength(node);
+    if (length === UNREADABLE) {
+      truncated = true;
+      continue;
+    }
+    if (length === undefined) continue; // a scalar. Nothing was skipped.
+    if (length > 0 && (depth > CLAIM_VALUE_MAX_DEPTH || length > budget)) {
+      truncated = true;
+      continue;
+    }
+
+    const walk = containerEntries(node);
+    if (walk === UNREADABLE) {
+      truncated = true;
+      continue;
+    }
+    if (walk.entries.length === 0) continue; // an empty container. Nothing was skipped.
+    if (depth > CLAIM_VALUE_MAX_DEPTH || walk.entries.length > budget) {
+      truncated = true;
+      continue;
+    }
+    budget -= walk.entries.length;
+
+    for (const [key] of walk.entries) {
+      if (!walk.isArray && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) {
+        mentionsAuthorisation = true;
       }
-      visit(child, childPath, depth + 1);
     }
-  };
-
-  visit(value, `${label}.value`, 0);
-  return {found, truncated};
-}
-
-/**
- * Does `value` state a discount authorisation anywhere inside it? (T-162.)
- *
- * `truncated` is the second half of the answer and it is not decoration. This walk used to say
- * `false` when it ran out of depth or of node budget — the same word it says when it looked
- * everywhere and found nothing — so its caller could not tell a finished look from an abandoned
- * one, and "no authorisation in here" was a claim this door had not measured. Padding is free to
- * whoever writes the value, so a bound that fails OPEN publishes its own bypass.
- *
- * The padding need not even be visible to `nestedProvenanceSources`, which is why its
- * `claim_value_unwalkable` did not already cover this: that sibling deliberately does not descend
- * into a *recognised* provenance block, so a block wearing a valid hook `source` is a hiding place
- * it spends one node on and reports `truncated: false` for, while this walk spends its whole
- * budget inside it. Mirrors the Python peer, whose measurement is quoted there; the two doors may
- * not disagree about what one payload is.
- *
- * `walkEntries` is asked BEFORE the depth/budget check, exactly as the sibling orders them: a
- * string, a number or a boolean met past the bound is not a subtree that went unread.
- */
-function mentionsDiscountAuthorisation(value: unknown): {found: boolean; truncated: boolean} {
-  let budget = NESTED_PROVENANCE_MAX_NODES;
-  let truncated = false;
-
-  const visit = (node: unknown, depth: number): boolean => {
-    const walk = walkEntries(node);
-    // Not a container at all — a string, a number, a boolean. Nothing was skipped.
-    if (walk === undefined) return false;
-    if (depth > NESTED_PROVENANCE_MAX_DEPTH || budget <= 0) {
-      truncated = true;
-      return false;
+    for (let i = walk.entries.length - 1; i >= 0; i -= 1) {
+      const [key, child] = walk.entries[i]!;
+      stack.push([child, walk.isArray ? `${path}[${key}]` : `${path}.${key}`, depth + 1]);
     }
-    budget -= 1;
-    for (const [key, child] of walk.entries) {
-      if (!walk.isArray && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) return true;
-      if (visit(child, depth + 1)) return true;
-    }
-    return false;
-  };
-
-  const found = visit(value, 0);
-  return {found, truncated};
-}
-
-/**
- * Is `claim` a statement about what the exchange PERMITS, rather than about the product?
- *
- * A claim whose KEY names the authorisation is judged on the key and its value is not walked at
- * all, so `truncated` is false there: the claim already asserts an authorisation, and a second one
- * buried in its value cannot make the verdict stronger than the key has already earned it.
- */
-function assertsDiscountAuthorisation(claim: unknown): {found: boolean; truncated: boolean} {
-  const record = readRecord(claim);
-  if (record === undefined) return {found: false, truncated: false};
-  const key = readOwn(record, "key");
-  if (typeof key === "string" && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) {
-    return {found: true, truncated: false};
   }
-  return mentionsDiscountAuthorisation(readOwn(record, "value"));
+
+  return {found, mentionsAuthorisation, truncated};
+}
+
+function assertsDiscountAuthorisation(claim: unknown, mentionsAuthorisation: boolean): boolean {
+  const record = readRecord(claim);
+  if (record === undefined) return false;
+  const key = readOwn(record, "key");
+  if (typeof key === "string" && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) return true;
+  return mentionsAuthorisation;
 }
 
 /**
@@ -637,37 +663,22 @@ function assertsDiscountAuthorisation(claim: unknown): {found: boolean; truncate
  * Flagged rather than refused at `bid.claims`: R18 already says an external agent may assert
  * freely there, and the addressable channel exists so an assertion can be admitted AND routed to
  * verification. At the sites with no index to flag it is refused instead.
- *
- * An UNFINISHED walk is judged the way `sourceVerdict` judges its own: `claim_value_unwalkable`
- * and no flag. The same code and the same fail-closed direction on purpose — it is the same
- * condition, one bounded look at one opaque `value` that did not reach the end of it, and a second
- * reason string for it would tell a seller two stories about one payload. It also DOMINATES a
- * found authorisation, as it does in the sibling: flagging says "there is one, go look at it", and
- * this door cannot say that when what it could not finish reading may hold another.
  */
 function authorisationVerdict(
   claim: unknown,
   path: BidPathName,
   label: string,
   addressable: boolean,
+  mentionsAuthorisation: boolean,
 ): {reasons: string[]; needsVerification: boolean} {
-  if (path !== EXTERNAL_PATH) return {reasons: [], needsVerification: false};
-
-  const walk = assertsDiscountAuthorisation(claim);
-  const reasons: string[] = [];
-  let needsVerification = false;
-
-  if (walk.found) {
-    if (addressable) needsVerification = true;
-    else reasons.push(`${REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:${label}`);
+  if (path !== EXTERNAL_PATH || !assertsDiscountAuthorisation(claim, mentionsAuthorisation)) {
+    return {reasons: [], needsVerification: false};
   }
-
-  if (walk.truncated) {
-    reasons.push(`${REASON_CLAIM_VALUE_UNWALKABLE}:${label}`);
-    needsVerification = false;
-  }
-
-  return {reasons, needsVerification};
+  if (addressable) return {reasons: [], needsVerification: true};
+  return {
+    reasons: [`${REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:${label}`],
+    needsVerification: false,
+  };
 }
 
 /** The R8/R18/S5 table for ONE declared provenance source. */
@@ -705,10 +716,12 @@ function sourceVerdict(
   path: BidPathName,
   label: string,
   addressable: boolean,
+  valueWalk?: ReturnType<typeof walkClaimValue>,
 ): {reasons: string[]; needsVerification: boolean} {
   const record = readRecord(holder);
-  const provenance = readRecord(record?.["provenance"]);
-  if (record === undefined || record["provenance"] === null || record["provenance"] === undefined) {
+  const rawProvenance = record === undefined ? undefined : readOwn(record, "provenance");
+  const provenance = readRecord(rawProvenance);
+  if (record === undefined || rawProvenance === null || rawProvenance === undefined) {
     return {reasons: [`${REASON_CLAIM_WITHOUT_PROVENANCE}:${label}`], needsVerification: false};
   }
   const source = sourceText(provenance === undefined ? undefined : readOwn(provenance, "source"));
@@ -726,7 +739,7 @@ function sourceVerdict(
   // source and every nested one: a claim is judged by where it came from, never by which field —
   // or which depth — it was written at. Mirrors the Python peer exactly; the two doors may not
   // disagree about what one payload is.
-  const nestedWalk = nestedProvenanceSources(readOwn(record, "value"), label);
+  const nestedWalk = valueWalk ?? walkClaimValue(readOwn(record, "value"), label);
   for (const [nestedLabel, nestedSource] of nestedWalk.found) {
     const nested = verdictForSource(nestedSource, path, nestedLabel, addressable);
     reasons.push(...nested.reasons);
@@ -763,18 +776,28 @@ function claimProvenanceReasons(
 
   claims.forEach((claim, index) => {
     const label = site === undefined ? String(index) : `${site}[${index}]`;
-    const verdict = sourceVerdict(claim, path, label, site === undefined);
+    // ONE walk over this claim's value, read by both verdicts below. Two walks with two budgets
+    // over one value drifted apart and reopened T-162; see `walkClaimValue`.
+    // `readRecord` first: a `null` or a scalar in the claims array must not reach `readOwn`,
+    // whose `hasOwnProperty.call(null, ...)` throws — and this door does not throw.
+    const claimRecord = readRecord(claim);
+    const valueWalk = walkClaimValue(
+      claimRecord === undefined ? undefined : readOwn(claimRecord, "value"),
+      label,
+    );
+    const verdict = sourceVerdict(claim, path, label, site === undefined, valueWalk);
     reasons.push(...verdict.reasons);
 
     // T-162, judged separately from the source because it is a different question: the source
     // says where the statement came from, this says what the statement is ABOUT.
-    // Both verdicts walk the SAME opaque `value` under the same two bounds, so one padded value
-    // exhausts both and both report `claim_value_unwalkable:<label>`. That is one finding about
-    // one value; logging it twice is the mislabelling this module already refuses elsewhere.
-    // Scoped to this claim's own reasons — the same code at a different label is a different
-    // claim and stays. The Python peer filters at the same seam.
-    const authorisation = authorisationVerdict(claim, path, label, site === undefined);
-    reasons.push(...authorisation.reasons.filter((reason) => !verdict.reasons.includes(reason)));
+    const authorisation = authorisationVerdict(
+      claim,
+      path,
+      label,
+      site === undefined,
+      valueWalk.mentionsAuthorisation,
+    );
+    reasons.push(...authorisation.reasons);
 
     if (verdict.needsVerification || authorisation.needsVerification) unverified.push(index);
   });

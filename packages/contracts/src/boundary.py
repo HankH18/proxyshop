@@ -59,6 +59,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+from itertools import islice
 from typing import Any
 
 from pydantic import ValidationError
@@ -139,13 +140,32 @@ DISCOUNT_AUTHORISATION_CLAIM_KEYS: frozenset[str] = frozenset(
     {"authorized_discount_pct", MAX_DISCOUNT_ROSTER_KEY}
 )
 
-#: How far into a claim's opaque `value` the nested-provenance walk descends, and how many
-#: nodes it will look at on the way. `Claim.value` is typed `Any`, so it is caller-shaped data
-#: and a walk over it has to terminate on a deeply nested or very wide payload as surely as it
-#: terminates on a flat one. Both limits are far above any real claim value and far below
-#: anything that costs measurable time.
-NESTED_PROVENANCE_MAX_DEPTH = 6
-NESTED_PROVENANCE_MAX_NODES = 512
+#: How deep into a claim's opaque `value` the walk descends, and how many entries it will read
+#: on the way. `Claim.value` is caller-shaped data — the published schema declares it `{}` and the
+#: generated model types it `Any` — so the walk must terminate on a deeply nested or very wide
+#: payload as surely as on a flat one, and a walk over caller data that can be made not to
+#: terminate is a denial of service wearing a wall's clothes.
+#:
+#: **Both numbers are deliberately generous, and that is the correction, not the compromise.**
+#: The walk fails CLOSED (`claim_value_unwalkable`), so a bound is not a place where laundering
+#: gets through — it is a place where an HONEST bid gets refused. A first attempt used a depth of
+#: 6 and 512 nodes, described in this very comment as "far above any real claim value". It was
+#: not: measured against documents already in this repo, a recorded Shopify Admin response nests
+#: 13 deep, an MCP catalog reply 10, `merchant.openapi.json` 12, and `apps/buyer/devstack/
+#: demo-market.json` sat exactly on the line at 7. A merchant's 512-row structured shipping table
+#: — which `contracts.Envelope`, `merchant_svc.envelope.model` and `ToolHooks.
+#: get_owner_commitments` all accept and copy verbatim — was refused end to end. The door was
+#: refusing what the published protocol explicitly permits, with no schema change announcing it,
+#: and the refusal killed the whole bid rather than the one claim.
+#:
+#: Depth is not the denial-of-service lever — a chain N deep is N entries, and the entry budget
+#: already bounds that — so it can be raised far past any real document without weakening
+#: anything. 64 is five times the deepest document measured here. The entry budget bounds TOTAL
+#: WORK rather than containers entered, because a walk that enters few containers can still read
+#: and sort millions of children; 65,536 is more than an order of magnitude above the widest
+#: document measured (`merchant.openapi.json`, 286 containers) and is still microseconds.
+CLAIM_VALUE_MAX_DEPTH = 64
+CLAIM_VALUE_MAX_ENTRIES = 65536
 
 #: The `format: date-time` positions of `packages/contracts/schemas/protocol.schema.json` that
 #: are REACHABLE FROM A BID, by the object that declares them. The bundle declares eight in
@@ -666,191 +686,180 @@ def _declared_provenance_source(block: Any) -> str | None:
     """
     if not isinstance(block, Mapping):
         return None
-    source = _source_text(_get(block, "source"))
+    raw_source = _get(block, "source")
+    # A STRING (or an enum wrapping one), because `Provenance.source` is a string enum in the
+    # published bundle and nothing else is a provenance source. It also removes a measured
+    # cross-door split: `str(["seller_asserted"])` is `"['seller_asserted']"` in Python and
+    # `String(["seller_asserted"])` is `"seller_asserted"` in JavaScript, so a source written as a
+    # one-element list was a provenance block to one door and caller data to the other.
+    try:
+        unwrapped = getattr(raw_source, "value", raw_source)
+    except Exception:  # noqa: BLE001 - a source that cannot be read is a source not stated
+        return None
+    if not isinstance(unwrapped, str):
+        return None
+    source = _trimmed(unwrapped)
     if source in HOOK_PROVENANCE_SOURCES or source in NON_HOOK_PROVENANCE_SOURCES:
         return source
     return None
 
 
-def _declared_provenance_sources(block: Any, path: str) -> list[tuple[str, str]]:
-    """Every provenance block reachable AT `block` — the mapping itself, or a list of them.
+#: Returned by the container probes below for a container that exists and could not be READ —
+#: a mapping whose `items()` raises, a sequence whose `__getitem__` does. Distinct from "not a
+#: container at all", because the two mean opposite things to a wall: a scalar hid nothing, and a
+#: container that would not open might have hidden anything.
+_UNREADABLE = object()
 
-    The list arm is not generosity, it is a hole that was measured: a walk that recognised only a
-    mapping under the key `provenance` was defeated by writing `{"provenance": [<block>]}`, one
-    bracket further out, and the laundered `seller_asserted` went straight back to being
-    invisible. `Claim.value` is `Any`, so the wrapper is free; the recogniser has to look through
-    it. Anything that is neither a provenance mapping nor a list containing one answers `[]` and
-    is walked as ordinary caller data.
+
+def _container_length(node: Any) -> Any:
+    """How many entries `node` has: an `int`, `None` for a non-container, or `_UNREADABLE`.
+
+    `len()` and nothing else, so the walk can decline a node it cannot afford WITHOUT paying to
+    read and sort it first. A bound that costs more to enforce than the payload it is bounding is
+    a denial of service of its own — and that is not hypothetical here: reading and sorting every
+    child of every node the budget had already rejected made a 5,000-wide payload take 5.6s.
     """
-    single = _declared_provenance_source(block)
-    if single is not None:
-        return [(path, single)]
-    if isinstance(block, Mapping) or isinstance(block, (str, bytes, bytearray)):
-        return []
-    if not isinstance(block, Sequence):
-        return []
+    if isinstance(node, (str, bytes, bytearray)) or not isinstance(node, (Mapping, Sequence)):
+        return None
     try:
-        entries = list(enumerate(block))
-    except Exception:  # noqa: BLE001 - a list that cannot be read stated nothing
-        return []
-    found: list[tuple[str, str]] = []
-    for index, element in entries:
-        source = _declared_provenance_source(element)
-        if source is not None:
-            found.append((f"{path}[{index}]", source))
-    return found
+        return len(node)
+    except Exception:  # noqa: BLE001 - a container whose size cannot be read is unreadable
+        return _UNREADABLE
 
 
-def _walk_entries(node: Any) -> tuple[list[tuple[str, Any]], bool] | None:
-    """`node`'s entries as `(key_text, child)` pairs in a CANONICAL order, or `None`.
-
-    `None` for anything the nested walks may not descend into — a string, a number, a boolean,
-    anything that is neither a mapping nor a sequence.
+def _container_entries(node: Any) -> Any:
+    """`node`'s entries as `(key_text, child)` pairs in a CANONICAL order, or `_UNREADABLE`.
 
     **Mapping entries are sorted by key.** Not tidiness: the two doors iterate one object in
     different orders. Python walks `dict.items()` in insertion order; JavaScript's
     `Object.entries` hoists integer-like keys to the front in ascending numeric order. Under a
-    node budget that decides WHICH entries get seen, a different order is a different verdict —
-    measured, an object of 512 keys with the provenance block written first and 511 integer-like
-    keys behind it was REFUSED by this door and ADMITTED by the TypeScript one, and the same
-    object with the keys the other way round reversed which door was fooled. Sorting by the key's
-    text makes the traversal canonical, so the budget cuts both walks off at the same place. The
-    TypeScript peer sorts by code point to match Python's own string ordering.
+    budget that decides WHICH entries get seen, a different order is a different verdict —
+    measured, an object of 512 keys with a `seller_asserted` block written first and 511
+    integer-like keys behind it was REFUSED by this door and ADMITTED by the TypeScript one, and
+    the same object with the keys the other way round reversed which door was fooled. Sorting by
+    the key's text makes the traversal canonical, so the budget cuts both walks off at the same
+    place. The TypeScript peer sorts by code point, which is Python's own string ordering.
 
     Sequence entries keep index order, which both languages already agree on.
     """
-    if isinstance(node, Mapping):
-        try:
-            items = list(node.items())
-        except Exception:  # noqa: BLE001 - a mapping that cannot be read stated nothing
-            return None
-        try:
-            return sorted(((_key_text(k), v) for k, v in items), key=lambda kv: kv[0]), True
-        except Exception:  # noqa: BLE001 - entries that cannot be read state nothing
-            return None
-    if isinstance(node, (str, bytes, bytearray)) or not isinstance(node, Sequence):
-        return None
+    cap = CLAIM_VALUE_MAX_ENTRIES + 1
     try:
-        return [(str(index), child) for index, child in enumerate(node)], False
-    except Exception:  # noqa: BLE001 - a sequence that cannot be read stated nothing
-        return None
+        if isinstance(node, Mapping):
+            # `islice`, not a comprehension over `.items()`. `_container_length` asked the
+            # container how big it is, and the container is the caller's object: one that
+            # understates its length — or a lazy `Sequence` whose `__getitem__` never raises
+            # `IndexError` — made the walk read forever while the affordability check waved it
+            # through. Producing at most one entry more than the budget can spend makes the read
+            # itself bounded, so `len()` decides only what the walk can AFFORD to look at and
+            # never how much it actually reads.
+            items = [(_key_text(key), child) for key, child in islice(node.items(), cap)]
+            items.sort(key=lambda entry: entry[0])
+            return items, True
+        return [(str(index), child) for index, child in islice(enumerate(node), cap)], False
+    except Exception:  # noqa: BLE001 - a container that cannot be read is unreadable
+        return _UNREADABLE
 
 
-def _nested_provenance_sources(value: Any, label: str) -> tuple[list[tuple[str, str]], bool]:
-    """Every protocol-shaped provenance block buried inside a claim's opaque `value`.
+def _walk_claim_value(value: Any, label: str) -> tuple[list[tuple[str, str]], bool, bool]:
+    """ONE bounded walk over a claim's opaque `value`, answering both questions it raises.
 
-    Returns `(label, source)` pairs, where the label is the breadcrumb the reason string names
-    the site by — `0.value.provenance`, `offer.commitments[0].value.grants[1].provenance` — so a
-    refusal points at the exact key the block was written under rather than at the claim as a
-    whole.
+    Returns `(provenance blocks found, states a discount authorisation, truncated)`.
 
-    Bounded in depth and in node count (`NESTED_PROVENANCE_MAX_DEPTH`,
-    `NESTED_PROVENANCE_MAX_NODES`): the thing being walked is caller-shaped data, and a walk over
-    caller-shaped data that can be made not to terminate is a denial of service wearing a wall's
-    clothes. Nothing raises out of here for the same reason `_get` never raises — a value that
-    cannot be read is a value that stated nothing.
+    **One walk, because two walks drifted.** T-161's walk and T-162's walk started as separate
+    traversals over the same value with the same budget, and they spent it at different rates —
+    the provenance walk stops AT a recognised block, the authorisation walk descended into it, so
+    it ran out first. The measured result was a 255-payload-wide window in which an external
+    submission carrying `authorized_discount_pct: 25.0` came back `ok=True,
+    requires_verification=False, unverified_claim_indexes=[]`: T-162's own defect, restored by
+    the fix for T-161's. Two budgets over one value are two things to keep in step, and this is
+    the same argument `price_floor` makes for why the exchange calls it rather than copying the
+    arithmetic.
+
+    **A provenance block is recognised WHEREVER it is found**, not only under a key spelled
+    `provenance`. Each earlier version keyed off the wrapper shape and each was defeated by
+    changing it — `{"provenance": <block>}`, then `{"provenance": [<block>]}`, then
+    `{"provenance": [[<block>]]}` — because a shape list is a blocklist and the attacker picks
+    the shape. `_declared_provenance_source` fires only on the protocol's own closed source
+    vocabulary, which is the property that makes recognising by shape safe; a legitimate
+    structured value is not carrying `{"source": "seller_asserted"}`.
+
+    **Iterative, not recursive**, so the depth bound is a policy rather than a stand-in for
+    CPython's stack limit, and raising it cannot turn a hostile payload into a `RecursionError`.
+
+    Truncation is set ONLY where something was actually skipped: a non-empty container the walk
+    declined to enter, or a container it could not read. An empty mapping or list at any depth,
+    and a scalar at any depth, hid nothing and say so — an earlier version refused seven wrappers
+    around `{}`, which is a false refusal on any reading.
     """
     found: list[tuple[str, str]] = []
-    budget = NESTED_PROVENANCE_MAX_NODES
+    mentions_authorisation = False
     truncated = False
+    budget = CLAIM_VALUE_MAX_ENTRIES
 
-    def visit(node: Any, path: str, depth: int) -> None:
-        nonlocal budget, truncated
-        if _walk_entries(node) is None:
-            # Not a container at all — a string, a number, a boolean. Nothing was skipped.
-            return
-        if depth > NESTED_PROVENANCE_MAX_DEPTH or budget <= 0:
+    stack: list[tuple[Any, str, int]] = [(value, f"{label}.value", 0)]
+    while stack:
+        node, path, depth = stack.pop()
+
+        source = _declared_provenance_source(node)
+        if source is not None:
+            found.append((path, source))
+            # ...and the walk KEEPS GOING through it. Stopping here is what turned the
+            # recogniser into a TERMINATOR: because a block is recognised by shape, adding one
+            # key — `{"source": "network", "x": {"provenance": <seller_asserted>}}` — made the
+            # wrapper itself a recognised (and perfectly innocent) block, and everything under it
+            # became an unwalked region. Measured: that one keystroke reopened T-161 AND T-162 on
+            # both doors, at every claim-bearing site, with both language suites green. A
+            # provenance block's own fields are scalars, so descending through one costs four
+            # entries and reports nothing twice; a block nested inside another is a second
+            # statement and is named separately, which is correct.
+
+        length = _container_length(node)
+        if length is _UNREADABLE:
             truncated = True
-            return
-        entries, is_mapping = _walk_entries(node) or ([], False)
-        budget -= 1
-        for key, child in entries:
-            child_path = f"{path}.{key}" if is_mapping else f"{path}[{key}]"
-            if is_mapping and key == "provenance":
-                nested = _declared_provenance_sources(child, child_path)
-                if nested:
-                    found.extend(nested)
-                    # Judged here. Descending INTO a block already being judged would report the
-                    # same statement twice under two labels.
-                    continue
-            visit(child, child_path, depth + 1)
-
-    visit(value, f"{label}.value", 0)
-    return found, truncated
-
-
-def _mentions_discount_authorisation(value: Any) -> tuple[bool, bool]:
-    """Does `value` state a discount authorisation anywhere inside it? `(found, truncated)`.
-
-    Same bounded walk as `_nested_provenance_sources`, same reason: `Claim.value` is `Any`, so
-    the permission can be written at the top (`{"authorized_discount_pct": 25.0}`) or one
-    wrapper down (`{"policy": {"max_discount_pct": 25.0}}`), and a check that read only the top
-    would be defeated by the same one-keystroke move this module has already been defeated by
-    twice.
-
-    **`truncated` is the second half of the answer, and it is not decoration.** This walk used
-    to say `False` when it ran out of depth or of node budget — the same word it says when it
-    looked everywhere and found nothing — so its caller could not tell a finished look from an
-    abandoned one, and "no authorisation in here" was a claim this door had not measured. That
-    is a fail-open on the wall T-162 exists to be, because padding is free to whoever writes the
-    value. Measured, external path: a grant six `{"w": …}` wrappers deep inside a value's
-    `provenance` block came back `ok=True, reasons=[], requires_verification=False`, while the
-    identical grant written plainly was flagged `unverified_claim_indexes=[0]`.
-
-    That padding did NOT have to be visible to `_nested_provenance_sources`, which is why its
-    `claim_value_unwalkable` did not already cover this hole: the sibling deliberately does not
-    descend into a *recognised* provenance block — it has already judged it — so a block wearing
-    a valid hook `source` is a hiding place the sibling spends exactly one node on and reports
-    `truncated=False` for, while this walk spends its whole budget inside it.
-
-    The `_walk_entries` check comes BEFORE the depth/budget check, exactly as the sibling orders
-    them: a string, a number or a boolean met past the bound is not a subtree that went unread,
-    and marking it truncated would refuse honest bids for having a scalar in a deep-ish value.
-    """
-    budget = NESTED_PROVENANCE_MAX_NODES
-    truncated = False
-
-    def visit(node: Any, depth: int) -> bool:
-        nonlocal budget, truncated
-        walk = _walk_entries(node)
-        if walk is None:
-            # Not a container at all — a string, a number, a boolean. Nothing was skipped.
-            return False
-        if depth > NESTED_PROVENANCE_MAX_DEPTH or budget <= 0:
+            continue
+        if length is None:
+            continue  # a scalar. Nothing was skipped.
+        if length and (depth > CLAIM_VALUE_MAX_DEPTH or length > budget):
             truncated = True
-            return False
-        entries, is_mapping = walk
-        budget -= 1
-        for key, child in entries:
+            continue
+
+        entries = _container_entries(node)
+        if entries is _UNREADABLE:
+            truncated = True
+            continue
+        items, is_mapping = entries
+        if not items:
+            continue  # an empty container. Nothing was skipped.
+        # `len()` is the caller's answer and the caller wrote the object; re-check against what
+        # the entries actually came to before spending anything on them.
+        if depth > CLAIM_VALUE_MAX_DEPTH or len(items) > budget:
+            truncated = True
+            continue
+        budget -= len(items)
+
+        for key, _child in items:
             if is_mapping and _trimmed(key) in DISCOUNT_AUTHORISATION_CLAIM_KEYS:
-                return True
-            if visit(child, depth + 1):
-                return True
-        return False
+                mentions_authorisation = True
+        for key, child in reversed(items):
+            stack.append((child, f"{path}.{key}" if is_mapping else f"{path}[{key}]", depth + 1))
 
-    found = visit(value, 0)
-    return found, truncated
+    return found, mentions_authorisation, truncated
 
 
-def _asserts_discount_authorisation(claim: Any) -> tuple[bool, bool]:
+def _asserts_discount_authorisation(claim: Any, mentions_authorisation: bool) -> bool:
     """Is `claim` a statement about what the exchange PERMITS, rather than about the product?
 
-    `(asserts, truncated)`, where `truncated` says the walk over the claim's opaque `value` did
-    not finish — see `_mentions_discount_authorisation`.
-
-    A claim whose KEY names the authorisation is judged on the key and the value is not walked
-    at all, so `truncated` is false there. That is not a shortcut past the bound: the claim is
-    already known to assert an authorisation, and a second one buried in its value cannot make
-    the verdict any stronger than the one the key has already earned it.
+    `mentions_authorisation` is the answer `_walk_claim_value` already computed for this claim's
+    value; only the claim's own `key` is left to read.
     """
     key = _get(claim, "key")
     if isinstance(key, str) and _trimmed(key) in DISCOUNT_AUTHORISATION_CLAIM_KEYS:
-        return True, False
-    return _mentions_discount_authorisation(_get(claim, "value"))
+        return True
+    return mentions_authorisation
 
 
 def _authorisation_verdict(
-    claim: Any, path: str, label: str, *, addressable: bool
+    claim: Any, path: str, label: str, *, addressable: bool, mentions_authorisation: bool
 ) -> tuple[list[str], bool]:
     """T-162. A submitted claim of one's OWN discount authority is not evidence of the authority.
 
@@ -872,33 +881,12 @@ def _authorisation_verdict(
 
     Hosted claims are untouched. This is not a second opinion about the hook ledger; it is the
     door that has no ledger declining to pretend it does.
-
-    An UNFINISHED walk is judged the way `_source_verdict` judges its own: `claim_value_unwalkable`
-    and no flag. Deliberately the same code and the same fail-closed direction, because it is the
-    same condition — one bounded look at one opaque `value` that did not reach the end of it —
-    and a second reason string for it would tell a seller two stories about one payload. It also
-    DOMINATES a found authorisation, exactly as it does in the sibling: flagging says "there is
-    one, go look at it", and this door cannot say that when the thing it could not finish reading
-    may hold another.
     """
-    if path != EXTERNAL_PATH:
+    if path != EXTERNAL_PATH or not _asserts_discount_authorisation(claim, mentions_authorisation):
         return [], False
-
-    asserts, truncated = _asserts_discount_authorisation(claim)
-    reasons: list[str] = []
-    needs_verification = False
-
-    if asserts:
-        if addressable:
-            needs_verification = True
-        else:
-            reasons.append(f"{REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:{label}")
-
-    if truncated:
-        reasons.append(f"{REASON_CLAIM_VALUE_UNWALKABLE}:{label}")
-        needs_verification = False
-
-    return reasons, needs_verification
+    if addressable:
+        return [], True
+    return [f"{REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:{label}"], False
 
 
 def _verdict_for_source(
@@ -921,7 +909,7 @@ def _verdict_for_source(
 
 
 def _source_verdict(
-    holder: Any, path: str, label: str, *, addressable: bool
+    holder: Any, path: str, label: str, *, addressable: bool, value_walk: Any = None
 ) -> tuple[list[str], bool]:
     """Judge ONE provenance-bearing object. Returns (reasons, needs_verification).
 
@@ -961,7 +949,9 @@ def _source_verdict(
     # The verdict is therefore the STRICTEST over the holder's own source and every nested one.
     # `_nested_provenance_sources` recognises only a block wearing the protocol's own closed
     # source vocabulary, so a legitimate structured value carries on through untouched.
-    nested_sources, truncated = _nested_provenance_sources(_get(holder, "value"), label)
+    if value_walk is None:
+        value_walk = _walk_claim_value(_get(holder, "value"), label)
+    nested_sources, _mentions, truncated = value_walk
     for nested_label, nested_source in nested_sources:
         nested_reasons, nested_needs = _verdict_for_source(
             nested_source, path, nested_label, addressable=addressable
@@ -1012,8 +1002,11 @@ def _claim_provenance_reasons(
 
     for index, claim in walk:
         label = str(index) if site is None else f"{site}[{index}]"
+        # ONE walk over this claim's value, read by both verdicts below. Two walks with two
+        # budgets over one value drifted apart and reopened T-162; see `_walk_claim_value`.
+        value_walk = _walk_claim_value(_get(claim, "value"), label)
         claim_reasons, needs_verification = _source_verdict(
-            claim, path, label, addressable=site is None
+            claim, path, label, addressable=site is None, value_walk=value_walk
         )
         reasons.extend(claim_reasons)
 
@@ -1022,15 +1015,9 @@ def _claim_provenance_reasons(
         # A claim of one's own authorisation is a claim about the exchange's permissions rather
         # than about the product, and this door holds no ledger to check it against.
         auth_reasons, needs_authorisation = _authorisation_verdict(
-            claim, path, label, addressable=site is None
+            claim, path, label, addressable=site is None, mentions_authorisation=value_walk[1]
         )
-        # Both verdicts walk the SAME opaque `value` under the same two bounds, so one padded
-        # value exhausts both and both report `claim_value_unwalkable:<label>`. That is one
-        # finding about one value, and logging it twice is the mislabelling this module already
-        # refuses for `not_positive`/`below_price_floor` and for a field the schema model has
-        # complained about. Scoped to this claim's own reasons: the same code at a different
-        # label is a different claim and stays.
-        reasons.extend(reason for reason in auth_reasons if reason not in claim_reasons)
+        reasons.extend(auth_reasons)
 
         if needs_verification or needs_authorisation:
             unverified.append(index)
@@ -1884,6 +1871,9 @@ def validate_external_submission(
 __all__ = [
     "ABSOLUTE_FLOOR_MAX_FRACTION",
     "BID_PATHS",
+    "CLAIM_VALUE_MAX_DEPTH",
+    "CLAIM_VALUE_MAX_ENTRIES",
+    "DISCOUNT_AUTHORISATION_CLAIM_KEYS",
     "EXTERNAL_PATH",
     "HOOK_PROVENANCE_SOURCES",
     "HOSTED_PATH",
@@ -1892,12 +1882,14 @@ __all__ = [
     "MINIMUM_PAYABLE_AMOUNT",
     "NON_HOOK_PROVENANCE_SOURCES",
     "OFFER_COMMITMENTS_SITE",
+    "OFFER_DATE_TIME_FIELDS",
     "OFFER_DISCOUNT_SITE",
     "OFFER_TOTAL_PRICE_SITE",
     "OFFER_UNIT_PRICE_SITE",
     "PERCENTAGE_DISCOUNT_TYPES",
     "PRICE_FLOOR_FRACTION",
     "PRICE_RECONCILIATION_TOLERANCE",
+    "PROVENANCE_DATE_TIME_FIELDS",
     "REASON_CLAIM_PROVENANCE_EMPTY_SOURCE",
     "REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE",
     "REASON_CLAIM_VALUE_UNWALKABLE",
@@ -1924,6 +1916,7 @@ __all__ = [
     "ROSTER_MAX_DISCOUNT_UNREADABLE",
     "ROSTER_PRICE_BELOW_FLOOR",
     "ROSTER_PRICE_NOT_POSITIVE",
+    "SUBMISSION_DATE_TIME_FIELDS",
     "parse_timestamp",
     "price_floor",
     "price_reasons",
