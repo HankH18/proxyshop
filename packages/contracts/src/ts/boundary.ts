@@ -531,14 +531,37 @@ function nestedProvenanceSources(
   return {found, truncated};
 }
 
-/** Does `value` state a discount authorisation anywhere inside it? (T-162.) */
-function mentionsDiscountAuthorisation(value: unknown): boolean {
+/**
+ * Does `value` state a discount authorisation anywhere inside it? (T-162.)
+ *
+ * `truncated` is the second half of the answer and it is not decoration. This walk used to say
+ * `false` when it ran out of depth or of node budget — the same word it says when it looked
+ * everywhere and found nothing — so its caller could not tell a finished look from an abandoned
+ * one, and "no authorisation in here" was a claim this door had not measured. Padding is free to
+ * whoever writes the value, so a bound that fails OPEN publishes its own bypass.
+ *
+ * The padding need not even be visible to `nestedProvenanceSources`, which is why its
+ * `claim_value_unwalkable` did not already cover this: that sibling deliberately does not descend
+ * into a *recognised* provenance block, so a block wearing a valid hook `source` is a hiding place
+ * it spends one node on and reports `truncated: false` for, while this walk spends its whole
+ * budget inside it. Mirrors the Python peer, whose measurement is quoted there; the two doors may
+ * not disagree about what one payload is.
+ *
+ * `walkEntries` is asked BEFORE the depth/budget check, exactly as the sibling orders them: a
+ * string, a number or a boolean met past the bound is not a subtree that went unread.
+ */
+function mentionsDiscountAuthorisation(value: unknown): {found: boolean; truncated: boolean} {
   let budget = NESTED_PROVENANCE_MAX_NODES;
+  let truncated = false;
 
   const visit = (node: unknown, depth: number): boolean => {
-    if (depth > NESTED_PROVENANCE_MAX_DEPTH || budget <= 0) return false;
     const walk = walkEntries(node);
+    // Not a container at all — a string, a number, a boolean. Nothing was skipped.
     if (walk === undefined) return false;
+    if (depth > NESTED_PROVENANCE_MAX_DEPTH || budget <= 0) {
+      truncated = true;
+      return false;
+    }
     budget -= 1;
     for (const [key, child] of walk.entries) {
       if (!walk.isArray && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) return true;
@@ -547,15 +570,24 @@ function mentionsDiscountAuthorisation(value: unknown): boolean {
     return false;
   };
 
-  return visit(value, 0);
+  const found = visit(value, 0);
+  return {found, truncated};
 }
 
-/** Is `claim` a statement about what the exchange PERMITS, rather than about the product? */
-function assertsDiscountAuthorisation(claim: unknown): boolean {
+/**
+ * Is `claim` a statement about what the exchange PERMITS, rather than about the product?
+ *
+ * A claim whose KEY names the authorisation is judged on the key and its value is not walked at
+ * all, so `truncated` is false there: the claim already asserts an authorisation, and a second one
+ * buried in its value cannot make the verdict stronger than the key has already earned it.
+ */
+function assertsDiscountAuthorisation(claim: unknown): {found: boolean; truncated: boolean} {
   const record = readRecord(claim);
-  if (record === undefined) return false;
+  if (record === undefined) return {found: false, truncated: false};
   const key = readOwn(record, "key");
-  if (typeof key === "string" && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) return true;
+  if (typeof key === "string" && DISCOUNT_AUTHORISATION_CLAIM_KEYS.has(trimmed(key))) {
+    return {found: true, truncated: false};
+  }
   return mentionsDiscountAuthorisation(readOwn(record, "value"));
 }
 
@@ -571,6 +603,13 @@ function assertsDiscountAuthorisation(claim: unknown): boolean {
  * Flagged rather than refused at `bid.claims`: R18 already says an external agent may assert
  * freely there, and the addressable channel exists so an assertion can be admitted AND routed to
  * verification. At the sites with no index to flag it is refused instead.
+ *
+ * An UNFINISHED walk is judged the way `sourceVerdict` judges its own: `claim_value_unwalkable`
+ * and no flag. The same code and the same fail-closed direction on purpose — it is the same
+ * condition, one bounded look at one opaque `value` that did not reach the end of it, and a second
+ * reason string for it would tell a seller two stories about one payload. It also DOMINATES a
+ * found authorisation, as it does in the sibling: flagging says "there is one, go look at it", and
+ * this door cannot say that when what it could not finish reading may hold another.
  */
 function authorisationVerdict(
   claim: unknown,
@@ -578,14 +617,23 @@ function authorisationVerdict(
   label: string,
   addressable: boolean,
 ): {reasons: string[]; needsVerification: boolean} {
-  if (path !== EXTERNAL_PATH || !assertsDiscountAuthorisation(claim)) {
-    return {reasons: [], needsVerification: false};
+  if (path !== EXTERNAL_PATH) return {reasons: [], needsVerification: false};
+
+  const walk = assertsDiscountAuthorisation(claim);
+  const reasons: string[] = [];
+  let needsVerification = false;
+
+  if (walk.found) {
+    if (addressable) needsVerification = true;
+    else reasons.push(`${REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:${label}`);
   }
-  if (addressable) return {reasons: [], needsVerification: true};
-  return {
-    reasons: [`${REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:${label}`],
-    needsVerification: false,
-  };
+
+  if (walk.truncated) {
+    reasons.push(`${REASON_CLAIM_VALUE_UNWALKABLE}:${label}`);
+    needsVerification = false;
+  }
+
+  return {reasons, needsVerification};
 }
 
 /** The R8/R18/S5 table for ONE declared provenance source. */
@@ -686,8 +734,13 @@ function claimProvenanceReasons(
 
     // T-162, judged separately from the source because it is a different question: the source
     // says where the statement came from, this says what the statement is ABOUT.
+    // Both verdicts walk the SAME opaque `value` under the same two bounds, so one padded value
+    // exhausts both and both report `claim_value_unwalkable:<label>`. That is one finding about
+    // one value; logging it twice is the mislabelling this module already refuses elsewhere.
+    // Scoped to this claim's own reasons — the same code at a different label is a different
+    // claim and stays. The Python peer filters at the same seam.
     const authorisation = authorisationVerdict(claim, path, label, site === undefined);
-    reasons.push(...authorisation.reasons);
+    reasons.push(...authorisation.reasons.filter((reason) => !verdict.reasons.includes(reason)));
 
     if (verdict.needsVerification || authorisation.needsVerification) unverified.push(index);
   });

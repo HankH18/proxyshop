@@ -727,23 +727,45 @@ def _nested_provenance_sources(value: Any, label: str) -> tuple[list[tuple[str, 
     return found, truncated
 
 
-def _mentions_discount_authorisation(value: Any) -> bool:
-    """Does `value` state a discount authorisation anywhere inside it?
+def _mentions_discount_authorisation(value: Any) -> tuple[bool, bool]:
+    """Does `value` state a discount authorisation anywhere inside it? `(found, truncated)`.
 
     Same bounded walk as `_nested_provenance_sources`, same reason: `Claim.value` is `Any`, so
     the permission can be written at the top (`{"authorized_discount_pct": 25.0}`) or one
     wrapper down (`{"policy": {"max_discount_pct": 25.0}}`), and a check that read only the top
     would be defeated by the same one-keystroke move this module has already been defeated by
     twice.
+
+    **`truncated` is the second half of the answer, and it is not decoration.** This walk used
+    to say `False` when it ran out of depth or of node budget — the same word it says when it
+    looked everywhere and found nothing — so its caller could not tell a finished look from an
+    abandoned one, and "no authorisation in here" was a claim this door had not measured. That
+    is a fail-open on the wall T-162 exists to be, because padding is free to whoever writes the
+    value. Measured, external path: a grant six `{"w": …}` wrappers deep inside a value's
+    `provenance` block came back `ok=True, reasons=[], requires_verification=False`, while the
+    identical grant written plainly was flagged `unverified_claim_indexes=[0]`.
+
+    That padding did NOT have to be visible to `_nested_provenance_sources`, which is why its
+    `claim_value_unwalkable` did not already cover this hole: the sibling deliberately does not
+    descend into a *recognised* provenance block — it has already judged it — so a block wearing
+    a valid hook `source` is a hiding place the sibling spends exactly one node on and reports
+    `truncated=False` for, while this walk spends its whole budget inside it.
+
+    The `_walk_entries` check comes BEFORE the depth/budget check, exactly as the sibling orders
+    them: a string, a number or a boolean met past the bound is not a subtree that went unread,
+    and marking it truncated would refuse honest bids for having a scalar in a deep-ish value.
     """
     budget = NESTED_PROVENANCE_MAX_NODES
+    truncated = False
 
     def visit(node: Any, depth: int) -> bool:
-        nonlocal budget
-        if depth > NESTED_PROVENANCE_MAX_DEPTH or budget <= 0:
-            return False
+        nonlocal budget, truncated
         walk = _walk_entries(node)
         if walk is None:
+            # Not a container at all — a string, a number, a boolean. Nothing was skipped.
+            return False
+        if depth > NESTED_PROVENANCE_MAX_DEPTH or budget <= 0:
+            truncated = True
             return False
         entries, is_mapping = walk
         budget -= 1
@@ -754,14 +776,24 @@ def _mentions_discount_authorisation(value: Any) -> bool:
                 return True
         return False
 
-    return visit(value, 0)
+    found = visit(value, 0)
+    return found, truncated
 
 
-def _asserts_discount_authorisation(claim: Any) -> bool:
-    """Is `claim` a statement about what the exchange PERMITS, rather than about the product?"""
+def _asserts_discount_authorisation(claim: Any) -> tuple[bool, bool]:
+    """Is `claim` a statement about what the exchange PERMITS, rather than about the product?
+
+    `(asserts, truncated)`, where `truncated` says the walk over the claim's opaque `value` did
+    not finish — see `_mentions_discount_authorisation`.
+
+    A claim whose KEY names the authorisation is judged on the key and the value is not walked
+    at all, so `truncated` is false there. That is not a shortcut past the bound: the claim is
+    already known to assert an authorisation, and a second one buried in its value cannot make
+    the verdict any stronger than the one the key has already earned it.
+    """
     key = _get(claim, "key")
     if isinstance(key, str) and _trimmed(key) in DISCOUNT_AUTHORISATION_CLAIM_KEYS:
-        return True
+        return True, False
     return _mentions_discount_authorisation(_get(claim, "value"))
 
 
@@ -788,12 +820,33 @@ def _authorisation_verdict(
 
     Hosted claims are untouched. This is not a second opinion about the hook ledger; it is the
     door that has no ledger declining to pretend it does.
+
+    An UNFINISHED walk is judged the way `_source_verdict` judges its own: `claim_value_unwalkable`
+    and no flag. Deliberately the same code and the same fail-closed direction, because it is the
+    same condition — one bounded look at one opaque `value` that did not reach the end of it —
+    and a second reason string for it would tell a seller two stories about one payload. It also
+    DOMINATES a found authorisation, exactly as it does in the sibling: flagging says "there is
+    one, go look at it", and this door cannot say that when the thing it could not finish reading
+    may hold another.
     """
-    if path != EXTERNAL_PATH or not _asserts_discount_authorisation(claim):
+    if path != EXTERNAL_PATH:
         return [], False
-    if addressable:
-        return [], True
-    return [f"{REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:{label}"], False
+
+    asserts, truncated = _asserts_discount_authorisation(claim)
+    reasons: list[str] = []
+    needs_verification = False
+
+    if asserts:
+        if addressable:
+            needs_verification = True
+        else:
+            reasons.append(f"{REASON_UNVERIFIED_DISCOUNT_AUTHORISATION}:{label}")
+
+    if truncated:
+        reasons.append(f"{REASON_CLAIM_VALUE_UNWALKABLE}:{label}")
+        needs_verification = False
+
+    return reasons, needs_verification
 
 
 def _verdict_for_source(
@@ -919,7 +972,13 @@ def _claim_provenance_reasons(
         auth_reasons, needs_authorisation = _authorisation_verdict(
             claim, path, label, addressable=site is None
         )
-        reasons.extend(auth_reasons)
+        # Both verdicts walk the SAME opaque `value` under the same two bounds, so one padded
+        # value exhausts both and both report `claim_value_unwalkable:<label>`. That is one
+        # finding about one value, and logging it twice is the mislabelling this module already
+        # refuses for `not_positive`/`below_price_floor` and for a field the schema model has
+        # complained about. Scoped to this claim's own reasons: the same code at a different
+        # label is a different claim and stays.
+        reasons.extend(reason for reason in auth_reasons if reason not in claim_reasons)
 
         if needs_verification or needs_authorisation:
             unverified.append(index)

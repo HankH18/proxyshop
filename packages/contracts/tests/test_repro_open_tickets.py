@@ -2099,3 +2099,144 @@ def test_the_t306_t307_generator_can_still_build_and_exercise_a_case() -> None:
         f"properties are running over a constant table after all — which is precisely the hole "
         f"the unpinned seed exists to close, and 22 measured fail-open keys walk through it"
     )
+
+
+# =============================================================================================
+# T-162 (part two) — the discount-authorisation walk's OWN bound fails open
+# =============================================================================================
+
+
+# NO `xfail` MARKER, deliberately: this gate lands in the same change as the repair it names, so
+# it is RED on the parent commit and GREEN here. A `strict` marker on a test its own commit
+# fixes is an XPASS failure by construction. The BEFORE measurement is quoted verbatim in the
+# docstring below, and reverting `_mentions_discount_authorisation` reproduces it exactly.
+def test_an_exhausted_discount_authorisation_walk_is_not_reported_as_a_clean_pass() -> None:
+    """A bounded walk that ran out of budget has not said "there is nothing here".
+
+    ``_mentions_discount_authorisation`` (packages/contracts/src/boundary.py) is the walk that
+    finds a self-granted ``authorized_discount_pct`` / ``max_discount_pct`` buried anywhere
+    inside a claim's opaque ``value``. It is bounded — ``NESTED_PROVENANCE_MAX_DEPTH`` and
+    ``NESTED_PROVENANCE_MAX_NODES`` — and it used to answer exhaustion with the same word it
+    uses for "I looked everywhere and found nothing"::
+
+        if depth > NESTED_PROVENANCE_MAX_DEPTH or budget <= 0:
+            return False
+
+    So no caller could tell a finished look from an abandoned one, and padding is free to
+    whoever writes the value. Its sibling ``_nested_provenance_sources`` gets this right: it
+    returns ``(found, truncated)`` and ``_source_verdict`` refuses on ``truncated``.
+
+    The padding does not even have to be visible to that sibling, which is why its
+    ``claim_value_unwalkable`` did not already cover this: the sibling deliberately does NOT
+    descend into a *recognised* provenance block (it has already judged it), so a block wearing
+    a valid hook ``source`` is a free hiding place — the sibling spends one node on it and
+    answers ``truncated=False`` while the authorisation walk spends its whole budget inside it.
+    Measured on this tree, external path, with the honest roster::
+
+        grant = {"authorized_discount_pct": 25.0}          # six {"w": …} wrappers around it
+        value = {"provenance": {**HOOK_PROVENANCE, "pad": <the wrapped grant>}}
+        validate_bid(make_bid(claims=[make_claim("policy", value, HOOK_PROVENANCE)]),
+                     path="external", ...)
+        -> ok=True  reasons=[]  requires_verification=False  unverified_claim_indexes=[]
+
+    while the identical grant written plainly answers ``ok=True requires_verification=True
+    unverified_claim_indexes=[0]``. Same grant, same door, same bid; only the padding changed,
+    and the padding is what turned a flagged claim into a silent one. The node-budget spelling
+    of the same move — 600 sibling containers written inside that provenance block — measured
+    identically, which is why both are pinned below.
+
+    What this test refuses is only that third outcome: a walk that did not finish, reported as a
+    clean pass. Every defensible repair satisfies it — refuse the bid (``claim_value_unwalkable``,
+    which is what the sibling's truncation already does), or route the claim to verification the
+    way a *found* authorisation is routed. It does not choose between them.
+    """
+
+    def buried(wrappers: int) -> dict[str, Any]:
+        grant: Any = {"authorized_discount_pct": 25.0}
+        for _ in range(wrappers):
+            grant = {"w": grant}
+        block = dict(HOOK_PROVENANCE)
+        block["pad"] = grant
+        return {"provenance": block}
+
+    # POSITIVE CONTROL. The same grant, unpadded, must still be seen — without this the gate
+    # would also pass on a boundary that stopped looking for discount authorisations at all.
+    plain = make_claim("policy", {"authorized_discount_pct": 25.0}, dict(HOOK_PROVENANCE))
+    control = _check(make_bid(claims=[plain]), EXTERNAL_PATH)
+    assert control.ok is False or control.requires_verification is True, (
+        "positive control: an unpadded self-asserted discount authorisation must still be "
+        f"caught on the external path, got ok={control.ok} reasons={control.reasons} "
+        f"requires_verification={control.requires_verification}"
+    )
+
+    # SECOND POSITIVE CONTROL. The same shape carrying NO authorisation must still be admitted —
+    # without it, "refuse anything with a provenance-shaped value in it" would satisfy the
+    # assertions below while refusing honest bids.
+    innocuous = dict(HOOK_PROVENANCE)
+    innocuous["pad"] = {"w": {"w": {"w": {"colour": "blue"}}}}
+    harmless = _check(
+        make_bid(claims=[make_claim("policy", {"provenance": innocuous}, dict(HOOK_PROVENANCE))]),
+        EXTERNAL_PATH,
+    )
+    assert harmless.ok is True and harmless.requires_verification is False, (
+        "second positive control: a nested value carrying no discount authorisation and no "
+        f"laundered provenance must still be admitted clean, got ok={harmless.ok} "
+        f"reasons={harmless.reasons} requires_verification={harmless.requires_verification}"
+    )
+
+    # THE DEFECT, in its depth spelling.
+    deep = _check(
+        make_bid(claims=[make_claim("policy", buried(6), dict(HOOK_PROVENANCE))]), EXTERNAL_PATH
+    )
+    assert deep.ok is False or deep.requires_verification is True, (
+        "a self-asserted discount authorisation buried past NESTED_PROVENANCE_MAX_DEPTH was "
+        f"admitted with nothing said: ok={deep.ok} reasons={deep.reasons} "
+        f"requires_verification={deep.requires_verification} "
+        f"unverified_claim_indexes={deep.unverified_claim_indexes}"
+    )
+
+    # ...and in its node-budget spelling, the same fail-open reached by width rather than by
+    # depth. Pinned separately because a repair that only re-checked the depth guard would leave
+    # this one wide open.
+    wide = dict(HOOK_PROVENANCE)
+    for index in range(600):
+        wide[f"pad_{index:04d}"] = {"x": index}
+    wide["zzz_grant"] = {"authorized_discount_pct": 25.0}
+    result = _check(
+        make_bid(claims=[make_claim("policy", {"provenance": wide}, dict(HOOK_PROVENANCE))]),
+        EXTERNAL_PATH,
+    )
+    assert result.ok is False or result.requires_verification is True, (
+        "a self-asserted discount authorisation written behind NESTED_PROVENANCE_MAX_NODES "
+        f"worth of padding was admitted with nothing said: ok={result.ok} "
+        f"reasons={result.reasons} requires_verification={result.requires_verification} "
+        f"unverified_claim_indexes={result.unverified_claim_indexes}"
+    )
+
+
+def test_one_unwalkable_claim_value_is_reported_once_not_once_per_walk() -> None:
+    """Two bounded walks over one value are two looks at one thing, not two findings.
+
+    ``_source_verdict`` walks a claim's ``value`` for laundered provenance and
+    ``_authorisation_verdict`` walks the same value for a self-granted discount depth. Both are
+    bounded by the same two constants, so one padded value exhausts both — and once the second
+    walk is allowed to report its exhaustion, the byte-identical ``claim_value_unwalkable:0``
+    would be logged twice for one claim. That is the mislabelling this module already refuses
+    for ``not_positive``/``below_price_floor`` and for a field the schema model has already
+    complained about: one finding, reported once, however many walks ran into it.
+    """
+    padded: Any = {"grant": {"authorized_discount_pct": 25.0}}
+    for _ in range(8):
+        padded = {"w": padded}
+
+    result = _check(
+        make_bid(claims=[make_claim("policy", padded, dict(HOOK_PROVENANCE))]), EXTERNAL_PATH
+    )
+
+    assert result.ok is False or result.requires_verification is True, (
+        "a value too deep for either walk to finish was admitted clean: "
+        f"ok={result.ok} reasons={result.reasons}"
+    )
+    assert len(result.reasons) == len(set(result.reasons)), (
+        f"one claim, one unfinished value, and the same reason logged twice: {result.reasons}"
+    )

@@ -169,27 +169,31 @@ _SANE_ROW: dict[str, Any] = {
 }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-270: a non-finite number in the request body returns an unauthenticated HTTP 500. "
-        "pydantic REJECTS it correctly and FastAPI's request_validation_exception_handler then "
-        "echoes the offending input into the 422 body, where starlette's JSONResponse serialises "
-        "with allow_nan=False and json.dumps raises 'Out of range float values are not JSON "
-        "compliant'. The rejection path is the defect, so allow_inf_nan=False does not close it; "
-        "remove this marker with the fix"
-    ),
-)
 def test_t270_a_non_finite_number_in_the_request_body_is_never_a_server_error() -> None:
-    """Nothing an unauthenticated caller can write may produce a 5xx — measured false.
+    """Nothing an unauthenticated caller can write may produce a 5xx — now a regression guard.
+
+    THE MARKER IS GONE BECAUSE THE DEFECT IS CLOSED, and the history is worth keeping because the
+    shape recurs. This node was written on ``repro/R-verifier``, which forked BEFORE the fix and
+    merged AFTER it, so it arrived carrying ``xfail(strict=True)`` for a defect the tree no longer
+    had. A strict xfail that starts passing is a FAILURE, so the stale marker reddened the build
+    at the merge rather than at the branch — measured here: ``1 failed ... [XPASS(strict)]``.
+
+    What closed it: ``RenderableValidationErrorRoute`` / ``RenderableJSONResponse`` on the auction
+    router (``apps/exchange/src/auction/routes.py``), which render a rejected non-finite value into
+    a serialisable 422 instead of exploding inside the 422 the rejection builds. The sibling node
+    that the fixing lane owned, ``test_t270_no_field_of_any_request_can_produce_a_5xx``, had ITS
+    marker removed in the same commit; this one was simply not re-measured against the merged tree.
+
+    All four bodies below now answer 422. The assertions are unchanged — nothing was weakened to
+    make this pass; only the marker was removed.
 
     ``1e400`` is the sharp end of this: it is **legal RFC-8259 JSON**, needing no malformed body
     and no lenient parser, and it parses to ``inf``. ``NaN`` is the second spelling. Both are
     refused by ``RosterEntry`` exactly as they should be, and the refusal is what fails::
 
-        POST /auctions  list_price: NaN    ->  HTTP 500 Internal Server Error
-        POST /auctions  list_price: 1e400  ->  HTTP 500 Internal Server Error
-        POST /auctions  tier: 1e400        ->  HTTP 500 Internal Server Error
+        POST /auctions  list_price: NaN    ->  HTTP 500  (before the fix)  ->  422 (now)
+        POST /auctions  list_price: 1e400  ->  HTTP 500  (before the fix)  ->  422 (now)
+        POST /auctions  tier: 1e400        ->  HTTP 500  (before the fix)  ->  422 (now)
 
     The control in the same test is the point of it: ``list_price: "cheap"`` is refused by the
     identical model on the identical field and answers a clean ``422`` with the offending input

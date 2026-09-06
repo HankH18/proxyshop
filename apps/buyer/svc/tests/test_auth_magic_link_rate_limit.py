@@ -23,6 +23,49 @@ import pytest
 VICTIM = "victim@example.com"
 
 
+class _CountedInstant(datetime):
+    """A timestamp that counts every staleness comparison made against it.
+
+    The limiter decides whether a tracked address has left the window by comparing that
+    address's newest admission against a cutoff. So "how many comparisons did one
+    ``check()`` make" IS "how many tracked entries did it look at" — the quantity the two
+    cost tests below are really about, and the quantity they used to infer from a stopwatch.
+
+    Counting it directly is what takes those tests out of the machine's hands. An O(tracked)
+    sweep and an O(1) one differ by orders of magnitude in comparisons on any box at any
+    load, whereas the microseconds they take differ by whatever else the machine happened to
+    be doing — MEASURED, and recorded at both tests.
+
+    Subclassing ``datetime`` rather than wrapping it is deliberate: the limiter's own
+    arithmetic (``now - window``) keeps working untouched — since 3.8 that arithmetic returns
+    the subclass — and nothing in ``routes.py`` is aware of it, so what is counted is the
+    shipped code path rather than a test-only one.
+    """
+
+    compared = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        """Begin a fresh measurement."""
+        cls.compared = 0
+
+    def __gt__(self, other: datetime) -> bool:
+        type(self).compared += 1
+        return super().__gt__(other)
+
+    def __ge__(self, other: datetime) -> bool:
+        type(self).compared += 1
+        return super().__ge__(other)
+
+    def __lt__(self, other: datetime) -> bool:
+        type(self).compared += 1
+        return super().__lt__(other)
+
+    def __le__(self, other: datetime) -> bool:
+        type(self).compared += 1
+        return super().__le__(other)
+
+
 def _client(app_service: object | None = None):
     """A client over the real app, with the login service doubled and the limiter real."""
     from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
@@ -503,24 +546,31 @@ def test_one_check_costs_the_same_at_a_thousand_and_at_a_hundred_thousand_tracke
     roughly twelve milliseconds serialised onto every login request in the service, paid by
     every buyer, forever, because somebody sprayed the door once.
 
+    COUNTED, not timed — a repair to this test, not a change of subject. It used to assert on
+    ``time.perf_counter()`` deltas, a ratio and a one-millisecond ceiling, which handed a
+    correct limiter's verdict to whatever else the machine was doing. MEASURED here: the
+    identical deterministic workload produced ratios from 1.06 to 3.13 with nothing changed
+    but the load on the box, and its sibling below — same shape, same 8x tolerance — went RED
+    four runs in six under contention, in the always-run gate, against code that is right. The
+    property was never about microseconds. It is that one ``check()`` examines a bounded
+    number of tracked entries however many are tracked; the limiter's own staleness
+    comparisons are that number, they are an integer, and they read the same on any machine.
+
     The table is seeded directly rather than through ``check()`` on purpose: filling 100,000
     addresses through the defective ``check()`` costs O(n^2) and took 151 s, so a gate that
     filled it honestly would hang rather than fail. Seeding is O(n) under both the defective
     and the repaired implementation, so the only thing this measures is one ``check()`` at n.
     """
-    import statistics
-    import time
-
     from buyer_svc.auth.routes import MagicLinkRateLimiter
 
-    frozen = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
-    tolerance = 8.0
-    ceiling_seconds = 1e-3
+    frozen = _CountedInstant(2026, 3, 1, 12, 0, tzinfo=UTC)
+    window = timedelta(minutes=15)
+    examined_ceiling = 4
 
     def _fresh(tracked: int) -> MagicLinkRateLimiter:
         limiter = MagicLinkRateLimiter(
             limit=5,
-            window=timedelta(minutes=15),
+            window=window,
             max_subjects=10_000_000,  # out of the way: the ceiling is not what is measured
             clock=lambda: frozen,
         )
@@ -528,39 +578,48 @@ def test_one_check_costs_the_same_at_a_thousand_and_at_a_hundred_thousand_tracke
         return limiter
 
     # ARMED: the shortcut is faithful. A seed that built a DIFFERENT structure from the one
-    # `check()` maintains would be timing a table the limiter never actually holds, and the
+    # `check()` maintains would be counting a table the limiter never actually holds, and the
     # measurement below would mean nothing.
-    built = MagicLinkRateLimiter(limit=5, window=timedelta(minutes=15), clock=lambda: frozen)
+    built = MagicLinkRateLimiter(limit=5, window=window, clock=lambda: frozen)
     for index in range(3):
         built.check(f"seed-{index}@example.invalid")
     assert list(built._hits.items()) == list(_fresh(3)._hits.items()), (
-        "the direct seed does not reproduce what check() builds, so the timing below is "
+        "the direct seed does not reproduce what check() builds, so the count below is "
         "measuring a structure this limiter never holds"
     )
 
-    def _per_check_seconds(tracked: int, samples: int = 120) -> float:
+    # ARMED: the instrument is not blind. A sweep that walked the whole table WOULD be seen
+    # doing it — this walks one by hand and reads the count back. Without this, an instrument
+    # that never fires reports every implementation, O(1) or O(tracked), as costing nothing,
+    # which is the failure mode a counter has and a stopwatch does not.
+    walked = _fresh(1_000)
+    cutoff = frozen - window
+    _CountedInstant.reset()
+    assert all(hits[-1] > cutoff for hits in walked._hits.values())
+    assert _CountedInstant.compared == 1_000, (
+        f"walking 1,000 tracked entries registered {_CountedInstant.compared} comparisons; the "
+        "instrument cannot tell an O(tracked) sweep from an O(1) one"
+    )
+
+    def _entries_examined(tracked: int) -> int:
         limiter = _fresh(tracked)
         assert limiter.tracked == tracked, "the seed did not take; this would measure nothing"
-        timings = []
-        for index in range(samples):
-            start = time.perf_counter()
-            limiter.check(f"probe-{index}@example.invalid")
-            timings.append(time.perf_counter() - start)
-        return statistics.median(timings)
+        _CountedInstant.reset()
+        limiter.check("probe@example.invalid")
+        return _CountedInstant.compared
 
-    small = _per_check_seconds(1_000)
-    large = _per_check_seconds(100_000)
+    small = _entries_examined(1_000)
+    large = _entries_examined(100_000)
 
-    assert large <= tolerance * small, (
-        f"one check() costs {large * 1e6:.1f} us at 100,000 tracked addresses against "
-        f"{small * 1e6:.1f} us at 1,000 — a factor of {large / small:.1f}, over the {tolerance}x "
-        "tolerance. The per-request cost scales with the size of a table an unauthenticated "
+    assert large == small, (
+        f"one check() examines {large} tracked entries at 100,000 tracked against {small} at "
+        f"1,000. The per-request cost scales with the size of a table an unauthenticated "
         "caller chooses, so the limiter is the bottleneck the flood exploits"
     )
-    assert large <= ceiling_seconds, (
-        f"one check() at 100,000 tracked addresses costs {large * 1e6:.1f} us, over the "
-        f"{ceiling_seconds * 1e6:.0f} us ceiling; a cost that is flat because it is uniformly "
-        "large is not the property this gates"
+    assert large <= examined_ceiling, (
+        f"one check() examines {large} tracked entries at 100,000 tracked, over the ceiling of "
+        f"{examined_ceiling}; a cost that is flat because it is uniformly large is not the "
+        "property this gates"
     )
 
 
@@ -743,15 +802,22 @@ def test_the_sweep_stays_flat_when_it_actually_collects_something() -> None:
     The old sweep rebuilt every entry's hit list on every request, so filling n addresses cost
     O(n^2) and this ratio grew with n. Sizes are an order of magnitude apart and modest, for
     exactly that reason: at a hundred thousand the unrepaired version takes 151 s to fill.
-    """
-    import time
 
+    COUNTED, not timed, for the reason recorded on its sibling — and this is the node that
+    proved the reason. As a stopwatch it FAILED four runs in six under load, in the always-run
+    gate, against a limiter that is correct: ``one admission costs 10.1 us amortised at 10,000
+    addresses against 0.8 us at 1,000 — a factor of 12.3``, over an 8x tolerance, purely
+    because 64 other processes wanted the CPU. Comparisons are what the sweep actually spends;
+    an O(n^2) sweep spends ten times more of them per admission at 10,000 than at 1,000, and
+    no amount of load moves the number by one.
+    """
     from buyer_svc.auth.routes import MagicLinkRateLimiter
 
-    start = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
-    tolerance = 8.0
+    start = _CountedInstant(2026, 3, 1, 12, 0, tzinfo=UTC)
+    flatness_tolerance = 1.5
+    per_admission_ceiling = 4.0
 
-    def _amortised_seconds(subjects: int) -> float:
+    def _comparisons_per_admission(subjects: int) -> float:
         now = {"t": start}
         limiter = MagicLinkRateLimiter(
             limit=5,
@@ -759,25 +825,36 @@ def test_the_sweep_stays_flat_when_it_actually_collects_something() -> None:
             max_subjects=10_000_000,
             clock=lambda: now["t"],
         )
-        began = time.perf_counter()
+        _CountedInstant.reset()
         for index in range(subjects):
             limiter.check(f"seed-{index}@example.com")
         # One request, long after every one of those has expired: it collects all of them.
         now["t"] = start + timedelta(hours=1)
         limiter.check("collector@example.com")
-        elapsed = time.perf_counter() - began
+        spent = _CountedInstant.compared
         # ARMED: the collection really happened. Without this the "flat" reading below could
         # be a sweep that never collects, which is the gap this test exists to close.
         assert limiter.tracked == 1, f"the sweep collected nothing: {limiter.tracked} tracked"
-        return elapsed / subjects
+        # ARMED: and the work was really watched. A run whose comparisons went uncounted would
+        # report the cheapest possible sweep for every implementation, including the O(n^2) one.
+        assert spent >= subjects, (
+            f"{subjects} admissions and a collecting request registered only {spent} staleness "
+            "comparisons; the instrument is not seeing this limiter's sweep"
+        )
+        return spent / subjects
 
-    small = _amortised_seconds(1_000)
-    large = _amortised_seconds(10_000)
-    assert large <= tolerance * small, (
-        f"one admission costs {large * 1e6:.1f} us amortised at 10,000 addresses against "
-        f"{small * 1e6:.1f} us at 1,000 — a factor of {large / small:.1f}, over the "
-        f"{tolerance}x tolerance. The sweep's cost is scaling with the size of a table an "
-        "unauthenticated caller chooses"
+    small = _comparisons_per_admission(1_000)
+    large = _comparisons_per_admission(10_000)
+    assert large <= flatness_tolerance * small, (
+        f"one admission costs {large:.2f} staleness comparisons amortised at 10,000 addresses "
+        f"against {small:.2f} at 1,000 — a factor of {large / small:.1f}, over the "
+        f"{flatness_tolerance}x tolerance. The sweep's cost is scaling with the size of a table "
+        "an unauthenticated caller chooses"
+    )
+    assert large <= per_admission_ceiling, (
+        f"one admission costs {large:.2f} staleness comparisons amortised at 10,000 addresses, "
+        f"over the ceiling of {per_admission_ceiling}; a cost that is flat because it is "
+        "uniformly large is not the property this gates"
     )
 
 

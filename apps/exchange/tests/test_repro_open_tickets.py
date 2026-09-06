@@ -435,14 +435,15 @@ def test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code(
     The mechanism it does document — and be careful here, because ``accept()`` has TWO guards
     today and this node only reaches the weaker one. The durable guard is an at-most-once claim
     on the auction id, taken **before** the merchant is asked to mint
-    (``apps/exchange/src/accept/offer.py:530-539``; the comment at ``:530`` calls it "THE guard
+    (``apps/exchange/src/accept/offer.py:823-854``; the comment at ``:823`` calls it "THE guard
     (T-158), and its position in this function is the fix"). The weaker one is a stamp:
     ``_record_acceptance`` writes ``accepted_bid_ref`` onto whatever object it was handed
-    (``offer.py:291-295``, called at ``:647``) and the read-back at ``offer.py:496-497`` refuses
-    a second accept on that basis — which holds for exactly as long as that one object does.
+    (``offer.py:365-369``, called at ``:906`` on the fallback handoff and at ``:1010`` on the
+    minting path) and the read-back at ``offer.py:707-708`` refuses a second accept on that
+    basis — which holds for exactly as long as that one object does.
 
     This node reaches only the stamp, and that is the whole point of it. It passes ``claims``
-    nowhere, so ``offer.py:535`` resolves the table from ``platform_acceptance_claims()``,
+    nowhere, so ``offer.py:833`` resolves the table from ``platform_acceptance_claims()``,
     nothing is wired process-wide, ``claim_table`` is ``None``, and the object-scoped stamp is
     all that is left. ``offer.py:50-56`` documents that fallback as deliberate — the result even
     reports which guard ran, via ``AcceptResult.claim_verified``. So the node's redness is a true
@@ -458,8 +459,8 @@ def test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code(
 
     ``AuctionRecord`` round-trips through ``InMemoryAuctionStore`` exactly as
     ``RedisAuctionStore`` does — both call ``AuctionRecord.from_json``
-    (``apps/exchange/src/auction/state.py:183-184``, ``return cls(**json.loads(blob))``) on every
-    ``load`` (``state.py:239-241`` and ``:288-292``; ``:244`` says "Serialise on the way in,
+    (``apps/exchange/src/auction/state.py:192-193``, ``return cls(**json.loads(blob))``) on every
+    ``load`` (``state.py:253-255`` and ``:302-306``; ``:258`` says "Serialise on the way in,
     exactly like the Redis store"). Two loads are therefore two unstamped records for free, which
     is the route shape the ticket describes.
 
@@ -478,10 +479,11 @@ def test_t158_a_second_accept_on_a_reloaded_auction_record_mints_no_second_code(
     would destroy the specimen and prove nothing about the deployment, and the marker is what
     keeps this file's normal run at its published shape. One honest caveat on "stays", so nobody
     is ambushed by it: the redness is conditional on nothing having wired a process-wide claim
-    table. This file has no autouse fixture restoring that wiring (the grader does, at
-    ``test_t158_acceptance_claim.py:362``), so a test that calls ``use_acceptance_claims()`` and
-    leaks it would flip this node to XPASS and, under ``strict=True``, to a hard failure. If that
-    ever happens the fix is to isolate the leaking wiring, never to weaken this node.
+    table. This file has no autouse fixture that puts process-wide wiring back as it found it
+    (the grader has one at ``test_t158_acceptance_claim.py:362-373``, though it restores the
+    seller registry rather than a claim table), so a test that calls ``use_acceptance_claims()``
+    and leaks it would flip this node to XPASS and, under ``strict=True``, to a hard failure. If
+    that ever happens the fix is to isolate the leaking wiring, never to weaken this node.
     """
     from exchange.accept import accept  # noqa: PLC0415
     from exchange.auction.state import CLOSED, AuctionRecord, InMemoryAuctionStore  # noqa: PLC0415

@@ -26,7 +26,10 @@ live:
 
 from __future__ import annotations
 
+import ast
+import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -34,6 +37,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -447,3 +451,318 @@ def test_an_undeclared_docker_item_stops_the_session_rather_than_being_widened(
         f"exit 4 above is the harness, not the refusal:\n{accepted.stdout}\n{accepted.stderr}"
     )
     assert "1 passed" in accepted.stdout, accepted.stdout
+
+
+# --------------------------------------------------------------------------------------
+# 6. T-172, layer three: a docker item may not be gated on a service its own CODE cannot use
+# --------------------------------------------------------------------------------------
+#
+# Sections 1-5 grade the resolution RULE. This one grades the RESULT: walk every ``docker``
+# item the real suite collects and refuse any that is gated on a service its own module has no
+# code-level way of reaching. Such an item is skipped at exit 0 every time that store blips —
+# the pre-T-109 defect surviving one item at a time.
+#
+# WHY A SECOND SWEEP EXISTS. ``apps/trust/tests/test_repro_open_tickets.py`` already walks the
+# corpus for exactly this, and its docstring says the layer "cannot be satisfied by stamping
+# ``@pytest.mark.docker(...)``" onto things. It strips the marker CALL before scanning — that
+# much was earned, and is documented there — but it then scans the rest of the module whole,
+# comments and docstrings included, and the annotation the same branch added reads::
+#
+#     @pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must
+#                                      # not skip it
+#
+# The call goes, the comment stays, and the comment names Redis and Neo4j. MEASURED on this
+# tree by re-running that reader with and without the branch's own ``# T-172:`` comments::
+#
+#     proxyshop_support/tests/test_role_password_end_to_end.py
+#         as committed  ['neo4j-bolt', 'postgres', 'redis']
+#         w/o comments  ['neo4j-bolt', 'postgres']      <- 'redis' came from the comment alone
+#     apps/trust/tests/test_schema_grants.py
+#         as committed  ['neo4j-bolt', 'postgres', 'redis']
+#         w/o comments  ['postgres', 'redis']           <- 'neo4j-bolt' likewise
+#
+# Both annotated files therefore read as full-stack-capable BECAUSE they were annotated, so
+# that sweep can never again fire on the seven items it was written for. Confirmed by
+# mutation, not by reading: gating
+# ``test_a_redis_outage_does_not_skip_a_bare_marked_postgres_fixture_test`` above on ``redis``
+# — a lie; that test points ``REDIS_URL`` at a closed port and needs Redis DOWN — is collected
+# as ``services ['redis']`` and still leaves that gate at ``2 passed``.
+#
+# THE GROUND TRUTH USED HERE, and why it is not the purer thing a reviewer asks for. Three
+# candidates, each run over the live 272-item corpus:
+#
+#     whole module source (the sweep above)      0 flagged, and forgeable by one comment
+#     imports only                              29 flagged, false positives throughout
+#     executable source + requested fixtures     0 flagged
+#
+# "Imports only" does not survive contact: seven items spin their OWN Postgres container
+# through ``docker``/``psql`` subprocesses and import no driver at all, and THIS file needs a
+# live Postgres while importing nothing Postgres-shaped. What does hold is the union of
+# (a) the module's source with comments and docstrings REMOVED — imports, identifiers and real
+# string literals survive, prose does not — and (b) the datastore fixtures the item actually
+# requests, which is a wiring rather than a claim.
+
+
+#: Spellings that betray, in a module's own code, that it talks to a compose service.
+#: Deliberately generous: the claim being made is only the contrapositive — a module whose code
+#: contains NO spelling of a service cannot be talking to it.
+_SERVICE_EVIDENCE: dict[str, str] = {
+    "postgres": r"postgres|psycopg|\bpg_|libpq",
+    "redis": r"redis",
+    "neo4j-bolt": r"neo4j|bolt",
+}
+
+#: The smallest corpus this sweep will reason about. Measured at 272 on this tree; a collection
+#: that silently drops most of the suite has to fail rather than pass over the remainder.
+_MIN_DOCKER_ITEMS = 200
+
+#: The plugin the collection subprocess runs under. ``tryfirst``, and the ``docker`` filtering
+#: done here rather than with ``-m docker``, so the corpus is complete even when ``conftest.py``
+#: turns a refusal into a ``UsageError`` that aborts collection immediately afterwards.
+_CORPUS_COLLECTOR = """\
+import json
+import os
+import pathlib
+
+import pytest
+
+from proxyshop_support import service_markers
+
+_RECORDS = []
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    for item in items:
+        marker_args = [list(mark.args) for mark in item.iter_markers("docker")]
+        if not marker_args:
+            continue
+        try:
+            services = list(service_markers.services_for(marker_args, item.fixturenames))
+        except Exception:
+            services = []  # a refusal gates on nothing, so it can be over-gated on nothing
+        _RECORDS.append(
+            {
+                "nodeid": item.nodeid,
+                "services": services,
+                "fixture_services": sorted(
+                    {
+                        service_markers.FIXTURE_SERVICES[name]
+                        for name in item.fixturenames
+                        if name in service_markers.FIXTURE_SERVICES
+                    }
+                ),
+            }
+        )
+
+
+def pytest_sessionfinish(session, exitstatus):
+    pathlib.Path(os.environ["PROXYSHOP_DOCKER_CORPUS_OUT"]).write_text(
+        json.dumps(_RECORDS), encoding="utf-8"
+    )
+"""
+
+#: One collection per process, shared by the armed guard and the sweep.
+_CORPUS_CACHE: list[dict[str, Any]] | None = None
+_EVIDENCE_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _docker_corpus(tmp_path: Path) -> list[dict[str, Any]]:
+    """Every ``docker``-marked item the REAL suite collects, with what it resolves to.
+
+    A subprocess running the repo's own collection rather than a re-implementation of it: the
+    thing being graded is what ``conftest.py`` asks ``services_for`` at collection time, and
+    anything short of a real collection grades a model of that instead.
+    """
+    global _CORPUS_CACHE
+    if _CORPUS_CACHE is not None:
+        return _CORPUS_CACHE
+
+    plugin_dir = tmp_path / "docker_corpus_plugin"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "proxyshop_docker_corpus.py").write_text(_CORPUS_COLLECTOR, encoding="utf-8")
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(plugin_dir), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
+    env.setdefault("PROXYSHOP_WORKER", "1")
+
+    # TWO passes. The default ``python_files`` glob is ``test_*.py``, so the docker-marked item
+    # in ``_service_skip_probe.py`` is invisible to a normal collection and would sit outside
+    # this sweep entirely. The lint fixtures are deliberately un-importable and are skipped.
+    merged: dict[str, dict[str, Any]] = {}
+    tails: list[str] = []
+    for name, extra in (
+        ("default", []),
+        ("underscore", ["-o", "python_files=_*.py", "--ignore-glob=*/lint_fixtures/*"]),
+    ):
+        out = tmp_path / f"docker_corpus_{name}.json"
+        env["PROXYSHOP_DOCKER_CORPUS_OUT"] = str(out)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "-p",
+                "proxyshop_docker_corpus",
+                *extra,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        tails.append(f"[{name}] rc={completed.returncode}\n{completed.stdout[-1000:]}")
+        if out.is_file():
+            for record in json.loads(out.read_text(encoding="utf-8")):
+                merged.setdefault(str(record["nodeid"]), record)
+
+    # A non-zero return code is TOLERATED as long as a corpus came back. Now that ``services_for``
+    # refuses an item that declares nothing, collecting such an item is SUPPOSED to fail the
+    # session — and the assertions below name every offender where the return code names one.
+    assert merged, (
+        "the collection subprocesses produced no docker corpus at all, so every count below "
+        "would be silently zero.\n" + "\n".join(tails)
+    )
+    _CORPUS_CACHE = [merged[nodeid] for nodeid in sorted(merged)]
+    return _CORPUS_CACHE
+
+
+def _executable_source(source: str) -> str:
+    """``source`` with every comment, every docstring and every ``docker`` marker call gone.
+
+    What survives is imports, identifiers and real string literals — the module's wiring. The
+    comments and docstrings are not stripped by a regex that a cleverer comment could slip
+    past: :func:`ast.parse` never records them in the first place, and :func:`ast.unparse`
+    regenerates the code from the tree.
+
+    The marker call has to go for the reason the trust sweep already documents — it is source,
+    so ``@pytest.mark.docker("postgres", "neo4j-bolt", "redis")`` would otherwise put all three
+    spellings into the very module it is lying about.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                # Replaced rather than deleted: a function whose whole body is a docstring
+                # would otherwise unparse to an empty suite.
+                body[0] = ast.Pass()
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            node.decorator_list = [
+                decorator
+                for decorator in node.decorator_list
+                if not ast.unparse(decorator).startswith("pytest.mark.docker")
+            ]
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
+def _evidence_in(source: str) -> frozenset[str]:
+    """The services ``source`` shows any CODE-level sign of talking to."""
+    code = _executable_source(source)
+    return frozenset(
+        service
+        for service, pattern in _SERVICE_EVIDENCE.items()
+        if re.search(pattern, code, re.IGNORECASE)
+    )
+
+
+def _module_evidence(path: str) -> frozenset[str]:
+    if path not in _EVIDENCE_CACHE:
+        _EVIDENCE_CACHE[path] = _evidence_in((REPO_ROOT / path).read_text(encoding="utf-8"))
+    return _EVIDENCE_CACHE[path]
+
+
+def test_prose_and_the_marker_itself_supply_no_evidence() -> None:
+    """The canary, and the assertion that goes red if the reader is widened back.
+
+    Every mention of Redis and Neo4j below sits in a docstring, a comment, or the ``docker``
+    marker call — the three places a test author writes when annotating rather than wiring.
+    The only thing this module actually does is import ``psycopg``. Scan the whole source, as
+    the trust sweep does, and it reads as needing all three services; scan the code, and it
+    needs Postgres.
+    """
+    forged = '''\
+"""A module that talks to Postgres, and to redis and neo4j only in this sentence."""
+
+import psycopg
+
+
+# T-172: declares Postgres; a Redis/Neo4j outage must not skip it
+@pytest.mark.docker("postgres", "redis", "neo4j-bolt")
+def test_annotated_into_the_whole_stack(pg_admin) -> None:
+    """Claims redis and neo4j bolt, does neither."""
+    psycopg.connect()
+'''
+    assert _evidence_in(forged) == {"postgres"}, (
+        f"prose or the marker call is still supplying evidence: {sorted(_evidence_in(forged))}. "
+        f"An annotation that manufactures its own answer key makes the sweep below vacuous."
+    )
+
+    # And the reader must still SEE a service that is genuinely wired, or the sweep is vacuous
+    # in the other direction — everything would look over-gated and the threshold guard would
+    # be the only thing left standing.
+    wired = "import redis\nfrom neo4j import GraphDatabase\nimport psycopg\n"
+    assert _evidence_in(wired) == set(reachability.SERVICES)
+
+
+def test_no_docker_item_is_gated_on_a_service_its_own_module_cannot_reach(
+    tmp_path: Path,
+) -> None:
+    """The consequence layer, on ground truth the annotated code cannot forge.
+
+    Two guards before the claim, because a sweep over collected items goes quiet far more
+    easily than it goes red — three sweeps in this repo have done exactly that (6 -> 0 of 8,
+    70 -> 0 of 79, 48 -> 0 of 66).
+    """
+    records = _docker_corpus(tmp_path)
+
+    assert len(records) >= _MIN_DOCKER_ITEMS, (
+        f"only {len(records)} docker items collected, below the {_MIN_DOCKER_ITEMS} floor "
+        f"(272 when this was written). A collection that finds nothing is the cheapest way to "
+        f"silence the walk below, so it fails here instead."
+    )
+
+    # ARMED, the half that matters after the reader changed: the reader has to answer NARROW
+    # for narrow modules. If it started answering "all three" everywhere, no surplus could ever
+    # exist and the assertion below would pass vacuously.
+    everything = frozenset(reachability.SERVICES)
+    narrow = [
+        record
+        for record in records
+        if _module_evidence(str(record["nodeid"]).split("::")[0]) != everything
+    ]
+    assert len(narrow) >= _MIN_DOCKER_ITEMS, (
+        f"only {len(narrow)} of {len(records)} docker items live in a module whose CODE shows "
+        f"evidence for fewer than all {len(reachability.SERVICES)} services (258 when this was "
+        f"written). The sweep can only fire on those."
+    )
+
+    over_gated: list[str] = []
+    for record in records:
+        path = str(record["nodeid"]).split("::")[0]
+        reachable = _module_evidence(path) | frozenset(record["fixture_services"])
+        surplus = sorted(set(record["services"]) - reachable)
+        if surplus:
+            over_gated.append(
+                f"{record['nodeid']} gated on {surplus}; its module's code and the fixtures it "
+                f"requests reach only {sorted(reachable)}"
+            )
+    assert over_gated == [], (
+        f"{len(over_gated)} docker items are gated on a service that neither their module's "
+        f"code nor the fixtures they request can reach, so a store they cannot possibly use "
+        f"still skips them at exit 0 — the pre-T-109 defect, surviving for exactly these "
+        f"items:\n  " + "\n  ".join(over_gated)
+    )
