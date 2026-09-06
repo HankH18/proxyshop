@@ -22,6 +22,12 @@ belongs to no feature package:
 ``fixture_loader``
     The ``tests/_fixtures_*.py`` auto-discovery used by every per-directory ``conftest.py``,
     so a worker adds fixtures in a file it owns and never edits a shared conftest.
+``logging_config``
+    T-308's single place application logging is configured. Nothing in the repo configured
+    it before, so a started service had ``root.handlers == []`` at level ``WARNING`` and
+    every INFO call site in the product was dropped before a record was built. Importing
+    this module changes nothing; a service calls ``configure_logging()`` on its startup
+    path. Also carries the per-request correlation id (``RequestIdMiddleware``).
 ``neo4j_lock``
     D37's cross-worker ``flock`` on ``/tmp/proxyshop-neo4j.lock``.
 ``reachability``
@@ -40,6 +46,7 @@ __all__ = [
     "embedding",
     "fixture_loader",
     "llm_double",
+    "logging_config",
     "neo4j_lock",
     "reachability",
     "redis_client",
