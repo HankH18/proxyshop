@@ -6,6 +6,8 @@ joined them. ``uvicorn exchange.main:app`` boots an exchange with
 
 * ``seller_eligibility``  -> :class:`~exchange.eligibility.StaticSellerEligibility` with no
   rows, whose answer for every store is ``UNAVAILABLE``;
+  **No longer** — see the note on the R12 seam below, which is the second entry in this list
+  to leave it for the same reason the ledger sink did;
 * ``bid_solicitor``       -> :class:`~exchange.auction.routes.NullSolicitor`, which asks nobody;
 * ``trust_snapshot``      -> ``{}``, in which no store can be shown to be off the blacklist;
 * ``ranking_registered_domains`` -> nothing, so the platform vouches for no checkout host;
@@ -30,8 +32,23 @@ and buyer can adopt without depending on this service. See the comment where the
 constants used to live for why the address is a default rather than a setting, and for why
 this does not weaken the invariant three paragraphs below.
 
+**And the R12 seam has now left the list for the same reason (T-303 b).** ``seller_eligibility``
+was the first entry above, and its default was not "fail closed" so much as "ask nobody": a
+:class:`~exchange.eligibility.StaticSellerEligibility` built with no rows is a deterministic
+DOUBLE, and every store it denied was denied ``static-eligibility: <store> is unavailable`` —
+a sentence that reads like a trust verdict and is not one. There was no trust-backed
+implementation of the port anywhere in the tree, so ``configure_auctions(app, eligibility=…)``
+had no product caller and the served exchange could not tell an honest store from a delisted
+one. It is bound by DEFAULT now, by :func:`bind_seller_eligibility`, to the trust service's
+published ``GET /snapshot`` — the read door ``packages/contracts/openapi/trust.openapi.json``
+declares as "Every store's snapshot, for exchange consumption" and which nothing in this
+repository had a client for. It does **not** weaken the invariant below: a trust service that
+cannot be read yields no snapshot, a store with no snapshot row is ``UNAVAILABLE``, and
+``UNAVAILABLE`` denies at all three gates. See :func:`bind_eligibility` for the full ladder.
+
 Seven fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
-this tree, on the app exactly as ``create_app()`` builds it::
+this tree, on the app exactly as ``create_app()`` builds it (the eligibility reason is the
+pre-T-303 one, kept verbatim because it is what was measured)::
 
     POST /auctions -> 201
     {"solicited": [], "entries": [],
@@ -109,6 +126,9 @@ The document
     inventing an answer the trust service never gave. The *served* trust document
     (``{"version": ..., "stores": {...}}``) is accepted and unwrapped here — that unwrap is
     the seam ``e2e/support/s1/flow.py`` documents as "nothing in the tree performs".
+    A document that states this key and **no** ``sellers`` also gets its R12 answer from it,
+    through :class:`~exchange.eligibility.trust_backed.TrustBackedSellerEligibility` — see
+    :func:`bind_eligibility` for why ``sellers`` still wins when both are stated.
 ``intent_clusters``
     The NAMED catalogue clusters this exchange addresses intents to, in the same
     ``{cluster_id, label}`` spelling ``apps/merchant``'s onboarding interview already uses for
@@ -150,12 +170,16 @@ The document
 ``checkout_mode``
     Optional; ``CHECKOUT_MODE`` still works and this overrides it for this app.
 ``trust_url``
-    The BASE address of the trust service, whose ``POST /events`` door every auction
-    transition is appended to (T-150). Optional, and the one key whose absence does **not**
-    leave the seam unbound: :func:`default_ledger_sink` writes to :data:`DEFAULT_TRUST_URL`,
-    overridable by the :data:`ENV_TRUST_URL` variable, so an exchange nobody configured still
-    produces an audit trail rather than a list it discards. State it when the trust service
-    is not at the compose service name.
+    The BASE address of the trust service — both of its doors: the ``POST /events`` every
+    auction transition is appended to (T-150) and the ``GET /snapshot`` R12 is read from
+    (T-303). Optional, and the one key whose absence does **not** leave a seam unbound:
+    :func:`default_ledger_sink` and :func:`default_seller_eligibility` both fall back to
+    :data:`DEFAULT_TRUST_URL`, overridable by the :data:`ENV_TRUST_URL` variable, so an
+    exchange nobody configured still produces an audit trail rather than a list it discards,
+    and still asks trust who it is allowed to solicit rather than asking a double. One key for
+    both doors on purpose: an exchange writing its audit trail to one trust service and taking
+    its blacklist from another is a deployment mistake nothing else would catch. State it when
+    the trust service is not at the compose service name.
 
 Validation is loud, and every rule below was chosen because the silent version of it produces
 an empty shortlist that looks like a policy decision:
@@ -218,7 +242,7 @@ from proxyshop_support.trust_ledger import (
     trust_events_url,
 )
 
-from . import describe_exception
+from . import describe, describe_exception
 from .auction.collect import (
     REFUSAL_FIELD,
     STORE_DECLINED_REASON,
@@ -229,6 +253,11 @@ from .auction.ledger import InMemoryLedgerSink
 from .checkout.registry import registered_modes
 from .checkout.sellers import StaticRegisteredDomains
 from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
+from .eligibility.trust_backed import (
+    TrustBackedSellerEligibility,
+    TrustSnapshotUnavailable,
+    snapshot_rows,
+)
 
 # NOTE ON THIS MODULE'S IMPORTS. The three `configure_*` seams and `InMemoryAuctionBids` live
 # in route modules that import THIS module (deferred, inside their request hook), so importing
@@ -247,6 +276,7 @@ __all__ = [
     "DECLINE_REASON_HEADER",
     "DEFAULT_LEDGER_TIMEOUT_SECONDS",
     "DEFAULT_SOLICIT_TIMEOUT_SECONDS",
+    "DEFAULT_TRUST_SNAPSHOT_TIMEOUT_SECONDS",
     "DEFAULT_TRUST_URL",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
@@ -255,6 +285,7 @@ __all__ = [
     "DeploymentConfigurationError",
     "HttpBidSolicitor",
     "HttpTrustLedgerSink",
+    "HttpTrustSnapshot",
     "MAX_BID_RESPONSE_BYTES",
     "MAX_DEPLOYMENT_BYTES",
     "MAX_DEPLOYMENT_SELLERS",
@@ -262,14 +293,21 @@ __all__ = [
     "MAX_UNDELIVERED_LEDGER_EVENTS",
     "SellerRow",
     "TRUST_EVENTS_PATH",
+    "TRUST_SNAPSHOT_PATH",
+    "TRUST_SNAPSHOT_REFRESH_SECONDS",
+    "TRUST_SNAPSHOT_RETRY_SECONDS",
+    "TrustBackedSellerEligibility",
     "TrustLedgerPublisher",
     "bind_ledger_sink",
+    "bind_seller_eligibility",
     "configure_exchange",
     "default_ledger_sink",
+    "default_seller_eligibility",
     "ensure_configured",
     "read_deployment",
     "solicitation_profile",
     "trust_events_url",
+    "trust_snapshot_endpoint",
 ]
 
 #: This module's logger. Named ``exchange.composition``, which is what an operator greps to
@@ -1092,9 +1130,344 @@ def default_ledger_sink(env: Mapping[str, str] | None = None) -> InMemoryLedgerS
 
 
 # =====================================================================================
+# The trust-SNAPSHOT seam — R12's `GET /snapshot`, read by the exchange at last
+# =====================================================================================
+#: The published read door. ``apps/trust/src/snapshot/routes.py`` serves it, it is declared in
+#: ``packages/contracts/openapi/trust.openapi.json`` as "Every store's snapshot, for exchange
+#: consumption", and until T-303 the exchange had no client for it — the server half landed in
+#: T-261 whose own header says "no such client exists yet".
+TRUST_SNAPSHOT_PATH = "/snapshot"
+
+#: How long ONE snapshot read may hold the calling thread.
+#:
+#: Read inline on ``POST /auctions`` and on ``POST /auctions/{id}/accept``, once per refresh
+#: window rather than once per store (see :class:`HttpTrustSnapshot`), so a buyer feels this at
+#: most once per request. Larger than the ledger's 0.5s because the response is every store's
+#: snapshot rather than one small event, and still finite: a trust service that has not
+#: answered in a second is down, not thinking, and a down trust service must deny rather than
+#: hold an auction open.
+DEFAULT_TRUST_SNAPSHOT_TIMEOUT_SECONDS = 1.0
+
+#: How long a snapshot that WAS read is served before it is revalidated.
+#:
+#: A cache is not an optimisation here, it is a correctness requirement: :meth:`SellerEligibility
+#: .check` is asked once per rostered store and three times per purchase (solicitation, ranking,
+#: checkout), so an uncached reader would turn one auction into a dozen round trips to trust and
+#: could answer differently for two stores in the same auction.
+TRUST_SNAPSHOT_REFRESH_SECONDS = 30.0
+
+#: How long a FAILED read is remembered before the next attempt.
+#:
+#: Deliberately much shorter than the refresh window: a failure denies every store, so an
+#: exchange must notice a trust service coming back quickly. Non-zero because ``check`` is
+#: driven from an unauthenticated request path — without it, one auction against a trust
+#: service that is down is one connection attempt per rostered store, which is a socket storm
+#: anybody can start by posting a large roster in a loop.
+TRUST_SNAPSHOT_RETRY_SECONDS = 5.0
+
+
+def trust_snapshot_endpoint(
+    base_url: str | None = None, env: Mapping[str, str] | None = None
+) -> tuple[str, str]:
+    """``(url, source)`` for the trust service's snapshot door.
+
+    Resolved THROUGH :func:`~proxyshop_support.trust_ledger.trust_endpoint` so the precedence
+    — the document's ``trust_url``, then :data:`ENV_TRUST_URL`, then :data:`DEFAULT_TRUST_URL`
+    — has exactly one implementation in the repository and the write door and the read door
+    can never disagree about which trust service this exchange is talking to. That function
+    takes no path argument today and appends :data:`TRUST_EVENTS_PATH` itself, so the suffix is
+    swapped here rather than the precedence being forked; giving it a ``path`` parameter
+    belongs beside the write client in ``proxyshop_support`` and is reported rather than done
+    here.
+    """
+    events_url, source = trust_endpoint(base_url, env)
+    base = (
+        events_url[: -len(TRUST_EVENTS_PATH)]
+        if events_url.endswith(TRUST_EVENTS_PATH)
+        else events_url
+    )
+    return f"{base}{TRUST_SNAPSHOT_PATH}", source
+
+
+class HttpTrustSnapshot:
+    """Reads trust's published ``GET /snapshot``, caching on the version trust publishes.
+
+    This is the transport half of the R12 read; the rule that turns a snapshot into an
+    eligibility answer is :class:`~exchange.eligibility.trust_backed.TrustBackedSellerEligibility`,
+    which holds one of these as a callable. Split for the reason ``HttpTrustLedgerSink`` and
+    ``TrustLedgerPublisher`` are split: the port's package must stay transport-free, and this
+    module is where this service's outbound clients already live (``HttpBidSolicitor``,
+    ``HttpTrustLedgerSink``).
+
+    **Caching, and what it is allowed to do when trust is down.** T-064 acceptance 3 specifies
+    that the exchange caches the snapshot and refreshes on a version bump; the served route
+    publishes that version as an ``ETag`` (and, spelled out, ``X-Trust-Snapshot-Version``), so a
+    revalidation is a conditional ``GET`` and a ``304`` costs a header exchange. What it may
+    NOT do is serve a snapshot it failed to revalidate: an exchange that cannot reach trust
+    knows nothing current about any store, and R12 says knowing nothing denies. So a failed
+    refresh DISCARDS the cache and every store reads ``unavailable`` until trust answers again
+    — the same direction ``trust.snapshot.delisting`` fails in, and the opposite of the
+    "probably still fine" reading that would quietly keep asking a store trust has just
+    delisted.
+
+    **No response-size bound, deliberately, and it is the one place this differs from
+    ``HttpBidSolicitor``.** That client streams with a hard :data:`MAX_BID_RESPONSE_BYTES` cap
+    because it reads from a STORE AGENT — a third party with an incentive, reached at an
+    address a seller supplied. This reads the deployment's own trust service, named by
+    ``trust_url``/:data:`ENV_TRUST_URL`/:data:`DEFAULT_TRUST_URL` and never by anything in a
+    request, and the body is legitimately every store's snapshot: a marketplace with more
+    stores has a larger one, without bound and without anything wrong. A cap invented here
+    would therefore not protect the exchange from an adversary, it would become the day the
+    marketplace outgrows it a refusal of EVERY store — the fail-closed path firing on honest
+    traffic, which is worse than the hazard it would be guarding.
+
+    **Failure is never silent and never chatty**, exactly as
+    :class:`~proxyshop_support.trust_ledger.TrustLedgerPublisher` is: one ``ERROR`` the moment
+    reads stop landing, one ``INFO`` the moment they land again, nothing at all in a steady
+    state. :meth:`status` renders the whole condition for a caller who wants it without a log
+    line.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        timeout: float = DEFAULT_TRUST_SNAPSHOT_TIMEOUT_SECONDS,
+        refresh_seconds: float = TRUST_SNAPSHOT_REFRESH_SECONDS,
+        retry_seconds: float = TRUST_SNAPSHOT_RETRY_SECONDS,
+        monotonic: Any = time.monotonic,
+    ) -> None:
+        self.url = str(url)
+        self._timeout = float(timeout)
+        self._refresh = float(refresh_seconds)
+        self._retry = float(retry_seconds)
+        self._monotonic = monotonic
+        self._client: Any = None
+        self._rows: Mapping[str, Any] | None = None
+        self._version: str | None = None
+        self._read_at: float | None = None
+        self._failure: str | None = None
+        self._failed_at: float | None = None
+        self._reads = 0
+        self._readable: bool | None = None
+
+    # -- the seam the eligibility source calls ----------------------------------------
+    def __call__(self) -> Mapping[str, Any]:
+        """The current snapshot, or raise :class:`TrustSnapshotUnavailable`."""
+        now = float(self._monotonic())
+        if (
+            self._rows is not None
+            and self._read_at is not None
+            and now - self._read_at < self._refresh
+        ):
+            return self._rows
+        if (
+            self._failure is not None
+            and self._failed_at is not None
+            and now - self._failed_at < self._retry
+        ):
+            # Inside the retry window a second store in the same auction gets the SAME answer
+            # without a second socket. Re-raised rather than remembered as a decision, so the
+            # denial reason still names the failure that produced it.
+            raise TrustSnapshotUnavailable(self._failure)
+        try:
+            rows, version = self._fetch()
+        except TrustSnapshotUnavailable as exc:
+            self._record_failure(str(exc), now)
+            raise
+        except Exception as exc:  # a blanket catch IS the fail-closed rule
+            failure = describe_exception(exc)
+            self._record_failure(failure, now)
+            raise TrustSnapshotUnavailable(failure) from exc
+        self._record_read(rows, version, now)
+        return rows
+
+    def status(self) -> dict[str, Any]:
+        """The whole delivery condition, readable after the log line has scrolled away."""
+        return {
+            "url": self.url,
+            "readable": self._readable,
+            "reads": self._reads,
+            "snapshot_version": self._version,
+            "stores": None if self._rows is None else len(self._rows),
+            "last_failure": self._failure,
+        }
+
+    # -- plumbing ---------------------------------------------------------------------
+    def _fetch(self) -> tuple[Mapping[str, Any], str | None]:
+        headers = {"accept": "application/json"}
+        if self._version and self._rows is not None:
+            # The conditional GET T-064 acceptance 3 asks for: a version that has not moved
+            # costs a 304 and the cached document stands.
+            headers["if-none-match"] = self._version
+        response = self._http_client().get(self.url, headers=headers)
+        if response.status_code == 304 and self._rows is not None:
+            return self._rows, self._version
+        if response.status_code != 200:
+            raise TrustSnapshotUnavailable(f"{self.url} answered HTTP {response.status_code}")
+        document = response.json()
+        rows = snapshot_rows(document)
+        if rows is None:
+            raise TrustSnapshotUnavailable(
+                f"{self.url} answered {describe(document)}, which is not a trust snapshot"
+            )
+        version = response.headers.get("etag") or response.headers.get("x-trust-snapshot-version")
+        return rows, (str(version) if version else None)
+
+    def _record_read(self, rows: Mapping[str, Any], version: str | None, now: float) -> None:
+        self._rows, self._version, self._read_at = rows, version, now
+        self._failure, self._failed_at = None, None
+        self._reads += 1
+        if self._readable is not True:
+            if self._readable is False:
+                _log.info(
+                    "exchange eligibility: %s is answering again (%d store(s), version %s). "
+                    "R12 is being read from the trust snapshot once more",
+                    self.url,
+                    len(rows),
+                    version or "<unpublished>",
+                )
+            self._readable = True
+
+    def _record_failure(self, failure: str, now: float) -> None:
+        # The cache is DISCARDED, not held: see the class docstring. A snapshot that could not
+        # be revalidated is not evidence that a store is still listed.
+        self._rows, self._read_at, self._version = None, None, None
+        self._failure, self._failed_at = failure, now
+        if self._readable is not False:
+            _log.error(
+                "exchange eligibility: %s stopped answering (%s). The exchange cannot read the "
+                "trust snapshot, so R12 denies EVERY store 'unavailable' until it can — "
+                "status() now reads readable=false. The next read that lands is logged; the "
+                "ones in between are not",
+                self.url,
+                failure,
+            )
+            self._readable = False
+
+    def _http_client(self) -> Any:
+        """One pooled client for this reader, built on first use.
+
+        Deferred for the reason :meth:`HttpBidSolicitor._http_client`'s is: constructing an
+        eligibility source — which a config check or a test does — must open no sockets, and
+        ``httpx`` should be imported only by a deployment that actually reaches out.
+        """
+        if self._client is None:
+            import httpx  # noqa: PLC0415 — see the docstring
+
+            self._client = httpx.Client(timeout=self._timeout)
+        return self._client
+
+
+def bind_seller_eligibility(
+    base_url: str | None = None, env: Mapping[str, str] | None = None
+) -> TrustBackedSellerEligibility:
+    """Build the R12 source, and say at ``INFO`` where this process will read trust from.
+
+    The wiring-time twin of :func:`bind_ledger_sink`, for the same reason and at the same
+    level: "which trust service decides who this exchange is allowed to ask, and did anybody
+    choose it" is a CONFIGURATION question with a settled answer the moment the seam is bound,
+    and ``INFO`` rather than ``WARNING`` because a deployment that states no ``trust_url`` has
+    not made a mistake — the default is the compose service name.
+    """
+    url, source = trust_snapshot_endpoint(base_url, env)
+    _log.info(
+        "exchange eligibility: R12 will be read from the trust service's snapshot at %s "
+        "(from %s). A store trust holds no row for is denied, and a trust service that "
+        "cannot be read denies every store",
+        url,
+        _ENDPOINT_SOURCES.get(source, source),
+    )
+    return TrustBackedSellerEligibility(
+        HttpTrustSnapshot(url), source=f"the trust snapshot at {url}"
+    )
+
+
+def default_seller_eligibility(
+    env: Mapping[str, str] | None = None,
+) -> TrustBackedSellerEligibility:
+    """The R12 source an exchange nobody has configured consults.
+
+    The DEFAULT has to be the trust-backed one, for exactly the reason
+    :func:`default_ledger_sink`'s does: ``exchange.main.create_app()`` with no deployment
+    document and no environment is both what T-303's gate builds and what ``docker compose up``
+    starts, so a source reachable only through configuration is a source no deployment in this
+    repository reaches — which is the whole finding (``configure_auctions(app,
+    eligibility=...)`` had no product caller, and the served exchange therefore asked nobody).
+
+    It does NOT weaken the invariant this module is built on. An exchange that cannot reach
+    trust reads no snapshot, a store with no snapshot row is ``UNAVAILABLE``, and ``UNAVAILABLE``
+    denies at all three gates — so an unconfigured exchange still refuses everything, and now
+    it refuses with a reason that names the trust service it could not reach instead of naming
+    a deterministic double nobody deployed.
+    """
+    return bind_seller_eligibility(env=env)
+
+
+# =====================================================================================
 # Binding
 # =====================================================================================
-def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
+def bind_eligibility(
+    app: Any, deployment: Deployment | None, env: Mapping[str, str] | None = None
+) -> bool:
+    """Bind this app's R12 source unless it already has one. Returns whether it bound.
+
+    **The ladder, and why it is in this order.** All three rungs are fail-closed; they differ
+    only in who is answering.
+
+    1. ``sellers`` — the platform's own registry, stated by a person. It stays FIRST even when
+       the document also states a ``trust_snapshot``, because the module header says why: R12's
+       eligibility and the trust snapshot are two independent reads by design, the ranking
+       calls them ``blacklisted_store`` and ``blacklist_unreadable`` separately, and a
+       composition root that manufactured one from the other would be inventing an answer the
+       trust service never gave. ``test_a_store_the_ranking_excluded_cannot_be_bought`` is
+       exactly that distinction: it marks ``s1`` blacklisted in the SNAPSHOT and requires the
+       store to still be solicited and still be excluded by the ranking.
+    2. ``trust_snapshot`` with no ``sellers`` — a document that states trust's verdict and no
+       registry of its own. Then trust's verdict IS the eligibility answer, read through
+       :class:`~exchange.eligibility.trust_backed.TrustBackedSellerEligibility` rather than
+       transcribed into rows: a store the snapshot delists is denied, and a store the snapshot
+       does not carry is denied too.
+    3. Neither, or no document at all — :func:`bind_seller_eligibility`, which reads trust's
+       published ``GET /snapshot`` over HTTP. This is the rung T-303 is about: before it, the
+       served exchange fell through to ``auction/routes.py``'s lazy
+       ``StaticSellerEligibility()`` with no rows, and answered ``static-eligibility: <store>
+       is unavailable`` for every store alive — which is not "consulted trust and refused", it
+       is "asked nobody".
+
+    Idempotent, and it never overwrites: an app a test or a deployment has already handed a
+    source through ``configure_auctions`` keeps it. That matters more here than elsewhere
+    because ``ensure_configured`` does NOT cache the "no deployment configured" answer, so this
+    runs on every request until something is bound.
+    """
+    from .auction.routes import configure_auctions  # noqa: PLC0415 — see the import note
+
+    if getattr(app.state, "seller_eligibility", None) is not None:
+        return False
+    if deployment is not None and deployment.sellers:
+        configure_auctions(app, eligibility=StaticSellerEligibility(deployment.eligibility_rows))
+        return True
+    if deployment is not None and deployment.trust_snapshot is not None:
+        configure_auctions(
+            app,
+            eligibility=TrustBackedSellerEligibility(
+                dict(deployment.trust_snapshot),
+                source=f"the trust snapshot in {deployment.source}",
+            ),
+        )
+        return True
+    configure_auctions(
+        app,
+        eligibility=bind_seller_eligibility(
+            None if deployment is None else deployment.trust_url, env
+        ),
+    )
+    return True
+
+
+def configure_exchange(
+    app: Any, deployment: Deployment, env: Mapping[str, str] | None = None
+) -> tuple[str, ...]:
     """Bind everything ``deployment`` states that this app has not already been given.
 
     Composed out of the three published wiring seams — :func:`configure_auctions`,
@@ -1135,8 +1508,7 @@ def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
         )
         bound.append("auction_machine")
 
-    if deployment.sellers and unset("seller_eligibility"):
-        configure_auctions(app, eligibility=StaticSellerEligibility(deployment.eligibility_rows))
+    if bind_eligibility(app, deployment, env):
         bound.append("seller_eligibility")
 
     endpoints = deployment.bid_endpoints
@@ -1215,12 +1587,21 @@ def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[s
         return already
     deployment = read_deployment(env)
     if deployment is None:
+        # An exchange nobody configured still ASKS (T-303). The R12 source is bound here rather
+        # than left to `auction/routes.py::_eligibility`'s lazy `StaticSellerEligibility()`,
+        # which is a deterministic double built with no rows: it answers "unavailable" for
+        # every store alive, which reads as a trust verdict and is not one. The trust-backed
+        # default denies just as completely when trust is unreachable — see
+        # `default_seller_eligibility` — so the invariant this module may not break is intact,
+        # and a denial now names the trust service instead of the double. `bind_eligibility` is
+        # idempotent, so this costs one bind and not one per request.
+        bind_eligibility(app, None, env)
         # Deliberately NOT cached. "No deployment configured" is two `os.environ` lookups to
         # re-establish, and caching it meant a document that appeared after the first request
         # was ignored for the life of the process — a real trap for an operator who starts the
         # exchange and then writes the file. Only a SUCCESSFUL bind is remembered; a failure is
         # not cached either, so a fixed document is picked up by the next request.
         return ()
-    bound = configure_exchange(app, deployment)
+    bound = configure_exchange(app, deployment, env)
     setattr(app.state, STATE_FLAG, bound)
     return bound

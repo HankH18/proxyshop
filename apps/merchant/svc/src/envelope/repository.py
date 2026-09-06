@@ -27,19 +27,28 @@ fails therefore leaves the process's history unchanged rather than one version a
 durable one — a store that believes it filed v4 while the table stops at v3 is the exact
 "stale writer reinstates replaced limits" failure the version rule exists to prevent.
 
-The honest limit, stated here rather than discovered inside a migration
------------------------------------------------------------------------
-``sealed.envelopes`` has **no column for the approval artifact**: its columns are
-``store_id, version, activation, max_discount_pct, budget_cap, floors, pursue_clusters,
-standing_commitments, created_at``. R6 requires a live envelope to carry the *recorded*
-written approval that authorized it, and this table cannot carry one. So a row read back as
-``active`` is restored in ``shadow`` and logged at WARNING: the approval that made it live is
-not in the table, and reinstating "live" on the strength of a row that lost its paperwork is
-precisely the caller-asserted activation T-248 closed. The failure direction is the safe one
-— a restart can only *stop* a store bidding, never start one — and the merchant re-activates
-against a fresh approval. Carrying activation across the boundary needs a migration that adds
-the artifact; that is a schema change and is reported as such, not smuggled into a jsonb
-column that nothing validates.
+The approval crosses the boundary too (T-350)
+----------------------------------------------
+``sealed.envelopes`` carries five ``approval_*`` columns mirroring
+:class:`~merchant_svc.envelope.model.ApprovalArtifact` field for field, and a CHECK,
+``envelopes_active_requires_approval``, that makes the three mandatory ones NOT NULL for any
+row asserting ``active``. That is the same rule
+``merchant_svc.envelope.store._refuse_unapproved_activation`` enforces in memory (R6, T-248),
+now stated in the one place a bug in this module cannot get around.
+
+It used to be the other way: the table had nowhere to put the artifact, so every row read back
+as ``active`` was downgraded to ``shadow`` and an approved envelope silently stopped bidding
+across a restart. :func:`restorable` still makes exactly that downgrade — it is the fail-safe
+for a row written before the migration, or by something that is not this module — but it is no
+longer the *only* thing that can happen to a live row. A row that carries its approval comes
+back live — and only if the artifact still *covers* the terms it came back with, which
+:func:`restorable` re-checks, so a hash that survived as text while the terms changed
+underneath it lands in ``shadow`` rather than being believed.
+
+Reading a row that predates the migration is deliberately still possible: the approval columns
+are treated as absent-means-no-approval rather than as a shape error, so the fail-safe applies
+to it instead of an exception. The eight columns that identify and describe a version are still
+required, because a row missing one of *those* is not a ``sealed.envelopes`` row at all.
 """
 
 from __future__ import annotations
@@ -47,10 +56,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Protocol, runtime_checkable
 
-from .model import ACTIVE, SHADOW, Envelope, EnvelopeInvalid
+from .digest import approval_covers, approval_digest
+from .model import ACTIVE, SHADOW, ApprovalArtifact, Envelope, EnvelopeInvalid
 
 __all__ = [
     "ENVELOPES_TABLE",
@@ -66,9 +77,9 @@ _log = logging.getLogger(__name__)
 #: future reader cannot drift on which table this is.
 ENVELOPES_TABLE = "sealed.envelopes"
 
-#: The row shape, in the order both statements use it. ``approval`` is deliberately absent —
-#: see the module docstring.
-_COLUMNS: tuple[str, ...] = (
+#: The eight columns that identify a version and describe its terms. A row missing one of
+#: these is not a ``sealed.envelopes`` row and is refused as such.
+_CORE_COLUMNS: tuple[str, ...] = (
     "store_id",
     "version",
     "activation",
@@ -79,9 +90,21 @@ _COLUMNS: tuple[str, ...] = (
     "standing_commitments",
 )
 
+#: The recorded written approval, column per :class:`ApprovalArtifact` field, in that class's
+#: own :data:`~merchant_svc.envelope.model.ApprovalArtifact.FIELDS` order. Appended AFTER the
+#: core eight and never interleaved: the parameter tuple's leading positions are asserted
+#: verbatim by the existing hardening suite, and reordering them would move a version's terms
+#: into the approval's columns.
+_APPROVAL_COLUMNS: tuple[str, ...] = tuple(f"approval_{field}" for field in ApprovalArtifact.FIELDS)
+
+#: The row shape, in the order every statement below uses it.
+_COLUMNS: tuple[str, ...] = _CORE_COLUMNS + _APPROVAL_COLUMNS
+
 _SELECT_HISTORY = f"select {', '.join(_COLUMNS)} from {ENVELOPES_TABLE} order by store_id, version"  # noqa: S608
 
-#: Columns that carry the version's STATE, as opposed to the two that identify it.
+#: Columns that carry the version's STATE, as opposed to the two that identify it. The
+#: approval belongs here: ``activate`` files the artifact onto the version it approves and
+#: ``kill`` carries it forward, both at the same version number, so both restate this row.
 _STATE_COLUMNS: tuple[str, ...] = _COLUMNS[2:]
 
 #: ``on conflict (store_id, version) do update`` is not a shortcut, it is what the table means.
@@ -132,20 +155,56 @@ def restorable(envelope: Envelope) -> Envelope:
     """``envelope`` as it may be brought back into a fresh process.
 
     An ``active`` version whose approval artifact did not survive the round trip comes back in
-    ``shadow``. This is the one place that decision is made, so the in-memory repository —
-    which *can* keep the artifact — and the Postgres one, which cannot, agree about what a
-    restart means, and a test against the fast implementation is evidence about the slow one.
+    ``shadow``. This is the one place that decision is made, so both repositories agree about
+    what a restart means and a test against the fast implementation is evidence about the slow
+    one.
+
+    Since T-350 both implementations *can* keep the artifact, so this fires for one case
+    rather than for every restored row: a row written before ``sealed.envelopes`` grew its
+    ``approval_*`` columns, or by something that is not this module. The table now refuses to
+    accept such a row (``envelopes_active_requires_approval``) and the migration downgraded the
+    ones already on file — this is the belt to that pair of braces, and it stays because
+    reinstating "live" on the strength of a row that lost its paperwork is exactly the
+    caller-asserted activation T-248 closed.
+
+    The second branch is the one the columns made necessary, and it is a **downgrade rather
+    than a refusal on purpose.** A stored artifact that does not cover the terms it came back
+    with means the row's approval and the row's terms disagree — someone changed a live
+    envelope's terms in the table without re-approving them. ``record`` refuses that outright
+    (T-248), because there is a caller to tell. On the way *in* there is nobody to tell and
+    raising takes the whole ``EnvelopeVersions`` down with it, which means the merchant service
+    cannot boot at all: no routes, and no kill switch, over ONE bad row for ONE store.
+    Measured against ``proxyshop-postgres-1`` with a hand-written row, before this branch
+    existed: ``ApprovalRejected`` out of ``EnvelopeVersions.__init__``. So it lands in
+    ``shadow`` like the other unjustified row, loudly — the safe direction this module has
+    always taken, and the only one that keeps stopping a store possible.
     """
-    if envelope.activation != ACTIVE or envelope.approval is not None:
+    if envelope.activation != ACTIVE:
         return envelope
-    _log.warning(
-        "store %r envelope v%d was stored active but its approval artifact did not survive "
-        "the persistence boundary; restoring it in %s — re-approve to make it live again",
-        envelope.store_id,
-        envelope.version,
-        SHADOW,
-    )
-    return envelope.with_activation(SHADOW, None)
+    approval = envelope.approval
+    if approval is None:
+        _log.warning(
+            "store %r envelope v%d was stored active but its approval artifact did not survive "
+            "the persistence boundary; restoring it in %s — re-approve to make it live again",
+            envelope.store_id,
+            envelope.version,
+            SHADOW,
+        )
+        return envelope.with_activation(SHADOW, None)
+    if not approval_covers(envelope, approval.envelope_hash):
+        _log.warning(
+            "store %r envelope v%d was stored active under an approval by %r bound to %s, "
+            "which is not this version's terms (%s); the row's terms and its approval "
+            "disagree, so nothing on file authorizes it being live — restoring it in %s",
+            envelope.store_id,
+            envelope.version,
+            approval.approver,
+            approval.envelope_hash,
+            approval_digest(envelope),
+            SHADOW,
+        )
+        return envelope.with_activation(SHADOW, None)
+    return envelope
 
 
 class InMemoryEnvelopeRepository:
@@ -229,9 +288,10 @@ class PostgresEnvelopeRepository:
             document["budget_cap"] = float(document["budget_cap"] or 0.0)
             for jsonb in ("floors", "pursue_clusters", "standing_commitments"):
                 document[jsonb] = _as_list(document[jsonb])
-            # `approval=None` and not KEEP: the table has no column for it, so "carry what the
-            # document recorded" would carry nothing while looking like it carried something.
-            envelope = Envelope.from_obj(document, approval=None)
+            # Explicit, never KEEP: the artifact is rebuilt from the row's own approval_*
+            # columns, so "no approval columns" reads as no approval rather than as whatever
+            # happened to be lying around in the document.
+            envelope = Envelope.from_obj(document, approval=_recorded_approval(document))
             history.setdefault(envelope.store_id, []).append(restorable(envelope))
         return history
 
@@ -248,6 +308,11 @@ class PostgresEnvelopeRepository:
         """
         document = envelope.to_dict()
         _refuse_terms_the_columns_would_round(document)
+        # `or {}` and not a branch: an envelope with no approval writes five NULLs, which is
+        # what `envelopes_approval_is_whole` means by "absent". Writing a partial artifact is
+        # not reachable from here — `ApprovalArtifact` cannot be built without its three
+        # mandatory fields — and the CHECK refuses it anyway.
+        approval: Mapping[str, Any] = document["approval"] or {}
         values = (
             document["store_id"],
             document["version"],
@@ -257,6 +322,7 @@ class PostgresEnvelopeRepository:
             json.dumps(document["floors"]),
             json.dumps(document["pursue_clusters"]),
             json.dumps(document["standing_commitments"]),
+            *(approval.get(field) for field in ApprovalArtifact.FIELDS),
         )
         try:
             with self._connection.cursor() as cur:
@@ -274,16 +340,64 @@ def _row_to_document(row: Any) -> dict[str, Any]:
     psycopg factory. Zipping a mapping against :data:`_COLUMNS` iterates its KEYS, and the
     lengths match, so ``strict=True`` does not catch it — every field silently becomes its own
     column name and the failure surfaces later as an unrelated float conversion error.
+
+    The :data:`_CORE_COLUMNS` are required and the :data:`_APPROVAL_COLUMNS` are not, because
+    those two absences mean different things. A row missing ``budget_cap`` did not come from
+    this table. A row missing ``approval_approver`` came from this table **before T-350 added
+    the column**, and the answer to it is the fail-safe that has always been there:
+    :func:`restorable` restores it in ``shadow``. Refusing it instead would turn a rolling
+    deploy — new code, old schema — into a merchant service that cannot boot.
     """
     if isinstance(row, Mapping):
-        missing = [column for column in _COLUMNS if column not in row]
+        missing = [column for column in _CORE_COLUMNS if column not in row]
         if missing:
             raise EnvelopeInvalid(
                 f"a {ENVELOPES_TABLE} row is missing column(s) {missing}; the table does not "
                 "have the shape this repository was written against"
             )
-        return {column: row[column] for column in _COLUMNS}
-    return dict(zip(_COLUMNS, row, strict=True))
+        return {column: row.get(column) for column in _COLUMNS}
+    values = tuple(row)
+    if len(values) == len(_CORE_COLUMNS):
+        document = dict(zip(_CORE_COLUMNS, values, strict=True))
+        document.update(dict.fromkeys(_APPROVAL_COLUMNS))
+        return document
+    return dict(zip(_COLUMNS, values, strict=True))
+
+
+def _recorded_approval(document: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The written approval this row records, or ``None`` when it records none.
+
+    ``None`` means *nothing at all was written down* — every approval column NULL, which is a
+    shadow row, a killed row that was never approved, or a row that predates the columns.
+    Anything else is handed to :meth:`ApprovalArtifact.parse` as-is, so a row carrying half an
+    artifact is refused by the model, loudly and by name, rather than quietly restored as an
+    approval with a missing approver. ``envelopes_approval_is_whole`` makes that unreachable
+    through the table; a hand-edited database is not the table's problem to catch twice.
+    """
+    recorded = {
+        field: _approval_field(document.get(column))
+        for field, column in zip(ApprovalArtifact.FIELDS, _APPROVAL_COLUMNS, strict=True)
+    }
+    if all(value is None for value in recorded.values()):
+        return None
+    return {field: value for field, value in recorded.items() if value is not None}
+
+
+def _approval_field(value: Any) -> Any:
+    """One ``approval_*`` column as the text :class:`ApprovalArtifact` expects.
+
+    ``approval_approved_at`` is ``timestamptz``, which is the honest type for an instant and
+    is what lets the database order and compare it — but psycopg hands it back as a
+    ``datetime``, and the artifact's ``approved_at`` is ISO-8601 text. Rendering it here in
+    UTC produces exactly what :func:`~merchant_svc.envelope.model._utc_timestamp` produced on
+    the way in, so the round trip is the identity for every instant the model can hold (it
+    truncates to microseconds at parse time, which is also ``timestamptz``'s resolution).
+    Nothing in the approval digest covers ``approved_at``, so this cannot move a hash — but an
+    approval record whose date changed by being written down is still not the record.
+    """
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
+    return value
 
 
 def _refuse_terms_the_columns_would_round(document: Mapping[str, Any]) -> None:

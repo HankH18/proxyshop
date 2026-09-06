@@ -32,15 +32,22 @@ on a harness that races nothing, and the file would prove nothing at all. The co
 claim table that always says "you won" — the pre-T-158 guard, exactly — and REQUIRES the
 double spend to be observed. If it stops reproducing, the harness is broken, not fixed.
 
-The remaining tests pin the pieces the cross-process test exercises as a bundle: the
+The next group pins the pieces the cross-process test exercises as a bundle: the
 reservation primitive itself, the ``ACCEPTED`` transition's serialisation, the in-process
 route under two threads with a Redis-shaped store latency, and A5's release-on-refusal.
+
+Section 9 points the other way, and the file was blind without it. Everything above refuses a
+second accept, and a guard that refuses EVERY accept passes all of it: keyed on a constant
+instead of the auction id, ``StoreAcceptanceClaims`` left this file at ``11 passed`` while the
+deployment refused every auction after the first. Section 9 is the positive control — the same
+fixtures and the same two-process harness, in the honest direction — and it carries that
+measurement in full.
 
 Ticket verify::
 
     PROXYSHOP_WORKER=<n> pytest apps/exchange/tests/test_t158_acceptance_claim.py -q
 
-Wall clock: 8 seconds measured, dominated by the 2 s start-instant lead each of the four
+Wall clock: 10 seconds measured, dominated by the 2 s start-instant lead each of the five
 pairs of child processes is given to boot, plus a ~150 ms mint latency per race.
 """
 
@@ -382,10 +389,17 @@ def closed_auction(store: Any, auction_id: str) -> AuctionStateMachine:
     return machine
 
 
-def wired_app(machine: AuctionStateMachine, auction_id: str, creator: Any, **extra: Any) -> Any:
-    """The served exchange, wired the way ``test_accept_routes.py::wired_app`` wires it."""
+def wired_app(
+    machine: AuctionStateMachine, auction_id: str | Sequence[str], creator: Any, **extra: Any
+) -> Any:
+    """The served exchange, wired the way ``test_accept_routes.py::wired_app`` wires it.
+
+    ``auction_id`` may name several auctions, which is what section 9 needs: one app, one
+    store, one claim table, and more than one auction to be honest about.
+    """
     book = InMemoryAuctionBids()
-    book.record(auction_id, [honest_bid("bid-a"), honest_bid("bid-b", "store-b")])
+    for one in [auction_id] if isinstance(auction_id, str) else list(auction_id):
+        book.record(one, [honest_bid("bid-a"), honest_bid("bid-b", "store-b")])
     app = create_app()
     configure_accept(
         app,
@@ -526,13 +540,24 @@ def _child_environment() -> dict[str, str]:
 
 
 def cross_process_accept(
-    workdir: Path, *, bid_ref: str, guard: str, lead: float = CHILD_LEAD_SECONDS
+    workdir: Path,
+    *,
+    bid_ref: str,
+    guard: str,
+    lead: float = CHILD_LEAD_SECONDS,
+    auction_ids: Sequence[str] = ("auction-t158", "auction-t158"),
 ) -> RaceOutcome:
-    """Two OS processes accept one auction at one instant. Returns statuses and codes minted.
+    """Two OS processes accept at one instant. Returns statuses and codes minted.
 
     Both children get the SAME ``bid_ref``: the double-click / client retry, which is the case
-    the ticket's reproduction shows is live. The auction is pre-created here, in the parent,
-    through the same :class:`FileBackedAuctionStore` the children will open.
+    the ticket's reproduction shows is live. Every auction named in ``auction_ids`` is
+    pre-created here, in the parent, through the same :class:`FileBackedAuctionStore` the
+    children will open.
+
+    ``auction_ids`` is one id per child and defaults to the same auction for both — the race.
+    Giving it two DIFFERENT ids is the honest-traffic direction (section 9): two buyers, two
+    auctions, two workers, one store, and both must mint. It is the same harness either way,
+    which is the point — a guard that passes the race by refusing everything fails here.
     """
     workdir.mkdir(parents=True, exist_ok=True)
     store_dir = workdir / "store"
@@ -540,31 +565,31 @@ def cross_process_accept(
     script = workdir / "accept_once.py"
     script.write_text(CHILD_SCRIPT, encoding="utf-8")
 
-    auction_id = "auction-t158"
-    machine = closed_auction(FileBackedAuctionStore(store_dir), auction_id)
-    assert machine.state_of(auction_id) == CLOSED
+    store = FileBackedAuctionStore(store_dir)
+    for one in dict.fromkeys(auction_ids):  # ordered, and created once when both share an id
+        machine = closed_auction(store, one)
+        assert machine.state_of(one) == CLOSED
 
     start_at = time.time() + lead
-    argv = [
-        sys.executable,
-        str(script),
-        str(Path(__file__).resolve()),
-        str(store_dir),
-        str(merchant_dir),
-        auction_id,
-        bid_ref,
-        f"{start_at!r}",
-        guard,
-    ]
     processes = [
         subprocess.Popen(
-            argv,
+            [
+                sys.executable,
+                str(script),
+                str(Path(__file__).resolve()),
+                str(store_dir),
+                str(merchant_dir),
+                auction_id,
+                bid_ref,
+                f"{start_at!r}",
+                guard,
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=_child_environment(),
             text=True,
         )
-        for _ in range(2)
+        for auction_id in auction_ids
     ]
 
     outcome = RaceOutcome()
@@ -905,3 +930,105 @@ def test_the_redis_store_reserves_atomically_across_independent_instances(
         f"auction:{auction_id}:"
     )
     assert redis_client.ttl(RedisAuctionStore.reservation_key(auction_id, "accept")) > 0
+
+
+# =====================================================================================
+# 9. The other direction — the guard must not refuse honest traffic
+# =====================================================================================
+# Every test above points at the attack, and a guard that refuses EVERYTHING passes all of
+# them. That is not a hypothetical here, it is measured: key ``StoreAcceptanceClaims`` on a
+# constant instead of the auction id — one line, in the money guard, and the deployment then
+# refuses every auction after the first for as long as the store lives — and this file stays
+# at ``11 passed``. The whole of ``apps/exchange/tests`` goes to ``2 failed, 1128 passed``,
+# and neither failure is in this file or about acceptance claims
+# (``test_composition_root.py::test_every_ranked_bid_is_one_the_auction_can_be_asked_to_accept``
+# and ``test_repro_open_tickets.py::test_t294_a_bid_the_exchange_just_returned_can_be_accepted``).
+# The ticket's own verify line runs THIS file, so that regression ships green past its gate.
+#
+# These three are the positive control, in the same fixtures, the same wiring and the same
+# cross-process harness the attack uses, so neither direction can be made green by weakening
+# the other. Each one goes red under the constant-key regression above.
+def test_the_claim_port_constrains_one_auction_and_leaves_every_other_open() -> None:
+    """The claim is on the AUCTION. A different auction — same bid ref — is still claimable.
+
+    :class:`StoreAcceptanceClaims` is the table :func:`configure_accept` derives and the
+    deployment therefore runs on, and this is the property that makes it a one-accept guard
+    rather than a one-accept-per-process guard: it constrains exactly one ``(auction, accept)``
+    pair. The same ``bid_ref`` is used on both auctions deliberately — a guard keyed on the bid
+    would pass every race in this file and refuse the second buyer who retried a ref the client
+    library happened to reuse.
+    """
+    claims = StoreAcceptanceClaims(InMemoryAuctionStore())
+
+    assert claims.claim("auction-1", "bid-a") == ClaimOutcome(won=True, holder="bid-a")
+    assert claims.claim("auction-2", "bid-a") == ClaimOutcome(won=True, holder="bid-a"), (
+        "a claim on one auction refused an accept on a different auction"
+    )
+    assert claims.claim("auction-1", "bid-b") == ClaimOutcome(won=False, holder="bid-a")
+
+    # A5's release is per-auction too, in both directions: it frees the one it names...
+    claims.release("auction-1", "bid-a")
+    assert claims.claim("auction-1", "bid-b") == ClaimOutcome(won=True, holder="bid-b")
+    # ...and leaves every other auction's claim exactly where it was.
+    assert claims.claim("auction-2", "bid-b") == ClaimOutcome(won=False, holder="bid-a"), (
+        "releasing one auction's claim reopened another auction for a second mint"
+    )
+
+
+def test_two_different_auctions_each_mint_their_own_code_through_one_served_app() -> None:
+    """One app, one store, one claim table, two auctions: two 200s and two distinct codes.
+
+    The ordinary shape of the exchange — a worker serves many auctions — and the shape the
+    race tests cannot distinguish from a guard that has jammed shut. Both accepts carry the
+    same ``bid_ref`` for the reason the port test above does, and the persisted stamps are
+    read back because a 200 that did not stamp is a second mint waiting to happen.
+    """
+    store = InMemoryAuctionStore()
+    closed_auction(store, "auction-one")
+    machine = closed_auction(store, "auction-two")
+    merchant = LatentCodeCreator(latency=0.0)
+    app = wired_app(machine, ("auction-one", "auction-two"), merchant)
+
+    with TestClient(app) as client:
+        first = client.post("/auctions/auction-one/accept", json={"bid_ref": "bid-a"})
+        second = client.post("/auctions/auction-two/accept", json={"bid_ref": "bid-a"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, (
+        f"the second auction's buyer was refused {second.text}; the one-accept guard is "
+        f"refusing honest traffic rather than a double accept"
+    )
+    codes = [first.json()["code"], second.json()["code"]]
+    assert len(set(codes)) == 2, f"one code was issued for two purchases: {codes}"
+    assert len(merchant.calls) == 2, f"merchant POST /codes calls: {len(merchant.calls)}"
+
+    for auction_id in ("auction-one", "auction-two"):
+        record = store.load(auction_id)
+        assert record is not None and record.state == ACCEPTED, auction_id
+        assert record.accepted_bid_ref == "bid-a", auction_id
+
+
+def test_two_processes_accepting_two_different_auctions_both_mint(tmp_path: Path) -> None:
+    """The deployment, doing its job: two workers, two buyers, two auctions, two codes.
+
+    The same two-OS-process harness as the headline test and the same shared durable store —
+    only the auction ids differ. It is the honest-traffic twin of
+    :func:`test_two_os_processes_accepting_one_auction_mint_exactly_one_code`: that one fails
+    if the durable claim is too weak, this one fails if it is too broad, and no single change
+    to the guard can satisfy both by accident.
+    """
+    outcome = cross_process_accept(
+        tmp_path / "honest",
+        bid_ref="bid-a",
+        guard="claimed",
+        auction_ids=("auction-t158-one", "auction-t158-two"),
+    )
+
+    assert sorted(outcome.statuses) == [200, 200], (
+        "a buyer on an auction nobody else touched was refused; " + outcome.summary()
+    )
+    assert len(outcome.codes) == 2, (
+        f"two auctions were accepted and the merchant issued {len(outcome.codes)} codes; "
+        f"{outcome.summary()}"
+    )
+    assert len(set(outcome.codes)) == 2, outcome.summary()

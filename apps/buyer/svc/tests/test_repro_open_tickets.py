@@ -1708,14 +1708,23 @@ def test_t142_the_published_row_sweep_is_armed(monkeypatch: Any) -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-142: publish_profile (profile/__init__.py:1378) is the ONLY writer of "
-        "app.buyer_accounts and has zero production callers — an AST scan of all 269 "
-        "non-test modules finds its own def and nothing else — while "
-        "apps/buyer/compose.yaml:32 already hands the buyer service a PROXYSHOP_PG_DSN_APP "
-        "that no line of apps/buyer reads. Nothing outside the buyer service references "
-        "app.buyer_accounts either, so R5's 'the BuyerProfile handed to stores' is handed to "
-        "nobody: GET /buyer/profile needs an X-Buyer-Session header only the buyer holds; "
-        "remove this marker with the fix"
+        "T-142, and at HEAD it is clause (C) ALONE. (A) and (B) are closed and are still "
+        "graded below: publish_profile (profile/__init__.py:1718 — not 1378) now has two "
+        "production callers, auth/routes.py:784 and :806, and all 40 served profiles reach "
+        "app.buyer_accounts over a connection opened from PROXYSHOP_PG_DSN_APP "
+        "(apps/buyer/compose.yaml:37, read at auth/routes.py:99), so 'no line of apps/buyer "
+        "reads it' is no longer true. What fails is (C): no production module OUTSIDE "
+        "apps/buyer/ names app.buyer_accounts — the only four that do are auth/magic_link.py, "
+        "auth/routes.py, auth/sessions.py and profile/__init__.py. Note R5's 'the BuyerProfile "
+        "handed to stores' IS delivered, but over HTTP rather than through this table: "
+        "intent/routes.py:437 -> intent/confirmation.py:269 puts the profile in the exchange's "
+        "POST /auctions body, exchange/composition.py:718 normalises it, and it reaches the "
+        "store agent as BidRequest.profile (store-agent/src/runtime/context.py:433). The table "
+        "is therefore a second copy of that data with no reader, and app.intents.pseudonym's "
+        "FK to it (db/migrations/0003_sealed_vault_app_tables.sql:302) is inert because "
+        "nothing writes app.intents either. Closing (C) means building a cross-service "
+        "consumer nobody has asked for, against a documented exchange decision NOT to look "
+        "buyers up (exchange/composition.py:718 docstring); remove this marker with the fix"
     ),
 )
 def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_store_table(

@@ -6,7 +6,7 @@ Same mechanism as the other ``test_repro_open_tickets.py`` files: one
 ``1 failed``. ``strict=True`` turns the eventual repair into an XPASS *failure*, so whoever
 fixes the defect must delete the marker.
 
-Covered here: T-242, T-265.
+Covered here: T-242, T-265, T-303 (a).
 
 Nothing in this file touches product source.
 """
@@ -531,3 +531,348 @@ def test_t265_the_confinement_guard_notices_its_whitelisted_kind_deviating(sim_r
         with pytest.raises(AssertionError, match="deviating"):
             guard(_StandInRun([_problem(kind, "some-published-key") for kind in sorted(kinds)]))
             pytest.fail(f"the guard accepted a set that is not the live one — {label}")
+
+
+# =====================================================================================
+# T-303 (a) — the delisting the run computes is sealed nowhere
+# =====================================================================================
+#
+# STATUS: FIXED. ``run_simulation`` now builds the snapshot BEFORE it verifies, seals every
+# ``delistings`` event the snapshot produced through ``trust.events.append``, and only then
+# calls ``event_store.verify()`` — so the chain that is verified is the chain that holds the
+# decision (services/sim/src/runner.py).
+#
+# WHAT THE DEFECT WAS, measured on the approved manifest at HEAD before the repair:
+#
+#   run.events                 36  (12 accepted, 12 code_created, 12 checkout_redirect)
+#   run.snapshot["delistings"]  1  ('blacklisted', 'store-brightbean', score 0.0729 vs 0.35)
+#   appends of that delisting   0
+#
+# ``run_simulation`` appended only ``outcome.events`` from ``exchange.accept`` inside the
+# episode loop, called ``event_store.verify()``, and THEN called ``build_snapshot(...)``. The
+# ``delistings`` the snapshot computed rode out on the returned dataclass and were appended to
+# nothing. The platform decided a store should be delisted and the ledger an exchange, an
+# auditor or an appeal reads never heard about it.
+#
+# The ordering matters as much as the append. Verifying first and appending after would leave
+# the run's ``chain_ok`` a statement about a chain that is missing its last events — a weaker
+# check than the one the field's name promises — so the sequence is snapshot, seal, verify.
+#
+# WHY THESE GATES WATCH THE WRITER AND NOT THE REPORT. ``sim.runner.normalise_event``
+# deliberately drops ``event_id`` and ``ts``, so comparing ids against ``run.events`` grades
+# the single string ``"None"``; and splicing the delistings into a reported list after the
+# fact would satisfy any report-shaped assertion while sealing nothing. So the spy sits on
+# ``InMemoryEventStore.append`` — the one seam ``trust.events.append`` delegates to — and the
+# appends are grouped BY INSTANCE, because appending to a throwaway store the run never
+# verifies is not sealing either.
+
+#: The two kinds ``apps/trust/src/snapshot/delisting.py`` emits. Both are in the frozen
+#: ``LEDGER_EVENT_KINDS`` vocabulary, which is what makes them appendable at all.
+_T303A_DELISTING_KINDS = frozenset({"blacklisted", "blacklist_expired"})
+
+
+def _t303a_seal_spy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[str, int, Any]], list[Any]]:
+    """Watch ``InMemoryEventStore``'s write and verify seams, in call order.
+
+    Returns the ordered log of ``("append" | "verify", id(store), payload)`` and the list of
+    live store objects. The second return value is not decoration: ``id()`` is unique only
+    among LIVE objects, so a discarded throwaway store could otherwise inherit the principal
+    store's id and make an append to it look like an append to the run's own chain. The
+    caller must keep the returned list referenced for as long as it reads the log.
+    """
+    from trust.events.store import InMemoryEventStore
+
+    log: list[tuple[str, int, Any]] = []
+    alive: list[Any] = []
+    real_append = InMemoryEventStore.append
+    real_verify = InMemoryEventStore.verify
+
+    def append_spy(self: Any, event: Mapping[str, Any]) -> Any:
+        alive.append(self)
+        log.append(("append", id(self), dict(event)))
+        return real_append(self, event)
+
+    def verify_spy(self: Any) -> Any:
+        alive.append(self)
+        report = real_verify(self)
+        log.append(("verify", id(self), dict(report)))
+        return report
+
+    monkeypatch.setattr(InMemoryEventStore, "append", append_spy)
+    monkeypatch.setattr(InMemoryEventStore, "verify", verify_spy)
+    return log, alive
+
+
+def _t303a_principal(log: Sequence[tuple[str, int, Any]]) -> int:
+    """The id of the store that took the most appends — the run's own chain."""
+    from collections import Counter
+
+    counts = Counter(store for verb, store, _ in log if verb == "append")
+    assert counts, (
+        "the spy saw no append at all go through InMemoryEventStore during a whole "
+        "simulation run. The write seam moved, so every assertion below would conclude from "
+        "nothing"
+    )
+    principal, appends = counts.most_common(1)[0]
+    assert appends >= 20, (
+        f"the busiest event store took only {appends} appends during a whole simulation run "
+        f"(36 when this was written), across {len(counts)} store(s). The run's chain is not "
+        f"being written through this seam any more"
+    )
+    return int(principal)
+
+
+def test_t303a_the_delisting_seal_probe_is_armed() -> None:
+    """Not xfail, and the separation is why it exists.
+
+    Everything the gates below need that does NOT require a simulation run is asserted here,
+    where a stale probe fails in its own name instead of being reported as the defect it was
+    written to detect.
+    """
+    import trust.events as events_pkg
+    from contracts.ledger import LEDGER_EVENT_KINDS
+    from trust.events.store import InMemoryEventStore
+
+    # The patch target, checked rather than assumed. ``run_simulation`` does
+    # ``from trust.events import InMemoryEventStore, append`` inside its own body; if the
+    # package attribute were a different class object from the one patched below, the spy
+    # would be installed on a door the run never opens.
+    assert events_pkg.InMemoryEventStore is InMemoryEventStore, (
+        "trust.events.InMemoryEventStore is no longer the class defined in "
+        "trust.events.store, so the monkeypatch below would be a silent no-op"
+    )
+    assert callable(getattr(InMemoryEventStore, "append", None)), (
+        "InMemoryEventStore has no callable `append`; trust.events.append delegates to it by "
+        "getattr, so the seam this gate watches has moved"
+    )
+
+    # An append cannot seal a kind the frozen vocabulary does not carry, so the two kinds the
+    # delisting seam emits have to be in it or the fix below is impossible rather than absent.
+    assert _T303A_DELISTING_KINDS <= set(LEDGER_EVENT_KINDS), (
+        f"the delisting kinds {sorted(_T303A_DELISTING_KINDS - set(LEDGER_EVENT_KINDS))} are "
+        "outside the frozen LedgerEvent vocabulary, so they could not be appended at all"
+    )
+
+    from apps.trust.src.snapshot.delisting import BLACKLIST_EXPIRED_KIND, BLACKLISTED_KIND
+
+    assert {BLACKLISTED_KIND, BLACKLIST_EXPIRED_KIND} == _T303A_DELISTING_KINDS, (
+        "the delisting seam emits kinds this gate does not know about: "
+        f"{sorted({BLACKLISTED_KIND, BLACKLIST_EXPIRED_KIND})}"
+    )
+
+
+def test_t303a_every_delisting_the_run_computes_is_sealed_into_the_chain_it_verifies(
+    sim_manifest: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The decision is computed. It is only recorded when it also reaches the writer.
+
+    Two properties, and the second is the one a naive reorder loses:
+
+    1. every event in ``run.snapshot["delistings"]`` went through the append seam of the
+       store that holds the run's own chain — not a throwaway, and not merely into a list on
+       the returned dataclass;
+    2. the run's ``verify()`` ran AFTER those appends. ``verify`` exists to check the chain,
+       and a chain verified before its last events land is a weaker check than one verified
+       after — ``chain_ok`` would be a statement about a prefix.
+    """
+    from sim.runner import run_simulation
+
+    log, alive = _t303a_seal_spy(monkeypatch)
+    run = run_simulation(sim_manifest, int(sim_manifest["seed"]))
+    assert alive, "the spy kept no store alive; the id grouping below is unsound"
+
+    principal = _t303a_principal(log)
+    delistings = list(run.snapshot["delistings"])
+    assert delistings, (
+        "the run computed no delisting at all, so this gate grades nothing. The approved "
+        "manifest's dishonest store is scored far below BLACKLIST_THRESHOLD by design; if "
+        "that is no longer true the manifest or the scorer moved and this gate must be "
+        "re-derived, not deleted"
+    )
+
+    sealed_ids = {
+        str(event.get("event_id"))
+        for verb, store, event in log
+        if verb == "append" and store == principal
+    }
+    elsewhere = {
+        str(event.get("event_id"))
+        for verb, store, event in log
+        if verb == "append" and store != principal
+    }
+    dropped = [
+        f"{event['kind']} for {event['payload']['store_id']} ({event['event_id']})"
+        for event in delistings
+        if str(event.get("event_id")) not in sealed_ids
+    ]
+    assert dropped == [], (
+        f"{len(dropped)} of {len(delistings)} delisting decisions the run computed never "
+        f"reached the store that seals the run's chain: {dropped}."
+        + (
+            " They DID reach some other event store — sealing them into a chain the run "
+            "never verifies is not sealing them."
+            if any(str(event.get("event_id")) in elsewhere for event in delistings)
+            else ""
+        )
+    )
+
+    # (2) the order. The last delisting append must precede the run's own verify.
+    positions = [
+        index
+        for index, (verb, store, event) in enumerate(log)
+        if verb == "append"
+        and store == principal
+        and str(event.get("event_id")) in {str(row["event_id"]) for row in delistings}
+    ]
+    verifies = [
+        index
+        for index, (verb, store, _) in enumerate(log)
+        if verb == "verify" and store == principal
+    ]
+    assert verifies, (
+        "the run never verified the store that holds its chain, so `chain_ok` is not a "
+        "statement about anything this run wrote"
+    )
+    assert max(positions) < max(verifies), (
+        f"the run's last verify() of its own chain ran at call {max(verifies)}, BEFORE the "
+        f"last delisting was appended at call {max(positions)}. The delisting is in the "
+        "chain but outside the check, so `chain_ok` describes a prefix that does not contain "
+        "the decision"
+    )
+    assert run.chain_ok, "the chain that now carries the delistings does not verify"
+
+
+def test_t303a_an_honest_store_never_acquires_a_delisting(
+    sim_manifest: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The positive control. Sealing every store is not a fix for sealing none of them.
+
+    A repair that appended a ``blacklisted`` event per rostered store would satisfy the gate
+    above completely. So this reads the delisting-kind events that actually reached the run's
+    chain and requires them to name EXACTLY the stores the trust snapshot delisted — and it
+    names the honest control store explicitly, so the assertion is about a store the run
+    really rewarded rather than about an empty set.
+    """
+    from sim.runner import run_simulation
+    from trust.scoring import BLACKLIST_THRESHOLD
+
+    log, alive = _t303a_seal_spy(monkeypatch)
+    run = run_simulation(sim_manifest, int(sim_manifest["seed"]))
+    assert alive, "the spy kept no store alive; the id grouping below is unsound"
+    principal = _t303a_principal(log)
+
+    decided = {str(event["payload"]["store_id"]) for event in run.snapshot["delistings"]}
+    honest = {
+        str(store_id)
+        for store_id, entry in run.snapshot["stores"].items()
+        if float(entry["score"]) >= BLACKLIST_THRESHOLD and str(store_id) not in decided
+    }
+    winners = {episode.winner for episode in run.episodes if episode.accepted and episode.winner}
+    assert decided, "no store was delisted; the sweep below cannot discriminate"
+    assert honest & winners, (
+        f"no store both stayed above BLACKLIST_THRESHOLD and won an accepted auction — "
+        f"honest={sorted(honest)}, winners={sorted(winners)}. Without one this control is "
+        "asserting about a store the run never rewarded"
+    )
+
+    recorded = {
+        str(event.get("store_id"))
+        for verb, store, event in log
+        if verb == "append"
+        and store == principal
+        and str(event.get("kind")) in _T303A_DELISTING_KINDS
+    }
+    assert recorded == decided, (
+        "the delisting events sealed into the run's chain do not name the stores the trust "
+        f"snapshot delisted.\n  snapshot delisted: {sorted(decided)}\n  chain recorded:    "
+        f"{sorted(recorded)}\n  recorded but not decided: {sorted(recorded - decided)}\n"
+        f"  decided but not recorded: {sorted(decided - recorded)}\n"
+        "Recording a decision nobody made is not the fix for dropping the one that was."
+    )
+    assert not (recorded & honest), (
+        f"the run sealed a delisting against {sorted(recorded & honest)}, which the trust "
+        f"engine scored at or above {BLACKLIST_THRESHOLD} and which won auctions in this very "
+        "run. A fix that delists everybody has not distinguished anything"
+    )
+
+
+def test_t303a_sealing_the_delisting_refuses_none_of_the_runs_honest_traffic(
+    sim_manifest: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new write is a wall in the run's own path. Drive the real traffic through it.
+
+    Every configuration here is REAL traffic out of this repository: the approved manifest,
+    the seeded catalogs ``fixtures.generator`` builds, the whole episode budget, each shorter
+    prefix of it, the empty run, and four seeds' worth of different catalogs and prices. None
+    of it is a corpus hand-written by the same mind that chose where the append goes.
+
+    The expected accept-path stream is read off ``run.episodes[*].ledger_kinds`` — the run's
+    own record of what ``exchange.accept`` returned — rather than from a count typed in here,
+    so a seed on which an episode denies instead of accepting is graded against what that run
+    actually produced. What must survive:
+
+    * every accept-path event the run produced is STILL sealed, in order (the reorder did not
+      displace, drop, or duplicate the traffic that was already being recorded);
+    * the chain still verifies, and the head hash is still published;
+    * the minted discount codes are still exactly the codes the sealed ``code_created``
+      events carry;
+    * a run with nothing to delist still completes and seals its accept path — the append
+      loop must be a no-op on an empty decision, not a crash and not an empty-event append.
+    """
+    from sim.runner import minted_codes, run_simulation
+
+    budget = int(sim_manifest["episode_budget"])
+    approved_seed = int(sim_manifest["seed"])
+    cases: list[tuple[int, int]] = [
+        (approved_seed, 0),
+        (approved_seed, 1),
+        (approved_seed, 2),
+        (approved_seed, budget),
+        (approved_seed + 1, budget),
+        (approved_seed + 7, budget),
+        (12345, budget),
+    ]
+    empty_seen = False
+    for seed, episodes in cases:
+        label = f"seed={seed} episodes={episodes}"
+        log, alive = _t303a_seal_spy(monkeypatch)
+        run = run_simulation(sim_manifest, seed, episodes=episodes)
+        assert alive, f"{label}: the spy kept no store alive"
+
+        sealed = [event for verb, _, event in log if verb == "append"]
+        accept_kinds = [
+            str(event.get("kind"))
+            for event in sealed
+            if str(event.get("kind")) not in _T303A_DELISTING_KINDS
+        ]
+        expected = [str(kind) for episode in run.episodes for kind in episode.ledger_kinds]
+        assert accept_kinds == expected, (
+            f"{label}: the accept path produced {expected} and the chain sealed "
+            f"{accept_kinds}. Sealing the delisting has displaced the traffic that was "
+            "already being recorded"
+        )
+        if episodes:
+            assert run.chain_ok, f"{label}: the chain no longer verifies"
+            assert run.head_hash, f"{label}: no head hash was published"
+            assert list(run.codes) == minted_codes(sealed), (
+                f"{label}: the codes the run reports ({len(run.codes)}) are no longer the "
+                f"codes it actually sealed ({len(minted_codes(sealed))})"
+            )
+            assert len(set(run.codes)) == len(run.codes), (
+                f"{label}: a discount code was minted twice: {run.codes}"
+            )
+        if not run.snapshot["delistings"]:
+            empty_seen = True
+            spurious = [
+                event for event in sealed if str(event.get("kind")) in _T303A_DELISTING_KINDS
+            ]
+            assert spurious == [], (
+                f"{label}: a run that computed no delisting sealed {len(spurious)} delisting "
+                f"events anyway: {spurious}"
+            )
+    assert empty_seen, (
+        "no configuration in this sweep produced an empty delisting list, so the "
+        "nothing-to-seal path was never exercised"
+    )

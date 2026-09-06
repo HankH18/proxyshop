@@ -2339,15 +2339,6 @@ def test_t303_the_exchange_eligibility_gate_never_fails_open() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-303 (a): the sim computes snapshot['delistings'] and drops it — no blacklisted or "
-        "blacklist_expired event is ever handed to trust.events' append seam, so the delisting "
-        "decision is sealed nowhere an exchange, an auditor or an appeal can read it; remove "
-        "this marker with the fix"
-    ),
-)
 def test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer(
     monkeypatch: Any,
 ) -> None:

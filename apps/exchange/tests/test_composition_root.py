@@ -37,10 +37,12 @@ seams — is called directly by
 ``test_the_composition_root_never_overwrites_wiring_a_deployment_already_chose`` and by
 ``test_a_deployment_states_where_its_trust_service_answers``, and
 ``exchange.auction.routes._machine`` by
-``test_an_exchange_nobody_configured_still_writes_its_transitions_at_the_trust_service``. All
-three are unit tests of those functions and none of them issues a request. Every HTTP test in
-this file goes through the ``deployed`` fixture or :func:`served_exchange`, and neither wires
-anything.
+``test_an_exchange_nobody_configured_still_writes_its_transitions_at_the_trust_service``, and
+``exchange.eligibility.trust_backed.TrustBackedSellerEligibility`` /
+``exchange.composition.HttpTrustSnapshot`` by the last two tests in the file. All of them are
+unit tests of those objects and none of them issues a request to the exchange. Every HTTP test
+in this file goes through the ``deployed`` fixture or :func:`served_exchange`, and neither
+wires anything.
 
 What is real here
 -----------------
@@ -71,7 +73,7 @@ import pytest
 from exchange.accept.offer import use_registered_domains
 from exchange.composition import ENV_DEPLOYMENT, ENV_DEPLOYMENT_JSON
 from exchange.main import create_app
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from proxyshop_support.asgi_server import serve
@@ -1414,3 +1416,347 @@ def test_a_served_auction_lands_in_a_real_trust_services_chained_ledger(
         "last_failure": None,
     }
     assert sink.kinds == kinds, (sink.kinds, kinds)
+
+
+# =====================================================================================
+# R12 is read from the TRUST SERVICE, not from a deterministic double (T-303 b)
+#
+# The finding: `configure_auctions(app, eligibility=...)` had no product caller, and there
+# was no trust-backed `SellerEligibility` anywhere in the tree to give it — not an unwired
+# one, none. So `auction/routes.py::_eligibility` fell through to a `StaticSellerEligibility`
+# built with NO ROWS, and the served exchange answered `static-eligibility: <store> is
+# unavailable` for every store alive. That is not "consulted trust and refused". It is
+# "asked nobody", wearing a sentence that reads like a verdict.
+#
+# The two halves are asserted separately on purpose, because the one-line way to satisfy
+# either alone breaks the other: a source that ADMITS by default satisfies "an honest store
+# is solicited" and fails the fail-closed half, and a source that DENIES everything satisfies
+# the fail-closed half and leaves the exchange asking nobody exactly as before.
+# =====================================================================================
+#: A price for the approved roster's rows. `list_price` is required by the route's own model.
+MANIFEST_LIST_PRICE = 19.99
+
+
+def _manifest_roster() -> tuple[list[dict[str, Any]], str, str]:
+    """The approved fixture roster, and the store the MANIFEST itself calls dishonest.
+
+    Read out of ``fixtures/manifest.json`` through its own loader rather than hand-written
+    here: the roster, the business identities and which store is the adversary are ground
+    truth a human approved (SPEC A3), and a corpus this file invented would be a corpus
+    written by the same mind that chose the wall.
+    """
+    from fixtures.manifest import load_manifest
+
+    manifest = load_manifest()
+    stores = [dict(row) for row in manifest["stores"]]
+    dishonest = manifest["dishonest_store"]
+    return stores, str(dishonest["store_id"]), str(dishonest["business_identity"])
+
+
+def _trust_service(stores: list[dict[str, Any]], blacklisted_identity: str) -> FastAPI:
+    """A REAL ``trust.main:create_app()`` serving ``GET /snapshot`` over the approved roster.
+
+    One substitution, and it is a datastore rather than a behaviour: ``snapshot_stores`` and
+    ``snapshot_blacklist`` on ``app.state``, the two seams
+    ``trust.snapshot.routes.stores_for`` / ``blacklist_for`` resolve first, so this needs no
+    Postgres. The route, the projection to the published ``TrustSnapshot`` property set, the
+    scoring and the identity-bound blacklist resolution are the trust service's own — which is
+    the point: what the exchange reads here is what a deployed trust service serves.
+
+    The blacklisting is bound to BUSINESS IDENTITY, not to ``store_id``, because that is what
+    ``trust.scoring.is_blacklisted`` resolves and it is the whole reason the registry is
+    identity-bound: a delisted operator must not return under a fresh store id.
+    """
+    from trust.events import InMemoryEventStore
+    from trust.main import create_app as create_trust
+    from trust.scoring import Blacklist
+
+    registry = Blacklist()
+    registry.add(
+        business_identity=blacklisted_identity,
+        reason_code="trust_score_below_threshold",
+        status="active",
+    )
+    app = create_trust()
+    app.state.snapshot_stores = [
+        {
+            "store_id": row["store_id"],
+            "business_identity": row["business_identity"],
+            "observations": [],
+        }
+        for row in stores
+    ]
+    app.state.snapshot_blacklist = registry
+    # The SAME substitution `test_a_served_auction_lands_in_a_real_trust_services_chained_ledger`
+    # makes, and for the same reason: this deployment's `trust_url` names one trust service for
+    # both doors, so a service that could serve `/snapshot` but 503 on `/events` would report a
+    # ledger fault and make the "honest traffic is silent" half of that test's property untrue
+    # here for a reason that has nothing to do with eligibility.
+    app.state.event_store = InMemoryEventStore()
+    return app
+
+
+def _open_a_roster_auction(client: httpx.Client, stores: list[dict[str, Any]]) -> dict[str, Any]:
+    response = client.post(
+        "/auctions",
+        json={
+            "intent": INTENT,
+            "profile": {"pseudonym": "psn-t303", "buckets": {}},
+            "roster": [
+                {"store_id": row["store_id"], "tier": 1, "list_price": MANIFEST_LIST_PRICE}
+                for row in stores
+            ],
+        },
+    )
+    assert response.status_code == 201, f"POST /auctions -> {response.status_code}: {response.text}"
+    return response.json()
+
+
+def test_a_booted_exchange_reads_r12_from_a_real_trust_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """HONEST TRAFFIC through the new wall: a real trust service, and a store it has delisted.
+
+    The exchange is the served one — ``create_app()`` plus a deployment document, no test-side
+    ``configure_auctions`` — and the trust service on the other end is
+    ``trust.main:create_app()`` on its own loopback port, answering the published
+    ``GET /snapshot`` over the approved fixture roster.
+
+    Both halves are asserted in the SAME run, which is what makes it a discrimination rather
+    than a mood: the store the trust registry delists must be refused, and the stores it holds
+    nothing against must be solicited. A source that refuses everybody fails the second, and a
+    source that admits everybody fails the first.
+
+    The log assertion is the other half of the fault channel: honest traffic through a trust
+    service that is answering must be SILENT. A fault report that fires when everything works
+    is a fault report an operator learns to ignore.
+    """
+    stores, dishonest_id, dishonest_identity = _manifest_roster()
+    honest = {row["store_id"] for row in stores} - {dishonest_id}
+    assert honest, "the approved roster has no honest store, so this cannot discriminate"
+
+    with serve(_trust_service(stores, dishonest_identity)) as trust_url:
+        # NO `sellers` key: this deployment states where trust answers and nothing about who
+        # is eligible, which is the arrangement that makes trust's verdict the R12 answer.
+        path = tmp_path / "deployment.json"
+        path.write_text(json.dumps({"trust_url": trust_url}), encoding="utf-8")
+        monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+        monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+        with caplog.at_level(logging.DEBUG, logger="exchange.composition"):
+            with served_exchange() as client:
+                body = _open_a_roster_auction(client, stores)
+
+    denials = {row["store_id"]: row for row in body["denied"]}
+    solicited = set(body["solicited"])
+
+    assert dishonest_id in denials, (
+        f"the store the trust registry delisted was not refused. denied={sorted(denials)}, "
+        f"solicited={sorted(solicited)}"
+    )
+    assert denials[dishonest_id]["status"] == "blacklisted", denials[dishonest_id]
+    assert "trust-eligibility" in denials[dishonest_id]["reason"], denials[dishonest_id]
+    assert dishonest_id not in solicited, "a delisted store was still asked to bid"
+
+    assert honest <= solicited, (
+        f"the served exchange did not solicit {sorted(honest - solicited)}, which the trust "
+        f"service holds nothing against. denied={[(k, v['reason']) for k, v in denials.items()]}"
+    )
+    assert not any("static-eligibility" in row["reason"] for row in body["denied"]), body["denied"]
+
+    faults = [
+        record
+        for record in caplog.records
+        if record.name == "exchange.composition" and record.levelno >= logging.WARNING
+    ]
+    assert faults == [], (
+        f"honest traffic against a trust service that is answering still reported a fault: "
+        f"{[record.getMessage() for record in faults]}"
+    )
+
+
+def test_an_exchange_whose_trust_service_is_down_denies_every_store_and_says_so_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The fail-closed half, at the wall this moved — and the positive control is the test above.
+
+    ``127.0.0.1:1`` is closed, so the exchange reads no snapshot at all. It must then deny
+    EVERY store, including the ones the test above proves it solicits when trust answers: an
+    exchange that cannot reach trust knows nothing current about anybody, and knowing nothing
+    denies (R12). It must also say so — once, on the state change, at ``ERROR`` — and not once
+    per store and not once per auction.
+    """
+    stores, _dishonest_id, _identity = _manifest_roster()
+    path = tmp_path / "deployment.json"
+    path.write_text(json.dumps({"trust_url": "http://127.0.0.1:1"}), encoding="utf-8")
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    with caplog.at_level(logging.DEBUG, logger="exchange.composition"):
+        with served_exchange() as client:
+            first = _open_a_roster_auction(client, stores)
+            second = _open_a_roster_auction(client, stores)
+
+    assert first["solicited"] == [], first
+    assert {row["status"] for row in first["denied"]} == {"unavailable"}, first["denied"]
+    assert len(first["denied"]) == len(stores), first["denied"]
+    for row in first["denied"]:
+        assert "trust-eligibility" in row["reason"], row
+        assert "static-eligibility" not in row["reason"], row
+    assert second["solicited"] == [], second
+
+    # The ELIGIBILITY channel only. The ledger writer reports the same unreachable service on
+    # the same logger, and it is a separate condition with its own one-line-per-change rule.
+    faults = [
+        record
+        for record in caplog.records
+        if record.name == "exchange.composition"
+        and record.levelno >= logging.ERROR
+        and "eligibility" in record.getMessage()
+    ]
+    assert len(faults) == 1, (
+        f"a trust service that is down should be reported once, on the state change, not "
+        f"{len(faults)} times: {[record.getMessage() for record in faults]}"
+    )
+    assert "127.0.0.1:1/snapshot" in faults[0].getMessage(), faults[0].getMessage()
+
+
+def test_an_unconfigured_exchange_refuses_by_naming_trust_rather_than_a_double(
+    monkeypatch: pytest.MonkeyPatch, unwired: None
+) -> None:
+    """No deployment at all still denies everything — and now it denies for a readable reason.
+
+    ``test_an_unconfigured_exchange_still_refuses_everything`` pins the BEHAVIOUR and must not
+    move. This pins what the behaviour is evidence OF: before T-303 every denial read
+    ``static-eligibility: s1 is unavailable``, which is a deterministic double that no
+    deployment ever bound saying it has no rows — indistinguishable, from outside, from a
+    trust service that had actually been asked. The reason now names the trust service this
+    process could not reach, which is the true statement.
+    """
+    monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    with served_exchange() as client:
+        body = _open_an_auction(client)
+
+    assert [row["status"] for row in body["denied"]] == ["unavailable"] * len(STORES)
+    for row in body["denied"]:
+        assert "trust-eligibility" in row["reason"], row
+        assert "static-eligibility" not in row["reason"], row
+
+
+def test_the_trust_backed_source_tells_unreachable_from_unknown_from_delisted() -> None:
+    """The three states the whole fix turns on, read through the port's own fail-closed reader.
+
+    A direct-call unit test of
+    :class:`~exchange.eligibility.trust_backed.TrustBackedSellerEligibility` — one of the
+    handful in this file that issues no request; see the module docstring. It is read through
+    ``read_eligibility`` rather than by calling ``check`` directly because that is the function
+    the three gates actually apply, so what is graded here is what a gate will do.
+    """
+    from exchange.eligibility import BLACKLISTED, ELIGIBLE, UNAVAILABLE, read_eligibility
+    from exchange.eligibility.trust_backed import (
+        TrustBackedSellerEligibility,
+        TrustSnapshotUnavailable,
+    )
+
+    #: `build_snapshot`'s envelope, not the flat mapping, so the unwrap is exercised too.
+    document = {
+        "version": "trust-snapshot/1.0.0",
+        "stores": {
+            "honest": {"store_id": "honest", "blacklisted": False, "score": 0.86},
+            "delisted": {"store_id": "delisted", "blacklisted": True, "score": 0.07},
+            "unreadable": {"store_id": "unreadable", "blacklisted": "false"},
+        },
+    }
+
+    def unreachable() -> dict[str, Any]:
+        raise TrustSnapshotUnavailable("ConnectError: nodename nor servname provided")
+
+    answering = TrustBackedSellerEligibility(document, source="the trust snapshot under test")
+    down = TrustBackedSellerEligibility(unreachable, source="the trust snapshot under test")
+
+    assert read_eligibility(answering, "honest").status == ELIGIBLE
+    assert read_eligibility(answering, "delisted").status == BLACKLISTED
+    # Trust answered and has no opinion. NOT the same state as trust being down, and NOT a
+    # reason to admit: this is the rule `trust.openapi.json` publishes on the route itself.
+    assert read_eligibility(answering, "never-heard-of").status == UNAVAILABLE
+    assert read_eligibility(answering, "unreadable").status == UNAVAILABLE
+    # The positive control is the first line: the SAME store id, admitted when trust answers
+    # and refused when it does not, so "trust-backed" cannot mean "admits when trust is down".
+    assert read_eligibility(down, "honest").status == UNAVAILABLE
+
+    for source, store_id in (
+        (answering, "delisted"),
+        (answering, "never-heard-of"),
+        (down, "honest"),
+    ):
+        reason = read_eligibility(source, store_id).reason
+        assert "trust-eligibility" in reason, reason
+        assert "static-eligibility" not in reason, reason
+
+
+def test_the_exchange_caches_the_trust_snapshot_and_revalidates_on_the_version_it_publishes() -> (
+    None
+):
+    """T-064 acceptance 3, at last: the exchange caches the snapshot and refreshes on a bump.
+
+    A direct-call unit test of :class:`~exchange.composition.HttpTrustSnapshot` against a
+    served stub, because the clock has to be injectable and the request count has to be
+    observable. The stub answers the two things the real route answers — an ``ETag`` carrying
+    the snapshot version, and ``304`` to a conditional ``GET`` naming the current one.
+
+    The cache is a correctness requirement and not an optimisation: ``check`` is asked once per
+    rostered store and three times per purchase, and an uncached reader could answer
+    differently for two stores in the same auction.
+    """
+    from exchange.composition import TRUST_SNAPSHOT_REFRESH_SECONDS, HttpTrustSnapshot
+
+    version = {"value": '"trust-snapshot/1.0.0"'}
+    rows: dict[str, Any] = {"s1": {"store_id": "s1", "blacklisted": False}}
+    conditionals: list[str | None] = []
+
+    stub = FastAPI(title="trust-snapshot-double")
+
+    @stub.get("/snapshot")
+    def snapshot(request: Request) -> Response:
+        offered = request.headers.get("if-none-match")
+        conditionals.append(offered)
+        if offered == version["value"]:
+            return Response(status_code=304, headers={"etag": version["value"]})
+        return JSONResponse(content=dict(rows), headers={"etag": version["value"]})
+
+    clock = {"now": 0.0}
+    with serve(stub) as url:
+        reader = HttpTrustSnapshot(f"{url}/snapshot", monotonic=lambda: clock["now"])
+
+        assert reader()["s1"]["blacklisted"] is False
+        reader()
+        reader()
+        assert conditionals == [None], (
+            f"the snapshot was refetched inside its refresh window: {conditionals}"
+        )
+
+        # The version moves, and so does the verdict. The refresh must be a CONDITIONAL get.
+        clock["now"] += TRUST_SNAPSHOT_REFRESH_SECONDS + 1.0
+        rows["s1"] = {"store_id": "s1", "blacklisted": True}
+        version["value"] = '"trust-snapshot/1.0.1"'
+        assert reader()["s1"]["blacklisted"] is True
+        assert conditionals == [None, '"trust-snapshot/1.0.0"'], conditionals
+
+        # A version that has NOT moved costs a 304 and the cached document stands.
+        clock["now"] += TRUST_SNAPSHOT_REFRESH_SECONDS + 1.0
+        assert reader()["s1"]["blacklisted"] is True
+        assert conditionals == [None, '"trust-snapshot/1.0.0"', '"trust-snapshot/1.0.1"'], (
+            conditionals
+        )
+        assert reader.status()["readable"] is True, reader.status()
+
+    # The service is gone. A snapshot that could not be REVALIDATED is discarded rather than
+    # served stale: it is no longer evidence that `s1` is still listed, and R12 denies on
+    # "no longer know" exactly as it denies on "never knew".
+    clock["now"] += TRUST_SNAPSHOT_REFRESH_SECONDS + 1.0
+    with pytest.raises(Exception) as failure:
+        reader()
+    assert "ConnectError" in str(failure.value) or "Connect" in str(failure.value), failure.value
+    assert reader.status()["readable"] is False, reader.status()

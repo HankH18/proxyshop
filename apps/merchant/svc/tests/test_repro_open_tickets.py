@@ -1009,6 +1009,11 @@ APPROVAL_COLUMN_WORDS = frozenset({"approval", "approved", "approver"})
 #: DDL keywords that start a table *constraint* rather than a column definition.
 _DDL_CONSTRAINT_KEYWORDS = ("constraint", "primary", "check", "unique", "foreign", "exclude")
 
+#: The three parts of :class:`merchant_svc.envelope.model.ApprovalArtifact` that R6 makes
+#: mandatory — who approved, when, and *what* (the digest the approval is bound to). ``note``
+#: and ``document_ref`` are optional on the artifact and are optional here too.
+REQUIRED_APPROVAL_PARTS = ("approver", "approved_at", "envelope_hash")
+
 
 def _sealed_envelopes_ddl() -> str:
     """The body of ``CREATE TABLE ... sealed.envelopes ( ... )``, comments stripped.
@@ -1024,8 +1029,8 @@ def _sealed_envelopes_ddl() -> str:
     return "\n".join(line.split("--", 1)[0] for line in body.splitlines())
 
 
-def _sealed_envelopes_columns() -> list[str]:
-    """Every column ``sealed.envelopes`` declares, in declaration order.
+def _ddl_items() -> list[str]:
+    """The table body split into its top-level items — one column or constraint each.
 
     The body is split on commas **at nesting depth zero**, not line by line: a multi-line
     ``CHECK (max_discount_pct IS NULL OR (...))`` puts column names on continuation lines, and
@@ -1046,14 +1051,35 @@ def _sealed_envelopes_columns() -> list[str]:
             continue
         current.append(character)
     items.append("".join(current))
+    return items
 
+
+def _sealed_envelopes_columns() -> list[str]:
+    """Every column ``sealed.envelopes`` declares, in declaration order."""
     columns: list[str] = []
-    for item in items:
+    for item in _ddl_items():
         token = item.split(maxsplit=1)[0].lower() if item.split() else ""
         if not token or token.startswith(_DDL_CONSTRAINT_KEYWORDS):
             continue
         columns.append(token)
     return columns
+
+
+def _sealed_envelopes_checks() -> dict[str, str]:
+    """``{constraint name: its CHECK expression}``, whitespace-collapsed and lowercased.
+
+    Only *named* table constraints are returned, which is every constraint this table has.
+    Reading the expression rather than searching the whole DDL for keywords is the point: a
+    scan over the file's text goes green when the words it wants appear in two unrelated
+    constraints, and "the activation is tied to the approval" is a claim about ONE expression.
+    """
+    checks: dict[str, str] = {}
+    for item in _ddl_items():
+        collapsed = " ".join(item.split()).lower()
+        match = re.match(r"constraint\s+(\w+)\s+check\s*\((.*)\)\s*$", collapsed, re.DOTALL)
+        if match:
+            checks[match.group(1)] = match.group(2)
+    return checks
 
 
 def test_t350_the_sealed_envelopes_reader_is_armed() -> None:
@@ -1080,41 +1106,47 @@ def test_t350_the_sealed_envelopes_reader_is_armed() -> None:
         f"the sealed.envelopes DDL no longer mentions {ACTIVE!r} at all, so there is nothing "
         "for the gate below to be about"
     )
+    # The constraint reader is armed too: it finds the constraints this table has always had,
+    # so a red below cannot mean "the CHECK parser returned an empty dict".
+    checks = _sealed_envelopes_checks()
+    assert {"envelopes_activation_check", "envelopes_discount_range"} <= set(checks), (
+        f"the sealed.envelopes CHECK reader found {sorted(checks)}, which does not include the "
+        "two constraints that have been on this table since it was created; the reader is "
+        "broken, not the schema"
+    )
+    assert f"'{ACTIVE}'" in checks["envelopes_activation_check"], (
+        "the CHECK reader returned an expression that does not contain the value that "
+        "constraint exists to admit, so its expressions are not being read"
+    )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-350: sealed.envelopes (db/migrations/0003_sealed_vault_app_tables.sql:41) declares "
-        "store_id, version, activation, max_discount_pct, budget_cap, floors, "
-        "pursue_clusters, standing_commitments and created_at and NOTHING ELSE — there is no "
-        "column for the approval artifact — while envelopes_activation_check admits "
-        "activation IN ('shadow','active','killed'). So a row asserting 'active' with no "
-        "recorded approval is valid at the storage layer, which is exactly the state T-248 "
-        "makes impossible in memory (merchant_svc.envelope.store._refuse_unapproved_"
-        "activation). The two layers disagree, and the durability seam pays for it: "
-        "merchant_svc.envelope.repository.restorable downgrades every row read back as "
-        "'active' to shadow at WARNING, because the artifact that would justify it cannot "
-        "be stored — so R6's 'a live envelope carries the approval that authorized it' "
-        "cannot be satisfied durably at all, and an approved envelope silently stops bidding "
-        "across a restart. THE FIX IS OUT OF apps/merchant's file scope: it is a column plus "
-        "a CHECK in db/migrations/0003, and the matching write/read in "
-        "apps/merchant/svc/src/envelope/repository.py; remove this marker with the fix"
-    ),
-)
+# TEST EDIT — the `xfail(strict=True)` marker that stood here was REMOVED, and nothing below
+#             it was weakened; the assertions were made STRICTER in the same change. The
+#             marker said the fix was "out of apps/merchant's file scope"; it no longer is.
+#             db/migrations/0003_sealed_vault_app_tables.sql now declares approval_approver,
+#             approval_approved_at, approval_envelope_hash, approval_note and
+#             approval_document_ref, plus `envelopes_active_requires_approval`, which is the
+#             CHECK the gate below now insists on reading as a single binding expression
+#             rather than as keywords scattered across the file. Under `strict=True` leaving
+#             the marker would turn the repaired defect into a RED suite.
 def test_t350_the_envelope_table_cannot_hold_an_activation_the_rule_forbids() -> None:
     """A domain rule the storage layer does not share is one bug away from being no rule.
 
-    The forbidden transition is precise and it is already written down twice: R6/T-248 say a
-    version is ``active`` only while a written approval artifact bound to *those very terms*
-    is on file, and ``merchant_svc.envelope.store._refuse_unapproved_activation`` enforces it
-    on every write and every restore. ``sealed.envelopes`` enforces neither half — it has no
-    column the artifact could live in, so it cannot.
+    The forbidden transition is precise and it is written down twice: R6/T-248 say a version
+    is ``active`` only while a written approval artifact bound to *those very terms* is on
+    file, and ``merchant_svc.envelope.store._refuse_unapproved_activation`` enforces it on
+    every write. The table must enforce the half it can — that the record EXISTS — because a
+    rule only application code knows is one bug in that code away from being no rule.
 
-    Two repairs make this pass and the gate does not care which: give the table the approval
-    columns and a CHECK that makes ``activation = 'active'`` require them, or remove
+    Two repairs satisfy this and the gate does not care which: give the table the approval
+    columns AND a CHECK that makes ``activation = 'active'`` require them, or remove
     ``'active'`` from ``envelopes_activation_check`` so the storage layer stops claiming to
-    hold a state it cannot justify.
+    hold a state it cannot justify. The first is what landed.
+
+    What the gate will NOT accept, measured against hand-built variants of the migration: the
+    columns present with no binding CHECK; a CHECK that demands only the approver, so half an
+    artifact still admits a live row; or a table with no ``approval_envelope_hash`` column, so
+    an approval is recorded but bound to nothing.
     """
     from merchant_svc.envelope.model import ACTIVE  # noqa: PLC0415
 
@@ -1137,18 +1169,168 @@ def test_t350_the_envelope_table_cannot_hold_an_activation_the_rule_forbids() ->
         )
         return
 
-    # The column exists — then the constraint has to make it mandatory for an active row,
-    # because a nullable column nothing checks permits exactly the same forbidden row.
-    guarded = re.search(
-        r"check\s*\(([^;]*?)\)\s*[,)]",
-        "\n".join(line for line in ddl.lower().splitlines() if "check" in line or "null" in line),
-        re.DOTALL,
+    # The columns exist — then every mandatory part of the artifact needs one, because an
+    # approval missing its approver, its date or the digest it is bound to is not a record.
+    recorded: dict[str, str] = {}
+    for part in REQUIRED_APPROVAL_PARTS:
+        carriers = [column for column in approval_columns if column.endswith(part)]
+        assert carriers, (
+            f"sealed.envelopes has approval columns {approval_columns} but none of them "
+            f"records the artifact's {part!r}; ApprovalArtifact.parse refuses an artifact "
+            f"without it, so a row that cannot carry it cannot justify {ACTIVE!r} either"
+        )
+        recorded[part] = carriers[0]
+
+    # ...and a CHECK has to make them mandatory for an active row, because a nullable column
+    # nothing checks permits exactly the same forbidden row the ticket is about. The binding
+    # constraint must be ONE expression naming the activation, the live value, and a NOT NULL
+    # test on every mandatory part — three separate constraints that each mention one of them
+    # do not compose into the implication.
+    binding = [
+        name
+        for name, expression in _sealed_envelopes_checks().items()
+        if "activation" in expression
+        and f"'{ACTIVE}'" in expression
+        and all(
+            re.search(rf"\b{re.escape(column)}\s+is\s+not\s+null", expression)
+            for column in recorded.values()
+        )
+    ]
+    assert binding, (
+        f"sealed.envelopes records the approval in {approval_columns}, but no single CHECK "
+        f"ties it to the activation: a row with activation = {ACTIVE!r} and every approval "
+        f"column NULL is still valid at the storage layer, which is the state the domain rule "
+        f"forbids. The constraints read were {sorted(_sealed_envelopes_checks())}"
     )
-    assert guarded is not None or any(
-        f"'{ACTIVE}'" in clause and any(column in clause for column in approval_columns)
-        for clause in ddl.lower().split("constraint")
-    ), (
-        f"sealed.envelopes records the approval in {approval_columns}, but no CHECK ties it "
-        f"to the activation: a row with activation = {ACTIVE!r} and every approval column "
-        "NULL is still valid at the storage layer, which is the state the domain rule forbids"
+
+
+#: The repo's own approved-envelope corpus. Real terms, authored for the acceptance suite and
+#: not by this test — a hand-written payload is written by the same mind that chose the bound.
+ENVELOPE_FIXTURES = REPO_ROOT / "fixtures" / "envelopes"
+
+
+class _RoundTrip:
+    """A connection that keeps what ``persist`` sends and replays it as ``load`` rows.
+
+    **Not a database, and it does not pretend to be.** It proves the repository writes every
+    part of the approval artifact into the row and rebuilds the same artifact from it — the
+    boundary T-350 is about. That the *table* refuses the forbidden row is the schema gate
+    above; that Postgres accepts these statements is not in evidence here, and this file may
+    not reach a datastore (see the module docstring).
+
+    Keyed on ``(store_id, version)`` and last-write-wins, because that is what
+    ``on conflict (store_id, version) do update`` means: activate and kill do not bump the
+    version, so they restate v1's row rather than appending to it.
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[tuple[Any, Any], tuple[Any, ...]] = {}
+        self.commits = 0
+
+    class _Cursor:
+        def __init__(self, connection: _RoundTrip) -> None:
+            self._connection = connection
+
+        def __enter__(self) -> _RoundTrip._Cursor:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
+            if statement.lower().startswith("insert"):
+                self._connection.rows[parameters[0], parameters[1]] = parameters
+
+        def fetchall(self) -> list[tuple[Any, ...]]:
+            return [self._connection.rows[key] for key in sorted(self._connection.rows)]
+
+    def cursor(self) -> _RoundTrip._Cursor:
+        return _RoundTrip._Cursor(self)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        return None
+
+
+def test_t350_an_approved_activation_survives_the_persistence_boundary() -> None:
+    """R6, durably: the approval that authorized a live envelope is written down and read back.
+
+    The schema gate above is about what the table may HOLD. This is the other half and the
+    reason the columns are worth adding at all: an envelope a merchant really approved and
+    really activated must come back live after a restart, carrying the same artifact. Today it
+    does not — ``merchant_svc.envelope.repository`` has nowhere to put the artifact, so
+    ``restorable`` downgrades the row to shadow and the store silently stops bidding.
+
+    Driven with ``fixtures/envelopes/store-alpha.approved.json``: real terms with two floors, a
+    cap, a budget and two standing commitments, authored for the acceptance suite rather than
+    for this assertion.
+    """
+    from merchant_svc.envelope.digest import approval_digest  # noqa: PLC0415
+    from merchant_svc.envelope.model import ACTIVE  # noqa: PLC0415
+    from merchant_svc.envelope.repository import PostgresEnvelopeRepository  # noqa: PLC0415
+    from merchant_svc.envelope.store import EnvelopeVersions  # noqa: PLC0415
+
+    fixture = json.loads(
+        (ENVELOPE_FIXTURES / "store-alpha.approved.json").read_text(encoding="utf-8")
     )
+    terms = fixture["envelope"]
+    store_id = terms["store_id"]
+
+    connection = _RoundTrip()
+    versions = EnvelopeVersions(PostgresEnvelopeRepository(connection))
+    stored = versions.put(store_id, terms)
+    approval = {
+        "approver": "owner@store-alpha.example",
+        "approved_at": "2026-09-05T10:00:00+00:00",
+        "envelope_hash": approval_digest(stored),
+        "note": "approved on the onboarding call",
+        "document_ref": "s3://approvals/store-alpha-v1.pdf",
+    }
+    live = versions.activate(store_id, approval)
+    assert live.activation == ACTIVE, "the fixture did not activate; the test is broken"
+
+    # The restart: a brand-new store over the same rows, sharing nothing else.
+    restarted = EnvelopeVersions(PostgresEnvelopeRepository(connection))
+    head = restarted.current(store_id)
+
+    assert restarted.is_live(store_id) is True, (
+        "an envelope the merchant approved and activated came back not live: the approval "
+        "artifact did not survive the persistence boundary, so restorable() downgraded it to "
+        "shadow and the store stops bidding across a restart (R6)"
+    )
+    assert head.approval is not None, "the restored live envelope carries no approval artifact"
+    assert head.approval.approver == "owner@store-alpha.example"
+    assert head.approval.approved_at == "2026-09-05T10:00:00+00:00"
+    assert head.approval.note == "approved on the onboarding call"
+    assert head.approval.document_ref == "s3://approvals/store-alpha-v1.pdf"
+    # And it is still bound to THESE terms — a hash that survived as text but no longer covers
+    # the row it came back on would be an approval of a document nobody approved.
+    assert head.approval.envelope_hash == approval_digest(head)
+    # The terms themselves round-tripped: this is the positive control the schema change must
+    # not break.
+    assert head.max_discount_pct == terms["max_discount_pct"]
+    assert head.budget_cap == terms["budget_cap"]
+    assert len(head.floors) == len(terms["floors"])
+    assert len(head.standing_commitments) == len(terms["standing_commitments"])
+
+
+def test_t350_a_row_with_no_recorded_approval_still_comes_back_in_shadow() -> None:
+    """The fail-safe direction, kept. A live row with no artifact must not be believed.
+
+    This is the half of the old behaviour that must survive the fix: adding the columns makes
+    an approved activation storable, and must NOT make an *unbacked* one restorable. A row
+    that asserts ``active`` with an empty approval — the state the new CHECK refuses, and the
+    state a pre-migration row is in — comes back in shadow, exactly as it does today.
+    """
+    from merchant_svc.envelope.model import ACTIVE, SHADOW  # noqa: PLC0415
+    from merchant_svc.envelope.repository import PostgresEnvelopeRepository  # noqa: PLC0415
+    from merchant_svc.envelope.store import EnvelopeVersions  # noqa: PLC0415
+
+    connection = _RoundTrip()
+    connection.rows[("s-unbacked", 1)] = ("s-unbacked", 1, ACTIVE, 10.0, 100.0, "[]", "[]", "[]")
+
+    versions = EnvelopeVersions(PostgresEnvelopeRepository(connection))
+    assert versions.current("s-unbacked").activation == SHADOW
+    assert versions.is_live("s-unbacked") is False

@@ -655,9 +655,16 @@ def test_app_role_reaches_sealed_and_the_exchange_does_not(ledger_clean, ledger_
     asserted here too.
     """
     assert ledger_roles.fetch("app", "select count(*) from sealed.envelopes") == [(0,)]
+    # 'shadow', not 'active'. What this test grades is REACHABILITY -- that the `app` role can
+    # write here at all -- and the activation value is incidental scaffolding to that. T-350 added
+    # `envelopes_active_requires_approval`, which makes an 'active' row with no approval artifact
+    # impossible on purpose: that unapproved-active row is precisely the forbidden state the
+    # constraint exists to refuse, and this fixture was asserting it. A legal row proves the grant
+    # just as well, and the migration itself demotes pre-existing 'active' rows to 'shadow' for the
+    # same reason.
     ledger_roles.execute(
         "app",
-        "insert into sealed.envelopes (store_id, version, activation) values ('s-1', 1, 'active')",
+        "insert into sealed.envelopes (store_id, version, activation) values ('s-1', 1, 'shadow')",
     )
     ledger_roles.denied("exchange", "select * from sealed.envelopes")
 

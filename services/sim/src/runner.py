@@ -431,6 +431,30 @@ def ledger_contract_problems(events: Iterable[Mapping[str, Any]]) -> list[tuple[
     ``roster_size`` / ``shortlist_size`` the whole time, unreported by the one component whose
     job is to report exactly that. Nothing about this function chose the narrower stream; its
     caller did, and the caller is where the fix lives.
+
+    **Graded is not the same as SEALED, and for the state machine's sink that gap is a
+    different ticket.** T-303 (a) sealed the delisting stream into the hash chain because it
+    was recorded nowhere at all; the sink's events are recorded — here — and sealing them
+    beside the accept path's is a change to what the ledger ASSERTS, not plumbing. Two
+    measurements on the approved manifest say why:
+
+    * the sink emits its own ``accepted`` for the same auction ``exchange.accept`` already
+      sealed — 12 and 12 in a default run. The sink's copy carries ``store_id: None`` and a
+      payload whose ``checkout_token`` and ``offer`` are both ``None``, while the sealed one
+      names the store and the offer. Appending both would put TWO ``accepted`` events in the
+      chain per acceptance, one of them naming nobody, and an auditor counting acceptances off
+      the ledger would read 24 for 12 auctions. That is the double-count the note in
+      :func:`run_simulation` refuses, not a hypothetical.
+    * the sink's ``auction_opened`` / ``auction_closed`` are the two bodies this function
+      currently REPORTS as deviating. Sealing a body the published contract rejects into a
+      tamper-evident record writes the defect in permanently instead of reporting it — the
+      opposite of what the delisting seam does, which validates at its producing boundary
+      (``trust.snapshot.delisting._event``) and raises rather than emit a malformed decision.
+
+    So the sink is graded and not sealed on purpose. The repair is at its producer —
+    ``apps/exchange/src/auction/state.py`` writing the published keys, and one ``accepted``
+    producer rather than two — and until that lands, sealing this stream would make the
+    ledger worse, not more complete.
     """
     from contracts.ledger import validate_ledger_payload
 
@@ -711,17 +735,19 @@ def run_simulation(
             )
         )
 
-    # T-242. The run emits ledger events down TWO paths and used to grade one: ``raw_events``
-    # is fed only from ``exchange.accept`` (step 4 above), while every ``auction_opened`` /
-    # ``auction_closed`` / ``accepted`` the state machine emits goes to ``ledger_sink`` and was
-    # read by nothing. Both streams are the run's own ledger, so both are graded. This is
-    # separate from ``raw_events`` on purpose: the sink is NOT appended to the hash chain and
-    # is NOT scanned for minted codes — folding it into ``raw_events`` would double-count the
-    # record rather than widen the audit.
-    all_ledger_events = [*raw_events, *ledger_sink.events]
-
-    verdict = event_store.verify()
-    final_as_of = episode_instant(manifest, max(last, FIRST_OBSERVED_EPISODE))
+    # 7. The verdict the whole run exists to reach, and the record of it.
+    #
+    # T-303 (a). The snapshot is built BEFORE the chain is verified, and the delistings it
+    # computes are sealed BEFORE that too, because the order is the substance of the fix.
+    # This used to read `verify()` -> `build_snapshot()` -> return, so the `delistings` the
+    # snapshot produced rode out on the returned dataclass and were appended to nothing: the
+    # platform decided a store should be delisted and the tamper-evident record an exchange,
+    # an auditor or an appeal reads never heard about it. Appending them after `verify()`
+    # would be barely better — `chain_ok` would then be a statement about the chain MINUS its
+    # last events, which is a weaker check than the field's name promises. So: decide, seal,
+    # then verify the chain that holds the decision.
+    final_episode = max(last, FIRST_OBSERVED_EPISODE)
+    final_as_of = episode_instant(manifest, final_episode)
     snapshot = build_snapshot(
         [
             {
@@ -734,6 +760,34 @@ def run_simulation(
         blacklist=blacklist,
         as_of=final_as_of,
     )
+
+    # The delisting is a ledger event like any other, so it goes to the same three places the
+    # accept path's events do: the hash chain, the canonical stream two runs compare, and the
+    # published-shape audit. `append` is not defended with a try/except on purpose — a
+    # delisting the ledger refuses is a decision that silently does not get recorded, which is
+    # the exact failure this ticket is about. `trust.snapshot.delisting` derives `event_id`
+    # from (kind, store, instant) rather than minting one, so a re-run of the same snapshot
+    # appends nothing a second time and the canonical stream stays byte-identical across runs.
+    delisting_sequence = sum(1 for row in canonical if row["episode"] == final_episode)
+    for offset, decision in enumerate(snapshot.get("delistings") or ()):
+        event = dict(decision)
+        append(event_store, event)
+        raw_events.append(event)
+        canonical.append(
+            normalise_event(event, episode=final_episode, sequence=delisting_sequence + offset)
+        )
+
+    # T-242. The run emits ledger events down TWO paths and used to grade one: ``raw_events``
+    # is fed from ``exchange.accept`` (step 4 above) and from the delisting seam just above,
+    # while every ``auction_opened`` / ``auction_closed`` / ``accepted`` the state machine
+    # emits goes to ``ledger_sink`` and was read by nothing. Both streams are the run's own
+    # ledger, so both are graded. The sink stays separate from ``raw_events`` on purpose: it
+    # is NOT appended to the hash chain and is NOT scanned for minted codes — folding it in
+    # would double-count the record rather than widen the audit. See the note in
+    # ``ledger_contract_problems`` for why sealing it is a different ticket from this one.
+    all_ledger_events = [*raw_events, *ledger_sink.events]
+
+    verdict = event_store.verify()
 
     return SimulationRun(
         seed=int(seed),

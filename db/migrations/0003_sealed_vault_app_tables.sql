@@ -38,24 +38,173 @@ SET LOCAL statement_timeout = '60s';
 -- ---------------------------------------------------------------------------------------
 -- sealed.* -- seller strategy. Never legible to the auction.
 -- ---------------------------------------------------------------------------------------
+-- T-350. The five `approval_*` columns and the two constraints beside them are not
+-- bookkeeping: they are the storage half of R6. `activation` is a plain text column, and
+-- before they existed a row could assert 'active' with nothing recording WHO approved it,
+-- WHEN, or WHAT they approved -- the exact state
+-- `merchant_svc.envelope.store._refuse_unapproved_activation` refuses in memory (T-248). A
+-- rule the table does not share is one bug away from being no rule, and the durability seam
+-- paid for it: `merchant_svc.envelope.repository.restorable` had to downgrade EVERY row read
+-- back as 'active' to shadow, because the artifact that would justify it was not storable, so
+-- an approved envelope silently stopped bidding across a restart.
+--
+-- The columns mirror `merchant_svc.envelope.model.ApprovalArtifact` field for field:
+-- approver / approved_at / envelope_hash are the three the artifact requires, note and
+-- document_ref are the two it makes optional. `approval_envelope_hash` is what makes an
+-- approval BOUND -- it is `approval_digest()` over the terms the merchant read -- so an
+-- approval lifted onto another version's terms stops verifying. The digest cannot be checked
+-- here (it is a hash over seven columns' canonical rendering); the table enforces the half it
+-- can, which is that the record EXISTS and is whole, and the domain re-checks the binding on
+-- every load.
+--
+-- Deliberately NOT constrained: a 'killed' row may keep its approval. `kill_envelope` leaves
+-- the artifact attached on purpose -- it is the record of what the store WAS running -- so a
+-- symmetric "only active rows carry an approval" constraint would refuse an honest kill.
 CREATE TABLE IF NOT EXISTS sealed.envelopes (
-  store_id              text        NOT NULL,
-  version               integer     NOT NULL,
-  activation            text        NOT NULL,
-  max_discount_pct      numeric(6, 3),
-  budget_cap            numeric(14, 2),
-  floors                jsonb       NOT NULL DEFAULT '[]'::jsonb,
-  pursue_clusters       jsonb       NOT NULL DEFAULT '[]'::jsonb,
-  standing_commitments  jsonb       NOT NULL DEFAULT '[]'::jsonb,
-  created_at            timestamptz NOT NULL DEFAULT now(),
+  store_id                text        NOT NULL,
+  version                 integer     NOT NULL,
+  activation              text        NOT NULL,
+  max_discount_pct        numeric(6, 3),
+  budget_cap              numeric(14, 2),
+  floors                  jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  pursue_clusters         jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  standing_commitments    jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  created_at              timestamptz NOT NULL DEFAULT now(),
+  -- After `created_at`, not beside the other terms, so a database CREATED by this file and a
+  -- database ALTERED into shape by the block below have the SAME column order: `ADD COLUMN`
+  -- can only append. Nothing here reads a row by ordinal -- every statement in
+  -- `merchant_svc.envelope.repository` names its columns -- but `select *` and `\d` are what
+  -- a human compares two databases with, and two shapes that differ only in column order are
+  -- a false positive nobody needs to chase.
+  approval_approver       text,
+  approval_approved_at    timestamptz,
+  approval_envelope_hash  text,
+  approval_note           text,
+  approval_document_ref   text,
   CONSTRAINT envelopes_pkey PRIMARY KEY (store_id, version),
   CONSTRAINT envelopes_version_positive   CHECK (version >= 1),
   CONSTRAINT envelopes_activation_check   CHECK (activation IN ('shadow', 'active', 'killed')),
   CONSTRAINT envelopes_discount_range     CHECK (
     max_discount_pct IS NULL OR (max_discount_pct >= 0 AND max_discount_pct <= 100)
   ),
-  CONSTRAINT envelopes_floors_is_array    CHECK (jsonb_typeof(floors) = 'array')
+  CONSTRAINT envelopes_floors_is_array    CHECK (jsonb_typeof(floors) = 'array'),
+  -- An approval is present or it is absent; there is no half of one. The blank-string arms
+  -- are not decoration: `text NOT NULL` is satisfied by '', and an approval signed by ''
+  -- names no approver -- which is precisely what `ApprovalArtifact.parse` refuses.
+  CONSTRAINT envelopes_approval_is_whole  CHECK (
+    (approval_approver IS NULL) = (approval_approved_at IS NULL)
+    AND (approval_approver IS NULL) = (approval_envelope_hash IS NULL)
+    AND (approval_approver IS NOT NULL
+         OR (approval_note IS NULL AND approval_document_ref IS NULL))
+    AND (approval_approver IS NULL OR btrim(approval_approver) <> '')
+    AND (approval_envelope_hash IS NULL OR btrim(approval_envelope_hash) <> '')
+  ),
+  -- The constraint the ticket is about. 'active' stays a legal value; it stops being a value
+  -- a row may assert on its own say-so.
+  CONSTRAINT envelopes_active_requires_approval CHECK (
+    activation <> 'active'
+    OR (approval_approver IS NOT NULL
+        AND approval_approved_at IS NOT NULL
+        AND approval_envelope_hash IS NOT NULL)
+  )
 );
+
+-- Idempotent repair for a database created by an earlier run of this file, guarded exactly
+-- as the `app.seller_endpoints` and `app.bid_nonces` blocks below are, and for the same
+-- reason: `CREATE TABLE IF NOT EXISTS` does nothing at all to a table that already exists, so
+-- a live database would otherwise keep the old shape forever while this file claims the new
+-- one. Adding a nullable column with no default is a catalog change in PostgreSQL 11+ -- no
+-- table rewrite -- and the file's `lock_timeout` bounds the ACCESS EXCLUSIVE it still takes.
+ALTER TABLE sealed.envelopes ADD COLUMN IF NOT EXISTS approval_approver      text;
+ALTER TABLE sealed.envelopes ADD COLUMN IF NOT EXISTS approval_approved_at   timestamptz;
+ALTER TABLE sealed.envelopes ADD COLUMN IF NOT EXISTS approval_envelope_hash text;
+ALTER TABLE sealed.envelopes ADD COLUMN IF NOT EXISTS approval_note          text;
+ALTER TABLE sealed.envelopes ADD COLUMN IF NOT EXISTS approval_document_ref  text;
+
+-- WHAT HAPPENS TO ROWS THAT ARE ALREADY THERE, stated rather than discovered.
+--
+-- Every row that predates this change has all five approval columns NULL, so any row already
+-- asserting 'active' violates `envelopes_active_requires_approval`. A migration that simply
+-- added the constraint would abort on the first such row -- and because the runner wraps this
+-- file in ONE transaction, it would abort the whole file, on every subsequent run, until an
+-- operator went in by hand. So the rows are repaired first, and the repair is not a judgement
+-- call: it is the SAME decision the service has been making on every boot since the
+-- durability seam landed. `merchant_svc.envelope.repository.restorable` reads a row back as
+-- 'active' with no artifact and restores it in 'shadow' at WARNING. This statement makes that
+-- downgrade durable and does it once, instead of the service re-deciding it forever.
+--
+-- The direction is the safe one and it is the only one available: a store stops bidding, and
+-- a restart can never START one. The merchant re-activates against a fresh approval, which is
+-- the same thing they already had to do. Nothing is deleted -- the terms, the version and the
+-- history are untouched; only the lifecycle flag moves, and only for rows whose activation
+-- was never justified by anything on file.
+UPDATE sealed.envelopes
+   SET activation = 'shadow'
+ WHERE activation = 'active'
+   AND (approval_approver IS NULL
+        OR approval_approved_at IS NULL
+        OR approval_envelope_hash IS NULL);
+
+DO $envelope_approval_constraints$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'sealed' AND t.relname = 'envelopes'
+       AND c.conname = 'envelopes_approval_is_whole'
+  ) THEN
+    ALTER TABLE sealed.envelopes
+      ADD CONSTRAINT envelopes_approval_is_whole
+      CHECK (
+        (approval_approver IS NULL) = (approval_approved_at IS NULL)
+        AND (approval_approver IS NULL) = (approval_envelope_hash IS NULL)
+        AND (approval_approver IS NOT NULL
+             OR (approval_note IS NULL AND approval_document_ref IS NULL))
+        AND (approval_approver IS NULL OR btrim(approval_approver) <> '')
+        AND (approval_envelope_hash IS NULL OR btrim(approval_envelope_hash) <> '')
+      ) NOT VALID;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'sealed' AND t.relname = 'envelopes'
+       AND c.conname = 'envelopes_active_requires_approval'
+  ) THEN
+    ALTER TABLE sealed.envelopes
+      ADD CONSTRAINT envelopes_active_requires_approval
+      CHECK (
+        activation <> 'active'
+        OR (approval_approver IS NOT NULL
+            AND approval_approved_at IS NOT NULL
+            AND approval_envelope_hash IS NOT NULL)
+      ) NOT VALID;
+  END IF;
+  -- Added NOT VALID above so the ADD itself takes no scan, then validated in a statement of
+  -- its own that needs only SHARE UPDATE EXCLUSIVE. A database that already carries both
+  -- constraints validated -- every fresh one, since the CREATE TABLE above declares them --
+  -- does none of this.
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'sealed' AND t.relname = 'envelopes'
+       AND c.conname = 'envelopes_approval_is_whole' AND NOT c.convalidated
+  ) THEN
+    ALTER TABLE sealed.envelopes VALIDATE CONSTRAINT envelopes_approval_is_whole;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint c
+      JOIN pg_class t      ON t.oid = c.conrelid
+      JOIN pg_namespace n  ON n.oid = t.relnamespace
+     WHERE n.nspname = 'sealed' AND t.relname = 'envelopes'
+       AND c.conname = 'envelopes_active_requires_approval' AND NOT c.convalidated
+  ) THEN
+    ALTER TABLE sealed.envelopes VALIDATE CONSTRAINT envelopes_active_requires_approval;
+  END IF;
+END
+$envelope_approval_constraints$;
 
 CREATE TABLE IF NOT EXISTS sealed.learned_policy (
   policy_id      uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
