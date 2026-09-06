@@ -1694,19 +1694,13 @@ def test_t175_the_unread_total_price_sweep_is_armed() -> None:
                 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-175: `PRICE_FIELD = 'unit_price'` at provenance.py:142, so `_walk` records a priced "
-        "node only where it reads BOTH `product_ref` and `unit_price`. A dict-built node naming "
-        "a product and stating only a `total_price` is collected by nothing — `prices` comes "
-        "back `[]` — so neither the floor wall nor the depth reconciliation ever sees the "
-        "number, and DESIGN.md:127 publishes `price_value` as a function of exactly that field "
-        "while the C11 accepted-event payload records it verbatim. Measured: 16 of 16 admitted, "
-        "against 16 of 16 refused for the identical node with the number spelled `unit_price`; "
-        "remove this marker with the fix"
-    ),
-)
+# T-175 FIXED in `_walk`, which now treats a node naming a product and stating EITHER number as
+# offer material, and in `_record_total`, which records the product beside the total so the floor
+# wall and the reconciliation can be asked about it — the two walls the ticket names. The xfail
+# marker was removed because the marker asserts the defect is PRESENT and it is not: measured
+# 16 of 16 admitted before the edit and 0 of 16 after, with the arming test's sixteen
+# `unit_price` controls still refused and its honest list-price bid — in BOTH spellings — still
+# admitted, which is what separates checking the field from banning it.
 def test_t175_a_total_price_under_the_envelope_floor_is_refused_like_a_unit_price_is() -> None:
     """A price the store agent's own walls never read is a price the merchant never approved.
 
@@ -2008,18 +2002,12 @@ def test_t209_t218_the_two_doors_nullability_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-209: T-195 regenerated the model with --strict-nullable, so `offer.commitments: null` "
-        "is now correctly refused `schema_invalid:offer.commitments` at the contracts door. The "
-        "store agent walks `commitments` with no pydantic gate at all: `_walk`'s first statement "
-        "is `if node is None: return`, so the null is skipped SILENTLY — not recorded in "
-        "`unwalkable`, not refused — and a dict-built bid carrying it is admitted by "
-        "enforce_bid_provenance. The two doors disagree about the same shape; remove this marker "
-        "with the fix"
-    ),
-)
+# T-209 FIXED, and fixed by the GENERIC repair T-218 asks for rather than by a point fix for
+# `commitments`: `_walk` now consults the protocol model for the fields that may not be null and
+# records a stated null in `unwalkable`, so `offer.commitments: null` is refused because it is a
+# MEMBER of that family, not because it was named. The xfail marker was removed because the
+# defect is gone — measured admitted before the edit, refused after, with the same walk still
+# admitting the four genuinely nullable controls the arming test drives.
 def test_t209_a_null_commitments_list_is_refused_by_the_store_agents_own_door_too() -> None:
     """The named case. `offer.commitments: null` must not be admitted by the auditor that walks it.
 
@@ -2045,18 +2033,12 @@ def test_t209_a_null_commitments_list_is_refused_by_the_store_agents_own_door_to
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-218: the cause is generic, not specific to commitments. `_walk` short-circuits on ANY "
-        "None while --strict-nullable made a growing set of fields non-nullable at the pydantic "
-        "door, so the family is whatever the generator has tightened so far. MEASURED: 9 of the "
-        "10 fields the contracts door refuses a null for are ADMITTED by enforce_bid_provenance, "
-        "with offer.product_ref the only one the two doors agree about. Every future field the "
-        "generator tightens joins the family and nothing on the store-agent side notices; remove "
-        "this marker with the fix"
-    ),
-)
+# T-218 FIXED structurally, which is what the ticket asked for over "six more point fixes":
+# `provenance._non_nullable_fields` asks PYDANTIC — the same machinery the contracts door
+# validates with — which fields of `Bid`/`Offer` refuse a null, and `_walk` records a stated null
+# in any of them. The family is read off the model on every walk, so a field the generator
+# tightens tomorrow joins this wall without anyone editing it. The xfail marker was removed
+# because the divergence is gone: measured 9 of 10 escaping before the edit and 0 of 10 after.
 def test_t218_the_two_doors_agree_about_every_field_that_may_not_be_null() -> None:
     """The property, not the six point fixes: whatever the contracts door refuses a null for,
     the store agent's own auditor must refuse too.
@@ -2231,19 +2213,11 @@ def test_t280_the_anonymous_receipt_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-280: the `malformed_submission` refusal for a mapping whose reads fail during "
-        "`_snapshot` is built by `_refuse(REASON_MALFORMED_SUBMISSION)` with no `payload=`, so "
-        "the receipt carries no signer_id and no nonce and cannot be tied to the submission it "
-        "refused. The same file argues the opposite case ninety lines earlier for "
-        "door_failed_closed — 'without it a genuine internal fault produced a receipt with no "
-        "identity at all, indistinguishable in a rejection log from an ordinary policy refusal' "
-        "— and every neighbouring refusal passes payload=. Measured: 6 of 6 anonymous; remove "
-        "this marker with the fix"
-    ),
-)
+# T-280 FIXED at `door.py`'s `_snapshot` failure site, which now refuses with
+# `_refuse(REASON_MALFORMED_SUBMISSION, payload=payload)` exactly as the `door_failed_closed`
+# site ninety lines above it already did. The xfail marker was removed because the defect is
+# gone, not because the gate was relaxed: measured 6 of 6 anonymous before the edit and 6 of 6
+# named after it, with the arming test's `signature_missing` control unchanged throughout.
 def test_t280_a_refused_submission_the_door_could_read_is_named_in_its_own_receipt() -> None:
     """A rejection log entry that cannot be tied to a submission is not a rejection log entry.
 
@@ -2420,18 +2394,12 @@ def test_t220_the_depth_coverage_reader_is_armed() -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-220: the two tests grading 'there is no depth at which a bid stops being checked' "
-        "parametrize layers as [1, 11, 13, 14, 64] and [1, 13, 14, 64] — values chosen either "
-        "side of the OLD bound of 12 — so a depth bound re-introduced at 65 or beyond is "
-        "invisible to the entire suite. The product code is correct; the coverage pins the fix "
-        "that was made rather than the property that was promised. MEASURED: max depth graded "
-        "anywhere in the package is 64, while the boundary is demonstrably still checking at "
-        "256; remove this marker with the fix"
-    ),
-)
+# T-220 FIXED in the sibling. Both graded parametrizations now read the shared
+# `test_price_reconciliation._DEPTHS = [1, 11, 13, 14, 64, 65, 128, 256]` — every value they
+# already carried, kept verbatim, with 65/128/256 APPENDED. No assertion in either test was
+# touched; the tests run 17 cases where they ran 9, and all 17 pass. The xfail marker was
+# removed because the coverage gap is closed: measured `max(depths)` 64 before and 256 after,
+# with the arming test independently driving the live boundary at 65, 128 and 256 on every run.
 def test_t220_the_suite_grades_depths_a_reintroduced_bound_could_hide_behind() -> None:
     """A bound at 65 must not be able to hide from the tests that exist to forbid it.
 

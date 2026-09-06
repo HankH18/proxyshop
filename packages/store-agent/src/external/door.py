@@ -580,10 +580,22 @@ def _receive_bid(
     #     Refusing a mapping we cannot copy is the fail-closed direction, and the refusal is
     #     safe on exactly the input it exists for because `_refuse` no longer re-reads what it
     #     is refusing (T-230).
+    #
+    #     `payload=` here for the reason `receive_bid`'s own fail-closed refusal states ninety
+    #     lines above: without it a submission whose identity the door HAD ALREADY READ — it got
+    #     past gate 1 and canonicalized at gate 2 — is refused anonymously, and a rejection log
+    #     entry that carries no `signer_id` and no `nonce` cannot be tied to the submission it
+    #     refused. This is a hostile-input path by construction, and `_refuse`'s reads are
+    #     guarded (T-230), so handing it the caller's raw mapping cannot itself raise: a `.get`
+    #     that explodes here yields `None` for that field and the receipt still carries whatever
+    #     the door could read. There is no fallback to the snapshot to prefer — `_snapshot` is
+    #     precisely what just failed, so `submitted` does not exist. The sibling refusal at the
+    #     not-a-`Mapping` gate above stays without a payload deliberately: there the object
+    #     provably is not a mapping, so there is no identity to carry (T-280).
     try:
         submitted = _snapshot(payload)
     except Exception:  # noqa: BLE001 - a mapping that cannot be read is a malformed submission
-        return _refuse(REASON_MALFORMED_SUBMISSION)
+        return _refuse(REASON_MALFORMED_SUBMISSION, payload=payload)
 
     #     Re-anchor the protocol on the snapshot. The bytes that were canonicalized at gate 2
     #     belong to the caller's object; these belong to the document that is actually going to

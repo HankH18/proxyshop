@@ -489,7 +489,24 @@ def _buried(payload: dict[str, Any], layers: int) -> dict[str, Any]:
     return payload
 
 
-@pytest.mark.parametrize("layers", [1, 11, 13, 14, 64])
+#: Depths both properties below are graded at. ADDITIVE: `[1, 11, 13, 14, 64]` is every value
+#: this parametrization already carried, kept verbatim, with `65, 128, 256` appended (T-220).
+#:
+#: The original values were chosen either side of the OLD bound of 12 and stopped at 64, which
+#: pinned the fix that was made rather than the property that was promised: a depth bound
+#: re-introduced at 65 — or 100, or 200 — was invisible to the entire suite, and the ticket's own
+#: reproduction is "re-introduce a depth bound of 65 in `_walk` and run the suite: green". 65 is
+#: the first depth the old coverage could not see; 256 is four times the old ceiling.
+#:
+#: 256 rather than 1000, and that ceiling is measured rather than guessed: past roughly 450-500
+#: layers `_walk` meets the interpreter's own recursion limit, `collect_claim_material` catches
+#: the `RecursionError`, and the bid is still REFUSED — but with the `unwalkable` reason instead
+#: of the price wall's, so `assert "unit_price" in reasons` would go red for a CORRECT behaviour.
+#: 256 sits well inside the price-wall regime.
+_DEPTHS = [1, 11, 13, 14, 64, 65, 128, 256]
+
+
+@pytest.mark.parametrize("layers", _DEPTHS)
 def test_a_priced_node_is_collected_however_deep_the_bid_buries_it(
     hooks: ToolHooks, layers: int
 ) -> None:
@@ -506,6 +523,11 @@ def test_a_priced_node_is_collected_however_deep_the_bid_buries_it(
     depth at which a bid stops being checked; the cycle hazard is handled by
     `test_a_self_referential_bid_is_refused_rather_than_walked_forever`, which is what a bound
     should have been all along.
+
+    **And "far past it" now means past a bound a repair could re-introduce.** Every value here
+    used to sit at or below 64 — one layer above the old bound of 12, chosen when 12 was the
+    number that mattered — so a NEW bound at 65 would have been graded by nothing (T-220). See
+    `_DEPTHS`.
     """
     bid = {
         "offer": {"product_ref": "prod-cap", "discount": None},
@@ -520,7 +542,7 @@ def test_a_priced_node_is_collected_however_deep_the_bid_buries_it(
     )
 
 
-@pytest.mark.parametrize("layers", [1, 13, 14, 64])
+@pytest.mark.parametrize("layers", _DEPTHS)
 def test_a_claim_is_checked_however_deep_the_bid_buries_it(hooks: ToolHooks, layers: int) -> None:
     """Wider than pricing: the *provenance* wall was reachable around too.
 
@@ -528,6 +550,10 @@ def test_a_claim_is_checked_however_deep_the_bid_buries_it(hooks: ToolHooks, lay
     under unknown keys; it nests two deep. The same unhooked commitment under fourteen was
     admitted, ledger unconsulted — the defect is in the walk, so it is in every wall the walk
     feeds.
+
+    Graded at the same depths as the priced-node property above, and for the same reason: this
+    one stopped at 64 too, so a re-introduced bound at 65 was invisible to it as well (T-220).
+    See `_DEPTHS`.
     """
     unhooked = {
         "key": "free_returns",
