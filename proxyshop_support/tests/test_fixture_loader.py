@@ -30,6 +30,7 @@ from proxyshop_support.fixture_loader import (
     DuplicateFixtureWarning,
     load_sibling_fixtures,
 )
+from proxyshop_support.tests._repo_scripts import load_repo_script
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -185,11 +186,12 @@ def test_the_static_gate_makes_a_duplicate_fatal(tmp_path: Path) -> None:
 
     Without this the collision could hide indefinitely behind a fixture nobody requests.
     """
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    try:
-        import check_verify_contracts as gate
-    finally:
-        sys.path.pop(0)
+    # T-252: by PATH, not by bare name. `sys.path.insert(0, scripts)` + `import
+    # check_verify_contracts` asks for whatever answers to that name, and a sys.modules
+    # entry or a meta_path finder beats the inserted path outright — measured, both. The
+    # assertions below are unchanged; what changed is that they are now guaranteed to be
+    # grading scripts/check_verify_contracts.py, which is a FROZEN file.
+    gate = load_repo_script("check_verify_contracts")
 
     (tmp_path / "_fixtures_alpha.py").write_text(ALPHA)
     (tmp_path / "_fixtures_beta.py").write_text(BETA)
@@ -201,11 +203,12 @@ def test_the_static_gate_makes_a_duplicate_fatal(tmp_path: Path) -> None:
 
 def test_the_static_gate_reads_the_name_keyword(tmp_path: Path) -> None:
     """``@pytest.fixture(name="x")`` renames the fixture; the gate must compare on ``x``."""
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
-    try:
-        import check_verify_contracts as gate
-    finally:
-        sys.path.pop(0)
+    # T-252: by PATH, not by bare name. `sys.path.insert(0, scripts)` + `import
+    # check_verify_contracts` asks for whatever answers to that name, and a sys.modules
+    # entry or a meta_path finder beats the inserted path outright — measured, both. The
+    # assertions below are unchanged; what changed is that they are now guaranteed to be
+    # grading scripts/check_verify_contracts.py, which is a FROZEN file.
+    gate = load_repo_script("check_verify_contracts")
 
     path = tmp_path / "_fixtures_renamed.py"
     path.write_text(

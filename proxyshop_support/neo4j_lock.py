@@ -80,6 +80,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -125,9 +126,86 @@ DEFAULT_TIMEOUT = 240.0
 #: cost several unattended runs before anyone looked at the frame it was stopped in.
 REPORT_EVERY = 30.0
 
+#: Headroom left between this module giving up and the AMBIENT per-item deadline firing
+#: (T-171). See :func:`ambient_deadline_remaining`. Building the
+#: :class:`Neo4jLockTimeout` message calls :func:`lock_holder`, which reads a file, and the
+#: caller still has to unwind its fixture stack — so "raise at the same instant pytest
+#: would have killed us" is a coin flip, not a fix.
+AMBIENT_DEADLINE_MARGIN = 5.0
+
 
 class Neo4jLockTimeout(RuntimeError):
     """The Neo4j flock could not be acquired in time."""
+
+
+def ambient_deadline_remaining() -> float | None:
+    """Seconds left on this process's ``ITIMER_REAL`` alarm, or ``None`` when unarmed.
+
+    **Why this exists (T-171).** :data:`DEFAULT_TIMEOUT` being smaller than the repo-wide
+    ``--timeout`` is NOT enough to make :class:`Neo4jLockTimeout` reachable, and T-191's
+    fix stopped one step short of that. pytest-timeout's budget covers an item's setup,
+    call and teardown *together*, so what the lock actually gets is the budget MINUS
+    whatever the item has already spent — and ``_neo4j_guard`` is not the first thing an
+    item does. Measured in this repo: with a 10 s budget, 5 s burned before the guard and
+    a lock wait of 7 s (which satisfies T-191's margin rule against that budget), the
+    contended wait still died at ``neo4j_lock.py`` inside ``time.sleep(poll)`` with
+    ``Failed: Timeout (>10.0s) from pytest-timeout`` — naming neither Neo4j nor the lock,
+    which is the exact undiagnosable red T-171 is about. At the shipped numbers the same
+    arithmetic leaves 300 - 240 = 60 s for everything else in the item; a sibling lane has
+    a gate that takes 101 s on its own.
+
+    A wall-clock constant cannot fix that, because the amount already spent is not knowable
+    at import time. The *remaining* budget is, though: pytest-timeout's default method on
+    any platform with ``SIGALRM`` is ``signal``, which arms ``ITIMER_REAL``, and the kernel
+    will tell anyone who asks how much of it is left. That is a live reading of the real
+    deadline rather than a second copy of a number.
+
+    Returns:
+        The seconds remaining, or ``None`` when no interval timer is armed — an unarmed
+        timer reads ``0.0``, and so does one that has just fired.
+
+    Honest limits, so nothing over-reads this:
+
+    * It sees ``ITIMER_REAL`` and nothing else. pytest-timeout falls back to its ``thread``
+      method under a debugger (and on a platform without ``SIGALRM``), and a
+      ``threading.Timer`` is invisible here — this returns ``None`` and the caller keeps
+      its full requested wait, i.e. exactly the pre-T-171 behaviour.
+    * It cannot tell *whose* alarm it is. Any ``ITIMER_REAL`` is a deadline this process
+      will not outlive, so treating it as one is right whoever armed it.
+    * ``getitimer`` is process-wide and safe from any thread (``setitimer`` is the
+      main-thread-only half of that pair), so a lock taken off the main thread still sees
+      the deadline. Verified on this host.
+    """
+    getitimer = getattr(signal, "getitimer", None)
+    if getitimer is None:  # pragma: no cover - every POSIX platform has it
+        return None
+    try:
+        remaining, _interval = getitimer(signal.ITIMER_REAL)
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return None
+    return remaining if remaining > 0.0 else None
+
+
+def _effective_timeout(timeout: float) -> tuple[float, float | None]:
+    """``timeout`` clipped to the ambient deadline (T-171).
+
+    Returns:
+        ``(budget, ambient)`` — the seconds the wait may actually use, and the ambient
+        remaining that clipped it, or ``None`` when nothing did. ``budget`` is never
+        negative: an item already past its margin gets 0, which means "fail with the
+        diagnosis on the first blocked poll" rather than "be killed anonymously".
+
+    Clipping only ever SHORTENS the wait, so this cannot make the lock give up later than
+    a caller asked, and it does not touch the uncontended path at all — the non-blocking
+    ``flock`` is attempted before any deadline is consulted.
+    """
+    ambient = ambient_deadline_remaining()
+    if ambient is None:
+        return timeout, None
+    allowed = max(ambient - AMBIENT_DEADLINE_MARGIN, 0.0)
+    if allowed >= timeout:
+        return timeout, None
+    return allowed, ambient
 
 
 @dataclass
@@ -415,20 +493,48 @@ def _report_to_stderr(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def _timeout_message(lock_path: Path, timeout: float) -> str:
+def _timeout_message(
+    lock_path: Path,
+    timeout: float,
+    ambient: float | None = None,
+    requested: float | None = None,
+) -> str:
     """The :class:`Neo4jLockTimeout` text. The FIRST LINE has to be the whole diagnosis.
 
     An unattended run's log, a CI summary and a ``-q`` pytest error line all show one line.
     Before T-191 that line was ``Failed: Timeout (>300.0s) from pytest-timeout``, which
     reads like a hung build and sent several sessions looking for a product bug that was
     never there.
+
+    Args:
+        timeout: the budget the wait actually used.
+        ambient: when the wait was cut short by :func:`ambient_deadline_remaining`, the
+            seconds that were left on that deadline when the wait started. Named in the
+            body because a reader who sees ``waited 12s`` against a configured 240 will
+            otherwise go looking for the bug in this module (T-171).
+        requested: what the caller originally asked to wait, when ``ambient`` clipped it.
+            Quoted rather than :data:`DEFAULT_TIMEOUT`: the caller may have passed its own
+            number, and a note that names a value nobody asked for is worse than no note.
     """
+    clipped = ""
+    if ambient is not None:
+        asked = DEFAULT_TIMEOUT if requested is None else requested
+        clipped = (
+            f"  note:      the wait was shortened from the {asked:g}s it asked for to "
+            f"{timeout:g}s, because this pytest item had only {ambient:.0f}s left on its "
+            f"own --timeout when the lock was requested (minus "
+            f"{AMBIENT_DEADLINE_MARGIN:g}s of margin). Giving up early is deliberate: the "
+            f"alternative is pytest-timeout killing the item with a message that names "
+            f"neither Neo4j nor this lock, which is undiagnosable in an unattended run "
+            f"(T-171).\n"
+        )
     return (
         f"another ProxyShop worker process holds the Neo4j lock (D37) — waited "
         f"{timeout:g}s for it and gave up.\n"
         f"  lock file: {lock_path}\n"
         f"  holder:    {lock_holder(lock_path)}\n"
         f"  this run:  pid={os.getpid()} worker={os.environ.get('PROXYSHOP_WORKER')}\n"
+        f"{clipped}"
         f"Neo4j Community has exactly ONE database (D4), so every pytest session that "
         f"touches the graph is serialized on this single machine-global flock — it is "
         f"deliberately outside every worktree, so a parallel swarm contends on it as a "
@@ -462,6 +568,15 @@ def neo4j_flock(
             per-item budget — read that constant's note before changing it. A nested
             acquisition inside the same process never waits, so this timeout is only ever
             about cross-worker contention.
+
+            **It is a ceiling, not a promise (T-171).** If this process is already under an
+            ``ITIMER_REAL`` deadline — which is what pytest-timeout arms for every item —
+            the wait is clipped to what is left of that, minus
+            :data:`AMBIENT_DEADLINE_MARGIN`, so :class:`Neo4jLockTimeout` is raised while
+            there is still time to raise it. Waiting the full ``timeout`` when the item has
+            less than that left does not buy a longer wait; it buys
+            ``Failed: Timeout (>Ns) from pytest-timeout``, which names neither Neo4j nor
+            the lock. See :func:`ambient_deadline_remaining`.
         poll: seconds between attempts.
         path: override the lock file (tests use this; production always uses the default).
         report: where progress goes while blocked. Defaults to :func:`_report_to_stderr`
@@ -507,7 +622,12 @@ def _acquire(
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = lock_path.open("a+")
         started = time.monotonic()
-        deadline = started + timeout
+        # T-171: the wait may not outlive the deadline this process is ALREADY under, or
+        # the diagnosis below never gets printed. Read once, here, rather than per poll:
+        # the budget must not creep as the alarm counts down, and one reading keeps the
+        # reported number and the deadline the same number.
+        budget, ambient = _effective_timeout(timeout)
+        deadline = started + budget
         announced = False
         next_report = started + report_every
         try:
@@ -521,22 +641,33 @@ def _acquire(
                         # Only ever reached when the lock is genuinely held elsewhere, so
                         # an uncontended run stays silent.
                         announced = True
+                        shortened = (
+                            ""
+                            if ambient is None
+                            else f" (cut from {timeout:g}s: this pytest item has only "
+                            f"{ambient:.0f}s of its own --timeout left)"
+                        )
                         report(
-                            f"[neo4j-lock] waiting up to {timeout:g}s for {lock_path} — "
-                            f"held by {lock_holder(lock_path)}. Neo4j Community has ONE "
-                            f"database (D4/D37) so graph sessions run one at a time; this "
-                            f"is cross-worker contention, not a hang."
+                            f"[neo4j-lock] waiting up to {budget:g}s{shortened} for "
+                            f"{lock_path} — held by {lock_holder(lock_path)}. Neo4j "
+                            f"Community has ONE database (D4/D37) so graph sessions run "
+                            f"one at a time; this is cross-worker contention, not a hang."
                         )
                     if now >= deadline:
-                        raise Neo4jLockTimeout(_timeout_message(lock_path, timeout)) from None
+                        raise Neo4jLockTimeout(
+                            _timeout_message(lock_path, budget, ambient, timeout)
+                        ) from None
                     if now >= next_report:
                         next_report = now + report_every
                         report(
                             f"[neo4j-lock] still waiting {now - started:.0f}s of "
-                            f"{timeout:g}s for {lock_path} — held by "
+                            f"{budget:g}s for {lock_path} — held by "
                             f"{lock_holder(lock_path)}."
                         )
-                    time.sleep(poll)
+                    # Never sleep past the deadline: with a budget clipped to a second or
+                    # two, a default 0.5s poll would otherwise overshoot it by most of a
+                    # poll and hand the margin back.
+                    time.sleep(min(poll, max(deadline - now, 0.0)))
             won_at = time.monotonic()
             handle.seek(0)
             handle.truncate()
