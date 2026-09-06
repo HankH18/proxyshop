@@ -5915,6 +5915,96 @@
       "defect": "THE K-ANONYMITY PRODUCTION KNOB IS UNDOCUMENTED, which is the one half of SPEC.md:56 that is genuinely unmet. That line reads: 'No k-anonymity enforcement beyond a configurable floor (default 1 in fixtures; production knob documented).' The default-1 half is correct and deliberate -- it is a stated NON-GOAL, it is what the fixtures pin, and cycle-9 already ruled that calling it a defect was wrong. The 'production knob documented' half is not met: PROXYSHOP_BUYER_K_ANONYMITY appears nowhere in .env.example, README.md or docs/ -- the grep is silent across all three. So an operator deploying this has no way to learn that the floor exists, that it defaults to 1, or how to raise it. Split out of T-221, which was ruled invalid because its core claim (that the default-1 floor is itself a defect) contradicts the SPEC non-goal and a prior ruling; this is the residue of that ticket that IS real. Deliberately scoped to documentation: the knob itself exists and works, and no code change is wanted here. Note for whoever takes it that raising the floor above 1 is not a safe default to recommend casually -- anonymise_cohort raises ValueError when len(accounts) < floor, so a single-account profile build under a floor > 1 returns a 500, which means the documentation must say what the knob costs as well as what it does.",
       "finding_id": "e125d423164e168fa81e6feefcecf482058305d6393f74bbc8b76acc372ff49d",
       "reproduction": "grep -rn PROXYSHOP_BUYER_K_ANONYMITY .env.example README.md docs/ -- returns nothing. Then read SPEC.md:56 and SPEC.md:84 (A6), which both promise the knob is documented. Confirm the knob is real by finding k_anonymity_floor in apps/buyer/svc/src/profile/__init__.py and the tests that pin its default at apps/buyer/svc/tests/test_profile_k_anonymity_knob.py:216."
+    },
+    {
+      "id": "T-352",
+      "title": "POST /auctions retains caller-chosen identifiers of unbounded length in a store with NO eviction of any kind. CreateAuctionRequest.intent is dict[str, Any], so pydantic validates nothing inside it, and _refuse_an_oversized_intent inspects only hard_constraints. create_auction writes intent.intent_id and intent.cluster_id into AuctionRecord via machine.create() in apps/exchange/src/auction/routes.py, and the default InMemoryAuctionStore._records is a plain dict whose own comment says 'Unbounded' - no capacity, no TTL, no eviction. GET /auctions/{auction_id} then hands the oversized string back to any anonymous reader. This is strictly worse than the bounded ~10 MiB ceiling on POST /internal/outcomes that was just fixed, because there is no ceiling at all.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/auction/state.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/exchange/src/auction/state.py",
+      "defect": "POST /auctions retains caller-chosen identifiers of unbounded length in a store with NO eviction of any kind. CreateAuctionRequest.intent is dict[str, Any], so pydantic validates nothing inside it, and _refuse_an_oversized_intent inspects only hard_constraints. create_auction writes intent.intent_id and intent.cluster_id into AuctionRecord via machine.create() in apps/exchange/src/auction/routes.py, and the default InMemoryAuctionStore._records is a plain dict whose own comment says 'Unbounded' - no capacity, no TTL, no eviction. GET /auctions/{auction_id} then hands the oversized string back to any anonymous reader. This is strictly worse than the bounded ~10 MiB ceiling on POST /internal/outcomes that was just fixed, because there is no ceiling at all.",
+      "finding_id": "ad287bf109c408448335107632ce34ac04d628f727f26bf5119c72d39dbb7588",
+      "reproduction": "Measured on task/exch-dos against the served app: 512 x POST /auctions with honest ids -> 201, 512 records held, store retained 0.252 MiB. 512 x POST /auctions with a 30,000-character intent_id and cluster_id -> 201, 512 records held, store retained 29.547 MiB. Growth is linear in request count with no plateau, unlike the policy door whose _stores cap at 256 produced a flat 256->2048 line. GET /auctions/{auction_id} returns the 30,001-character string to an unauthenticated caller."
+    },
+    {
+      "id": "T-353",
+      "title": "bid_ref on the unauthenticated accept door carries no max_length, while its sibling RosterEntry.store_id carries max_length=128. The value is echoed in the refusal body and interpolated into the persisted policy_event, so it is both an unbounded echo and an unbounded retained event. Amplification was measured at 1.00x, so this is NOT an amplifier - an earlier characterization of it as 'the cheapest live amplifier' was overstated and is corrected here.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/accept/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/accept/routes.py",
+      "defect": "bid_ref on the unauthenticated accept door carries no max_length, while its sibling RosterEntry.store_id carries max_length=128. The value is echoed in the refusal body and interpolated into the persisted policy_event, so it is both an unbounded echo and an unbounded retained event. Amplification was measured at 1.00x, so this is NOT an amplifier - an earlier characterization of it as 'the cheapest live amplifier' was overstated and is corrected here.",
+      "finding_id": "e9d050d53757ca24ba1918c416fa5e7e43ed46cae5356199b9caaf5ae607fe64",
+      "reproduction": "Verified live on main: a 4,000,000-character bid_ref returns 409 with a 3.9 MiB body, and the reference is written into the persisted policy_event."
+    },
+    {
+      "id": "T-354",
+      "title": "The 404 body interpolates the caller's auction_id with no length bound and, unlike every sibling door in the package, without the redact_addresses sweep. Both an unbounded echo and a gap in the address-redaction discipline the rest of the package applies.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/ranking/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/ranking/routes.py",
+      "defect": "The 404 body interpolates the caller's auction_id with no length bound and, unlike every sibling door in the package, without the redact_addresses sweep. Both an unbounded echo and a gap in the address-redaction discipline the rest of the package applies.",
+      "finding_id": "26bbdd9717a3dad0f627a8b6f5575e2c1342c7a61f239505f438b53dd823dae5",
+      "reproduction": "Observed during the exch-dos sibling sweep of every unauthenticated route on the branch's touched files: this door is the one sibling with neither a length bound nor a redaction sweep."
+    },
+    {
+      "id": "T-355",
+      "title": "There is no request-body size cap of any kind on POST /auctions or on POST /auctions/{id}/accept. DEFAULT_MAX_OUTCOME_BYTES (64 KiB, counted while streaming) exists only on the policy door, so the convention exists in the package and these two doors do not follow it.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/exchange/src/auction/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/exchange/src/auction/routes.py",
+      "defect": "There is no request-body size cap of any kind on POST /auctions or on POST /auctions/{id}/accept. DEFAULT_MAX_OUTCOME_BYTES (64 KiB, counted while streaming) exists only on the policy door, so the convention exists in the package and these two doors do not follow it.",
+      "finding_id": "02fec23b556de2cf297715fd2edb94a536cdbc5bb93203bb51be6a0cfdeec589",
+      "reproduction": "Established by the 19-field-group sibling sweep across every unauthenticated route on the files task/exch-dos added or touched: the streaming byte cap is present on the policy door and absent on both auction doors."
+    },
+    {
+      "id": "T-356",
+      "title": "normalise_buyer_key only strips and case-folds, so sub-addressing defeats the magic-link per-address budget entirely. The rate limiter's own class docstring claims 'the mailbox is what is being protected'; it protects the string, not the mailbox. The fix is deliberately NOT local - normalise_buyer_key is the vault's identity key repo-wide, so changing it reaches far beyond the auth package and needs its own ticket rather than a lane edit.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/vault/pseudonyms.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "HIGH",
+      "location": "apps/buyer/svc/src/vault/pseudonyms.py",
+      "defect": "normalise_buyer_key only strips and case-folds, so sub-addressing defeats the magic-link per-address budget entirely. The rate limiter's own class docstring claims 'the mailbox is what is being protected'; it protects the string, not the mailbox. The fix is deliberately NOT local - normalise_buyer_key is the vault's identity key repo-wide, so changing it reaches far beyond the auth package and needs its own ticket rather than a lane edit.",
+      "finding_id": "d92874d25323c706eaa41a809b234398cffbc564a51aec62f28f7b2388b49314",
+      "reproduction": "Measured live against the served app on task/buyer-auth: 40 of 40 requests for dana.reyes+0@example.com through dana.reyes+39@example.com were accepted, mailing 40 magic links to one physical mailbox under a configured budget of 5. Case and whitespace correctly do NOT buy a fresh budget - DANA@, Dana.Reyes@ and a space-padded form all collapse to one key - so the normalisation works and its domain is simply too narrow."
+    },
+    {
+      "id": "T-357",
+      "title": "The unauthenticated magic-link door has no per-caller or per-IP ceiling. The per-address budget closed the one-mailbox flood and left the many-mailbox one, so the door remains an unauthenticated bulk mailer. Not mentioned in the implementing commit body.",
+      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "scope": [
+        "apps/buyer/svc/src/auth/routes.py"
+      ],
+      "depends_on": [],
+      "source": "finding",
+      "severity": "MEDIUM",
+      "location": "apps/buyer/svc/src/auth/routes.py",
+      "defect": "The unauthenticated magic-link door has no per-caller or per-IP ceiling. The per-address budget closed the one-mailbox flood and left the many-mailbox one, so the door remains an unauthenticated bulk mailer. Not mentioned in the implementing commit body.",
+      "finding_id": "ead132299e6c1164a067e25c70a2bb092698419db4dccf58cefd92b5c82af831",
+      "reproduction": "Measured live: 300 of 300 requests for 300 distinct addresses from a single caller were accepted, every one returning 202."
     }
   ]
 }
