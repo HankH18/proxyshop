@@ -496,6 +496,251 @@ def test_the_published_denial_reason_example_is_a_value_the_exchange_can_produce
 
 
 # =============================================================================================
+# T-267 (part two) — the pattern must fit what the gate PASSES THROUGH, not only what
+#                    `denial_reason()` BUILDS
+# =============================================================================================
+#
+# The sweep above grades `denial_reason(code)` and `denial_reason(code, prose)`. Those are
+# values the package CONSTRUCTS: `"<code>"` and `"<code>: <prose>"` by construction, which
+# cannot violate a pattern written around that shape. So the check asked a narrower question
+# than the surface it protects, and the surface has a third path.
+#
+# `apps/exchange/src/accept/gate.py::_denial_reason` is the only producer that emits a string
+# it did not build:
+#
+#     if denial_code(reason) == code:
+#         return reason            # <- verbatim, whatever the eligibility source wrote
+#
+# and `accept/routes.py::_denied` republishes that untouched, because `denial_code` is not
+# `None`. `denial_code` splits on a BARE colon and `.strip()`s the token:
+#
+#     token = str(reason or "").split(DENIAL_SEPARATOR.strip(), 1)[0].strip()
+#
+# so it accepts a colon with NO space behind it, and whitespace in FRONT of it. Executed,
+# against the `($|: )` tail this lane first published: `"blacklisted:chargeback fraud"`,
+# `"blacklisted : chargeback fraud"` and `"blacklisted:"` were all served verbatim and all
+# three were refused by the published pattern.
+#
+# That is not hypothetical. `EligibilityDecision.reason` is a free-form `str` on a public port
+# (`SellerEligibility.check`) whose live lookup is explicitly not yet written, so a third-party
+# source is entitled to write any of those — and the contract said the service could not
+# return them. No in-repo producer emits one, which is exactly why nothing was red.
+#
+# The three gates below are one gate in three parts: a sweep driven through the real producer,
+# the same rule as a property over every code point in Unicode, and the positive control that
+# proves the first two can fail.
+
+
+#: The tail this repair replaced, kept as the positive control's input. `($|: )` demanded a
+#: colon AND a space; `denial_code` demands neither.
+SUPERSEDED_DENIAL_REASON_TAIL = "($|: )"
+
+
+def _published_denial_reason_pattern() -> str:
+    """The `pattern` the checked-in contract publishes for the 409 `denial_reason`."""
+    document = json.loads((_CONTRACTS / "openapi/exchange.openapi.json").read_text())
+    body = document["paths"]["/auctions/{auction_id}/accept"]["post"]["responses"]["409"][
+        "content"
+    ]["application/json"]
+    return str(body["schema"]["properties"]["denial_reason"]["pattern"])
+
+
+def _reason_shapes_denial_code_accepts() -> list[tuple[str, str]]:
+    """`(status, reason)` pairs an eligibility source could answer with, built from the
+    PARSER rather than from a list of witnesses.
+
+    `denial_code` is `reason.split(":", 1)[0].strip() in DENIAL_REASONS`. Three degrees of
+    freedom fall straight out of that expression and nothing else does:
+
+    * which declared code the token is — so the codes come from `DENIAL_REASONS` live;
+    * what `.strip()` removes around the token — so the gaps are every ASCII code point for
+      which `chr(cp).strip() == ""`, computed here, never typed;
+    * what follows the first separator — free prose, including another separator.
+
+    A hard-coded table of the four strings that were observed failing would fix four strings.
+    This enumerates the shape instead, and the caller filters it with `denial_code` itself.
+    """
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR  # noqa: PLC0415
+
+    separator = DENIAL_SEPARATOR.strip()
+    # Written as code points so this file carries no raw control characters (T-108's habit).
+    blanks = tuple(chr(cp) for cp in range(0x21) if chr(cp).strip() == "")
+    gaps = ("", *blanks, chr(0x20) * 3, chr(0x09) + chr(0x20) + chr(0x0A))
+    tails = (
+        "",
+        "prose",
+        chr(0x20) + "prose",
+        chr(0x20) * 2 + "prose",
+        separator,
+        "prose" + separator + chr(0x20) + "nested",
+    )
+
+    shapes: list[tuple[str, str]] = []
+    for code in DENIAL_REASONS:
+        shapes.append((code, code))
+        for gap in gaps:
+            shapes.append((code, code + gap))
+            shapes.append((code, gap + code))
+            for tail in tails:
+                shapes.append((code, code + gap + separator + tail))
+                shapes.append((code, gap + code + gap + separator + tail))
+    return shapes
+
+
+def _serve(status: str, reason: str) -> str:
+    """The `denial_reason` a client receives when an eligibility source answers `(status,
+    reason)` — through the REAL producer, gate then HTTP boundary, nothing re-implemented."""
+    from exchange.accept.gate import _denial_reason  # noqa: PLC0415
+    from exchange.accept.routes import _denied  # noqa: PLC0415
+    from exchange.eligibility import EligibilityDecision  # noqa: PLC0415
+
+    decision = EligibilityDecision(store_id="store-1", status=status, reason=reason)
+    # `Response.body` is typed `bytes | memoryview[int]`; `bytes(...)` narrows it for mypy
+    # without changing a byte of what the client would receive.
+    return str(json.loads(bytes(_denied(_denial_reason(decision)).body))["denial_reason"])
+
+
+def test_the_published_denial_reason_pattern_fits_every_reason_the_gate_passes_through() -> None:
+    """T-267: drive `gate._denial_reason`'s passthrough, not just the values the package builds.
+
+    Every shape `denial_code` accepts is pushed through the real gate and the real 409
+    boundary, and the value a client would actually receive must satisfy the published
+    `pattern`. The inputs are filtered by `denial_code` itself, so the day the parser widens,
+    this sweep widens with it.
+    """
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR, denial_code  # noqa: PLC0415
+
+    pattern = re.compile(_published_denial_reason_pattern())
+    shapes = [
+        (status, reason)
+        for status, reason in _reason_shapes_denial_code_accepts()
+        if denial_code(reason) is not None
+    ]
+    assert len(shapes) >= 500, (
+        f"the sweep collapsed to {len(shapes)} inputs; denial_code accepts a far larger family "
+        "than that, so this is no longer the sweep this test claims to be"
+    )
+
+    served = [(reason, _serve(status, reason)) for status, reason in shapes]
+    rejected = [(reason, value) for reason, value in served if pattern.match(value) is None]
+    assert rejected == [], (
+        "the exchange served these denial_reason values and the published pattern refuses "
+        f"them, so the contract is false about responses the service really returns: "
+        f"{rejected[:8]}"
+    )
+
+    # ...and the sweep must actually LEAVE the set `denial_reason()` can build, or it is the
+    # narrower check again wearing a wider name. `denial_reason` emits `"<code>"` or
+    # `"<code>: <prose>"` and nothing else; anything here outside those two shapes reached the
+    # published surface through the passthrough.
+    beyond = sorted(
+        {
+            value
+            for _, value in served
+            if value not in DENIAL_REASONS
+            and not any(value.startswith(code + DENIAL_SEPARATOR) for code in DENIAL_REASONS)
+        }
+    )
+    assert len(beyond) >= 20, (
+        "this sweep never produced a value outside the two shapes denial_reason() builds, so "
+        f"it re-asks the question the constructed-value sweep already answered: {beyond}"
+    )
+
+
+def test_the_published_denial_reason_pattern_and_denial_code_agree_on_every_code_point() -> None:
+    """The rule as a PROPERTY, over all of Unicode, rather than over a list someone thought of.
+
+    What the boundary emits verbatim is decided by two expressions and no others:
+    `denial_code(reason) == code` in `gate._denial_reason`, and `str(reason).strip()` in
+    `routes._denied`. So for one declared code and every code point there is, insert that code
+    point between the token and the separator and require the published pattern to accept the
+    result exactly when the producer would emit it. Equality in BOTH directions: a pattern that
+    accepted everything would be as false as one that refuses real traffic.
+
+    This is what makes the fix a fix for the class. The four strings that were observed failing
+    are four of the thirty code points this walks; the pattern is not permitted to fit only
+    those.
+    """
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR, denial_code  # noqa: PLC0415
+
+    pattern = re.compile(_published_denial_reason_pattern())
+    separator = DENIAL_SEPARATOR.strip()
+    code = DENIAL_REASONS[0]
+
+    disagreements = []
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:  # surrogates are not characters
+            continue
+        reason = f"{code}{chr(cp)}{separator}prose"
+        # The producer's own two conditions, quoted from the source, not paraphrased.
+        emitted_verbatim = denial_code(reason) == code and reason == reason.strip()
+        if bool(pattern.match(reason)) is not emitted_verbatim:
+            disagreements.append(hex(cp))
+    assert disagreements == [], (
+        "the published pattern and the exchange's own denial_code parser disagree about "
+        f"{len(disagreements)} code point(s); the first few are {disagreements[:12]}"
+    )
+
+
+def test_the_superseded_denial_reason_tail_would_have_failed_both_gates_above() -> None:
+    """The positive control. A gate that passed for the OLD pattern too would prove nothing.
+
+    `($|: )` is re-attached to the same code alternation the document publishes, and the two
+    gates above are re-run against it: the sweep must reject real served values, and the
+    code-point property must find exactly the thirty points where a bare-colon parser and a
+    colon-plus-space pattern part company — the twenty-nine `str.strip()` removes, plus the
+    separator itself (`"blacklisted::x"`, which `denial_code` accepts and `: ` does not).
+    """
+    import re  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import DENIAL_SEPARATOR, denial_code  # noqa: PLC0415
+
+    published = _published_denial_reason_pattern()
+    # The alternation is everything up to the tail group; the old pattern is rebuilt from the
+    # document's own code list so the control cannot drift away from what is published.
+    alternation = published[: published.rindex("($|")]
+    superseded = re.compile(alternation + SUPERSEDED_DENIAL_REASON_TAIL)
+
+    served = [
+        _serve(status, reason)
+        for status, reason in _reason_shapes_denial_code_accepts()
+        if denial_code(reason) is not None
+    ]
+    refused = [value for value in served if superseded.match(value) is None]
+    assert refused, (
+        "the superseded tail accepts every value this sweep serves, so the sweep above cannot "
+        "have been what caught the defect"
+    )
+
+    separator = DENIAL_SEPARATOR.strip()
+    code = DENIAL_REASONS[0]
+    divergent = []
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        reason = f"{code}{chr(cp)}{separator}prose"
+        emitted_verbatim = denial_code(reason) == code and reason == reason.strip()
+        if bool(superseded.match(reason)) is not emitted_verbatim:
+            divergent.append(cp)
+    expected = sorted(
+        [cp for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF and chr(cp).strip() == ""]
+        + [ord(separator)]
+    )
+    assert divergent == expected, (
+        "the superseded tail no longer diverges where it was measured to diverge, so this "
+        f"control has stopped controlling anything: {len(divergent)} vs {len(expected)}"
+    )
+
+
+# =============================================================================================
 # T-240 — the pinned merchant contract has nowhere to put an envelope approval artifact
 # =============================================================================================
 
