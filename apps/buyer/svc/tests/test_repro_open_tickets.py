@@ -22,21 +22,13 @@ inside the test body rather than at module scope.
 from __future__ import annotations
 
 import ast
-import inspect
 import pathlib
-import textwrap
 from types import ModuleType
 from typing import Any
 
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
-
-#: Names that mean "the k-anonymity floor was consulted here". Any of them appearing as a
-#: real AST reference — not a docstring, not a comment — counts.
-FLOOR_SYMBOLS = frozenset(
-    {"anonymise_cohort", "k_anonymity_floor", "buckets_at_level", "build_profiles"}
-)
 
 
 def _assert_in_tree(module: ModuleType) -> None:
@@ -53,22 +45,6 @@ def _assert_in_tree(module: ModuleType) -> None:
         f"{module.__name__} resolved to {resolved}, which is outside the tree under test "
         f"({REPO_ROOT}) — a .pth leak, not a measurement"
     )
-
-
-def _references(func: Any, symbols: frozenset[str]) -> bool:
-    """True when ``func``'s body really mentions one of ``symbols``.
-
-    Parsed rather than string-matched on purpose: ``"anonymise_cohort" in source`` is
-    satisfied by adding the word to a docstring, which would close the ticket without
-    changing a single execution.
-    """
-    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in symbols:
-            return True
-        if isinstance(node, ast.Attribute) and node.attr in symbols:
-            return True
-    return False
 
 
 #: A well-formed session subject. The profile module only ever checks the ``psn-`` prefix and
@@ -326,57 +302,339 @@ def test_t199_a_surname_that_is_also_a_taxonomy_label_is_still_a_leak() -> None:
 
 
 # ======================================================================================
-# T-221 — the k-anonymity floor is off by default and the production path never applies it
+# T-221 — the k-anonymity floor has to be REACHABLE on the production path, and raising the
+#         knob has to change what a store is shown
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-221: DEFAULT_K_ANONYMITY = 1 (profile/__init__.py:175) is a no-op floor unless "
-        "PROXYSHOP_BUYER_K_ANONYMITY is set, and build_profile — the ONLY path production "
-        "takes (magic_link.py:330) — never calls anonymise_cohort or k_anonymity_floor at "
-        "all, so the generalisation ladder T-138 delivered is unreachable and a rotated "
-        "pseudonym still publishes a byte-identical tuple; remove this marker with the fix"
-    ),
-)
-def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_the_production_path() -> None:
-    """The floor has to be a floor, and it has to be on the path the product takes.
+# MARKER REMOVED, AND THE ASSERTION IT GUARDED REPLACED. justify-test-edit, recorded here
+# because a test diff with no justification is indistinguishable from reward hacking six
+# months later.
+#
+# QUOTED, the marker that was here:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-221: DEFAULT_K_ANONYMITY = 1 (profile/__init__.py:175) is a no-op floor unless "
+#         "PROXYSHOP_BUYER_K_ANONYMITY is set, and build_profile — the ONLY path production "
+#         "takes (magic_link.py:330) — never calls anonymise_cohort or k_anonymity_floor at "
+#         "all, so the generalisation ladder T-138 delivered is unreachable and a rotated "
+#         "pseudonym still publishes a byte-identical tuple; remove this marker with the fix"))
+#
+# QUOTED, the assertion that was here and is now gone:
+#     floor = k_anonymity_floor({})
+#     assert floor > 1, (
+#         f"the default k-anonymity floor is {floor}: a floor of 1 puts every buyer alone in "
+#         "their own equivalence class, which is exactly the re-linkability T-138 exists to "
+#         "prevent, and PROXYSHOP_BUYER_K_ANONYMITY is the only thing that raises it")
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? YES — which is what makes this a
+# TEST-IS-WRONG edit and not green-pressure. `k_anonymity_floor({}) > 1` fails against every
+# tree this repo has ever had, today's fix included, because SPEC pins the opposite value in
+# two places and the product obeys SPEC:
+#     SPEC.md:56 (Non-goals) — "No k-anonymity enforcement beyond a configurable floor
+#         (default 1 in fixtures; production knob documented)."
+#     SPEC.md:84 (A6) — "k defaults to 1 in fixtures (non-goal notes the production knob)."
+# THE USER RULED ON THE CONTRADICTION, verbatim: "If users only have anonymity at scale,
+# that is totally fine and expected. Obviously, they wouldn't have anonymity at k = 1."
+# Anonymity-at-scale is the intended posture. DEFAULT_K_ANONYMITY therefore STAYS 1, no
+# product code was touched by this edit, and the argument is not to be re-opened. Measured
+# elsewhere in this cycle and reported alongside the ruling, not by this node: raising the
+# default broke 47 tests across six files, 41 of which encode intended behaviour rather than
+# this defect. The ticket over-reached; the spec was right.
+#
+# WHAT REMAINS TRUE IS THE HALF WORTH GRADING, and it was a real defect. Before today
+# `build_profile` — the only builder production reaches (`MagicLinkAuth.profile_for`,
+# auth/magic_link.py:560) — never read the floor and never called the ladder, so a
+# deployment that set PROXYSHOP_BUYER_K_ANONYMITY got rung 0 whatever it set: the
+# generalisation ladder T-138 delivered was unreachable in a deployment. REACHABILITY, not
+# the default, was the bug. So this node now grades reachability and effect AT THE
+# CONFIGURED k, driven end to end through the login path rather than asserted about a
+# constant:
+#   (1) at k=1 — both spellings, knob unset and knob set to 1 — the login path still
+#       publishes rung 0, value for value: the new wiring costs honest traffic nothing;
+#   (2) `build_profile` reads the knob itself, with no caller passing anything;
+#   (3) with the knob raised, what `profile_for` actually publishes changes, and the
+#       profiles published across the whole directory form a release whose smallest
+#       equivalence class holds at least k buyers;
+#   (4) a floor too large for the population withholds every facet, and never falls through
+#       to the fine-grained tuple.
+# A gate that pins a number the spec sets elsewhere is a gate that fights the spec forever.
+# These four are properties of the product, and SPEC agrees with all four.
+#
+# THE AST PROBE WENT WITH IT. `_references(build_profile, FLOOR_SYMBOLS)` asked whether the
+# floor's NAME appears in a function body — a proxy for reachability that a never-executed
+# call satisfies, and that pins one call-site shape. Driving `MagicLinkAuth.profile_for` and
+# reading what it publishes is the property itself and strictly subsumes the proxy: a
+# `profile_for` that read the floor and then hardcoded k=1 still parses as "references
+# k_anonymity_floor" and fails (3) at once. `FLOOR_SYMBOLS`, `_references` and the
+# `inspect`/`textwrap` imports were used by this node alone, so they were deleted rather
+# than left dead.
+#
+# NO MARKER SURVIVES, and that is a decision rather than tidying. The ticket's default half
+# is not a defect (SPEC + the ruling above) and its reachability half is fixed and asserted
+# below, so there is nothing left for an xfail to encode; per this file's convention (module
+# docstring, line 10: "the marker cannot outlive the bug") the node is now a live regression
+# test. One thing this node deliberately does NOT grade, because it belongs to T-140 and not
+# here: `build_account_directory` (auth/routes.py:646) returns an in-memory directory that
+# forgets every buyer on restart. That costs the cohort its contents after a restart, not
+# its correctness — an empty directory is a release of one, which no floor above 1 admits,
+# so the documented answer is to withhold everything (4) and never to publish rung 0.
+#
+# NOT VACUOUS, MEASURED, not argued. Four separate sabotages of the product were applied one
+# at a time and reverted; each turns this node RED, and each trips a DIFFERENT one of the
+# four claims, so no claim is riding on another's coverage:
+#   (a) auth/magic_link.py:558-559, the production path's floor read, neutered to
+#       `floor = 1` / `cohort = ()` — RED at (3): "PROXYSHOP_BUYER_K_ANONYMITY=3 changed
+#       nothing the login path published for [all six buyers]". This is the T-221 defect
+#       itself, put back; the node sees it.
+#   (b) profile/__init__.py build_profile, `k_anonymity_floor() if k is None else k` weakened
+#       to `1 if k is None else k` — RED at (2): the builder no longer reads the knob, so a
+#       deployment could only get a floor by having every caller pass one.
+#   (c) profile/__init__.py build_profile, the unsatisfiable-floor branch changed from
+#       `UNSATISFIABLE_FLOOR_LEVEL` to `0` — RED at (4): a floor of 7 over 6 buyers published
+#       the fine-grained tuple instead of withholding, which is the floor pretending to hold.
+#   (d) DEFAULT_K_ANONYMITY raised from 1 to 3 — RED at (1), quoting SPEC.md:56 and :84: an
+#       unconfigured deployment stopped getting rung 0. Recorded because it is the direction
+#       the ORIGINAL gate demanded; the node now refuses it, on the spec's authority and the
+#       user's, instead of demanding it.
+# Every other node in this file is untouched by all four, and with the tree restored
+# byte-for-byte to HEAD this node passes.
 
-    Both halves of the ticket, and nothing else. In particular this does NOT assert that a
-    pseudonym rotation is re-linkable: that is the *defect*, and asserting it would turn the
-    ticket's own fix into a permanent red.
+#: A buyer directory shaped like a real one: identity fields the coarseners must never read,
+#: order histories with distinct budgets, categories and frequencies. Distinct on purpose —
+#: the test asserts that every one of these lands in its own class of ONE at the default,
+#: which is the precondition that makes "a floor of 3 changed the release" mean something.
+#: A fixture whose rung-0 tuples happened to collide would satisfy k=3 without generalising
+#: anything and the node would prove nothing.
+_DIRECTORY: dict[str, dict[str, Any]] = {
+    "dana.reyes@example.com": {
+        "first_name": "Dana",
+        "last_name": "Reyes",
+        "region": "US-OR",
+        "orders": [
+            {"order_ref": "ord-1", "total": 140.0, "category": "camera-lenses"},
+            {"order_ref": "ord-2", "total": 210.0, "category": "camera-lenses"},
+        ],
+    },
+    "samir.okafor@example.com": {
+        "first_name": "Samir",
+        "last_name": "Okafor",
+        "region": "US-CA",
+        "orders": [{"order_ref": "ord-3", "total": 38.0, "category": "espresso"}],
+    },
+    "wei.chen@example.com": {
+        "first_name": "Wei",
+        "last_name": "Chen",
+        "region": "CA-BC",
+        "orders": [
+            {"order_ref": "ord-4", "total": 610.0, "category": "headphones"},
+            {"order_ref": "ord-5", "total": 720.0, "category": "headphones"},
+            {"order_ref": "ord-6", "total": 95.0, "category": "cookware"},
+        ],
+    },
+    "ola.nilsen@example.com": {
+        "first_name": "Ola",
+        "last_name": "Nilsen",
+        "region": "US-NY",
+        "orders": [
+            {"order_ref": "ord-7", "total": 42.0, "category": "dog-food"},
+            {"order_ref": "ord-8", "total": 51.0, "category": "dog-food"},
+        ],
+    },
+    "priya.nair@example.com": {
+        "first_name": "Priya",
+        "last_name": "Nair",
+        "region": "US-WA",
+        "orders": [{"order_ref": "ord-9", "total": 330.0, "category": "tents"}],
+    },
+    "juan.ortiz@example.com": {
+        "first_name": "Juan",
+        "last_name": "Ortiz",
+        "region": "MX-JAL",
+        "orders": [
+            {"order_ref": "ord-10", "total": 175.0, "category": "trail-gear"},
+            {"order_ref": "ord-11", "total": 160.0, "category": "trail-gear"},
+            {"order_ref": "ord-12", "total": 180.0, "category": "trail-gear"},
+        ],
+    },
+}
 
-    The second half is checked against BOTH ends of the production path — ``build_profile``
-    and its only caller, ``MagicLinkAuth.profile_for`` — because the ticket admits two
-    repairs: teach ``build_profile`` the floor, or route production through
-    ``build_profiles``, which already applies it. Either one closes the ticket.
+
+def _class_sizes(profiles: dict[str, Any]) -> list[int]:
+    """How many of ``profiles`` share each published quasi-identifier tuple, ascending.
+
+    Measured with the product's own :func:`~buyer_svc.profile.equivalence_class` rather than
+    a tuple rebuilt here: "how many buyers share this profile" is the quantity a floor turns
+    on, and an auditor who re-derives it can drift from what the floor is actually counting.
+    """
+    from buyer_svc.profile import equivalence_class  # noqa: PLC0415
+
+    counts: dict[tuple[Any, ...], int] = {}
+    for profile in profiles.values():
+        key = equivalence_class(profile.buckets)
+        counts[key] = counts.get(key, 0) + 1
+    return sorted(counts.values())
+
+
+def _set_floor(monkeypatch: pytest.MonkeyPatch, floor: int | None) -> None:
+    """Configure the deployment knob, or explicitly unset it.
+
+    The environment is set rather than a ``k=`` argument threaded in, because "a deployment
+    sets ``PROXYSHOP_BUYER_K_ANONYMITY`` and the login path spends it" is the whole claim; a
+    test that passed ``k`` by hand would grade a parameter, not a deployment. Unset is made
+    explicit for the same reason the old node passed ``{}``: whatever the surrounding shell
+    exports must not be able to change the reading.
+    """
+    from buyer_svc.profile import K_ANONYMITY_ENV  # noqa: PLC0415
+
+    if floor is None:
+        monkeypatch.delenv(K_ANONYMITY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(K_ANONYMITY_ENV, str(floor))
+
+
+def _buyer_service(monkeypatch: pytest.MonkeyPatch, floor: int | None) -> tuple[Any, list[str]]:
+    """A ``MagicLinkAuth`` over :data:`_DIRECTORY` at ``floor``, plus the tokens it delivers."""
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth  # noqa: PLC0415
+
+    _set_floor(monkeypatch, floor)
+    tokens: list[str] = []
+
+    def deliver(email: str, token: str, expires_at: Any) -> None:
+        tokens.append(token)
+
+    service = MagicLinkAuth(accounts=InMemoryAccountDirectory(_DIRECTORY), deliver=deliver)
+    return service, tokens
+
+
+def _login_and_read_profiles(service: Any, tokens: list[str]) -> dict[str, Any]:
+    """Every buyer in the directory logged in for real, mapped to the profile served back.
+
+    The whole login gesture per buyer — ``request_login`` -> the delivered token ->
+    ``redeem`` -> ``profile_for`` — because the claim under test is about the path
+    production takes, and a profile obtained by calling the builder directly is not it.
+    """
+    profiles: dict[str, Any] = {}
+    for email in _DIRECTORY:
+        service.request_login(email)
+        session = service.redeem(tokens[-1])
+        profiles[email] = service.profile_for(session.session_id)
+    return profiles
+
+
+def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_the_production_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor is read on the production path by default, and spending it changes the release.
+
+    Read the node's name as what it grades: the floor *read* is on by default — every
+    profile production builds consults it with no caller passing anything — NOT that the
+    default value is above 1, which SPEC.md:56 and :84 forbid and the user ruled against
+    (see the block above). The name is kept verbatim because T-221's own gate command in
+    ``tickets.json`` selects this node with a ``-k`` expression spelling it out in full, and
+    that file is frozen and protected (T-328): renaming the node would leave the ticket's
+    gate selecting nothing and exiting 5 rather than running.
+
+    Four claims, in the order a deployment meets them: honest traffic at the default, the
+    builder's own read of the knob, the effect of raising it on the path production takes,
+    and the direction it fails in when the population is too small to satisfy it.
     """
     from buyer_svc import profile as profile_mod  # noqa: PLC0415
-    from buyer_svc.auth import MagicLinkAuth  # noqa: PLC0415
-    from buyer_svc.profile import build_profile, k_anonymity_floor  # noqa: PLC0415
+    from buyer_svc.profile import (  # noqa: PLC0415
+        build_buckets,
+        build_profile,
+        equivalence_class,
+    )
 
     _assert_in_tree(profile_mod)
 
-    # (1) A floor of 1 is not a floor. An explicit empty environment is passed so the reading
-    # cannot be changed by whatever the surrounding shell happens to export.
-    floor = k_anonymity_floor({})
-    assert floor > 1, (
-        f"the default k-anonymity floor is {floor}: a floor of 1 puts every buyer alone in "
-        "their own equivalence class, which is exactly the re-linkability T-138 exists to "
-        "prevent, and PROXYSHOP_BUYER_K_ANONYMITY is the only thing that raises it"
+    # (1) HONEST TRAFFIC AT k = 1, BOTH SPELLINGS OF IT. Six real buyers log in — once with
+    # the knob unset, once with it set to 1 explicitly — and every one must come back rung 0,
+    # value for value. Deliberately NOT `assert k_anonymity_floor() == 1`: pinning the number
+    # here would put SPEC's default in a second place that has to be edited to change it, and
+    # a gate that pins a number the spec sets elsewhere is a gate that fights the spec
+    # forever. The behaviour is what a deployment actually experiences, and the explicit-1
+    # pass makes the honest-traffic claim ("the ladder wiring costs k=1 nothing") independent
+    # of whatever the default happens to be.
+    service, tokens = _buyer_service(monkeypatch, None)
+    at_default = _login_and_read_profiles(service, tokens)
+    explicit, explicit_tokens = _buyer_service(monkeypatch, 1)
+    at_explicit_one = _login_and_read_profiles(explicit, explicit_tokens)
+    for email, profile in at_default.items():
+        record = service.accounts.get(email)
+        assert profile.buckets == build_buckets(record), (
+            f"with no floor configured, the login path published {profile.buckets!r} for "
+            f"{email} where build_buckets publishes {build_buckets(record)!r}. SPEC.md:56 "
+            "('No k-anonymity enforcement beyond a configurable floor (default 1 in "
+            "fixtures; production knob documented)') and SPEC.md:84 put the unconfigured "
+            "deployment at k=1, and the user ruled that anonymity-at-scale is the intended "
+            "posture — so an unconfigured deployment gets rung 0, value for value, and the "
+            "k-anonymity wiring must not cost it anything"
+        )
+        assert at_explicit_one[email].buckets == profile.buckets, (
+            f"PROXYSHOP_BUYER_K_ANONYMITY=1 published {at_explicit_one[email].buckets!r} for "
+            f"{email} where the unset knob published {profile.buckets!r}: k=1 is documented "
+            "as no enforcement at all, so the two spellings of it cannot differ"
+        )
+
+    # The precondition that makes (3) mean something: at the default every one of these
+    # buyers is alone in their own equivalence class, so a release satisfying k=3 CANNOT be
+    # reached by leaving the tuples as they are.
+    singletons = _class_sizes(at_default)
+    assert singletons == [1] * len(_DIRECTORY), (
+        f"this fixture is supposed to publish {len(_DIRECTORY)} distinct rung-0 tuples so "
+        f"that a floor of 3 has to generalise something; class sizes were {singletons}. A "
+        "fixture whose tuples collide would satisfy the floor without the ladder running"
     )
 
-    # (2) The production path must actually apply it. Parsed, not string-matched: adding
-    # "anonymise_cohort" to a docstring must not close this ticket.
-    applies_floor = _references(build_profile, FLOOR_SYMBOLS) or _references(
-        MagicLinkAuth.profile_for, FLOOR_SYMBOLS
+    # (2) THE BUILDER READS THE KNOB ITSELF. No `k=` is passed here: if the default for `k`
+    # is not `k_anonymity_floor()`, a deployment's environment reaches nothing, which is the
+    # shape the ticket's second half described.
+    _set_floor(monkeypatch, 3)
+    cohort = list(_DIRECTORY.values())
+    account = cohort[0]
+    unconfigured = build_profile(account, PSN_A, k=1, cohort=cohort)
+    from_env = build_profile(account, PSN_A, cohort=cohort)
+    assert from_env.buckets != unconfigured.buckets, (
+        "build_profile published the same buckets with PROXYSHOP_BUYER_K_ANONYMITY=3 as it "
+        f"did at k=1 ({unconfigured.buckets!r}), so its `k=None` default is not reading "
+        "k_anonymity_floor() and no deployment can configure a floor without every caller "
+        "passing one"
     )
-    assert applies_floor, (
-        "neither build_profile nor its only production caller "
-        "(apps/buyer/svc/src/auth/magic_link.py:330 MagicLinkAuth.profile_for) references "
-        f"any of {sorted(FLOOR_SYMBOLS)}, so the generalisation ladder commit 958fead added "
-        "is never reached on the path the product takes — only build_profiles applies it, "
-        "and nothing in production calls build_profiles"
+
+    # (3) EFFECT AT THE CONFIGURED k, ON THE PATH PRODUCTION TAKES. The same six buyers log
+    # in with the floor raised; what the login path publishes must change, and the release
+    # those published profiles form must actually satisfy the floor.
+    floor = 3
+    service, tokens = _buyer_service(monkeypatch, floor)
+    published = _login_and_read_profiles(service, tokens)
+    changed = [
+        email
+        for email, profile in published.items()
+        if profile.buckets != at_default[email].buckets
+    ]
+    assert len(changed) == len(_DIRECTORY), (
+        f"PROXYSHOP_BUYER_K_ANONYMITY={floor} changed nothing the login path published for "
+        f"{sorted(set(_DIRECTORY) - set(changed))}: MagicLinkAuth.profile_for still serves "
+        "the rung-0 tuple, so the generalisation ladder is unreachable from the only path "
+        "production takes and the knob is decoration"
     )
+    sizes = _class_sizes(published)
+    assert min(sizes) >= floor, (
+        f"the profiles GET /buyer/profile actually published form classes of {sizes} at "
+        f"k={floor}: a buyer in a class of {min(sizes)} is re-linkable across a pseudonym "
+        "rotation by whoever holds the tuple, which is the whole point of the floor"
+    )
+
+    # (4) A FLOOR THE POPULATION CANNOT SATISFY WITHHOLDS, and does not fall through. The
+    # direction of failure is the safety property: publishing the fine-grained tuple when
+    # the floor cannot be met would be the defect wearing the fix's name.
+    unsatisfiable = len(_DIRECTORY) + 1
+    service, tokens = _buyer_service(monkeypatch, unsatisfiable)
+    for email, profile in _login_and_read_profiles(service, tokens).items():
+        assert equivalence_class(profile.buckets) == (None, (), None, None, None), (
+            f"a floor of {unsatisfiable} over {len(_DIRECTORY)} buyers cannot be satisfied "
+            f"by any generalisation, and the login path published {profile.buckets!r} for "
+            f"{email} anyway. Withholding every facet is the documented answer; falling "
+            "through to the fine-grained tuple is the floor pretending to hold"
+        )
 
 
 # ======================================================================================

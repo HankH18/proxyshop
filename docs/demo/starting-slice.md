@@ -15,16 +15,29 @@ section of this page.
 
 ## What this run proves
 
-- **S1.** intent → up to three clarifications → parallel bids → shortlist → accepted offer →
+Two things run on this page and they prove different amounts, so each bullet says which. **§3**
+is the live driver a room watches; **§4** is the scripted proof. A claim marked §4 is real and
+tested — it is simply not what the room sees.
+
+- **S1** — intent → up to three clarifications → parallel bids → shortlist → accepted offer →
   code created and validated → checkout through the `CheckoutProvider` port → webhook and
-  pixel reconciled → ledger event → trust update.
-- **C9.** All of it offline. Nothing in this procedure reaches the public network.
-- **C11.** The simulated redirect path emits the same canonical `LedgerEvent` kinds a
-  Shopify checkout would, so the pixel and reconciliation obligations hold either way.
-- **R10.** A store whose agent never answers is still represented, at its catalogue list
-  price, and can still reach the shortlist.
-- **S8.** No blacklisted seller is eligible at any gate, and no checkout URL is ever returned
-  off the seller's registered domain.
+  pixel reconciled → ledger event → trust update. *§3 runs it as far as the signed webhook and
+  a verified hash chain; the reconciliation and trust-update tail is §4's, and §3 prints a
+  `DOES NOT RUN YET` block saying so.*
+- **C9** — no network egress. *True of §3 and §4, which is where it matters: neither reaches
+  the public network. **Provisioning does**, once — `make bootstrap` runs `uv sync` and
+  `npm ci`, and building or pulling the stub's image fetches a base image and wheels.*
+- **C11** — the simulated redirect path emits the same canonical `LedgerEvent` kinds a Shopify
+  checkout would, so the pixel and reconciliation obligations hold either way. *Neither run
+  demonstrates this: both are `CHECKOUT_MODE=redirect`. It is held structurally — both
+  providers build their events through the same `CheckoutProvider._events` — and pinned by
+  the exchange's own checkout-provider suite ("C11: provider swap is invisible downstream").*
+- **R10** — a store whose agent never answers is still represented, at its catalogue list
+  price, and can still reach the shortlist. ***§3 measures this every run***, and prints the
+  slot it took.
+- **S8** — no blacklisted seller is eligible at any gate, and no checkout URL is ever returned
+  off the seller's registered domain. *§3 shows the FIRST gate live and says so; the remaining
+  gates and the four-way off-domain spoof matrix are §4's.*
 
 ## What you need, and what you do not
 
@@ -48,9 +61,12 @@ cp .env.example .env
 ```
 
 **Then load it into your shell.** The copy gives Compose its interpolation values, and nothing
-on the path you are about to walk reads it — not the Makefile, not the database-init script,
-not any Python at import — so the next step, straight after the copy, would fail with
-`FATAL: PROXYSHOP_WORKER is unset`:
+on the `make deps-up` path reads the file itself — not the Makefile, not the database-init
+script, not any Python at import — so the next step, straight after the copy, would fail with
+`FATAL: PROXYSHOP_WORKER is unset`. (One script on this page does source it: `scripts/verify.sh`,
+behind `make check`, `set -a`-sources `.env` on every invocation while shielding
+`PROXYSHOP_WORKER`. `.env.example` records that an earlier revision claiming otherwise was
+wrong.)
 
 ```bash
 set -a && . ./.env && set +a
@@ -89,7 +105,9 @@ live demo you want it running as a service:
 docker compose --profile e2e up -d shopify-stub
 ```
 
-Confirm the whole toolchain is sound before going further:
+Confirm the whole toolchain is sound before going further. Budget several minutes: this runs
+ruff, eslint, mypy, `tsc -b` and the full pytest suite, and it holds a machine-global Neo4j lock
+for part of that, so it serialises against anything else running on this box.
 
 ```bash
 make check
@@ -127,18 +145,25 @@ This is the beat to run in front of an audience. **This is the command:**
 ./.venv/bin/python -m proxyshop_demo
 ```
 
-It takes about eight seconds and prints the whole journey as a narrative — the shopper's
+It takes about two seconds and prints the whole journey as a narrative — the shopper's
 words, the questions asked back, the store that is denied and why, each store's bid as it
 arrives, the ranked shortlist with the reason each slot placed where it did, the real
-single-use code, the permalink, the order the merchant closed, the pixel beacon and the
-HMAC-signed webhook. Every arrow it prints is a real HTTP round trip.
+single-use code, the permalink, the order the merchant closed, the pixel beacon, the
+HMAC-signed webhook, and the hash-chained ledger the exchange wrote while all of that
+happened. Every arrow it prints is a real HTTP round trip.
 
 **Everything above this section except `make bootstrap` is optional for this command.** The
 driver starts what it needs on loopback ports of its own — the buyer service, one store agent
-per hosted store, the exchange, the merchant stub, a pixel collector and a webhook receiver —
-and touches no datastore, so `make deps-up`, the migration, the seeded catalogue and the
-long-running stub are for the rest of this page, not for this beat. Nothing it does reaches
-the public network.
+per hosted store, the exchange, the trust service, the merchant stub, a pixel collector and a
+webhook receiver — and touches no datastore, so `make deps-up`, the migration, the seeded
+catalogue and the long-running stub are for the rest of this page, not for this beat. Nothing
+it does reaches the public network.
+
+The trust service is the one component the driver hands a substitution to, and it is a
+datastore rather than a behaviour: an `InMemoryEventStore` is put on `app.state.event_store`,
+the seam `trust.events.routes.store_for` reads before it reaches for Postgres. It is the same
+append-and-seal path the Postgres writer takes, so the chain beat 7 verifies is the service's
+own — and the "touches no datastore" sentence above stays true.
 
 Nothing is wired by the driver, which is the property that makes it worth watching: the
 exchange reads its collaborators out of a deployment document it is pointed at with
@@ -158,7 +183,9 @@ quietly omitted it would be the same claim as a green board over a broken system
 *measured* by the run — the driver makes the call and prints the answer it got — rather than
 asserted from having read the source:
 
-1. **Reconciliation and the trust projection cannot run from anything served** — see 3.6/3.7.
+1. **Reconciliation and the trust projection cannot run over the ledger chain the exchange
+   writes** — see 3.6/3.7. The chain itself is now real and is verified in front of you (3.8);
+   what it does not yet carry is two of the three kinds `reconcile` needs.
 
 **This section used to list four.** Three of them have since been closed, and the driver
 measures all three every run rather than taking anyone's word for it:
@@ -186,14 +213,21 @@ separate act, and until it happens no auction exists.
 
 ### 3.2 The auction opens and the roster is gated
 
-The confirmed intent is posted to the exchange's `POST /auctions`. The auction state machine
-opens the auction and writes `auction_opened`. Before any store is asked for a bid the seller
-eligibility source is read, and it fails closed: a store whose status cannot be read is
-treated as unavailable, and a blacklisted store is denied here — it is never asked, never
-collected, never ranked, never shown.
+The shopper's confirmation really does open an auction: `POST /buyer/intent/confirm` answers
+201 with an `auction_id`, and the auction state machine writes `auction_opened`. **The auction
+narrated from here on is a second one**, opened directly on the S1 run fixture's intent so that
+this beat and the scripted proof in section 4 are about one purchase rather than two that
+resemble each other. The driver prints both auction ids and says which is which, and it is why
+the chain in 3.8 carries two `auction_opened`/`auction_closed` pairs.
 
-Point out that the blacklisted store appears in the response's `denied` list with its status
-and reason. That is the first of the four gates it has to fail.
+Before any store is asked for a bid the seller eligibility source is read, and it fails closed:
+a store whose status cannot be read is treated as unavailable, and a blacklisted store is denied
+here — it is never asked, never collected, never ranked, never shown.
+
+Point out that the blacklisted store appears in the response's `denied` list with its status and
+reason. That is the **first** of the gates S1 makes it fail; the rest — never collected, never
+ranked, never shown, never accepted, and never in the chain 3.8 reads back — are checked in one
+pass by section 4.
 
 ### 3.3 Pitches, verification and eligibility
 
@@ -212,6 +246,14 @@ store's catalogue snapshot, producing one of four statuses per claim — `verifi
 `contradicted`, `unsupported` or `ambiguous`. Only a `verified` claim counts as evidence for
 a hard constraint. A fallback offer asserts no claims at all, which is why it can never be
 the evidence that satisfies one.
+
+**Section 4 exercises that grading; the live driver does not, and says so in beat 2.** The
+exchange grades claims against a `catalog` key in its deployment document, and this driver
+deliberately states none — that snapshot is the exchange's own evidence about a store, and a
+demo supplying it would be marking the store's homework. Unstated,
+`ranking.serving.catalog_of` keeps its `NoCatalogSnapshots` default, every claim grades
+`unsupported`, and R19 will not let an unsupported claim satisfy a hard constraint. The live
+shortlist is non-empty only because the fixture's intent carries `"hard_constraints": []`.
 
 ### 3.4 Ranking and the shortlist
 
@@ -234,10 +276,16 @@ changed rather than wondering which page to believe.
 
 What the shortlist *does* carry is worth pointing at: each slot names why it placed there. The
 driver prints the weighted terms, and they sum to the score — in a normal run the two hosted
-stores differ on the `trust` term alone, because the approved manifest calls one of them its
-honest control store and the other its scripted dishonest one, and the served snapshot says so.
+stores differ on the `trust` term alone. The numbers themselves are **stated by the deployment
+document this driver writes**, not served by the trust service; which store gets the honest side
+of the split is read from `fixtures/manifest.json`. The derivation is exactly what 3.7 says the
+live beat cannot show.
 
-Each filled slot is written to the ledger as `shown`.
+A filled slot is a `shown` event in the frozen vocabulary — but nothing under `apps/`,
+`packages/` or `services/` writes one. The scripted proof in section 4 emits its own from the
+ranker's real slots, and the S1 flow suite under `e2e/` guards that: it searches the tree for a
+producer of `shown`, `checkout_pixel` or `claim_verified` and turns red the day one appears. So
+the chain 3.8 serves has no `shown` row in it, and that absence is measured rather than assumed.
 
 ### 3.5 Acceptance, the single-use code and the simulated redirect
 
@@ -246,10 +294,14 @@ provider for `CHECKOUT_MODE`. In `redirect` that is `SimulatedRedirectProvider`,
 a single-use code locally and builds a cart permalink on the seller's **registered** domain —
 the platform's record of that domain, not the domain the bid claimed for itself.
 
-The host comparison is exact. Worth demonstrating: a bid whose checkout URL points at
-`checkout.<seller>` or `evil-<seller>.attacker.tld` or `<seller>@attacker.tld` is refused,
-and refused *before* a discount code is created. The port writes `accepted`, `code_created`
-and `checkout_redirect`.
+The host comparison is exact: a bid whose checkout URL points at `checkout.<seller-domain>`,
+`evil-<seller-domain>` or `<seller-domain>@attacker.tld` is refused, and refused *before* a
+discount code is created. **The live driver states that; it does not attempt it.** The four
+spoofs are driven for real by section 4. The port **builds** `accepted`, `code_created`
+and `checkout_redirect` and hands them back on `CheckoutResult.events` — but no served path
+emits them: `exchange.accept.routes` reads the `accepted` one for its `offer` body and drops the
+rest. The `accepted` row in the chain 3.8 serves is the state machine's own transition event,
+not the port's. That is one half of why reconciliation still cannot run (3.6).
 
 ### 3.6 The pixel, the webhook and reconciliation
 
@@ -276,15 +328,30 @@ order redeemed nothing", not "the second attempt errored".
 
 Then it stops, for two reasons it prints:
 
-- `reconcile` reads a page of ledger events. The exchange's ledger is an in-process sink that
-  no HTTP route serves, and this repository's pixel source directory is empty, so nothing
-  deployed emits `checkout_pixel` at all. A driver that manufactured those events would be
-  supplying the join whose absence is the defect.
-- Even given the page, the join key is missing. The checkout provider invents its
-  `checkout_token` and never transmits it — the permalink carries the discount code and
-  nothing else — while the merchant mints its own, unrelated token when the cart is visited.
-  `reconcile` joins on exactly that key. `e2e/support/s1` closes the gap by deriving the
-  binding from the single-use code and says so in its own docstring; nothing deployed does.
+- `reconcile` needs three kinds — `accepted`, `checkout_pixel`, `order_paid` — and **two of
+  the three have no producer on any served path**. `accepted` is present: it is the last row of
+  the chain 3.8 serves, and it carries the offer and the token. The other two cannot be, because
+  `AuctionStateMachine._transition` is the exchange's only caller of `ledger.record` **on a
+  served path** (`retrieval.fit` holds the other one, the `bid_placed` producer, and no route
+  reaches it), so a served run's chain is auction transitions and nothing else. `checkout_pixel`
+  has no producer anywhere in the repository — `pixel/src/` holds one empty `.gitkeep`, and
+  `merchant_svc.collector` stops at a `PixelObservation` in memory — and the verified
+  `order_paid` goes into a bounded in-process hand-off buffer the module itself calls the seam a
+  downstream lane replaces. A driver that manufactured those events would be supplying the
+  evidence whose absence is the defect.
+- The join is still unmade, and beat 7 *measures* it: it prints the token the exchange stamped
+  into the ledger beside the token the merchant minted at the cart, and whether they match. They
+  do not. In `redirect` mode no merchant is called at all — `SimulatedRedirectProvider` mints
+  locally — and the `checkout_token` is invented right after the code is. It reaches the ledger;
+  it never reaches the *merchant*, because the only thing handed to the shopper is a cart
+  permalink carrying a variant, a quantity and the discount code. The merchant therefore mints
+  its own when the cart is visited. `reconcile` no longer joins on that token alone: it also
+  bridges an offer to an order through the single-use code, reading `code_created` and
+  `checkout_redirect`. Those two are exactly the events the checkout port builds, hands back on
+  `CheckoutResult.events`, and that no served path emits — `exchange.accept.routes` reads the
+  `accepted` one for its `offer` body and drops the rest. `e2e/support/s1` writes them itself
+  from real upstream data, which is what lets section 4 reach a `reconciled` verdict; the
+  `checkout_token` binding it still carries is vestigial and its own docstring says so.
 
 ### 3.7 The trust projection
 
@@ -300,6 +367,33 @@ being *read* — the driver's deployment document states one, the ranker filters
 `trust` term is what separates the two hosted stores' scores — and it does not show the
 snapshot being *written*. Section 4's scripted proof is where the whole loop is exercised
 today, and the driver says so at the point it stops.
+
+### 3.8 The chained ledger, read back off the trust service
+
+The exchange's state machine records every auction transition into a ledger sink, and the only
+thing its deployment document says about that sink is *where* it posts: one line, `trust_url`.
+The driver states the trust service's own loopback address there and then asks a **different
+application** what it received — `GET /events` and `GET /events/verify` on `apps/trust`, neither
+of which is authenticated. (Different application, not different process: every server on this
+page is a uvicorn instance in a thread of the one interpreter. What makes the read meaningful is
+the socket and the separate app state, and both of those are real.)
+
+What beat 7 prints is the chain itself: five events (`auction_opened`, `auction_closed`,
+`auction_opened`, `auction_closed`, `accepted`), each one's `prev_hash` equal to its
+predecessor's `event_hash`, followed by the service's verdict — `ok: true`, `verified: 5`,
+`anchor_ok: true`, and the head hash. `anchor_ok` is the half worth pointing at: the chain's
+length and head are recorded outside the row list, so a stream truncated to a shorter but
+perfectly-linked prefix still fails verification. A flawless chain of the wrong length is still
+a tampered one.
+
+This is the beat that used to be impossible. Before T-150 the exchange's ledger was an
+in-process list discarded with the app, and `apps/trust`'s hash chaining, once-only landing and
+replay were grading a stream no served request produced. Running the demo with the trust service
+unreachable is still honest and still visible: `proxyshop_support.trust_ledger` logs one `ERROR`
+the moment events stop landing and one `INFO` the moment they land again, and
+`TrustLedgerPublisher.status()` keeps the condition readable after the line scrolls away. That
+level matters here — the demo's own gate under `docs/tests/` fails on any `ERROR` record, so
+"the audit trail lands" is now a checked property of this command rather than a hope.
 
 ## 4. Run the whole beat as one scripted proof
 
@@ -338,6 +432,12 @@ means:
 
 The ledger is append-only and hash-chained, so the sequence is tamper-evident: an edited
 event breaks the chain rather than passing quietly.
+
+That table is what the *scripted proof* in section 4 produces. A **served** run produces three
+kinds and no others: `auction_opened`, `auction_closed`, and an `accepted` — and that `accepted`
+has a different provenance from the fifth row above, being the state machine's own transition
+event rather than the checkout port's trio. Everything else in the table, `bid_placed` included,
+has no emitter any route reaches. 3.8 is where the served chain is shown and verified.
 
 ## Off the starting path: dev-store provisioning, the onboarding interview, and `make e2e-live`
 

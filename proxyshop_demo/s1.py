@@ -10,44 +10,68 @@ The only runnable thing on the page was section 4, and what a room saw when it r
 line — ``27 passed in 1.38s``. No intent, no clarifying questions, no bids, no shortlist, no
 discount code. The data all existed; nothing surfaced it.
 
-This driver surfaces it. It starts four real ASGI deployables on four loopback ports and walks
-one purchase across them, printing what happened in plain language beside the real values:
+This driver surfaces it. It stands five ProxyShop deployables up on five loopback ports and
+walks one purchase across them, printing what happened in plain language beside the real values
+(beat 6 adds three more servers on the merchant side, and says so where it does it):
 
 * ``buyer_svc.main:create_app()``   — the shopper's clarifier, reached at ``POST /buyer/intent/clarify``
-* ``store_agent.main:create_app()`` — one process per store, answering ``POST /v1/bid-requests``
+* ``store_agent.main:create_app()`` — one server per store, answering ``POST /v1/bid-requests``
 * ``exchange.main:create_app()``    — ``POST /auctions`` and ``POST /auctions/{id}/accept``
+* ``trust.main:create_app()``       — ``POST /events``, where the exchange's ledger lands (T-150)
 
-Nothing here is a test double and nothing is replayed. Every arrow in the output is an HTTP
+None of the ProxyShop services here is a test double. Every arrow in the output is an HTTP
 request over a real TCP socket, which is the boundary the class of defect this repository kept
 finding hides at: an app object handed to a test is never *started*, so nothing between
-``create_app()`` and a served request is executed.
+``create_app()`` and a served request is executed. **They are uvicorn servers in daemon threads
+of this one interpreter, not separate processes** — ``proxyshop_support.asgi_server.serve``
+says so. What that buys is still the thing that matters: a different app object, a different
+composition root, a real socket, and real serialisation in both directions.
 
 What it deliberately does NOT do
 --------------------------------
 It does not wire anything. The exchange reads its own deployment document out of
-``EXCHANGE_DEPLOYMENT`` and each store agent reads its own context out of
-``STORE_AGENT_CONTEXT``, which is what a person deploying these containers does. The single
-exception is loud and is named in the output: the ranking's *catalogue* and the buyer service's
-*auction client* have no configuration surface at all, so the beats that need them are reported
-as gaps rather than faked.
+``EXCHANGE_DEPLOYMENT`` — including ``trust_url``, the one line that decides where its audit
+trail goes — and each store agent reads its own context out of ``STORE_AGENT_CONTEXT``, which
+is what a person deploying these containers does. The buyer service reads its exchange address
+out of ``EXCHANGE_URL``, which is what ``apps/buyer/compose.yaml`` sets, and this driver sets it
+after the exchange is actually listening — the way a container's environment would have, before
+either process started.
+
+**The one key this driver deliberately leaves unstated is the exchange's ``catalog``**, and the
+consequence is named in beat 2 rather than hidden. That key is the snapshot the exchange grades
+a store's CLAIMS against; unstated, ``ranking.serving.catalog_of`` keeps its
+``NoCatalogSnapshots`` default, every claim comes back ``unsupported``, and R19 will not let an
+unsupported claim satisfy a hard constraint. This run still shortlists three stores only because
+the auction is opened on ``e2e/support/s1/run.json``'s intent, whose ``hard_constraints`` is
+empty. Wiring a catalogue here would mean this driver supplying the exchange's own evidence on
+the store's behalf, so it does not; it says so instead.
+
+The one substitution it makes on the ProxyShop side is a DATASTORE, not a behaviour, and it is
+stated in beat 0: trust is served with an ``InMemoryEventStore`` on ``app.state.event_store``, the
+seam ``trust.events.routes.store_for`` reads before it reaches for Postgres. Same normalise,
+same seal, same verifier — so the chain beat 7 verifies is the service's own, and this command
+still needs no Postgres, no Redis, no docker compose and no network egress.
 
 **Where the product cannot do something yet, this prints it.** A demo driver that quietly omits
 the broken beats is the same lie as a green board over a broken system, so every such beat lands
-in :attr:`JourneyResult.gaps` and is rendered as a ``DOES NOT RUN YET`` block. Four are real
-today, and each one is **measured by this driver in the line above the block that reports it**
-rather than asserted from reading the source:
+in :attr:`JourneyResult.gaps` and is rendered as a ``DOES NOT RUN YET`` block. Every one of them
+is **measured by this driver in the line above the block that reports it** rather than asserted
+from reading the source, which is why the list shrinks by itself as the product improves. What
+fires is whatever the run measured; on this tree that is one thing:
 
-1. ``POST /buyer/intent/confirm`` answers 503 — the buyer service has no composition root
-   binding an auction client, so a confirmed intent has nowhere to go;
-2. a store agent handed the clarifier's own intent answers ``204 cluster_not_pursued``: the
-   clarifier derives ``cluster_id`` by hashing the query, envelopes authorise NAMED catalogue
-   clusters, and nothing maps one namespace onto the other;
-3. R10's silent-store fallback is manufactured with no ``expires_at`` and no ``checkout_url``,
-   so the ranking excludes it ``expired_offer`` + ``off_domain_checkout`` before it can be
-   shown — the runbook's section 3.4 says the shortlist carries it, and over the real composed
-   exchange it does not;
-4. reconciliation and the trust projection have no ledger page any deployable serves, and no
-   ``checkout_token`` binding between the exchange's offer and the merchant's order.
+* reconciliation and the trust projection cannot run over the chain the exchange now writes.
+  ``trust.reconcile.reconcile`` needs ``accepted``, ``checkout_pixel`` and ``order_paid``; only
+  the first has a producer any served path emits, and the ``checkout_token`` seam between the
+  exchange's offer and the merchant's order is still unbound. Beat 7 measures both halves.
+
+Three beats that were gaps when this module was written no longer are, and the driver found that
+out the same way — by running them. ``POST /buyer/intent/confirm`` answers 201 now that the buyer
+service's composition root binds an auction client; a store agent handed the clarified intent
+carrying the exchange's own cluster assignment answers on the merits (``no_matching_product``)
+instead of ``cluster_not_pursued``, so the two namespaces now meet; and R10's silent-store
+fallback
+reaches the shortlist rather than being excluded ``expired_offer`` + ``off_domain_checkout``.
+All three are still measured every run; there is simply nothing left to report about them.
 
 The scenario
 ------------
@@ -86,10 +110,12 @@ RUN_FIXTURE = REPO_ROOT / "e2e" / "support" / "s1" / "run.json"
 #: an error instead of hanging in front of an audience.
 REQUEST_TIMEOUT_SECONDS = 30.0
 
-#: The discount depth each store's approved envelope authorises in this scenario, and the same
-#: number the roster states. They have to agree: the roster row is the PLATFORM's half of the
-#: T-177 price wall, and a roster that states a different cap turns an honest bid into
-#: ``fallback_reason: 'bid_price_unreconcilable'``.
+#: The discount depth each store's approved envelope authorises in this scenario. This ONE
+#: constant fills both halves of the T-177 price wall — the store's envelope and the roster row
+#: the platform states — deliberately, because they have to agree: a roster naming a different
+#: cap turns an honest bid into ``fallback_reason: 'bid_price_unreconcilable'``. The S1 run
+#: fixture states no cap of its own, so there is one number here rather than two that could
+#: drift, and this driver is not demonstrating the disagreement case.
 ENVELOPE_MAX_DISCOUNT_PCT = 20.0
 
 #: A far-future instant, so an offer minted during the demo is never expired by the clock.
@@ -116,6 +142,7 @@ class JourneyResult:
 
     buyer_url: str = ""
     exchange_url: str = ""
+    trust_url: str = ""
     agent_urls: dict[str, str] = field(default_factory=dict)
 
     clarifying_questions: list[str] = field(default_factory=list)
@@ -124,7 +151,9 @@ class JourneyResult:
     #: What the served buyer app answered to the shopper's confirmation. Measured, not assumed.
     confirm_status: int = 0
     confirm_detail: str = ""
-    #: What one store agent answered when handed the clarifier's own intent, unedited.
+    #: What one store agent answered when handed the clarified intent with ONE field
+    #: replaced: the ``cluster_id``, swapped for the assignment the exchange actually made.
+    #: Not "unedited" — the substitution is the point, and the code below says why.
     agent_probe_status: int = 0
     agent_probe_reason: str = ""
 
@@ -142,8 +171,17 @@ class JourneyResult:
     permalink_url: str = ""
     auction_history: list[dict[str, Any]] = field(default_factory=list)
 
+    #: Every event the exchange's ledger sink actually delivered to the trust service, read
+    #: back off ``GET /events`` rather than off the exchange's own in-process copy.
+    ledger_events: list[dict[str, Any]] = field(default_factory=list)
+    #: What ``GET /events/verify`` answered about that chain. Empty if trust was never read.
+    ledger_verify: dict[str, Any] = field(default_factory=dict)
+
     order_name: str = ""
     order_total: str = ""
+    #: The token the MERCHANT minted when the cart was visited. Kept so beat 7 can hold it up
+    #: beside the one the exchange stamped into the ledger instead of asserting they differ.
+    merchant_checkout_token: str = ""
     pixel_order_ref: str = ""
     webhook_ledger_kind: str = ""
     webhook_order_ref: str = ""
@@ -169,8 +207,9 @@ def _closed_port() -> int:
     """A loopback port with nothing listening on it.
 
     Used for the store that never answers. A refused connection is a real "nobody is home",
-    it is instantaneous, and it is what ``HttpBidSolicitor`` turns into ``no_response`` — the
-    R10 case — without spending three seconds of an audience's attention on a timeout.
+    it is instantaneous, and it is what ``HttpBidSolicitor`` reports as no bid at all — which
+    ``auction.collect`` then labels ``no_response``, the R10 case — without spending three
+    seconds of an audience's attention on a timeout.
     """
     probe = socket.socket()
     try:
@@ -261,8 +300,36 @@ def _served_store_agent(store: Mapping[str, Any], cluster_id: str, workdir: Path
         yield url
 
 
+@contextlib.contextmanager
+def _served_trust() -> Iterator[str]:
+    """The trust service, serving its ledger door on a loopback port.
+
+    One substitution, and it is a *datastore* rather than a behaviour.
+    ``trust.events.routes.store_for`` resolves the writer in this order: whatever is on
+    ``app.state.event_store``, otherwise a ``PostgresEventStore`` built from the environment.
+    This demo has no Postgres and must never need one, so an ``InMemoryEventStore`` is put on
+    that seam before the app is served. It is the same append path the Postgres store takes —
+    both normalise through ``normalise_event`` and seal through ``trust.ledger.seal_event`` —
+    so the hash chaining, the once-only landing and the verification the demo reads back are
+    the service's real ones, reached over a real socket by a real POST from a different
+    application's ledger sink.
+
+    Nothing on ``trust.events.routes`` is authenticated, which is why the exchange needs no
+    credential to reach it and why this driver needs to arrange none.
+    """
+    from trust.events import InMemoryEventStore
+    from trust.main import create_app as create_trust
+
+    from proxyshop_support.asgi_server import serve
+
+    app = create_trust()
+    app.state.event_store = InMemoryEventStore()
+    with serve(app) as url:
+        yield url
+
+
 def _deployment_document(
-    stores: Sequence[Mapping[str, Any]], endpoints: Mapping[str, str]
+    stores: Sequence[Mapping[str, Any]], endpoints: Mapping[str, str], trust_url: str
 ) -> dict[str, Any]:
     """The document a person writes to deploy this exchange.
 
@@ -313,6 +380,13 @@ def _deployment_document(
                 "attributes": {"brew_method": "espresso"},
             }
         ],
+        # WHERE this exchange's audit trail goes (T-150). The key states an address and
+        # nothing else: the ledger seam is bound whether or not it is present, because an
+        # exchange that has to be told to keep an audit trail is one that ships without one.
+        # Absent, the exchange falls back to `TRUST_URL` and then to `http://trust:8084`,
+        # the compose service name — which resolves to nothing outside compose, which is
+        # exactly what this demo used to print a WARNING about on every transition.
+        "trust_url": trust_url,
         "checkout_mode": "redirect",
     }
 
@@ -342,10 +416,12 @@ def _demo_trust_score(store: Mapping[str, Any], honesty: Mapping[str, bool]) -> 
     """A served trust score for this store.
 
     **Stated by the deployment, not computed here, and that is the honest framing.** The trust
-    service builds this projection from its own ledger of reconciled outcomes, and this driver
-    does not run the trust service. What the demo shows is that the ranker READS the served
-    snapshot, that the score moves a candidate's position, and that a blacklisted row is
-    refused. What it does not show is the score's derivation.
+    service builds this projection from its own ledger of reconciled outcomes. This driver now
+    runs that service (beat 7) and the exchange's ledger really lands in it — but the ledger it
+    receives holds auction transitions, not the ``reconciled`` verdicts a score is folded from,
+    so nothing in this run could derive these numbers. What the demo shows is that the ranker
+    READS the served snapshot, that the score moves a candidate's position, and that a
+    blacklisted row is refused. What it does not show is the score's derivation.
 
     The two hosted stores are given different scores because the approved manifest says they
     are different stores — one is its honest control and one is its scripted dishonest store —
@@ -402,6 +478,13 @@ def run_journey(stream: TextIO | None = None) -> JourneyResult:
         workdir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="proxyshop-demo-")))
 
         # -- the deployables ----------------------------------------------------------
+        # Trust comes up FIRST, because its address is a line in the deployment document the
+        # exchange reads at composition time: the ledger sink is built once, out of
+        # `trust_url`, and an exchange composed against an address nothing was listening on
+        # would keep that address for the life of the process.
+        trust_url = stack.enter_context(_served_trust())
+        result.trust_url = trust_url
+
         endpoints: dict[str, str] = {}
         for store in hosted:
             agent_url = stack.enter_context(_served_store_agent(store, cluster_id, workdir))
@@ -417,7 +500,8 @@ def run_journey(stream: TextIO | None = None) -> JourneyResult:
 
         document = workdir / "exchange-deployment.json"
         document.write_text(
-            json.dumps(_deployment_document(stores, endpoints), indent=2), encoding="utf-8"
+            json.dumps(_deployment_document(stores, endpoints, trust_url), indent=2),
+            encoding="utf-8",
         )
         os.environ[ENV_DEPLOYMENT] = str(document)
         os.environ.pop(ENV_DEPLOYMENT_JSON, None)
@@ -447,6 +531,10 @@ def run_journey(stream: TextIO | None = None) -> JourneyResult:
         _beat_two_to_four(say, result, exchange, fixture, stores)
         _beat_five(say, result, exchange)
         _beat_six(say, result)
+        trust = stack.enter_context(
+            httpx.Client(base_url=trust_url, timeout=REQUEST_TIMEOUT_SECONDS)
+        )
+        _beat_seven(say, result, trust)
         _epilogue(say, result)
 
     return result
@@ -463,15 +551,24 @@ def _beat_zero(
 ) -> None:
     say.title(
         "ProxyShop — the S1 starting slice, live",
-        "four deployables, four loopback ports, one purchase, no Shopify account",
+        "five ProxyShop deployables, one purchase, no Shopify account",
     )
     say.say(
         """
-        Everything below is a real HTTP round trip between processes this command started a
-        moment ago. Nothing is replayed, nothing is a test double, and no service was wired by
-        this driver: the exchange read its collaborators out of a deployment document, and each
-        store agent read its envelope and catalogue out of a store-context file, which is what
-        a person deploying these containers does.
+        Everything below is a real HTTP round trip to a server this command started a moment
+        ago — a uvicorn instance in a thread of this process, not a separate process, but a
+        separate application reached over a real socket. No service was wired by this driver:
+        the exchange read its collaborators out of a deployment document, and each store agent
+        read its envelope and catalogue out of a store-context file, which is what a person
+        deploying these containers does.
+
+        On the ProxyShop side there is exactly one substitution, and it is a datastore rather
+        than a behaviour: the trust service is given an in-memory event store instead of the
+        Postgres one it would resolve from its environment, on the seam its own route handler
+        reads first. Same append-and-seal path, so the hash chain beat 7 verifies is the
+        service's real one; what it is not is durable past this process. The merchant side of
+        beat 6 is openly a stand-in — a local Shopify stub and two recording endpoints — and
+        that beat says so where it happens.
         """
     )
     say.section("Running right now:")
@@ -479,6 +576,7 @@ def _beat_zero(
     say.fact("exchange", result.exchange_url)
     for store_id, url in result.agent_urls.items():
         say.fact(f"store agent {store_id}", url)
+    say.fact("trust service", result.trust_url)
     say.fact("deployment document", str(document))
 
     say.section("The four sellers on this auction's roster, and the role each one plays:")
@@ -582,6 +680,15 @@ def _beat_one(say: Narrator, result: JourneyResult, buyer: Any, fixture: Mapping
         )
     # Show, rather than assert, what a store agent does with the clarifier's own cluster id.
     say.section("What a store agent makes of that intent, asked directly:")
+    say.say(
+        """
+        One field is replaced before asking, and it is named on the next line. The clarifier
+        mints `cluster_id` by hashing the query; a store's envelope authorises NAMED catalogue
+        clusters, and the EXCHANGE is what maps one onto the other. Probing with the raw hash
+        would measure a hop nothing performs, so the driver reads back what the exchange
+        assigned to the auction the confirmation just opened and asks with that.
+        """
+    )
     probe_store, probe_url = next(iter(result.agent_urls.items()), ("", ""))
     decline_reason = ""
     if probe_url:
@@ -649,7 +756,10 @@ def _beat_one(say: Narrator, result: JourneyResult, buyer: Any, fixture: Mapping
             """,
         )
     else:
-        say.bullet(f"{probe_store} answered {result.agent_probe_status} to the clarified intent")
+        say.bullet(
+            f"{probe_store} answered {result.agent_probe_status} to the clarified intent, "
+            f"asked with the exchange's cluster assignment rather than the clarifier's hash"
+        )
 
 
 # =====================================================================================
@@ -684,6 +794,30 @@ def _beat_two_to_four(
     say.fact("auction_id", result.auction_id)
     say.fact("state after the window", body["state"])
     say.blank()
+    say.fact(
+        "opened on intent",
+        f"{fixture['intent']['intent_id']}  (the S1 run fixture's, not the clarifier's)",
+    )
+    say.fact(
+        "its hard constraints",
+        json.dumps(fixture["intent"].get("hard_constraints") or []),
+    )
+    say.blank()
+    say.say(
+        """
+        Read those two lines, because this is the seam where the demo is narrower than the
+        story. Beat 1's confirmation opened a real auction of its own from the clarifier's
+        intent; the auction ranked below is a SECOND one, opened directly on the S1 run
+        fixture's intent — the same purchase the scripted proof runs, which is what makes the
+        two comparable. The empty hard-constraint list is load-bearing. This driver states no
+        `catalog` in its deployment document, because that snapshot is the exchange's own
+        evidence about a store and a demo that supplied it would be marking the store's
+        homework. Unstated, every claim grades `unsupported` and R19 will not let an
+        unsupported claim satisfy a hard constraint — so on an intent that carried the
+        clarifier's `brew_method eq espresso`, this same exchange shortlists nobody.
+        `exchange.composition`'s `catalog` entry records that measurement over a real socket.
+        """
+    )
     say.say(
         """
         Before a single store was asked for a price, the exchange read the seller eligibility
@@ -703,8 +837,9 @@ def _beat_two_to_four(
     blocked = [store["store_id"] for store in stores if store["eligibility"] == "blacklisted"]
     for store_id in blocked:
         say.bullet(
-            f"{store_id} is absent from that list, which is the first of the four gates it "
-            f"has to fail.",
+            f"{store_id} is absent from that list, which is the first of the gates S1 makes "
+            f"it fail. The rest are below: never collected, never ranked, never shown, never "
+            f"accepted, and never in the chain beat 7 reads back.",
             marker="*",
         )
 
@@ -714,8 +849,10 @@ def _beat_two_to_four(
         """
         Solicitation fanned out to every eligible store inside a bounded bid window. Each
         hosted agent priced from its own catalogue, moved only within the discount depth its
-        approved envelope authorises, and answered with a sealed bid. No model is anywhere
-        near a price.
+        approved envelope authorises, and answered with a priced bid. No model is anywhere
+        near a price. (Unsigned, and deliberately: this is the exchange-to-seller door, which
+        a hosted Tier-1 agent answers without crossing an external trust boundary. The signing
+        envelope belongs to the external Tier-2 door, which this run never touches.)
         """
     )
     say.blank()
@@ -839,7 +976,9 @@ def _beat_five(say: Narrator, result: JourneyResult, exchange: Any) -> None:
     say.say(
         f"""
         The shopper takes the '{top["slot"]}' slot. The exchange re-checks eligibility, then
-        resolves a checkout provider for CHECKOUT_MODE. In `redirect` that is the simulated
+        resolves a checkout provider for the mode its deployment document stated —
+        `checkout_mode: redirect`, which outranks the `CHECKOUT_MODE` environment variable
+        rather than reading it. In `redirect` that is the simulated
         provider, which mints a single-use code locally and builds a cart permalink on the
         seller's REGISTERED domain — the platform's record of that domain, not the domain the
         bid claimed for itself. The host comparison is exact.
@@ -867,8 +1006,9 @@ def _beat_five(say: Narrator, result: JourneyResult, exchange: Any) -> None:
         That code is single use and it was minted for this acceptance alone. The permalink's
         host is {store_domain(result.accepted_store_id)} — the domain the platform has on
         record for this seller. A bid whose checkout URL pointed at
-        `checkout.{result.accepted_store_id}` or `evil-{result.accepted_store_id}.attacker.tld`
-        would have been refused here, and refused BEFORE any discount code was created.
+        `checkout.{store_domain(result.accepted_store_id)}` or
+        `evil-{store_domain(result.accepted_store_id)}` would have been refused here, and
+        refused BEFORE any discount code was created.
         """
     )
 
@@ -902,9 +1042,11 @@ STUB_PRODUCT_ID = 8123456
 def permalink_parts(url: str) -> tuple[int, int, str]:
     """``(variant_id, quantity, discount_code)`` out of a cart permalink.
 
-    The checkout follows the URL the exchange minted rather than a variant this driver picked,
-    so a permalink the merchant could not actually redeem ends the demo instead of passing
-    quietly.
+    The checkout is driven from the URL the exchange minted rather than from a variant this
+    driver picked, and the merchant stub is then seeded to match what the URL says. So this is
+    a statement about PROVENANCE — the three values below came out of the offer — and not a
+    redemption guard: the stub is configured from these values, so no parseable permalink can
+    fail to redeem. What ends the demo here is a permalink this cannot parse at all.
     """
     from urllib.parse import parse_qs, urlsplit
 
@@ -1031,6 +1173,7 @@ def _beat_six(say: Narrator, result: JourneyResult) -> None:
     completion = checkout["completion"]
     result.order_name = str(completion.get("order_name") or "")
     result.order_total = str(completion.get("total_price") or "")
+    result.merchant_checkout_token = str(completion.get("checkout_token") or "")
     say.section("The order the merchant closed:")
     say.fact("order", result.order_name)
     say.fact("total paid", money(result.order_total))
@@ -1054,9 +1197,12 @@ def _beat_six(say: Narrator, result: JourneyResult) -> None:
         say.blank()
         say.say(
             """
-            The merchant app's real collector read those exact bytes. It is a browser-side
-            beacon, so it is allowed to go missing and it carries no money — the amount comes
-            from the webhook, which is the truth.
+            The merchant app's own collector logic read that beacon. The bytes above went to
+            a recording endpoint over a real socket and were then handed to
+            `merchant_svc.collector.accept_pixel_event` in THIS process — the merchant service
+            itself is not one of the servers this driver starts, and that is the honest
+            framing. It is a browser-side beacon, so it is allowed to go missing and it
+            carries no money — the amount comes from the webhook, which is the truth.
             """
         )
         say.fact("order_ref", observation.order_ref)
@@ -1081,7 +1227,13 @@ def _beat_six(say: Narrator, result: JourneyResult) -> None:
         body=delivery["body"], headers=delivery["headers"], secret=WEBHOOK_SECRET
     )
     say.blank()
-    say.say("The merchant app verified it:")
+    say.say(
+        """
+        The merchant app's own verifier read it — `merchant_svc.install.webhooks.handle_delivery`,
+        called in this process on the exact bytes the receiver recorded off the wire. The
+        signature check is the real one; what is not served here is the merchant's own HTTP door.
+        """
+    )
     say.fact("verdict", f"{decision.status_code} {decision.reason}")
     say.fact("accepted", decision.accepted)
     if decision.event is not None:
@@ -1137,33 +1289,148 @@ def _beat_six(say: Narrator, result: JourneyResult) -> None:
             """
         )
 
+
+# =====================================================================================
+# beat 7 — the audit trail, read back off a different process
+# =====================================================================================
+def _beat_seven(say: Narrator, result: JourneyResult, trust: Any) -> None:
+    say.beat(7, "The audit trail: what the exchange wrote, and whether the chain holds")
+    say.say(
+        f"""
+        Nothing in beats 2 to 5 was asked to keep an audit trail. The exchange's state machine
+        records every transition into a ledger sink, and the only thing the deployment document
+        said about that sink is WHERE it posts — one line, `trust_url`. Everything below is
+        read back off a DIFFERENT application, over HTTP, at {result.trust_url}. The exchange
+        is not being asked what it remembers; the trust service is being asked what it
+        received.
+        """
+    )
+    say.blank()
+    page = trust.get("/events")
+    say.wire("GET", f"{result.trust_url}/events", page.status_code)
+    page.raise_for_status()
+    result.ledger_events = list(page.json().get("events", []))
+
+    if not result.ledger_events:
+        _gap(
+            say,
+            result,
+            "the trust service received no ledger events",
+            """
+            The exchange was pointed at a trust service that answered, and its chain is empty.
+            Every auction transition in this run landed nowhere, which is the condition T-150
+            exists to prevent.
+            """,
+        )
+        return
+
+    say.section(f"The chain the trust service holds ({len(result.ledger_events)} event(s)):")
+    for event in result.ledger_events:
+        say.bullet(
+            f"seq {str(event.get('seq')):<3} {str(event.get('kind')):<15} "
+            f"prev {str(event.get('prev_hash'))[:12]}.. -> "
+            f"self {str(event.get('event_hash'))[:12]}.."
+        )
+    say.blank()
+    say.say(
+        """
+        Each event's `prev_hash` is the previous event's `event_hash`, so the rows are not
+        merely ordered — each one commits to every row before it. Removing the middle of that
+        list, or editing one field of one event, breaks the link at that point and every link
+        after it.
+        """
+    )
+
+    report = trust.get("/events/verify")
+    say.blank()
+    say.wire("GET", f"{result.trust_url}/events/verify", report.status_code)
+    report.raise_for_status()
+    result.ledger_verify = dict(report.json())
+
+    say.section("The service's own verdict on that chain:")
+    say.fact("chain intact", result.ledger_verify.get("ok"))
+    say.fact("events verified", result.ledger_verify.get("verified"))
+    say.fact("anchor agrees", result.ledger_verify.get("anchor_ok"))
+    say.fact("head hash", result.ledger_verify.get("head_hash"))
+    say.fact("stream hash", result.ledger_verify.get("stream_hash"))
+
+    if not (result.ledger_verify.get("ok") and result.ledger_verify.get("anchor_ok")):
+        _gap(
+            say,
+            result,
+            "the chained ledger did not verify",
+            f"""
+            `GET /events/verify` answered ok={result.ledger_verify.get("ok")}
+            anchor_ok={result.ledger_verify.get("anchor_ok")}:
+            {result.ledger_verify.get("detail") or result.ledger_verify.get("reason")}. The
+            audit trail this run produced cannot be trusted to be the one it wrote.
+            """,
+        )
+    else:
+        say.blank()
+        say.say(
+            """
+            `anchor_ok` is the half that is easy to miss and is the reason a deleted event
+            cannot hide. The chain's length and head are recorded OUTSIDE the row list, so a
+            stream that was truncated to a shorter but perfectly-linked prefix still fails
+            here — a flawless chain of the wrong length is still a tampered one.
+            """
+        )
+
+    # -- the join key, measured rather than asserted -------------------------------
+    exchange_token = ""
+    for event in result.ledger_events:
+        payload = event.get("payload")
+        if str(event.get("kind")) == "accepted" and isinstance(payload, Mapping):
+            exchange_token = str(payload.get("checkout_token") or "")
+    if exchange_token or result.merchant_checkout_token:
+        say.section("The join key reconciliation needs, as the two sides actually wrote it:")
+        say.fact("exchange, in the ledger", exchange_token or "(absent)")
+        say.fact("merchant, at the cart", result.merchant_checkout_token or "(absent)")
+        say.fact(
+            "same value?",
+            bool(exchange_token) and exchange_token == result.merchant_checkout_token,
+        )
+
     # -- where it stops -----------------------------------------------------------
     _gap(
         say,
         result,
-        "reconciliation and the trust update cannot run from anything this demo served",
+        "reconciliation and the trust update cannot run over the ledger chain the exchange writes",
         """
         The runbook's sections 3.6 and 3.7 close the loop: `trust.reconcile.reconcile` joins
         the accepted offer, the beacon and the webhook into one `reconciled` verdict, and that
         verdict moves the store's trust score, which is the same snapshot the ranker filters
-        on. Both components exist and are tested. Neither can be reached from what this driver
-        just stood up, for two measured reasons:
+        on. Both components exist and are tested. The chain above is now real and neither can
+        run over it, for two measured reasons:
 
-        1. `reconcile` reads a page of ledger events — `accepted`, `checkout_pixel`,
-           `order_paid`. The exchange's ledger is an in-process sink that no HTTP route
-           serves, and `pixel/src/` in this repository is an empty directory, so no deployable
-           emits `checkout_pixel` at all. A driver that manufactured those three events would
-           be supplying the join whose absence is the defect.
+        1. `reconcile` needs three kinds — `accepted`, `checkout_pixel`, `order_paid` — and
+           TWO of the three have no producer on any served path. `accepted` is there: it is
+           `seq 5` above, and it carries the offer and the token. The other two are not, and
+           cannot be, because `AuctionStateMachine._transition` is the only caller of
+           `ledger.record` on any SERVED path, so a served run's chain is auction transitions
+           and nothing else. (`retrieval.fit` holds the exchange's only other `record` call,
+           the `bid_placed` producer, and no route reaches it.) `checkout_pixel` has no producer anywhere in this
+           repository — `pixel/src/` holds one empty `.gitkeep`, and `merchant_svc.collector`
+           stops at a `PixelObservation` in memory. The `order_paid` beat 6 verified went into
+           a bounded in-process hand-off buffer that the module itself calls the seam a
+           downstream lane replaces. A driver that manufactured those two events would be
+           supplying the evidence whose absence is the defect.
 
-        2. Even given the page, the join key is missing. The checkout provider invents its
-           `checkout_token` with `secrets.token_hex(16)` and never transmits it — the cart
-           permalink carries the discount code and nothing else — while the merchant mints its
-           own, unrelated token when the cart is visited. `reconcile` joins on exactly that
-           key, so it finds none and emits nothing. `e2e/support/s1/flow.py` closes the gap
-           by deriving the binding from the single-use code and says so in its own docstring;
-           nothing in a deployed service does.
+        2. The join is still unmade, and the three lines above are the measurement rather
+           than the claim. The token the exchange stamped into `accepted` really did travel —
+           it is in the chain — but it never reaches the MERCHANT. The checkout provider mints
+           it with `secrets.token_hex(16)` after it has minted the code, and the only thing it
+           hands the shopper is a cart permalink carrying a variant, a quantity and the
+           discount code: no token. The merchant therefore mints its own when the cart is
+           visited, and the two values above are what that produces. `reconcile` no longer
+           joins on that token alone; it also bridges an offer to an order through the
+           single-use code, reading `code_created` and `checkout_redirect`. But those two are
+           exactly the events the checkout port BUILDS and hands back on
+           `CheckoutResult.events`, and that no served path emits: `exchange.accept.routes`
+           reads the `accepted` one for its `offer` body and drops the rest on the floor.
 
-        This is where the starting slice genuinely stops today.
+        That is where the starting slice genuinely stops today.
         """,
     )
 
@@ -1197,6 +1464,12 @@ def _epilogue(say: Narrator, result: JourneyResult) -> None:
         say.bullet(
             f"one HMAC-signed webhook verified and read as {result.webhook_ledger_kind} "
             f"(order {result.webhook_order_ref})"
+        )
+    if result.ledger_verify.get("ok") and result.ledger_verify.get("anchor_ok"):
+        say.bullet(
+            f"{result.ledger_verify.get('verified')} ledger event(s) delivered to the trust "
+            f"service and served back as a VERIFIED hash chain "
+            f"(head {str(result.ledger_verify.get('head_hash'))[:12]}..)"
         )
 
     say.section(f"Did NOT run, and why ({len(result.gaps)}):")

@@ -397,11 +397,27 @@ def test_the_command_the_runbook_names_runs_and_exits_zero() -> None:
 
     A ``WARNING`` is deliberately allowed, and that is not a loophole. This driver's whole
     contract is that it REPORTS what is degraded instead of hiding it — see
-    :func:`test_every_beat_that_does_not_run_is_reported_rather_than_skipped` — and a run
-    today emits exactly one: T-150's ledger sink saying the trust service is unreachable, the
-    honest truth about a demo running with an unchained ledger. Asserting that the demo never
-    warns would be asserting that the demo is never degraded, which is the opposite of what
-    every other test in this file grades.
+    :func:`test_every_beat_that_does_not_run_is_reported_rather_than_skipped` — so asserting
+    that the demo never warns would be asserting that the demo is never degraded, which is the
+    opposite of what every other test in this file grades.
+
+    A run today emits **none**, and how that happened is the part worth writing down, because
+    the "no loud record" assertion above is now doing real work rather than passing vacuously.
+
+    T-150 shipped a once-per-sink ``WARNING`` saying the trust service at ``http://trust:8084``
+    was unreachable and the auction's transitions were landing in no chained ledger — which was
+    the honest truth about a demo running against a service nobody had started.
+    ``proxyshop_support.trust_ledger`` has since replaced that with one ``ERROR`` the moment
+    delivery stops and one ``INFO`` the moment it resumes, on the argument that ``WARNING`` is
+    the wrong level for a required write that is not happening.
+
+    That change moved the line **into** the "nothing loud" assertion. So this test is now a
+    live check that the demo's audit trail actually lands: the driver serves
+    ``trust.main:create_app()`` on a loopback port and states that address as the exchange's
+    ``trust_url``, and if that ever stops working the ``ERROR`` fires and this test goes red.
+    Nothing here silences it — no level was lowered and no stream redirected; the same record
+    still fires on the same code path for anyone who runs the exchange with no trust service
+    reachable, which is exactly what a probe pointing the driver at a dead port produces.
     """
     environ = {key: value for key, value in os.environ.items() if key not in DRIVER_ENV_KEYS}
     completed = subprocess.run(

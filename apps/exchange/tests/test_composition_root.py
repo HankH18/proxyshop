@@ -59,6 +59,7 @@ What is real here
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -1162,3 +1163,254 @@ def test_an_unreachable_trust_service_changes_nothing_a_buyer_or_a_store_can_see
     )
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["code"].startswith("PSX-"), accepted.json()
+
+
+# =====================================================================================
+# The ledger writer is shared machinery, and it reports a condition rather than an event
+# =====================================================================================
+def test_the_ledger_writer_is_shared_machinery_rather_than_this_services_private_client() -> None:
+    """The exchange's sink is built ON the shared writer; it does not carry a copy of one.
+
+    T-150 shipped the FIRST cross-process ledger writer in this repository as a private class
+    in ONE service's composition root. Nothing else here POSTs to the trust service:
+    ``trust.events.append`` is in-process, the exchange's ``InMemoryLedgerSink`` is a list
+    discarded with the app, and merchant's ``HANDOFF`` ring says in its own docstring that it
+    exists because "E6 is not deployed yet". So the mechanism lives in
+    ``proxyshop_support.trust_ledger`` now — where ``redis_client``, ``postgres``,
+    ``asgi_server`` and ``logging_config`` already live, and which merchant's and buyer's
+    ``main.py`` already import — and the exchange's sink is the composition of the two halves
+    that are genuinely the exchange's: the in-process readback, and that writer.
+
+    ``issubclass`` both ways is the assertion that a *copy* cannot satisfy. The endpoint
+    resolver is asserted to be the same function OBJECT for the same reason: two spellings of
+    "append ``/events`` to the base URL" is how two callers end up disagreeing about it.
+    """
+    from exchange.auction.ledger import InMemoryLedgerSink
+    from exchange.composition import HttpTrustLedgerSink, trust_events_url
+
+    from proxyshop_support import trust_ledger
+
+    assert issubclass(HttpTrustLedgerSink, trust_ledger.TrustLedgerPublisher), (
+        "the exchange's trust sink is not built on the shared writer, so adopting the "
+        "mechanism from merchant or buyer means copying it"
+    )
+    assert issubclass(HttpTrustLedgerSink, InMemoryLedgerSink), (
+        "the in-process readback three test_auction.py nodes assert on is gone"
+    )
+    assert trust_events_url is trust_ledger.trust_events_url
+    assert HttpTrustLedgerSink("http://ledger:9/events").status()["url"] == "http://ledger:9/events"
+
+
+def test_a_trust_service_that_stops_taking_events_is_a_reported_fault_not_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """JOB 2. The per-event warning is gone, and what replaced it says more, not less.
+
+    T-150 shipped warn-and-continue: one ``WARNING`` per sink, saying that the auction stands
+    and the transition is not in the chained ledger, and then counters. That is the posture of
+    a service that has not decided whether its audit trail is required. It is decided now — the
+    trust ledger is standing architecture — so a required write that is not happening is a
+    fault, reported at ``ERROR``, on the two moments the CONDITION changes:
+
+    * five failing publishes are one fault, not five lines and not a per-event warning;
+    * recovery is reported, with the number of events that were lost. The old shape reported
+      the start of an outage once per process and its end never;
+    * a second outage after a recovery is reported again. The old shape was silent forever
+      after its one line, which is what "counted, not logged" quietly costs.
+
+    And the condition stays readable after the line scrolls: ``status()`` is the mapping an
+    operator or a health route reads, and it never carries a payload.
+    """
+    from exchange.composition import HttpTrustLedgerSink
+
+    class _Transport:
+        def __init__(self) -> None:
+            self.up = False
+
+        def post(self, url: str, **kwargs: Any) -> Any:
+            if not self.up:
+                raise httpx.ConnectError("nodename nor servname provided, or not known")
+            return httpx.Response(201, request=httpx.Request("POST", url))
+
+    transport = _Transport()
+    sink = HttpTrustLedgerSink("http://trust.invalid/events")
+    sink._client = transport
+
+    with caplog.at_level(logging.DEBUG, logger="exchange.composition"):
+        for index in range(5):
+            sink.emit({"event_id": f"e-{index}", "kind": "auction_opened"})
+        outage = [record for record in caplog.records if record.name == "exchange.composition"]
+        assert [record.levelname for record in outage] == ["ERROR"], (
+            f"five undeliverable events produced {[r.levelname for r in outage]}. A WARNING "
+            f"here is the old warn-and-continue posture; more than one line is per-event noise "
+            f"on the auction path"
+        )
+        assert sink.delivering is False
+
+        caplog.clear()
+        transport.up = True
+        sink.emit({"event_id": "e-back", "kind": "auction_closed"})
+        recovery = [record for record in caplog.records if record.name == "exchange.composition"]
+        assert [record.levelname for record in recovery] == ["INFO"], recovery
+        assert "5 event(s)" in recovery[0].getMessage(), recovery[0].getMessage()
+
+        caplog.clear()
+        transport.up = False
+        sink.emit({"event_id": "e-again", "kind": "auction_closed"})
+        again = [record for record in caplog.records if record.name == "exchange.composition"]
+        assert [record.levelname for record in again] == ["ERROR"], (
+            "a trust service that failed, recovered and failed again said nothing the second "
+            "time — the hole a one-shot report leaves"
+        )
+
+    # The in-process record is untouched by any of it, which is what makes the ring and the
+    # status a diagnosis rather than a hole.
+    assert sink.kinds == ["auction_opened"] * 5 + ["auction_closed"] * 2
+    assert sink.status() == {
+        "url": "http://trust.invalid/events",
+        "delivering": False,
+        "delivered": 1,
+        "lost": 6,
+        "last_failure": "ConnectError: nodename nor servname provided, or not known",
+    }
+
+
+def test_an_exchange_says_where_its_audit_trail_goes_at_the_moment_it_binds_the_seam(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, unwired: None
+) -> None:
+    """JOB 2, the other half: the configuration question is answered at wiring time.
+
+    "Which trust service is this process writing to, and did anybody choose it" is a
+    configuration question, and the old shape could only answer it from a runtime warning that
+    fired when something had already gone wrong. It is stated once now, when the seam is
+    bound, where an operator reading a start-up log is looking — and at ``INFO``, not
+    ``WARNING``, because a deployment that states no ``trust_url`` has not made a mistake: the
+    default is the compose service name, which is the address that is correct in the
+    deployment this repository ships.
+    """
+    from exchange.composition import (
+        DEFAULT_TRUST_URL,
+        configure_exchange,
+        default_ledger_sink,
+        read_deployment,
+    )
+
+    def bound_lines() -> list[logging.LogRecord]:
+        return [record for record in caplog.records if record.name == "exchange.composition"]
+
+    with caplog.at_level(logging.DEBUG, logger="exchange.composition"):
+        caplog.clear()
+        default_ledger_sink({})
+        silent = bound_lines()
+        assert [record.levelname for record in silent] == ["INFO"], silent
+        assert DEFAULT_TRUST_URL in silent[0].getMessage(), silent[0].getMessage()
+        assert "default" in silent[0].getMessage(), silent[0].getMessage()
+
+        caplog.clear()
+        default_ledger_sink({"TRUST_URL": "http://ledger:9"})
+        from_environment = bound_lines()
+        assert [record.levelname for record in from_environment] == ["INFO"]
+        assert "http://ledger:9/events" in from_environment[0].getMessage()
+        assert "TRUST_URL" in from_environment[0].getMessage()
+
+        caplog.clear()
+        document = {**_deployment_document("http://127.0.0.1:1"), "trust_url": "http://stated:9"}
+        monkeypatch.setenv(ENV_DEPLOYMENT_JSON, json.dumps(document))
+        monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+        deployment = read_deployment()
+        assert deployment is not None
+        configure_exchange(create_app(), deployment)
+        stated = [record for record in bound_lines() if "trust" in record.getMessage()]
+        assert [record.levelname for record in stated] == ["INFO"], stated
+        assert "http://stated:9/events" in stated[0].getMessage()
+        assert "deployment document" in stated[0].getMessage()
+
+
+def test_a_served_auction_lands_in_a_real_trust_services_chained_ledger(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unwired: None,
+    agent_url: str,
+) -> None:
+    """HONEST TRAFFIC through the moved wall — a real purchase into a real trust service.
+
+    Everything else in this file measures the unreachable case, because there is no trust
+    service in this suite. That is exactly half the property, and it is the half a refactor of
+    the delivery mechanism cannot break by accident: a writer that posted nothing at all would
+    pass it. So this one serves ``trust.main:create_app()`` on its own loopback port, names it
+    in the exchange's deployment document, drives the same auction and the same accept the
+    rest of this file drives — real store agents, real sockets, a real minted code — and then
+    reads the transitions back **out of the trust service over HTTP**.
+
+    One substitution, and it is a datastore rather than a behaviour: ``InMemoryEventStore`` on
+    ``app.state.event_store``, the seam ``trust.events.routes.store_for`` resolves first, so
+    this needs no Postgres. The append path, the hash chaining and the verification are the
+    trust service's own — which is why ``/events/verify`` is asserted here rather than a
+    count. It is the same substitution ``proxyshop_demo`` makes for the same reason.
+
+    The log assertion is the other half of JOB 2: honest traffic through the new fault channel
+    must be SILENT. A fault report that also fires when everything is working is a fault report
+    an operator learns to ignore.
+    """
+    from trust.events import InMemoryEventStore
+    from trust.main import create_app as create_trust
+
+    trust_app = create_trust()
+    trust_app.state.event_store = InMemoryEventStore()
+
+    with serve(trust_app) as trust_url:
+        document = {**_deployment_document(agent_url), "trust_url": trust_url}
+        path = tmp_path / "deployment.json"
+        path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+        monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+        monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+        exchange_app = create_app()
+        with caplog.at_level(logging.DEBUG, logger="exchange.composition"):
+            with serve(exchange_app) as exchange_url:
+                with httpx.Client(base_url=exchange_url, timeout=REQUEST_TIMEOUT_SECONDS) as buyer:
+                    body = _open_an_auction(buyer)
+                    assert body["shortlist"]["slots"], body
+                    top = body["shortlist"]["slots"][0]
+                    accepted = buyer.post(
+                        f"/auctions/{body['auction_id']}/accept", json={"bid_ref": top["bid_ref"]}
+                    )
+                    assert accepted.status_code == 200, accepted.text
+                    assert accepted.json()["code"].startswith("PSX-"), accepted.json()
+
+            faults = [
+                record
+                for record in caplog.records
+                if record.name == "exchange.composition" and record.levelno >= logging.WARNING
+            ]
+            assert faults == [], (
+                f"honest traffic into a trust service that is answering still reported a "
+                f"delivery fault: {[record.getMessage() for record in faults]}"
+            )
+
+        with httpx.Client(base_url=trust_url, timeout=REQUEST_TIMEOUT_SECONDS) as reader:
+            page = reader.get("/events")
+            assert page.status_code == 200, page.text
+            chain = page.json()
+            report = reader.get("/events/verify")
+            assert report.status_code == 200, report.text
+
+    kinds = [event["kind"] for event in chain["events"]]
+    assert {"auction_opened", "auction_closed", "accepted"} <= set(kinds), (
+        f"a served auction and its accept reached a REACHABLE trust service with {kinds}; the "
+        f"transitions the exchange recorded are not all in the chained ledger"
+    )
+    assert chain["is_chain"] is True, chain
+    assert report.json()["ok"] is True, report.json()
+    assert {event["auction_id"] for event in chain["events"]} == {body["auction_id"]}, chain
+
+    sink = exchange_app.state.auction_machine.ledger.sink
+    assert sink.status() == {
+        "url": f"{trust_url}/events",
+        "delivering": True,
+        "delivered": len(chain["events"]),
+        "lost": 0,
+        "last_failure": None,
+    }
+    assert sink.kinds == kinds, (sink.kinds, kinds)
