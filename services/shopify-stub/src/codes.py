@@ -237,9 +237,33 @@ class DiscountCode:
             return RejectionReason.CONFLICTS_WITH_EXISTING_DISCOUNT
         return None
 
-    def is_redeemable_at(self, now: datetime) -> bool:
-        """Convenience for the common "no other discount on the cart" case."""
-        return self.rejection(now=now) is None
+    def is_redeemable_at(
+        self,
+        now: datetime,
+        *,
+        cart_has_order_discount: bool = False,
+    ) -> bool:
+        """Whether this code applies right now — the boolean form of :meth:`rejection`.
+
+        Args:
+            now: the instant of the redemption attempt (timezone-aware).
+            cart_has_order_discount: whether an order-level discount is already on the cart,
+                exactly as :meth:`rejection` means it.
+
+        Returns:
+            ``True`` when :meth:`rejection` returns ``None`` for the same arguments.
+
+        ``cart_has_order_discount`` is forwarded rather than pinned to ``False`` (T-255).
+        It used to be pinned, with no parameter for it and a docstring calling that "the
+        common case" — but it is not the case any live caller is in: BOTH redemption sites
+        (``app.py``'s ``_apply_discount_code`` and ``orders.py``'s re-validation at payment)
+        pass ``state.config.has_active_automatic_discount``. A caller reaching for the
+        shorter spelling therefore got ``True`` for a cart the redemption path rejects with
+        ``CONFLICTS_WITH_EXISTING_DISCOUNT``, silently, and there was no way to ask this
+        method the question the platform actually asks. There is now, and the two can no
+        longer disagree for the same inputs.
+        """
+        return self.rejection(now=now, cart_has_order_discount=cart_has_order_discount) is None
 
 
 def utc_now() -> datetime:
@@ -247,6 +271,13 @@ def utc_now() -> datetime:
 
     One function so a test can freeze time (``frozen_clock``) or the control plane can
     override it, without every module reaching for :func:`datetime.now` independently.
+
+    That sentence was aspirational until T-253 and is now enforced: this is the ONLY
+    ``datetime.now`` in ``services/shopify-stub/src``, and :meth:`shopify_stub.state.
+    StubState.now` — the clock every live read in the stub goes through — delegates here
+    through the module attribute, so overriding this name really does move the stub's clock.
+    Anything added later that reads the wall clock for itself puts the claim back in the
+    state this ticket found it in.
     """
     return datetime.now(UTC)
 

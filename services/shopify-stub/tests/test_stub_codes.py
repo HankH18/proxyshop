@@ -333,3 +333,80 @@ def test_the_expiry_raises_clause_names_every_argument_that_raises() -> None:
         f"code_expiry's Raises clause names {sorted(documented)} but the function refuses "
         f"{sorted(enforced)}"
     )
+
+
+# --------------------------------------------------------------------------------------
+# `is_redeemable_at` — T-255. It had zero callers AND zero tests; these are the tests.
+# --------------------------------------------------------------------------------------
+
+
+def test_is_redeemable_at_agrees_with_rejection_on_every_cart_state() -> None:
+    """The boolean form and the reason form must never disagree for the same arguments.
+
+    ``is_redeemable_at`` used to take no ``cart_has_order_discount`` at all — it pinned
+    ``False`` and called that "the common case", while BOTH live redemption sites
+    (``app.py``'s ``_apply_discount_code``, ``orders.py``'s re-validation at payment) pass
+    ``state.config.has_active_automatic_discount``. So the helper could not be asked the
+    question the platform asks, and answered ``True`` for a cart the platform rejects.
+
+    Asserted as agreement between the two functions rather than against hand-written
+    expectations, so this keeps grading if either one's rules change.
+    """
+    cases = {
+        "redeemable": _code(),
+        "not yet active": _code(starts_at=NOW + timedelta(hours=1)),
+        "expired": _code(ends_at=NOW - timedelta(seconds=1)),
+        "used up": _code(usage_count=1),
+        "combines with order discounts": _code(combines_with=CombinesWith(order_discounts=True)),
+    }
+    for label, code in cases.items():
+        for cart_has_order_discount in (False, True):
+            expected = (
+                code.rejection(now=NOW, cart_has_order_discount=cart_has_order_discount) is None
+            )
+            observed = code.is_redeemable_at(
+                NOW, cart_has_order_discount=cart_has_order_discount
+            )
+            assert observed is expected, (
+                f"{label!r} with cart_has_order_discount={cart_has_order_discount!r}: "
+                f"rejection says redeemable={expected}, is_redeemable_at says {observed}"
+            )
+
+
+def test_is_redeemable_at_sees_the_conflicting_discount_the_live_path_sees() -> None:
+    """The one case the old signature could not express, pinned in its own name.
+
+    Without this the agreement sweep above would still pass against a helper that accepted
+    ``cart_has_order_discount`` and ignored it — as long as ``rejection`` were ignoring it
+    too. This asserts the narrowing is really applied, and applied only to the code that
+    does not combine.
+    """
+    non_combining = _code()
+    assert non_combining.is_redeemable_at(NOW) is True
+    assert non_combining.is_redeemable_at(NOW, cart_has_order_discount=True) is False, (
+        "a non-combining code on a cart that already carries an order-level discount is "
+        "CONFLICTS_WITH_EXISTING_DISCOUNT on the live path; the boolean form must say so too"
+    )
+
+    combining = _code(combines_with=CombinesWith(order_discounts=True))
+    assert combining.is_redeemable_at(NOW, cart_has_order_discount=True) is True, (
+        "a code that combines with order discounts is unaffected by one being on the cart"
+    )
+
+
+def test_is_redeemable_at_takes_the_cart_state_by_keyword_only() -> None:
+    """Keyword-only, so a second positional can never be silently read as the cart flag.
+
+    ``rejection`` is keyword-only for the same reason. A boolean positional argument next to
+    a datetime is the shape that gets passed in the wrong order exactly once.
+    """
+    signature = inspect.signature(DiscountCode.is_redeemable_at)
+    cart = signature.parameters["cart_has_order_discount"]
+    assert cart.kind is inspect.Parameter.KEYWORD_ONLY, (
+        f"cart_has_order_discount is {cart.kind}; it must be keyword-only"
+    )
+    assert cart.default is False, (
+        "the default must stay False so existing single-argument callers keep their meaning"
+    )
+    with pytest.raises(TypeError):
+        DiscountCode.is_redeemable_at(_code(), NOW, True)  # type: ignore[misc]

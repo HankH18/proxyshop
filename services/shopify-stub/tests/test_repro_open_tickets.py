@@ -220,15 +220,13 @@ def test_t253_the_utc_now_probe_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-253: shopify_stub.codes.utc_now documents itself as the stub's single wall-clock "
-        "read and has zero callers, while shopify_stub.state.StubState.now — the clock every "
-        "live read in the stub goes through — calls datetime.now(UTC) directly, so overriding "
-        "utc_now moves nothing; remove this marker with the fix"
-    ),
-)
+# FIXED — the ``xfail(strict=True)`` marker that stood here was removed with the repair, not
+# around it. ``StubState.now`` (services/shopify-stub/src/state.py) now delegates to
+# ``shopify_stub.codes.utc_now`` through the module attribute, so ``utc_now`` really is the
+# stub's single wall-clock read and overriding it really does move the clock. CAUSATION
+# PROVEN: reverting that ONE expression to ``datetime.now(UTC)`` and changing nothing else
+# returns this test to ``xfailed`` (measured: ``1 passed, 3 deselected, 1 xfailed``);
+# restoring it returns it to a pass. No assertion in this test's body was touched.
 def test_t253_overriding_utc_now_moves_the_stubs_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     """The docstring's promise, driven at the clock every live caller in the stub uses."""
     from shopify_stub import codes as codes_module
@@ -311,16 +309,14 @@ def test_t255_the_is_redeemable_at_probe_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-255: DiscountCode.is_redeemable_at pins rejection(cart_has_order_discount=False) "
-        "and takes no parameter for it, while both live redemption sites (app.py:347, "
-        "orders.py:124) forward state.config.has_active_automatic_discount — so the helper "
-        "cannot be asked the question the platform actually asks; remove this marker with "
-        "the fix"
-    ),
-)
+# FIXED — the ``xfail(strict=True)`` marker that stood here was removed with the repair.
+# ``DiscountCode.is_redeemable_at`` now takes ``cart_has_order_discount`` (keyword-only,
+# defaulting to False) and forwards it to ``rejection``, so the two can no longer disagree
+# for the same inputs. CAUSATION PROVEN: reverting the signature and the forwarded argument,
+# and changing nothing else, returns this test to ``xfailed`` (measured: ``1 passed, 3
+# deselected, 1 xfailed``); restoring returns it to a pass. No assertion in this test's body
+# was touched. A fix that ACCEPTED the keyword and ignored it does not pass: the sweep
+# compares against ``rejection``'s own verdict, which does not ignore it.
 def test_t255_is_redeemable_at_agrees_with_the_live_rejection_path() -> None:
     """For every cart state the redemption path can be in, the two must give one answer."""
     code = _t255_code()
