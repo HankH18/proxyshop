@@ -3171,7 +3171,7 @@
     {
       "id": "T-175",
       "title": "Neither the new price-reconciliation wall nor the pre-existing floor wall looks at Offer.total_price (PRICE_FIELD == 'unit_price'), so a bid can state a fully honest unit_price and an arbitrary total_price and be admitted \u2014 the same unauthorised-discount shape T-153 closed, moved one field over. DESIGN.md:127 specifies the ranking price dimension as a function of total_price, and the C11 accepted-event payload records total_price verbatim, so a downstream consumer can treat an unreconciled number as authoritative. Companion to T-156 with the design citation attached.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} && uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t175",
       "scope": [
         "packages/store-agent/src/hooks/provenance.py:830-834 vs DESIGN.md"
       ],
@@ -3273,7 +3273,7 @@
     {
       "id": "T-181",
       "title": "T-151's DSN ORDER RESTS ON A SINGLE ASSERTION IN A SINGLE TEST OF 327. Sabotage S3a (reorder the tuple, i.e. re-ship the exact defect) and S3b (leave the tuple correct but walk it in the wrong order) both produce exactly 1 red: test_the_per_role_ledger_dsn_outranks_the_generic_app_dsn at line 606. S3b is the valuable half \u2014 it proves the DEFAULT_DSN_ENV.index(...) source-text assertion at line 610 is NOT doing the work, and the behavioural assertion carries it alone, which is the right shape. But the live connected-principal test cannot see precedence at all: it clears every DSN variable and sets only trust_rw, so it stayed green under both sabotages. It defends the OMISSION (T-151's original half), never the ORDER. One more precedence assertion, ideally at the live layer, would make the order as well defended as the omission.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t181",
       "scope": [
         "apps/trust/tests/test_events_hardening.py (DSN precedence coverage)"
       ],
@@ -3749,7 +3749,7 @@
     {
       "id": "T-209",
       "title": "THE CONTRACTS BOUNDARY WAS TIGHTENED AND THE STORE-AGENT'S OWN AUDITOR WAS NOT. T-195's fix regenerates the model with --strict-nullable so `offer.commitments: null` now correctly fails at the contracts door (boundary.py: ok=True -> ok=False, ['schema_invalid:offer.commitments']). But the store-agent walks `commitments` with no pydantic gate at all, so a DICT-BUILT bid carrying `commitments: null` still slips past enforce_bid_provenance's own walk. Pre-existing and independently re-verified by the boundary lane's verifier rather than relayed. The two doors now disagree about the same shape \u2014 the contracts one refuses it, the store-agent one skips it.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} && uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t209",
       "scope": [
         "packages/store-agent/src/hooks/provenance.py:129,:496-507 (commitments walk, no pydantic gate)"
       ],
@@ -3902,7 +3902,7 @@
     {
       "id": "T-218",
       "title": "T-209 CONFIRMED BUT UNDERSTATED, and the cause is generic rather than specific to commitments. The store-agent's walk short-circuits on ANY None, while --strict-nullable made a growing set of fields non-nullable at the pydantic door. The verifier enumerated at least SIX shapes the store-agent auditor ADMITS that the tightened contracts door now REFUSES. The structural consequence matters more than the six: every future field the generator tightens silently joins the family, and nothing on the store-agent side notices. This wants a property test asserting the two doors agree on nullability, not six more point fixes.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} && uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t218",
       "scope": [
         "packages/store-agent/src/hooks/provenance.py:523 (`if node is None: return`) \u2014 T-209 is one of a family of at least six"
       ],
@@ -3936,7 +3936,7 @@
     {
       "id": "T-220",
       "title": "The cycle-detection replacement for MAX_SWEEP_DEPTH is correct, but nothing in the suite would notice a depth bound being silently RE-INTRODUCED above 64. The two tests grading 'there is no depth at which a bid stops being checked' parametrize layers as [1, 11, 13, 14, 64] and [1, 13, 14, 64] \u2014 values chosen either side of the OLD bound of 12 \u2014 so any new bound at 65 or beyond is invisible. The tests pin the fix that was made rather than the property that was promised.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} && uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t220",
       "scope": [
         "packages/store-agent/tests/test_price_reconciliation.py (depth parametrization) \u2014 cycle detection has an invisible ceiling"
       ],
@@ -4298,7 +4298,7 @@
     {
       "id": "T-244",
       "title": "MEASUREMENT CREDIBILITY: receive_bid has 28 callers and ZERO of them are production. swarmloop reachable returns TESTS ONLY \u2014 'every caller is a test. Something goes green over this symbol and nothing the user runs reaches it.' The rung-2 discriminator was asked and the answer is YES: seven-plus tests in test_e4_store_agent.py pass because of it and contribute to E4's 20/20. So e4_store_agent_passing counts a signed-external-bid capability as met that no running process performs. The same question, same answer, for merchant 'edit': TESTS ONLY, 14 callers, 0 product, and test_e5_merchant.py:787-820 passes because of it. This is the same class as T-236 (no production code constructs any CatalogAdapter) and it is now the THIRD epic where the metric outruns the wiring.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k \"t244 or store_agent_import_closure_probe_is_armed\"",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -4448,7 +4448,7 @@
     {
       "id": "T-254",
       "title": "ExtractedClaim.as_claim() has zero callers and zero tests. This is the DESIGN Claim projection ({key, value, provenance}) named in T-021's objective 'decompose to atomic Claims'; its sibling as_attribute() IS wired into the upsert path. So ingestion writes AttributeValues and the Claim projection is defined but never produced -- T-021's objective outruns its wiring.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-7} && uv run python -m pytest services/ingest/tests/test_repro_open_tickets.py -q --runxfail -k t254",
       "scope": [
         "services/ingest/src/extraction/claims.py"
       ],
@@ -4553,7 +4553,7 @@
     {
       "id": "T-261",
       "title": "T-064's acceptance criterion 3 -- the exchange client caches the trust snapshot and refreshes it on a version bump -- DOES NOT EXIST. There is no snapshot HTTP route (apps/trust/src/main.py mounts only /events/*), and no client, no cache and no version-bump refresh anywhere in Python or TypeScript. Zero tests name it. Criteria 1 and 2 are genuinely built and graded, which is why the epic-scoped gate passes and hides the gap. T-064 has deliberately been left OPEN rather than closed by the cycle-16 closure audit.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t261",
       "scope": [
         "apps/trust/src/snapshot/builder.py"
       ],
@@ -4688,7 +4688,7 @@
     {
       "id": "T-270",
       "title": "A caller-supplied NaN still produces an UNAUTHENTICATED HTTP 500. list_price: NaN and tier: 1e400 both return 500. The 500 does not come from the handler: pydantic correctly REJECTS the value, and then FastAPI's request_validation_exception_handler builds a 422 body that ECHOES the offending input back, and json.dumps raises 'ValueError: Out of range float values are not JSON compliant: nan' while serialising it. So the error path itself is the defect, and it is reachable by anyone who can POST. Pre-existing rather than a regression, but the batch's own test docstring asserts 'Nothing the caller can write may produce a 5xx', which is measurably false on merged main. Note the F1 fix (allow_inf_nan=False) does NOT close this -- it makes NaN a rejection, and rejection is exactly the path that 500s.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k \"t270 or non_finite_payload_corpus_is_armed\"",
       "scope": [
         "apps/exchange/src/auction/routes.py"
       ],
@@ -4763,7 +4763,7 @@
     {
       "id": "T-275",
       "title": "T-237'S GATE CANNOT SEE ITS OWN FIX. Its _KIND_EMISSION pattern matches only QUOTED STRING LITERALS, but the repo emits ledger kinds two ways: {'kind': 'code_created'} (matches) and kind=LedgerEventKind.feedback (apps/buyer/svc/src/feedback/submission.py:442 -- the ledger-writer house style, does NOT match). A correct fix written in the enum style leaves this strict=True gate red forever, so the ticket can never close. The pattern also greens on a COMMENT or DOCSTRING containing the literal, so it can be satisfied without any code change at all -- both failure directions at once.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t275",
       "scope": [
         "apps/trust/tests/test_repro_open_tickets.py"
       ],
@@ -4838,7 +4838,7 @@
     {
       "id": "T-280",
       "title": "A REFUSAL RECEIPT WITH NO IDENTITY. door.py:498 returns _refuse(REASON_MALFORMED_SUBMISSION) with no `payload=`, so the receipt for a mapping whose reads fail during _snapshot(payload) at :496 carries no signer_id and no nonce and cannot be tied to the submission it refused. This CONTRADICTS THE SAME FILE'S OWN REASONING about the identical situation: door.py:402-407, roughly ninety lines earlier, spells out why the door_failed_closed refusal passes `payload=` -- 'so this refusal carries the same signer_id/nonce diagnosis every other refusal does. Without it a genuine internal fault produced a receipt with no identity at all, indistinguishable in a rejection log from an ordinary policy refusal' -- and notes that _refuse's reads are guarded, so handing it the caller's raw object cannot itself raise. That guarantee holds at :498 too. Every neighbouring refusal already does this: :468 (_refuse(REASON_SIGNATURE_MISSING, payload=payload)), :510 (_refuse(REASON_ENVELOPE_UNCANONICALIZABLE, payload=submitted)), :582, :590. The sibling site at door.py:464 (the not-a-Mapping refusal) omits payload= as well, but there the object provably is not a Mapping, so it is a defensible omission; :498 is the one where a genuine hostile submission with a readable signer_id/nonce is refused anonymously.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} && uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t280",
       "scope": [
         "packages/store-agent/src/external/door.py"
       ],
@@ -4913,7 +4913,7 @@
     {
       "id": "T-285",
       "title": "AN UNWIRED TEST HELPER: THE SyntaxWarning IT WAS WRITTEN TO MUTE STILL LEAKS. _parse(path) at apps/merchant/svc/tests/test_repro_open_tickets.py:134-146 wraps ast.parse in warnings.catch_warnings()/simplefilter('ignore', SyntaxWarning), and its docstring at :135-139 says exactly why -- 'services/ingest/src/er/identity.py:209 has \\\\s in a non-raw docstring, so parsing the product tree emits a warning that has nothing to do with any ticket in this file and would otherwise be charged to it'. It is never called: grep for '_parse(' in the file matches only the definition. The two bare ast.parse call sites it was written to replace are untouched -- :334 (inside test_t246_some_production_code_reads_the_envelope_activation_decision, which begins at :310 and walks every product .py via _product_python_files) and :419 -- so the warning still leaks from test_t246, which is the exact test the helper names. The :334 site even duplicates the helper's `except SyntaxError: continue` handling inline. Either wire both call sites to _parse (they differ only in that :334 skips on None and :419 does not) or delete the helper; leaving it is a dead symbol that reads as a solved problem.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-2} && uv run python -m pytest apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k t285",
       "scope": [
         "apps/merchant/svc/tests/test_repro_open_tickets.py"
       ],
@@ -4973,7 +4973,7 @@
     {
       "id": "T-289",
       "title": "T-181'S TEST IS GREEN UNDER THE EXACT MUTATION IT EXISTS TO CATCH, because it derives its expectation from the tuple it purports to defend. Line 215 iterates `for index, earlier in enumerate(DEFAULT_DSN_ENV)` and line 216 `for later in DEFAULT_DSN_ENV[index+1:]`, then asserts at 223 that `earlier` won -- so reordering the tuple reorders the expectation with it. Sabotage executed: reordering DEFAULT_DSN_ENV from (LEDGER, TRUST_RW, APP) to (LEDGER, APP, TRUST_RW) leaves the test GREEN when it should be RED, and the sabotaged writer then resolves postgresql://app@db/x -- which is the T-151 defect re-shipped. The ticket asks for coverage of TWO sabotages: S3a (reorder the tuple) and S3b (correct tuple, walked wrong). This test covers S3b for every pair, which is real value, and ZERO of S3a. It is also not at the live layer -- it calls the private PostgresEventStore()._resolve_dsn() rather than a real connection. After this test, S3a is defended by exactly one assertion: the source-text DEFAULT_DSN_ENV.index() check at apps/trust/tests/test_events_hardening.py:610, which the ticket itself says is not doing the work. THE ORCHESTRATOR'S RECORDED REASON FOR EXCLUDING T-181 FROM AMENDMENT 15 WAS WRONG: it was excluded as 'a coverage ticket, not a defect, so it could never be a red gate'; the correct reason is 'it defends half the ticket and cannot be a red gate for EITHER half'. Do not close T-181 on the strength of this test -- the gap the ticket describes stays open.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t289",
       "scope": [
         "apps/trust/tests/test_repro_open_tickets.py"
       ],
@@ -4988,7 +4988,7 @@
     {
       "id": "T-290",
       "title": "T-167's gate computes `bodies = {path.read_bytes() for path in copies}` at line 179 and NEVER ASSERTS ON IT -- the variable appears only in the failure message. The load-bearing assertion at line 182 is `assert len(real_files) <= 1`, i.e. 'exactly one real file', while T-167's defect text is 'nothing enforces that they stay identical'. Same class as the T-237 detector problem but milder, since the ticket's own recommended remedy (hoist to a single module) is what this gate matches. Measured: four regular files, all md5 56d63d332af0fc3eb7d5bb5baf058f6c, none a symlink.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t290",
       "scope": [
         "apps/trust/tests/test_repro_open_tickets.py"
       ],
@@ -5003,7 +5003,7 @@
     {
       "id": "T-291",
       "title": "T-212's gate hardcodes its fixture roster: _DATASTORE_FIXTURES at lines 446-458 is a literal frozenset of nine fixture names, so a datastore fixture added later under a new name silently escapes the gate. Moot if T-274 retires this gate, which is the likely resolution since T-212 is already closed and REFUTED.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t291",
       "scope": [
         "apps/trust/tests/test_repro_open_tickets.py"
       ],
@@ -5033,7 +5033,7 @@
     {
       "id": "T-293",
       "title": "A LIVE MEMORY ADDRESS REACHES AN UNAUTHENTICATED HTTP CLIENT AND A PERSISTED EVENT. This is T-264's exact defect on a second, uncovered path. T-264 fixed `registered_domains {source!r}` in checkout/provider.py:1094 (now `type(source).__name__`), but `CheckoutCreatorError: injected code creator {creator!r} exposes neither create_code(...) nor __call__(...)` at providers.py:110 still formats an arbitrary injected object with its default `__repr__`. `accept()` catches CheckoutCreatorError and builds `denial_reason(DENIAL_CHECKOUT_REFUSED, f\"{type(exc).__name__}: {exc}\")` at accept/offer.py:541, so the address is carried through the DECLARED vocabulary intact -- the T-204 boundary normaliser at accept/routes.py does not strip it, because `checkout_refused` IS a declared code and only the prose carries the address. Reachable in a deployment whose `code_creator` is misconfigured (the merchant `POST /codes` client), which is exactly the state `configure_accept(code_creator=...)` exists to set. Two lines further down, at providers.py:126, the SAME file already fixed this class for T-215 -- `{reply!r}` was replaced by the shape of the reply -- so the repair pattern is in the file; line 110 was simply missed. The fix is `exchange.accept.reasons.describe(creator)`, the helper T-264 just added for this. Note `describe()` currently lives in apps/exchange/src/accept/, and checkout/ must not import from accept/ -- check the .importlinter contracts before choosing where it lands.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k \"t293 or unusable_code_creator_corpus_is_armed\"",
       "scope": [
         "apps/exchange/src/checkout/providers.py"
       ],
@@ -5048,7 +5048,7 @@
     {
       "id": "T-294",
       "title": "THE ACCEPT PATH T-170 JUST SHIPPED CANNOT ACCEPT ANYTHING, BECAUSE NOTHING IN THE REPOSITORY PERSISTS AN AUCTION'S BIDS. `AuctionRecord` (apps/exchange/src/auction/state.py:100) carries `roster` and has no `bids` field at all. `POST /auctions` calls `solicit_bids` at auction/routes.py:288, renders `result.entries` into the response at :307 via `_entries_out`, and drops the collected `BidEntry` list -- `machine.close` at :302 only stamps `closed_at`/`history`. The accept route reads bids through the injected `app.state.auction_bids` port whose default, `NoRecordedBids` (accept/routes.py:110), knows nothing, so `accept()` -> `_find_bid` -> `_bids_of` (accept/offer.py:202) gets an empty sequence and refuses every accept with `unknown_bid`. The two halves are already built and simply not connected: `InMemoryAuctionBids.record(auction_id, bids)` exists at accept/routes.py:136 and `configure_accept(..., bids=...)` at accept/routes.py:177/211. The fix is one `record(auction_id, [entry.bid for entry in result.entries])` after auction/routes.py:288 plus wiring the same store into `configure_accept(bids=...)`. THE WRONG FIX, EXPLICITLY: do NOT rebuild bids from `roster`. `RosterEntry` (auction/routes.py:94, fields at :138-169) carries `list_price` and NO `store_domain`, so an accept built from a roster row would (a) hand the buyer a discount computed against a price the store never offered, and (b) leave the registered-domain check with no domain to check -- re-opening T-169 through the back door. The C18-accept lane documented this gap in its own module docstring (accept/routes.py:34-44) and reported it in NEEDS rather than fixing it, because auction/routes.py was outside its scope. NO TICKET OWNS IT: a search of all 240 tickets for `auction_bids`, `NoRecordedBids`, `unknown_bid`, and AuctionRecord-plus-bids returns zero hits.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/exchange/tests/test_repro_open_tickets.py -q --runxfail -k \"t294 or recorded_bid_corpus_is_armed\"",
       "scope": [
         "apps/exchange/src/auction/routes.py"
       ],
@@ -5168,7 +5168,7 @@
     {
       "id": "T-302",
       "title": "THREE FROZEN LEDGER KINDS ARE RESERVED IN ALL FOUR VOCABULARIES AND EMITTED BY NO PRODUCT CODE -- three siblings of the T-237 shape found by sweeping 18 kinds. 'shown', 'checkout_pixel' and 'claim_verified' each exist in the vocabulary and nothing produces them. checkout_pixel COMPOUNDS: reconcile/engine.py is a THREE-WAY reconciler permanently missing one of its three inputs, and pixel/src/ contains only a .gitkeep, so the pixel leg is not merely unemitted but unbuilt. claim_verified is worse in a different way: packages/contracts/openapi/trust.openapi.json:22 uses it as its EXAMPLE body, so the published contract advertises an event the system cannot produce.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t302",
       "scope": [
         "apps/trust/src/reconcile/engine.py"
       ],
@@ -5393,7 +5393,7 @@
     {
       "id": "T-317",
       "title": "THE MERCHANT SERVES THREE ROUTES THAT APPEAR IN NO PUBLISHED CONTRACT: GET /install, GET /install/callback, GET /install/shops. Measured by constructing the app and diffing app.openapi()['paths'] against packages/contracts/openapi/. This is the served-but-UNPUBLISHED direction, and merchant was previously believed to be the one service whose surface agreed with its contract \u2014 T-312 records merchant as fully served and says nothing about it publishing less than it serves. Undeclared served routes are a security and review surface: nothing in the contract review process ever looks at them.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-2} && uv run python -m pytest apps/merchant/svc/tests/test_repro_open_tickets.py -q --runxfail -k t317",
       "scope": [
         "apps/merchant/svc/src/onboarding/routes.py"
       ],
@@ -5423,7 +5423,7 @@
     {
       "id": "T-319",
       "title": "T-288'S STRENGTHENED AST GATE IS STILL EVADABLE BY TWO SHAPES THAT PRESERVE THE DEAD 503 ARM. _names_holding_a_status_code propagates taint only through Assign/AnnAssign/AugAssign/NamedExpr, so (1) `for code in (response.status_code,):` evades it because an ast.For target is not an assignment node, and (2) a helper parameter `def _arm(c): if c == 503` evades it because there is no interprocedural propagation. Under xfail(strict=True) either evasion makes the test XPASS, which RETIRES T-166 while its defect is live \u2014 the gate failing open in the most expensive direction. There is also a related over-taint bug: ast.walk on `self.code = response.status_code` taints the bare name `self`. Deliberately not fixed by the lane that found it: strengthening an interprocedural taint analysis risks false positives across the whole suite and is its own ticket.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t319",
       "scope": [
         "apps/trust/tests/test_repro_open_tickets.py"
       ],
@@ -5438,7 +5438,7 @@
     {
       "id": "T-320",
       "title": "_lapsed_reasons at delisting.py:112 iterates the registry, so a LOOKUP-ONLY registry implementation emits zero blacklist_expired events and no listing is ever re-opened. A sub-agent filed this as a fail-open; the lane checked and DOWNGRADED it, and the downgrade is recorded here rather than the original claim: the docstring documents the choice and its reason (avoiding a second read per store against app.seller_blacklist), and the direction is fail-CLOSED \u2014 the store simply stays delisted. It is a real coverage gap in the expiry path, not a security hole, and it should be fixed by iterating the blacklist rather than the registry.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t320",
       "scope": [
         "apps/trust/src/snapshot/delisting.py"
       ],
@@ -5453,7 +5453,7 @@
     {
       "id": "T-321",
       "title": "SIX CONTRACT/SERVED SWEEP HELPERS NOW EXIST IN THREE COPIES, one per package, with nothing enforcing that they agree. They were unified once already after diverging \u2014 a regex path-normaliser in the store-agent copy disagreed with the other two on malformed input, which is exactly the failure mode that makes two of the three gates measure something slightly different from the third. There is no shared location for them because the three files live in three packages with no common test-support package. This is the T-167 shape (four byte-identical shims) reappearing in the test tier, and T-167's own gate does not cover test files.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-5} && uv run python -m pytest packages/store-agent/tests/test_repro_open_tickets.py -q --runxfail -k t321",
       "scope": [
         "packages/store-agent/tests/test_repro_open_tickets.py"
       ],
@@ -5618,7 +5618,7 @@
     {
       "id": "T-332",
       "title": "A DELISTING EVENT NAMING NO STORE PASSES EVERY LAYER, AND IS THEN INVISIBLE TO THE AUDITOR THE MODULE EXISTS TO SERVE. delisting.py:180 guards `store_id is None` but not '' or '   ', while the sibling identity path IS normalised (business_identity_of does str(v).strip() or None). Measured end to end: validate_ledger_payload('blacklisted', ...) returns [] for '', '   ' AND None \u2014 it is presence-only; normalise_event accepts; append accepts and a real row was written as trust_rw. LedgerEvent.store_id is the ONE store_id in protocol.schema.json with no minLength (:503, versus minLength:1 on all seven siblings) and the column is nullable text. HARM: store.read(store_id=...), read_events(store_id=...) and GET /events?store_id= all return ZERO ROWS, so a blacklisting that did happen cannot be found by the store it happened to.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t332",
       "scope": [
         "apps/trust/src/snapshot/delisting.py"
       ],
@@ -5633,7 +5633,7 @@
     {
       "id": "T-333",
       "title": "delisting.py IS THE ONLY LEDGER-EVENT PRODUCER THAT NEVER CALLS validate_ledger_payload. Every other producing boundary does: exchange/auction/ledger.py:146, merchant/svc/src/codes/ledger.py:99, buyer/svc/src/feedback/submission.py:429, exchange/retrieval/fit.py:227. The only validation these events receive lives in a TEST, applied to events the test itself constructs \u2014 so the production path is unvalidated and the test path validates a different object than production emits. This is why the blank-store_id defect reaches the ledger at all.",
-      "verify": "false  # NO GATE YET \u2014 write one that fails on this finding first",
+      "verify": "export PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} && uv run python -m pytest apps/trust/tests/test_repro_open_tickets.py -q --runxfail -k t333",
       "scope": [
         "apps/trust/src/snapshot/delisting.py"
       ],
