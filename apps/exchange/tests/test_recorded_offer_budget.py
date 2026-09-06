@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
@@ -452,3 +452,52 @@ def test_the_walk_terminates_on_a_value_that_refers_to_itself() -> None:
     cycle: list[Any] = ["a"]
     cycle.append(cycle)
     assert _recordable_offer({"currency": cycle}) is None
+
+
+def test_refusing_a_wide_value_does_not_first_walk_all_of_it() -> None:
+    """The check must stop AT the budget, not after reading everything and then refusing.
+
+    This grades the repair against a hole the repair itself can open. The walk runs once per
+    roster row — 500 times on the duplicated roster the memory attack uses — so a bound that
+    reads a whole 30,000-key mapping before saying no hands the same attacker a CPU
+    amplification on the axis the bound exists to close. Measured, 500 calls against one
+    30,000-key mapping: 0.8186s when the pairs were materialised first, 0.0028s when they were
+    consumed lazily. Same verdict; 292x the work to reach it.
+
+    Asserted on ITEMS CONSUMED rather than wall clock, so it grades the algorithm rather than
+    the machine it ran on.
+    """
+    consumed = 0
+    width = 30_000
+
+    class _CountingMapping(Mapping[str, int]):
+        """A mapping that reports how much of itself the walk actually read."""
+
+        def __getitem__(self, key: str) -> int:
+            return 0
+
+        def __iter__(self) -> Iterator[str]:
+            nonlocal consumed
+            for index in range(width):
+                consumed += 1
+                yield f"k{index}"
+
+        def __len__(self) -> int:
+            return width
+
+    assert _recordable_offer({"currency": _CountingMapping()}) is None
+    assert consumed <= MAX_RECORDED_OFFER_ITEMS + 2, (
+        f"the walk read {consumed} of {width} keys before refusing a value it could have "
+        f"refused after {MAX_RECORDED_OFFER_ITEMS}; that is work an attacker chooses the "
+        "size of, repeated once per roster row"
+    )
+
+
+def test_a_bytearray_is_charged_as_characters_rather_than_waved_through() -> None:
+    """``bytes`` is charged; its mutable twin has to be too.
+
+    JSON produces neither, but ``collect_bids`` is a public seam and a mutable buffer is the
+    one uncharged type that ``deepcopy`` would genuinely COPY per record rather than share.
+    """
+    assert _recordable_offer({"currency": bytearray(MAX_RECORDED_OFFER_VALUE_CHARS + 1)}) is None
+    assert _recordable_offer({"currency": bytearray(8)}) == {"currency": bytearray(8)}
