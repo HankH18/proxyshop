@@ -4,14 +4,17 @@
 # external door an unharnessed seller speaks through. `store_agent.main:app` is the frozen
 # entrypoint.
 #
-# STATED PLAINLY, because a reader deserves it before they deploy this: the app serves NO
-# business routes. `main.py:29-30` mounts routers by globbing `*/routes.py` and there is no
-# `routes.py` anywhere under packages/store-agent/src, so `app.state.mounted_routers` is []
-# and the container answers only FastAPI's own /openapi.json, /docs and /redoc. That is not
-# a packaging defect and this Dockerfile does not paper over it: the store agent's surface
-# is a LIBRARY consumed in-process (services/sim drives it; apps/exchange solicits through
-# it), and the HTTP entrypoint is the frozen T-000 scaffold waiting for a router. The image
-# is real, it starts, and its healthcheck is honest about probing only that.
+# STATED PLAINLY, because a reader deserves it before they deploy this: the HTTP surface is
+# THIN. `main.py` mounts routers by globbing `*/routes.py`, and there is exactly one —
+# `packages/store-agent/src/solicitation/routes.py`. Measured by running the image built
+# from this file: `1 feature router(s) mounted: store_agent.solicitation.routes`, and the
+# container otherwise answers only FastAPI's own /openapi.json, /docs and /redoc. (This
+# paragraph used to say "NO business routes ... there is no `routes.py` anywhere under
+# packages/store-agent/src". That was true when it was written and is not true now; a
+# comment about the shipped artifact that a deployer reads has to be re-measured, not
+# inherited.) The store agent's surface is still mostly a LIBRARY consumed in-process
+# (services/sim drives it; apps/exchange solicits through it), and the healthcheck is honest
+# about probing only that the app is up.
 #
 # Build context is the REPO ROOT (see the sibling compose.yaml), not this directory: the
 # flat src layout (D42) means a service image has to reach across member directories.
@@ -70,6 +73,15 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 # alone lands a dangling link in the image and `contracts.protocol` dies on
 # `No module named 'contracts.generated'` at import time — observed, not theorised.
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
+# `proxyshop_support/` completes the BYTE-IDENTICAL prologue the block at the top of this
+# file describes ("contracts/support copy"), and it is not optional here: T-308 wired
+# `configure_logging()` into every service's `create_app()`, so `src/main.py:31` is
+# `from proxyshop_support.logging_config import RequestIdMiddleware, configure_logging` at
+# column 0 — fatal at import, i.e. the container could not start without this line. It
+# lands at /app/proxyshop_support, and `/app` is already a PYTHONPATH root (line 47), so no
+# `.pkgroot` link is needed; this is exactly how buyer, exchange, merchant, trust, ingest
+# and sim ship it.
+COPY proxyshop_support/             /app/proxyshop_support/
 COPY packages/store-agent/src/   /app/packages/store-agent/src/
 
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
@@ -82,8 +94,9 @@ COPY packages/store-agent/src/   /app/packages/store-agent/src/
 # __file__ with their own, to bind one canonical spelling. Reached under any other name that
 # lookup fails (caught) or resolves to a SECOND module object with its own copy of the
 # module state. This link is what makes `store_agent.*` the only spelling in the image.
-# `proxyshop_support/` is deliberately NOT copied: nothing under packages/store-agent/src
-# imports it at any scope.
+#
+# There is no `proxyshop_support` link and there must not be one: that package is copied
+# straight to /app (see the COPY above), which is a PYTHONPATH root in its own right.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
  && ln -s ../packages/store-agent/src /app/.pkgroot/store_agent

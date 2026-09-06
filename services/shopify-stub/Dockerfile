@@ -37,6 +37,33 @@ COPY services/shopify-stub/src/ /app/shopify_stub/
 # the module's own path arithmetic is true on both sides.
 COPY services/shopify-stub/fixtures/ /app/fixtures/
 
+# T-308 wired `configure_logging()` into every service's `create_app()`, so `src/app.py:94`
+# is `from proxyshop_support.logging_config import RequestIdMiddleware, configure_logging`
+# at column 0 — fatal at import, i.e. this container could not start without the lines
+# below. `/app` is this image's only sys.path root (there is no ENV PYTHONPATH; uvicorn's
+# `--app-dir` defaults to `.`, which is WORKDIR, and that is already what makes
+# `shopify_stub` importable at all), so copying the package to /app/proxyshop_support is all
+# the wiring it needs — no `.pkgroot` link, same as the six images that ship it whole.
+#
+# The MEASURED CLOSURE rather than the whole package, and the difference is this image's
+# four-wheel pip layer. `COPY proxyshop_support/ /app/proxyshop_support/` — what buyer,
+# exchange, merchant, trust, ingest and sim do — ships `redis_client.py`, whose line 30 is
+# `import redis` at column 0, and this image installs no redis. Measured, not feared: with
+# the whole-package copy in place the gate reported "services/shopify-stub/Dockerfile: 1 of
+# 27 shipped modules cannot be imported ... proxyshop_support/redis_client.py:
+# ModuleNotFoundError: No module named 'redis'". The alternative was pinning redis (and
+# hiredis) into a stub that never opens a socket to it; copying what the stub actually
+# imports keeps the pip layer honest, and it is the same partial-copy idiom
+# `apps/exchange/Dockerfile:85-86` uses for `packages/store-agent` (an `__init__.py` plus
+# the one subtree it needs).
+#
+# `logging_config` is stdlib-only at every scope and `proxyshop_support/__init__.py` imports
+# nothing, so this pair is self-contained. Add a second `proxyshop_support.*` import to this
+# service and it will NOT silently degrade: that module is absent here, the import is
+# module-scope, and the copy-set gate's runtime half fails on the ModuleNotFoundError.
+COPY proxyshop_support/__init__.py       /app/proxyshop_support/__init__.py
+COPY proxyshop_support/logging_config.py /app/proxyshop_support/logging_config.py
+
 EXPOSE 8787
 
 # One worker on purpose: the stub's whole state is in process memory, and a second worker
