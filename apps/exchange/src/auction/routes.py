@@ -633,11 +633,28 @@ def _within_the_recorded_offer_budget(value: Any, slots_left: int) -> int | None
             children: Any = (part for pair in item.items() for part in pair)
         elif isinstance(item, (list, tuple, set, frozenset)):
             children = item
-        else:
-            # A scalar — number, bool, None, or anything else a caller handed us. It costs no
-            # slots and has nothing under it. Its own storage is bounded by the reply size cap,
-            # and `deepcopy` returns immutables unchanged, so it does not multiply per record.
+        elif item is None or isinstance(item, (bool, int, float, complex)):
+            # An IMMUTABLE scalar, and that is the whole reason it costs nothing: `deepcopy`
+            # returns these unchanged (`copy._deepcopy_atomic`), so 500 records hold 500
+            # references to one object rather than 500 copies. Measured — a 4300-digit int
+            # recorded into 500 records: book 0.29 MiB, the honest baseline. Size is bounded
+            # by the reply cap; multiplication, which is what this budget is about, does not
+            # happen.
             continue
+        else:
+            # **Anything else is REFUSED, and the list above is a whitelist for that reason.**
+            # An adversarial pass drove the earlier blacklist version of this branch, which
+            # waved through every type it had not been told about: `deque(range(200_000))` is
+            # the same value as the `list` two branches up, `deepcopy` copies it just the
+            # same, and it was RECORDED — 500 records retained 792.7 MiB in 54.55s. So did
+            # `array('q', ...)`, `UserList`, and any object holding a list as an attribute.
+            # A blacklist here has to enumerate every copyable type Python has; a whitelist
+            # has to enumerate the ones a bid legitimately contains, which is this line.
+            # Nothing reachable is lost: the production solicitor parses with `json.loads`
+            # (`composition.HttpBidSolicitor`), whose output is exactly str/dict/list/number/
+            # bool/None. A direct caller of `collect_bids` handing something exotic is
+            # refused, which is the fail-closed direction the rest of this path takes.
+            return None
         for child in children:
             slots_left -= 1
             if slots_left < 0:
