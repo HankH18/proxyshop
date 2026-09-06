@@ -104,14 +104,15 @@ delegating provider hands *back* still does not exist until the provider has run
 still leave the registered domain after ``POST /codes`` has issued a live single-use discount.
 The pre-mint check gained a case; it did not become sufficient.
 
-So the pre-mint ``assert_on_domain`` on the offer's own ``checkout_url`` does not run for a
-served bid of *either* kind; a fallback's derived ``expires_at`` never reaches this path
-(``code_expiry(now, {})`` takes the 48-hour ceiling, ``code TTL = 172800.0 seconds``); and
-``assert_offer_is_mintable`` and ``offer_quantity`` pass trivially on ``{}``. **This is
-pre-existing, and not something R10 did** — a hosted bid's real ``checkout_url`` and
-``expires_at`` are dropped by the same line — and it is reported separately as its own
-finding. The consequence for this paragraph is only that the post-mint permalink check below
-remains the first failable host comparison, exactly as it was before 87a889f.
+What that paragraph replaced said the pre-mint ``assert_on_domain`` does not run for a served
+bid of either kind, that a fallback's derived ``expires_at`` never reaches this path, and that
+``assert_offer_is_mintable`` and ``offer_quantity`` pass trivially on ``{}``. All three were
+true and none is now: they described the ``offer: {}`` book, and T-349 is what changed it.
+Driven live, a served bid's code TTL is now 60 s where the flat ceiling would have made it
+172800 s. The claim that survives is the narrow one — the post-mint permalink check remains
+the first failable host comparison for an offer that STILL arrives without a URL, which a
+direct caller of :func:`accept` can supply and which a fallback for a store the registry
+knows no domain for still is.
 
 The buyer is still protected (no permalink is returned, and the auction stays open) and the
 live code is **no longer lost**: the port carries it out on
