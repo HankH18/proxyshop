@@ -183,6 +183,13 @@ class MagicLinkAuth:
             same gesture.
         deliver: called as ``deliver(email, token, expires_at)``. The **only** place the
             token is ever handed out. Defaults to :func:`_drop`.
+        publish: called as ``publish(profile)`` with every profile
+            :meth:`profile_for` builds, before it is returned. ``None`` — the default —
+            publishes nowhere, which is what a database-less dev boot wants. The deployment
+            passes :func:`~buyer_svc.auth.routes.build_profile_publisher`'s output, which
+            upserts into ``app.buyer_accounts``. Note the *shape*: a callable taking only
+            the profile, so this class never holds a connection and never learns which
+            table, role or database the store-visible working set lives in.
         clock: injectable ``now``.
         link_ttl / session_ttl: lifetimes.
         max_pending: ceiling on the unredeemed-link table. See :data:`DEFAULT_MAX_PENDING`.
@@ -192,6 +199,7 @@ class MagicLinkAuth:
     sessions: SessionStore = field(default_factory=InMemorySessionStore)
     accounts: AccountDirectory = field(default_factory=InMemoryAccountDirectory)
     deliver: Callable[[str, str, datetime], None] = _drop
+    publish: Callable[[BuyerProfile], None] | None = None
     clock: Callable[[], datetime] = _utcnow
     link_ttl: timedelta = DEFAULT_LINK_TTL
     session_ttl: timedelta = DEFAULT_SESSION_TTL
@@ -341,10 +349,27 @@ class MagicLinkAuth:
         This is the one method that crosses the boundary, and it crosses it *inwards*: it
         resolves the pseudonym back to an email inside the vault, reads the account, and
         returns a profile from which the email cannot be recovered.
+
+        It is also where the profile is **published** (T-142), when a publisher was wired.
+        This is the one moment in the service's life when a ``BuyerProfile`` exists, so it
+        is the only place the store-visible working set can be brought up to date; the
+        alternative — publishing at redemption — has no profile to publish, because a
+        redemption produces a session and a pseudonym and never builds one.
+
+        A publisher that raises is *not* caught. ``app.buyer_accounts`` is what a store
+        reads; serving the buyer a fresh profile while the store's row silently stayed stale
+        is a divergence nothing downstream could detect, and a deployment that configured
+        the app DSN asked for the publish to happen.
         """
         session = self.sessions.get(session_id)
         email = self.vault.resolve(session.pseudonym)
         account: Mapping[str, Any] = {}
         if email is not None:
             account = self.accounts.get(email) or {}
-        return build_profile(account, session.pseudonym)
+        profile = build_profile(account, session.pseudonym)
+        if self.publish is not None:
+            # After build_profile, never before: build_profile is what raises IdentityLeak,
+            # and a profile that failed the identity backstop must not be the thing this
+            # writes into a table every store-facing role can read.
+            self.publish(profile)
+        return profile

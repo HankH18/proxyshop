@@ -787,19 +787,39 @@ def test_t140_the_generated_buyer_sweep_is_armed(monkeypatch: Any) -> None:
     ], "the seeded shape draw is not reproducible; the spread floors above are a coin flip"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-140: build_auth_service() (auth/routes.py:133-134) decides the vault and nothing "
-        "else — the word 'accounts' does not appear in that module at all — so production "
-        "always gets the empty default InMemoryAccountDirectory (magic_link.py:193), and the "
-        "ONLY non-test writer of a buyer record in the tree is redeem's "
-        "self.accounts.upsert(email, {'email': email}) (magic_link.py:304). There is no "
-        "production populator, so a record can never carry anything the login gesture did "
-        "not already know, and a service rebuilt as a restart would rebuild it has forgotten "
-        "every buyer; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-140 is fixed. justify-test-edit, recorded at the removal site.
+#
+# QUOTED, the marker that was here:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-140: build_auth_service() (auth/routes.py:133-134) decides the vault and "
+#         "nothing else — the word 'accounts' does not appear in that module at all — so "
+#         "production always gets the empty default InMemoryAccountDirectory "
+#         "(magic_link.py:193), and the ONLY non-test writer of a buyer record in the tree "
+#         "is redeem's self.accounts.upsert(email, {'email': email}) (magic_link.py:304). "
+#         "There is no production populator, so a record can never carry anything the login "
+#         "gesture did not already know, and a service rebuilt as a restart would rebuild it "
+#         "has forgotten every buyer; remove this marker with the fix"))
+#
+# WHAT IT ENCODED: the presence of the defect, per this file's convention ("the marker
+# cannot outlive the bug"). Not a requirement — every requirement is in the assertion body
+# below, which is untouched, including clause (5)'s AST read of build_auth_service.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No. MEASURED: with
+# auth/routes.py and auth/magic_link.py alone restored to their contents at f688b32 (the
+# T-165 commit), this file reports `9 passed, 3 xfailed` with THIS node among the xfailed,
+# beside T-142 and T-221. Restore the two files and this is the only node that flips; T-142
+# stays xfailed either way, which is why only this marker is being removed.
+#
+# THE FIX IT NAMES: build_auth_service() now hands every service it builds
+# `accounts=account_directory()` — one process-wide AccountDirectory behind a module-level
+# factory (routes.py), installable by a deployment through set_account_directory(). A buyer
+# record written through it therefore outlives the service that was running when it was
+# written, so a rebuilt service reads the history rather than re-inventing a buyer out of
+# the address. The in-memory default is still not durable across a real process restart;
+# that half needs a table for the unredacted account record, which does not exist and needs
+# a migration outside this module. It is reported rather than silently claimed.
+
+
 def test_t140_the_production_login_path_serves_a_profile_that_reflects_the_buyer(
     monkeypatch: Any,
 ) -> None:

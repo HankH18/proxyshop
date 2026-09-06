@@ -34,14 +34,21 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 
-from ..profile import IdentityLeak
+from ..profile import BuyerProfile, IdentityLeak, publish_profile
 from ..vault import PostgresPseudonymStore, PseudonymVault, normalise_buyer_key
-from .magic_link import MagicLinkAuth, MagicLinkError, MagicLinkThrottled
+from .magic_link import (
+    AccountDirectory,
+    InMemoryAccountDirectory,
+    MagicLinkAuth,
+    MagicLinkError,
+    MagicLinkThrottled,
+)
 from .sessions import SessionError
 
 _log = logging.getLogger(__name__)
 
 __all__ = [
+    "APP_DSN_ENV",
     "DEFAULT_MAGIC_LINK_RATE_LIMIT",
     "DEFAULT_MAGIC_LINK_RATE_SUBJECTS",
     "DEFAULT_MAGIC_LINK_RATE_WINDOW",
@@ -52,12 +59,16 @@ __all__ = [
     "MagicLinkRateLimited",
     "MagicLinkRateLimiter",
     "ProcessLocalStateUnsafe",
+    "account_directory",
     "auth_service",
+    "build_account_directory",
     "build_auth_service",
+    "build_profile_publisher",
     "build_rate_limiter",
     "get_auth_service",
     "get_rate_limiter",
     "router",
+    "set_account_directory",
     "set_auth_service",
 ]
 
@@ -67,6 +78,12 @@ router = APIRouter(prefix="/buyer", tags=["buyer-auth"])
 #: set the login service keeps its email↔pseudonym history in ``vault.pseudonym_history``
 #: rather than in this process's memory.
 VAULT_DSN_ENV = "PROXYSHOP_PG_DSN_VAULT"
+
+#: DSN for the ``app`` role — the one D5 lets write ``app.*``. ``apps/buyer/compose.yaml``
+#: has been handing this service that variable since the service existed while no line of
+#: ``apps/buyer`` read it; with it set, a served profile is also upserted into
+#: ``app.buyer_accounts``, the store-visible working set (T-142).
+APP_DSN_ENV = "PROXYSHOP_PG_DSN_APP"
 
 #: The variables a process manager sets when it will fork more than one worker. Standard
 #: names, not invented ones: uvicorn and gunicorn both read ``WEB_CONCURRENCY``.
@@ -93,6 +110,8 @@ MAGIC_LINK_RATE_LIMIT_ENV = "PROXYSHOP_BUYER_MAGIC_LINK_RATE_LIMIT"
 MAGIC_LINK_RATE_WINDOW_ENV = "PROXYSHOP_BUYER_MAGIC_LINK_RATE_WINDOW_SECONDS"
 
 _service: MagicLinkAuth | None = None
+_accounts: AccountDirectory | None = None
+_accounts_lock = threading.Lock()
 _limiter_lock = threading.Lock()
 
 
@@ -276,12 +295,108 @@ def _vault_from_env() -> PseudonymVault | None:
     return PseudonymVault(PostgresPseudonymStore(psycopg.connect(dsn, autocommit=True)))
 
 
+def build_account_directory() -> AccountDirectory:
+    """The account directory a deployment starts with (T-140).
+
+    An :class:`~buyer_svc.auth.magic_link.InMemoryAccountDirectory`, deliberately, and it is
+    the *shape* of the seam that is the fix rather than this default. Before this existed
+    ``build_auth_service`` decided the vault and nothing else, so every service the process
+    built got its own brand-new empty directory: the only writer of a buyer record anywhere
+    in the tree was ``redeem``'s ``upsert(email, {"email": email})``, a record can therefore
+    never carry anything the login gesture already knew, and ``GET /buyer/profile`` returned
+    the same information-free buckets for every buyer alive.
+
+    :func:`account_directory` keeps one of these per process and
+    :func:`build_auth_service` hands it to every service it builds, so a populator — an
+    importer, an admin path, an order feed — writes once and every service in the process,
+    including one rebuilt after this one, reads it. That is what makes a served profile a
+    coarsening of a real record instead of a function of the address.
+
+    NOT durable, and the docstring says so rather than the reader discovering it: an
+    in-memory directory forgets every buyer on a real process restart. Closing that needs a
+    table for the *unredacted* account record, which does not exist — ``app.buyer_accounts``
+    holds only (pseudonym, buckets) by design — so it needs a migration, which is outside
+    this module. :func:`set_account_directory` is the seam a durable implementation installs
+    itself through when it lands.
+    """
+    return InMemoryAccountDirectory()
+
+
+def account_directory() -> AccountDirectory:
+    """The process-wide account directory, built on first use.
+
+    Process-wide on purpose and not per-service: a directory belonging to one
+    ``MagicLinkAuth`` would be forgotten every time the service was rebuilt, which is the
+    finding — "a service rebuilt as a restart would rebuild it has forgotten every buyer".
+    """
+    global _accounts
+    if _accounts is None:
+        with _accounts_lock:
+            if _accounts is None:
+                _accounts = build_account_directory()
+    return _accounts
+
+
+def set_account_directory(directory: AccountDirectory | None) -> None:
+    """Install (or, with ``None``, forget) the process-wide account directory.
+
+    The deployment seam. A durable directory — DSN-backed, an importer's output, a fake for
+    a test — is installed here before the first request, exactly as
+    :func:`set_auth_service` installs a login service.
+    """
+    global _accounts
+    _accounts = directory
+
+
+def _app_connection_from_env() -> Any | None:
+    """A connection authenticated as ``app``, when its DSN is configured. Otherwise ``None``.
+
+    ``app`` and not ``buyer_vault``: T-011's grant model gives the vault role only ``SELECT``
+    on ``app.*``, so the role that can read the email↔pseudonym mapping deliberately cannot
+    write the store-visible table. Two schemas, two roles, and no single connection that can
+    join them — which is why this is a second connection rather than the vault's.
+
+    Autocommit for the same reason :func:`_vault_from_env` uses it: a long-lived service that
+    left each statement sitting in an open transaction would pin a snapshot and block DDL for
+    as long as it ran.
+    """
+    dsn = os.environ.get(APP_DSN_ENV)
+    if not dsn:
+        return None
+    import psycopg
+
+    return psycopg.connect(dsn, autocommit=True)
+
+
+def build_profile_publisher() -> Callable[[BuyerProfile], None] | None:
+    """The callable that puts a served profile into ``app.buyer_accounts`` (T-142).
+
+    ``None`` when :data:`APP_DSN_ENV` is unset, so a database-less dev boot is unchanged and
+    ``GET /buyer/profile`` still answers from memory alone.
+
+    Deliberately NOT wrapped in ``try/except``. ``app.buyer_accounts`` is described as "the
+    store-visible working set"; a deployment that configured this DSN has asked for buyer
+    profiles to reach the stores, and a publish that fails silently would leave every store
+    reading a stale row while the buyer is served a fresh one and nothing anywhere says so.
+    A failure here is a real failure and is allowed to be loud.
+    """
+    connection = _app_connection_from_env()
+    if connection is None:
+        return None
+
+    def _publish(profile: BuyerProfile) -> None:
+        publish_profile(connection, profile)
+
+    return _publish
+
+
 def build_auth_service() -> MagicLinkAuth:
     """Construct the login service this process will serve from.
 
-    Two things are decided here, and before this existed neither was decided anywhere: the
-    service was a bare ``MagicLinkAuth()`` and :class:`PostgresPseudonymStore` had no
-    caller outside its own tests.
+    Four things are decided here, and before this existed none of them was decided anywhere:
+    the service was a bare ``MagicLinkAuth()``, :class:`PostgresPseudonymStore` had no caller
+    outside its own tests, and neither did
+    :func:`~buyer_svc.profile.publish_profile`.
 
     * **The vault.** With :data:`VAULT_DSN_ENV` set the email↔pseudonym history lives in
       ``vault.pseudonym_history`` and survives a restart, which is what makes R5's "a
@@ -289,6 +404,18 @@ def build_auth_service() -> MagicLinkAuth:
       of one process's lifetime — an in-memory vault forgets every pseudonym it ever issued
       on restart, leaving the freshness check nothing to check against. Without the DSN the
       in-memory default is kept, so a database-less dev boot is unchanged.
+
+    * **The account directory** (T-140). Every service built here shares the process's one
+      directory, so a buyer record written through it outlives the service that was running
+      when it was written. Without this, ``accounts=`` was never passed at all: production
+      ran the empty default, and every coarsener therefore ran on an empty account.
+
+    * **The profile publisher** (T-142). With :data:`APP_DSN_ENV` set, a profile served over
+      ``GET /buyer/profile`` is also upserted into ``app.buyer_accounts`` through an
+      ``app``-role connection. ``apps/buyer/compose.yaml`` has been handing this service that
+      DSN while no line of ``apps/buyer`` read it.
+
+    * **The worker count**, below.
 
     Raises:
         ProcessLocalStateUnsafe: a process manager is configured to fork more than one
@@ -309,7 +436,14 @@ def build_auth_service() -> MagicLinkAuth:
             f"Run a single worker, or give this service a shared session store first."
         )
     vault = _vault_from_env()
-    return MagicLinkAuth() if vault is None else MagicLinkAuth(vault=vault)
+    accounts = account_directory()
+    publish = build_profile_publisher()
+    # Spelled out twice rather than assembled into a ``**kwargs`` dict: ``vault`` has a
+    # default factory, so there is no value meaning "use the default", and a service built
+    # from an unpacked mapping is one no reader — and no static check — can see the wiring of.
+    if vault is None:
+        return MagicLinkAuth(accounts=accounts, publish=publish)
+    return MagicLinkAuth(vault=vault, accounts=accounts, publish=publish)
 
 
 def auth_service() -> MagicLinkAuth:
