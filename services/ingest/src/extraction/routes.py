@@ -90,10 +90,25 @@ class StoreCrawlRequest(BaseModel):
 
 
 def _claim_json(claim: ExtractedClaim) -> dict[str, Any]:
-    """One claim, with its provenance inline. DESIGN ``Claim{key, value, provenance}``."""
+    """One claim, with its provenance inline. DESIGN ``Claim{key, value, provenance}``.
+
+    The ``{key, value, provenance}`` triple is **taken from**
+    :meth:`~ingest.extraction.claims.ExtractedClaim.as_claim`, not re-read off the record
+    here. That is the point of the projection: the shape DESIGN calls a ``Claim`` is the
+    shape that crosses a wire, and this handler is the wire. Hand-rolling the same three
+    fields beside the projection left the projection defined but never produced — free to
+    disagree with what the service actually emits, with nothing to notice.
+
+    The remaining keys are extraction's own annotations on that reading — what it believed,
+    where in the page it read it, whether the floor held it back — which DESIGN's ``Claim``
+    deliberately does not carry. They stay alongside the triple rather than inside it, so
+    ``provenance`` is the only nesting a caller has to unwrap.
+    """
+    projection = claim.as_claim()
+    provenance = projection["provenance"]
     return {
-        "key": claim.key,
-        "value": claim.value,
+        "key": projection["key"],
+        "value": projection["value"],
         "unit": claim.unit,
         "claim_type": claim.claim_type,
         "confidence": claim.confidence,
@@ -101,10 +116,10 @@ def _claim_json(claim: ExtractedClaim) -> dict[str, Any]:
         "span": list(claim.span),
         "quarantine_reason": claim.quarantine_reason,
         "provenance": {
-            "source": claim.provenance.source,
-            "ref": claim.provenance.ref,
-            "observed_at": claim.provenance.observed_at,
-            "authority_rank": claim.provenance.authority_rank,
+            "source": provenance.source,
+            "ref": provenance.ref,
+            "observed_at": provenance.observed_at,
+            "authority_rank": provenance.authority_rank,
         },
         "supported_by": claim.supported_by.as_properties(),
     }

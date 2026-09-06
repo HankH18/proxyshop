@@ -916,3 +916,133 @@ def test_extracted_claims_land_in_the_graph_with_complete_provenance(
     assert again == written
     count = session.run("MATCH (a:AttributeValue) RETURN count(a) AS n").single()["n"]
     assert count == len(result.claims)
+
+
+# ---------------------------------------------------------------------------------------
+# T-254 — the DESIGN Claim projection, and the wire that produces it
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_claim_projection_is_designs_claim_and_nothing_else() -> None:
+    """``as_claim()`` is ``Claim{key, value, provenance}`` — a projection, not a dump.
+
+    Its sibling ``as_attribute()`` sorts the value into a typed graph slot and pushes the
+    provenance out into a ``SUPPORTED_BY`` edge. This one keeps the value as read and the
+    provenance *inline*, which is the whole reason the shape exists: a downstream consumer
+    holds one fact together with its evidence without a graph round trip.
+    """
+    from ingest.extraction.claims import ExtractedClaim
+
+    claim = ExtractedClaim(
+        key="shipping.dispatch_window_days",
+        value=2,
+        claim_type="shipping_window",
+        confidence=0.9,
+        provenance=ClaimProvenance(
+            source="scraped",
+            ref="snapshot://store-one.example.com/policies/shipping@sha256:0f1e2d3c",
+            observed_at="2026-01-01T00:00:00Z",
+        ),
+        unit="days",
+        evidence="We dispatch within 2 business days.",
+        span=(0, 34),
+    )
+
+    projection = claim.as_claim()
+    assert set(projection) == {"key", "value", "provenance"}, (
+        f"DESIGN's Claim is exactly those three keys; got {sorted(projection)}"
+    )
+    assert projection["key"] == "shipping.dispatch_window_days"
+    assert projection["value"] == 2
+    assert projection["provenance"] is claim.provenance, (
+        "the provenance travels inline and unflattened — that is what distinguishes this "
+        "projection from as_attribute(), which drops it into a SUPPORTED_BY edge"
+    )
+    # The value keeps the type it was read as. as_attribute() would sort it into a slot.
+    assert isinstance(projection["value"], int)
+    assert claim.as_attribute() == AttributeValue(
+        key="shipping.dispatch_window_days", value_number=2.0, unit="days"
+    ), "the sibling projection is unchanged; the two are different shapes of one reading"
+
+
+def test_a_quarantined_claim_still_projects_with_its_provenance_intact() -> None:
+    """C10 holds low-confidence readings back; it does not strip their evidence.
+
+    A held-back claim that projected without provenance would be indistinguishable from an
+    unprovenanced one at exactly the moment somebody is inspecting why it was held.
+    """
+    from ingest.extraction.claims import ExtractedClaim
+
+    claim = ExtractedClaim(
+        key="returns.window_days",
+        value=30,
+        claim_type="return_window",
+        confidence=0.1,
+        provenance=ClaimProvenance(
+            source="scraped",
+            ref="snapshot://store-one.example.com/policies/returns@sha256:aabbccdd",
+            observed_at="2026-01-01T00:00:00Z",
+        ),
+    ).quarantine("below the confidence floor")
+
+    projection = claim.as_claim()
+    assert projection["provenance"].ref.endswith("sha256:aabbccdd")
+    assert set(projection) == {"key", "value", "provenance"}
+    assert claim.quarantine_reason == "below the confidence floor", (
+        "the reason is extraction's annotation, not part of DESIGN's Claim"
+    )
+
+
+def test_the_wire_claim_carries_the_projections_triple(policy_pages) -> None:
+    """The projection is what the running service emits — not a parallel hand-rolled copy.
+
+    This is the coupling T-254 was about. ``as_claim()`` had no callers and no tests, so it
+    was free to disagree with what ``/extraction/policy-pages`` actually put on the wire and
+    nothing would have noticed.
+
+    Both halves are anchored on the claim RECORDS rather than on each other, which is what
+    keeps this from being a mirror that agrees with itself. ``expected`` is read off
+    ``ExtractedClaim`` attributes directly; the projection is then checked against those same
+    attributes, and the wire against ``expected``. So a broken ``as_claim()`` turns the first
+    check red even though the route now flows through it, and a route that drifts back to
+    hand-rolling the triple turns the second red.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    url = "https://store.example.com/policies/shipping"
+    body = policy_pages["shipping.html"]
+
+    routes = importlib.import_module("ingest.extraction.routes")
+    routes.ledger.forget(url)
+
+    with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+        response = client.post("/extraction/policy-pages", json={"url": url, "body": body})
+    assert response.status_code == 200, response.text
+    wire = response.json()
+    assert wire["claims"], "nothing to compare if the page extracted nothing"
+
+    # The same extraction, in process. `expected` is read off the RECORDS, not the projection.
+    result = extract_claims(page_text(body), None, url=url, kind="shipping")
+    records = {c.key: c for c in (*result.claims, *result.quarantined)}
+    assert records, "the in-process control extracted nothing; the comparison would be empty"
+
+    # Half one: the projection agrees with the record it projects. Independent of the route.
+    for key, record in records.items():
+        assert record.as_claim() == {
+            "key": record.key,
+            "value": record.value,
+            "provenance": record.provenance,
+        }, f"as_claim() does not project {key} as DESIGN's Claim{{key, value, provenance}}"
+
+    # Half two: the wire agrees with the record. Independent of as_claim()'s implementation.
+    for emitted in (*wire["claims"], *wire["quarantined"]):
+        record = records[emitted["key"]]
+        assert emitted["value"] == record.value, emitted["key"]
+        assert emitted["provenance"] == {
+            "source": record.provenance.source,
+            "ref": record.provenance.ref,
+            "observed_at": record.provenance.observed_at,
+            "authority_rank": record.provenance.authority_rank,
+        }, f"the wire's provenance for {emitted['key']} is not the record's"

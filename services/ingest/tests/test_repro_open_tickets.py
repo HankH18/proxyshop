@@ -849,17 +849,6 @@ def test_t254_the_claim_projection_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-254: ExtractedClaim.as_claim() — DESIGN's Claim{key, value, provenance}, the "
-        "projection T-021's objective 'decompose to atomic Claims' names — is called by "
-        "nothing the running ingest service imports, while its sibling as_attribute() is "
-        "called from extraction/pipeline.py and reaches the graph; so ingestion writes "
-        "AttributeValues and the Claim projection is defined but never produced; remove this "
-        "marker with the fix"
-    ),
-)
 def test_t254_the_claim_projection_is_produced_by_the_running_service() -> None:
     """An objective's wiring, not its definition. T-021 said "decompose to atomic Claims".
 
