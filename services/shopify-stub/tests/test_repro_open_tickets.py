@@ -115,14 +115,15 @@ def test_the_stub_url_fixture_does_not_turn_a_broken_import_into_a_skip() -> Non
     ``shopify_stub.app`` unimportable does NOT turn them green — ``_fixtures_stub.py:26`` and
     ``test_stub_contract.py:32`` both import the stub at module scope, so the directory dies as
     a collection error, ``rc=4``, loudly red. Exactly **two** tests in the repository request
-    this fixture, and the second (``proxyshop_support/tests/test_shared_runtime.py:470``)
+    this fixture, and the second (``proxyshop_support/tests/test_shared_runtime.py:786``,
+    ``test_shopify_stub_url_fixture_is_wired_to_the_stub``)
     catches the skip deliberately. So the true cost of the swallow is one silent test, not a
     silent suite.
 
     It is still worth closing, because the shape is the one T-159 names and because the
     fixture's skip is the last thing standing between a broken entry point and a green report
     for the test that exists to check it. Note for whoever fixes it: raising instead of
-    skipping does **not** break ``test_shared_runtime.py:470`` — that test's skip branch is
+    skipping does **not** break ``test_shared_runtime.py:786`` — that test's skip branch is
     already dead, since the import succeeds today and it simply asserts the yielded URL.
 
     ``pytest.raises(ImportError)`` cannot express this: ``Skipped`` is not caught by
