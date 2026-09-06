@@ -466,23 +466,32 @@ def test_the_malformed_audit_record_probe_is_armed() -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-283: build_published_event (apps/exchange/src/auction/ledger.py:118, raising at "
-        ":155) is called from two regions that cannot absorb a raise — "
-        "checkout/provider.py:880 calls self._events(...) inside the try opened at :865 whose "
-        "`except Exception` at :889 raises OrphanedCheckoutCode at :896, and accept/offer.py's "
-        "_orphan_record (:387) / policy_event (:589) run inside _refused, which accept() "
-        "invokes from an except block with no outer try. MEASURED with contracts publishing "
-        "one key the producers do not write: a successfully minted live code became an "
-        "OrphanedCheckoutCode refusal, and accept() let MalformedLedgerPayload escape "
-        "uncaught. Repair belongs at the CONSUMERS, not by weakening the check; remove this "
-        "marker with the fix"
-    ),
-)
 def test_t283_a_malformed_audit_record_does_not_cost_a_buyer_a_minted_code() -> None:
     """A defective AUDIT RECORD must not decide the auction. Two consumers, one property.
+
+    **CLOSED — the ``xfail(strict=True)`` marker was deleted with the repair, which is what
+    the marker was for.** What it said, kept because it is the measurement this node exists to
+    hold and a gate whose reproduction is gone cannot be re-graded: ``build_published_event``
+    (``auction/ledger.py``) was called from two regions that cannot absorb a raise —
+    ``checkout/provider.py``'s ``self._events(...)`` inside the post-mint ``try`` whose
+    ``except Exception`` raises ``OrphanedCheckoutCode``, and ``accept/offer.py``'s
+    ``_orphan_record`` / ``policy_event``, which run inside ``_refused``, which ``accept()``
+    invokes from an ``except`` block with no outer try. Measured with ``contracts`` publishing
+    one key the producers do not write: a successfully minted live code became an
+    ``OrphanedCheckoutCode`` refusal, and ``accept()`` let ``MalformedLedgerPayload`` escape
+    uncaught.
+
+    The repair is at the CONSUMERS, as the ticket required: ``build_published_event`` still
+    raises on a body that is not the published one — ``test_the_malformed_audit_record_probe_
+    is_armed``'s last assertion is the tripwire that keeps it raising — and each producer now
+    drops the one event it could not build, records it through
+    ``auction.ledger.record_audit_anomaly``, and hands back the outcome the buyer earned.
+
+    **This node no longer covers the accept half on its own**, and that is why
+    ``test_a_malformed_audit_record_leaves_a_refused_accept_a_refusal`` exists below: with the
+    checkout half repaired, ``provider.checkout`` returns a result here, ``accept()`` succeeds,
+    and nothing in this node reaches ``_refused`` any more. That node reaches it through an
+    ordinary post-mint domain refusal instead, which does not depend on this defect at all.
 
     ``ledger.py``'s own module docstring states the contract this violates, in bold, at line 19:
     "**A sink that raises does not take the auction down.** Losing an audit record is bad;
@@ -563,6 +572,197 @@ def test_t283_a_malformed_audit_record_does_not_cost_a_buyer_a_minted_code() -> 
             )
 
         assert accepted is not None, "accept() returned nothing; it is supposed to return a result"
+
+
+class _MovesAfterTheFirstAnswer:
+    """A platform registry that answers one host, then a different one.
+
+    Not a hostile store and not a stub for its own sake: it is the shape
+    ``CheckoutProvider._mint_recording_orphans`` documents — *"a ``registered_domains`` lookup
+    that answers the first call and raises on the second ... a dropped connection, a cache
+    eviction"* — with the failure moved from an exception to a different ANSWER, which is what
+    a registry that has been rewritten between two reads does. The port resolves the domain
+    once before the mint and ``default_permalink`` resolves it again inside it, so the second
+    answer is the host the permalink is built on and the first is the host it is checked
+    against: an ordinary, correct ``OrphanedOffDomainCheckout`` with a live code behind it.
+    """
+
+    def __init__(self, first: str, then: str) -> None:
+        self._answers = [first, then]
+
+    def domain_for(self, store_id: str) -> str | None:
+        return self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+
+
+def _accept_through_a_post_mint_domain_refusal(registry: Any) -> Any:
+    """``accept()`` on the T-283 auction with ``registry`` as the platform's lookup."""
+    from exchange.accept import accept  # noqa: PLC0415 - kept out of this file's frozen import head
+
+    return accept(
+        _t283_auction(),
+        "bid-t283",
+        None,
+        "redirect",
+        registered_domains=registry,
+        claims=None,
+    )
+
+
+def test_a_malformed_audit_record_leaves_a_refused_accept_a_refusal() -> None:
+    """The ``accept()`` half of the property above, kept measurable after the checkout half.
+
+    NOT xfail, and it is a second node rather than a second assertion for one reason: the gate
+    above reaches ``_refused`` **through** the checkout defect. With ``code_created`` widened,
+    ``provider.checkout`` raised ``OrphanedCheckoutCode``, ``accept()`` caught it, and
+    ``_refused`` -> ``_orphan_record`` re-raised the same ``MalformedLedgerPayload`` out of an
+    ``except`` block with no outer try. Repair the checkout half and that route into ``_refused``
+    is gone — the checkout returns a result, ``accept()`` succeeds, and the accept half of the
+    ticket stops being graded by the node that found it. Half a repair would read as done.
+
+    This reaches ``_refused`` a way that does not depend on the audit record at all: an ordinary
+    post-mint domain refusal (T-202's own shape, see :class:`_MovesAfterTheFirstAnswer`). That
+    refusal is CORRECT and must stay a refusal — what must not happen is the record of the live
+    code it carries turning it into an exception out of a served accept.
+
+    Both controls the file's convention demands are here, in this node:
+
+    * **uninjected**, the same call must refuse *and* carry the orphan's ``code_created``
+      record — otherwise the probe never reaches ``_orphan_record`` and grades nothing;
+    * **injected**, the refusal must survive, still name the live code on
+      ``AcceptResult.orphaned_code`` (the only channel that can — the ``denial_reason`` prose
+      may not spell a discount, T-215), and the audit failure must be recorded rather than
+      dropped in silence.
+    """
+    from exchange.auction.ledger import (  # noqa: PLC0415
+        MalformedLedgerPayload,
+        audit_anomalies,
+    )
+
+    # CLEAN CONTROL — uninjected, this really is a post-mint refusal that files an orphan
+    # record. If this stops holding, everything below is grading some other refusal.
+    control = _accept_through_a_post_mint_domain_refusal(
+        _MovesAfterTheFirstAnswer(T283_DOMAIN, "moved.example.com")
+    )
+    assert not control.accepted, (
+        "the probe's registry no longer produces a refusal at all; it is supposed to move the "
+        "permalink off the domain the port checked before the mint"
+    )
+    assert control.orphaned_code is not None, (
+        f"the refusal carried no orphaned code ({control.denial_reason!r}), so it refused "
+        "BEFORE anything was minted and never reaches _orphan_record"
+    )
+    assert "code_created" in control.kinds, (
+        f"the uninjected refusal filed {control.kinds}; without the orphan's code_created "
+        "record this probe is not exercising the builder T-283 is about"
+    )
+
+    seen_before = len(audit_anomalies())
+
+    with _contract_publishes_one_more_key("code_created", T283_UNWRITTEN_KEY):
+        try:
+            refusal = _accept_through_a_post_mint_domain_refusal(
+                _MovesAfterTheFirstAnswer(T283_DOMAIN, "moved.example.com")
+            )
+        except MalformedLedgerPayload as exc:
+            pytest.fail(
+                "a malformed audit record escaped accept() uncaught on the very path the "
+                "orphan machinery exists for: a live code had already been minted, the "
+                "post-mint domain check refused it, and _refused -> _orphan_record raised "
+                "from inside an `except` block with no outer try — a 500 where the buyer "
+                f"should have been told the offer was refused. Message: {exc}"
+            )
+
+    assert not refusal.accepted, "the refusal became an acceptance under a malformed audit record"
+    assert refusal.orphaned_code is not None, (
+        "the refusal lost the live discount code: `orphaned_code` is the ONLY channel that "
+        "may carry it (the denial_reason prose may not, T-215), so dropping it here is the "
+        "T-157/T-202 defect returning by way of the audit record"
+    )
+    assert refusal.orphaned_code.code, "the orphan record carries no code at all"
+
+    recorded = audit_anomalies()[seen_before:]
+    assert [anomaly.kind for anomaly in recorded] == ["code_created"], (
+        "the audit failure was neither emitted nor recorded: with the code_created record "
+        "refused, an anomaly naming it is the only thing standing between an operator and a "
+        f"live discount nobody wrote down. Anomalies since the control: {recorded}"
+    )
+    assert T283_UNWRITTEN_KEY in recorded[0].problem, (
+        f"the recorded anomaly does not say what was wrong with the body: {recorded[0]}"
+    )
+
+
+def test_the_audit_anomaly_channel_never_writes_down_a_live_code() -> None:
+    """The channel T-283's repair added holds a ``code_created`` body, so it is graded as one.
+
+    NOT xfail. The repair keeps the malformed record instead of raising it, and the body it
+    keeps is the one carrying a live single-use discount — so a new place that holds that
+    payload is a new place it can leak from, and this whole package is built around that not
+    happening: ``OrphanedCode`` suppresses its generated ``repr``, the refusal prose is
+    redacted, ``safe_token`` drops a merchant-authored fragment that spells the code (T-215).
+    An anomaly is a dataclass, and a dataclass gets formatted — by a log line, a traceback, a
+    REPL, this test's own failure message. It therefore keeps key NAMES and a fingerprint and
+    no payload value at all.
+
+    It is also the only node that asserts the CHECKOUT half's anomaly is recorded rather than
+    silently swallowed. The ticket's node asserts the buyer keeps the code, which is the half
+    that matters to the buyer; this is the half that matters to whoever has to find the
+    missing record afterwards — and "dropped the event and told nobody" would satisfy that
+    node exactly as well as the repair does.
+    """
+    from exchange.auction.ledger import audit_anomalies  # noqa: PLC0415
+    from exchange.checkout import SimulatedRedirectProvider  # noqa: PLC0415
+
+    provider = SimulatedRedirectProvider()
+    seen_before = len(audit_anomalies())
+
+    with _contract_publishes_one_more_key("code_created", T283_UNWRITTEN_KEY):
+        result = provider.checkout(_t283_request())
+
+    recorded = audit_anomalies()[seen_before:]
+    assert [anomaly.kind for anomaly in recorded] == ["code_created"], (
+        "the checkout dropped its code_created record without recording an anomaly for it, "
+        f"which is losing the audit trail quietly rather than reporting it. Recorded: {recorded}"
+    )
+    anomaly = recorded[0]
+
+    assert anomaly.where == "CheckoutProvider._events", (
+        f"the anomaly is filed under {anomaly.where!r}; the call site has to be the one an "
+        "operator can open, and it must be code-authored — a provider may name itself after "
+        "the code it is minting"
+    )
+    assert T283_UNWRITTEN_KEY in anomaly.problem, (
+        f"the anomaly does not name the key that was missing: {anomaly.problem!r}. That "
+        "sentence is the diagnosis; without it the record says only that something was wrong"
+    )
+    assert "code" in anomaly.written and "checkout_token" in anomaly.written, (
+        f"the anomaly does not say what the producer actually wrote ({anomaly.written}), so "
+        "nobody can reconstruct the record that was refused"
+    )
+    # `published` is read through `published_body`, and this file's own injection docstring
+    # says why it reads the UN-widened tuple here: `exchange.auction.ledger` imported
+    # `LEDGER_PAYLOAD_SHAPES` by value and the injection rebinds it on `contracts.ledger`
+    # only. Asserting the widened tuple would be asserting that a documented, deliberate
+    # property of the harness is false — the missing key is pinned above, off `problem`,
+    # which is built by the same call that raised.
+    assert anomaly.published == ("code", "permalink_url", "expires_at"), (
+        f"the anomaly records {anomaly.published} as the published body; an operator reading "
+        "it has to be told what the shape was supposed to be"
+    )
+    assert anomaly.context.get("checkout_token") == result.checkout_token, (
+        "the anomaly does not carry the checkout_token, so the two events that DID survive "
+        "cannot be joined back to the record that did not"
+    )
+
+    rendered = f"{anomaly!r} {anomaly}"
+    assert result.code and result.code not in rendered, (
+        "the anomaly renders the live discount code. Every T-215 measurement in this package "
+        "is about a value like this reaching something that formats it"
+    )
+    assert result.kinds == ["accepted", "checkout_redirect"], (
+        f"the checkout filed {result.kinds}: the refused record must be ABSENT, not emitted "
+        "through the unvalidated builder — a body that lies under a published kind is the "
+        "one-kind-two-bodies defect T-235 closed"
+    )
 
 
 # =====================================================================================

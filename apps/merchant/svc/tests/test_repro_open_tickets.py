@@ -34,6 +34,7 @@ import subprocess
 import sys
 import textwrap
 import warnings
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -850,4 +851,304 @@ def test_t317_every_route_the_merchant_serves_is_in_its_published_contract() -> 
         f"the merchant service answers {len(unpublished)} operation(s) that appear in no "
         f"published contract: {unpublished}. They are reachable, they are not generated into "
         "any client, and no contract review has ever seen them"
+    )
+
+
+# ======================================================================================
+# T-345 — the merchant money path takes a price and a currency it cannot read
+# ======================================================================================
+#: The instant every T-345 probe is anchored at. Pinned rather than read from the clock so
+#: the D22 window (``min(now + 48h, offer.expires_at)``) is the same on every machine at
+#: every moment; the fixture offer expires six hours later, which is inside the 48h cap.
+T345_NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+#: A well-formed accepted offer for the merchant's ``POST /codes`` path, in the flat spelling
+#: the exchange actually posts (``discount_pct``/``variant_id``). 10 percentage points off a
+#: 100.00 list price is 90.00, so the T-203 price-versus-percentage cross-check in
+#: ``merchant_svc.codes.offer.assert_discount_matches_prices`` has two readable prices and
+#: agrees with them — every red below is therefore about the ONE field a probe overrides.
+def _mintable_offer(**overrides: Any) -> dict[str, Any]:
+    offer: dict[str, Any] = {
+        "store_id": "acme",
+        "offer_id": "o-t345",
+        "discount_pct": 10.0,
+        "discount_type": "percentage",
+        "variant_id": "1001",
+        "expires_at": "2026-01-01T06:00:00Z",
+        "list_price": "100.00",
+        "unit_price": "90.00",
+        "currency": "USD",
+    }
+    offer.update(overrides)
+    return offer
+
+
+#: A fixed-amount discount, which is the only shape that reads ``currency`` at all.
+def _fixed_amount_offer(**overrides: Any) -> dict[str, Any]:
+    offer: dict[str, Any] = {
+        "store_id": "acme",
+        "offer_id": "o-t345-fixed",
+        "discount": {"type": "fixed_amount", "value": "5.00"},
+        "currency": "USD",
+        "variant_id": "1001",
+        "expires_at": "2026-01-01T06:00:00Z",
+    }
+    offer.update(overrides)
+    return offer
+
+
+def test_t345_the_merchant_money_path_control_is_armed() -> None:
+    """Control for T-345, and it must PASS. Three things the red below depends on.
+
+    Without all three a red on the gate would be an accident rather than the defect: the
+    fixture offer could have stopped being mintable at all (then *every* probe raises and the
+    gate passes for the wrong reason), the price-versus-percentage cross-check could have
+    stopped being able to refuse anything, or ``currency`` could have stopped being read.
+    """
+    from merchant_svc.codes.offer import (  # noqa: PLC0415
+        UnusableOffer,
+        assert_offer_is_mintable,
+        offer_discount,
+    )
+
+    # 1. The fixture really is mintable, so a refusal below is about the overridden field.
+    assert_offer_is_mintable("acme", _mintable_offer(), now=T345_NOW)
+    assert offer_discount(_mintable_offer()).percent == 10.0
+
+    # 2. The cross-check can refuse: the same two prices against a percentage they contradict
+    #    (0.2 where 20.0 was meant — the two-orders-of-magnitude unit error T-203 is about).
+    with pytest.raises(UnusableOffer):
+        assert_offer_is_mintable("acme", _mintable_offer(discount_pct=0.2), now=T345_NOW)
+
+    # 3. `currency` is really read off a fixed-amount discount, so the probe below has a
+    #    field to be wrong about.
+    assert offer_discount(_fixed_amount_offer()).currency == "USD"
+
+
+# MARKER REMOVED — T-345 is fixed. The marker quoted verbatim, and the ritual:
+#
+#   @pytest.mark.xfail(strict=True, reason=(
+#       "T-345: on the merchant's money path a price the system cannot read is treated as a "
+#       "price the offer never stated. `_money` (apps/merchant/svc/src/codes/offer.py:348) "
+#       "answers None for anything it cannot parse, and `assert_discount_matches_prices` "
+#       "reads that None as 'the offer states only one price, so there is nothing to check' "
+#       "and returns silently — so an offer whose unit_price is an object, a dict, a list, "
+#       "'abc', True or a negative number is ACCEPTED and a real single-use discount is "
+#       "minted, with the one guard that catches a 0.2 meant as 20% disabled. In the same "
+#       "function `offer_discount` takes a non-string currency through `str(currency)`, so "
+#       "`currency=object()` denominates a money amount in '<object object at 0x...>' — a "
+#       "value taken and coerced rather than refused, and a heap address, on a path whose "
+#       "UnusableOffer text is echoed to the caller as POST /codes' 400 detail "
+#       "(codes/routes.py:139); remove this marker with the fix"))
+#
+# What it encodes: while the money path takes a price it cannot read this test must fail, and
+# strict=True makes it fail loudly once it starts passing, so the marker cannot outlive the
+# bug. Its own reason text prescribes this removal.
+#
+# Would this test still be wrong if my change were reverted? YES. Measured on this worktree:
+# with codes/offer.py restored from HEAD the selected test reports `1 failed` under
+# `--runxfail` with `{'unit_price': ["'object'", "'dict'", "'list'", "'str'", "'bool'",
+# "'str'"], 'list_price': [...same...]}`; with `_stated_price` and `_currency` in place it
+# reports `1 passed`. My change is the cause. The assertion body is untouched — the diff
+# removes the decorator and nothing else.
+def test_t345_the_merchant_money_path_refuses_money_it_cannot_read() -> None:
+    """A money field the system cannot interpret is refused, never treated as absent.
+
+    Absent and unreadable are different answers. Absent is legitimate — an offer that states
+    only a list price has nothing to cross-check — but a field that is *present* and
+    unreadable is a value the system cannot confidently interpret, and on a path that mints a
+    real spendable discount the failure mode of guessing is charging the wrong amount.
+    """
+    from merchant_svc.codes.offer import UnusableOffer, offer_discount  # noqa: PLC0415
+    from merchant_svc.codes.offer import assert_offer_is_mintable as mintable  # noqa: PLC0415
+
+    # (label, value). Labelled rather than repr'd in the report below, because `repr` of the
+    # bare object renders a live heap address and this message is read by people.
+    unreadable: list[tuple[str, Any]] = [
+        ("an object", object()),
+        ("a dict", {"amount": "90.00"}),
+        ("a list", ["90.00"]),
+        ("the string 'abc'", "abc"),
+        ("the boolean True", True),
+        ("the negative price '-5.00'", "-5.00"),
+    ]
+    taken: dict[str, list[str]] = {"unit_price": [], "list_price": []}
+    for field in taken:
+        for label, value in unreadable:
+            try:
+                mintable("acme", _mintable_offer(**{field: value}), now=T345_NOW)
+            except UnusableOffer:
+                continue
+            taken[field].append(label)
+    refused = taken
+    assert refused == {"unit_price": [], "list_price": []}, (
+        f"the merchant minted a code for an offer whose stated price it could not read: "
+        f"{refused}. `_money` answered None, `assert_discount_matches_prices` read that as "
+        "'the offer states no such price' and skipped the T-203 unit check entirely"
+    )
+
+    # A non-string currency is refused rather than coerced. `str(object())` renders a live
+    # heap address, and that address then denominates a real money amount.
+    for bad_currency in (object(), 123, ["USD"], {"code": "USD"}, True):
+        with pytest.raises(UnusableOffer):
+            offer_discount(_fixed_amount_offer(currency=bad_currency))
+
+
+# ======================================================================================
+# T-350 — sealed.envelopes can hold an activation the domain rule forbids
+# ======================================================================================
+#: The migration that declares every ``sealed.*`` table. T-350 names line 41 of this file.
+SEALED_MIGRATION = REPO_ROOT / "db" / "migrations" / "0003_sealed_vault_app_tables.sql"
+
+#: Words a column recording the written approval artifact would be built out of. Matched as
+#: whole underscore-separated parts of a column name, never as substrings — the same rule
+#: :data:`PERSISTENCE_WORDS` follows above, and for the same reason.
+APPROVAL_COLUMN_WORDS = frozenset({"approval", "approved", "approver"})
+
+#: DDL keywords that start a table *constraint* rather than a column definition.
+_DDL_CONSTRAINT_KEYWORDS = ("constraint", "primary", "check", "unique", "foreign", "exclude")
+
+
+def _sealed_envelopes_ddl() -> str:
+    """The body of ``CREATE TABLE ... sealed.envelopes ( ... )``, comments stripped.
+
+    Comments are stripped because this whole file is heavily commented and a scan that reads
+    prose would go green on a paragraph *describing* the missing column.
+    """
+    sql = SEALED_MIGRATION.read_text(encoding="utf-8")
+    start = sql.find("sealed.envelopes")
+    if start < 0:
+        return ""
+    body = sql[sql.find("(", start) + 1 : sql.find(");", start)]
+    return "\n".join(line.split("--", 1)[0] for line in body.splitlines())
+
+
+def _sealed_envelopes_columns() -> list[str]:
+    """Every column ``sealed.envelopes`` declares, in declaration order.
+
+    The body is split on commas **at nesting depth zero**, not line by line: a multi-line
+    ``CHECK (max_discount_pct IS NULL OR (...))`` puts column names on continuation lines, and
+    a line-wise reader reports them as columns of their own.
+    """
+    body = _sealed_envelopes_ddl()
+    items: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for character in body:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        if character == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    items.append("".join(current))
+
+    columns: list[str] = []
+    for item in items:
+        token = item.split(maxsplit=1)[0].lower() if item.split() else ""
+        if not token or token.startswith(_DDL_CONSTRAINT_KEYWORDS):
+            continue
+        columns.append(token)
+    return columns
+
+
+def test_t350_the_sealed_envelopes_reader_is_armed() -> None:
+    """Control for T-350, and it must PASS. The DDL reader really reads that table.
+
+    A red below has to mean "the table cannot record an approval". It must not be able to
+    mean "the migration moved", "the CREATE TABLE block was not found", or "the extraction
+    returned an empty string and every scan over it is vacuous".
+    """
+    from merchant_svc.envelope.model import ACTIVE  # noqa: PLC0415
+
+    assert SEALED_MIGRATION.is_file(), f"{SEALED_MIGRATION} is gone; T-350 names that file"
+
+    columns = _sealed_envelopes_columns()
+    # The three columns the merchant repository writes on every persist are all found, so the
+    # extraction is really parsing a column list and not an empty string.
+    assert {"store_id", "version", "activation"} <= set(columns), (
+        f"the sealed.envelopes DDL reader found columns {columns}, which does not include the "
+        "three merchant_svc.envelope.repository.persist writes; the reader is broken, not the "
+        "schema"
+    )
+    # And the CHECK that admits the forbidden value is really there to be found.
+    assert f"'{ACTIVE}'" in _sealed_envelopes_ddl(), (
+        f"the sealed.envelopes DDL no longer mentions {ACTIVE!r} at all, so there is nothing "
+        "for the gate below to be about"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-350: sealed.envelopes (db/migrations/0003_sealed_vault_app_tables.sql:41) declares "
+        "store_id, version, activation, max_discount_pct, budget_cap, floors, "
+        "pursue_clusters, standing_commitments and created_at and NOTHING ELSE — there is no "
+        "column for the approval artifact — while envelopes_activation_check admits "
+        "activation IN ('shadow','active','killed'). So a row asserting 'active' with no "
+        "recorded approval is valid at the storage layer, which is exactly the state T-248 "
+        "makes impossible in memory (merchant_svc.envelope.store._refuse_unapproved_"
+        "activation). The two layers disagree, and the durability seam pays for it: "
+        "merchant_svc.envelope.repository.restorable downgrades every row read back as "
+        "'active' to shadow at WARNING, because the artifact that would justify it cannot "
+        "be stored — so R6's 'a live envelope carries the approval that authorized it' "
+        "cannot be satisfied durably at all, and an approved envelope silently stops bidding "
+        "across a restart. THE FIX IS OUT OF apps/merchant's file scope: it is a column plus "
+        "a CHECK in db/migrations/0003, and the matching write/read in "
+        "apps/merchant/svc/src/envelope/repository.py; remove this marker with the fix"
+    ),
+)
+def test_t350_the_envelope_table_cannot_hold_an_activation_the_rule_forbids() -> None:
+    """A domain rule the storage layer does not share is one bug away from being no rule.
+
+    The forbidden transition is precise and it is already written down twice: R6/T-248 say a
+    version is ``active`` only while a written approval artifact bound to *those very terms*
+    is on file, and ``merchant_svc.envelope.store._refuse_unapproved_activation`` enforces it
+    on every write and every restore. ``sealed.envelopes`` enforces neither half — it has no
+    column the artifact could live in, so it cannot.
+
+    Two repairs make this pass and the gate does not care which: give the table the approval
+    columns and a CHECK that makes ``activation = 'active'`` require them, or remove
+    ``'active'`` from ``envelopes_activation_check`` so the storage layer stops claiming to
+    hold a state it cannot justify.
+    """
+    from merchant_svc.envelope.model import ACTIVE  # noqa: PLC0415
+
+    ddl = _sealed_envelopes_ddl()
+    columns = _sealed_envelopes_columns()
+    approval_columns = [
+        column
+        for column in columns
+        if APPROVAL_COLUMN_WORDS & {part for part in column.split("_") if part}
+    ]
+
+    if not approval_columns:
+        assert f"'{ACTIVE}'" not in ddl, (
+            f"sealed.envelopes has no column recording a written approval — its columns are "
+            f"{columns} — yet its activation CHECK admits {ACTIVE!r}. The table can therefore "
+            f"hold a live envelope that R6 and merchant_svc.envelope.store."
+            f"_refuse_unapproved_activation both say is impossible, and the durability seam "
+            f"has to downgrade every restored {ACTIVE!r} row to shadow because the artifact "
+            f"that would justify it was never storable"
+        )
+        return
+
+    # The column exists — then the constraint has to make it mandatory for an active row,
+    # because a nullable column nothing checks permits exactly the same forbidden row.
+    guarded = re.search(
+        r"check\s*\(([^;]*?)\)\s*[,)]",
+        "\n".join(line for line in ddl.lower().splitlines() if "check" in line or "null" in line),
+        re.DOTALL,
+    )
+    assert guarded is not None or any(
+        f"'{ACTIVE}'" in clause and any(column in clause for column in approval_columns)
+        for clause in ddl.lower().split("constraint")
+    ), (
+        f"sealed.envelopes records the approval in {approval_columns}, but no CHECK ties it "
+        f"to the activation: a row with activation = {ACTIVE!r} and every approval column "
+        "NULL is still valid at the storage layer, which is the state the domain rule forbids"
     )

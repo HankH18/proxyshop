@@ -133,7 +133,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .. import describe_exception
-from ..auction.ledger import build_published_event
+from ..auction.ledger import MalformedLedgerPayload, build_published_event, record_audit_anomaly
 from ..checkout import (
     CheckoutRequest,
     CheckoutResult,
@@ -369,7 +369,57 @@ def _record_acceptance(auction: Any, bid_ref: str) -> None:
     setattr(auction, _ACCEPTED_FIELD, bid_ref)
 
 
-def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any]:
+def _published_or_recorded(
+    kind: str,
+    *,
+    where: str,
+    auction_id: str,
+    store_id: str | None,
+    payload: Mapping[str, Any],
+    **context: Any,
+) -> Mapping[str, Any] | None:
+    """:func:`build_published_event`, or ``None`` and a recorded anomaly (T-283).
+
+    **Every ledger producer in this module runs where a raise costs the buyer something
+    real,** which is why they all go through here rather than each growing its own ``try``.
+    :func:`_refusal_event` is reached from :func:`_refused`, and ``accept()`` calls
+    ``_refused`` from inside an ``except`` block with no outer try — so a
+    ``MalformedLedgerPayload`` out of the orphan record or the ``policy_event`` did not
+    become a refusal, it became a 500 on the served accept path, on precisely the input the
+    orphan machinery exists to record. Measured: with ``contracts`` publishing one
+    ``code_created`` key the producers do not write, an ordinary post-mint domain refusal
+    (a live code already issued) raised ``exchange.auction.ledger.MalformedLedgerPayload``
+    straight out of ``accept()``. :func:`_handoff_events` is the same shape one branch over:
+    its caller turns a raise into ``DENIAL_UNROUTABLE_FALLBACK``, so a malformed body would
+    have taken away the destination a fallback buyer had already been shown.
+
+    The producing-boundary check is NOT weakened — :func:`build_published_event` still
+    refuses the body, which is what stops one kind from having two shapes (T-235). What
+    changes is who pays: the event is dropped and recorded in
+    :func:`~..auction.ledger.audit_anomalies`, and the accept goes on to whatever answer it
+    had already decided on.
+
+    ``context`` is join keys for whoever reads the anomaly, and it must already be safe to
+    render (T-215): a ``fingerprint``, never the discount.
+    """
+    try:
+        return build_published_event(
+            kind, auction_id=auction_id, store_id=store_id, payload=dict(payload)
+        )
+    except MalformedLedgerPayload as exc:
+        record_audit_anomaly(
+            where,
+            kind,
+            exc,
+            payload=payload,
+            auction_id=auction_id,
+            store_id=store_id,
+            **context,
+        )
+        return None
+
+
+def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any] | None:
     """The ``code_created`` event for a code that exists but whose checkout was refused.
 
     This is the whole of T-202's fix, and it is a ``code_created`` for the plain reason that
@@ -396,9 +446,14 @@ def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any]:
     **beside** the refusal, never instead of it, and no ``accepted`` or
     ``checkout_redirect`` accompanies it — the buyer was handed nothing, and the C11 trio
     describes a checkout that completed.
+
+    ``None`` — the body would not validate — is the T-283 case and is handled by
+    :func:`_refusal_event`, which keeps the refusal and keeps the pointer to the live code.
+    See :func:`_published_or_recorded`.
     """
-    return build_published_event(
+    return _published_or_recorded(
         "code_created",
+        where="accept._orphan_record",
         auction_id=str(_read(auction, "auction_id") or orphan.auction_id or ""),
         store_id=orphan.store_id or None,
         payload={
@@ -414,6 +469,9 @@ def _orphan_record(auction: Any, orphan: OrphanedCode) -> Mapping[str, Any]:
             # The join to the refusal's redacted prose (T-215).
             "fingerprint": code_fingerprint(orphan.code),
         },
+        bid_ref=orphan.bid_ref,
+        provider=orphan.provider,
+        fingerprint=code_fingerprint(orphan.code),
     )
 
 
@@ -512,11 +570,19 @@ def _handoff_events(
     Both halves are closed: the shape is coerced here, and the call site now builds these
     events BEFORE the stamp so that anything else that surprises us is a refusal rather than
     a lockout.
+
+    **Nor on a body ``contracts`` will not accept (T-283).** The caller turns anything raised
+    here into ``DENIAL_UNROUTABLE_FALLBACK``, which is the right answer for a destination that
+    could not be established and the wrong one for an audit record that would not validate:
+    the buyer had already been shown that destination, and it is still reachable. A refused
+    body is dropped and recorded instead — see :func:`_published_or_recorded` — so this pair
+    can come back short, exactly as the minting trio can.
     """
     body = dict(offer) if isinstance(offer, Mapping) else {}
-    return (
-        build_published_event(
+    built = (
+        _published_or_recorded(
             "accepted",
+            where="accept._handoff_events",
             auction_id=auction_id,
             store_id=store_id,
             payload={
@@ -528,9 +594,12 @@ def _handoff_events(
                 "fallback": True,
                 "discount_applied": False,
             },
+            bid_ref=bid_ref,
+            fallback=True,
         ),
-        build_published_event(
+        _published_or_recorded(
             "checkout_redirect",
+            where="accept._handoff_events",
             auction_id=auction_id,
             store_id=store_id,
             payload={
@@ -550,8 +619,11 @@ def _handoff_events(
                 # reader of one event should not have to know which path produced it.
                 "domain_verified": True,
             },
+            bid_ref=bid_ref,
+            fallback=True,
         ),
     )
+    return tuple(event for event in built if event is not None)
 
 
 def _refusal_event(
@@ -580,13 +652,29 @@ def _refusal_event(
     pointer: dict[str, Any] | None = None
     if orphan is not None:
         record = _orphan_record(auction, orphan)
-        events.append(record)
-        pointer = {
-            "fingerprint": code_fingerprint(orphan.code),
-            "event_id": record["event_id"],
-            "kind": "code_created",
-            "provider": orphan.provider,
-        }
+        if record is not None:
+            events.append(record)
+            pointer = {
+                "fingerprint": code_fingerprint(orphan.code),
+                "event_id": record["event_id"],
+                "kind": "code_created",
+                "provider": orphan.provider,
+            }
+        else:
+            # T-283: the record was REFUSED, not skipped, so the pointer is written without
+            # the id it would have named rather than dropped with it. A live single-use
+            # discount exists; `reason` may not spell it (T-215) and there is now no
+            # `code_created` event to walk to, which leaves this pointer and
+            # `AcceptResult.orphaned_code` as the only two places it is written down at all.
+            # `recorded: False` is what stops a reader reading the missing `event_id` as a
+            # lookup miss — the anomaly naming the same fingerprint is in
+            # `auction.ledger.audit_anomalies()`.
+            pointer = {
+                "fingerprint": code_fingerprint(orphan.code),
+                "recorded": False,
+                "kind": "code_created",
+                "provider": orphan.provider,
+            }
 
     payload: dict[str, Any] = {
         "kind": ACCEPT_REFUSED,
@@ -598,14 +686,17 @@ def _refusal_event(
     if pointer is not None:
         payload["orphaned_code"] = pointer
 
-    events.append(
-        build_published_event(
-            "policy_event",
-            auction_id=str(_read(auction, "auction_id") or ""),
-            store_id=store_id,
-            payload=payload,
-        )
+    refusal = _published_or_recorded(
+        "policy_event",
+        where="accept._refusal_event",
+        auction_id=str(_read(auction, "auction_id") or ""),
+        store_id=store_id,
+        payload=payload,
+        bid_ref=bid_ref,
+        policy_kind=ACCEPT_REFUSED,
     )
+    if refusal is not None:
+        events.append(refusal)
     return tuple(events)
 
 

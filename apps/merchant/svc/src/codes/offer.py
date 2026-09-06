@@ -38,9 +38,14 @@ from merchant_svc.install.shop import InvalidShopDomain, normalize_shop_domain
 
 __all__ = [
     "FIXED_AMOUNT_DISCOUNT_TYPES",
+    "LIST_PRICE_FIELDS",
     "MAX_CODE_LIFETIME",
     "MAX_DISCOUNT_PERCENT",
     "PERCENTAGE_DISCOUNT_TYPES",
+    "PRICE_MATCH_ABSOLUTE_TOLERANCE",
+    "PRICE_MATCH_RELATIVE_TOLERANCE",
+    "REFUSAL_VALUE_EXCERPT",
+    "UNIT_PRICE_FIELDS",
     "OffDomainOffer",
     "OfferDiscount",
     "UnusableOffer",
@@ -84,6 +89,34 @@ FIXED_AMOUNT_DISCOUNT_TYPES: frozenset[str] = frozenset({"fixed_amount", "fixed"
 
 #: The protocol's own ceiling: the policy Envelope's ``max_discount_pct`` is ``maximum: 100``.
 MAX_DISCOUNT_PERCENT = 100.0
+
+#: Where the price a buyer would actually pay under this offer is spelled. Both offer shapes
+#: are listed for the reason the module docstring gives: neither is going to be renamed here,
+#: and a reader that knows only one of them silently stops reading half the traffic.
+UNIT_PRICE_FIELDS: tuple[str, ...] = ("unit_price", "unitPrice")
+
+#: Where the price that unit price is discounted *from* is spelled. ``compare_at_price`` is
+#: Shopify's own name for it, and arrives on offers assembled from a product read.
+LIST_PRICE_FIELDS: tuple[str, ...] = ("list_price", "listPrice", "compare_at_price")
+
+#: The absolute slack :func:`assert_discount_matches_prices` allows between the price the
+#: stated percentage implies and the price the offer states: one cent. It exists so the check
+#: does not have to reproduce Shopify's rounding, and it is deliberately far too small to
+#: hide the two-orders-of-magnitude unit error (a ``0.2`` meant as ``20.0``) it exists to
+#: catch — on a 100.00 list price that error is 19.80 off, which is 1980 times this.
+PRICE_MATCH_ABSOLUTE_TOLERANCE = Decimal("0.01")
+
+#: The proportional half of the same slack, as a fraction of the list price: half a
+#: percentage point. Same reasoning, scaled — it grows with the price so a 1000.00 item is
+#: not held to a one-cent tolerance, and it is still forty times smaller than the unit error.
+PRICE_MATCH_RELATIVE_TOLERANCE = Decimal("0.005")
+
+#: How many characters of a malformed value a refusal quotes back. Every ``UnusableOffer``
+#: message leaves this process verbatim as ``POST /codes``' 400 ``detail``
+#: (``merchant_svc.codes.routes``), so the excerpt is one 100-column terminal line minus room
+#: for the sentence around it: enough to identify the offending value, short enough that the
+#: endpoint is not a mirror reflecting an arbitrarily large request body back at its sender.
+REFUSAL_VALUE_EXCERPT = 80
 
 
 def _read(offer: Any, *names: str) -> Any:
@@ -325,7 +358,7 @@ def offer_discount(offer: Any) -> OfferDiscount:
         if amount <= 0:
             raise UnusableOffer(f"discount amount {raw_value!r} is not a positive sum of money")
         currency = _read(offer, "currency", "currency_code", "currencyCode")
-        return OfferDiscount(type=kind, amount=amount, currency=str(currency) if currency else None)
+        return OfferDiscount(type=kind, amount=amount, currency=_currency(currency))
 
     if kind not in PERCENTAGE_DISCOUNT_TYPES:
         raise UnusableOffer(
@@ -345,17 +378,90 @@ def offer_discount(offer: Any) -> OfferDiscount:
     return OfferDiscount(type=kind, percent=percent)
 
 
-def _money(value: Any) -> Decimal | None:
-    """A price as an exact decimal, or ``None`` when the offer does not state a usable one."""
-    if value is None or isinstance(value, bool):
+def _describe(value: Any) -> str:
+    """A malformed value, named for a refusal message, without ever rendering the object.
+
+    ``repr`` on an arbitrary object renders ``<object object at 0x104d8d7d0>`` — a live heap
+    address — and every message raised here leaves the process verbatim as ``POST /codes``'
+    400 ``detail``. Only the kinds a JSON body can actually carry are shown; anything else is
+    named by its type, which is all a caller needs in order to fix the field.
+    """
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        name = type(value).__name__
+        return f"{'an' if name[:1].lower() in 'aeiou' else 'a'} {name}"
+    text = repr(value)
+    return text if len(text) <= REFUSAL_VALUE_EXCERPT else f"{text[:REFUSAL_VALUE_EXCERPT]}..."
+
+
+def _stated_price(offer: Any, names: tuple[str, ...], *, field: str) -> Decimal | None:
+    """One price the offer states, as an exact decimal, or ``None`` when it states none.
+
+    **Absent and unreadable are different answers, and this is where they stopped being the
+    same one (T-345).** The reader this replaces answered ``None`` to both, and its one caller
+    reads ``None`` as "the offer states only one price, so there is nothing to check" — so an
+    offer whose ``unit_price`` was an object, a dict, a list, ``"abc"`` or ``True`` was
+    ACCEPTED, a real single-use discount was minted for it, and the T-203 cross-check that
+    catches a ``0.2`` meant as ``20.0`` was switched off by the very field it grades. On a
+    path that spends the merchant's money, a value the system cannot interpret is refused;
+    the failure mode of guessing is charging the wrong amount.
+
+    An empty or whitespace-only string is "not stated" — the same reading
+    :func:`offer_quantity` already gives it. A blank field is one nobody filled in, not a
+    price nobody can read.
+
+    Zero is a stated price and is checked like any other, because a free item really can be
+    priced at 0.00 and a 100% discount really does imply it. Only a *negative* price is
+    refused outright: there is no offer it could describe.
+
+    Raises:
+        UnusableOffer: the field is present and is not a price.
+    """
+    raw = _read(offer, *names)
+    if raw is None:
         return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float, Decimal)):
+        raise UnusableOffer(
+            f"the offer's {field} is {_describe(raw)}, which is not a price. A money field "
+            "this service cannot read is refused rather than treated as absent — treating it "
+            "as absent silently disables the price-versus-percentage check that catches a "
+            "0.2 meant as 20 percentage points (T-203)"
+        )
     try:
-        amount = Decimal(str(value).strip())
-    except (InvalidOperation, ValueError, ArithmeticError):
-        return None
-    if not amount.is_finite() or amount <= 0:
-        return None
+        amount = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError, ArithmeticError) as exc:
+        raise UnusableOffer(
+            f"the offer's {field} {_describe(raw)} is not a price this service can read, so "
+            "the discount it promised cannot be checked against it"
+        ) from exc
+    if not amount.is_finite():
+        raise UnusableOffer(f"the offer's {field} {_describe(raw)} is not a finite price")
+    if amount < 0:
+        raise UnusableOffer(
+            f"the offer's {field} {_describe(raw)} is negative, which describes no offer"
+        )
     return amount
+
+
+def _currency(value: Any) -> str | None:
+    """The currency a fixed money amount is denominated in, or ``None`` when unstated.
+
+    Raises:
+        UnusableOffer: the field is present and is not a currency code. It used to be
+            ``str(value)``, so an object arrived as ``'<object object at 0x104d8d7d0>'`` — a
+            real money amount denominated in a heap address, taken and coerced rather than
+            refused (T-345).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or isinstance(value, bool):
+        raise UnusableOffer(
+            f"the offer denominates its discount in {_describe(value)}, which is not a "
+            "currency code; a sum of money whose unit cannot be established is refused "
+            "rather than coerced into one"
+        )
+    return value.strip() or None
 
 
 def assert_discount_matches_prices(offer: Any, discount: OfferDiscount) -> None:
@@ -370,22 +476,39 @@ def assert_discount_matches_prices(offer: Any, discount: OfferDiscount) -> None:
     90.00 checks out; a 0.2 against the same pair implies 99.80 and does not.
 
     Silent about offers that state only one price, because then there is nothing to check —
-    and deliberately generous about rounding (a cent, plus half a percent of the list
-    price), because catching a two-orders-of-magnitude unit error does not require
-    reproducing Shopify's rounding to the cent.
+    and deliberately generous about rounding (:data:`PRICE_MATCH_ABSOLUTE_TOLERANCE` plus
+    :data:`PRICE_MATCH_RELATIVE_TOLERANCE` of the list price), because catching a
+    two-orders-of-magnitude unit error does not require reproducing Shopify's rounding.
+
+    **Silent about a price it cannot READ is the one thing it must not be** (T-345). Both
+    prices are read, and refused when unreadable, *before* the percentage is consulted — so a
+    fixed-amount discount cannot smuggle an uninterpretable ``unit_price`` past the door
+    either, and an unreadable price can no longer switch this whole check off by impersonating
+    an absent one.
 
     Raises:
-        UnusableOffer: the stated prices and the stated percentage disagree by more than
-            rounding can explain.
+        UnusableOffer: one of the stated prices cannot be read, or the stated prices and the
+            stated percentage disagree by more than rounding can explain.
     """
-    if discount.percent is None:
+    # Read both prices FIRST and unconditionally. The cross-check below needs a percentage;
+    # refusing a money field this service cannot interpret does not.
+    list_price = _stated_price(offer, LIST_PRICE_FIELDS, field="list price")
+    unit_price = _stated_price(offer, UNIT_PRICE_FIELDS, field="unit price")
+    if discount.percent is None or list_price is None or unit_price is None:
         return
-    list_price = _money(_read(offer, "list_price", "listPrice", "compare_at_price"))
-    unit_price = _money(_read(offer, "unit_price", "unitPrice"))
-    if list_price is None or unit_price is None:
-        return
+    if list_price == 0:
+        # Nothing to take a percentage OF. Reachable only now that a stated 0.00 is a stated
+        # price rather than a silently skipped one: with a 0 unit price too it is a free item
+        # and consistent, and otherwise it is a contradiction with no implied percentage to
+        # report. A negative price never reaches here — `_stated_price` refuses it.
+        if unit_price == 0:
+            return
+        raise UnusableOffer(
+            f"the offer prices a {unit_price} unit against a 0 list price, so the "
+            f"{discount.percent!r} percentage points it states cannot be true of it"
+        )
     expected = list_price * (Decimal(100) - Decimal(str(discount.percent))) / Decimal(100)
-    tolerance = Decimal("0.01") + list_price * Decimal("0.005")
+    tolerance = PRICE_MATCH_ABSOLUTE_TOLERANCE + list_price * PRICE_MATCH_RELATIVE_TOLERANCE
     if abs(expected - unit_price) <= tolerance:
         return
     implied = (Decimal(100) * (list_price - unit_price) / list_price).quantize(Decimal("0.001"))

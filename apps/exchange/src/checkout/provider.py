@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
 from .. import describe, describe_exception, redact_addresses
-from ..auction.ledger import build_published_event
+from ..auction.ledger import MalformedLedgerPayload, build_published_event, record_audit_anomaly
 from .codes import (
     assert_offer_is_mintable,
     build_cart_permalink,
@@ -1019,13 +1019,32 @@ class CheckoutProvider:
         ``{checkout_token, discount_code}``, carrying none of ``code``, ``permalink_url`` or
         ``expires_at``. So anything that needed to revoke or expire a *live* discount found
         the fields present only on the refused one (T-235).
+
+        **A body that will not validate costs this checkout its EVENT, never its code
+        (T-283).** This method runs inside ``checkout``'s post-mint ``try``, whose handler
+        opens with "building the result cannot normally fail" and turns anything reaching it
+        into an :class:`OrphanedCheckoutCode` — so a raise from here refused a buyer a
+        discount the merchant had already issued, over a bookkeeping mismatch. Measured, with
+        ``contracts`` publishing one key this trio does not write: a live
+        ``code:1ef0d265c7e7`` became an ``OrphanedCheckoutCode`` and the shopper got nothing.
+
+        The check itself is untouched and still refuses the body — that is what keeps one kind
+        from having two shapes — but the refusal is now *recorded* rather than *raised*:
+        :func:`~..auction.ledger.record_audit_anomaly` keeps the missing record's kind, its
+        published shape, the keys that were written and the join keys an operator needs, and
+        the trio comes back one event short. Deliberately short rather than emitted through
+        the unvalidated :func:`build_event`: a malformed body reaching the trust service under
+        a published kind is precisely the defect T-235 closed, and "the record is missing" is
+        a state a reconciler can act on while "the record is present and lying" is not. The
+        surviving events carry ``checkout_token`` and the anomaly names it, so *which*
+        checkout lost its record is still answerable.
         """
         offer = dict(request.offer)
         common = {"auction_id": request.auction_id, "store_id": request.store_id}
-        return [
-            build_published_event(
+        bodies: tuple[tuple[str, dict[str, Any]], ...] = (
+            (
                 "accepted",
-                payload={
+                {
                     "checkout_token": checkout_token,
                     "bid_ref": request.bid_ref,
                     "offer": {
@@ -1035,11 +1054,10 @@ class CheckoutProvider:
                         "discount": offer.get("discount"),
                     },
                 },
-                **common,
             ),
-            build_published_event(
+            (
                 "code_created",
-                payload={
+                {
                     # The published `code_created` body (D24) — the same three keys the
                     # orphan record has always carried, so one kind is one shape whether the
                     # checkout completed or was refused after the mint.
@@ -1053,11 +1071,10 @@ class CheckoutProvider:
                     "checkout_token": checkout_token,
                     "discount_code": minted.code,
                 },
-                **common,
             ),
-            build_published_event(
+            (
                 "checkout_redirect",
-                payload={
+                {
                     "checkout_token": checkout_token,
                     "permalink_url": minted.permalink_url,
                     "discount_code": minted.code,
@@ -1066,9 +1083,33 @@ class CheckoutProvider:
                     # against the platform's registry or against the seller's own word.
                     "domain_verified": verified,
                 },
-                **common,
             ),
-        ]
+        )
+
+        events: list[Mapping[str, Any]] = []
+        for kind, payload in bodies:
+            try:
+                events.append(build_published_event(kind, payload=payload, **common))
+            except MalformedLedgerPayload as exc:
+                record_audit_anomaly(
+                    # A code-authored call site, never `self.name`: a provider is free to
+                    # name itself after the code it is about to mint (T-215), and the
+                    # provider's own name goes in the context below where it is one value
+                    # among several rather than the label the anomaly is filed under.
+                    "CheckoutProvider._events",
+                    kind,
+                    exc,
+                    payload=payload,
+                    provider=self.name,
+                    auction_id=request.auction_id,
+                    store_id=request.store_id,
+                    bid_ref=request.bid_ref,
+                    # The join, and the only two values here that touch the discount: the
+                    # token the surviving events carry, and the FINGERPRINT — never the code.
+                    checkout_token=checkout_token,
+                    fingerprint=code_fingerprint(minted.code),
+                )
+        return events
 
 
 def _usable(domain: Any, request: CheckoutRequest) -> str:

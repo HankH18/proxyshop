@@ -61,30 +61,185 @@ to read a clock itself and says why — a snapshot computed against ``now()`` ca
 from a stale one — so the instant is chosen HERE, once, stamped into the response, and
 carried into every score. A caller replaying a past decision passes the instant it was taken
 at and gets that decision back rather than today's.
+
+Why ``as_of`` is screened at the door
+-------------------------------------
+That parameter is chosen by an anonymous caller — this route takes no credential — and it
+is written into the ``X-Trust-As-Of`` response header. Unscreened, it was three defects in
+one line, all measured against a real uvicorn server (a ``TestClient`` shows none of them:
+it never hands a header to an HTTP encoder):
+
+* **a 5xx the caller picks.** A value outside Latin-1 raised ``UnicodeEncodeError`` inside
+  Starlette's header assignment, *after* the whole snapshot had been computed — 500.
+* **a dropped connection, which is worse.** A value carrying CR, LF or NUL is Latin-1
+  encodable and is not a legal header value: uvicorn closed the connection with no status
+  at all, so the caller could not tell a refusal from a network fault.
+* **caller-controlled bytes in a response header**, which is the shape of header injection.
+  With no stores present the scorer was never reached, so an unparseable ``as_of`` came
+  back ``200`` with the string echoed verbatim into the header; with one store present the
+  same value became a 500, because ``trust.scoring._parse_instant`` raises a bare
+  ``ValueError`` and this handler caught only ``EventServiceError``.
+
+:func:`validated_as_of` closes all three in the same place and in the fail-closed
+direction: a value that is not a bounded, renderable, parseable instant is refused with a
+422 that names the problem and never repeats the value. A header is emitted only for a
+value this process has already proved it can render.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from ..events.errors import EventServiceError, StoreUnavailable
-from ..scoring import BLACKLIST_STATUSES, Blacklist
+from ..scoring import (
+    BLACKLIST_STATUSES,
+    Blacklist,
+    UnknownObservationType,
+    UnknownTrustDimension,
+)
+
+# The scorer's OWN parser, imported private-and-deliberately: the door and the scorer must
+# agree on what an instant is, and two parsers written to the same spec is exactly how a
+# value gets admitted here and then raises there — which is the 500 this door exists to
+# close. One function cannot drift from itself.
+from ..scoring.engine import _parse_instant
 from .builder import SNAPSHOT_VERSION, build_snapshot
 
 __all__ = [
+    "MAX_AS_OF_LENGTH",
     "PUBLISHED_DIMENSION_FIELDS",
     "PUBLISHED_SNAPSHOT_FIELDS",
+    "UNRENDERABLE_HEADER_CHARACTERS",
     "blacklist_for",
     "published_entry",
     "router",
     "stores_for",
+    "validated_as_of",
 ]
 
 router = APIRouter(tags=["trust"])
+
+#: The longest ``as_of`` this door admits. An RFC-3339 instant with microsecond precision
+#: and a numeric offset is 32 characters, so 64 is twice what any caller needs.
+#:
+#: Not redundant with the parse check: ``datetime.fromisoformat`` accepts ANY number of
+#: fractional-second digits, so ``"2026-01-01T00:00:00." + "0" * 200 + "Z"`` is a perfectly
+#: good instant — measured — and this value is written into a response header. A caller who
+#: can choose an unbounded header value chooses the size of every response served.
+MAX_AS_OF_LENGTH = 64
+
+#: Characters a response header value cannot carry: the C0 controls (CR, LF and NUL among
+#: them), DEL, and the C1 controls.
+#:
+#: This screen is redundant with NEITHER of the other two, and both halves were measured
+#: against a real uvicorn server on the code as it shipped:
+#:
+#: * Latin-1 encodability does not imply legality. ``"2026-02-01T00:00:00Z\r\n"`` encodes
+#:   fine and is a response split; uvicorn answered such a response by CLOSING THE
+#:   CONNECTION with no status at all, which is worse than a 500 — the caller cannot tell a
+#:   refusal from a network fault.
+#: * Parseability does not imply legality either. ``_parse_instant`` ``strip()``\\ s trailing
+#:   whitespace, so that same CRLF value parses; and CPython's ``fromisoformat`` parses
+#:   straight through a trailing NUL, so ``"2026-02-01T00:00:00Z\x00"`` was a perfectly good
+#:   instant to the scorer and a dropped connection on the wire.
+#:
+#: The same lesson ``trust.events.routes.UNRENDERABLE_IDENTIFIER_CHARACTERS`` records for
+#: caller-chosen identifiers, reached independently here on a different parameter.
+UNRENDERABLE_HEADER_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _refuse_as_of(reason: str, why: str) -> NoReturn:
+    """Refuse ``as_of`` with a 4xx that names the problem and never repeats the value.
+
+    The value is caller-chosen, unbounded, and in every case that reaches here carries
+    something this process could not render. Quoting it back would put the caller's own
+    bytes on the wire in a different field — which is the defect this door closes, not a
+    helpful error message. The ``reason`` code is server-owned vocabulary and says which of
+    the four screens refused, which is what a caller can actually act on.
+    """
+    raise HTTPException(
+        422,
+        {
+            "error": "as_of_not_servable",
+            "field": "as_of",
+            "reason": reason,
+            "message": (
+                f"the as_of query parameter {why}. It must be one RFC-3339 instant of at "
+                f"most {MAX_AS_OF_LENGTH} characters, Latin-1 encodable and free of control "
+                f"characters: it is the instant every score is decayed against and it is "
+                f"reported back in the X-Trust-As-Of response header. The offending value "
+                f"is deliberately not repeated here."
+            ),
+        },
+    )
+
+
+def validated_as_of(as_of: str | None) -> str:
+    """The instant this request is served against, or a 422 saying why it is not one.
+
+    Four screens, in this order, and the order is load-bearing:
+
+    1. **length**, so nothing longer than a timestamp is examined or emitted at all;
+    2. **control characters**, before anything tries to render or parse the value — this is
+       the screen that closes the dropped connection, and it catches values the other three
+       all accept (see :data:`UNRENDERABLE_HEADER_CHARACTERS`);
+    3. **Latin-1**, the header codec on the wire, which is where the ``UnicodeEncodeError``
+       500 came from;
+    4. **parseability**, through the scorer's own ``_parse_instant``, so a value that is not
+       an instant is refused HERE with a 422 instead of raising a bare ``ValueError`` deep
+       inside ``build_snapshot`` and surfacing as a 500.
+
+    Absent or empty is not a refusal: ``as_of`` is optional and documented to default to the
+    serve instant, so ``None`` and a value that parses to "no instant" both yield the serve
+    instant exactly as before. Everything else is returned as the caller spelled it — this
+    route's contract is that a replayed decision is stamped with the instant it was replayed
+    at — and by the time it is returned this process has proved it can both render and score
+    that spelling.
+
+    The one normalisation is surrounding whitespace, and it is not cosmetic: HTTP does not
+    consider leading or trailing OWS part of a field value, so an unstripped instant is a
+    header the client reads back DIFFERENTLY from the one this handler set — measured,
+    ``" 2026-02-01T00:00:00Z "`` came back trimmed. ``_parse_instant`` strips identically,
+    so stripping here keeps what is scored, what is set and what is read the same string.
+    """
+    if as_of is None:
+        return _instant(None)
+    if len(as_of) > MAX_AS_OF_LENGTH:
+        _refuse_as_of(
+            "too_long",
+            f"is {len(as_of)} characters, over the {MAX_AS_OF_LENGTH}-character ceiling",
+        )
+    if UNRENDERABLE_HEADER_CHARACTERS.search(as_of):
+        _refuse_as_of(
+            "control_character",
+            "carries a control character (C0, DEL or C1). A header value cannot hold one: "
+            "CR/LF is a response split, and uvicorn answers such a response by closing the "
+            "connection with no status at all",
+        )
+    try:
+        as_of.encode("latin-1")
+    except UnicodeEncodeError:
+        _refuse_as_of(
+            "not_latin_1",
+            "is outside Latin-1. HTTP header values are Latin-1 on the wire, so such a "
+            "value raised UnicodeEncodeError after the whole snapshot had been computed",
+        )
+    normalized = as_of.strip()
+    try:
+        parsed = _parse_instant(normalized)
+    except ValueError:
+        _refuse_as_of(
+            "not_an_instant",
+            "is not an RFC-3339 instant. Decay is a function of recorded time (D17/S3), so "
+            "an unscoreable instant is refused rather than served as a header",
+        )
+    return normalized if parsed is not None else _instant(None)
+
 
 #: The property names ``TrustSnapshot`` declares. It is ``additionalProperties: false``, so
 #: this is a whitelist and not a preference — anything else served here is a schema error
@@ -315,7 +470,7 @@ def get_all_trust_snapshots(
     published ``TrustSnapshot``, and putting it in this body would make a read-only cache
     refresh look like a delisting decision.
     """
-    moment = as_of or _instant(None)
+    moment = validated_as_of(as_of)
     try:
         stores = stores_for(request)
         blacklist = blacklist_for(request)
@@ -336,7 +491,42 @@ def get_all_trust_snapshots(
             detail={"error": "store_unavailable", "message": str(exc)},
         ) from exc
 
-    snapshot = build_snapshot(stores, blacklist=blacklist, as_of=moment)
+    try:
+        snapshot = build_snapshot(stores, blacklist=blacklist, as_of=moment)
+    except (ValueError, UnknownObservationType, UnknownTrustDimension) as exc:
+        # The scorer raises a BARE ``ValueError`` on an unparseable timestamp, and this
+        # handler used to catch only ``EventServiceError`` — so an unparseable ``as_of``
+        # was a 500 an anonymous caller could choose. ``moment`` has been through
+        # ``validated_as_of``, which parses with this same function, so it cannot be the
+        # cause any more; the re-check is what keeps that true if the two ever drift, and
+        # it is the belt to the door's braces. A caller-chosen value must never be able to
+        # pick this service's status class.
+        try:
+            _parse_instant(moment)
+        except ValueError:
+            _refuse_as_of(
+                "not_an_instant",
+                "is not an RFC-3339 instant and reached the scorer, which refused it",
+            )
+        # So this is the SOURCE, not the request: a stored row the scorer will not read.
+        # 503 and never ``{}`` for the reason this route already documents — the exchange
+        # denies a store with no row here (R12), so an empty body for "one row is poison"
+        # would silently deny every store. The offending value is not quoted: rows in
+        # ``ledger.trust_observations`` are written from ``POST /events``, so it is
+        # caller-influenced too, and the scorer's own message interpolates it.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "store_unavailable",
+                "message": (
+                    "a stored trust observation carries a timestamp, dimension, type or "
+                    "weight the scorer refuses, so no snapshot can be computed. Fail "
+                    "closed — an empty snapshot is a valid answer meaning 'no stores' and "
+                    "would be read as one."
+                ),
+            },
+        ) from exc
+
     response.headers["ETag"] = f'"{snapshot["version"]}"'
     response.headers["X-Trust-Snapshot-Version"] = str(snapshot["version"])
     response.headers["X-Trust-Score-Version"] = str(snapshot["score_version"])

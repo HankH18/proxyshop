@@ -56,6 +56,7 @@ consume its single use.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -90,8 +91,56 @@ from shopify_stub.state import (
 from shopify_stub.telemetry import PixelEmitter, collector_payload
 from shopify_stub.webhooks import WebhookDispatcher
 
+from proxyshop_support.logging_config import RequestIdMiddleware, configure_logging
+
 #: Timeout for the POST that carries a pixel event to the collector. Short: loopback only.
 PIXEL_POST_TIMEOUT_SECONDS = 5.0
+
+#: The longest caller-supplied string this module will render into a log line.
+#:
+#: Where the number comes from, measured in this repo rather than assumed: the only two
+#: caller-controlled values logged below are an Admin API version handle and a discount
+#: code. ``shopify_stub.state.DEFAULT_API_VERSION`` is ``"2026-07"`` — 7 characters — and
+#: every code this stub mints is ``shopify_stub.codes.CODE_PREFIX`` plus eight Crockford
+#: base32 characters, so 12 (``"PSX-7QK2ZB0M"``). 64 is a little over five times the longer
+#: of the two, so nothing this system legitimately produces is ever truncated, and a value
+#: long enough to be truncated is by construction not one of them.
+#:
+#: The bound is not decoration. NEITHER value has a length limit of its own: the version is
+#: a path segment, the code is a query parameter, and ``StubConfig`` does not constrain the
+#: shape of ``api_version`` at all. Without a bound here a caller writes an arbitrarily
+#: large record on every request — the unbounded-input defect class this repo has spent the
+#: day closing, walking back in through a log line. Same reasoning as
+#: ``proxyshop_support.logging_config.MAX_REQUEST_ID_LENGTH``, which is 128 because a
+#: correlation id must survive round-tripping through a header; nothing here does.
+MAX_LOGGED_VALUE_CHARS = 64
+
+_log = logging.getLogger(__name__)
+
+
+def _loggable(value: str | None) -> str:
+    """Render a caller-supplied string so that it is safe to put in one log line.
+
+    Two hazards, and ``repr`` plus a length bound is what answers both:
+
+    * **length** — see :data:`MAX_LOGGED_VALUE_CHARS`. Truncation is *marked*, so a line
+      never quietly claims a code was ``"SAVE10"`` when the caller sent ``"SAVE10…"``.
+    * **injection** — an embedded ``\\r\\n`` splits one record into two, and the second one is
+      attacker-authored: a forged ``CRITICAL`` line in the same aggregator this repo's
+      logging exists to feed. ``repr`` escapes it to the literal characters ``\\r\\n``, so it
+      stays one record. It is the same forgery
+      :func:`proxyshop_support.logging_config.sanitise_request_id` refuses at the header
+      boundary, arriving instead through a path parameter and a query parameter.
+
+    Nothing is scrubbed away silently — the value is still legible to whoever is reading the
+    log, which is the entire reason it is being logged.
+    """
+    if value is None:
+        return "<none>"
+    if len(value) > MAX_LOGGED_VALUE_CHARS:
+        kept = value[:MAX_LOGGED_VALUE_CHARS]
+        return f"{kept!r}+{len(value) - MAX_LOGGED_VALUE_CHARS}chars"
+    return repr(value)
 
 
 class Stub:
@@ -114,7 +163,15 @@ class Stub:
 
 
 def create_app(config: StubConfig | None = None) -> FastAPI:
-    """Build a stub application with its own isolated state."""
+    """Build a stub application with its own isolated state.
+
+    ``configure_logging()`` is called here (T-308) because this factory is the stub's whole
+    in-process startup path — the root ``conftest.py``'s ``shopify_stub_url`` fixture, the
+    module-level ``app`` at the bottom of this file and a ``uvicorn`` deployment all arrive
+    through it. It is idempotent, so the per-test fixture building a second stub in the same
+    process installs one handler, not one per stub.
+    """
+    configure_logging()
     stub = Stub(config)
 
     @asynccontextmanager
@@ -122,6 +179,23 @@ def create_app(config: StubConfig | None = None) -> FastAPI:
         # Nothing to open or close: the stub holds no connections. The hook exists because
         # the server runs with `lifespan="on"`, and an app without one logs a warning that
         # reads like a failure.
+        #
+        # The one line below is the anchor an operator reads first: which shop this process
+        # is pretending to be, at which API version, and how lossy its pixel is configured
+        # to be — the four knobs that explain almost every "the stub disagrees with me"
+        # report. `pixel_collector_url` is deliberately NOT logged: it is an arbitrary
+        # caller-supplied URL that may carry a token in its query string, and only whether
+        # one is configured is operationally interesting.
+        config_now = stub.state.config
+        _log.info(
+            "shopify stub ready: shop_domain=%s api_version=%s pixel_mode=%s "
+            "pixel_drop_rate=%s pixel_collector=%s",
+            _loggable(config_now.shop_domain),
+            _loggable(config_now.api_version),
+            config_now.pixel_mode.value,
+            config_now.pixel_drop_rate,
+            "configured" if stub.state.pixel_collector_url else "none",
+        )
         yield
 
     application = FastAPI(
@@ -131,6 +205,10 @@ def create_app(config: StubConfig | None = None) -> FastAPI:
         docs_url=None,
         redoc_url=None,
     )
+    # Mints or adopts one correlation id per request and echoes it in `x-request-id`. It is
+    # what lets a pixel POST landing on the merchant collector be tied back to the checkout
+    # completion here that produced it.
+    application.add_middleware(RequestIdMiddleware)
     application.state.stub = stub
     application.include_router(_shopify_router(stub))
     application.include_router(_control_router(stub))
@@ -179,6 +257,13 @@ def _shopify_router(stub: Stub) -> APIRouter:
         """
         configured = stub.state.config.api_version
         if version != configured:
+            # `version` is a path segment: unbounded, caller-chosen, possibly containing CR
+            # or LF. It goes through `_loggable`, never straight into the record.
+            _log.warning(
+                "admin GraphQL refused: caller asked for API version %s, this stub serves %s",
+                _loggable(version),
+                _loggable(configured),
+            )
             return JSONResponse(
                 status_code=404,
                 content={
@@ -285,6 +370,17 @@ def _shopify_router(stub: Stub) -> APIRouter:
             created_at=state.now(),
         )
         state.checkouts[checkout.token] = checkout
+        if rejection is not None:
+            # Acceptance 2 requires the SHOPPER to be told nothing, which is exactly why the
+            # operator has to be. `requested_code` is a raw query parameter, so it is bounded
+            # and escaped by `_loggable`; the reason is an enum, and the token is stub-minted.
+            _log.info(
+                "cart %s: discount code %s refused (%s) and silently dropped — the shopper "
+                "sees an ordinary cart, so this is the only trace outside /_stub/checkouts",
+                checkout.token,
+                _loggable(requested_code),
+                rejection.value,
+            )
 
         subtotal = variant.price * quantity
         discount = _preview_discount(stub, applied, subtotal)
@@ -624,6 +720,32 @@ def _control_router(stub: Stub) -> APIRouter:  # noqa: C901 - a flat route table
             payload=order_webhook_payload(order, shop_domain=state.config.shop_domain, state=state),
             now=now,
         )
+        # Every value here is stub-minted or a bool/count — nothing caller-controlled.
+        _log.info(
+            "checkout %s completed as order %s (%s): pixel emitted=%s posted=%s, "
+            "%d webhook delivery attempt(s)",
+            checkout.token,
+            order.id,
+            order.name,
+            event is not None,
+            posted,
+            len(deliveries),
+        )
+        undelivered = [delivery for delivery in deliveries if not delivery.delivered]
+        if undelivered:
+            # "The webhook is the truth" is this stub's own contract, and the pixel is allowed
+            # to be lossy precisely because the webhook is not. A dropped delivery therefore
+            # means a consumer will never learn the order exists, which is a different and
+            # much worse failure than a dropped pixel — hence WARNING, not INFO.
+            _log.warning(
+                "order %s: %d of %d %s webhook deliveries failed (status codes %s); the "
+                "consumer will not learn of this order from the webhook",
+                order.id,
+                len(undelivered),
+                len(deliveries),
+                WebhookTopic.ORDERS_PAID.value,
+                [delivery.status_code for delivery in undelivered],
+            )
         return JSONResponse(
             status_code=201,
             content={

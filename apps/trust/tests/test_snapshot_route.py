@@ -16,12 +16,19 @@ in ``apps/exchange`` and are that lane's to build.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+
+from proxyshop_support.asgi_server import serve
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AS_OF = "2026-02-01T00:00:00Z"
@@ -310,3 +317,414 @@ def test_the_route_reads_the_real_tables_as_trust_rw(
         "a store with no observations did not come back on the untouched prior, so rows are "
         "reaching the wrong store"
     )
+
+
+# ======================================================================================
+# ``as_of`` at the door — graded over a REAL uvicorn server
+#
+# ``TestClient`` cannot grade any of this. It never hands a response header to an HTTP
+# encoder, so the two worst outcomes below — a ``UnicodeEncodeError`` 500 and a connection
+# dropped with no response at all — do not happen in-process. Everything in this section
+# therefore runs against ``proxyshop_support.asgi_server.serve``, the same real loopback
+# server ``test_events_poison_rows.py`` uses, for the same reason.
+#
+# Measured on the code as it shipped, ``GET /snapshot``, unauthenticated, one query
+# parameter written straight into ``response.headers["X-Trust-As-Of"]``:
+#
+#   with no stores injected:
+#     non-Latin-1 ``as_of``             -> HTTP 500
+#     ``as_of`` carrying CR/LF or NUL   -> CONNECTION DROPPED, no status at all
+#     an unparseable ``as_of``          -> HTTP 200, echoed VERBATIM into the header
+#   with one store injected:
+#     non-Latin-1 / CR / LF / garbage   -> HTTP 500 — ``trust.scoring._parse_instant``
+#                                          raises a bare ``ValueError`` and this handler
+#                                          catches only ``EventServiceError``
+#     NUL                               -> CONNECTION DROPPED (the NUL survives the parse)
+#
+# Three distinct defects in one line, all reachable by an anonymous caller: a 5xx the
+# caller chooses, a dropped connection (worse than a 5xx — the client cannot tell a refusal
+# from a network fault), and caller-controlled bytes in a response header, which is the
+# shape of header injection.
+# ======================================================================================
+
+#: Characters no response header value may carry: the C0 controls (CR, LF and NUL among
+#: them), DEL, and the C1 controls. Spelled out HERE rather than imported from the route,
+#: so this gate stays a independent statement of what is illegal and cannot be relaxed by
+#: relaxing the module it grades.
+_ILLEGAL_HEADER_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+#: ``as_of`` values outside Latin-1 — Cyrillic, an emoji, CJK. HTTP header values are
+#: Latin-1 on the wire and this route builds ``X-Trust-As-Of`` from this parameter, so each
+#: raised ``UnicodeEncodeError`` inside Starlette's header assignment: a 500 chosen by an
+#: unauthenticated caller.
+NON_LATIN_1_AS_OF: tuple[str, ...] = ("заказ-1", "2026-02-01T00:00:00Z🚀", "註文")
+
+#: ``as_of`` values that ARE Latin-1 encodable and are still not legal header values. Each
+#: was measured against a real uvicorn server as a dropped connection —
+#: ``httpx.RemoteProtocolError("Server disconnected without sending a response")`` — which
+#: is strictly worse than a 500: the caller cannot tell a refusal from a network fault.
+CONTROL_CHARACTER_AS_OF: tuple[str, ...] = (
+    "2026-02-01T00:00:00Z\r\nX-Injected: 1",
+    "2026\nX-Injected: 1",
+    "2026-02-01T00:00:00Z\x00",
+)
+
+#: The half of the above that ``trust.scoring._parse_instant`` **accepts**: it ``strip()``s
+#: trailing whitespace (so a trailing CRLF parses) and CPython's ``fromisoformat`` parses
+#: straight through a trailing NUL. So "is it a parseable instant?" does NOT imply "can a
+#: header carry it", and neither does "is it Latin-1 encodable". Both of these reached the
+#: header on the shipped code with the scorer perfectly happy, and both dropped the
+#: connection. This tuple is why the control-character screen is a separate, load-bearing
+#: check rather than a redundant one.
+PARSEABLE_BUT_UNRENDERABLE_AS_OF: tuple[str, ...] = (
+    "2026-02-01T00:00:00Z\r\n",
+    "2026-02-01T00:00:00Z\x00",
+)
+
+#: An ``as_of`` that is renderable and is not an instant. Measured: served ``200`` with this
+#: string echoed verbatim into ``X-Trust-As-Of`` when no store was present, and ``500`` when
+#: one was. The distinctive prefix is what the no-echo assertion searches the response for.
+UNPARSEABLE_AS_OF = "not-an-instant-" + "z" * 64
+
+#: An ``as_of`` that IS a parseable instant and is 221 characters long — ``fromisoformat``
+#: takes any number of fractional digits. Parseability alone therefore bounds nothing, and a
+#: caller who can choose an unbounded header value can choose the size of every response
+#: this route serves.
+OVERLONG_AS_OF = "2026-01-01T00:00:00." + "0" * 200 + "Z"
+
+#: Both source populations, because the shipped failure MODE differed between them: with no
+#: stores the scorer is never called, so garbage sailed through to the header; with one it
+#: was called and raised the uncaught ``ValueError``.
+LIVE_STORE_SETS: tuple[tuple[str, list[dict[str, Any]]], ...] = (
+    ("no-stores", []),
+    (
+        "one-store",
+        [
+            _store(
+                "store-1",
+                "co-1",
+                [
+                    {
+                        "dim": "price_honored",
+                        "type": "verified",
+                        "observed_at": "2026-01-01T00:00:00Z",
+                    }
+                ],
+            )
+        ],
+    ),
+)
+
+_STORE_SET_IDS = [name for name, _ in LIVE_STORE_SETS]
+_STORE_SET_VALUES = [stores for _, stores in LIVE_STORE_SETS]
+
+
+@contextlib.contextmanager
+def _live_client(stores: Any) -> Iterator[httpx.Client]:
+    """A real HTTP client against a real loopback uvicorn server serving ``stores``.
+
+    Port 0 through ``proxyshop_support.asgi_server.serve`` (D40), so nothing here pins a
+    port and the pytest socket guard's loopback allowance covers it.
+    """
+    from trust.main import create_app
+    from trust.scoring import Blacklist
+
+    app = create_app()
+    app.state.snapshot_stores = stores
+    app.state.snapshot_blacklist = Blacklist()
+    with serve(app) as base_url, httpx.Client(base_url=base_url, timeout=60.0) as client:
+        yield client
+
+
+def _get_snapshot(client: httpx.Client, as_of: str | None) -> httpx.Response:
+    """One ``GET /snapshot``, with ``as_of`` percent-encoded onto the query string.
+
+    Percent-encoded rather than handed to ``params=``: the bytes on the wire must be legal
+    whatever the parameter carries, so that what is being graded is the APPLICATION's
+    handling of a control character and never the client's refusal to send one.
+
+    A dropped connection is turned into a named assertion failure rather than an error,
+    because that is the pre-fix behaviour this section exists to close and an
+    ``httpx.RemoteProtocolError`` traceback does not say so.
+    """
+    url = "/snapshot" if as_of is None else f"/snapshot?as_of={quote(as_of, safe='')}"
+    try:
+        return client.get(url)
+    except httpx.RemoteProtocolError as exc:  # pragma: no cover - the pre-fix behaviour
+        raise AssertionError(
+            f"the server dropped the connection with no response at all for as_of="
+            f"{as_of!r} ({exc}). A caller-chosen value reached a response header that "
+            f"could not carry it; the caller cannot tell this from a network fault."
+        ) from exc
+
+
+def _assert_refused(response: httpx.Response, as_of: str) -> dict[str, Any]:
+    """The one refusal shape: a clean 4xx, naming ``as_of``, with no header emitted."""
+    assert 400 <= response.status_code < 500, (
+        f"as_of={as_of!r} was answered {response.status_code}, not a 4xx. A value chosen "
+        f"by an anonymous caller must never decide this service's 5xx rate."
+    )
+    assert response.status_code == 422, response.text
+    assert "X-Trust-As-Of" not in response.headers, (
+        f"as_of={as_of!r} was refused and the header was emitted anyway: "
+        f"{response.headers.get('X-Trust-As-Of')!r}"
+    )
+    detail = response.json()["detail"]
+    assert detail["field"] == "as_of", detail
+    assert detail["error"], detail
+    return dict(detail)
+
+
+def _assert_headers_are_renderable(response: httpx.Response, as_of: str | None) -> None:
+    """Every header on this response is a value HTTP can actually carry.
+
+    The class check, not the instance one: it walks the whole response rather than
+    ``X-Trust-As-Of`` alone, so a future header built from a new caller-derived value is
+    graded by this test the day it is added.
+    """
+    for name, value in response.headers.items():
+        assert not _ILLEGAL_HEADER_CHARACTERS.search(value), (
+            f"header {name!r} carries a control character for as_of={as_of!r}: {value!r}"
+        )
+        value.encode("latin-1")
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+@pytest.mark.parametrize("as_of", NON_LATIN_1_AS_OF)
+def test_a_non_latin_1_as_of_is_refused_and_is_never_a_500(stores: Any, as_of: str) -> None:
+    """Measured 500 on the shipped code, from a query string, with no credential.
+
+    ``X-Trust-As-Of`` is built from this parameter and header values are Latin-1 on the
+    wire, so Starlette's header assignment raised ``UnicodeEncodeError`` *after* the
+    snapshot had been computed. A caller who can choose the status class can choose this
+    service's error rate.
+    """
+    with _live_client(stores) as client:
+        response = _get_snapshot(client, as_of)
+    _assert_refused(response, as_of)
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+@pytest.mark.parametrize("as_of", CONTROL_CHARACTER_AS_OF)
+def test_an_as_of_carrying_a_control_character_never_drops_the_connection(
+    stores: Any, as_of: str
+) -> None:
+    """The worst of the three: no status at all, chosen by an anonymous caller.
+
+    CR/LF in a header value is a response split, and uvicorn answers such a response by
+    closing the connection — the client sees ``RemoteProtocolError`` and cannot distinguish
+    a refusal from a dropped network. ``_get_snapshot`` converts that into a failure with
+    this test's name on it.
+    """
+    with _live_client(stores) as client:
+        response = _get_snapshot(client, as_of)
+    _assert_refused(response, as_of)
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+@pytest.mark.parametrize("as_of", PARSEABLE_BUT_UNRENDERABLE_AS_OF)
+def test_an_as_of_the_scorer_accepts_is_still_refused_when_a_header_cannot_carry_it(
+    stores: Any, as_of: str
+) -> None:
+    """A parse check alone does not close this, and neither does an encodability check.
+
+    Both values here are Latin-1 encodable AND parse cleanly through
+    ``trust.scoring._parse_instant`` (it strips trailing whitespace; ``fromisoformat``
+    parses through a trailing NUL), and both dropped the connection on the shipped code.
+    The screen that catches them is the control-character one, and this is the test that
+    says so — if the fix is "reject what does not parse", this stays red.
+    """
+    from trust.scoring.engine import _parse_instant
+
+    assert _parse_instant(as_of) is not None, (
+        f"{as_of!r} no longer parses, so this test no longer grades what it claims to: "
+        f"the point is a value the SCORER accepts and a HEADER cannot carry"
+    )
+    as_of.encode("latin-1")
+
+    with _live_client(stores) as client:
+        response = _get_snapshot(client, as_of)
+    _assert_refused(response, as_of)
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+def test_an_unparseable_as_of_is_refused_and_never_echoed_back(stores: Any) -> None:
+    """The 200-with-garbage half and the bare-``ValueError`` 500 half, in one gate.
+
+    With no store the scorer was never called and the string was echoed verbatim into
+    ``X-Trust-As-Of``; with one store ``_parse_instant`` raised a ``ValueError`` the handler
+    does not catch and the caller got a 500. Both are the same defect — a value that is not
+    an instant is not a header worth emitting — so both are refused here, and the refusal
+    must not repeat the caller's bytes back to it in any form.
+    """
+    with _live_client(stores) as client:
+        response = _get_snapshot(client, UNPARSEABLE_AS_OF)
+    _assert_refused(response, UNPARSEABLE_AS_OF)
+
+    marker = UNPARSEABLE_AS_OF[:20]
+    assert marker not in response.text, (
+        f"the refusal echoes the offending value back to the caller: {response.text}"
+    )
+    for name, value in response.headers.items():
+        assert marker not in value, f"header {name!r} echoes the offending value: {value!r}"
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+def test_a_parseable_but_unbounded_as_of_cannot_become_an_unbounded_header(
+    stores: Any,
+) -> None:
+    """``fromisoformat`` accepts any number of fractional digits, so parsing bounds nothing.
+
+    The ceiling is imported rather than restated, so raising it moves this gate with it —
+    and the second assertion keeps "raise the ceiling" from being a way to make this pass.
+    """
+    from trust.snapshot.routes import MAX_AS_OF_LENGTH
+
+    assert MAX_AS_OF_LENGTH <= 128, (
+        f"the as_of ceiling is {MAX_AS_OF_LENGTH}; an RFC-3339 instant is ~35 characters "
+        f"and this value ends up in a response header"
+    )
+    assert len(OVERLONG_AS_OF) > MAX_AS_OF_LENGTH
+
+    with _live_client(stores) as client:
+        response = _get_snapshot(client, OVERLONG_AS_OF)
+    _assert_refused(response, OVERLONG_AS_OF)
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+def test_no_response_header_this_route_serves_can_carry_an_illegal_value(stores: Any) -> None:
+    """Header safety as a CLASS: every header, every input, refused or served.
+
+    Five headers are written by this handler — ``ETag``,
+    ``X-Trust-Snapshot-Version``, ``X-Trust-Score-Version``, ``X-Trust-As-Of`` and
+    ``Cache-Control`` — and the first three plus the last come from module constants while
+    only ``X-Trust-As-Of`` is caller-derived. That is a fact about today's code, so it is
+    asserted rather than assumed: the constants are checked directly, and the whole response
+    is walked for every hostile input so a newly caller-derived header is caught here.
+    """
+    from trust.scoring import SCORE_VERSION
+    from trust.snapshot import SNAPSHOT_VERSION
+
+    for constant in (SNAPSHOT_VERSION, SCORE_VERSION):
+        assert not _ILLEGAL_HEADER_CHARACTERS.search(constant), constant
+        constant.encode("latin-1")
+
+    probes: tuple[str | None, ...] = (
+        None,
+        AS_OF,
+        UNPARSEABLE_AS_OF,
+        OVERLONG_AS_OF,
+        *NON_LATIN_1_AS_OF,
+        *CONTROL_CHARACTER_AS_OF,
+        *PARSEABLE_BUT_UNRENDERABLE_AS_OF,
+    )
+    with _live_client(stores) as client:
+        for as_of in probes:
+            _assert_headers_are_renderable(_get_snapshot(client, as_of), as_of)
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+def test_a_valid_as_of_still_serves_its_instant_in_the_header(stores: Any) -> None:
+    """Positive control. The fix is worthless if it refuses the values the route is for.
+
+    Over the real socket, not ``TestClient``, so this also proves the served header
+    survives an actual HTTP encode.
+    """
+    with _live_client(stores) as client:
+        response = _get_snapshot(client, AS_OF)
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Trust-As-Of"] == AS_OF
+    assert response.headers["ETag"], response.headers
+    assert sorted(response.json()) == sorted(store["store_id"] for store in stores)
+
+
+@pytest.mark.parametrize("stores", _STORE_SET_VALUES, ids=_STORE_SET_IDS)
+def test_omitting_as_of_still_serves_the_serve_instant(stores: Any) -> None:
+    """Positive control, second half: the default path is untouched.
+
+    ``as_of`` is optional and defaults to the serve instant, and a door that refused a
+    missing value would break every client that does not replay a past decision. The header
+    must still be there and must still be an instant the scorer would accept.
+    """
+    from trust.scoring.engine import _parse_instant
+
+    with _live_client(stores) as client:
+        response = _get_snapshot(client, None)
+    assert response.status_code == 200, response.text
+    served = response.headers["X-Trust-As-Of"]
+    assert served.endswith("Z"), served
+    assert _parse_instant(served) is not None, served
+    assert sorted(response.json()) == sorted(store["store_id"] for store in stores)
+
+
+def test_a_stored_observation_the_scorer_refuses_is_a_503_and_not_a_bare_traceback() -> None:
+    """The other reachable ``ValueError``: the DATA, once ``as_of`` is screened at the door.
+
+    ``trust.scoring.score`` raises a bare ``ValueError`` on an unparseable ``observed_at``,
+    and rows in ``ledger.trust_observations`` are written from ``POST /events`` — so the
+    value is caller-influenced even though this request did not carry it. The handler caught
+    only ``EventServiceError``, so such a row was an unhandled exception.
+
+    503 and never an empty body, for the reason the route already documents: the exchange
+    reads a missing row as an unavailable eligibility read and denies (R12), so ``{}`` for
+    "one row is poison" would silently deny every store. The refusal names the class of
+    problem and not the stored value — that value came from a caller too.
+    """
+    poisoned = [
+        _store(
+            "store-1",
+            "co-1",
+            [{"dim": "price_honored", "type": "verified", "observed_at": "not-a-date"}],
+        )
+    ]
+    with _live_client(poisoned) as client:
+        response = _get_snapshot(client, AS_OF)
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert detail["error"], detail
+    assert "not-a-date" not in response.text, response.text
+
+
+#: Every legitimate RFC-3339 spelling the scorer accepts, plus the two "no instant" ones.
+#: Measured over a real socket: each is served ``200`` with a header the wire carries. This
+#: is the door's admit set, and it is graded for the same reason the refusals are — a screen
+#: that also refuses the offset form, the lowercase ``z`` or microsecond precision would
+#: break real clients while every hostile test above stayed green.
+ADMITTED_AS_OF: tuple[str, ...] = (
+    "2026-02-01T00:00:00Z",
+    "2026-02-01t00:00:00z",
+    "2026-02-01T00:00:00+00:00",
+    "2026-02-01T00:00:00.123456+05:30",
+    "2026-02-01 00:00:00+00:00",
+    " 2026-02-01T00:00:00Z ",
+    "2026-02-01",
+    "",
+    "   ",
+)
+
+
+@pytest.mark.parametrize("as_of", ADMITTED_AS_OF)
+def test_every_instant_the_scorer_accepts_is_still_served_with_a_header(as_of: str) -> None:
+    """The admit set, over the wire. A fail-closed door that refuses real clients is a bug.
+
+    The empty and whitespace-only cases are the documented default and not a refusal:
+    ``as_of`` is optional, so "no instant" yields the serve instant exactly as it did before
+    this door existed.
+    """
+    from trust.scoring.engine import _parse_instant
+
+    with _live_client([]) as client:
+        response = _get_snapshot(client, as_of)
+    assert response.status_code == 200, response.text
+    served = response.headers["X-Trust-As-Of"]
+    _assert_headers_are_renderable(response, as_of)
+    assert _parse_instant(served) is not None, served
+    if as_of.strip():
+        # ``as_of.strip()`` and not ``as_of``: HTTP does not treat surrounding OWS as part
+        # of a field value, so a padded instant comes back trimmed however the app spells
+        # it. The door normalises for exactly that reason — what is scored, what is set and
+        # what is read must be one string — and this is the assertion that says so.
+        assert served == as_of.strip(), (
+            f"the caller's instant was rewritten to {served!r}; a replayed decision is "
+            f"stamped with the instant it was replayed at"
+        )
