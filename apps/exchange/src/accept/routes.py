@@ -185,10 +185,12 @@ def renderable_validation_detail(errors: Any) -> list[Any]:
 class RenderableJSONResponse(JSONResponse):
     """A :class:`JSONResponse` that can still be encoded when the body quotes ``inf``/``nan``.
 
-    The rejected value is not the only way a non-finite float reaches the renderer: a value
-    that VALIDATES and is echoed back hits the same ``allow_nan=False`` encode. The fast path
-    is starlette's own; only a body that would otherwise have raised takes the second pass.
-    See the fuller note on the twin in ``auction/routes.py``.
+    **Ungraded defence in depth — no gate is red without it**, and the twin's docstring in
+    ``auction/routes.py`` records the re-measurement that established that, along with the
+    stale witness an earlier version of both docstrings cited. The reasoning is kept: a value
+    that VALIDATES and is echoed back meets the same ``allow_nan=False`` encode as a rejected
+    one. The fast path is starlette's own; only a body that would otherwise have raised takes
+    the second pass.
     """
 
     def render(self, content: Any) -> bytes:

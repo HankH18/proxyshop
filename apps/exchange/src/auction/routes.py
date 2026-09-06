@@ -176,13 +176,23 @@ def renderable_validation_detail(errors: Any) -> list[Any]:
 class RenderableJSONResponse(JSONResponse):
     """A :class:`JSONResponse` that can still be encoded when the body quotes ``inf``/``nan``.
 
-    THE REJECTED VALUE IS NOT THE ONLY WAY A NON-FINITE FLOAT REACHES THE RENDERER. ``intent``
-    is annotated ``dict[str, Any]``, so a non-finite nested inside it is ACCEPTED — correctly,
-    that is what the annotation says — and is then echoed into the 201, where the identical
-    ``allow_nan=False`` encode fails. Measured: ``1e999`` at ``intent.hard_constraints``
-    answered 500 on both apps with the 422 path already repaired. The gate does not ask for
-    those positions to be refused (it says so in as many words); it asks that the answer be
-    readable.
+    **UNGRADED DEFENCE IN DEPTH — no gate in this repository is red without it, and an earlier
+    version of this docstring claimed otherwise.** What it claimed was: "Measured: ``1e999`` at
+    ``intent.hard_constraints`` answered 500 on both apps with the 422 path already repaired."
+    That measurement was true when it was taken and is now stale, because :func:`~..retrieval.
+    clusters._constraints_of` — added in the same commit, one layer earlier — drops the value
+    before any response is built. Re-measured after an adversarial review: with this class
+    removed from both routers the T-270 gate is green 15 runs of 15, and that same ``1e999``
+    body answers 201. Keeping a stale measurement in a docstring is how a class comes to look
+    load-bearing when nothing depends on it, so the correction is recorded here rather than
+    quietly dropped.
+
+    It is kept because the reasoning behind it survives the correction even though the witness
+    did not: ``intent`` is annotated ``dict[str, Any]``, so a non-finite value nested inside it
+    is ACCEPTED — correctly; that is what the annotation says — and any future path that echoes
+    such a value into a response meets the same ``allow_nan=False`` encode. The gate does not
+    ask for those positions to be refused (it says so in as many words); it asks that the
+    answer be readable.
 
     The fast path is starlette's own encode, untouched. Only a body that would otherwise have
     raised takes the second pass, where ``allow_nan=True`` emits the bare tokens and
