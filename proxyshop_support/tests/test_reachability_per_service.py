@@ -207,11 +207,46 @@ def test_an_explicit_argument_beats_the_fixture_closure() -> None:
     assert service_markers.services_for([("redis",)], ["pg_role"]) == ("redis",)
 
 
-def test_an_item_that_names_nothing_needs_the_whole_stack() -> None:
-    """The conservative default: an unannotated ``docker`` test with no datastore fixture
-    could be talking to anything, so it keeps exactly the pre-T-109 behaviour."""
-    assert service_markers.services_for([()], ["capsys"]) == reachability.SERVICES
-    assert service_markers.services_for([], []) == reachability.SERVICES
+def test_an_item_that_names_nothing_is_refused_rather_than_widened() -> None:
+    """Silence about a dependency must not read as depending on everything (T-172).
+
+    **This replaces an assertion, so the replacement is recorded here rather than implied.**
+    It used to read, under the name ``test_an_item_that_names_nothing_needs_the_whole_stack``
+    and introduced by d46f931 (T-109) as "the conservative default"::
+
+        assert service_markers.services_for([()], ["capsys"]) == reachability.SERVICES
+        assert service_markers.services_for([], []) == reachability.SERVICES
+
+    What it claimed: an item passing no marker argument and requesting no datastore fixture
+    resolves to the full compose stack, keeping exactly the pre-T-109 behaviour.
+
+    Why that claim is false rather than merely inconvenient: T-172 measured the hole it
+    leaves. Eight already-merged ``docker`` items land in this branch — five schema-grants
+    and two role-password tests that spin their **own** fresh-volume Postgres container
+    (hence no shared fixture to infer from) and one that points at a closed loopback port
+    and needs no datastore at all. All eight are Postgres-only or datastore-free, and all
+    eight were skipped at exit 0 by a *Redis*-only outage, which is the pre-T-109 defect
+    surviving for exactly these items — five of them security checks of the same class T-109
+    was written to stop silently skipping. The old assertion did not merely permit that; it
+    pinned it as the contract, which is why it has to be replaced and not just deleted.
+
+    Revert check — would the old assertion still be wrong if this change were reverted?
+    Yes. The eight items and their exit-0 skip predate this branch: the corpus was collected
+    against unmodified ``main`` and named all eight, and ``tickets.json``'s T-172 record
+    carries the same measurement independently. Nothing here made it true.
+
+    The whole stack is still perfectly expressible — see ``_service_skip_probe.py``'s
+    ``test_probe_whole_stack``, which now names all three services. The difference is that
+    it has to be *said*, so it can be told apart from having said nothing.
+    """
+    with pytest.raises(ValueError, match="declares no compose service"):
+        service_markers.services_for([()], ["capsys"])
+    with pytest.raises(ValueError, match="declares no compose service"):
+        service_markers.services_for([], [])
+
+    # And an item that really does need everything still gets everything — the refusal is
+    # about silence, not about breadth.
+    assert service_markers.services_for([reachability.SERVICES], []) == reachability.SERVICES
 
 
 def test_an_unknown_service_in_a_marker_is_an_error_not_a_silent_full_stack() -> None:

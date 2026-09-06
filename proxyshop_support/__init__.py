@@ -31,7 +31,8 @@ belongs to no feature package:
 ``service_markers``
     The rule that turns one collected item into the set of compose services it needs — an
     explicit ``@pytest.mark.docker("postgres")`` argument, else the datastore fixtures it
-    requests, else the whole stack.
+    requests. An item that declares neither is **refused**, not widened to the whole stack
+    (T-172): silence about a dependency must not read as depending on everything.
 """
 
 __all__ = [
