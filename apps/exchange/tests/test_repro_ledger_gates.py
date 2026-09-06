@@ -14,6 +14,15 @@ The mechanism, in both directions:
 * ``strict=True`` turns the eventual repair into an XPASS *failure*, so whoever fixes the
   defect must delete the marker. The gate cleans itself up.
 
+**All three markers are gone: every gate in this file is CLOSED and now runs as a live
+regression test.** T-283 went first, T-282 with it, and T-150 last — its repair is
+``exchange.composition.default_ledger_sink()``, the sink ``auction/routes.py::_machine`` now
+installs instead of letting ``AuctionStateMachine()`` default to a list discarded with the app.
+Each node's own docstring carries what was measured before its repair and what changed; the
+mechanism above is kept here because it is what the next placeholder gate in this file follows,
+and because a reader arriving from ``tickets.json``'s ``--runxfail -k tNNN`` command needs to
+know why it now reports ``1 passed``.
+
 Three gates, three selectors::
 
     -k t150    test_t150_a_served_auction_puts_its_transitions_in_the_trust_ledger
@@ -28,12 +37,13 @@ could make a gate below measure NOTHING and report success is asserted in an arm
 name, where it fails ``make verify`` loudly. None of the armer names contains a ticket number,
 so ``-k tNNN`` selects exactly one node and a per-gate run is exactly ``1 failed``.
 
-**Two of the three tickets reproduce exactly as written; T-150 does not.** Its "nothing in the
-repository writes an event into it" is FALSE at HEAD — ``services/sim`` and ``e2e/support``
-both feed the trust writer — and ``tickets.json`` records the ticket itself ``closed`` /
-REFUTED while ``.swarm-loop/backlog.md`` still lists it as open. Its gate is written to the
-narrower property that does hold, and the banner above that section carries the correction and
-the reasons to keep or delete it. The other two sections do not depend on it.
+**Two of the three tickets reproduced exactly as written; T-150 did not.** Its "nothing in the
+repository writes an event into it" was FALSE when it was filed — ``services/sim`` and
+``e2e/support`` both fed the trust writer — and ``tickets.json`` records the ticket itself
+``closed`` / REFUTED while ``.swarm-loop/backlog.md`` still lists it as open. Its gate was
+written to the narrower property that did hold — that no SERVED request produced a ledger
+event — and that is the property the repair closed. The other two sections never depended on
+it.
 
 Nothing here touches product source. A lane that repairs the defect it was asked to reproduce
 destroys the gate that would have graded the repair.
@@ -1067,22 +1077,19 @@ def test_the_trust_ledger_producer_probe_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-150 (NARROWED — the ticket's absolute claim is false at HEAD, see the docstring): "
-        "the SERVED exchange has no producer into the trust ledger. MEASURED — POST /auctions "
-        "on the app exchange.main.create_app() builds answers 201 and drives the auction to "
-        "'closed', emitting auction_opened and auction_closed into the InMemoryLedgerSink that "
-        "auction/routes.py:382's bare AuctionStateMachine() defaults to (ledger.py:172); with "
-        "every trust event store's append and every outbound httpx request watched, nothing "
-        "left the process by either channel. The once-only landing, hash chaining and replay "
-        "in apps/trust/src/events grade a stream no SERVED request produces; remove this "
-        "marker with the fix"
-    ),
-)
 def test_t150_a_served_auction_puts_its_transitions_in_the_trust_ledger() -> None:
     """An auction the exchange serves must leave a record in the ledger that grades it.
+
+    **CLOSED — the ``xfail(strict=True)`` marker was deleted with the repair, which is what
+    keeps this node a live regression test rather than a note.** What was measured at HEAD
+    before the fix is preserved verbatim below; what changed is one seam.
+    ``auction/routes.py::_machine`` no longer builds a bare ``AuctionStateMachine()``: it takes
+    its sink from ``exchange.composition.default_ledger_sink()``, an ``HttpTrustLedgerSink``
+    that POSTs each event to the trust service's published ``POST /events`` — and SUBCLASSES
+    ``InMemoryLedgerSink``, so everything the paragraphs below say about the in-process
+    readback is still true and still asserted by ``test_auction.py``. A deployment document may
+    name the service (``trust_url``); nothing has to, because the gate here and
+    ``docker compose up`` both start an exchange with nothing set.
 
     Measured at HEAD by building the app and posting one auction at it::
 

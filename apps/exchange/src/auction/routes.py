@@ -706,9 +706,40 @@ def configure_auctions(
 
 
 def _machine(request: Request) -> AuctionStateMachine:
+    """This app's state machine, built on first use — with a ledger that leaves the process.
+
+    ``AuctionStateMachine()`` with no sink is what shipped, and its ``LedgerRecorder`` installs
+    an :class:`~..auction.ledger.InMemoryLedgerSink`: every transition a SERVED auction made
+    went into a list discarded with the app, so nothing a request produced ever reached the
+    chained ledger in ``apps/trust/src/events`` (T-150). The sink is chosen by the composition
+    root instead — :func:`~..composition.default_ledger_sink` — which posts each event to
+    trust's published ``POST /events`` while still keeping the in-process record every
+    readback here depends on.
+
+    It is a DEFAULT and not a configuration key, because ``create_app()`` with nothing set is
+    both what the ticket's gate builds and what ``docker compose up`` starts. A deployment that
+    has to name its trust service can still do so (``trust_url`` in the deployment document, or
+    ``TRUST_URL``): ``_bind_the_deployment`` runs before this function in ``POST /auctions`` and
+    in ``POST /auctions/{auction_id}/accept``, so on both write paths the document wins over
+    this fallback rather than racing it.
+
+    Stated exactly, because it is one door short of "always", and this is the ONE lazy default
+    in this module of which that is true: every other one (``_solicitor``, ``_eligibility``,
+    ``_bid_book``) is reached only from inside a handler the hook has already run in, while
+    ``GET /auctions/{auction_id}`` below reaches this function with **no** composition hook in
+    front of it. So a read arriving before this app's first write installs the fallback, and a
+    document's ``trust_url`` is then never applied for the life of the process. The failure is
+    bounded and in the safe direction — the seam degrades to
+    :data:`~..composition.DEFAULT_TRUST_URL`, never to a sink that goes nowhere.
+
+    The import is deferred for the reason ``_bind_the_deployment``'s is: ``composition``
+    imports the route modules, so a module-scope import here would be a cycle.
+    """
     machine = getattr(request.app.state, "auction_machine", None)
     if machine is None:
-        machine = AuctionStateMachine()
+        from ..composition import default_ledger_sink  # noqa: PLC0415 — see the docstring
+
+        machine = AuctionStateMachine(ledger=default_ledger_sink())
         request.app.state.auction_machine = machine
     return machine
 

@@ -17,6 +17,17 @@ joined them. ``uvicorn exchange.main:app`` boots an exchange with
   holds a snapshot for nobody, so no claim is ever checked, no hard constraint is ever
   satisfied, and a shopper who states a must-have is shown an empty shortlist.
 
+There was an eighth seam in that list and it did not belong there, because losing it is not
+fail-*closed*, it is fail-*silent*: ``auction_machine`` -> a bare
+:class:`~exchange.auction.state.AuctionStateMachine`, whose
+:class:`~exchange.auction.ledger.LedgerRecorder` installs an in-process
+:class:`~exchange.auction.ledger.InMemoryLedgerSink` — so every transition a served auction
+made was appended to a list discarded with the app, and the hash chaining, once-only landing
+and replay in ``apps/trust/src/events`` graded a stream no request ever produced (T-150). It
+is bound by DEFAULT now, by :func:`default_ledger_sink`, to the trust service's published
+``POST /events``; see :data:`DEFAULT_TRUST_URL` for why a default rather than a setting, and
+for why this does not weaken the invariant three paragraphs below.
+
 Seven fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
 this tree, on the app exactly as ``create_app()`` builds it::
 
@@ -78,7 +89,8 @@ The document
                   "offer": {"unit_price": 389.0, "currency": "USD"}}
                ]}
       },
-      "checkout_mode": "redirect"
+      "checkout_mode": "redirect",
+      "trust_url": "http://trust:8084"
     }
 
 ``sellers``
@@ -135,6 +147,13 @@ The document
     ``NoCatalogSnapshots`` default — exactly today's behaviour.
 ``checkout_mode``
     Optional; ``CHECKOUT_MODE`` still works and this overrides it for this app.
+``trust_url``
+    The BASE address of the trust service, whose ``POST /events`` door every auction
+    transition is appended to (T-150). Optional, and the one key whose absence does **not**
+    leave the seam unbound: :func:`default_ledger_sink` writes to :data:`DEFAULT_TRUST_URL`,
+    overridable by the :data:`ENV_TRUST_URL` variable, so an exchange nobody configured still
+    produces an audit trail rather than a list it discards. State it when the trust service
+    is not at the compose service name.
 
 Validation is loud, and every rule below was chosen because the silent version of it produces
 an empty shortlist that looks like a policy decision:
@@ -173,21 +192,24 @@ this module composes those three published seams rather than reaching past them.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from . import describe_exception
 from .auction.collect import (
     REFUSAL_FIELD,
     STORE_DECLINED_REASON,
     STORE_REFUSED_REASON,
     refusal_reason,
 )
+from .auction.ledger import InMemoryLedgerSink
 from .checkout.registry import registered_modes
 from .checkout.sellers import StaticRegisteredDomains
 from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
@@ -207,22 +229,35 @@ from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
 __all__ = [
     "ANONYMOUS_PSEUDONYM_PREFIX",
     "DECLINE_REASON_HEADER",
+    "DEFAULT_LEDGER_TIMEOUT_SECONDS",
     "DEFAULT_SOLICIT_TIMEOUT_SECONDS",
+    "DEFAULT_TRUST_URL",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
+    "ENV_TRUST_URL",
     "Deployment",
     "DeploymentConfigurationError",
     "HttpBidSolicitor",
+    "HttpTrustLedgerSink",
     "MAX_BID_RESPONSE_BYTES",
     "MAX_DEPLOYMENT_BYTES",
     "MAX_DEPLOYMENT_SELLERS",
     "MAX_SOLICIT_WALL_CLOCK_SECONDS",
+    "MAX_UNDELIVERED_LEDGER_EVENTS",
     "SellerRow",
+    "TRUST_EVENTS_PATH",
     "configure_exchange",
+    "default_ledger_sink",
     "ensure_configured",
     "read_deployment",
     "solicitation_profile",
+    "trust_events_url",
 ]
+
+#: This module's logger. Named ``exchange.composition``, which is what an operator greps to
+#: learn what a started exchange actually bound — and, for :class:`HttpTrustLedgerSink`, that
+#: its audit records are not reaching the trust service.
+_log = logging.getLogger(__name__)
 
 #: The header a store agent's ``204`` decline states its reason in.
 #:
@@ -295,6 +330,50 @@ MAX_DEPLOYMENT_SELLERS = 10_000
 #: that timed out.
 MAX_SOLICIT_WALL_CLOCK_SECONDS = 15.0
 
+#: Where the trust service answers, when neither the document nor the environment says.
+#:
+#: `trust:8084` is the compose service name and the published port — `apps/trust/compose.yaml`
+#: binds `${TRUST_PORT:-8084}:8084` and runs `uvicorn trust.main:app --port 8084`, and
+#: `apps/buyer/compose.yaml:48` already spells this exact URL for the same service. It is a
+#: DEFAULT rather than a required setting on purpose: the ledger is where a served auction's
+#: transitions become auditable, and an exchange that has to be told where to write its audit
+#: trail before it writes one is an exchange that ships not writing one — which is the whole
+#: of T-150. Outside compose the name does not resolve, every emit fails, and
+#: :class:`HttpTrustLedgerSink` records that instead of raising.
+#:
+#: This does NOT weaken the invariant this module's header states. "An exchange nobody has
+#: configured must still refuse everything rather than quietly admit anything" is a rule about
+#: the gates — eligibility, the trust snapshot, registered domains — and every one of them is
+#: untouched here. Writing down what an auction did admits nobody.
+DEFAULT_TRUST_URL = "http://trust:8084"
+
+#: The environment variable that overrides :data:`DEFAULT_TRUST_URL`. Same spelling as the one
+#: `apps/buyer/compose.yaml` already forwards, so one variable names the service everywhere.
+ENV_TRUST_URL = "TRUST_URL"
+
+#: The published append door: `apps/trust/src/events/routes.py`'s router carries
+#: `prefix="/events"` and its `POST ""` is "Append one ledger event".
+TRUST_EVENTS_PATH = "/events"
+
+#: How long ONE ledger write may hold the request thread.
+#:
+#: ``LedgerRecorder.record`` is synchronous and runs inline in ``POST /auctions``, which writes
+#: two events (``auction_opened``, ``auction_closed``) and ``POST /auctions/{id}/accept`` a
+#: third — so this number is multiplied by three in the worst case a buyer can feel, and 0.5s
+#: bounds that at 1.5s. Deliberately far below :data:`MAX_SOLICIT_WALL_CLOCK_SECONDS`: a
+#: ledger append is a small POST to a service on the same network, and one that has not
+#: answered in half a second is a service that is down, not a service that is thinking.
+DEFAULT_LEDGER_TIMEOUT_SECONDS = 0.5
+
+#: How many undelivered ledger events one sink remembers for an operator to read.
+#:
+#: A ring, not a list, and for the same reason :data:`~exchange.auction.ledger.
+#: AUDIT_ANOMALY_CAPACITY` is one: this is driven from the unauthenticated ``POST /auctions``,
+#: so an unbounded record of failures against a trust service that is down is a memory leak
+#: anybody can fill by posting in a loop, against ``apps/exchange/compose.yaml``'s
+#: ``mem_limit: 256m``. Only the event id and the reason are kept — never the body.
+MAX_UNDELIVERED_LEDGER_EVENTS = 512
+
 
 class DeploymentConfigurationError(RuntimeError):
     """The deployment document is missing, unreadable, or says something unusable.
@@ -338,6 +417,13 @@ class Deployment:
     #: BINDS an empty catalog, which is the same behaviour and a different statement — the
     #: same distinction :attr:`intent_clusters` draws, for the same reason.
     catalog: Mapping[str, Any] | None = None
+    #: Where this deployment's trust service answers — the BASE url, not the ``/events`` path.
+    #: ``None`` leaves :func:`trust_events_url` to fall back to :data:`ENV_TRUST_URL` and then
+    #: :data:`DEFAULT_TRUST_URL`. It is stated in the document as well as in the environment
+    #: because ``apps/exchange/compose.yaml`` forwards no variable it does not name, and the
+    #: two it does name for this module are the two deployment keys — so the document is the
+    #: only knob that reaches the shipped container today.
+    trust_url: str | None = None
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
@@ -556,6 +642,17 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
                 f"per accept, because a mode nobody serves is a deployment that mints nothing"
             )
 
+    trust_url = body.get("trust_url")
+    if trust_url is not None:
+        trust_url = str(trust_url).strip() or None
+        if trust_url is not None and not trust_url.lower().startswith(("http://", "https://")):
+            raise DeploymentConfigurationError(
+                f"{source}: trust_url {trust_url!r} is not an http(s) URL; this is the base "
+                f"address of the trust service, whose {TRUST_EVENTS_PATH} door the exchange "
+                f"appends every auction transition to. Refused here rather than at the first "
+                f"emit, because that failure is swallowed by design and would be invisible"
+            )
+
     return Deployment(
         source=source,
         sellers=sellers,
@@ -563,6 +660,7 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         checkout_mode=checkout_mode,
         intent_clusters=_intent_clusters(body.get("intent_clusters"), source),
         catalog=_catalog(body.get("catalog"), source),
+        trust_url=trust_url,
     )
 
 
@@ -891,6 +989,119 @@ def _rfc3339(moment: float | None) -> str:
 
 
 # =====================================================================================
+# The outbound trust-ledger client — D16's `POST /events`
+# =====================================================================================
+def trust_events_url(base_url: str | None = None, env: Mapping[str, str] | None = None) -> str:
+    """The trust service's append door, from the document, then the environment, then default.
+
+    ``base_url`` is what the deployment document stated (``"trust_url"``); ``None`` means it
+    stated nothing, and then :data:`ENV_TRUST_URL` decides, and then
+    :data:`DEFAULT_TRUST_URL`. Whichever wins, :data:`TRUST_EVENTS_PATH` is appended here so
+    that no caller has to remember the path and no two callers can disagree about it.
+    """
+    environ = os.environ if env is None else env
+    base = str(base_url or "").strip() or str(environ.get(ENV_TRUST_URL) or "").strip()
+    return f"{(base or DEFAULT_TRUST_URL).rstrip('/')}{TRUST_EVENTS_PATH}"
+
+
+class HttpTrustLedgerSink(InMemoryLedgerSink):
+    """A ledger sink that actually leaves the process: it POSTs to trust's ``POST /events``.
+
+    This is the join T-150 names. The exchange's state machine has always recorded every
+    transition — into :class:`~exchange.auction.ledger.InMemoryLedgerSink`, a list discarded
+    with the app — so ``apps/trust/src/events``' hash chaining, once-only landing and replay
+    were grading a stream **no served request produced**. The sim harness and the e2e support
+    module each bridged their own events across by hand, which is precisely why nothing about
+    the served wiring ever had to change for those to pass.
+
+    **It SUBCLASSES the stub rather than replacing it, and that is load-bearing.** Three live
+    tests read ``app.state.auction_machine.ledger.sink.kinds`` back off the served app
+    (``test_auction.py``'s fan-out test and both parameters of its over-long-identifier test),
+    and ``InMemoryLedgerSink.for_auction`` is a published read. Keeping the in-process record
+    also keeps the two properties independent: what the auction recorded is still readable
+    when the trust service is unreachable, which is what makes the ``undelivered`` ring below
+    a diagnosis rather than a hole.
+
+    **A trust service that is down must not fail an auction, and must not fail it quietly
+    either.** ``LedgerRecorder.record`` already swallows a raising sink — but into
+    ``LedgerRecorder.failures``, an unbounded list on an unauthenticated path. So the transport
+    failure is caught HERE, into a bounded ring, and reported once per sink at ``WARNING``:
+    a served exchange whose audit trail is landing nowhere is an operator's problem, and 500
+    identical log lines per minute is not how they find out about it.
+    """
+
+    def __init__(self, url: str, *, timeout: float = DEFAULT_LEDGER_TIMEOUT_SECONDS) -> None:
+        super().__init__()
+        self.url = str(url)
+        self.delivered = 0
+        #: ``(event_id, reason)`` for the events that did not land, newest last. Ids and
+        #: reasons only — never a payload, which is the same rule ``AuditAnomaly`` follows.
+        self.undelivered: deque[tuple[str, str]] = deque(maxlen=MAX_UNDELIVERED_LEDGER_EVENTS)
+        self._timeout = float(timeout)
+        self._client: Any | None = None
+        self._reported = False
+
+    def emit(self, event: Mapping[str, Any]) -> None:
+        # Record locally FIRST. The in-process readback is what the served response and the
+        # tests above are built on, and it must not become conditional on a network hop.
+        super().emit(event)
+        try:
+            response = self._http_client().post(self.url, json=dict(event))
+        except Exception as exc:
+            # A blanket catch IS the rule here, not a shortcut: every failure mode of an
+            # outbound POST — DNS, connect, timeout, a proxy answering something unparseable —
+            # is an operational problem with the audit trail and none of them is a reason to
+            # refuse a buyer an auction.
+            self._undelivered(event, describe_exception(exc))
+            return
+        if response.status_code >= 400:
+            # Includes 409: the trust door answers that for an event id it already holds,
+            # which is once-only landing working, not a delivery failure. It is recorded
+            # rather than counted as delivered so the two stay distinguishable.
+            self._undelivered(event, f"trust answered HTTP {response.status_code}")
+            return
+        self.delivered += 1
+
+    def _undelivered(self, event: Mapping[str, Any], reason: str) -> None:
+        self.undelivered.append((str(event.get("event_id")), reason))
+        if not self._reported:
+            self._reported = True
+            _log.warning(
+                "exchange ledger: %s did not reach the trust service at %s (%s). The auction "
+                "stands and the transition is still readable in this process, but it is not "
+                "in the chained ledger; further failures from this sink are counted, not "
+                "logged (see HttpTrustLedgerSink.undelivered)",
+                str(event.get("kind")),
+                self.url,
+                reason,
+            )
+
+    def _http_client(self) -> Any:
+        """One pooled client for this sink, built on first use — as ``HttpBidSolicitor`` is.
+
+        Deferred so that composing an exchange opens no sockets and imports no ``httpx``, and
+        so a test that never serves an auction never pays for either.
+        """
+        if self._client is None:
+            import httpx  # noqa: PLC0415 — see the docstring
+
+            self._client = httpx.Client(timeout=self._timeout)
+        return self._client
+
+
+def default_ledger_sink(env: Mapping[str, str] | None = None) -> InMemoryLedgerSink:
+    """The sink an exchange nobody has configured writes its transitions through.
+
+    The DEFAULT has to be the trust-backed one, not an opt-in. T-150's gate builds the app
+    ``exchange.main.create_app()`` returns with no deployment document and no environment at
+    all — which is also what ``docker compose up`` starts, since neither ``EXCHANGE_DEPLOYMENT``
+    variable has a value there — so a producer reachable only through configuration is a
+    producer no deployment in this repository reaches.
+    """
+    return HttpTrustLedgerSink(trust_events_url(env=env))
+
+
+# =====================================================================================
 # Binding
 # =====================================================================================
 def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
@@ -906,12 +1117,36 @@ def configure_exchange(app: Any, deployment: Deployment) -> tuple[str, ...]:
     """
     from .accept.routes import InMemoryAuctionBids, configure_accept  # noqa: PLC0415
     from .auction.routes import configure_auctions  # noqa: PLC0415
+    from .auction.state import AuctionStateMachine  # noqa: PLC0415
     from .ranking.serving import configure_ranking  # noqa: PLC0415
 
     bound: list[str] = []
 
     def unset(name: str) -> bool:
         return getattr(app.state, name, None) is None
+
+    if unset("auction_machine"):
+        # The ledger seam (T-150). Bound with NO key required, unlike every other branch here,
+        # for two reasons. The document states only WHERE — `trust_url`, falling back to the
+        # environment and then to `DEFAULT_TRUST_URL` — because an exchange that has to be told
+        # to keep an audit trail is an exchange that ships without one.
+        #
+        # And binding it here rather than leaving it to `auction/routes.py::_machine` closes a
+        # narrower hole than it looks: `accept/routes.py` has its own `_machine` accessor with
+        # its own bare `AuctionStateMachine()` default, so an app whose FIRST auction request
+        # is an accept — an auction another process created against a shared store — would
+        # otherwise install a sink that goes nowhere and drop its `accepted` event. This hook
+        # runs before both accessors in both routes.
+        #
+        # It is a whole machine because `configure_auctions` takes one; the store is the same
+        # `InMemoryAuctionStore` either lazy default builds, so nothing else moves.
+        configure_auctions(
+            app,
+            machine=AuctionStateMachine(
+                ledger=HttpTrustLedgerSink(trust_events_url(deployment.trust_url))
+            ),
+        )
+        bound.append("auction_machine")
 
     if deployment.sellers and unset("seller_eligibility"):
         configure_auctions(app, eligibility=StaticSellerEligibility(deployment.eligibility_rows))

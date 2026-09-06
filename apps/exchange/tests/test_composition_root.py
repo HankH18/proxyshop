@@ -34,9 +34,13 @@ is exactly what a person running the service does, and is the thing that was mis
 Stated exactly, because an overclaiming docstring is how the next reader stops looking:
 ``configure_exchange`` — the composition root's OWN function, not one of the three route
 seams — is called directly by
-``test_the_composition_root_never_overwrites_wiring_a_deployment_already_chose``, which is a
-unit test of that function and issues no request. Every HTTP test in this file goes through
-the ``deployed`` fixture or :func:`served_exchange`, and neither wires anything.
+``test_the_composition_root_never_overwrites_wiring_a_deployment_already_chose`` and by
+``test_a_deployment_states_where_its_trust_service_answers``, and
+``exchange.auction.routes._machine`` by
+``test_an_exchange_nobody_configured_still_writes_its_transitions_at_the_trust_service``. All
+three are unit tests of those functions and none of them issues a request. Every HTTP test in
+this file goes through the ``deployed`` fixture or :func:`served_exchange`, and neither wires
+anything.
 
 What is real here
 -----------------
@@ -58,6 +62,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -926,3 +931,234 @@ def test_the_real_store_agent_and_the_real_exchange_complete_a_purchase(
     assert payload["code"].startswith("PSX-"), payload
     assert payload["permalink_url"].startswith(f"https://{REAL_STORE_DOMAIN}/cart/"), payload
     assert f"discount={payload['code']}" in payload["permalink_url"], payload
+
+
+# =====================================================================================
+# The ledger seam (T-150) — the eighth collaborator, and the only one bound by DEFAULT
+# =====================================================================================
+def test_an_exchange_nobody_configured_still_writes_its_transitions_at_the_trust_service() -> None:
+    """The sink an unconfigured app installs on first use is a producer into the trust ledger.
+
+    ``AuctionStateMachine()`` with no sink is what shipped, and its ``LedgerRecorder`` builds
+    an ``InMemoryLedgerSink`` — a list discarded with the app — so the hash chaining, once-only
+    landing and replay in ``apps/trust/src/events`` graded a stream no served request produced
+    (T-150). It has to be the DEFAULT and not a configuration key, because ``create_app()``
+    with nothing set is what ``docker compose up`` starts: ``apps/exchange/compose.yaml``
+    forwards exactly two variables for this module and neither has a value there, so a producer
+    reachable only through configuration is a producer no deployment in this repository reaches.
+
+    That the write actually LEAVES the process is measured in ``test_repro_ledger_gates.py``
+    ``::test_t150_a_served_auction_puts_its_transitions_in_the_trust_ledger``, which serves an
+    auction with every trust event store's ``append`` and every outbound ``httpx`` request
+    watched. What is asserted here is the composition root's half: which sink the route's lazy
+    default takes, and from where.
+    """
+    from exchange.auction.routes import _machine
+    from exchange.composition import (
+        DEFAULT_TRUST_URL,
+        TRUST_EVENTS_PATH,
+        HttpTrustLedgerSink,
+        default_ledger_sink,
+    )
+
+    assert isinstance(default_ledger_sink(), HttpTrustLedgerSink)
+    assert default_ledger_sink({}).url == f"{DEFAULT_TRUST_URL}{TRUST_EVENTS_PATH}"
+    assert default_ledger_sink({"TRUST_URL": "http://ledger:9/"}).url == "http://ledger:9/events"
+
+    # …and it is the sink the served route installs. `_machine` reads one attribute off the
+    # request, so a stand-in carrying the real app is the whole of what it needs — and using
+    # the real app is what makes this an assertion about `create_app()`'s wiring.
+    app = create_app()
+    machine = _machine(SimpleNamespace(app=app))
+    assert machine is app.state.auction_machine
+    sink = machine.ledger.sink
+    assert isinstance(sink, HttpTrustLedgerSink), (
+        f"an unconfigured exchange installed a {type(sink).__name__} as its ledger sink. "
+        f"Whatever else that is, it does not leave the process"
+    )
+    assert sink.url == f"{DEFAULT_TRUST_URL}{TRUST_EVENTS_PATH}", sink.url
+    # The in-process readback three `test_auction.py` nodes assert on is still there, because
+    # the sink SUBCLASSES the stub rather than replacing it.
+    assert sink.kinds == [] and sink.for_auction("a-1") == []
+
+
+def test_a_deployment_states_where_its_trust_service_answers(
+    monkeypatch: pytest.MonkeyPatch, unwired: None
+) -> None:
+    """``trust_url`` in the document outranks the default, and binds a whole machine.
+
+    The document as well as an environment variable, because ``apps/exchange/compose.yaml``
+    forwards no variable it does not name and the two it names are ``EXCHANGE_DEPLOYMENT`` and
+    ``EXCHANGE_DEPLOYMENT_JSON`` — so in the shipped container the document is the only knob
+    that reaches this module.
+    """
+    from exchange.composition import (
+        DEFAULT_TRUST_URL,
+        TRUST_EVENTS_PATH,
+        HttpTrustLedgerSink,
+        configure_exchange,
+        read_deployment,
+    )
+
+    document = {**_deployment_document("http://127.0.0.1:1"), "trust_url": "http://ledger:9/"}
+    monkeypatch.setenv(ENV_DEPLOYMENT_JSON, json.dumps(document))
+    monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+    deployment = read_deployment()
+    assert deployment is not None
+    assert deployment.trust_url == "http://ledger:9/"
+
+    app = create_app()
+    bound = configure_exchange(app, deployment)
+    assert "auction_machine" in bound, bound
+    sink = app.state.auction_machine.ledger.sink
+    assert isinstance(sink, HttpTrustLedgerSink)
+    # One trailing slash in the document must not become `//events`: the path is appended in
+    # exactly one place so no two callers can disagree about it.
+    assert sink.url == "http://ledger:9/events", sink.url
+
+    # …and it never overwrites a machine a caller already chose, like every other seam here.
+    chosen = create_app()
+    chosen.state.auction_machine = object()
+    assert "auction_machine" not in configure_exchange(chosen, deployment)
+
+    # A document that states no `trust_url` still binds the seam — the key says WHERE, never
+    # WHETHER. That is what stops `accept/routes.py`'s own bare `AuctionStateMachine()` default
+    # from being installed by an app whose first auction request is an accept.
+    monkeypatch.setenv(ENV_DEPLOYMENT_JSON, json.dumps(_deployment_document("http://127.0.0.1:1")))
+    silent_document = read_deployment()
+    assert silent_document is not None and silent_document.trust_url is None
+
+    silent = create_app()
+    assert "auction_machine" in configure_exchange(silent, silent_document)
+    assert silent.state.auction_machine.ledger.sink.url == f"{DEFAULT_TRUST_URL}{TRUST_EVENTS_PATH}"
+
+
+def test_a_trust_url_that_is_not_an_http_url_is_refused_by_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused at parse, because the alternative failure is invisible by design.
+
+    Every other malformed key in this document produces an empty shortlist that at least looks
+    like a policy decision. This one is worse: a sink pointed at nonsense swallows its own
+    transport failure — deliberately, so a trust service that is down cannot fail an auction —
+    so a typo here would leave a perfectly healthy exchange writing its audit trail nowhere,
+    with nothing in any response to say so.
+    """
+    from exchange.composition import DeploymentConfigurationError, read_deployment
+
+    document = {**_deployment_document("http://127.0.0.1:1"), "trust_url": "trust:8084"}
+    monkeypatch.setenv(ENV_DEPLOYMENT_JSON, json.dumps(document))
+    monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+
+    with pytest.raises(DeploymentConfigurationError) as raised:
+        read_deployment()
+    assert "trust_url" in str(raised.value) and "http(s)" in str(raised.value)
+
+
+def test_a_trust_service_that_is_down_costs_the_auction_nothing_and_is_not_silent() -> None:
+    """The three properties that make writing to another service on the request path safe.
+
+    * **The transition still stands.** ``LedgerRecorder``'s own rule — losing an audit record
+      is bad, failing a live auction because the audit sink hiccuped is worse — now has to
+      survive a network, so the sink swallows its own transport failure.
+    * **It is not swallowed into ``LedgerRecorder.failures``.** That list is unbounded and this
+      runs on the unauthenticated ``POST /auctions``, so a trust service down for an hour would
+      be a memory leak anybody can drive by posting in a loop. The record is a bounded ring
+      instead, event ids and reasons only, never a payload.
+    * **The in-process readback is untouched**, which is what makes the ring a diagnosis rather
+      than a hole: what the auction recorded is still readable when trust is not.
+    """
+    from exchange.auction.ledger import LedgerRecorder
+    from exchange.composition import MAX_UNDELIVERED_LEDGER_EVENTS, HttpTrustLedgerSink
+
+    class _DeadTrust:
+        def post(self, url: str, **kwargs: Any) -> Any:
+            raise httpx.ConnectError("nodename nor servname provided, or not known")
+
+    sink = HttpTrustLedgerSink("http://trust.invalid/events")
+    sink._client = _DeadTrust()
+    recorder = LedgerRecorder(sink)
+
+    recorded = recorder.record("auction_opened", auction_id="a-1", payload={"roster_size": 0})
+
+    assert recorder.failures == [], (
+        f"a transport failure reached LedgerRecorder.failures, an unbounded list on an "
+        f"unauthenticated path: {recorder.failures}"
+    )
+    assert sink.kinds == ["auction_opened"], sink.kinds
+    assert sink.delivered == 0
+    assert [event_id for event_id, _ in sink.undelivered] == [recorded["event_id"]]
+    assert [reason for _, reason in sink.undelivered] == [
+        "ConnectError: nodename nor servname provided, or not known"
+    ], list(sink.undelivered)
+
+    # The ring is a ring. Driven past its bound it holds the newest, and does not grow.
+    assert sink.undelivered.maxlen == MAX_UNDELIVERED_LEDGER_EVENTS
+    for index in range(MAX_UNDELIVERED_LEDGER_EVENTS + 10):
+        recorder.record("auction_closed", auction_id=f"a-{index}", payload={})
+    assert len(sink.undelivered) == MAX_UNDELIVERED_LEDGER_EVENTS
+    assert recorder.failures == []
+
+
+def test_a_trust_service_that_refuses_an_event_is_recorded_rather_than_counted_as_landed() -> None:
+    """A 4xx/5xx is not delivery — and ``409``, which is once-only landing working, is not either.
+
+    Kept distinguishable on purpose: an operator reading ``delivered`` wants the number of
+    events the chained ledger actually took, and a door answering "I already have it" took none,
+    however healthy that is.
+    """
+    from exchange.composition import HttpTrustLedgerSink
+
+    class _Refusing:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        def post(self, url: str, **kwargs: Any) -> Any:
+            return httpx.Response(self.status, request=httpx.Request("POST", url))
+
+    for status in (409, 422, 503):
+        sink = HttpTrustLedgerSink("http://trust.invalid/events")
+        sink._client = _Refusing(status)
+        sink.emit({"event_id": f"e-{status}", "kind": "auction_opened"})
+        assert sink.delivered == 0, status
+        assert [reason for _, reason in sink.undelivered] == [f"trust answered HTTP {status}"]
+
+    landed = HttpTrustLedgerSink("http://trust.invalid/events")
+    landed._client = _Refusing(201)
+    landed.emit({"event_id": "e-ok", "kind": "auction_opened"})
+    assert landed.delivered == 1 and not landed.undelivered
+
+
+def test_an_unreachable_trust_service_changes_nothing_a_buyer_or_a_store_can_see(
+    deployed: httpx.Client,
+) -> None:
+    """HONEST TRAFFIC. The whole purchase, with the new outbound write failing every time.
+
+    This is the case neither a red-before gate nor an adversarial verifier catches, because
+    both are pointed at the defect: the repair adds an outbound call to the request path of
+    every auction and every accept, and there is no trust service anywhere in this suite — so
+    **every one of those calls fails**, on a DNS name that does not resolve. The property is
+    that neither a buyer nor a store can tell.
+
+    Driven through the same served process on a real socket, the same real store agents over
+    loopback and the same deployment document the rest of this file uses — not a stub — and
+    carried all the way to a minted, chargeable discount code, because the ledger writes are
+    spread across ``auction_opened``, ``auction_closed`` and ``accepted`` and a mint that
+    survived the first two would prove nothing about the third.
+    """
+    body = _open_an_auction(deployed)
+
+    assert body["solicited"] == [row["store_id"] for row in STORES], body
+    assert body["entries"] and all(entry["fallback"] is False for entry in body["entries"]), (
+        f"a store fell back to its list price, so a solicitation did not land: {body['entries']}"
+    )
+    assert body["denied"] == [], body["denied"]
+    assert body["ranked"], f"nothing ranked; exclusions were {body['excluded']}"
+    assert body["shortlist"]["slots"], body
+
+    top = body["shortlist"]["slots"][0]
+    accepted = deployed.post(
+        f"/auctions/{body['auction_id']}/accept", json={"bid_ref": top["bid_ref"]}
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["code"].startswith("PSX-"), accepted.json()
