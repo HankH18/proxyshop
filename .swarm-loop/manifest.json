@@ -18,7 +18,7 @@
     "Makefile": "5667e65a172b98035e56e39d12b5cf44063e29de592cb0f93a91322eacc89c62",
     "scripts/verify.sh": "a509eef02c766987fee2c6ab253c17b5192487750e4a84bbdaea50796bc98862",
     "scripts/check_verify_contracts.py": "4ff99fd83dd328b3be7b5cef72c63ed7e3bfcef2f102b7f0928ba959789d193e",
-    "tickets.json": "72fcee223d5a3326ed89c77e51796569b01b8954b878cdbeef7f4480476d60d1",
+    "tickets.json": "67377de033f06bc42ca4b04ce1673b640c4f60a3752c897ca71d6b3fc357034a",
     ".swarm-loop/amend-classes.json": "895bd4a09b949b533bbfc3e693d0dab11c12d0856437ce1c0252b24b2515900d"
   },
   "targets": {
@@ -36,7 +36,7 @@
     "e8_proofs_passing": 8.0
   },
   "goals_canon": "968c4996d90b13565555da6796be7101e63de4db96a152c9af20b9e78cfe728e",
-  "log_seq": 72,
+  "log_seq": 75,
   "metric_defs": {
     "acceptance_pass_rate": {
       "target": 100.0,
