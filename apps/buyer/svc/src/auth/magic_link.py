@@ -202,6 +202,26 @@ class MagicLinkAuth:
     #: unsynchronised check-then-mark would let two racing requests both find a link unused.
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        """Hand the session store the vault whose pseudonyms it will be shown (T-163).
+
+        Without this the session boundary could only check a subject's *format*, so
+        ``"psn-" + the buyer's own email`` opened a session that authenticated
+        ``GET /buyer/profile``: the pseudonym was a bearer credential whose shape was its
+        only proof. Binding happens here, at the one place that holds both halves, rather
+        than in :class:`SessionStore`'s constructor — which would force every caller of every
+        store implementation to thread a vault through, and would still leave this class free
+        to pair a store with a vault that did not issue what the store admits.
+
+        Deliberately tolerant of a store that is not one of this module's: a custom
+        :class:`SessionStore` that never learned about ``bind_vault`` keeps working, exactly
+        as it did before this existed. It does not get the membership check, and the two
+        stores this package ships both do.
+        """
+        binder = getattr(self.sessions, "bind_vault", None)
+        if callable(binder):
+            binder(self.vault)
+
     # -- issuing --------------------------------------------------------------------
 
     @property

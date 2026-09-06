@@ -37,10 +37,13 @@ from .sessions import (
     DEFAULT_SESSION_TTL,
     InMemorySessionStore,
     NotAPseudonym,
+    PseudonymRegistry,
     Session,
     SessionError,
     SessionExpired,
     SessionStore,
+    SessionsExhausted,
+    UnissuedPseudonym,
     UnknownSession,
 )
 
@@ -59,10 +62,13 @@ __all__ = [
     "MagicLinkThrottled",
     "MagicLinkUnknown",
     "NotAPseudonym",
+    "PseudonymRegistry",
     "Session",
     "SessionError",
     "SessionExpired",
     "SessionStore",
+    "SessionsExhausted",
+    "UnissuedPseudonym",
     "UnknownSession",
     "token_fingerprint",
 ]

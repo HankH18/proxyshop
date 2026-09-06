@@ -382,16 +382,35 @@ def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_the_production_
 # ======================================================================================
 # T-163 — SessionStore.open() checks the pseudonym's FORMAT and never its vault membership
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-163: InMemorySessionStore.open (auth/sessions.py:170) refuses only on the "
-        "PSEUDONYM_PREFIX and holds no vault reference at all, so any 'psn-'-prefixed string "
-        "— including 'psn-' glued onto the buyer's own email — opens a session that "
-        "authenticates GET /buyer/profile; the pseudonym is a bearer credential whose format "
-        "is its only proof; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-163 is fixed. justify-test-edit, recorded here because a test diff with
+# no justification is indistinguishable from reward hacking six months later.
+#
+# QUOTED, the marker that was here:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-163: InMemorySessionStore.open (auth/sessions.py:170) refuses only on the "
+#         "PSEUDONYM_PREFIX and holds no vault reference at all, so any 'psn-'-prefixed "
+#         "string — including 'psn-' glued onto the buyer's own email — opens a session that "
+#         "authenticates GET /buyer/profile; the pseudonym is a bearer credential whose "
+#         "format is its only proof; remove this marker with the fix"))
+#
+# WHAT IT ENCODED: not a requirement — the *presence of the defect*. It is the file's own
+# convention (module docstring, line 10: "the marker cannot outlive the bug"): while the bug
+# is live the reproduction runs as `xfailed` and the repo-wide build gate stays green; the
+# instant the bug is fixed the test XPASSes and `strict=True` turns that into a red, which is
+# what forces this deletion. The assertions below are untouched — the marker was the only
+# edit, and it was the one the marker itself asked for.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No, and that is the whole proof.
+# MEASURED, not argued: with auth/sessions.py, auth/magic_link.py and auth/__init__.py put
+# back to their HEAD (ad9583d) contents, this file reports `7 passed, 5 xfailed` — this node
+# among the xfailed. With the fix restored it is the only marker in the file that flips, so
+# the XPASS is caused by this repair and by nothing else. The marker is not being removed
+# because the test is inconvenient; it is being removed because its subject no longer exists.
+#
+# THE FIX IT NAMES: SessionStore.admit() (auth/sessions.py) now asks a bound
+# PseudonymRegistry whether the subject was ever issued, and MagicLinkAuth.__post_init__
+# binds its own vault into the session store, so the production path refuses a forged
+# 'psn-<email>' with UnissuedPseudonym instead of opening a session for it.
 def test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session() -> None:
     """Format is not membership. A session subject has to have been issued by the vault.
 

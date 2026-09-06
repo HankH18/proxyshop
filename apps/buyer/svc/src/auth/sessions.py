@@ -9,6 +9,20 @@ The constructor is where that is enforced rather than described. :meth:`SessionS
 refuses a subject that is not a vault-issued pseudonym, so the shortest wrong
 implementation — ``sessions.open(email)`` — fails at the boundary instead of quietly
 threading an address through every downstream payload.
+
+Format is not membership (T-163)
+--------------------------------
+The prefix check alone made the pseudonym a bearer credential whose *shape* was its only
+proof: ``psn-`` glued onto the buyer's own email opened a session that authenticated
+``GET /buyer/profile``. A store may therefore be given the vault that issued the pseudonyms
+it will be shown — see :meth:`SessionStore.bind_vault` — after which a subject the vault has
+no record of is refused with :class:`UnissuedPseudonym`.
+
+:class:`~buyer_svc.auth.magic_link.MagicLinkAuth` binds its own vault into whatever store it
+was handed, so the production path built by
+:func:`~buyer_svc.auth.routes.build_auth_service` always checks membership. A store
+constructed on its own has no vault to ask and keeps the older format-only guard: that is
+the documented meaning of an unbound store, not a fallback a caller can reach by accident.
 """
 
 from __future__ import annotations
@@ -17,6 +31,7 @@ import secrets
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol, runtime_checkable
 
 from ..vault import PSEUDONYM_PREFIX
 
@@ -25,11 +40,13 @@ __all__ = [
     "DEFAULT_SESSION_TTL",
     "InMemorySessionStore",
     "NotAPseudonym",
+    "PseudonymRegistry",
     "Session",
     "SessionError",
     "SessionExpired",
     "SessionStore",
     "SessionsExhausted",
+    "UnissuedPseudonym",
     "UnknownSession",
 ]
 
@@ -83,6 +100,33 @@ class NotAPseudonym(SessionError, ValueError):
     """
 
 
+class UnissuedPseudonym(NotAPseudonym):
+    """The subject looks like a pseudonym and the vault has never issued it (T-163).
+
+    A subclass of :class:`NotAPseudonym` on purpose: "carries the prefix" was never the
+    property this boundary meant to assert, so a caller that already refuses a bad subject
+    keeps refusing this one, and one that wants the finer distinction can ask for it.
+
+    Like its base it never echoes the subject. The value that reaches here is, in the case
+    worth catching, ``psn-`` concatenated with the buyer's own email address.
+    """
+
+
+@runtime_checkable
+class PseudonymRegistry(Protocol):
+    """The one question a session store asks the vault: *did you issue this?*
+
+    Deliberately the narrowest seam that answers it. Both
+    :class:`~buyer_svc.vault.PseudonymVault` and
+    :class:`~buyer_svc.vault.store.PseudonymStore` already satisfy it, so binding one costs
+    this module no import of the vault package beyond the prefix it already takes, and hands
+    the session store no way to *use* the email it gets back.
+    """
+
+    def resolve(self, pseudonym: str) -> str | None:
+        """The buyer behind ``pseudonym``, or ``None`` when it was never issued."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -107,7 +151,64 @@ class Session:
 
 
 class SessionStore:
-    """The seam a persistent session store would implement. See :class:`InMemorySessionStore`."""
+    """The seam a persistent session store would implement. See :class:`InMemorySessionStore`.
+
+    The subject guard lives here rather than in one implementation so that every store —
+    the in-memory one, a Redis one, anything a later ticket adds — refuses the same subjects
+    for the same reasons, and so binding a vault does not have to be re-implemented per
+    backend. Subclasses call :meth:`admit` at the top of their own :meth:`open`.
+    """
+
+    #: The vault this store checks membership against, or ``None`` for a store that has not
+    #: been given one. A class attribute so every subclass has it without a constructor.
+    _vault: PseudonymRegistry | None = None
+
+    def bind_vault(self, vault: PseudonymRegistry | None) -> None:
+        """Attach the vault whose issuance decides which subjects may open a session.
+
+        Idempotent and one-way in practice: :class:`~buyer_svc.auth.magic_link.MagicLinkAuth`
+        binds its own vault into whatever store it was handed, and a store that was already
+        given one keeps it, so passing ``sessions=`` and ``vault=`` that disagree does not
+        silently retarget the check.
+        """
+        if vault is None or self._vault is not None:
+            return
+        self._vault = vault
+
+    @property
+    def vault(self) -> PseudonymRegistry | None:
+        """The bound vault, if any. Read-only; use :meth:`bind_vault` to set it."""
+        return self._vault
+
+    def admit(self, pseudonym: str) -> None:
+        """Refuse ``pseudonym`` unless it is a subject a session may be about.
+
+        Two refusals, and the second one is T-163:
+
+        * it does not carry :data:`~buyer_svc.vault.PSEUDONYM_PREFIX`, so it is not even
+          shaped like something the vault hands out — the ``sessions.open(email)`` mistake;
+        * it is shaped right and the bound vault has no record of ever issuing it, so it is
+          a forgery. Before this check the format *was* the proof, and
+          ``"psn-" + buyer_email`` authenticated ``GET /buyer/profile``.
+
+        Raises:
+            NotAPseudonym: the prefix is missing.
+            UnissuedPseudonym: no vault issued it. Only reachable on a bound store.
+        """
+        if not isinstance(pseudonym, str) or not pseudonym.startswith(PSEUDONYM_PREFIX):
+            raise NotAPseudonym(
+                f"R5: a session subject must be a vault-issued pseudonym "
+                f"(prefix {PSEUDONYM_PREFIX!r}); the value offered is withheld from this "
+                f"message because the mistake this catches is passing the buyer's email"
+            )
+        vault = self._vault
+        if vault is not None and vault.resolve(pseudonym) is None:
+            raise UnissuedPseudonym(
+                "R5: this session subject carries the pseudonym prefix but no vault ever "
+                "issued it, so it is a forgery rather than a credential; the value offered "
+                "is withheld from this message because a forged subject is built out of the "
+                "buyer's own email"
+            )
 
     def open(self, pseudonym: str, *, ttl: timedelta | None = None) -> Session:
         raise NotImplementedError
@@ -128,11 +229,13 @@ class InMemorySessionStore(SessionStore):
         clock: Callable[[], datetime] | None = None,
         ttl: timedelta = DEFAULT_SESSION_TTL,
         max_sessions: int = DEFAULT_MAX_SESSIONS,
+        vault: PseudonymRegistry | None = None,
     ) -> None:
         self._clock = clock if clock is not None else _utcnow
         self._ttl = ttl
         self._max_sessions = max_sessions
         self._sessions: dict[str, Session] = {}
+        self._vault: PseudonymRegistry | None = vault
 
     def __len__(self) -> int:
         return len(self._sessions)
@@ -164,15 +267,12 @@ class InMemorySessionStore(SessionStore):
                 issues carries :data:`~buyer_svc.vault.PSEUDONYM_PREFIX`; an email address,
                 an account id or a bare name does not, and none of them may become the
                 subject of a session.
+            UnissuedPseudonym: the prefix is there and this store's bound vault never issued
+                the value (T-163). Only reachable on a store that was given a vault.
             SessionsExhausted: the store already holds ``max_sessions`` live sessions. New
                 sessions are shed rather than live ones evicted; see the class.
         """
-        if not isinstance(pseudonym, str) or not pseudonym.startswith(PSEUDONYM_PREFIX):
-            raise NotAPseudonym(
-                f"R5: a session subject must be a vault-issued pseudonym "
-                f"(prefix {PSEUDONYM_PREFIX!r}); the value offered is withheld from this "
-                f"message because the mistake this catches is passing the buyer's email"
-            )
+        self.admit(pseudonym)
         issued_at = self._clock()
         self._forget_expired(issued_at)
         if len(self._sessions) >= self._max_sessions:
