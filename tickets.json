@@ -2396,7 +2396,7 @@
         "3. Every fix carries a mutation that was green before and is red after",
         "4. The approved manifest's recorded digests still verify - no fix re-seals ground truth"
       ],
-      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} ./scripts/verify.sh check",
+      "verify": "PROXYSHOP_WORKER=${PROXYSHOP_GATE_WORKER:-14} uv run python -m pytest fixtures/tests/test_golden_set.py -q",
       "refs": [
         "T-080 lane adversarial pass, 2026-09-02",
         "F1-checker-journal"

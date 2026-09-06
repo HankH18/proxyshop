@@ -1,6 +1,6 @@
 {
-  "frozen_at": "2026-09-06T00:04:53",
-  "amendments": 36,
+  "frozen_at": "2026-09-06T10:08:22",
+  "amendments": 37,
   "files": {
     ".swarm-loop/acceptance/README.md": "650910301dc909eb6fb13bd1fcebabc4766e372e0c08210d08e18d84e42e596e",
     ".swarm-loop/acceptance/conftest.py": "298928bc45944aaaa58dcf39d2d1e7b5515b879c89d7658adae3aff03f7796bf",
@@ -18,7 +18,7 @@
     "Makefile": "5667e65a172b98035e56e39d12b5cf44063e29de592cb0f93a91322eacc89c62",
     "scripts/verify.sh": "a509eef02c766987fee2c6ab253c17b5192487750e4a84bbdaea50796bc98862",
     "scripts/check_verify_contracts.py": "4ff99fd83dd328b3be7b5cef72c63ed7e3bfcef2f102b7f0928ba959789d193e",
-    "tickets.json": "10b812ca8090492f21cf321b29a30102495e0964bbd173baa63dac71a9db5321",
+    "tickets.json": "f3ac3182a816f45d6000a44484f505fa644c3e5f90922b7ddf00c04e657e8ea1",
     ".swarm-loop/amend-classes.json": "895bd4a09b949b533bbfc3e693d0dab11c12d0856437ce1c0252b24b2515900d"
   },
   "targets": {
@@ -36,7 +36,7 @@
     "e8_proofs_passing": 8.0
   },
   "goals_canon": "968c4996d90b13565555da6796be7101e63de4db96a152c9af20b9e78cfe728e",
-  "log_seq": 78,
+  "log_seq": 79,
   "metric_defs": {
     "acceptance_pass_rate": {
       "target": 100.0,
