@@ -218,15 +218,28 @@ def _declared_route_paths() -> dict[str, list[str]]:
     return declared
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-190: exchange.openapi.json pins POST /v1/auctions/{auction_id}/bids "
-        "(operationId submitExternalBid) as the signed external door, and no routes.py in the "
-        "repo declares it — so validate_external_submission has no production caller and the "
-        "tightened bid boundary is unreachable from outside; remove this marker with the fix"
-    ),
-)
+# T-190 FIXED — and the marker is removed here by a commit whose ticket list names T-244, not
+# T-190, which is worth saying out loud rather than leaving to be discovered.
+#
+# This node asserts that some `routes.py` declares the pinned `/bids` path. T-244's repair is
+# `apps/exchange/src/external_bids/routes.py`, which declares exactly that path and calls
+# `store_agent.external.door.receive_bid` behind it — so it removes the defect THIS node
+# encodes as a side effect of removing its own. Under `xfail(strict=True)` that is not
+# something a lane may leave alone: the node became XPASS(strict), i.e. FAILED, the moment the
+# route existed. T-266's own marker text predicted this exact consequence in advance —
+# "serving the bid door turns packages/contracts/tests/test_repro_open_tickets::
+# test_the_pinned_external_bid_door_is_actually_served into an XPASS(strict) failure".
+#
+# Measured in this worktree on 2026-09-06 at worker index 10:
+#   BEFORE: `1 failed` under --runxfail — "the contract pins /v1/auctions/{auction_id}/bids as
+#           the signed external door and no routes.py declares any /bids path".
+#   AFTER:  `1 passed`, with the declared-routes map now carrying
+#           'apps/exchange/src/external_bids/routes.py': ['/v1/auctions/{auction_id}/bids'].
+#   CAUSATION: deleting `apps/exchange/src/external_bids/` in a scratch copy outside the repo
+#           returns this node to its original failure verbatim.
+#
+# The assertion itself is untouched: `validate_external_submission` now genuinely has a
+# production caller, which is the thing the node was written to demand.
 def test_the_pinned_external_bid_door_is_actually_served() -> None:
     """A published door with no building behind it.
 

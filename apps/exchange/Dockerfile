@@ -69,6 +69,21 @@ COPY proxyshop_support/             /app/proxyshop_support/
 # nothing but hashlib, json, math, re, datetime, types and typing.
 COPY packages/verification/__init__.py /app/packages/verification/__init__.py
 COPY packages/verification/src/        /app/packages/verification/src/
+# T-244. `exchange.external_bids.routes` imports `store_agent.external.door` at module scope,
+# and `exchange.main.create_app` imports every `<feature>/routes.py` it globs — so without
+# these two lines `app = create_app()` raises `ModuleNotFoundError: No module named
+# 'store_agent'` at IMPORT time and the container never finishes booting. That is a strictly
+# worse failure than the one the route repairs, which is why the image is changed in the same
+# commit as the route rather than left for the deployment to discover.
+#
+# ONLY `external/` is copied, never `packages/store-agent/src/` wholesale, and the narrowness
+# is the point twice over: the door's entire import closure is `contracts` (already above) plus
+# `external/{door,nonces,signatures}.py`, and `.importlinter`'s c3 contract FORBIDS
+# `exchange -> store_agent.modes` — a module that is not in the image cannot be imported by
+# accident. `packages/store-agent/src/__init__.py` is empty and is copied only so the flat
+# layout's package root exists.
+COPY packages/store-agent/src/__init__.py /app/packages/store-agent/src/
+COPY packages/store-agent/src/external/   /app/packages/store-agent/src/external/
 COPY apps/exchange/src/          /app/apps/exchange/src/
 # T-299. `ingest.graph` and `ingest.embeddings` are a SHARED LIBRARY that happens to live at
 # a service's path, and candidate retrieval is the exchange's own responsibility (DESIGN.md:34),
@@ -111,6 +126,7 @@ RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
  && ln -s ../packages/verification/src /app/.pkgroot/claim_verification \
  && ln -s ../apps/exchange/src /app/.pkgroot/exchange \
+ && ln -s ../packages/store-agent/src /app/.pkgroot/store_agent \
  && ln -s ../services/ingest/src /app/.pkgroot/ingest
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
