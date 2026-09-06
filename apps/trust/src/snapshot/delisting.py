@@ -53,6 +53,7 @@ __all__ = [
     "BLACKLIST_EXPIRED_KIND",
     "DELISTING_SOURCE",
     "TRUST_SCORE_REASON_CODE",
+    "MalformedDelistingPayload",
     "below_blacklist_threshold",
     "delisting_events",
 ]
@@ -87,7 +88,63 @@ def below_blacklist_threshold(value: Any) -> bool:
     return float(value) < BLACKLIST_THRESHOLD
 
 
-def _lapsed_reasons(blacklist: Any, as_of: Any) -> dict[str, str]:
+def _listed_records(blacklist: Any, identities: Iterable[str]) -> list[Any]:
+    """The registry's records, by iteration if it offers one and by lookup if it does not.
+
+    ITERATION FIRST, and that ordering is the whole design. ``build_snapshot`` has already
+    asked ``lookup`` exactly once for every store on its way to ``entry["blacklisted"]``, so
+    asking again per store would double every read against a source that is a Postgres table
+    (``app.seller_blacklist``) — a real cost, pinned by a test that counts the calls
+    (``test_snapshot.test_blacklisted_fails_closed_when_the_blacklist_lookup_raises``).
+    Iteration is also the only shape that can see a lapsed listing whose store is not in this
+    snapshot at all, so it stays the preferred path and the one every in-process registry
+    takes.
+
+    THE FALLBACK IS T-320's FIX. ``list(blacklist)`` was previously wrapped in a bare
+    ``except`` that returned ``{}``, which made a registry that cannot be iterated
+    indistinguishable from a registry with nothing lapsed. That is the shape a Postgres-backed
+    adapter over ``app.seller_blacklist`` naturally has — a keyed read, not "materialise every
+    row into this process" — and under it NO listing ever expired and no store was ever
+    re-listed. The direction was fail-closed (the store stayed delisted) so it was a coverage
+    gap in the expiry path rather than a security hole, but "the only signal is silence" is
+    not a property an expiry path may have.
+
+    So when iteration is unavailable, the identities THIS SNAPSHOT carries are asked for
+    directly. That is strictly narrower than iteration — a lapsed listing whose store is
+    absent from this snapshot still cannot be seen — and it is the most such a registry can
+    answer. The ticket's own remedy ("iterate the blacklist rather than the registry") is a
+    no-op as written: in ``delisting_events(entries, *, blacklist=...)`` the blacklist IS the
+    registry, and this function already iterated it.
+
+    Every failure still yields nothing, which leaves the store listed: a registry that offers
+    neither iteration nor a callable ``lookup``, and a ``lookup`` that raises. Fail closed, in
+    the same direction as :func:`trust.scoring.is_blacklisted`.
+    """
+    try:
+        return list(blacklist)
+    except Exception:  # noqa: BLE001 - not iterable, or iteration raised; try the other door
+        pass
+
+    lookup = getattr(blacklist, "lookup", None)
+    if not callable(lookup):
+        return []
+
+    records: list[Any] = []
+    seen: set[str] = set()
+    for identity in identities:
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            record = lookup(identity)
+        except Exception:  # noqa: BLE001 - an unreadable entry must not release a store
+            continue
+        if record is not None:
+            records.append(record)
+    return records
+
+
+def _lapsed_reasons(blacklist: Any, as_of: Any, identities: Iterable[str] = ()) -> dict[str, str]:
     """Business identity -> reason code, for every listing still blocking but lapsed at ``as_of``.
 
     The reason travels with the identity because the expiry event has to carry the reason the
@@ -96,22 +153,11 @@ def _lapsed_reasons(blacklist: Any, as_of: Any) -> dict[str, str]:
     ``trust_score_below_threshold`` on a listing a human opened for ``manual_review`` would
     file a false record of why it ended.
 
-    Read by ITERATING the registry once, deliberately, rather than by calling
-    ``lookup(identity)`` per store. ``build_snapshot`` has already asked ``lookup`` exactly
-    once for every store on its way to ``entry["blacklisted"]``, and asking a second time
-    would double every read against a source that is a Postgres table
-    (``app.seller_blacklist``) — a real cost, and one an existing test pins by counting the
-    calls. Iteration is also the only shape that can see a lapsed listing whose store is not
-    in this snapshot at all.
-
-    Every failure yields nothing, which leaves the store listed: a registry that is not
-    iterable, one whose iteration raises, and an entry that cannot say whether it expired.
-    Fail closed, in the same direction as :func:`trust.scoring.is_blacklisted`.
+    ``identities`` are the business identities this snapshot carries; they are used only when
+    the registry cannot be iterated. See :func:`_listed_records` for why, and for the cost
+    argument that keeps iteration the preferred path.
     """
-    try:
-        records = list(blacklist)
-    except Exception:  # noqa: BLE001 - a registry that cannot answer must not release a store
-        return {}
+    records = _listed_records(blacklist, identities)
 
     lapsed: dict[str, str] = {}
     for record in records:
@@ -129,6 +175,17 @@ def _lapsed_reasons(blacklist: Any, as_of: Any) -> dict[str, str]:
     return lapsed
 
 
+class MalformedDelistingPayload(ValueError):
+    """A delisting body this module built that is not the one its kind publishes.
+
+    A programming error in THIS file and never a caller's input: every key the two published
+    bodies name is written a few lines below, from values this module owns. It is raised
+    rather than logged because a delisting the ledger will not accept is a decision that
+    silently does not get recorded, and silence is the failure mode the whole module exists
+    to remove.
+    """
+
+
 def _event(kind: str, *, store_id: str, as_of: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """One ledger event, carrying only the fields ``trust.ledger.canonical.EVENT_FIELDS`` names.
 
@@ -137,7 +194,34 @@ def _event(kind: str, *, store_id: str, as_of: Any, payload: dict[str, Any]) -> 
     the same snapshot appends nothing a second time. ``ts`` is ``as_of`` and never a clock —
     a decision taken against a snapshot belongs at that snapshot's instant, or a replay would
     time-stamp it differently from the serve.
+
+    T-333: VALIDATED AT THE PRODUCING BOUNDARY, which is what this module was the odd one out
+    for not doing. ``apps/exchange/src/auction/ledger.py``, ``apps/merchant/svc/src/codes/
+    ledger.py``, ``apps/buyer/svc/src/feedback/submission.py`` and
+    ``apps/exchange/src/retrieval/fit.py`` all call :func:`contracts.ledger.
+    validate_ledger_payload` on the way out; this one did not, so the only validation these
+    events ever received lived in a TEST — applied to events the test itself constructed,
+    which is a different object from the one production emits. That is how T-332's blank
+    ``store_id`` reached a written row.
+
+    Kept honest about what the validator can and cannot see: it is PRESENCE-only for these
+    kinds, so it would not have caught the blank id on its own. It catches the other half —
+    a published key dropped or renamed — which is the class that turns a delisting into a row
+    the auditor cannot read, and it is checked here rather than nowhere.
+
+    The import is local because ``contracts`` is a sibling package: ``services/sim/Dockerfile``
+    ships ``apps/trust/src/`` and the image's ``.pkgroot`` carries ``contracts``, but a
+    module-scope import would make this file unimportable anywhere that layout is not in
+    place, and this function is the only thing here that needs it.
     """
+    from contracts.ledger import validate_ledger_payload
+
+    problems = validate_ledger_payload(kind, payload)
+    if problems:
+        raise MalformedDelistingPayload(
+            f"refusing to emit a {kind!r} delisting for store {store_id!r} whose body is not "
+            f"the published one: {'; '.join(problems)}"
+        )
     moment = str(as_of)
     return {
         "event_id": f"{kind}:{store_id}:{moment}",
@@ -170,16 +254,37 @@ def delisting_events(
     cannot be keyed by is already denied by ``is_blacklisted``'s fail-closed path.
     """
     entries = list(entries)
-    lapsed = _lapsed_reasons(blacklist, as_of) if entries else {}
-    events: list[dict[str, Any]] = []
-    for entry in entries:
-        store_id = entry.get("store_id")
-        identity = business_identity_of(entry)
-        if store_id is None or not identity:
+    # NORMALISED FIRST, then used for both the lookup fallback and the events themselves, so
+    # the identities offered to a lookup-only registry are exactly the ones an event could be
+    # written about. See the `store_id` guard below for why blank is not a value here.
+    subjects: list[tuple[Mapping[str, Any], str, str]] = []
+    for candidate in entries:
+        raw_store_id = candidate.get("store_id")
+        identity = business_identity_of(candidate)
+        # T-332. `store_id is None` was the whole guard, while `business_identity_of` beside
+        # it does `str(v).strip() or None`. So '' and '   ' passed, were `str()`-ed into the
+        # event, and survived every layer below: `validate_ledger_payload` is presence-only
+        # for this field, `normalise_event` accepts it, and `append` writes the row. The harm
+        # is that `store.read(store_id=...)`, `read_events(store_id=...)` and
+        # `GET /events?store_id=` all match on equality, so a delisting recorded against ''
+        # is returned by none of them — the store it happened to cannot find it, and neither
+        # can an appeal. `event_id` is `f"{kind}:{store_id}:{moment}"` too, so every
+        # blank-store delisting at one instant collapses onto ONE idempotency key.
+        #
+        # Normalised the same way as the identity beside it, because a store id that is not a
+        # store id is missing evidence, and the module already declines to act on that.
+        store_id = str(raw_store_id).strip() if raw_store_id is not None else ""
+        if not store_id or not identity:
             continue
-        store_id = str(store_id)
-        identity = str(identity)
+        subjects.append((candidate, store_id, str(identity)))
 
+    lapsed = (
+        _lapsed_reasons(blacklist, as_of, [identity for _, _, identity in subjects])
+        if subjects
+        else {}
+    )
+    events: list[dict[str, Any]] = []
+    for entry, store_id, identity in subjects:
         if identity in lapsed:
             events.append(
                 _event(

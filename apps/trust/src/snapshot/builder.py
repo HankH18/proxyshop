@@ -202,6 +202,80 @@ def store_entry(store: Any, *, blacklist: Any, as_of: Any) -> dict[str, Any]:
     }
 
 
+class _ReadOnceRegistry:
+    """The caller's blacklist, asked at most once per identity for the span of ONE snapshot.
+
+    Why it exists, and it is a cost decision rather than a style one. Two readers inside a
+    single :func:`build_snapshot` want the same rows: :func:`~..scoring.is_blacklisted`, once
+    per store on the way to ``entry["blacklisted"]``, and
+    :func:`~.delisting.delisting_events`, which needs each listing's ``status`` and
+    ``expires_at`` to decide whether it lapsed. The registry is a Postgres table
+    (``app.seller_blacklist``), and the natural adapter over it answers a keyed read rather
+    than materialising every row — so before T-320 the second reader simply gave up on such a
+    registry (``list(blacklist)`` raised, a bare ``except`` swallowed it, and no listing ever
+    expired), and the obvious repair — ask ``lookup`` again per store — doubles every read.
+
+    Memoising the first reader's answers makes the second one free, so the expiry path works
+    against a lookup-only registry at NO extra cost, which is better than either. The
+    invariant "every store is asked about exactly once" is pinned by
+    ``test_snapshot.test_blacklisted_fails_closed_when_the_blacklist_lookup_raises``
+    (``assert blacklist.calls == 3``) and is what this class keeps true.
+
+    A FAILED read is cached as a failure and re-raised, not retried. That is the fail-closed
+    direction: the second reader gets the same "unknown" the first one got, rather than a
+    second chance that might answer differently and release a store mid-snapshot. It also
+    keeps a snapshot INTERNALLY CONSISTENT — the same identity cannot read blocked for
+    ``blacklisted`` and clear for the expiry rule within one served object.
+
+    The cache lives exactly as long as one ``build_snapshot`` call. Nothing here is a
+    process-wide cache: a snapshot is decided against one instant, and a registry read cached
+    past that instant would be a stale decision served as a fresh one.
+    """
+
+    __slots__ = ("_answers", "_inner")
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._answers: dict[str, tuple[bool, Any]] = {}
+
+    def lookup(self, business_identity: Any) -> Any:
+        key = str(business_identity)
+        if key not in self._answers:
+            try:
+                self._answers[key] = (True, self._inner.lookup(key))
+            except Exception as exc:  # noqa: BLE001 - cached and re-raised, never swallowed
+                self._answers[key] = (False, exc)
+        answered, value = self._answers[key]
+        if not answered:
+            raise value
+        return value
+
+    def __iter__(self) -> Any:
+        """Delegate iteration, INCLUDING its failure.
+
+        A registry that cannot be iterated must stay one — that is the condition
+        ``delisting.py``'s fallback keys on — so this deliberately does not synthesise an
+        iterator out of the cache. ``iter()`` on a non-iterable inner raises ``TypeError``
+        here exactly as it would on the inner itself.
+        """
+        return iter(self._inner)
+
+
+def _read_once(blacklist: Any) -> Any:
+    """Wrap ``blacklist`` in :class:`_ReadOnceRegistry`, or hand it back untouched.
+
+    Untouched when it exposes no callable ``lookup``: that is one of the four unknowns
+    :func:`~..scoring.is_blacklisted` fails closed on, and wrapping it would put a ``lookup``
+    on an object that has none — turning a refusal into an ``AttributeError`` raised from
+    inside the wrapper. The refusal is the documented behaviour and it stays.
+    """
+    if isinstance(blacklist, _ReadOnceRegistry):
+        return blacklist
+    if not callable(getattr(blacklist, "lookup", None)):
+        return blacklist
+    return _ReadOnceRegistry(blacklist)
+
+
 def build_snapshot(stores: Iterable[Any], *, blacklist: Any, as_of: Any) -> dict[str, Any]:
     """Build the versioned TrustSnapshot the exchange consumes.
 
@@ -232,9 +306,10 @@ def build_snapshot(stores: Iterable[Any], *, blacklist: Any, as_of: Any) -> dict
         before. Nothing here mutates the registry or writes anything; see
         :mod:`.delisting` for why the decision is pure.
     """
+    registry = _read_once(blacklist)
     entries: dict[str, dict[str, Any]] = {}
     for store in stores:
-        entry = store_entry(store, blacklist=blacklist, as_of=as_of)
+        entry = store_entry(store, blacklist=registry, as_of=as_of)
         key = entry["store_id"]
         if key is None:
             continue
@@ -245,5 +320,5 @@ def build_snapshot(stores: Iterable[Any], *, blacklist: Any, as_of: Any) -> dict
         "dimensions": list(TRUST_DIMENSIONS),
         "as_of": as_of,
         "stores": entries,
-        "delistings": delisting_events(entries.values(), blacklist=blacklist, as_of=as_of),
+        "delistings": delisting_events(entries.values(), blacklist=registry, as_of=as_of),
     }

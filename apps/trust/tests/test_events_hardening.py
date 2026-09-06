@@ -756,3 +756,74 @@ def test_the_writer_appends_to_the_real_ledger_as_trust_rw(
         assert store.verify()["ok"] is True
     finally:
         store.close()
+
+
+@pytest.mark.docker
+def test_the_writer_connects_as_trust_rw_when_both_dsn_variables_are_set(
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_migrated: str,
+    worker_database: str,
+    worker_index: int,
+) -> None:
+    """T-181: the ORDER, graded against a real connection instead of against a string.
+
+    Every other precedence test in this file grades what ``_resolve_dsn`` HANDS BACK, and the
+    one that grades a real connection isolates the environment down to a single variable
+    first — so it defends the OMISSION T-151 filed (the per-role variable was not read at
+    all) and never the ORDER (which of two set variables wins). That gap is what T-181 is.
+
+    The arrangement below is the one a real deployment presents, and the reason it is not
+    hypothetical: three of the four services hand this process ``PROXYSHOP_PG_DSN_APP``, and
+    a trust deployment additionally sets ``PROXYSHOP_PG_DSN_TRUST_RW``. Both are set, both
+    are live, both reach the same database — and the only thing that decides which principal
+    the ledger writer ends up holding is ``DEFAULT_DSN_ENV``'s order.
+
+    WHY THIS IS NOT THE STRING TEST AGAIN. ``test_the_per_role_ledger_dsn_outranks_the_
+    generic_app_dsn`` sets both too, and asserts on the returned string. It cannot see the
+    consequence: which grant set the writer actually holds. ``app`` and ``trust_rw`` are
+    genuinely different grants (0004 gives ``app`` ``SELECT, INSERT`` on ``ledger`` and full
+    DML on ``sealed``; ``trust_rw`` gets full DML on ``ledger`` and nothing in ``sealed``),
+    so this asks Postgres which one it is talking to and reads a ``sealed`` privilege back as
+    the discriminator — a value that differs between the two roles and would therefore be
+    wrong, not merely absent, if the order flipped.
+
+    RED UNDER THE SABOTAGE THIS EXISTS FOR: reorder ``DEFAULT_DSN_ENV`` to put
+    ``PROXYSHOP_PG_DSN_APP`` ahead of ``PROXYSHOP_PG_DSN_TRUST_RW`` (the T-151 defect,
+    re-shipped) and ``current_user`` reads ``app`` here. No expectation in this test is read
+    off ``DEFAULT_DSN_ENV``: ``trust_rw`` is named because ``proxyshop_support.postgres.ROLES``
+    and D5 designate it for this writer, which is an authority outside the tuple under test.
+    """
+    from apps.trust.src.events.pg import PostgresEventStore
+    from proxyshop_support.postgres import ROLES, role_dsn
+
+    _isolate_ledger_dsn_env(monkeypatch)
+    trust_rw_dsn = role_dsn("trust_rw", worker_index, database=worker_database)
+    app_dsn = role_dsn("app", worker_index, database=worker_database)
+    assert trust_rw_dsn != app_dsn, (
+        "the two role DSNs are indistinguishable, so this test could not tell which one the "
+        "writer used even if it connected"
+    )
+    monkeypatch.setenv(ROLES["trust_rw"][0], trust_rw_dsn)
+    monkeypatch.setenv(ROLES["app"][0], app_dsn)
+
+    store = PostgresEventStore()
+    try:
+        with store._connection() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT current_user")
+            connected_as = cursor.fetchone()[0]
+            cursor.execute("SELECT has_schema_privilege(current_user, 'sealed', 'USAGE')")
+            may_touch_sealed = cursor.fetchone()[0]
+    finally:
+        store.close()
+
+    assert connected_as == "trust_rw", (
+        f"with BOTH {ROLES['trust_rw'][0]} and {ROLES['app'][0]} set — the arrangement a real "
+        f"deployment presents — the ledger writer opened its connection as {connected_as!r}. "
+        f"D5 grants this writer trust_rw; falling through to the generic app role is the "
+        f"privilege confusion T-151 was filed as, and it is silent: the write succeeds."
+    )
+    assert not may_touch_sealed, (
+        f"the principal the writer resolved holds USAGE on `sealed`, which trust_rw is not "
+        f"granted and `app` is. current_user reported {connected_as!r}, so either the role "
+        f"name and its grants disagree or this connection is not the one it claims to be."
+    )

@@ -112,15 +112,21 @@ _NEGATION_WINDOW = 4
 def _reads_a_status_code(node: ast.AST, tainted: frozenset[str]) -> bool:
     """True when this expression reads a response status **however it is spelled**.
 
-    Three spellings, because the substring check this replaced saw only the first:
+    Four spellings, because the substring check this replaced saw only the first:
 
     * the attribute itself — ``response.status_code``;
     * the attribute name as a string — ``getattr(response, "status_code")``;
-    * a local that was ASSIGNED from one — ``code`` after ``code = response.status_code``.
+    * a local that was ASSIGNED from one — ``code`` after ``code = response.status_code``;
+    * an ATTRIBUTE that was assigned from one — ``self.code`` after
+      ``self.code = response.status_code`` (T-319). It is matched by its dotted spelling and
+      never by its base, which is what keeps ``self`` itself untainted.
     """
     for child in ast.walk(node):
-        if isinstance(child, ast.Attribute) and child.attr == _STATUS_ATTRIBUTE:
-            return True
+        if isinstance(child, ast.Attribute):
+            if child.attr == _STATUS_ATTRIBUTE:
+                return True
+            if ast.unparse(child) in tainted:
+                return True
         if isinstance(child, ast.Constant) and child.value == _STATUS_ATTRIBUTE:
             return True
         if isinstance(child, ast.Name) and child.id in tainted:
@@ -128,30 +134,136 @@ def _reads_a_status_code(node: ast.AST, tainted: frozenset[str]) -> bool:
     return False
 
 
+def _bound_names(target: ast.expr) -> set[str]:
+    """The names a binding target actually BINDS — never the object it binds THROUGH.
+
+    T-319 (over-taint half). This used to be ``ast.walk(target)`` collecting every ``Name``,
+    which made ``self.code = response.status_code`` taint the bare name ``self``; every later
+    ``if self.<anything>`` then read as a branch on a status the test can never reach. A false
+    red on correct code is the direction that gets a gate deleted rather than fixed.
+
+    So: a bare name binds itself, a tuple/list/starred pattern binds the names inside it, and
+    an ATTRIBUTE target binds its own DOTTED spelling and nothing else — ``self.code = x``
+    rebinds an attribute, and ``self`` is exactly as it was. A subscript target
+    (``codes[0] = x``) binds nothing this analysis can name, so it binds nothing.
+    """
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _bound_names(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return {name for element in target.elts for name in _bound_names(element)}
+    if isinstance(target, ast.Attribute):
+        return {ast.unparse(target)}
+    return set()
+
+
+def _value_bindings(tree: ast.AST) -> list[tuple[ast.expr, ast.expr]]:
+    """Every ``(target, value)`` pair in ``tree`` where the value FLOWS INTO the target.
+
+    T-319 (missed-binding half). The walk this replaces followed ``Assign``, ``AnnAssign``,
+    ``AugAssign`` and ``NamedExpr`` and stopped, so three other binding forms carried the
+    status code past it while leaving the dead 503 arm exactly where it was:
+
+    * ``for code in (response.status_code,):`` — an ``ast.For`` target is not an assignment
+      node, so the loop variable was never tainted;
+    * ``with opened(response.status_code) as code:`` — same, for a ``withitem``; and
+    * a comprehension's ``for`` clause, which is the same shape as the first in an expression.
+
+    None of these is an evasion someone has to choose to write: a reviewer refactoring a test
+    into a loop or a context manager trips them by accident. The interprocedural case — a
+    helper's parameter — is handled separately in :func:`_names_holding_a_status_code`,
+    because it needs the call graph rather than a syntactic pair.
+    """
+    bindings: list[tuple[ast.expr, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            bindings.extend((target, node.value) for target in node.targets)
+        elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
+            if node.value is not None:
+                bindings.append((node.target, node.value))
+        elif isinstance(node, ast.For | ast.AsyncFor):
+            bindings.append((node.target, node.iter))
+        elif isinstance(node, ast.With | ast.AsyncWith):
+            bindings.extend(
+                (item.optional_vars, item.context_expr)
+                for item in node.items
+                if item.optional_vars is not None
+            )
+        elif isinstance(node, ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp):
+            bindings.extend((clause.target, clause.iter) for clause in node.generators)
+    return bindings
+
+
+def _parameter_bindings(tree: ast.AST) -> list[tuple[str, ast.expr]]:
+    """``(parameter name, argument expression)`` for every call to a function defined here.
+
+    T-319 (interprocedural half). ``def _arm(c): ...`` / ``_arm(response.status_code)`` kept
+    the dead branch and evaded the analysis entirely, because taint stopped at the call. This
+    is deliberately the SMALL version of interprocedural propagation and not a general one:
+    only calls whose callee is a plain name defined in this same tree, matched positionally
+    and by keyword. That is enough for the shape the ticket measures, and it is bounded — the
+    ticket's own reason for not fixing this here was that a general taint analysis risks false
+    positives across the whole suite, and a rule that cannot see past a locally-defined
+    function cannot reach the whole suite.
+
+    Defaults are not followed: a parameter's default is written at the definition, not passed
+    at the call, and a status code cannot be a literal default.
+    """
+    functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    bindings: list[tuple[str, ast.expr]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        callee = functions.get(node.func.id)
+        if callee is None:
+            continue
+        positional = [*callee.args.posonlyargs, *callee.args.args]
+        for index, argument in enumerate(node.args):
+            if index < len(positional):
+                bindings.append((positional[index].arg, argument))
+            elif callee.args.vararg is not None:
+                bindings.append((callee.args.vararg.arg, argument))
+        named = {argument.arg for argument in (*positional, *callee.args.kwonlyargs)}
+        for keyword in node.keywords:
+            if keyword.arg in named:
+                bindings.append((keyword.arg, keyword.value))
+            elif keyword.arg is None and callee.args.kwarg is not None:
+                bindings.append((callee.args.kwarg.arg, keyword.value))
+    return bindings
+
+
 def _names_holding_a_status_code(tree: ast.AST) -> frozenset[str]:
-    """Every local name that ends up holding a status code, to a fixed point.
+    """Every name that ends up holding a status code, to a fixed point.
 
     Iterated rather than single-pass so a chain — ``code = response.status_code`` then
-    ``alias = code`` — is followed all the way, in either source order.
+    ``alias = code`` — is followed all the way, in either source order, and so a value that
+    reaches a helper's parameter through one call can reach a second helper from there.
+
+    "Name" includes a dotted attribute spelling (``self.code``); see :func:`_bound_names` for
+    why the object it hangs off is deliberately NOT one.
     """
+    value_bindings = _value_bindings(tree)
+    parameter_bindings = _parameter_bindings(tree)
     tainted: set[str] = set()
     while True:
         grew = False
-        for node in ast.walk(tree):
-            targets: list[ast.expr]
-            if isinstance(node, ast.Assign):
-                targets, value = list(node.targets), node.value
-            elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.NamedExpr):
-                targets, value = [node.target], node.value  # type: ignore[list-item]
-            else:
+        for target, value in value_bindings:
+            if not _reads_a_status_code(value, frozenset(tainted)):
                 continue
-            if value is None or not _reads_a_status_code(value, frozenset(tainted)):
+            for name in _bound_names(target) - tainted:
+                tainted.add(name)
+                grew = True
+        for parameter, argument in parameter_bindings:
+            if parameter in tainted:
                 continue
-            for target in targets:
-                for name in ast.walk(target):
-                    if isinstance(name, ast.Name) and name.id not in tainted:
-                        tainted.add(name.id)
-                        grew = True
+            if _reads_a_status_code(argument, frozenset(tainted)):
+                tainted.add(parameter)
+                grew = True
         if not grew:
             return frozenset(tainted)
 
@@ -310,6 +422,24 @@ def test_the_elected_primary_binding_shim_has_exactly_one_home() -> None:
     bodies = {path.read_bytes() for path in copies}
     real_files = {path.resolve() for path in copies}
 
+    # T-290 FIX, and the assertion this gate was missing. `bodies` was computed here and
+    # reached nothing but an f-string, so T-167's SECOND half — "nothing enforces that the
+    # copies stay identical" — was graded by no assertion at all. It is stated first because
+    # divergence is the more dangerous of the two states: two copies that AGREE are a
+    # maintenance smell, while two that have drifted are the module-identity bug back in one
+    # feature package and not the others, which is the failure T-167 was filed for.
+    #
+    # Vacuous today, deliberately: the shim was hoisted to `_shared/_binding.py`, so `copies`
+    # holds one path and one body. That is the point — it has to be here BEFORE a fourth copy
+    # reappears, or the copy arrives and nothing says the bodies drifted.
+    assert len(bodies) <= 1, (
+        f"the binding shim exists as {len(copies)} paths holding {len(bodies)} DIFFERENT "
+        f"bodies ({[str(p.relative_to(REPO_ROOT)) for p in copies]}). A fix applied to one "
+        f"copy and not the others is the dual-spelling module-identity bug reintroduced in "
+        f"whichever feature package was missed — and it is silent, because each package "
+        f"imports its own copy and neither one errors."
+    )
+
     assert len(real_files) <= 1, (
         f"the elected-primary binding shim exists as {len(real_files)} independent files "
         f"({[str(p.relative_to(REPO_ROOT)) for p in copies]}), holding "
@@ -322,24 +452,55 @@ def test_the_elected_primary_binding_shim_has_exactly_one_home() -> None:
 # ======================================================================================
 # T-181 — the DSN precedence order, defended at more than one point (NOT an xfail)
 # ======================================================================================
+def _granted_ledger_dsn_precedence() -> tuple[str, ...]:
+    """The resolution order D5 and the role registry imply, read from OUTSIDE the tuple.
+
+    T-289 FIX, and the whole point of this function is where the names come from. The two
+    that matter are taken from ``proxyshop_support.postgres.ROLES`` — ``trust_rw`` is the
+    role D5 grants the ledger writer, ``app`` is the generic one three of the four services
+    hand this process — so an expectation built here CANNOT move when ``DEFAULT_DSN_ENV``
+    moves. That is the property the derived walk below lacks and this one has.
+
+    ``PROXYSHOP_LEDGER_DSN`` heads the list as the documented explicit override
+    (``apps/trust/compose.yaml`` sets it to point the writer somewhere without disturbing the
+    per-role variables). It is a literal because it designates no role and so has no entry in
+    the registry to be read from; its POSITION is separately pinned by
+    ``test_events_hardening.test_an_explicit_ledger_dsn_override_still_outranks_the_per_role_
+    variable``, which is where a claim about it belongs.
+    """
+    from proxyshop_support.postgres import ROLES
+
+    return ("PROXYSHOP_LEDGER_DSN", ROLES["trust_rw"][0], ROLES["app"][0])
+
+
 def test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T-181's missing second precedence assertion. Green today, deliberately.
+    """T-181's missing second precedence assertion, in the two halves it needs.
 
     T-181 records that the ORDER of ``DEFAULT_DSN_ENV`` rests on a single test: reordering
-    the tuple, and walking a correct tuple in the wrong order, each produce exactly one red.
-    The live connected-principal test cannot see order at all — it clears every DSN variable
-    and sets one.
+    the tuple (S3a), and walking a correct tuple in the wrong order (S3b), each produce
+    exactly one red. The live connected-principal test cannot see order at all — it clears
+    every DSN variable and sets one.
 
-    This is the second assertion, and it is derived rather than enumerated: for EVERY pair
-    ``(earlier, later)`` in the resolution order, setting both must resolve to ``earlier``.
-    That covers the pairs the existing test does not, and it grades behaviour rather than
-    the tuple's source text, so it survives a reordering only if the resolution really does
-    walk the tuple in order.
+    **The walk (S3b).** The first loop is derived rather than enumerated: for every pair
+    ``(earlier, later)`` in ``DEFAULT_DSN_ENV``, setting both must resolve to ``earlier``.
+    It grades behaviour rather than source text, so it survives only if resolution really
+    does walk the tuple in order — and it covers every pair, including any variable added to
+    the tuple later.
 
-    Not marked xfail: the behaviour it asserts is already correct, and T-181 is a coverage
-    gap rather than a live defect. It cannot have a red gate for that reason.
+    **The order (S3a) — added by T-289, which is what that loop cannot see.** An expectation
+    read off ``DEFAULT_DSN_ENV`` moves when ``DEFAULT_DSN_ENV`` moves: reorder the tuple to
+    put ``PROXYSHOP_PG_DSN_APP`` ahead of ``PROXYSHOP_PG_DSN_TRUST_RW`` — the T-151 defect,
+    re-shipped — and the first loop's expectation reorders with it and stays GREEN while the
+    writer starts resolving the app principal. The second loop asks the same behavioural
+    question against :func:`_granted_ledger_dsn_precedence`, whose names come from the ROLE
+    REGISTRY and D5's grant rather than from the tuple under test, so it goes red under
+    exactly that reorder.
+
+    Not marked xfail: the behaviour both loops assert is correct on this branch. T-181 is a
+    coverage gap rather than a live defect, so it cannot have a red gate — the gate that CAN
+    be red is T-289's, which measures whether this test catches S3a at all.
     """
     from apps.trust.src.events.pg import DEFAULT_DSN_ENV, PostgresEventStore
 
@@ -354,6 +515,29 @@ def test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one(
             assert resolved == f"postgresql://{earlier.lower()}@db.example:5432/w0", (
                 f"with {earlier} and {later} both set the writer resolved {resolved!r}; "
                 f"{earlier} is listed first in DEFAULT_DSN_ENV and must win"
+            )
+
+    granted = _granted_ledger_dsn_precedence()
+    assert set(granted) <= set(DEFAULT_DSN_ENV), (
+        f"the writer no longer reads {sorted(set(granted) - set(DEFAULT_DSN_ENV))} at all, "
+        f"so the order this half grades is not one the writer has: {list(DEFAULT_DSN_ENV)}"
+    )
+    for index, earlier in enumerate(granted):
+        for later in granted[index + 1 :]:
+            for name in (*DEFAULT_DSN_ENV, *granted):
+                monkeypatch.delenv(name, raising=False)
+            monkeypatch.setenv(earlier, f"postgresql://{earlier.lower()}@db.example:5432/w0")
+            monkeypatch.setenv(later, f"postgresql://{later.lower()}@db.example:5432/w0")
+
+            resolved = PostgresEventStore()._resolve_dsn()
+            assert resolved == f"postgresql://{earlier.lower()}@db.example:5432/w0", (
+                f"with {earlier} and {later} both set the ledger writer resolved {resolved!r}. "
+                f"{earlier} must win, and that expectation is NOT read off DEFAULT_DSN_ENV — "
+                f"it comes from proxyshop_support.postgres.ROLES and D5's grant, so it does "
+                f"not move when the tuple moves. DEFAULT_DSN_ENV is currently "
+                f"{list(DEFAULT_DSN_ENV)}; if PROXYSHOP_PG_DSN_APP now precedes "
+                f"PROXYSHOP_PG_DSN_TRUST_RW there, that is T-151 re-shipped and the writer is "
+                f"connecting as a role the deployment did not grant it."
             )
 
 
@@ -799,22 +983,77 @@ def test_the_mismatch_return_gloss_gate_is_not_evadable_by_rewording_the_inversi
 # ======================================================================================
 # T-212 — a database-backed test with no docker marker
 # ======================================================================================
+def _t291_fixture_graph() -> tuple[dict[str, list[str]], set[str], dict[str, str]]:
+    """``(fixture -> its parameters, fixtures that call the reachability guard, homes)``.
+
+    Read out of the conftest and fixture modules this package actually loads, so the roster
+    below is DERIVED from the repo rather than typed next to it.
+    """
+    files = [
+        REPO_ROOT / "conftest.py",
+        REPO_ROOT / "apps" / "trust" / "tests" / "conftest.py",
+        *sorted((REPO_ROOT / "apps" / "trust" / "tests").glob("_fixtures_*.py")),
+    ]
+    params: dict[str, list[str]] = {}
+    seeds: set[str] = set()
+    homes: dict[str, str] = {}
+    for path in files:
+        if not path.is_file():
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            decorators = [ast.unparse(item) for item in node.decorator_list]
+            if not any("fixture" in text for text in decorators):
+                continue
+            name = node.name
+            for text in decorators:
+                named = re.search(r"name=[\'\"]([^\'\"]+)", text)
+                if named:
+                    name = named.group(1)
+            params[name] = [argument.arg for argument in node.args.args]
+            homes[name] = str(path.relative_to(REPO_ROOT))
+            body = ast.unparse(node)
+            if "_require_services" in body or "_require(" in body:
+                seeds.add(name)
+    return params, seeds, homes
+
+
+def _t291_datastore_fixtures() -> dict[str, str]:
+    """Every PUBLIC fixture that transitively depends on the per-service reachability guard."""
+    params, seeds, homes = _t291_fixture_graph()
+    closure = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for fixture, requested in params.items():
+            if fixture in closure:
+                continue
+            if any(name in closure for name in requested):
+                closure.add(fixture)
+                changed = True
+    return {name: homes[name] for name in closure if not name.startswith("_")}
+
+
 #: Fixtures that open, migrate or clean a real Postgres database. A test requesting any of
 #: them touches the datastore and must therefore carry ``@pytest.mark.docker``, which is
 #: what T-109's per-service reachability inference keys on.
-_DATASTORE_FIXTURES = frozenset(
-    {
-        "ledger_migrated",
-        "ledger_clean",
-        "worker_database",
-        "pg_admin",
-        "pg_role",
-        "events_store",
-        "events_client",
-        "redis_client",
-        "neo4j_driver",
-    }
-)
+#:
+#: T-291 FIX. This was nine names typed here by hand, and the ticket is about how the roster
+#: is OBTAINED rather than what it holds: a fixture that opens a real database under a tenth
+#: name was invisible to the gate below, and six already were (``events_dsn``,
+#: ``events_running``, ``events_service``, ``ledger_roles``, ``ledger_second_database``,
+#: ``neo4j_session``). It is now COMPUTED from the fixture graph the package actually loads —
+#: every public fixture that transitively reaches the per-service reachability guard, which
+#: is this repo's own definition of "this touches a datastore" — so a fixture added next week
+#: is in the roster the day it lands.
+#:
+#: Evaluated at import time, once. ``test_t291_the_derived_fixture_roster_is_armed`` is what
+#: makes a broken derivation loud: an empty roster would make the gate below pass by matching
+#: nothing, which is the fail-open direction, so that control asserts the graph is real
+#: (>= 20 fixtures parsed, ``worker_database`` still reaching the guard) rather than trusting
+#: the derivation to have worked.
+_DATASTORE_FIXTURES = frozenset(_t291_datastore_fixtures())
 
 
 # JUSTIFY-TEST-EDIT (T-212) — xfail marker REMOVED because the defect it encoded is fixed.
@@ -882,14 +1121,35 @@ def test_every_database_backed_hardening_test_carries_the_docker_marker() -> Non
 #: ``db/migrations/0002``, in the protocol schema and in ``trust.events.LEDGER_EVENT_KINDS``.
 _BLACKLIST_EVENT_KINDS = ("blacklisted", "blacklist_expired")
 
-#: A string literal used as an event KIND, in any of the spellings this repo emits events
-#: with: a ``"kind": "blacklisted"`` dict entry, a ``kind="blacklisted"`` keyword, or a
-#: module constant named ``*_KIND``.
-_KIND_EMISSION = re.compile(
-    r"""(["']kind["']\s*:\s*["'](?:blacklisted|blacklist_expired)["'])"""
-    r"""|(\bkind\s*=\s*["'](?:blacklisted|blacklist_expired)["'])"""
-    r"""|(_KIND\s*(?::[^=\n]+)?=\s*["'](?:blacklisted|blacklist_expired)["'])"""
-)
+
+def _KIND_EMISSION(source: str) -> bool:  # noqa: N802 - the name this gate has always had
+    """Does ``source`` NAME a delisting kind as a value? Read from the AST, never from text.
+
+    T-275 FIX. This was a whole-file regex over three quoted spellings, and it failed in both
+    directions at once:
+
+    * it matched only QUOTED literals, so this repo's own ledger-writer house style —
+      ``kind=LedgerEventKind.blacklisted``, live at ``apps/buyer/svc/src/feedback/
+      submission.py`` for the ``feedback`` kind — did not match. A correct fix for T-237
+      written that way would have left a ``strict=True`` gate red forever, with no reachable
+      green; and
+    * it was applied to file TEXT, so a COMMENT, a docstring or an unrelated string literal
+      naming the kind satisfied it. A gate that can be closed by writing a sentence is not a
+      gate.
+
+    Both are fixed by reading the four spellings this repo actually emits with off the AST,
+    which is what :func:`_t302_kinds_named_in` already does for T-302's sweep — a
+    ``{"kind": "x"}`` dict entry, a ``kind="x"`` keyword, a ``*_KIND = "x"`` module constant,
+    and ``LedgerEventKind.x``. It is deliberately ONE detector rather than two: two would be
+    two things to drift, and T-302's armed control already measures on every run that
+    comment, docstring and string-literal samples return nothing from it.
+
+    The forward reference is intentional. ``_t302_kinds_named_in`` is defined with the T-302
+    gate it was written for, ~3400 lines below; a module-level name in a function body is
+    resolved at CALL time, so the ordering is fine and the definition stays next to the
+    ticket that explains it.
+    """
+    return bool(_t302_kinds_named_in(source) & set(_BLACKLIST_EVENT_KINDS))
 
 
 def test_a_sub_threshold_trust_score_produces_a_blacklisted_ledger_event() -> None:
@@ -938,7 +1198,11 @@ def test_a_sub_threshold_trust_score_produces_a_blacklisted_ledger_event() -> No
     emitters = [
         str(path.relative_to(REPO_ROOT))
         for path in _product_python_files()
-        if _KIND_EMISSION.search(path.read_text(encoding="utf-8", errors="ignore"))
+        # `_KIND_EMISSION(...)`, not `.search(...)`: T-275's fix replaced the whole-file regex
+        # with an AST reader (see its definition). No assertion in this test changed — the
+        # question it asks, "does any product module emit a delisting kind", is the same one;
+        # what changed is that the answer can no longer be produced by a comment.
+        if _KIND_EMISSION(path.read_text(encoding="utf-8", errors="ignore"))
     ]
 
     assert emitters, (
@@ -3401,15 +3665,13 @@ def test_t332_the_blank_store_id_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-332: delisting.py guards `store_id is None` but not '' or '   ', while the sibling "
-        "identity path is normalised, so a blacklisted event naming NO STORE is emitted, "
-        "validates, appends, and is then invisible to every store_id-filtered read the "
-        "auditor it exists for would use; remove this marker with the fix"
-    ),
-)
+# FIXED (T-332). `delisting_events` now normalises the store id the same way the identity
+# beside it has always been normalised — `str(v).strip()`, and a blank result is skipped — so
+# '' , '   ' and '\t' produce no event at all instead of an event naming no store. Measured:
+# all three samples below emitted a `blacklisted` event before the change and emit nothing
+# after, while `store-real` (the armed control) is unaffected. The top-level `store_id` and
+# the payload copy both come from the one normalised local, so the field the described
+# readers actually filter on is the field that was fixed.
 def test_t332_a_delisting_event_never_names_a_store_that_is_not_a_store() -> None:
     """A blacklisting nobody can find is a blacklisting that did not happen, for an auditor.
 
@@ -3509,15 +3771,12 @@ def test_t333_the_producer_validation_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-333: apps/trust/src/snapshot/delisting.py builds blacklisted / blacklist_expired "
-        "ledger events and never calls validate_ledger_payload, while four sibling producing "
-        "boundaries do — so nothing checks its payloads on the production path, which is how "
-        "T-332's blank store_id reaches a written row; remove this marker with the fix"
-    ),
-)
+# FIXED (T-333). `delisting.py::_event` now calls `contracts.ledger.validate_ledger_payload`
+# on every body it builds and raises `MalformedDelistingPayload` when the body is not the
+# published one, which is the same shape the four sibling producing boundaries have. Measured:
+# `_t_lane_calls(source, "validate_ledger_payload")` — an AST call-site read, so a docstring
+# mention could not satisfy it — went False to True, and the armed control still measures that
+# all four siblings call it and that a commented-out call does not count.
 def test_t333_the_delisting_producer_validates_what_it_produces() -> None:
     """The producing boundary that leaks is the one that does not validate.
 
@@ -3628,15 +3887,21 @@ def test_t320_the_expiry_path_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-320: _lapsed_reasons reads the registry with `list(blacklist)`, so a lookup-only "
-        "implementation — the shape a Postgres-backed app.seller_blacklist adapter has — "
-        "yields zero blacklist_expired events and no listing is ever re-opened; remove this "
-        "marker with the fix"
-    ),
-)
+# FIXED (T-320). `_lapsed_reasons` now goes through `_listed_records`, which prefers
+# iteration and falls back to `lookup(identity)` for the identities THIS SNAPSHOT carries when
+# iteration is unavailable. Measured: the lookup-only double below produced no events at all
+# before and produces the `blacklist_expired` after, carrying the reason the listing was
+# opened with.
+#
+# THE COST PIN THIS GATE WARNS ABOUT IS INTACT, AND NOT BY LUCK. A bare fallback made
+# `test_snapshot.test_blacklisted_fails_closed_when_the_blacklist_lookup_raises` read
+# `calls == 6` — measured, not predicted, because `_UnavailableBlacklist` is not iterable
+# either, so the fallback fired there too and re-asked all three identities. Rather than edit
+# that assertion, `build_snapshot` now wraps the registry in `_ReadOnceRegistry`, which
+# memoises each identity's answer (failures included) for the span of one snapshot. The second
+# reader is served from the first reader's answers, so the expiry path works against a
+# lookup-only registry at NO extra read and `assert blacklist.calls == 3` stays green
+# untouched.
 def test_t320_a_lapsed_listing_expires_even_when_the_registry_only_answers_lookups() -> None:
     """The expiry path is the only route back off the blacklist, and it needs iteration.
 
@@ -3723,16 +3988,13 @@ def test_t319_the_taint_evasion_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-319: _names_holding_a_status_code propagates taint only through Assign/AnnAssign/"
-        "AugAssign/NamedExpr, so a for-loop target, a helper parameter and a with-statement "
-        "target all keep the dead 503 arm while T-166's gate reports it gone — a live "
-        "regression guard that passes on the defect it exists to catch; remove this marker "
-        "with the fix"
-    ),
-)
+# FIXED (T-319, missed-binding half). `_names_holding_a_status_code` now drives off
+# `_value_bindings` (Assign/AnnAssign/AugAssign/NamedExpr PLUS For/AsyncFor, With/AsyncWith
+# and comprehension `for` clauses) and `_parameter_bindings` (calls to functions defined in
+# the same tree, matched positionally and by keyword). Measured: all three evasions below
+# report the dead branch where every one was green before, the T-166 gate and its adversarial
+# companion still pass, and `assert response.status_code == 200` — the shape a genuine fix
+# has — still yields no branches, so the analysis is not red against its own fix.
 def test_t319_the_status_code_analysis_follows_every_binding_that_carries_the_value() -> None:
     """A gate that fails open under ``strict=True`` retires its own ticket. That is the harm.
 
@@ -3764,15 +4026,12 @@ def test_t319_the_status_code_analysis_follows_every_binding_that_carries_the_va
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-319 (over-taint half): _names_holding_a_status_code walks the whole assignment "
-        "target with ast.walk, so `self.code = response.status_code` taints the bare name "
-        "`self` and every later `if self.<anything>` reads as a status-code branch; remove "
-        "this marker with the fix"
-    ),
-)
+# FIXED (T-319, over-taint half). Binding targets now go through `_bound_names`, which binds
+# a bare name, the names inside a tuple/list/starred pattern, and — for an attribute target —
+# its DOTTED spelling and nothing else. Measured: `self.code = response.status_code` yields
+# taint `{'self.code'}` where it used to yield `{'self', 'self.code'}`, `if self.ok:` is no
+# longer reported as a status-code branch, and `if self.code == 503:` still IS — so the
+# false positive went away without the true positive going with it.
 def test_t319_the_status_code_analysis_does_not_taint_the_object_it_assigns_through() -> None:
     """The same walk that misses four bindings also invents one, in the expensive direction.
 
@@ -3787,6 +4046,84 @@ def test_t319_the_status_code_analysis_does_not_taint_the_object_it_assigns_thro
         f"assigning through an attribute tainted the object as well: {sorted(tainted)}. "
         f"`self` does not hold a status code, and treating it as though it does makes every "
         f"later `if self.<x>` a false positive."
+    )
+
+
+def test_the_status_code_analysis_is_attacked_from_both_directions() -> None:
+    """T-319's fix, attacked. A widened taint analysis nobody attacked is not a fix.
+
+    Two lists, and BOTH have to hold, because T-319 is a defect in two directions at once and
+    a change that fixed either one alone would be a regression in the other.
+
+    ``caught`` is the widened reach: the three binding forms the ticket measured, plus two
+    the same mechanism now covers for free — a comprehension's ``for`` clause and a value
+    reaching a second helper through a first — plus the attribute chain that motivated the
+    over-taint fix. Every one keeps the dead 503 arm verbatim and only moves where the status
+    code is BOUND.
+
+    ``clean`` is the price of that reach, and it is the half that matters more. An analysis
+    that flagged everything would make T-319's gate green while turning T-166's live guard
+    into a source of false reds on correct code — which is the direction the ticket says is
+    why the lane that found this did not fix it. ``if self.ok:`` after
+    ``self.code = response.status_code`` is the exact false positive that used to fire.
+    """
+    caught = {
+        "a single-element for-loop": (
+            "for code in (response.status_code,):\n    if code == 503:\n        pass\n"
+        ),
+        "a helper's parameter": (
+            "def _arm(c):\n    if c == 503:\n        pass\n_arm(response.status_code)\n"
+        ),
+        "a with-statement target": (
+            "with opened(response.status_code) as code:\n    if code == 503:\n        pass\n"
+        ),
+        "a keyword argument": (
+            "def _arm(*, c):\n    if c == 503:\n        pass\n_arm(c=response.status_code)\n"
+        ),
+        "two helper hops": (
+            "def a(x):\n    return b(x)\ndef b(y):\n    if y == 503:\n        pass\n"
+            "a(response.status_code)\n"
+        ),
+        "an attribute the value was stored on": (
+            "self.code = response.status_code\nif self.code == 503:\n    pass\n"
+        ),
+    }
+    missed = [
+        label
+        for label, source in caught.items()
+        if not _branches_on_a_status_code(ast.parse(textwrap.dedent(source)))
+    ]
+    assert missed == [], (
+        f"these rewrites keep the unreachable 503 branch and the analysis does not see it: "
+        f"{missed}. Each binds the status code by a form the taint walk must follow, or "
+        f"T-166's live regression guard reports a dead branch as gone while it is still there."
+    )
+
+    clean = {
+        "the shape a real fix has": "assert response.status_code == 200, response.text\n",
+        "an unrelated attribute on the same object": (
+            "self.code = response.status_code\nif self.ok:\n    pass\n"
+        ),
+        "an unrelated local that happens to compare to 503": (
+            "n = len(items)\nif n == 503:\n    pass\n"
+        ),
+        "a loop over something else entirely": (
+            "for item in items:\n    if item == 503:\n        pass\n"
+        ),
+        "a call to a function this tree does not define": (
+            "def _arm(c):\n    if c == 503:\n        pass\n_arm(len(items))\n"
+        ),
+    }
+    flagged = {
+        label: _branches_on_a_status_code(ast.parse(textwrap.dedent(source)))
+        for label, source in clean.items()
+        if _branches_on_a_status_code(ast.parse(textwrap.dedent(source)))
+    }
+    assert flagged == {}, (
+        f"the analysis reports a status-code branch in code that has none: {flagged}. A false "
+        f"red on correct code is the direction that gets a gate deleted rather than fixed, "
+        f"and it is the reason T-319 was filed as its own ticket instead of being widened in "
+        f"place."
     )
 
 
@@ -3894,15 +4231,13 @@ def test_t289_the_dsn_reordering_sabotage_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-289: test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one derives "
-        "its expectation from DEFAULT_DSN_ENV itself, so reordering the tuple reorders the "
-        "expectation with it and the derived grader that presents itself as the comprehensive "
-        "precedence defence catches ZERO of sabotage S3a; remove this marker with the fix"
-    ),
-)
+# FIXED (T-289). `test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one` now
+# carries a SECOND behavioural walk whose order comes from `_granted_ledger_dsn_precedence()`
+# — `proxyshop_support.postgres.ROLES` plus D5's grant, an authority outside the tuple under
+# test — so it no longer reorders with `DEFAULT_DSN_ENV`. Measured: `_t289_reds_under(
+# _t289_reordered())` now names that test, where before the reorder left it green. The
+# original derived walk is untouched and still grades S3b for every pair; the new one is
+# appended beside it, so nothing that was covered stopped being covered.
 def test_t289_reordering_the_dsn_precedence_tuple_turns_some_grader_red() -> None:
     """An expectation read off the thing under test cannot see the thing under test move.
 
@@ -4011,15 +4346,16 @@ def _t181_live_dsn_tests() -> dict[str, set[str]]:
     return found
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-181: the live connected-principal test clears every DSN variable and sets exactly "
-        "one, so it defends the OMISSION T-151 filed and never the ORDER — no test anywhere "
-        "opens a real connection with BOTH the per-role and the generic app DSN set; remove "
-        "this marker with the fix"
-    ),
-)
+# FIXED (T-181). The marker this carried is gone because the defect is:
+# `apps/trust/tests/test_events_hardening.py::
+# test_the_writer_connects_as_trust_rw_when_both_dsn_variables_are_set` is docker-marked,
+# takes `ledger_migrated`, sets BOTH `ROLES['trust_rw'][0]` and `ROLES['app'][0]` to live
+# DSNs for this worker's database, opens a connection through the store's own pool and reads
+# `current_user` back. Measured both ways against a real Postgres: green as shipped, and RED
+# under the S3a sabotage (DEFAULT_DSN_ENV reordered to put PROXYSHOP_PG_DSN_APP first, run
+# from a scratch copy outside the repo) with the witness `connected as 'app'` — a real
+# connection holding the wrong grant set, which is the consequence no string-level test can
+# see. The ORDER is now defended at the live layer, as this ticket asked.
 def test_t181_some_live_test_opens_a_connection_with_both_dsn_variables_set() -> None:
     """The order is what a deployment gets wrong, and only the live layer can settle it.
 
@@ -4076,15 +4412,12 @@ def test_t290_the_unused_binding_detector_is_armed() -> None:
     assert not any("unused" in text for text in expressions), expressions
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-290: T-167's gate computes `bodies = {path.read_bytes() for path in copies}` and "
-        "never asserts on it — the name appears only in a failure message — so the 'nothing "
-        "enforces that the copies stay identical' half of T-167 is graded by nothing; remove "
-        "this marker with the fix"
-    ),
-)
+# FIXED (T-290). `test_the_elected_primary_binding_shim_has_exactly_one_home` now carries
+# `assert len(bodies) <= 1` alongside its `len(real_files)` assertion, so the "do the copies
+# AGREE" half of T-167 is graded rather than decorated. Measured: `_t290_assert_expressions`
+# now returns an expression matching `len(bodies)`, where before every expression named only
+# `copies` or `real_files`. The pre-existing assertion is unchanged — the new one is appended
+# beside it, and the two grade different halves of T-167.
 def test_t290_the_binding_shim_gate_asserts_on_the_bodies_it_reads() -> None:
     """A value computed for an assertion, and then not asserted on, is decoration.
 
@@ -4119,42 +4452,6 @@ def test_t290_the_binding_shim_gate_asserts_on_the_bodies_it_reads() -> None:
 # --------------------------------------------------------------------------------------
 # T-291 — T-212's fixture roster is typed by hand, so new datastore fixtures escape it
 # --------------------------------------------------------------------------------------
-def _t291_fixture_graph() -> tuple[dict[str, list[str]], set[str], dict[str, str]]:
-    """``(fixture -> its parameters, fixtures that call the reachability guard, homes)``.
-
-    Read out of the conftest and fixture modules this package actually loads, so the roster
-    below is DERIVED from the repo rather than typed next to it.
-    """
-    files = [
-        REPO_ROOT / "conftest.py",
-        REPO_ROOT / "apps" / "trust" / "tests" / "conftest.py",
-        *sorted((REPO_ROOT / "apps" / "trust" / "tests").glob("_fixtures_*.py")),
-    ]
-    params: dict[str, list[str]] = {}
-    seeds: set[str] = set()
-    homes: dict[str, str] = {}
-    for path in files:
-        if not path.is_file():
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            decorators = [ast.unparse(item) for item in node.decorator_list]
-            if not any("fixture" in text for text in decorators):
-                continue
-            name = node.name
-            for text in decorators:
-                named = re.search(r"name=[\'\"]([^\'\"]+)", text)
-                if named:
-                    name = named.group(1)
-            params[name] = [argument.arg for argument in node.args.args]
-            homes[name] = str(path.relative_to(REPO_ROOT))
-            body = ast.unparse(node)
-            if "_require_services" in body or "_require(" in body:
-                seeds.add(name)
-    return params, seeds, homes
-
-
 def _t291_roster_is_a_literal() -> bool:
     """Whether ``_DATASTORE_FIXTURES`` is assigned a hand-typed collection of string constants.
 
@@ -4186,22 +4483,6 @@ def _t291_roster_is_a_literal() -> bool:
     return False
 
 
-def _t291_datastore_fixtures() -> dict[str, str]:
-    """Every PUBLIC fixture that transitively depends on the per-service reachability guard."""
-    params, seeds, homes = _t291_fixture_graph()
-    closure = set(seeds)
-    changed = True
-    while changed:
-        changed = False
-        for fixture, requested in params.items():
-            if fixture in closure:
-                continue
-            if any(name in closure for name in requested):
-                closure.add(fixture)
-                changed = True
-    return {name: homes[name] for name in closure if not name.startswith("_")}
-
-
 def test_t291_the_derived_fixture_roster_is_armed() -> None:
     """The derivation finds a real graph, not an empty one.
 
@@ -4223,15 +4504,14 @@ def test_t291_the_derived_fixture_roster_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-291: T-212's _DATASTORE_FIXTURES is a hand-typed frozenset of nine names, so a "
-        "datastore fixture added later under a new name silently escapes the gate — six "
-        "already do (events_dsn, events_running, events_service, ledger_roles, "
-        "ledger_second_database, neo4j_session); remove this marker with the fix"
-    ),
-)
+# FIXED (T-291). `_DATASTORE_FIXTURES` is now `frozenset(_t291_datastore_fixtures())` — the
+# fixture graph, computed at import time — and the two derivation helpers were moved above it
+# so the name is bound before the T-212 gate that reads it. Measured: the roster went from the
+# nine hand-typed names to fifteen, picking up exactly the six escapees this ticket named
+# (events_dsn, events_running, events_service, ledger_roles, ledger_second_database,
+# neo4j_session); `_t291_roster_is_a_literal()` now returns False where it returned True; and
+# the T-212 gate still passes against the WIDER roster, so nothing was let through by
+# narrowing what counts as a datastore fixture.
 def test_t291_the_datastore_fixture_roster_is_derived_and_not_typed() -> None:
     """The roster that decides which tests need a docker marker must not be a hand-typed list.
 
@@ -4303,16 +4583,12 @@ def test_t275_the_kind_detector_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-275: _KIND_EMISSION matches only QUOTED literals, so a fix written in this repo's "
-        "own ledger-writer house style (kind=LedgerEventKind.blacklisted) leaves the strict "
-        "gate red forever, while a bare COMMENT or docstring naming the literal turns it "
-        "green with no code change — both failure directions at once; remove this marker "
-        "with the fix"
-    ),
-)
+# FIXED (T-275). `_KIND_EMISSION` is no longer a regex over file text; it is an AST reader
+# delegating to `_t302_kinds_named_in` (see its definition ~line 888). Measured: both house-
+# style samples below are now seen, all three prose samples are now rejected, the T-237 gate
+# that consumes the detector still finds `apps/trust/src/snapshot/delisting.py`, and the
+# armed control's three quoted-form expectations still hold. Restore the regex and this gate
+# reports the same two failure directions it was filed for.
 def test_t275_the_kind_detector_reads_emissions_and_not_prose() -> None:
     """Two failures in opposite directions, which is why this cannot be left as it is.
 
@@ -4529,15 +4805,15 @@ def test_t261_the_snapshot_route_sweep_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-261: T-064's acceptance 3 — the exchange client caches the trust snapshot and "
-        "refreshes on a version bump — has no server half at all: /snapshot is published in "
-        "trust.openapi.json and apps/trust/src/main.py mounts no snapshot router, so there is "
-        "nothing for a client to cache; remove this marker with the fix"
-    ),
-)
+# FIXED (T-261). `apps/trust/src/snapshot/routes.py` now exists and exports a module-level
+# `router`, so the frozen glob in `main.py` mounts it: `create_app().state.mounted_routers`
+# carries `trust.snapshot.routes` and the booted app serves `/snapshot`. The route is not a
+# shim — measured against a live Postgres by
+# `apps/trust/tests/test_snapshot_route.py::test_the_route_reads_the_real_tables_as_trust_rw`,
+# which seeds `app.sellers`, `ledger.trust_observations` and `app.seller_blacklist`, boots the
+# app with NOTHING injected on `app.state`, and reads the seeded score and listing back
+# through the ledger writer's own trust_rw connection. Delete `snapshot/routes.py` and this
+# gate goes red again with `/snapshot` back among the published-and-unserved paths.
 def test_t261_the_trust_snapshot_it_publishes_is_actually_served() -> None:
     """A snapshot nobody can fetch cannot be cached, and cannot be refreshed on a bump.
 
