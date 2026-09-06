@@ -77,6 +77,8 @@ __all__ = [
     "MAX_HARD_CONSTRAINT_BYTES",
     "MAX_HARD_CONSTRAINTS",
     "MAX_IDENTIFIER_LENGTH",
+    "MAX_RECORDED_OFFER_DEPTH",
+    "MAX_RECORDED_OFFER_ITEMS",
     "MAX_RECORDED_OFFER_VALUE_CHARS",
     "MAX_ROSTER_ENTRIES",
     "RECORDED_OFFER_FIELDS",
@@ -202,7 +204,8 @@ RECORDED_OFFER_FIELDS: tuple[str, ...] = (
     "variant_ref",
 )
 
-#: The most one recorded offer VALUE may weigh, in characters.
+#: The most one recorded offer VALUE may weigh, in characters — **summed over every string
+#: anywhere inside it**, not just an outermost one.
 #:
 #: The whitelist above bounds the number of fields; this bounds their size, because a store
 #: that cannot add a padding key can still put 256 KiB inside ``checkout_url``. A bid carrying
@@ -211,7 +214,51 @@ RECORDED_OFFER_FIELDS: tuple[str, ...] = (
 #: silently emptied, because an offer with its URL removed reads as a fallback and would take
 #: the R10 handoff. An unrecorded bid is refused ``unknown_bid``, which is the same fail-closed
 #: direction everything else on this path takes. 4096 is far above any real cart permalink.
+#:
+#: The budget is PER VALUE rather than per offer, and that is deliberate rather than lax:
+#: ``deepcopy`` shares immutable strings, so the 500 records a duplicated roster produces hold
+#: 500 references to ONE string object. Measured: all eight whitelisted fields at exactly 4096
+#: chars, 500 duplicate rows — book retained 0.29 MiB. Characters are not what multiplies.
 MAX_RECORDED_OFFER_VALUE_CHARS = 4096
+
+#: The most CONTAINER SLOTS one recorded offer may occupy, counted across every kept value and
+#: every level of nesting **together**.
+#:
+#: **This is the cap that was measured missing, and the measurement is the reason it is
+#: recursive.** The bound above it used to read ``len(value) > 64`` against the OUTER container
+#: only, so ``{"currency": [[0] * 80000]}`` presented an outer length of 1 and was recorded
+#: whole. Containers are what multiplies, because ``InMemoryAuctionBids.record`` deep-copies
+#: each record and a duplicated roster produces one record per ROW: unlike a string, a list is
+#: rebuilt 500 times. Driven at the T-349 shape — 500 duplicate rows naming one store, one
+#: hostile bid of 234.6 KiB, comfortably UNDER ``composition.MAX_BID_RESPONSE_BYTES``::
+#:
+#:     outer-length bound   ->  HTTP 201, 500 records, book retained 339.82 MiB, peak RSS 428 MiB
+#:     no bound at all      ->  HTTP 201, 500 records, book retained 339.82 MiB
+#:     this bound           ->  HTTP 201, 0 records,   book retained  0.00 MiB, peak RSS  64 MiB
+#:
+#: The middle line is why the cap is written this way rather than tightened: against a nested
+#: payload the outer-length bound was not weak, it was *inert* — deleting it entirely changed
+#: nothing. The same hole was reachable through ``currency``, through ``variant_ref``, and one
+#: level further down through ``discount``'s ``{type, value}``, which the projection keeps.
+#:
+#: Budgeted TOGETHER, for the reason :data:`MAX_HARD_CONSTRAINT_BYTES` gives: 64 slots spread
+#: over eight fields is the same retained memory as 64 in one, and there is no reason to allow
+#: either. 64 is far above anything the published ``Offer`` declares — the only nested value in
+#: :data:`RECORDED_OFFER_FIELDS` is ``discount``, which spends two.
+MAX_RECORDED_OFFER_ITEMS = 64
+
+#: How deep a kept value may nest before the bid is dropped.
+#:
+#: Not redundant with the slot budget, because depth costs stack rather than slots: a value
+#: nested 600 deep occupies 600 slots — inside the budget — and still crashes the process, since
+#: ``InMemoryAuctionBids.record``'s ``deepcopy`` recurses once per level. Measured in this
+#: worktree: ``json.loads`` parses a 2000-deep list happily (the C scanner's limit is far above
+#: the interpreter's), ``deepcopy`` raises ``RecursionError`` from about 600, and the whole
+#: payload is ~1.2 KiB of JSON — three orders of magnitude cheaper than the memory attack above.
+#: So the depth cap is refused HERE, before the value can reach the copy that would fault on it.
+#: 4 is generous: every value the published ``Offer`` declares is a scalar except ``discount``,
+#: which is one level deep.
+MAX_RECORDED_OFFER_DEPTH = 4
 
 
 class RosterEntry(BaseModel):
@@ -543,30 +590,82 @@ def _bid_book(request: Request) -> Any:
     return book
 
 
+def _within_the_recorded_offer_budget(value: Any, slots_left: int) -> int | None:
+    """Slots remaining after charging ``value``, or ``None`` if it does not fit.
+
+    Walks ``value`` to its leaves rather than measuring its outermost container, and charges
+    three budgets while doing so: :data:`MAX_RECORDED_OFFER_VALUE_CHARS` over every string it
+    contains, ``slots_left`` of the shared :data:`MAX_RECORDED_OFFER_ITEMS` over every
+    container slot at every level, and :data:`MAX_RECORDED_OFFER_DEPTH` over its nesting.
+
+    **Iterative on an explicit stack, not recursive, and that is a requirement rather than a
+    style.** This function's whole job is to refuse a value that is too deep to copy safely; a
+    recursive implementation would fault on exactly the input it exists to reject, turning a
+    refusal into the unauthenticated 500 it was written to prevent. The depth cap is applied
+    per item as it is pushed, so the walk never descends past it either.
+
+    Termination does not depend on the value being acyclic: every container slot visited spends
+    one from a finite budget, so a self-referential structure exhausts it and is refused rather
+    than walked forever. (JSON cannot express one; a direct caller of ``collect_bids`` can.)
+    """
+    chars_left = MAX_RECORDED_OFFER_VALUE_CHARS
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        if depth > MAX_RECORDED_OFFER_DEPTH:
+            return None
+        if isinstance(item, (str, bytes)):
+            chars_left -= len(item)
+            if chars_left < 0:
+                return None
+            continue
+        if isinstance(item, Mapping):
+            children: Any = [part for pair in item.items() for part in pair]
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            children = item
+        else:
+            # A scalar — number, bool, None, or anything else a caller handed us. It costs no
+            # slots and has nothing under it. Its own storage is bounded by the reply size cap.
+            continue
+        for child in children:
+            slots_left -= 1
+            if slots_left < 0:
+                return None
+            stack.append((child, depth + 1))
+    return slots_left
+
+
 def _recordable_offer(offer: Any) -> dict[str, Any] | None:
     """``offer`` projected onto :data:`RECORDED_OFFER_FIELDS`, or ``None`` to drop the bid.
 
-    ``None`` means "do not record this bid at all" and is returned when any kept value is
-    longer than :data:`MAX_RECORDED_OFFER_VALUE_CHARS`. See that constant for why dropping
-    beats truncating and beats emptying.
+    ``None`` means "do not record this bid at all" and is returned when the kept values do not
+    fit the budgets :func:`_within_the_recorded_offer_budget` charges. See
+    :data:`MAX_RECORDED_OFFER_VALUE_CHARS` for why dropping beats truncating and beats
+    emptying, and :data:`MAX_RECORDED_OFFER_ITEMS` for why the check has to reach the leaves.
 
     ``discount`` is the one nested value in the set, so it is projected in turn rather than
     copied: it is read for a ``type`` and a ``value`` (``checkout/discounts.py``) and a store
-    could otherwise park its padding one level down.
+    could otherwise park its padding one level down. That projection is a whitelist, not a
+    bound — ``{"type": [[0] * 80000], "value": 0}`` survives it intact — so the budget below
+    is what actually stops it.
+
+    A bid that FITS is recorded whole, with the real published fields the accept and checkout
+    path read (T-349). Nothing here empties an offer that was merely large.
     """
     if not isinstance(offer, Mapping):
         return {}
     kept: dict[str, Any] = {}
+    slots_left = MAX_RECORDED_OFFER_ITEMS
     for field in RECORDED_OFFER_FIELDS:
         if field not in offer:
             continue
         value = offer[field]
         if field == "discount" and isinstance(value, Mapping):
             value = {key: value[key] for key in ("type", "value") if key in value}
-        if isinstance(value, str) and len(value) > MAX_RECORDED_OFFER_VALUE_CHARS:
+        remaining = _within_the_recorded_offer_budget(value, slots_left)
+        if remaining is None:
             return None
-        if isinstance(value, (Mapping, list, tuple, set)) and len(value) > 64:
-            return None
+        slots_left = remaining
         kept[field] = value
     return kept
 
