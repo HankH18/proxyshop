@@ -1306,3 +1306,788 @@ def test_the_service_reaches_the_postgres_vault_when_its_dsn_is_configured(
             connection = getattr(store, "connection", None)
             if connection is not None:
                 connection.close()
+
+
+# =======================================================================================
+# A link is consumed for a session, and only for a session. Appended: a sibling of the
+# limiter's un-refunded admission, found by sweeping for the same class in this package.
+# =======================================================================================
+
+
+def test_a_redemption_that_fails_does_not_destroy_the_buyers_link() -> None:
+    """``redeem`` marks the link used, then does work that can fail. Failing must not burn it.
+
+    The mark has to happen under the lock — two racing requests must not both find the link
+    unused — but everything it was consumed FOR happens after the lock is released: the
+    account upsert, ``vault.issue`` and ``sessions.open``. All three can fail transiently, and
+    with ``PROXYSHOP_PG_DSN_VAULT`` set every vault call is a database round trip.
+
+    MEASURED before the repair, with a session store momentarily at its ceiling: the
+    redemption raised ``SessionsExhausted``, the buyer retried once there was room, and the
+    retry was refused as ``MagicLinkAlreadyUsed``. A failure that granted them nothing had
+    destroyed the only credential they had, and the only way back is the rate-limited door
+    this branch just put in front of the mailbox.
+
+    This is the same class as the limiter admission charged for a link that was then refused,
+    one module over: a charge taken for work that did not happen must not persist.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.auth.sessions import InMemorySessionStore, SessionsExhausted
+
+    tokens: list[str] = []
+    store = InMemorySessionStore(max_sessions=1)
+    service = MagicLinkAuth(
+        sessions=store,
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+    # Somebody else is holding the one slot: a transient condition, not a permanent one.
+    store.open(service.vault.issue("someone.else@example.com"))
+
+    service.request_login("dana.reyes@example.com")
+    token = tokens[-1]
+
+    # ARMED: the failure is real and is the one this is about. Without this the retry below
+    # could succeed simply because nothing ever went wrong.
+    with pytest.raises(SessionsExhausted):
+        service.redeem(token)
+
+    store.close(next(iter(store)).session_id)
+    session = service.redeem(token)
+    assert session.session_id, (
+        "the link was consumed by a redemption that opened no session, so a transient "
+        "failure destroyed the buyer's only credential"
+    )
+
+    # Still single use: giving the link back must not have given it back twice.
+    from buyer_svc.auth import MagicLinkAlreadyUsed
+
+    with pytest.raises(MagicLinkAlreadyUsed):
+        service.redeem(token)
+
+
+def test_a_link_given_back_after_a_failure_is_still_single_use_under_a_race() -> None:
+    """Re-arming must not open a replay window.
+
+    The mark is exclusive, so the request that re-arms is the only one that ever got past it
+    and every concurrent sibling has already been refused. What must not happen is a link that
+    has been given back twice being redeemable twice.
+
+    The two failures are driven SERIALLY and the race is run afterwards, deliberately. Racing
+    the failures as well makes the outcome a function of scheduling — measured: with all eight
+    threads racing a vault that fails twice, the two failures are sometimes consumed by two
+    threads while the other six have already been refused as *already used*, leaving nobody to
+    succeed and the node red on a green tree. So the failure count is established as a fact
+    first, and the race then measures the one thing it is here to measure: after two re-arms,
+    exactly one of eight concurrent redemptions may win.
+    """
+    from buyer_svc.auth import MagicLinkAuth
+    from buyer_svc.vault import PseudonymVault
+
+    class _FlakyVault(PseudonymVault):
+        """Fails the first two issues, then works. A vault whose database is blipping."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.failures = 0
+
+        def issue(self, buyer_key: str) -> str:
+            if self.failures < 2:
+                self.failures += 1
+                raise RuntimeError("vault.pseudonym_history is unreachable")
+            return super().issue(buyer_key)
+
+    tokens: list[str] = []
+    service = MagicLinkAuth(
+        vault=_FlakyVault(), deliver=lambda email, token, expires_at: tokens.append(token)
+    )
+    service.request_login("dana.reyes@example.com")
+    token = tokens[-1]
+
+    # Two failures, two re-arms, both facts rather than races.
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            service.redeem(token)
+    assert service.vault.failures == 2, service.vault.failures
+
+    sessions: list[str] = []
+    guard = threading.Lock()
+
+    def _attempt() -> None:
+        try:
+            session = service.redeem(token)
+        except Exception:  # noqa: BLE001 - every refusal is a legitimate outcome here
+            return
+        with guard:
+            sessions.append(session.session_id)
+
+    threads = [threading.Thread(target=_attempt) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert len(sessions) == 1, (
+        f"one magic link that had been given back twice produced {len(sessions)} sessions "
+        f"({sessions}); zero means the failures destroyed it, more than one means re-arming "
+        "cost it its single use"
+    )
+
+
+def test_a_link_given_back_after_a_failure_is_not_given_back_once_it_was_superseded() -> None:
+    """Re-arming must not resurrect a credential a newer request already killed.
+
+    ``_forget_stale(superseded=...)`` drops an address's outstanding UNREDEEMED links when a
+    new one is minted, and deliberately keeps consumed ones so a replay is still recognisable
+    as a replay. A failed redemption therefore has to ask before it un-marks: between the mark
+    and the failure, the buyer may have requested another link — and this module's own reason
+    for superseding is that the buyer who re-requests one *because* they think the first mail
+    was intercepted must not be handed the first one back.
+
+    So the recovery in ``test_a_redemption_that_fails_does_not_destroy_the_buyers_link`` is
+    conditional, and this is the condition. Two live credentials for one mailbox is exactly
+    what the supersede rule exists to prevent.
+
+    The interleaving has to be forced. The new request must land BETWEEN the mark and the
+    failure — a supersede that happens after the link is already back simply deletes it, and
+    that ordering is covered by the ``MagicLinkUnknown`` half at the end. Only the in-flight
+    ordering reaches the guard, so the session store is what fires it.
+    """
+    from buyer_svc.auth import (
+        InMemoryAccountDirectory,
+        MagicLinkAlreadyUsed,
+        MagicLinkAuth,
+        MagicLinkUnknown,
+    )
+    from buyer_svc.auth.sessions import InMemorySessionStore, SessionsExhausted
+
+    tokens: list[str] = []
+    holder: dict[str, MagicLinkAuth] = {}
+
+    class _SupersedingStore(InMemorySessionStore):
+        """Asks for a new link while the redemption that consumed the old one is in flight."""
+
+        fired = False
+
+        def open(self, pseudonym: str, *, ttl: timedelta | None = None):
+            if not self.fired:
+                self.fired = True
+                holder["service"].request_login("dana.reyes@example.com")
+                raise SessionsExhausted("the store is momentarily full")
+            return super().open(pseudonym, ttl=ttl)
+
+    store = _SupersedingStore()
+    service = MagicLinkAuth(
+        sessions=store,
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+    holder["service"] = service
+
+    service.request_login("dana.reyes@example.com")
+    first = tokens[-1]
+
+    with pytest.raises(SessionsExhausted):
+        service.redeem(first)
+
+    # ARMED: the interleaving really happened — a second link exists and it is a new one.
+    second = tokens[-1]
+    assert store.fired and second != first, (tokens, store.fired)
+
+    with pytest.raises(MagicLinkAlreadyUsed):
+        service.redeem(first)
+
+    # The link the buyer actually holds still works, so the refusal above is the supersede
+    # rule and not the recovery being broken.
+    assert service.redeem(second).session_id
+
+    # The other ordering — the failure completes, the link comes back, and only THEN is a new
+    # one requested — is refused too, by supersede deleting the record outright.
+    service.request_login("samir.okafor@example.com")
+    stale = tokens[-1]
+    store.fired = False  # arm the store to fail once more
+    with pytest.raises(SessionsExhausted):
+        service.redeem(stale)
+    service.request_login("samir.okafor@example.com")
+    with pytest.raises((MagicLinkAlreadyUsed, MagicLinkUnknown)):
+        service.redeem(stale)
+
+
+def test_a_link_is_not_given_back_when_the_store_may_already_have_opened_a_session() -> None:
+    """The re-arm is for refusals, not for failures. The difference is one token, two sessions.
+
+    A store that REFUSES — the ceiling, a subject it will not admit — has opened nothing, and
+    says so by raising ``SessionError``. A store that FAILS has not promised anything: the
+    case a durable session store exists for is precisely the one where it writes the row and
+    then loses the answer on the way back, and there the session DOES exist. Re-arming there
+    hands the same token out again and the buyer's next redemption opens a second session on
+    it, which is the single-use property gone.
+
+    MEASURED with a store that persists and then raises, before the distinction was drawn:
+    one token produced two live sessions and the second redemption was accepted.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAlreadyUsed, MagicLinkAuth
+    from buyer_svc.auth.sessions import InMemorySessionStore
+
+    class _PersistsThenFails(InMemorySessionStore):
+        """Writes the session, then loses the answer on the way back. Once."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        def open(self, pseudonym: str, *, ttl: timedelta | None = None):
+            session = super().open(pseudonym, ttl=ttl)
+            if not self.failed:
+                self.failed = True
+                raise TimeoutError("the session was written; the acknowledgement was not read")
+            return session
+
+    tokens: list[str] = []
+    store = _PersistsThenFails()
+    service = MagicLinkAuth(
+        sessions=store,
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+    service.request_login("dana.reyes@example.com")
+    token = tokens[-1]
+
+    with pytest.raises(TimeoutError):
+        service.redeem(token)
+
+    # ARMED: the store really did keep the session it failed to acknowledge, so a re-armed
+    # link would genuinely be a second session rather than a first one.
+    assert store.failed and len(store) == 1, (len(store), store.failed)
+
+    with pytest.raises(MagicLinkAlreadyUsed):
+        service.redeem(token)
+    assert len(store) == 1, (
+        f"one token opened {len(store)} sessions; the link was given back after a failure "
+        "that had already created a session, so single use is gone"
+    )
+
+
+def test_a_failure_on_the_pseudonym_redraw_still_gives_the_link_back() -> None:
+    """The narrow path between the two ways ``redeem`` can leave the session store.
+
+    ``redeem`` re-draws once when ``sessions.open`` refuses a subject as retired — a race a
+    concurrent redemption for the same address can create. The re-draw calls ``vault.issue``
+    again, and with ``PROXYSHOP_PG_DSN_VAULT`` set that is a database round trip a blip can
+    break. So the sequence is: the store REFUSED (it opened nothing), and then the vault
+    failed. No session exists, and the link must come back.
+
+    What makes that work is one line — clearing the "we were inside the store" flag before
+    re-drawing. Without it the vault's failure is judged as though it had come out of
+    ``sessions.open``, and because it is not a ``SessionError`` it is read as "the store may
+    already have opened a session", so the link is kept consumed. MEASURED with that line
+    deleted: the store opened zero sessions and the retry was refused
+    ``MagicLinkAlreadyUsed`` — the buyer's only credential burned for work that created
+    nothing, which is the exact failure the re-arm exists to prevent.
+
+    The line survived a 17-mutant campaign undetected before this test existed.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.auth.sessions import InMemorySessionStore, RetiredPseudonym
+    from buyer_svc.vault import PseudonymVault
+
+    class _BlipsOnTheRedraw(PseudonymVault):
+        """Issues, then its database is unreachable for exactly the re-draw."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def issue(self, buyer_key: str) -> str:
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("vault.pseudonym_history is unreachable")
+            return super().issue(buyer_key)
+
+    class _LostTheRaceOnce(InMemorySessionStore):
+        """Refuses the first subject as retired, the way a concurrent rotation would."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.refusals = 0
+
+        def open(self, pseudonym: str, *, ttl: timedelta | None = None):
+            if self.refusals == 0:
+                self.refusals += 1
+                raise RetiredPseudonym("rotated away between resolve and active")
+            return super().open(pseudonym, ttl=ttl)
+
+    tokens: list[str] = []
+    store = _LostTheRaceOnce()
+    vault = _BlipsOnTheRedraw()
+    service = MagicLinkAuth(
+        vault=vault,
+        sessions=store,
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+    service.request_login("dana.reyes@example.com")
+    token = tokens[-1]
+
+    with pytest.raises(RuntimeError):
+        service.redeem(token)
+
+    # ARMED: this is the path it claims to be on — the store refused, the re-draw was reached,
+    # and nothing was opened. Without these the assertion below could be measuring any failure.
+    assert store.refusals == 1, "the store never refused, so no re-draw happened"
+    assert vault.calls == 2, f"the re-draw was not reached: {vault.calls} issue calls"
+    assert len(store) == 0, "the store opened a session it said it refused"
+
+    assert service.redeem(token).session_id, (
+        "the link was consumed by a redemption in which the store refused and the vault then "
+        "failed — nothing was created, and the buyer's only credential is gone"
+    )
+
+
+def test_a_superseded_link_stays_dead_even_after_the_newer_one_has_been_redeemed() -> None:
+    """The supersede rule must survive the re-arm on ORDERING, not on used-ness.
+
+    ``test_a_link_given_back_after_a_failure_is_not_given_back_once_it_was_superseded`` mints
+    the newer link mid-flight and stops there, so it only ever exercises the case where the
+    newer link is still unredeemed. This is the case it skips, and it is the one that matters:
+
+    1. L1's redemption is in flight — marked used, parked inside ``sessions.open``;
+    2. the buyer re-requests, so L2 is minted; L1 is a CONSUMED record and survives the sweep
+       that would have dropped it;
+    3. the buyer redeems L2 — a real session opens and ``L2.used_at`` is now set;
+    4. L1's redemption finally fails.
+
+    A guard that asks "is there another UNREDEEMED link for this address?" now finds nothing,
+    because the newer link has been spent, and re-arms L1. MEASURED before the repair:
+    ``_pending`` held ``{L1: UNUSED, L2: used}`` and replaying L1 opened a SECOND session under
+    an independent pseudonym, while the buyer's own session kept working — so nothing anywhere
+    signals it. That is the precise thing this module's supersede rule exists to prevent: the
+    buyer who re-requests a link because they believe the first mail was intercepted must not
+    have the first one handed back to the interceptor.
+
+    Note that the obvious repair is wrong: dropping the used-ness test entirely re-opens the
+    defect the re-arm closes, because a returning buyer always has a consumed record for their
+    own address. The question is not whether another link was used, it is whether another link
+    is NEWER — so the guard is an ordering comparison.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAlreadyUsed, MagicLinkAuth
+    from buyer_svc.auth.sessions import InMemorySessionStore, SessionsExhausted
+
+    tokens: list[str] = []
+    holder: dict[str, Any] = {}
+
+    class _ReRequestsAndRedeemsThenFails(InMemorySessionStore):
+        """Runs the whole supersede-and-redeem sequence inside L1's redemption."""
+
+        fired = False
+
+        def open(self, pseudonym: str, *, ttl: timedelta | None = None):
+            if not self.fired:
+                self.fired = True
+                holder["service"].request_login("dana.reyes@example.com")
+                holder["second"] = holder["service"].redeem(tokens[-1])
+                raise SessionsExhausted("the store was momentarily full")
+            return super().open(pseudonym, ttl=ttl)
+
+    store = _ReRequestsAndRedeemsThenFails()
+    service = MagicLinkAuth(
+        sessions=store,
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+    holder["service"] = service
+
+    service.request_login("dana.reyes@example.com")
+    first = tokens[0]
+
+    with pytest.raises(SessionsExhausted):
+        service.redeem(first)
+
+    # ARMED: the sequence really ran — a second link was minted, REDEEMED, and the buyer holds
+    # a live session from it. Without this the refusal below could be any refusal at all.
+    assert store.fired, "the interleaving never happened"
+    assert len(tokens) == 2 and tokens[1] != first, tokens
+    assert holder["second"].session_id, "the newer link never opened a session"
+    opened_by_the_buyer = len(store)
+
+    with pytest.raises(MagicLinkAlreadyUsed):
+        service.redeem(first)
+    assert len(store) == opened_by_the_buyer, (
+        f"replaying the superseded link opened another session ({len(store)} now open); a "
+        "link the buyer deliberately replaced has been handed back to whoever holds it, and "
+        "the buyer's own session keeps working so nothing signals it"
+    )
+
+
+def test_a_returning_buyers_link_survives_a_failure_despite_their_own_consumed_record() -> None:
+    """The other side of the ordering guard: an OLDER record must not block the re-arm.
+
+    A redeemed record is kept until it expires, so a replay reads as a replay. That means a
+    buyer who logged in within the last quarter of an hour already has a consumed record for
+    their own address sitting in ``_pending`` when they log in again — and the supersede guard
+    walks exactly that table.
+
+    So "is there another entry for this address?" is the wrong question in the other
+    direction: it is always yes for a returning buyer, and answering it that way refuses every
+    re-arm and puts the whole defect back. Only "is there a NEWER one?" is right, which is why
+    the guard compares issue order rather than presence or used-ness.
+
+    Measured: this is the case the obvious repair fails, and it passed every other test in
+    this file.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.auth.sessions import InMemorySessionStore, SessionsExhausted
+
+    tokens: list[str] = []
+    store = InMemorySessionStore(max_sessions=1)
+    service = MagicLinkAuth(
+        sessions=store,
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+
+    # A successful login. Its record stays in `_pending`, consumed, so a replay is a replay.
+    service.request_login("dana.reyes@example.com")
+    first_session = service.redeem(tokens[-1])
+    assert len(store) == 1
+
+    # The same buyer, minutes later. The store is momentarily full, so this redemption fails
+    # after consuming the link.
+    service.request_login("dana.reyes@example.com")
+    second = tokens[-1]
+    with pytest.raises(SessionsExhausted):
+        service.redeem(second)
+
+    # ARMED: the buyer's own earlier record really is still in the table and really is
+    # consumed — the thing a presence test would trip over. (There is exactly one such record:
+    # the second link's own is unused again, which is the re-arm this test is about.)
+    consumed = [record for record in service._pending.values() if record.used_at is not None]
+    assert len(consumed) == 1, f"the earlier consumed record did not survive: {consumed}"
+    assert len(service._pending) == 2, f"both records should be held: {service._pending}"
+
+    store.close(first_session.session_id)
+    assert service.redeem(second).session_id, (
+        "a returning buyer's link was destroyed by a transient failure because their OWN "
+        "earlier consumed record was mistaken for a newer link"
+    )
+
+
+def test_every_pending_link_carries_a_distinct_increasing_issue_order() -> None:
+    """The invariant the supersede guard rests on, pinned so it cannot quietly stop holding.
+
+    The guard asks whether another entry for this address has a HIGHER ``sequence``. That is
+    only a supersede test while sequences are unique and increase with issue order: if two
+    links could share one, "strictly higher" and "higher or equal" would stop meaning the same
+    thing and the guard's behaviour would turn on a comparison operator rather than on the
+    facts. (Measured: mutating ``>`` to ``>=`` changes nothing today, and this is why.)
+
+    Both halves matter. Distinctness is what makes "another entry with a higher number" mean
+    "a link issued after mine". Monotonicity is what makes the number an ORDER rather than a
+    label — the property ``used_at`` and ``expires_at`` could not supply.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+
+    tokens: list[str] = []
+    service = MagicLinkAuth(
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+
+    # Several addresses interleaved, and one address asked repeatedly, so the order under test
+    # is the SERVICE's and not a per-address counter.
+    for round_index in range(4):
+        for address in ("dana.reyes@example.com", "samir.okafor@example.com", "wu.lin@example.com"):
+            service.request_login(address)
+        # A redemption in between, so consumed records are in the table too.
+        if round_index == 1:
+            service.redeem(tokens[-1])
+
+    sequences = [record.sequence for record in service._pending.values()]
+    assert len(set(sequences)) == len(sequences), (
+        f"two pending links share an issue number ({sorted(sequences)}); 'another entry with "
+        "a higher number' no longer means 'a link issued after mine'"
+    )
+    assert all(number >= 1 for number in sequences), sorted(sequences)
+
+    # And it increases: the newest link for an address outranks every earlier one.
+    service.request_login("dana.reyes@example.com")
+    newest = max(record.sequence for record in service._pending.values())
+    dana = [
+        record.sequence
+        for record in service._pending.values()
+        if record.email == "dana.reyes@example.com"
+    ]
+    assert max(dana) == newest, (
+        f"the link just issued to this address is not the highest-numbered one ({dana} vs "
+        f"{newest}); issue order is not increasing and the supersede guard cannot read it"
+    )
+
+
+def test_a_tie_in_issue_order_refuses_the_re_arm_rather_than_allowing_it() -> None:
+    """At a tie the guard must fail closed. Costs one link; buys a credential staying dead.
+
+    Within one service the counter strictly increases under the lock, so a tie is unreachable
+    and ``>`` and ``>=`` are equivalent — a differential fuzz over twenty thousand operations
+    could not tell them apart. They stop being equivalent the moment two services share one
+    ``_pending`` table, which ``dataclasses.replace`` produces in one line: two independent
+    counters over one table, and two links for one address both stamped ``1``.
+
+    MEASURED with ``>``: the superseded link was re-armed and redeemed a second time. The
+    whole cost of ``>=`` is that a genuinely transient failure at a genuine tie burns the
+    buyer's link and they request another; the cost of ``>`` is a superseded credential coming
+    back. That is not a close trade.
+    """
+    import dataclasses
+
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAlreadyUsed, MagicLinkAuth
+    from buyer_svc.auth.sessions import InMemorySessionStore, SessionsExhausted
+
+    email = "dana.reyes@example.com"
+    issued: list[str] = []
+    holder: dict[str, Any] = {}
+
+    class _ReRequestsOnTheOtherService(InMemorySessionStore):
+        fired = False
+
+        def open(self, pseudonym: str, *, ttl: timedelta | None = None):
+            if not self.fired:
+                self.fired = True
+                holder["other"].request_login(email)
+                raise SessionsExhausted("the store was momentarily full")
+            return super().open(pseudonym, ttl=ttl)
+
+    store = _ReRequestsOnTheOtherService()
+    first = MagicLinkAuth(
+        sessions=store,
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda address, token, expires_at: issued.append(token),
+    )
+    second = dataclasses.replace(
+        first,
+        sessions=InMemorySessionStore(),
+        deliver=lambda address, token, expires_at: issued.append(token),
+    )
+    second._pending = first._pending
+    holder["other"] = second
+
+    first.request_login(email)
+    stuck = issued[0]
+    with pytest.raises(SessionsExhausted):
+        first.redeem(stuck)
+
+    # ARMED: the tie is real. Without it this would be re-testing the ordinary supersede case.
+    sequences = sorted(record.sequence for record in first._pending.values())
+    assert len(sequences) == 2 and len(set(sequences)) == 1, sequences
+
+    with pytest.raises(MagicLinkAlreadyUsed):
+        first.redeem(stuck)
+
+
+def test_a_link_whose_issue_order_cannot_be_read_never_unblocks_a_re_arm() -> None:
+    """An unreadable order must BLOCK, not read as "oldest".
+
+    ``getattr(record, "sequence", 0)`` looks harmless and is a fail-open default on a guard
+    whose job is to fail closed: it makes an unstamped record the oldest thing in the table,
+    so such a record can never block a re-arm no matter what it is. A substitute
+    ``_PendingLink`` — this package's own concurrency test installs one — is exactly a record
+    with no readable ``sequence``, and so is anything a future change forgets to stamp.
+
+    Both directions are asserted: an unreadable order on the OTHER record must block, and an
+    unreadable order on the record being given back must block too.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAlreadyUsed, MagicLinkAuth
+    from buyer_svc.auth.magic_link import token_fingerprint
+    from buyer_svc.auth.sessions import InMemorySessionStore, SessionsExhausted
+
+    email = "dana.reyes@example.com"
+
+    def _service(slots: int) -> tuple[MagicLinkAuth, list[str]]:
+        """A service whose store has ``slots - 1`` free, so a redemption fails on demand."""
+        issued: list[str] = []
+        store = InMemorySessionStore(max_sessions=slots)
+        service = MagicLinkAuth(
+            sessions=store,
+            accounts=InMemoryAccountDirectory(),
+            deliver=lambda address, token, expires_at: issued.append(token),
+        )
+        store.open(service.vault.issue("someone.else@example.com"))
+        return service, issued
+
+    # (a) the buyer's OWN earlier consumed record cannot be ordered. It must block, because a
+    #     record this service cannot place in issue order might be the newer one.
+    service, issued = _service(slots=2)
+    service.request_login(email)
+    service.redeem(issued[-1])  # succeeds; its record stays, consumed
+    service._pending[token_fingerprint(issued[-1])].sequence = None  # type: ignore[assignment]
+
+    service.request_login(email)
+    second = issued[-1]
+    with pytest.raises(SessionsExhausted):
+        service.redeem(second)
+    with pytest.raises(MagicLinkAlreadyUsed):
+        service.redeem(second)
+
+    # (b) the record being given back cannot be ordered. Same answer, for the same reason.
+    service, issued = _service(slots=1)
+    service.request_login(email)
+    token = issued[-1]
+    service._pending[token_fingerprint(token)].sequence = None  # type: ignore[assignment]
+    with pytest.raises(SessionsExhausted):
+        service.redeem(token)
+    with pytest.raises(MagicLinkAlreadyUsed):
+        service.redeem(token)
+
+
+def test_the_mark_happens_under_the_same_lock_as_the_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check-then-mark must be one critical section, and this is what proves it.
+
+    ``test_a_magic_link_cannot_be_redeemed_twice_concurrently`` is structurally blind to this.
+    Its gate parks on reading ``expires_at``, which happens BEFORE the mark and INSIDE the
+    lock whether or not the mark is: the second thread blocks on the lock rather than on the
+    barrier, the barrier times out, and the run looks identical in both trees. MEASURED:
+    moving ``pending.used_at = now`` to the line after the ``with self._lock`` block passes the
+    whole suite — 706 passed, 2 xfailed — while being exactly the race the module docstring
+    says the lock exists to prevent.
+
+    So this parks on the MARK instead. A ``_PendingLink`` whose ``used_at`` setter waits on a
+    two-party barrier splits the two trees cleanly:
+
+    * mark inside the lock — the first thread parks while HOLDING it, the second cannot get
+      past ``_lock`` to reach its own mark, the barrier times out, and the second thread then
+      finds the link used. One session.
+    * mark outside the lock — the first thread parks holding nothing, the second walks through
+      the check it should have been excluded from, reaches its own mark, and the barrier trips.
+      Two sessions from one link.
+
+    The barrier timing out is the PASSING path here, exactly as in the older test.
+    """
+    import threading
+
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.auth import magic_link as magic_link_module
+
+    gate = threading.Barrier(2)
+
+    class _GatedMark:
+        """A ``_PendingLink`` that parks whoever CONSUMES it until a second consumer arrives."""
+
+        def __init__(
+            self, email: str, expires_at: datetime, used_at: datetime | None = None
+        ) -> None:
+            self.email = email
+            self.expires_at = expires_at
+            self.sequence = 0
+            self._used_at = used_at
+
+        @property
+        def used_at(self) -> datetime | None:
+            return self._used_at
+
+        @used_at.setter
+        def used_at(self, value: datetime | None) -> None:
+            if value is not None:
+                try:
+                    gate.wait(timeout=2.0)
+                except threading.BrokenBarrierError:
+                    pass  # serialised: the second thread never reached its own mark.
+            self._used_at = value
+
+    monkeypatch.setattr(magic_link_module, "_PendingLink", _GatedMark)
+
+    tokens: list[str] = []
+    service = MagicLinkAuth(
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+    service.request_login("dana.reyes@example.com")
+    token = tokens[-1]
+
+    sessions: list[str] = []
+    guard = threading.Lock()
+
+    def _redeem_once() -> None:
+        try:
+            session = service.redeem(token)
+        except Exception:  # noqa: BLE001 - every refusal is a legitimate outcome
+            return
+        with guard:
+            sessions.append(session.session_id)
+
+    threads = [threading.Thread(target=_redeem_once) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+        assert not thread.is_alive(), "a redemption thread never finished"
+
+    # ARMED: the substitute really was installed, so this measured the mark and not a link
+    # class that ignores the gate entirely.
+    assert isinstance(next(iter(service._pending.values())), _GatedMark)
+
+    assert len(sessions) == 1, (
+        f"one magic link produced {len(sessions)} sessions ({sessions}); the mark is not "
+        "inside the same critical section as the check, so two requests carrying one token "
+        "both found it unused"
+    )
+
+
+def test_issue_order_is_stamped_atomically_with_the_number_it_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bumping under the lock is not enough; the STAMP has to be under it too.
+
+    ``test_every_pending_link_carries_a_distinct_increasing_issue_order`` checks the numbers
+    that come out single-threaded, which cannot see this: assigning ``link.sequence`` after
+    the ``with self._lock`` block still produces a strictly increasing counter, and still
+    passes the whole suite. What it stops producing is DISTINCT numbers — two threads bump to
+    1 and 2, both then read ``self._sequence`` and both stamp 2 — and distinctness is the
+    property the supersede guard reads.
+
+    Real threads, distinct addresses so nothing supersedes anything, and the assertion is on
+    the multiset of stamps rather than on their order.
+
+    The interpreter's switch interval is shortened for the duration. The window between the
+    lock releasing and the stamp landing is a couple of bytecodes wide, so at the default 5 ms
+    the mutant produces ZERO duplicates over 2,880 requests and looks exactly like the repair —
+    measured. At a microsecond it produces 14 over 720. That is not making the defect up: it
+    is making a real, narrow race observable instead of leaving it to luck, which is the
+    difference between a gate and a coin toss.
+    """
+    import sys
+    import threading
+
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+
+    service = MagicLinkAuth(accounts=InMemoryAccountDirectory())
+    workers, each = 16, 80
+
+    def _request(worker: int) -> None:
+        for index in range(each):
+            service.request_login(f"buyer-{worker}-{index}@example.com")
+
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=_request, args=(worker,)) for worker in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+            assert not thread.is_alive(), "a request thread never finished"
+    finally:
+        sys.setswitchinterval(previous_interval)
+
+    stamps = [record.sequence for record in service._pending.values()]
+    # ARMED: every request really did land, so a "no duplicates" reading cannot come from an
+    # empty or truncated table.
+    assert len(stamps) == workers * each, f"{len(stamps)} links held, expected {workers * each}"
+
+    duplicates = len(stamps) - len(set(stamps))
+    assert duplicates == 0, (
+        f"{duplicates} of {len(stamps)} links share an issue number with another; the stamp "
+        "is not taken under the same lock as the bump, so concurrent callers read a counter "
+        "that has already moved and the supersede guard can no longer order them"
+    )

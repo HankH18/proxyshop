@@ -217,3 +217,122 @@ def test_a_custom_session_store_without_bind_vault_is_not_a_crash() -> None:
     service.request_login(FORGED_EMAIL)
     assert service.redeem(tokens[-1]).session_id == "sid"
     assert store.opened and store.opened[0].startswith("psn-")
+
+
+# =======================================================================================
+# Membership is not currency. Appended: a defence-in-depth gate on T-163's own repair.
+# =======================================================================================
+
+
+def test_a_retired_pseudonym_does_not_open_a_session() -> None:
+    """DEFENCE IN DEPTH, NOT A LIVE HOLE — read this before judging its severity.
+
+    Nothing reachable over HTTP accepts a pseudonym as input. ``POST /buyer/auth/session``
+    takes a token, the other routes take a session id, and the only production caller of
+    ``SessionStore.open`` anywhere in the tree is
+    ``MagicLinkAuth.redeem`` (``auth/magic_link.py``), which supplies a pseudonym it has just
+    had issued. There is no request an attacker can send today that reaches this check with a
+    retired value. This gate exists so the guarantee matches what T-163 claims, so that the
+    next route or job that accepts a subject inherits the strong version rather than the weak
+    one — not because a door is standing open.
+
+    What was actually delivered was weaker than the ticket's words. ``admit`` asked
+    ``vault.resolve()``, which answers for RETIRED rows as well as live ones, so the property
+    enforced was "the vault ever issued this" rather than "this is the subject the buyer
+    currently holds". MEASURED before the repair: issue ``p1`` for an address, rotate to
+    ``p2``, and ``store.open(p1)`` returned a working session that authenticated
+    ``GET /buyer/profile``. ``PseudonymVault.active()`` existed and was never consulted.
+
+    That set matters more than it looks. Under T-142 — the same branch — every served
+    pseudonym is written into ``app.buyer_accounts``, which this code describes as a table
+    "every store-facing role can read". The values satisfying ``admit`` were therefore exactly
+    the values published to stores.
+    """
+    # `NotAPseudonym` and not `RetiredPseudonym` here on purpose: the refusal is asserted
+    # through a name that predates this repair, so against the unrepaired code this node
+    # fails with "DID NOT RAISE" — the behaviour — rather than with an ImportError over a
+    # symbol that simply does not exist yet. A gate whose only witness is a missing name
+    # proves a rename happened, not that a defect was closed.
+    from buyer_svc.auth import MagicLinkAuth, NotAPseudonym
+
+    service = MagicLinkAuth()
+    first = service.vault.issue(FORGED_EMAIL)
+    second = service.vault.issue(FORGED_EMAIL)
+
+    # ARMED: the vault really did rotate, and it really does still know the retired value —
+    # otherwise this would be re-testing the forgery case under a new name.
+    assert first != second
+    assert service.vault.resolve(first) is not None, "fixture error: the vault forgot p1"
+    assert service.vault.active(FORGED_EMAIL) == second
+
+    with pytest.raises(NotAPseudonym) as caught:
+        service.sessions.open(first)
+
+    # ...and it is refused as retired, not misreported as a forgery the vault never issued.
+    from buyer_svc.auth import RetiredPseudonym
+
+    assert isinstance(caught.value, RetiredPseudonym), type(caught.value)
+
+    # The subject the buyer actually holds still opens one, so the guard was not bought by
+    # refusing everything.
+    assert service.sessions.open(second).pseudonym == second
+
+
+def test_the_retired_refusal_is_a_session_error_and_never_echoes_the_subject() -> None:
+    """The new refusal must not escape a caller that already handled the old ones (T-133).
+
+    ``routes.read_profile`` catches ``SessionError``; callers elsewhere catch
+    ``NotAPseudonym``. A refusal outside both hierarchies surfaces as an unhandled 500
+    carrying the subject — and a subject built from a rotated pseudonym is still a value the
+    vault can map straight back to an email.
+    """
+    from buyer_svc.auth import MagicLinkAuth, NotAPseudonym, SessionError, UnissuedPseudonym
+
+    service = MagicLinkAuth()
+    retired = service.vault.issue(FORGED_EMAIL)
+    service.vault.issue(FORGED_EMAIL)
+
+    # The behavioural half first, through names that predate the repair, so the witness here
+    # is "the retired subject opened a session" and not "a new class is missing".
+    with pytest.raises(SessionError) as caught:
+        service.sessions.open(retired)
+    message = str(caught.value).casefold()
+    for fragment in ("dana", "reyes", "example.com", retired.casefold()):
+        assert fragment not in message, f"{fragment!r} was echoed by the refusal: {message}"
+
+    from buyer_svc.auth import RetiredPseudonym
+
+    assert issubclass(RetiredPseudonym, NotAPseudonym)
+    assert issubclass(RetiredPseudonym, SessionError)
+    # NOT a forgery: a reader catching "the vault never issued this" must not silently be
+    # catching "the vault issued this and moved on".
+    assert not issubclass(RetiredPseudonym, UnissuedPseudonym)
+
+
+def test_the_ordinary_login_path_is_untouched_by_the_rotation_check() -> None:
+    """The check must not break the one production caller that reaches it.
+
+    ``redeem`` issues a pseudonym and immediately opens a session on it, and issuing is what
+    retires the previous one — so every login rotates a subject out from under a check that
+    now looks at rotation. Logging in repeatedly must therefore keep working, and a session
+    opened before a rotation must keep working too: a live session is a session, and ending
+    it is ``DELETE /buyer/auth/session``'s job, not this guard's.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+
+    tokens: list[str] = []
+    service = MagicLinkAuth(
+        accounts=InMemoryAccountDirectory({FORGED_EMAIL: {"email": FORGED_EMAIL, "orders": []}}),
+        deliver=lambda email, token, expires_at: tokens.append(token),
+    )
+
+    sessions = []
+    for _ in range(5):
+        service.request_login(FORGED_EMAIL)
+        sessions.append(service.redeem(tokens[-1]))
+    assert len({session.pseudonym for session in sessions}) == 5, "the vault stopped rotating"
+
+    # The session opened four rotations ago still resolves and still serves a profile.
+    oldest = sessions[0]
+    assert service.session(oldest.session_id).session_id == oldest.session_id
+    assert service.profile_for(oldest.session_id).model_dump()["pseudonym"] == oldest.pseudonym

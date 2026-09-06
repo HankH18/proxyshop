@@ -433,3 +433,492 @@ def test_publishing_never_runs_on_a_profile_that_failed_the_identity_backstop(
     with pytest.raises(IdentityLeak):
         service.profile_for(session.session_id)
     assert published == [], f"a leaking profile was published: {published}"
+
+
+# =======================================================================================
+# T-142's other half: a failure must be loud AND survivable. Appended.
+# =======================================================================================
+
+
+class _Cluster:
+    """A database that can go away and come back.
+
+    An outage kills every connection already open and refuses new ones; recovery lets NEW
+    connections through and never revives an old one. That asymmetry is the whole point and
+    it is what a real socket does: a process holding one connection for its lifetime does not
+    come back when the database does.
+    """
+
+    def __init__(self) -> None:
+        self.up = True
+        self.statements: list[tuple[str, Any]] = []
+        self.opened: list[Any] = []
+        self._live: list[Any] = []
+        self._closed: list[Any] = []
+
+    def connect(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.up:
+            raise RuntimeError("could not connect to server: Connection refused")
+        connection = _Connection(self.statements, self.opened, f"args={args!r} kwargs={kwargs!r}")
+        connection.usable = True
+        # `closed` is psycopg's own signal and the publisher reads it to tell a dead socket
+        # from a rejected statement: psycopg marks a connection closed when the socket is gone
+        # and leaves it open when the server merely said no. Modelling it is what makes the
+        # difference between the two failures testable at all.
+        connection.closed = 0
+
+        # Per-instance, so a socket that is closed can be told apart from one still held —
+        # which is how a leaked connection becomes visible to a test.
+        #
+        # And closing REALLY closes it. Written first as a bare `self._closed.append(...)`,
+        # this made `close()` inert: a test could close a connection another thread was using
+        # and that thread would carry on working, so the gate below for exactly that hazard
+        # could not fail. A fake whose destructive operation is not destructive measures
+        # nothing.
+        def _close(connection: Any = connection) -> None:
+            self._closed.append(connection)
+            connection.usable = False
+            connection.closed = 1
+
+        connection.close = _close
+        self._live.append(connection)
+        return connection
+
+    def outage(self) -> None:
+        self.up = False
+        for connection in self._live:
+            connection.usable = False
+            connection.closed = 1
+        self._live.clear()
+
+    def recover(self) -> None:
+        self.up = True
+
+    def live(self) -> list[Any]:
+        """Connections opened since the last outage and not closed since."""
+        return [connection for connection in self._live if connection not in self._closed]
+
+    def writes(self) -> list[tuple[str, Any]]:
+        return [(text, params) for text, params in self.statements if "buyer_accounts" in text]
+
+
+def _cursor_honouring_usable(self: Any, *_a: Any, **_k: Any) -> Any:
+    if not getattr(self, "usable", True):
+        raise RuntimeError("connection is closed / server closed the connection unexpectedly")
+    return _Cursor(self._log)
+
+
+def test_a_transient_database_outage_is_not_permanent_for_the_life_of_the_process(
+    clean_env: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both properties at once: the failure is never swallowed, and it is never forever.
+
+    ``build_profile_publisher`` opened ONE connection at build time and opened no other,
+    deliberately without a ``try/except`` on a fail-loudly argument. That argument covers the
+    first failure and says nothing about the permanent one. MEASURED before the repair, with a
+    cluster that goes down and comes back up: ``GET /buyer/profile`` answered
+    ``200, 500, [500, 500, 500]`` — every profile read after a single transient blip failed for
+    the rest of the process's life, and only a restart cured it. This is a failure mode T-142's
+    half of the branch introduced.
+
+    The fix must not be a swallowed publish. ``app.buyer_accounts`` is what a store reads, and
+    the commit body's own concern is right: a publish that fails silently leaves every store
+    reading a stale row while the buyer is served a fresh one, and nothing downstream can
+    detect that. So the outage must still be a 500 while it lasts, and the recovery must be a
+    200 over a row that actually reached a cursor.
+    """
+    import psycopg
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    routes_mod = fresh_process_state
+    cluster = _Cluster()
+    monkeypatch.setattr(_Connection, "cursor", _cursor_honouring_usable, raising=False)
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", SENTINEL_APP_DSN)
+
+    tokens: dict[str, str] = {}
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    service = routes_mod.build_auth_service()
+    routes_mod.set_auth_service(service)
+    service.deliver = lambda email, token, expires_at: tokens.__setitem__(email, token)
+    service.accounts.upsert(DANA["email"], DANA)
+
+    def _login_and_read() -> int:
+        client.post("/buyer/auth/magic-link", json={"email": DANA["email"]})
+        session = client.post("/buyer/auth/session", json={"token": tokens[DANA["email"]]}).json()
+        return client.get(
+            "/buyer/profile", headers={"X-Buyer-Session": session["session_id"]}
+        ).status_code
+
+    # ARMED: healthy, this really does serve and really does write. Without this the two
+    # readings below could both be produced by a route that was broken from the start.
+    assert _login_and_read() == 200
+    healthy_writes = len(cluster.writes())
+    assert healthy_writes, "no row reached a cursor while the database was up"
+
+    cluster.outage()
+    during = _login_and_read()
+    assert during == 500, (
+        f"a profile whose publish could not reach the store table was served as {during}; a "
+        "silently stale row is exactly the divergence nothing downstream can detect"
+    )
+    assert len(cluster.writes()) == healthy_writes, "a write landed during the outage"
+
+    cluster.recover()
+    after = [_login_and_read() for _ in range(3)]
+    assert after == [200, 200, 200], (
+        f"the database came back and GET /buyer/profile did not: {after}. One transient blip "
+        "left the publisher holding a connection it can never use again, so every buyer is "
+        "answered 500 until somebody restarts the process"
+    )
+    assert len(cluster.writes()) >= healthy_writes + 3, (
+        f"the route answered 200 three times and only {len(cluster.writes()) - healthy_writes} "
+        "further rows reached a cursor; recovering by not publishing is the silent divergence "
+        "wearing the repair's clothes"
+    )
+
+
+def test_a_publish_that_cannot_be_completed_still_fails_loudly_after_the_retry(
+    clean_env: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reconnect must not become a way to swallow a publish that never lands.
+
+    The dangerous shape of this repair is "try, reconnect, try again, and carry on regardless"
+    — which turns every publish failure into a 200 over a row nobody wrote. A database that is
+    down and stays down must therefore still produce a 500, and it must still not carry the
+    buyer out with it.
+    """
+    import psycopg
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    routes_mod = fresh_process_state
+    cluster = _Cluster()
+    monkeypatch.setattr(_Connection, "cursor", _cursor_honouring_usable, raising=False)
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", SENTINEL_APP_DSN)
+
+    tokens: dict[str, str] = {}
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    service = routes_mod.build_auth_service()
+    routes_mod.set_auth_service(service)
+    service.deliver = lambda email, token, expires_at: tokens.__setitem__(email, token)
+    service.accounts.upsert(DANA["email"], DANA)
+
+    cluster.outage()
+    for _ in range(3):
+        client.post("/buyer/auth/magic-link", json={"email": DANA["email"]})
+        session = client.post("/buyer/auth/session", json={"token": tokens[DANA["email"]]}).json()
+        answered = client.get("/buyer/profile", headers={"X-Buyer-Session": session["session_id"]})
+        assert answered.status_code == 500, (
+            f"the publisher reported success while the database was down: "
+            f"{answered.status_code} {answered.text}"
+        )
+        for fragment in ("dana", "reyes", "example.com"):
+            assert fragment not in answered.text.casefold(), answered.text
+    assert cluster.writes() == [], f"a row landed against a dead cluster: {cluster.writes()!r}"
+
+
+def test_the_publisher_does_not_open_a_fresh_connection_for_every_profile_read(
+    clean_env: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconnecting on failure, not connecting per request.
+
+    A publisher that opened a connection per publish would pass the recovery gate above and
+    hand a production deployment a connection storm instead — one TCP+TLS+auth round trip on
+    every ``GET /buyer/profile``, against a Postgres role whose connection limit is finite.
+    """
+    import psycopg
+
+    routes_mod = fresh_process_state
+    cluster = _Cluster()
+    monkeypatch.setattr(_Connection, "cursor", _cursor_honouring_usable, raising=False)
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", SENTINEL_APP_DSN)
+
+    tokens: list[str] = []
+    service = routes_mod.build_auth_service()
+    service.deliver = lambda email, token, expires_at: tokens.append(token)
+    service.accounts.upsert(DANA["email"], DANA)
+
+    for _ in range(6):
+        service.request_login(DANA["email"])
+        session = service.redeem(tokens[-1])
+        service.profile_for(session.session_id)
+
+    assert len(cluster.writes()) >= 6, "the sweep published nothing, so it measured nothing"
+    assert len(cluster.opened) == 1, (
+        f"{len(cluster.opened)} connections were opened for six profile reads against a "
+        "healthy database; the publisher reconnects per request rather than on failure"
+    )
+
+
+def test_a_reconnect_does_not_serialise_every_other_profile_read_behind_it(
+    clean_env: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reconnecting must not turn a publisher outage into a whole-service stall.
+
+    ``def`` endpoints run in a threadpool, so during an outage every thread in that pool is
+    inside the publisher at once. If the slot's lock were held across ``psycopg.connect``,
+    each of them would wait out the one before it — an OS-length TCP timeout apiece against a
+    host that is not answering — and the pool would be starved for routes that have nothing to
+    do with profiles. Recovering from a local failure by stalling globally is the same shape of
+    bug as the one this branch's limiter repair closes.
+
+    Driven with events rather than sleeps: the first thread is parked *inside* ``connect``, and
+    the second must be able to reach ``connect`` while it is parked. A lock held across the
+    call makes the second thread unreachable and this fails on the timeout instead of hanging.
+    """
+    import threading
+
+    import psycopg
+
+    routes_mod = fresh_process_state
+    cluster = _Cluster()
+    monkeypatch.setattr(_Connection, "cursor", _cursor_honouring_usable, raising=False)
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", SENTINEL_APP_DSN)
+
+    tokens: list[str] = []
+    service = routes_mod.build_auth_service()
+    service.deliver = lambda email, token, expires_at: tokens.append(token)
+    service.accounts.upsert(DANA["email"], DANA)
+
+    sessions = []
+    for _ in range(2):
+        service.request_login(DANA["email"])
+        sessions.append(service.redeem(tokens[-1]))
+
+    # Kill the connection built at boot, so the next publish must reconnect.
+    cluster.outage()
+    cluster.recover()
+
+    entered = threading.Semaphore(0)
+    release_first = threading.Event()
+    reconnects: list[int] = []
+    real_connect = cluster.connect
+
+    def _slow_connect(*args: Any, **kwargs: Any) -> Any:
+        reconnects.append(1)
+        entered.release()
+        if len(reconnects) == 1:
+            # Park the first reconnect INSIDE connect, the way a dead host would.
+            assert release_first.wait(timeout=10), "the test's own event never fired"
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(psycopg, "connect", _slow_connect)
+
+    errors: list[BaseException] = []
+
+    def _publish(index: int) -> None:
+        try:
+            service.profile_for(sessions[index].session_id)
+        except BaseException as exc:  # noqa: BLE001 - reported, not swallowed
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_publish, args=(i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+
+    assert entered.acquire(timeout=5), "no thread reached connect at all"
+    reached_while_parked = entered.acquire(timeout=5)
+    release_first.set()
+    for thread in threads:
+        thread.join(timeout=15)
+        assert not thread.is_alive(), "a publish thread never finished"
+
+    assert reached_while_parked, (
+        "the second profile read could not even reach psycopg.connect while the first was "
+        "parked inside it, so the slot's lock is held across the connect; during an outage "
+        "every threadpool thread queues behind one TCP timeout and the whole service stalls"
+    )
+    assert errors == [], f"a publish raised against a healthy cluster: {errors!r}"
+    # And the race did not leak a socket: one connection is held, the loser closed its own.
+    assert len(cluster.live()) == 1, (
+        f"{len(cluster.live())} connections are still open after a two-thread reconnect race; "
+        "the loser leaked its socket instead of closing it"
+    )
+
+
+def test_a_rejected_statement_does_not_throw_away_a_healthy_connection(
+    clean_env: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead socket and a rejected statement are different failures. Only one needs a retry.
+
+    A constraint violation, a missing grant, a value the column will not take — the server
+    answered, the connection is fine, and reconnecting buys nothing. MEASURED when the retry
+    treated every failure as a socket failure: 20 reads of ONE profile whose row cannot be
+    written opened 40 connections and closed 40, roughly two per request, for as long as that
+    one buyer keeps logging in — against a Postgres role whose ``max_connections`` is finite.
+
+    ``test_the_publisher_does_not_open_a_fresh_connection_for_every_profile_read`` measures
+    only the healthy case, which was never the case in doubt. This is the unhealthy one, and
+    the failure must still be loud: the row did not land, so the buyer must not be told it did.
+    """
+    import psycopg
+
+    routes_mod = fresh_process_state
+    cluster = _Cluster()
+
+    def _rejecting_cursor(self: Any, *_a: Any, **_k: Any) -> Any:
+        if not getattr(self, "usable", True):
+            raise RuntimeError("connection is closed / server closed the connection")
+        # The server answered, and said no. `closed` stays 0, exactly as psycopg leaves it.
+        raise RuntimeError('new row for relation "buyer_accounts" violates check constraint')
+
+    monkeypatch.setattr(_Connection, "cursor", _rejecting_cursor, raising=False)
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", SENTINEL_APP_DSN)
+
+    tokens: list[str] = []
+    service = routes_mod.build_auth_service()
+    service.deliver = lambda email, token, expires_at: tokens.append(token)
+    service.accounts.upsert(DANA["email"], DANA)
+    opened_after_boot = len(cluster.opened)
+
+    failures = 0
+    for _ in range(20):
+        service.request_login(DANA["email"])
+        session = service.redeem(tokens[-1])
+        try:
+            service.profile_for(session.session_id)
+        except Exception:  # noqa: BLE001 - the point is that it DOES raise
+            failures += 1
+
+    # ARMED: every publish really did fail, so the connection count below is being measured
+    # against twenty genuine failures rather than twenty successes.
+    assert failures == 20, f"only {failures} of 20 publishes failed; this measured nothing"
+
+    churn = len(cluster.opened) - opened_after_boot
+    assert churn == 0, (
+        f"{churn} connections were opened for 20 rejected statements against a connection the "
+        "server never closed; a publish failure that is not a connection failure is being "
+        "answered with a reconnect"
+    )
+    assert cluster.live(), "the healthy connection was thrown away over a rejected statement"
+
+
+def test_one_threads_reconnect_does_not_break_another_threads_publish(
+    clean_env: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connection is shared by the whole threadpool, so discarding must not close it.
+
+    During a failover the first statement on the shared connection fails for whoever reaches
+    it first, and several threads discover it at once. If a discard closed the socket, one
+    thread's cleanup would land on a connection another thread had already replaced and was
+    mid-statement on — turning one thread's blip into the other's 500 on a database that is
+    back up. Nothing this publisher discards needs closing anyway: it only discards what the
+    driver has already marked closed.
+    """
+    import threading
+
+    import psycopg
+
+    routes_mod = fresh_process_state
+    cluster = _Cluster()
+    monkeypatch.setattr(_Connection, "cursor", _cursor_honouring_usable, raising=False)
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", SENTINEL_APP_DSN)
+
+    tokens: list[str] = []
+    service = routes_mod.build_auth_service()
+    service.deliver = lambda email, token, expires_at: tokens.append(token)
+    service.accounts.upsert(DANA["email"], DANA)
+
+    sessions = []
+    for _ in range(6):
+        service.request_login(DANA["email"])
+        sessions.append(service.redeem(tokens[-1]))
+
+    # The failover: the connection every thread is about to use is dead, and the database is
+    # already back, so a reconnect succeeds.
+    cluster.outage()
+    cluster.recover()
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(6, timeout=10)
+
+    def _publish(index: int) -> None:
+        try:
+            barrier.wait()
+            service.profile_for(sessions[index].session_id)
+        except BaseException as exc:  # noqa: BLE001 - collected, not swallowed
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_publish, args=(i,)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+        assert not thread.is_alive(), "a publish thread never finished"
+
+    assert errors == [], (
+        f"{len(errors)} of 6 concurrent publishes failed against a database that was back up: "
+        f"{errors!r}. One thread's discard closed the connection another was using"
+    )
+    assert len(cluster.writes()) >= 6, "the sweep published nothing, so it measured nothing"
+
+
+def test_a_retry_that_also_fails_is_reported_and_not_swallowed(
+    clean_env: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry's OWN failure must reach the caller, and no existing test reached that line.
+
+    ``test_a_publish_that_cannot_be_completed_still_fails_loudly_after_the_retry`` drives a
+    cluster that is down and stays down, so the second attempt never happens: the reconnect
+    itself raises and that is what the route reports. The retry's ``publish_profile`` is
+    therefore never executed there, and a repair that swallowed it — ``except Exception: pass``
+    around the second attempt — passed the whole suite. Measured as a surviving mutant.
+
+    This is the ordering that reaches it: the cluster ACCEPTS connections and then drops every
+    one of them on the first statement, which is what a half-healthy replica does. First
+    attempt fails, reconnect succeeds, second attempt fails. The buyer must be told.
+    """
+    import psycopg
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    routes_mod = fresh_process_state
+    cluster = _Cluster()
+
+    def _resetting_cursor(self: Any, *_a: Any, **_k: Any) -> Any:
+        # The server drops the connection instead of answering. `closed` goes to 1, exactly as
+        # psycopg marks it, so the publisher correctly reads this as a socket failure and
+        # reconnects — and the replacement behaves the same way.
+        self.usable = False
+        self.closed = 1
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(_Connection, "cursor", _resetting_cursor, raising=False)
+    monkeypatch.setattr(psycopg, "connect", cluster.connect)
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", SENTINEL_APP_DSN)
+
+    tokens: dict[str, str] = {}
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    service = routes_mod.build_auth_service()
+    routes_mod.set_auth_service(service)
+    service.deliver = lambda email, token, expires_at: tokens.__setitem__(email, token)
+    service.accounts.upsert(DANA["email"], DANA)
+    opened_before = len(cluster.opened)
+
+    client.post("/buyer/auth/magic-link", json={"email": DANA["email"]})
+    session = client.post("/buyer/auth/session", json={"token": tokens[DANA["email"]]}).json()
+    answered = client.get("/buyer/profile", headers={"X-Buyer-Session": session["session_id"]})
+
+    # ARMED: the retry really was attempted, so the assertion below is about the retry's
+    # failure and not about the first attempt's.
+    assert len(cluster.opened) > opened_before, (
+        "no reconnect happened, so the second publish attempt never ran and this measured "
+        "the same path the down-and-stays-down test already covers"
+    )
+    assert answered.status_code == 500, (
+        f"a profile was served as {answered.status_code} after BOTH publish attempts failed; "
+        "the retry's own failure is being swallowed, which leaves every store reading a stale "
+        "row while the buyer is handed a fresh one"
+    )
+    assert cluster.writes() == [], (
+        f"a row landed despite both attempts failing: {cluster.writes()!r}"
+    )
+    for fragment in ("dana", "reyes", "example.com"):
+        assert fragment not in answered.text.casefold(), answered.text

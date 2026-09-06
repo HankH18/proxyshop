@@ -23,6 +23,23 @@ was handed, so the production path built by
 :func:`~buyer_svc.auth.routes.build_auth_service` always checks membership. A store
 constructed on its own has no vault to ask and keeps the older format-only guard: that is
 the documented meaning of an unbound store, not a fallback a caller can reach by accident.
+
+Membership is not currency, either
+----------------------------------
+``vault.resolve`` answers for retired rows as well as live ones, so asking it alone tests
+"the vault ever issued this" — which is every pseudonym the service has ever handed out, and
+since T-142 every pseudonym it has ever published into ``app.buyer_accounts``. R5 promises a
+pseudonym that rotates per session, so :meth:`SessionStore.admit` asks the narrower question
+as well: the buyer's *current* pseudonym, via :meth:`~buyer_svc.vault.PseudonymVault.active`.
+See :class:`RetiredPseudonym`.
+
+**The scope of that check is OPENING a session, and nothing more.** It is not "a retired
+pseudonym cannot authenticate". A session opened while its pseudonym was current stays live
+across a later rotation and keeps serving that now-retired pseudonym until it expires or is
+closed — :meth:`InMemorySessionStore.get` does not re-admit, deliberately, because ending a
+buyer's existing session is what ``DELETE /buyer/auth/session`` and the TTL are for, not what
+a subject guard should do behind their back. Read every claim in this module as being about
+the moment a session is opened.
 """
 
 from __future__ import annotations
@@ -41,6 +58,8 @@ __all__ = [
     "InMemorySessionStore",
     "NotAPseudonym",
     "PseudonymRegistry",
+    "RetiredPseudonym",
+    "RotatingPseudonymRegistry",
     "Session",
     "SessionError",
     "SessionExpired",
@@ -112,6 +131,26 @@ class UnissuedPseudonym(NotAPseudonym):
     """
 
 
+class RetiredPseudonym(NotAPseudonym):
+    """The vault issued this subject and has since rotated the buyer off it.
+
+    ``vault.resolve`` answers for every row the vault ever wrote, retired ones included, so
+    "the vault knows this" is a weaker statement than "this is the subject the buyer
+    currently holds" — and it is the second one R5 means by a pseudonym that rotates per
+    session. Every pseudonym the service ever issued satisfies the first, and under T-142
+    every one of them is also written into ``app.buyer_accounts``, a table the code describes
+    as readable by every store-facing role. The set of values that could open a session was
+    therefore the set of values published to stores.
+
+    A subclass of :class:`NotAPseudonym` for the reason :class:`UnissuedPseudonym` is one:
+    a caller that already refuses a subject a session may not be about keeps refusing this
+    one. Deliberately NOT a subclass of ``UnissuedPseudonym`` — this subject was issued, and
+    a reader who catches "forgery" should not silently be catching "expired" as well.
+
+    Like its siblings it never echoes the subject.
+    """
+
+
 @runtime_checkable
 class PseudonymRegistry(Protocol):
     """The one question a session store asks the vault: *did you issue this?*
@@ -125,6 +164,25 @@ class PseudonymRegistry(Protocol):
 
     def resolve(self, pseudonym: str) -> str | None:
         """The buyer behind ``pseudonym``, or ``None`` when it was never issued."""
+
+
+@runtime_checkable
+class RotatingPseudonymRegistry(PseudonymRegistry, Protocol):
+    """A registry that can also say which pseudonym a buyer holds *now*.
+
+    Kept separate from :class:`PseudonymRegistry` rather than folded into it, because the two
+    questions have different answers about the same value and only one of them can be asked
+    of every backing store. :class:`~buyer_svc.vault.PseudonymVault` answers both;
+    :class:`~buyer_svc.vault.store.PseudonymStore` answers only the first, and a store bound
+    directly keeps exactly the guarantee it can support — the same documented tolerance this
+    module already extends to a store that was given no vault at all.
+
+    ``active`` is the vault's own existing method and takes the buyer's key, not a pseudonym,
+    which is why :meth:`SessionStore.admit` resolves first and compares second.
+    """
+
+    def active(self, buyer_key: str) -> str | None:
+        """The buyer's current pseudonym, or ``None`` if they have never signed in."""
 
 
 def _utcnow() -> datetime:
@@ -183,17 +241,45 @@ class SessionStore:
     def admit(self, pseudonym: str) -> None:
         """Refuse ``pseudonym`` unless it is a subject a session may be about.
 
-        Two refusals, and the second one is T-163:
+        Three refusals, and the last two are T-163:
 
         * it does not carry :data:`~buyer_svc.vault.PSEUDONYM_PREFIX`, so it is not even
           shaped like something the vault hands out — the ``sessions.open(email)`` mistake;
         * it is shaped right and the bound vault has no record of ever issuing it, so it is
           a forgery. Before this check the format *was* the proof, and
-          ``"psn-" + buyer_email`` authenticated ``GET /buyer/profile``.
+          ``"psn-" + buyer_email`` authenticated ``GET /buyer/profile``;
+        * the vault issued it and has since rotated the buyer onto another one, so it is a
+          retired subject rather than a current credential.
+
+        The third exists because ``resolve`` answers for retired rows too, which makes it a
+        test of "the vault ever issued this" — a set that includes every pseudonym the service
+        has ever handed out, and under T-142 every pseudonym it has ever *published* into
+        ``app.buyer_accounts``. What R5 means by a per-session pseudonym is the narrower
+        thing, so the narrower thing is what is asked: resolve the subject to its buyer, then
+        ask the vault which pseudonym that buyer currently holds. A registry that cannot
+        answer the second question keeps exactly the guarantee it could support before —
+        see :class:`RotatingPseudonymRegistry`.
+
+        COST, measured, because this check is not free and the number belongs where the call
+        is. ``resolve`` is a dict lookup; ``active`` goes through
+        :meth:`~buyer_svc.vault.PseudonymVault.history`, and
+        :class:`~buyer_svc.vault.store.InMemoryPseudonymStore` answers that by scanning every
+        row it holds. On this machine: 0.13 us for ``resolve`` against 1.5 us / 54.9 us /
+        616.2 us for ``active`` at 100 / 5,000 / 50,000 rows — O(rows), and that table only
+        grows. ``PostgresPseudonymStore`` has ``pseudonym_history_email_idx``
+        (``db/migrations/0003_sealed_vault_app_tables.sql``), so the durable path pays one
+        indexed round trip and nothing more; the in-memory store is what
+        :func:`~buyer_svc.auth.routes.build_auth_service` falls back to when
+        ``PROXYSHOP_PG_DSN_VAULT`` is unset. Closing that means indexing the in-memory store by
+        email, which is a change to ``buyer_svc.vault.store`` — a package this module may
+        depend on but does not own — so it is written down here rather than worked around.
+        ``open`` is called once per redemption, so the cost is per login and not per request.
 
         Raises:
             NotAPseudonym: the prefix is missing.
             UnissuedPseudonym: no vault issued it. Only reachable on a bound store.
+            RetiredPseudonym: the vault issued it and has rotated past it. Only reachable on
+                a store bound to a registry that answers ``active``.
         """
         if not isinstance(pseudonym, str) or not pseudonym.startswith(PSEUDONYM_PREFIX):
             raise NotAPseudonym(
@@ -202,15 +288,37 @@ class SessionStore:
                 f"message because the mistake this catches is passing the buyer's email"
             )
         vault = self._vault
-        if vault is not None and vault.resolve(pseudonym) is None:
+        if vault is None:
+            return
+        buyer_key = vault.resolve(pseudonym)
+        if buyer_key is None:
             raise UnissuedPseudonym(
                 "R5: this session subject carries the pseudonym prefix but no vault ever "
                 "issued it, so it is a forgery rather than a credential; the value offered "
                 "is withheld from this message because a forged subject is built out of the "
                 "buyer's own email"
             )
+        current = getattr(vault, "active", None)
+        if callable(current) and current(buyer_key) != pseudonym:
+            raise RetiredPseudonym(
+                "R5: this session subject was issued by the vault and the buyer has since "
+                "been rotated onto another pseudonym, so it is a retired subject rather than "
+                "the one they currently hold; the value offered is withheld from this "
+                "message for the reason its siblings withhold theirs"
+            )
 
     def open(self, pseudonym: str, *, ttl: timedelta | None = None) -> Session:
+        """Start a session, or refuse.
+
+        CONTRACT, and another module depends on it:
+        :meth:`~buyer_svc.auth.magic_link.MagicLinkAuth.redeem` gives a consumed magic link
+        back when this raises a :class:`SessionError`, on the strength of "a refusal means
+        nothing was opened". An implementation that creates the session and *then* raises a
+        ``SessionError`` breaks that, and one magic link becomes two sessions. Raise refusals
+        before anything exists — :meth:`admit` first, as :class:`InMemorySessionStore` does —
+        and let a genuine failure be something other than a ``SessionError``, which ``redeem``
+        deliberately treats as "a session may exist" and does not give the link back for.
+        """
         raise NotImplementedError
 
     def get(self, session_id: str) -> Session:
@@ -269,6 +377,8 @@ class InMemorySessionStore(SessionStore):
                 subject of a session.
             UnissuedPseudonym: the prefix is there and this store's bound vault never issued
                 the value (T-163). Only reachable on a store that was given a vault.
+            RetiredPseudonym: the bound vault issued the value and has rotated the buyer onto
+                another one since (T-163). Only reachable on a store bound to a vault.
             SessionsExhausted: the store already holds ``max_sessions`` live sessions. New
                 sessions are shed rather than live ones evicted; see the class.
         """
