@@ -1,13 +1,23 @@
-"""Reproduction gate for the open `services/shopify-stub` finding.
+"""Reproduction gates for the open `services/shopify-stub` findings.
 
-The test here asserts the behaviour that SHOULD hold and therefore fails against the tree as it
-stands. It carries ``xfail(strict=True)`` so an ordinary run reports ``xfailed`` and the
+Each test here asserts the behaviour that SHOULD hold and therefore fails against the tree as
+it stands. It carries ``xfail(strict=True)`` so an ordinary run reports ``xfailed`` and the
 repo-wide build gate stays green, while the ticket's own gate
 (``pytest <file> -q --runxfail -k <name>``) reports a real failure with the test SELECTED. When
 the defect is repaired the test XPASSes, which ``strict=True`` turns into a failure — so the
 marker cannot outlive the bug.
 
-**Read the docstring below before treating T-205's recorded blast radius as fact.** The
+Every ``xfail`` gate here is paired with a ``..._is_armed`` control that is NOT xfail. That
+separation is load-bearing: under ``xfail(strict=True)`` **any** exception in the graded body
+is reported ``xfailed``, which is green, so a probe that had quietly stopped working would be
+indistinguishable from the defect it is meant to detect — and under the ticket's own
+``--runxfail`` gate every dead-probe state reads as "still broken". The preconditions that
+make the red meaningful therefore live in the control, where they fail in their own name
+during ``make verify``.
+
+Covered here: T-205, T-253, T-255.
+
+**Read the T-205 docstring below before treating its recorded blast radius as fact.** The
 swallow it names is real and is reproduced here; the consequence it states — that 219 stub
 tests silently report green — is not, and the measurement is in the docstring.
 """
@@ -18,6 +28,7 @@ import builtins
 import importlib.util
 import sys
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -140,3 +151,191 @@ def test_the_stub_url_fixture_does_not_turn_a_broken_import_into_a_skip() -> Non
         pytest.fail("the synthetic import breakage never fired; this probe is wrong")
     finally:
         next(breaker, None)
+
+
+# =============================================================================================
+# T-253 — `utc_now()` is documented as the stub's single wall-clock read and is called by
+#          nothing, while `StubState.now()` reads `datetime.now(UTC)` for itself
+# =============================================================================================
+#
+# ``services/shopify-stub/src/codes.py:245`` publishes this contract in its own docstring:
+#
+#     The stub's single wall-clock read.
+#     One function so a test can freeze time (``frozen_clock``) or the control plane can
+#     override it, without every module reaching for ``datetime.now`` independently.
+#
+# Measured at HEAD, on this branch, from this worktree:
+#   * ``git grep -n utc_now -- services apps packages`` finds the definition and NO call site,
+#     so the "single wall-clock read" is read by nobody;
+#   * ``git grep -n 'datetime.now' -- services/shopify-stub/src`` finds exactly two hits, and
+#     the second is ``state.py:513`` — ``StubState.now()``, which every live clock read in the
+#     stub actually goes through (``app.py:210,285,348,610``; ``orders.py:103,167,210``;
+#     ``webhooks.py:155``). So the module that matters reaches for ``datetime.now``
+#     independently, which is the exact thing the docstring says does not happen.
+#
+# The gate is behavioural rather than a grep, deliberately: a source scan over
+# ``services/shopify-stub/src`` would be grading files this lane can edit, which measures
+# nothing. What is asserted instead is the *consequence* the docstring promises — that
+# overriding the one function moves the stub's clock.
+#
+# ONE PREMISE OF THE TICKET IS FALSE AND THE RECORD SHOULD SAY SO. T-253 states that
+# "frozen_clock does not exist anywhere in the repo". It does: ``conftest.py:471`` defines it
+# (a ``time_machine`` fixture), ``conftest.py:52`` documents it, ``proxyshop_support/clock.py:9``
+# names it, and ``proxyshop_support/tests/test_shared_runtime.py:141`` exercises it. The
+# docstring's reference is therefore live, not dangling. What is false is the *first* sentence
+# — "the stub's single wall-clock read" — and that half reproduces exactly.
+
+
+def test_t253_the_utc_now_probe_is_armed() -> None:
+    """Not xfail. Everything the gate below needs in order for its red to mean something.
+
+    If ``utc_now`` were deleted, or ``StubState.now`` stopped being the stub's clock, the gate
+    would raise and ``xfail(strict=True)`` would report that as green. These assertions fail
+    in their own name instead.
+    """
+    from shopify_stub import codes as codes_module
+    from shopify_stub.state import StubState
+
+    assert callable(getattr(codes_module, "utc_now", None)), (
+        "shopify_stub.codes.utc_now is gone, so the gate below has no override point"
+    )
+    live = codes_module.utc_now()
+    assert isinstance(live, datetime) and live.tzinfo is not None, (
+        f"utc_now() returned {live!r}; the gate compares it against an aware sentinel"
+    )
+
+    # The override mechanism itself works — so a red below is the stub not honouring the
+    # override, never the monkeypatch failing to take.
+    sentinel = datetime(2031, 3, 4, 5, 6, 7, tzinfo=UTC)
+    original = codes_module.utc_now
+    try:
+        codes_module.utc_now = lambda: sentinel  # type: ignore[assignment]
+        assert codes_module.utc_now() == sentinel, "patching the module attribute did not take"
+    finally:
+        codes_module.utc_now = original  # type: ignore[assignment]
+
+    clock = StubState().now()
+    assert isinstance(clock, datetime) and clock.tzinfo is not None, (
+        f"StubState.now() returned {clock!r}; it is supposed to be the stub's aware clock"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-253: shopify_stub.codes.utc_now documents itself as the stub's single wall-clock "
+        "read and has zero callers, while shopify_stub.state.StubState.now — the clock every "
+        "live read in the stub goes through — calls datetime.now(UTC) directly, so overriding "
+        "utc_now moves nothing; remove this marker with the fix"
+    ),
+)
+def test_t253_overriding_utc_now_moves_the_stubs_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The docstring's promise, driven at the clock every live caller in the stub uses."""
+    from shopify_stub import codes as codes_module
+    from shopify_stub.state import StubState
+
+    sentinel = datetime(2031, 3, 4, 5, 6, 7, tzinfo=UTC)
+    monkeypatch.setattr(codes_module, "utc_now", lambda: sentinel)
+
+    observed = StubState().now()
+    assert observed == sentinel, (
+        "StubState.now() ignored the override of shopify_stub.codes.utc_now and returned "
+        f"{observed!r} instead of {sentinel!r}. utc_now is not the stub's single wall-clock "
+        "read: state.py reaches for datetime.now(UTC) on its own, which is what its docstring "
+        "says no module does."
+    )
+
+
+# =============================================================================================
+# T-255 — `DiscountCode.is_redeemable_at()` cannot express the cart state both live callers
+#          pass, so it silently answers a narrower question than the redemption path asks
+# =============================================================================================
+#
+# ``codes.py:240`` reads::
+#
+#     def is_redeemable_at(self, now: datetime) -> bool:
+#         """Convenience for the common "no other discount on the cart" case."""
+#         return self.rejection(now=now) is None
+#
+# ``rejection``'s ``cart_has_order_discount`` is therefore pinned to ``False`` with no way for
+# a caller to say otherwise. Measured at HEAD: BOTH live redemption sites pass it explicitly
+# and neither passes ``False`` — ``app.py:347-350`` and ``orders.py:124-127`` both forward
+# ``state.config.has_active_automatic_discount``. So the "common case" the docstring names is
+# not the case any live caller is in, and a future caller reaching for the shorter spelling
+# gets ``True`` for a cart the redemption path rejects with
+# ``CONFLICTS_WITH_EXISTING_DISCOUNT``.
+#
+# The two functions are asserted against EACH OTHER rather than against a hand-written
+# expectation, so the gate keeps grading if either one's rules change.
+
+
+def _t255_code(**overrides: Any) -> Any:
+    """A minted code in its ordinary live state: active, unused, non-combining."""
+    from shopify_stub.codes import DiscountCode
+
+    base: dict[str, Any] = {
+        "code": "PSX-T255ABCD",
+        "starts_at": _T255_NOW,
+        "ends_at": _T255_NOW + timedelta(hours=48),
+        "usage_limit": 1,
+        "percentage": 0.1,
+    }
+    base.update(overrides)
+    return DiscountCode(**base)
+
+
+_T255_NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def test_t255_the_is_redeemable_at_probe_is_armed() -> None:
+    """Not xfail. The disagreement the gate below measures is real, and is not a fixture bug.
+
+    Three facts, none of which needs the repair: the live path really does narrow on the
+    cart; the same code with no cart discount really is redeemable; and the convenience
+    wrapper really does answer ``True`` for the code the live path would reject. If any of
+    these stops holding, the gate's red would mean something other than T-255.
+    """
+    from shopify_stub.codes import RejectionReason
+
+    code = _t255_code()
+    assert code.rejection(now=_T255_NOW, cart_has_order_discount=True) is (
+        RejectionReason.CONFLICTS_WITH_EXISTING_DISCOUNT
+    ), "the live path no longer narrows on an order-level discount already on the cart"
+    assert code.rejection(now=_T255_NOW, cart_has_order_discount=False) is None, (
+        "the probe's code is not redeemable even on an empty cart, so it grades nothing"
+    )
+    assert code.is_redeemable_at(_T255_NOW) is True, (
+        "is_redeemable_at answers True for a cart the redemption path rejects — this is the "
+        "narrowing T-255 names, and it is asserted here so the gate's red is about the "
+        "MISSING PARAMETER rather than about this disagreement having evaporated"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-255: DiscountCode.is_redeemable_at pins rejection(cart_has_order_discount=False) "
+        "and takes no parameter for it, while both live redemption sites (app.py:347, "
+        "orders.py:124) forward state.config.has_active_automatic_discount — so the helper "
+        "cannot be asked the question the platform actually asks; remove this marker with "
+        "the fix"
+    ),
+)
+def test_t255_is_redeemable_at_agrees_with_the_live_rejection_path() -> None:
+    """For every cart state the redemption path can be in, the two must give one answer."""
+    code = _t255_code()
+    for cart_has_order_discount in (False, True):
+        expected = (
+            code.rejection(
+                now=_T255_NOW, cart_has_order_discount=cart_has_order_discount
+            )
+            is None
+        )
+        observed = code.is_redeemable_at(
+            _T255_NOW, cart_has_order_discount=cart_has_order_discount
+        )
+        assert observed is expected, (
+            f"with cart_has_order_discount={cart_has_order_discount!r} the redemption path "
+            f"says redeemable={expected} and is_redeemable_at says {observed}. The helper "
+            "answers a narrower question than the live path asks."
+        )
