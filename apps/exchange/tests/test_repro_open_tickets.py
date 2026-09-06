@@ -2598,19 +2598,41 @@ def test_the_recorded_bid_corpus_is_armed() -> None:
 # — `collected_bid_records` stubbed to return `[]`, the pre-T-294 world — the node is RED on
 # 20 of 20 fresh seeds: 0 codes minted, all 67 accepts refused `unknown_bid`, while the
 # armer stays green. With the recording restored: 200 of 200 fresh seeds green, 20 auctions,
-# 20 distinct live `PSX-…` codes. The green is caused by the recording, not by the corpus.
+# ~20 distinct live `PSX-…` codes — measured 19.9 mean over 100 fresh corpora, and 19 in 6% of
+# runs, because an auction can carry no admitted non-fallback bid. Every code in 1,990 was
+# distinct and `PSX-` prefixed. The green is caused by the recording, not by the corpus.
 #
 # WHAT THE CORPUS NOW SUPPLIES is what a deployment supplies, drawn per run like everything
 # else here: a trust snapshot in the `{store_id: {...}}` shape `composition.py` loads from a
 # deployment document — a TABLE, not a formula, so a store the platform has never heard of
-# is still fail-closed, and ~1 store in 10 really is blacklisted and really is excluded (5-11
-# per run); a `checkout_url` on the store's own registered host; and `hard_constraints: []`,
+# is still fail-closed, and ~1 store in 10 really is blacklisted and really is excluded. The
+# per-run count was written here as "5-11" and an adversarial pass measured it over 200 fresh
+# seeds: min 1, mean 7.9, max 16, with 17% of runs outside that band. The 10.1% blacklist rate
+# (8 of 79 stores) is right; the band was not, and a number nobody re-measures is how a
+# comment starts lying. Exclusions were never ZERO in 260 seeds, and analytically a
+# zero-exclusion run needs ~80 consecutive clean draws at p=8/79 — about 1 run in 5,300.
+# Also: a `checkout_url` on the store's own registered host; and `hard_constraints: []`,
 # the shape `e2e/support/s1/run.json` already ships. The forged-ref machinery is untouched.
 #
 # TWO THINGS STATED RATHER THAN BURIED. (1) The entries filter now also drops candidates the
 # auction itself published under `excluded`: demanding a 200 for a blacklisted store's bid
 # would be demanding back the measured hole where a blacklisted store was bought for a live
-# code. (2) This node does NOT grade T-349 — with `offer: {}` restored it still passes,
+# code.
+#
+#     AND THE PRICE OF THAT, which the first version of this comment stopped one sentence
+#     short of saying: THIS NODE CAN NO LONGER SEE THAT HOLE REOPEN. Driven — with
+#     `collected_bid_records` ignoring `eligible`, 55 of 60 blacklisted stores' bids minted a
+#     live code, and this node and its armer stayed GREEN on 20 of 20 seeds. The property is
+#     still guarded, by exactly one sibling: running the whole suite with that hole open
+#     reddens `test_composition_root.py::test_a_store_the_ranking_excluded_cannot_be_bought`
+#     `[blacklisted]` and nothing else. So the coverage lost here is redundant rather than
+#     unique — but it is redundant with ONE test, and whoever deletes or weakens that one is
+#     removing the last thing that watches this. The corpus holds every blacklisted ref, so a
+#     negative assertion ("a blacklisted store's bid must be REFUSED") could be added here;
+#     it is not in this change because it is a different claim from the one this node makes,
+#     and bolting it on would make a node that already grades one ticket grade two.
+#
+# (2) This node does NOT grade T-349 — with `offer: {}` restored it still passes,
 # because the missing offer skips the pre-mint host check rather than failing it and
 # `default_permalink` rebuilds the cart URL. T-349 needs its own gate; this is not it.
 def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
@@ -2740,8 +2762,26 @@ def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
         # store that FABRICATES a bid for whatever ref it is handed mints for it. That second
         # shape passed the earlier version of this gate — the unguessable token protects only
         # against an attacker who has to guess, and `accept_bid` is handed the ref — so the
-        # question is asked directly. It runs before the real accept because a refusal leaves
-        # the auction open, while an acceptance would close it.
+        # question is asked directly.
+        #
+        # THIS COMMENT USED TO SAY the forgery "runs before the real accept because a
+        # refusal leaves the auction open, while an acceptance would close it". That was
+        # true when this node could never reach a 200. `real_slot` puts the real accept at
+        # a RANDOM position among the forgeries — deliberately, because a fixed
+        # forged-then-real order was defeated by a process-global call counter with no bid
+        # store at all — so once the corpus was wired to actually mint, about half the
+        # forgeries began landing on a CLOSED auction. Measured over 30 runs and 1,490
+        # forged accepts: 763 (51.2%) before the real accept, refused `unknown_bid`, which
+        # is the bid-book question; 727 (48.8%) after it, refused `auction_not_acceptable`,
+        # which is not. 27% of auctions ask no pre-real forgery at all.
+        #
+        # The probe still has teeth and that was measured rather than assumed: a `_find_bid`
+        # that fabricates a bid for any ref is caught RED on 20 of 20 seeds (8-19 auctions
+        # per run), and a process-global bid bag on 50 of 50 (1-6 per run — thin, never
+        # zero). Reported rather than repaired because both fixes are worse: forcing every
+        # forgery before the real accept restores the enumerable order that was already
+        # defeated once, and asking a forgery on a closed auction is not nothing either —
+        # it is where a book that outlives its auction would show up.
         # Two refs this auction never published, and BOTH are drawn from the same generator
         # as the real ones — `bid-<8 hex>`, byte-for-byte the same shape. An earlier version
         # used a literal `bid-ffffffff0001`, and four separate attacks keyed off exactly that
