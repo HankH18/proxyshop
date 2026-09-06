@@ -84,12 +84,15 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Iterable, Mapping
+from functools import cache
 from typing import Any, NamedTuple
 
 from contracts import (
     HOOK_PROVENANCE_SOURCES,
+    Bid,
     Claim,
     ClaimType,
+    Offer,
     Provenance,
     ProvenanceSource,
     canonical_authority_rank,
@@ -130,6 +133,95 @@ CLAIM_BEARING_FIELDS: tuple[str, ...] = ("claims", "commitments")
 
 #: Fields carrying a nested object that itself carries claims. A bid's offer is part of the bid.
 NESTED_OBJECT_FIELDS: tuple[str, ...] = ("offer",)
+
+#: The protocol model each place in a bid is supposed to conform to, so the walk can ask the
+#: SAME question the shared `contracts.boundary` door asks about a field that may not be null.
+#:
+#: `None` keys the root — :func:`collect_claim_material` is handed a whole bid by
+#: :func:`enforce_bid_provenance` — and every entry beside it names a field in
+#: :data:`NESTED_OBJECT_FIELDS`. It is a mapping rather than a pair of constants so that a future
+#: nested object joins by being listed here once, in the same place the walk already learns to
+#: descend into it.
+#:
+#: **Why the walk consults the model at all** (T-209/T-218). `--strict-nullable` made a growing
+#: set of protocol fields non-nullable at the pydantic door, so `offer.commitments: null` is now
+#: refused `schema_invalid:offer.commitments` there. This module's walk short-circuited on ANY
+#: `None`, so the identical dict-built bid was ADMITTED here: the two doors disagreed about the
+#: same document, and a *point* fix for `commitments` would have left the other eight — and every
+#: field the generator tightens tomorrow. Reading the answer off the model on each walk is what
+#: makes a future tightening join automatically instead of silently opening a ninth hole.
+SHAPES: dict[str | None, Any] = {None: Bid, "offer": Offer}
+
+
+@cache
+def _non_nullable_fields(model: Any) -> frozenset[str]:
+    """Every field of `model` that may not be `None`, asked of pydantic rather than of a list.
+
+    Asked through `TypeAdapter(annotation).validate_python(None)` — the same machinery the
+    generated model itself validates with — so "nullable" cannot come to mean one thing at the
+    contracts door and another here. A hard-coded set would be a second source of truth, which is
+    precisely the arrangement T-218 is about.
+
+    An annotation pydantic cannot build an adapter for is reported as NULLABLE, deliberately:
+    this wall must never refuse honest traffic on the strength of a classification it could not
+    make. A divergence introduced that way is not silent — the store agent's own gate discovers
+    the family from the contracts door on every run and goes red naming the field.
+
+    Cached per model class; the models are module-level singletons, so this runs once each.
+    """
+    from pydantic import TypeAdapter  # noqa: PLC0415 - kept off the import path of every caller
+
+    refused: set[str] = set()
+    for name, field in model.model_fields.items():
+        try:
+            TypeAdapter(field.annotation).validate_python(None)
+        except Exception:  # noqa: BLE001 - anything but "None validated" means None is refused
+            refused.add(name)
+    return frozenset(refused)
+
+
+def _is_present(node: Any, field: str) -> bool:
+    """Whether `node` *states* `field` at all, as opposed to leaving it out.
+
+    Presence, not truth, and the distinction is the whole of the null wall below: a bid that
+    omits `auction_id` is an incomplete document and is the shared boundary's business, while a
+    bid that spells `"auction_id": null` has stated a value the protocol does not allow. Only the
+    second is something this walk can say it was stopped by. Refusing the first here would fail
+    every partial bid the frozen suite builds — `{"offer": ..., "claims": []}` is a legitimate
+    argument to this boundary — for a reason that is not this module's subject.
+    """
+    if isinstance(node, Mapping):
+        return field in node
+    return hasattr(node, field)
+
+
+def _record_nulls(node: Any, path: str, found: ClaimMaterial, shape: Any) -> None:
+    """Record every field of `node` that is explicitly `null` where `shape` forbids it.
+
+    Recorded in `unwalkable` rather than refused with a message of its own, because that is what
+    it honestly is: the walk went looking for the offer, the commitments or the price and found a
+    `None` where a value belongs, so it did not look at anything. `unwalkable` exists precisely so
+    that "we did not look" is an answer the boundary gives out loud rather than swallows — the
+    silence the old `MAX_SWEEP_DEPTH` produced — and a null in a non-nullable field is the same
+    silence one field wide.
+
+    It does NOT speak `schema_invalid`, and should not: this is a provenance auditor, not a schema
+    validator, and the two doors are required to agree on the VERDICT, not on the vocabulary.
+    """
+    for field in sorted(_non_nullable_fields(shape)):
+        if _is_present(node, field) and _read(node, field) is None:
+            found.unwalkable.append(
+                (
+                    f"{path}.{field}",
+                    f"this bid states an explicit null for {field!r}, which "
+                    f"{shape.__name__} does not allow a null in. There is nothing here to "
+                    "inspect, so the boundary is not looking at the structure it was handed — "
+                    "and the shared contracts door refuses this same document. A missing field "
+                    "would be the other door's business; a stated null is this walk being "
+                    "stopped, and it is said out loud rather than skipped",
+                )
+            )
+
 
 #: The field carrying the priced discount. Not a `Claim` — `contracts.Discount` has no `key` —
 #: so it cannot be checked against the ledger directly; it is checked against the grant that
@@ -477,11 +569,13 @@ class ClaimMaterial(NamedTuple):
     `disguises` are nodes that are claim-shaped *and* carry offer material — see
     :func:`_walk` for why that is a refusal rather than a shape to interpret.
 
-    `unwalkable` is every place the walk could not finish, as ``(path, why)``. Two things land
-    here and both are refusals rather than gaps: a node the walk is already inside (a cycle), and
-    a structure too deeply nested for the interpreter to recurse through. Recording them is the
-    point — a boundary that quietly stopped walking would be reporting on a structure that is not
-    the one it was handed, which is exactly what `MAX_SWEEP_DEPTH` did.
+    `unwalkable` is every place the walk could not finish, as ``(path, why)``. Three things land
+    here and all three are refusals rather than gaps: a node the walk is already inside (a cycle),
+    a structure too deeply nested for the interpreter to recurse through, and a field stating an
+    explicit `null` where the protocol model forbids one (:func:`_record_nulls`). Recording them
+    is the point — a boundary that quietly stopped walking would be reporting on a structure that
+    is not the one it was handed, which is exactly what `MAX_SWEEP_DEPTH` did, and what returning
+    on a `None` did one field at a time.
     """
 
     claims: list[Any]
@@ -489,14 +583,19 @@ class ClaimMaterial(NamedTuple):
     prices: list[tuple[str, Any, Any]]
     disguises: list[tuple[str, Any]]
     unwalkable: list[tuple[str, str]]
-    #: ``(path, the unit price stated beside it, the total)`` for every priced node that also
-    #: states a `total_price`. A SEPARATE list rather than a fourth column on `prices`, because
-    #: the two are not the same kind of number and are not checked by the same walls: `prices`
-    #: feeds the floor and the depth reconciliation, both of which are about one unit, and a
-    #: total is only ever compared against the unit standing next to it. Appended last so the
-    #: five existing fields keep their positions — `prices` is destructured as a 3-tuple by the
-    #: suite and this must not move under it.
-    totals: list[tuple[str, Any, Any]]
+    #: ``(path, the product it names, the unit price stated beside it, the total)`` for every node
+    #: that names a product and states a `total_price`. A SEPARATE list rather than a fourth
+    #: column on `prices`, because the two are not the same kind of number: `prices` is about ONE
+    #: unit, and a total is a price for an unstated number of them. Appended last so the five
+    #: existing fields keep their positions — `prices` is destructured as a 3-tuple by the suite
+    #: and this must not move under it.
+    #:
+    #: The unit price may be `None`: a dict-built node is free to name a product and state only a
+    #: total, and that is exactly the shape neither price wall used to see (T-175). The walls
+    #: below take that case one at a time — `_total_price_refusal` has nothing to compare against
+    #: and says so by returning, while the floor and the reconciliation ask about the total
+    #: itself, which is decidable without a unit.
+    totals: list[tuple[str, Any, Any, Any]]
 
 
 def _walk(
@@ -506,6 +605,7 @@ def _walk(
     *,
     strict: bool = True,
     seen: frozenset[int] = frozenset(),
+    shape: Any = None,
 ) -> None:
     """Collect every claim, discount and price reachable in `node`, depth first.
 
@@ -523,6 +623,16 @@ def _walk(
     was taken for a leaf, and was admitted on a fingerprint that genuinely matched: the price it
     named was collected by nothing and was therefore outside the floor wall and the
     reconciliation alike. A priced node is offer material whatever else it is wearing.
+
+    **A total is a price the same way** (T-175). "Priced" used to mean a product plus a
+    `unit_price` specifically, so a dict-built node naming a product and stating only a
+    `total_price` was collected by NOTHING: `prices` came back empty, `totals` came back empty,
+    and neither the floor wall nor the reconciliation ever saw the number — while
+    `apps/exchange/src/ranking` reads ``("total_price", "unit_price", "price")`` in that order,
+    total FIRST, and DESIGN.md:127 publishes `price_value` as a function of exactly that field.
+    The identical node with the number spelled `unit_price` was refused by both walls. So a node
+    naming a product and stating EITHER number is offer material, and the total is recorded with
+    the product it names so the walls that need one can be asked about it.
 
     `strict` says what to do with something that is neither a claim, a container nor a
     collection. Where the contract says claims live — the argument itself, `claims`,
@@ -553,9 +663,21 @@ def _walk(
         )
         return
 
+    # The two doors must agree about a field that may not be null. Before this, the FIRST
+    # statement of this function was `if node is None: return`, so a null in a non-nullable field
+    # was skipped in silence — not collected, not recorded, not refused — while the shared
+    # contracts door refused the identical document (T-209/T-218). Done here rather than at the
+    # `None` itself precisely because a `None` carries no path of its own: only the node holding
+    # it can say which field it was, and only the model can say whether that field allows one.
+    if shape is not None:
+        _record_nulls(node, path, found, shape)
+
     fields = _structural_fields(node)
     claim_shaped = _is_claim_shaped(node)
-    priced = _read(node, PRODUCT_FIELD) is not None and _read(node, PRICE_FIELD) is not None
+    named = _read(node, PRODUCT_FIELD) is not None
+    priced = named and (
+        _read(node, PRICE_FIELD) is not None or _read(node, TOTAL_PRICE_FIELD) is not None
+    )
     if claim_shaped and not fields and not priced:
         found.claims.append(node)
         return
@@ -569,7 +691,13 @@ def _walk(
                 _walk(_read(node, field), f"{path}.{field}", found, seen=nested)
         for field in NESTED_OBJECT_FIELDS:
             if field in fields:
-                _walk(_read(node, field), f"{path}.{field}", found, seen=nested)
+                _walk(
+                    _read(node, field),
+                    f"{path}.{field}",
+                    found,
+                    seen=nested,
+                    shape=SHAPES.get(field),
+                )
         if DISCOUNT_FIELD in fields:
             discount = _read(node, DISCOUNT_FIELD)
             if discount is not None:
@@ -577,7 +705,7 @@ def _walk(
         price = _read(node, PRICE_FIELD)
         if price is not None:
             found.prices.append((f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), price))
-            _record_total(node, path, found)
+        _record_total(node, path, found)
         _sweep(node, path, found, nested)
         return
 
@@ -587,15 +715,19 @@ def _walk(
     # nothing collected it and therefore neither price wall ever saw it. Both walls were
     # evadable that way, the floor one included.
     #
-    # It takes BOTH names to be treated as a price: a node that names a product *and* prices it
-    # is an offer by any reading, while a `metadata` blob with a stray `unit_price` in it names
-    # nothing and is left alone, which is the same line `_sweep` already draws. Collected rather
-    # than returned on, so a non-claim in a place the contract says holds claims is still refused
-    # for being one — and so a claim-shaped one is still recorded as the disguise it is.
+    # It takes a PRODUCT and a NUMBER to be treated as a price: a node that names a product *and*
+    # states what it costs is an offer by any reading, while a `metadata` blob with a stray
+    # `unit_price` in it names nothing and is left alone, which is the same line `_sweep` already
+    # draws. Either number counts — `unit_price` or `total_price` — because a node stating only a
+    # total was collected by nothing at all and was therefore outside every price wall (T-175).
+    # Collected rather than returned on, so a non-claim in a place the contract says holds claims
+    # is still refused for being one — and so a claim-shaped one is still recorded as the
+    # disguise it is.
     if priced:
-        found.prices.append(
-            (f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), _read(node, PRICE_FIELD))
-        )
+        if _read(node, PRICE_FIELD) is not None:
+            found.prices.append(
+                (f"{path}.{PRICE_FIELD}", _read(node, PRODUCT_FIELD), _read(node, PRICE_FIELD))
+            )
         _record_total(node, path, found)
 
     if _is_sequence(node):
@@ -610,21 +742,37 @@ def _walk(
 
 
 def _record_total(node: Any, path: str, found: ClaimMaterial) -> None:
-    """Record `node`'s `total_price` beside the unit price the walk just collected from it.
+    """Record `node`'s `total_price`, the product it names and the unit price standing beside it.
 
-    Called from both places :func:`_walk` records a price — the model-shaped branch and the
-    dict-shaped one — because a bid built as a dict can put a priced node under any key it likes
-    and both walls were evadable that way once already.
+    Called from both places :func:`_walk` reaches offer material — the model-shaped branch and
+    the dict-shaped one — because a bid built as a dict can put a priced node under any key it
+    likes and both walls were evadable that way once already.
 
-    The total is recorded ONLY where a unit price was, and that is the honest limit of what this
-    module can say: the relation :func:`_total_price_refusal` checks is between the two numbers,
-    so a node stating a total and no unit has nothing here to be reconciled against. That gap is
-    a live, separately-recorded finding (T-175) rather than an oversight — closing it means
-    deciding what a bare total is a price OF, which is the same open design question.
+    **No longer conditional on a unit price** (T-175). It used to be, on the reasoning that
+    `_total_price_refusal` compares the two numbers and a bare total has nothing to be compared
+    against. That reasoning is sound about THAT wall and was wrong as a rule for the list: a node
+    naming a catalogued product and stating only a total was collected by nothing at all, so the
+    number was outside the floor wall and the reconciliation too — walls that need the CATALOG
+    and not a unit price, and can therefore say a great deal about a bare total. Measured: a
+    total of 0.41 on a product the merchant floors at 95.00 was ADMITTED, where the identical
+    node spelling the same number `unit_price` was refused by both.
+
+    The unit price is recorded as `None` in that case rather than the record being skipped, and
+    `_total_price_refusal` reads that `None` and returns — the one relation that genuinely needs
+    both numbers still declines to guess. What a total is a price OF is still the open design
+    question T-156 left open, and nothing here answers it: the walls asked about a bare total are
+    the ones whose answer no quantity can change.
     """
     total = _read(node, TOTAL_PRICE_FIELD)
     if total is not None:
-        found.totals.append((f"{path}.{TOTAL_PRICE_FIELD}", _read(node, PRICE_FIELD), total))
+        found.totals.append(
+            (
+                f"{path}.{TOTAL_PRICE_FIELD}",
+                _read(node, PRODUCT_FIELD),
+                _read(node, PRICE_FIELD),
+                total,
+            )
+        )
 
 
 def _sweep(node: Any, path: str, found: ClaimMaterial, seen: frozenset[int]) -> None:
@@ -671,7 +819,12 @@ def collect_claim_material(presented: Any) -> ClaimMaterial:
     """
     found = ClaimMaterial([], [], [], [], [], [])
     try:
-        _walk(presented, "", found)
+        # The root is judged against `Bid`, because that is what `enforce_bid_provenance` hands
+        # this function and what a runtime submits. A flat list of claims — the two-argument call
+        # the frozen boundary makes — states none of `Bid`'s fields, so `_record_nulls` finds
+        # nothing present and the null wall is silent on it, which is correct: a list of claims is
+        # not a bid making a claim about `auction_id`.
+        _walk(presented, "", found, shape=SHAPES[None])
     except RecursionError:
         found.unwalkable.append(
             (
@@ -1249,13 +1402,36 @@ def enforce_hook_provenance(
         )
         if reason is not None:
             extras.append(reason)
-    # The total, against the unit standing beside it. A third wall rather than a third question
-    # asked of the second one: the floor and the reconciliation both need the catalog and the
-    # grant to say anything, and this one needs neither — it is the only price relation that is
-    # decidable from the bid alone, which is why it is also the only thing that can be said about
-    # a field the protocol object carries no quantity for. See `_total_price_refusal`.
-    for path, unit, total in found.totals:
+    # The total. THREE questions, and they are not the same question asked three ways.
+    #
+    # `_total_price_refusal` is the one that needs no catalog and no grant: a total below the
+    # price of ONE of the units it is a total of is unreachable at every quantity, which is the
+    # only relation decidable from the bid alone. It is silent where no unit price stands beside
+    # the total, and that is honest rather than a gap.
+    #
+    # The other two are the SAME walls the unit price already clears, asked about the number the
+    # published rank formula actually reads (T-175). Both are quantity-SAFE for exactly the
+    # reason above: every quantity is at least one, so a total is at least one already-discounted
+    # unit, and a total under the merchant's floor — or under what the depth this node declares
+    # prices out at — is unreachable however many units it is for. Neither decides what a total
+    # OUGHT to be; both refuse only the half-line no answer to the quantity question can reach.
+    # Before this, `PRICE_FIELD` was `unit_price` and both walls looked at nothing else: measured,
+    # 16 of 16 bids stating a total under the envelope's own floor for a catalogued product were
+    # ADMITTED, against 16 of 16 refused for the identical node one field over.
+    for path, named, unit, total in found.totals:
         reason = _total_price_refusal(path, unit, total)
+        if reason is not None:
+            extras.append(reason)
+        for_product = named if named is not None else product_ref
+        reason = _price_refusal(path, for_product, total, hooks)
+        if reason is not None:
+            extras.append(reason)
+        node = (
+            path[: -len(TOTAL_PRICE_FIELD) - 1] if path.endswith(f".{TOTAL_PRICE_FIELD}") else path
+        )
+        reason = _price_reconciliation_refusal(
+            path, for_product, total, declared.get(node, 0.0), hooks
+        )
         if reason is not None:
             extras.append(reason)
     for path, node in found.disguises:
