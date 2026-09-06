@@ -91,6 +91,52 @@ def _trust_snapshot_for(payload: Any) -> dict[str, Any]:
     return {store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}}
 
 
+def _list_prices_for(payload: Any) -> dict[str, Any]:
+    """The catalog the CALLER holds, which every gate below now has to be given too.
+
+    The exact sibling of `_trust_snapshot_for` above, one ticket later and for the same reason.
+    An ABSENT `list_prices` used to mean "abstain" at the shared boundary, so these probes passed
+    none and the price wall said nothing. T-306/T-307 closed that — a signed bid awarding itself
+    85% off was admitted whenever the roster was omitted — so an absent roster now refuses exactly
+    as an explicit empty one does, `price_unreconcilable:offer.unit_price:list_price_unavailable`.
+
+    Which lands on this file the same way the eligibility row did: every probe here that has to
+    reach a LATER gate is hollowed out without it, and the sweeps that carry
+    `if not receipt.accepted: continue` would silently assert nothing. Their arming assertions —
+    added when `trust_snapshot` did this — are what turn that into a red instead of a green, and
+    they fire correctly today.
+
+    **Nothing is loosened to satisfy the wall.** The roster is HONEST: it prices the product at
+    exactly what the offer states, so the wall is silent because the bid is truthful. A bid that
+    lies about its price is still refused, which is what the T-156 and T-175 gates depend on.
+
+    DERIVED FROM THE BID, not fixed, and that is required rather than tidy: the T-233 property
+    below draws `product_ref` randomly on every run, so a hard-coded roster key would miss every
+    draw and the property would grade an unpriceable product instead of an eligibility default.
+    The fixture product is merged underneath so a deliberately-lying payload still meets a caller
+    who holds a catalog — a caller's catalog is a property of the caller, not of the submission.
+
+    Keyed off the honest payload for the same reason `_trust_snapshot_for` is: several payloads
+    below are liars, and their own answers must not be allowed to steer the fixture.
+    """
+    roster: dict[str, Any] = {
+        "gate-prod-1": {"list_price": HONEST_PRICE, "max_discount_pct": 100.0}
+    }
+    offer = payload.get("offer") if isinstance(payload, Mapping) else None
+    if isinstance(offer, Mapping):
+        product_ref = offer.get("product_ref")
+        unit_price = offer.get("unit_price")
+        if (
+            isinstance(product_ref, str)
+            and product_ref
+            and isinstance(unit_price, (int, float))
+            and not isinstance(unit_price, bool)
+            and float(unit_price) >= 0.0
+        ):
+            roster[product_ref] = {"list_price": float(unit_price), "max_discount_pct": 100.0}
+    return roster
+
+
 def _keyring() -> dict[str, dict[str, str]]:
     return {SIGNER: {KEY_ID: KEY}}
 
@@ -250,6 +296,7 @@ def test_the_body_that_was_validated_is_the_body_that_is_enqueued() -> None:
             now=NOW,
             auction_deadline=DEADLINE,
             trust_snapshot=_trust_snapshot_for(payload),
+            list_prices=_list_prices_for(payload),
         )
         if not receipt.accepted:
             continue
@@ -349,6 +396,7 @@ def test_the_snapshot_is_deep_so_a_nested_value_cannot_be_swapped_or_mutated() -
         now=NOW,
         auction_deadline=DEADLINE,
         trust_snapshot=_trust_snapshot_for(payload),
+        list_prices=_list_prices_for(payload),
     )
     assert receipt.accepted is True, f"control: this bid must be admitted: {receipt!r}"
     assert queue.count == 1
@@ -380,6 +428,7 @@ def test_the_snapshot_is_deep_so_a_nested_value_cannot_be_swapped_or_mutated() -
             now=NOW,
             auction_deadline=DEADLINE,
             trust_snapshot=_trust_snapshot_for(fresh),
+            list_prices=_list_prices_for(fresh),
         )
         if not nested.accepted:
             continue
@@ -454,6 +503,7 @@ def test_every_identity_field_on_the_work_item_is_the_one_that_was_signed() -> N
                 now=NOW,
                 auction_deadline=DEADLINE,
                 trust_snapshot=_trust_snapshot_for(payload),
+                list_prices=_list_prices_for(payload),
             )
             if not receipt.accepted:
                 continue
@@ -525,6 +575,7 @@ def test_the_door_never_raises_on_the_three_inputs_that_make_it_raise() -> None:
         # either way. It is here so that stays true by construction rather than by gate
         # ordering: each case has to be refused on ITS OWN hazard.
         kwargs.setdefault("trust_snapshot", _trust_snapshot_for(payload))
+        kwargs.setdefault("list_prices", _list_prices_for(payload))
         return receive_bid(
             kwargs.pop("payload", payload),
             signature,
@@ -619,6 +670,7 @@ def test_a_non_finite_freshness_window_does_not_disable_the_freshness_gates() ->
         # row. The row is supplied anyway so the probe never depends on that gate ordering, and
         # `setdefault` keeps a caller free to override it.
         kwargs.setdefault("trust_snapshot", _trust_snapshot_for(stale))
+        kwargs.setdefault("list_prices", _list_prices_for(stale))
         return receive_bid(
             stale,
             signature,
@@ -686,6 +738,7 @@ def test_a_door_with_no_injected_nonce_store_does_not_admit_the_same_bid_twice()
             now=NOW,
             auction_deadline=DEADLINE,
             trust_snapshot=_trust_snapshot_for(payload),
+            list_prices=_list_prices_for(payload),
         )
         admitted += 1 if receipt.accepted else 0
         enqueued += queue.count
@@ -813,6 +866,7 @@ def test_omitting_the_eligibility_inputs_is_not_more_permissive_than_passing_emp
             nonce_store=NonceStore(),
             now=NOW,
             auction_deadline=DEADLINE,
+            list_prices=_list_prices_for(payload),
             **kwargs,
         )
 
@@ -1023,6 +1077,7 @@ def test_the_absent_eligibility_argument_is_indistinguishable_from_the_empty_one
                 nonce_store=NonceStore(),
                 now=NOW,
                 auction_deadline=DEADLINE,
+                list_prices=_list_prices_for(payload),
                 **kwargs,
             )
 

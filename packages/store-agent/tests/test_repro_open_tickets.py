@@ -890,6 +890,19 @@ def _t279_bases() -> list[dict[str, Any]]:
                 "trust_snapshot": {
                     store_id: {"store_id": store_id, "score": 0.9, "blacklisted": False}
                 },
+                # The catalog the CALLER holds, priced at exactly what this drawn offer states,
+                # so the price wall is silent because the bid is truthful. Carried on the BASE
+                # rather than derived per call on purpose: a hazard and its benign twin must meet
+                # the SAME catalog, or the reason-token comparison would read a roster difference
+                # as a door difference. An absent roster stopped being the abstention with
+                # T-306/T-307 and now refuses like an empty one — which is what the arming
+                # assertion caught, correctly, rather than going quietly green.
+                "list_prices": {
+                    payload["offer"]["product_ref"]: {
+                        "list_price": unit_price,
+                        "max_discount_pct": 100.0,
+                    }
+                },
             }
         )
     return bases
@@ -912,7 +925,7 @@ def _t279_invoke(entry: Any, base: dict[str, Any], overrides: dict[str, Any]) ->
         "blacklist": None,
         "freshness_window_seconds": T279_FRESHNESS_WINDOW_SECONDS,
         "trust_snapshot": base["trust_snapshot"],
-        "list_prices": None,
+        "list_prices": base["list_prices"],
         "max_discount_pct": None,
     }
     positional = ("payload", "signature", "keyring")
@@ -1832,6 +1845,23 @@ def _t209_snapshot() -> dict[str, Any]:
     }
 
 
+def _t209_roster() -> dict[str, Any]:
+    """The catalog the exchange holds for the base bid's product, priced from the same fixture.
+
+    The nullability question is about SCHEMA, so every other wall on that door is satisfied
+    deliberately — and since T-306/T-307 an ABSENT `list_prices` is no longer the abstention: it
+    refuses `price_unreconcilable:offer.unit_price:list_price_unavailable` exactly as an empty
+    roster does. Without this the base bid is refused before a single field has been flipped, and
+    the arming test says so rather than the sweep quietly measuring the base's own refusal.
+    """
+    return {
+        "prod-cap": {
+            "list_price": float(_t156_fixture()["catalog"]["prod-cap"]["list_price"]),
+            "max_discount_pct": 100.0,
+        }
+    }
+
+
 def _t209_paths() -> list[str]:
     """Every field of `Bid`, plus every field of `Offer` as ``offer.<name>``.
 
@@ -1861,7 +1891,13 @@ def _t209_contracts_verdict(body: dict[str, Any]) -> list[str]:
     from contracts.boundary import validate_bid  # noqa: PLC0415
 
     return list(
-        validate_bid(body, path="hosted", trust_snapshot=_t209_snapshot(), now=T209_NOW).reasons
+        validate_bid(
+            body,
+            path="hosted",
+            trust_snapshot=_t209_snapshot(),
+            list_prices=_t209_roster(),
+            now=T209_NOW,
+        ).reasons
     )
 
 

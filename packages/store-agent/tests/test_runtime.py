@@ -674,6 +674,33 @@ def test_the_price_floor_and_not_only_the_cap_bounds_the_price() -> None:
 SNAPSHOT = {STORE_ID: {"store_id": STORE_ID, "score": 0.7, "blacklisted": False}}
 
 
+def _roster() -> dict[str, Any]:
+    """The catalog the EXCHANGE holds, taken from the same approved fixture the store bids out of.
+
+    The price-wall sibling of `SNAPSHOT`, and it arrives for the same reason that row did. An
+    ABSENT `list_prices` used to mean "abstain" at the shared boundary, so these three calls
+    passed none and the price wall said nothing; T-306/T-307 closed that — a signed bid awarding
+    itself 85% off was admitted whenever the roster was omitted — and an absent roster now refuses
+    `price_unreconcilable:offer.unit_price:list_price_unavailable` exactly as an empty one does.
+
+    **Nothing is loosened.** The list price is the fixture's OWN, so the wall is silent because
+    this runtime bids honestly — which is the whole claim these tests make. The exact-reason
+    assertions below are unchanged and still exact: the expiry case still reads `["offer_expired"]`
+    and nothing else, which it could not if the roster were wrong.
+
+    `max_discount_pct` is 100.0 rather than the envelope's cap because the cap is the STORE's
+    limit on itself and is already enforced by `authorize_discount` two walls earlier; putting it
+    here as well would make these tests re-grade the store's own envelope through the exchange's
+    roster, which is not what they are about.
+    """
+    return {
+        ref: {"list_price": float(row["list_price"]), "max_discount_pct": 100.0}
+        for ref, row in _fixture()["catalog"].items()
+        if isinstance(row.get("list_price"), (int, float))
+        and not isinstance(row["list_price"], bool)
+    }
+
+
 @pytest.mark.parametrize(
     "context_of", [_context, lambda: _with_intro(15.0), lambda: _with_policy(10.0)]
 )
@@ -692,6 +719,7 @@ def test_the_bid_is_admissible_at_the_exchanges_own_hosted_door(context_of: Any)
         _bid(context=context_of()),
         path="hosted",
         trust_snapshot=SNAPSHOT,
+        list_prices=_roster(),
         now="2026-01-02T00:00:00Z",
     )
     assert result.ok, (
@@ -1045,14 +1073,22 @@ def test_the_respond_by_expiry_floor_is_a_known_limitation_and_is_written_down()
 
     at_close = _bid().offer.expires_at
     assert at_close == _request()["respond_by"]
-    refused = validate_bid(_bid(), path="hosted", trust_snapshot=SNAPSHOT, now=at_close)
+    refused = validate_bid(
+        _bid(), path="hosted", trust_snapshot=SNAPSHOT, list_prices=_roster(), now=at_close
+    )
     assert list(refused.reasons) == ["offer_expired"], (
         "documented: at the instant the auction closes, the fallback expiry has lapsed"
     )
 
     stated = _context()
     stated[OFFER_EXPIRES_AT_KEY] = "2999-06-01T00:00:00Z"
-    ok = validate_bid(_bid(context=stated), path="hosted", trust_snapshot=SNAPSHOT, now=at_close)
+    ok = validate_bid(
+        _bid(context=stated),
+        path="hosted",
+        trust_snapshot=SNAPSHOT,
+        list_prices=_roster(),
+        now=at_close,
+    )
     assert ok.ok and list(ok.reasons) == [], "a stated expiry removes the limitation"
 
 
