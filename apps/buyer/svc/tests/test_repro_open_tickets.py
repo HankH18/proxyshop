@@ -382,16 +382,35 @@ def test_t221_the_k_anonymity_floor_is_on_by_default_and_reaches_the_production_
 # ======================================================================================
 # T-163 — SessionStore.open() checks the pseudonym's FORMAT and never its vault membership
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-163: InMemorySessionStore.open (auth/sessions.py:170) refuses only on the "
-        "PSEUDONYM_PREFIX and holds no vault reference at all, so any 'psn-'-prefixed string "
-        "— including 'psn-' glued onto the buyer's own email — opens a session that "
-        "authenticates GET /buyer/profile; the pseudonym is a bearer credential whose format "
-        "is its only proof; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-163 is fixed. justify-test-edit, recorded here because a test diff with
+# no justification is indistinguishable from reward hacking six months later.
+#
+# QUOTED, the marker that was here:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-163: InMemorySessionStore.open (auth/sessions.py:170) refuses only on the "
+#         "PSEUDONYM_PREFIX and holds no vault reference at all, so any 'psn-'-prefixed "
+#         "string — including 'psn-' glued onto the buyer's own email — opens a session that "
+#         "authenticates GET /buyer/profile; the pseudonym is a bearer credential whose "
+#         "format is its only proof; remove this marker with the fix"))
+#
+# WHAT IT ENCODED: not a requirement — the *presence of the defect*. It is the file's own
+# convention (module docstring, line 10: "the marker cannot outlive the bug"): while the bug
+# is live the reproduction runs as `xfailed` and the repo-wide build gate stays green; the
+# instant the bug is fixed the test XPASSes and `strict=True` turns that into a red, which is
+# what forces this deletion. The assertions below are untouched — the marker was the only
+# edit, and it was the one the marker itself asked for.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No, and that is the whole proof.
+# MEASURED, not argued: with auth/sessions.py, auth/magic_link.py and auth/__init__.py put
+# back to their HEAD (ad9583d) contents, this file reports `7 passed, 5 xfailed` — this node
+# among the xfailed. With the fix restored it is the only marker in the file that flips, so
+# the XPASS is caused by this repair and by nothing else. The marker is not being removed
+# because the test is inconvenient; it is being removed because its subject no longer exists.
+#
+# THE FIX IT NAMES: SessionStore.admit() (auth/sessions.py) now asks a bound
+# PseudonymRegistry whether the subject was ever issued, and MagicLinkAuth.__post_init__
+# binds its own vault into the session store, so the production path refuses a forged
+# 'psn-<email>' with UnissuedPseudonym instead of opening a session for it.
 def test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session() -> None:
     """Format is not membership. A session subject has to have been issued by the vault.
 
@@ -431,17 +450,36 @@ def test_t163_a_session_subject_that_no_vault_ever_issued_cannot_open_a_session(
 # ======================================================================================
 # T-165 — the unauthenticated magic-link endpoint has no rate limit of any kind
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-165: POST /buyer/auth/magic-link is unauthenticated and unmetered — no "
-        "rate-limit, throttle or backoff symbol exists in auth/routes.py, and the only "
-        "ceiling (MagicLinkAuth.max_pending, which magic_link.py:248 itself calls 'not a "
-        "rate limiter') never fires for a repeated address because each request supersedes "
-        "the last, so 20 requests mail 20 live login tokens to one mailbox with "
-        "pending_links pinned at 1; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-165 is fixed. justify-test-edit, recorded at the removal site.
+#
+# QUOTED, the marker that was here:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-165: POST /buyer/auth/magic-link is unauthenticated and unmetered — no "
+#         "rate-limit, throttle or backoff symbol exists in auth/routes.py, and the only "
+#         "ceiling (MagicLinkAuth.max_pending, which magic_link.py:248 itself calls 'not a "
+#         "rate limiter') never fires for a repeated address because each request supersedes "
+#         "the last, so 20 requests mail 20 live login tokens to one mailbox with "
+#         "pending_links pinned at 1; remove this marker with the fix"))
+#
+# WHAT IT ENCODED: the presence of the defect, per this file's convention (module docstring,
+# line 10: "the marker cannot outlive the bug"). It is not a requirement — the requirement is
+# the assertion body, which is untouched.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No. MEASURED: with
+# auth/routes.py alone put back to its contents at 8242046 (the T-163 commit, i.e. this
+# file's only other change already in place), this file reports `8 passed, 4 xfailed` with
+# THIS node among the xfailed and T-140, T-142 and T-221 still xfailed alongside it. Restore
+# routes.py and this is the only node that flips. The XPASS is caused by the limiter and by
+# nothing else.
+#
+# THE FIX IT NAMES: MagicLinkRateLimiter (auth/routes.py) now charges every
+# POST /buyer/auth/magic-link against a per-address budget — five links per fifteen minutes
+# by default, overridable per deployment — and the route answers 429 with a Retry-After when
+# it is spent. It sits in FRONT of MagicLinkAuth.request_login rather than inside it,
+# because the memory ceiling and the mailbox budget are two different properties: the
+# thousand-call assertion in test_auth_vault.py's
+# test_pending_links_do_not_accumulate_for_an_unauthenticated_caller still holds, and still
+# passes.
 def test_t165_repeated_unauthenticated_magic_link_requests_are_eventually_refused() -> None:
     """One caller cannot mail an unbounded number of login tokens into one mailbox."""
     from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth  # noqa: PLC0415
@@ -749,19 +787,39 @@ def test_t140_the_generated_buyer_sweep_is_armed(monkeypatch: Any) -> None:
     ], "the seeded shape draw is not reproducible; the spread floors above are a coin flip"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-140: build_auth_service() (auth/routes.py:133-134) decides the vault and nothing "
-        "else — the word 'accounts' does not appear in that module at all — so production "
-        "always gets the empty default InMemoryAccountDirectory (magic_link.py:193), and the "
-        "ONLY non-test writer of a buyer record in the tree is redeem's "
-        "self.accounts.upsert(email, {'email': email}) (magic_link.py:304). There is no "
-        "production populator, so a record can never carry anything the login gesture did "
-        "not already know, and a service rebuilt as a restart would rebuild it has forgotten "
-        "every buyer; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-140 is fixed. justify-test-edit, recorded at the removal site.
+#
+# QUOTED, the marker that was here:
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-140: build_auth_service() (auth/routes.py:133-134) decides the vault and "
+#         "nothing else — the word 'accounts' does not appear in that module at all — so "
+#         "production always gets the empty default InMemoryAccountDirectory "
+#         "(magic_link.py:193), and the ONLY non-test writer of a buyer record in the tree "
+#         "is redeem's self.accounts.upsert(email, {'email': email}) (magic_link.py:304). "
+#         "There is no production populator, so a record can never carry anything the login "
+#         "gesture did not already know, and a service rebuilt as a restart would rebuild it "
+#         "has forgotten every buyer; remove this marker with the fix"))
+#
+# WHAT IT ENCODED: the presence of the defect, per this file's convention ("the marker
+# cannot outlive the bug"). Not a requirement — every requirement is in the assertion body
+# below, which is untouched, including clause (5)'s AST read of build_auth_service.
+#
+# WOULD THIS TEST STILL BE WRONG IF I REVERTED MY CHANGE? No. MEASURED: with
+# auth/routes.py and auth/magic_link.py alone restored to their contents at f688b32 (the
+# T-165 commit), this file reports `9 passed, 3 xfailed` with THIS node among the xfailed,
+# beside T-142 and T-221. Restore the two files and this is the only node that flips; T-142
+# stays xfailed either way, which is why only this marker is being removed.
+#
+# THE FIX IT NAMES: build_auth_service() now hands every service it builds
+# `accounts=account_directory()` — one process-wide AccountDirectory behind a module-level
+# factory (routes.py), installable by a deployment through set_account_directory(). A buyer
+# record written through it therefore outlives the service that was running when it was
+# written, so a rebuilt service reads the history rather than re-inventing a buyer out of
+# the address. The in-memory default is still not durable across a real process restart;
+# that half needs a table for the unredacted account record, which does not exist and needs
+# a migration outside this module. It is reported rather than silently claimed.
+
+
 def test_t140_the_production_login_path_serves_a_profile_that_reflects_the_buyer(
     monkeypatch: Any,
 ) -> None:
