@@ -482,10 +482,40 @@ def _bid_book(request: Request) -> Any:
     return book
 
 
+def merged_candidates(
+    rows: Sequence[Mapping[str, Any]],
+    projected: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """The rank ROW and the candidate PROJECTION for one bid, in a single mapping (T-349).
+
+    Neither half is a superset of the other, which is why this joins rather than swaps.
+    ``rank()``'s row carries ``eligible`` — the ranking's own verdict, and the only thing
+    that decides whether a bid is recorded at all — and carries neither ``offer`` nor
+    ``store_domain``. ``ranking/candidates.py``'s projection carries both and no verdict.
+    Passing the row alone wrote every record with ``offer: {}``; passing the projection
+    alone would record nothing, because it has no ``eligible``.
+
+    **The join lives here rather than inside :func:`collected_bid_records`, and that is a
+    correction rather than a preference.** It was a third parameter on that function
+    first, and the signature is not private: ``test_ranking_served.py`` substitutes a
+    two-argument replacement for it to suppress the ``fallback`` stamp, so a third
+    positional argument broke that substitution with ``TypeError: without_the_flag() takes
+    2 positional arguments but 3 were given``. The test was right and the signature change
+    was wrong: a seam something else wraps is part of the contract. Merging first keeps
+    that seam exactly as it was.
+
+    The ROW wins on any key both carry, so a verdict can never be overwritten by the
+    projection; the projection only fills in what the row does not have. A row with no
+    match is passed through unchanged, so an empty ``projected`` degrades to the old
+    behaviour instead of dropping bids.
+    """
+    by_bid = {str(row.get("bid_id") or ""): row for row in projected if row.get("bid_id")}
+    return [{**by_bid.get(str(row.get("bid_id") or ""), {}), **row} for row in rows]
+
+
 def collected_bid_records(
     candidates: Sequence[Mapping[str, Any]],
     entries: Sequence[Any],
-    projected: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Every bid this auction collected, in the shape ``accept()`` reads.
 
@@ -536,12 +566,13 @@ def collected_bid_records(
     route also had no handle on the projection — ``ranking.serving.rank_auction`` built it
     locally and returned only ``rank()``'s output.
 
-    So both halves are passed and JOINED here on the minted ``bid_id``: the rank ROW decides
-    eligibility, the PROJECTION supplies ``offer`` and ``store_domain``. ``rank_auction`` now
-    returns the projection under ``"projected"`` — additive, no existing key changed, so
-    ``_excluded_out``'s argument is untouched because that one does need the row.
-    ``projected`` defaults to empty and each record falls back to the row, so a caller that
-    passes nothing behaves exactly as before instead of silently recording nothing.
+    So both halves are joined BEFORE this function is called, by :func:`merged_candidates`,
+    and this function's two-argument signature is unchanged — deliberately, because
+    ``test_ranking_served.py`` substitutes its own two-argument replacement for it and a
+    third parameter broke that substitution. ``rank_auction`` now returns the projection
+    under ``"projected"`` — additive, no existing key changed, so ``_excluded_out``'s
+    argument is untouched because that one does need the row. A caller that merges nothing
+    in gets exactly the old behaviour rather than silently recording nothing.
 
     MEASURED over the real socket in ``test_composition_root.py``, by spying on this
     function's return with the repair reverted and restored — the test PASSES either way,
@@ -590,12 +621,6 @@ def collected_bid_records(
     colliding ref would let one bidder decide which offer another store's reference accepts.
     """
     by_store = {str(getattr(entry, "store_id", "")): entry for entry in entries}
-    # The two halves, joined on the minted `bid_id`. `candidates` is `rank()`'s ROW
-    # projection and is where `eligible` lives — the ranking's own verdict, and the only
-    # thing that decides whether a bid is recorded at all. `projected` is
-    # `ranking/candidates.py`'s projection and is where `offer` and `store_domain` live.
-    # Neither is a superset of the other, which is why the join exists rather than a swap.
-    by_bid = {str(row.get("bid_id") or ""): row for row in projected if row.get("bid_id")}
 
     records: list[dict[str, Any]] = []
     minted: set[str] = set()
@@ -608,16 +633,12 @@ def collected_bid_records(
         if not bid_id:
             continue
         store_id = str(candidate.get("store_id") or "")
-        # The projection where there is one, the row where there is not. Falling back to
-        # the row rather than skipping keeps a caller that passes no projection working
-        # exactly as before instead of silently recording nothing.
-        source: Mapping[str, Any] = by_bid.get(bid_id, candidate)
         record: dict[str, Any] = {
             "bid_id": bid_id,
             "store_id": store_id,
-            "offer": source.get("offer") or {},
+            "offer": candidate.get("offer") or {},
         }
-        domain = source.get("store_domain")
+        domain = candidate.get("store_domain")
         if domain:
             record["store_domain"] = str(domain)
         # Carried so the accept door can tell a price a STORE quoted from one the exchange
@@ -911,7 +932,8 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         recorder(
             auction_id,
             collected_bid_records(
-                ranking["candidates"], result.entries, ranking.get("projected") or ()
+                merged_candidates(ranking["candidates"], ranking.get("projected") or ()),
+                result.entries,
             ),
         )
 
