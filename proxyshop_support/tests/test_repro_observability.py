@@ -1,21 +1,45 @@
-"""Reproduction gates for T-308 — the system has no observability at all.
+"""Regression gates for T-308 — the observability the system did not have.
 
-Every test here asserts the behaviour that SHOULD hold and therefore fails against the tree
-as it stands. Each carries ``@pytest.mark.xfail(strict=True)`` while the defect is live, so:
+**T-308 is closed, and both gates below are ordinary passing tests.** They were written as
+``@pytest.mark.xfail(strict=True)`` reproductions while the defect was live; the markers were
+removed by the change that closed it, which is what ``strict=True`` was there to force. The
+red readings, for the record:
 
-* an ordinary run reports ``xfailed`` and the repo-wide build gate stays GREEN;
-* the ticket's own gate runs
-  ``export PROXYSHOP_WORKER=4 && ./.venv/bin/pytest
-  proxyshop_support/tests/test_repro_observability.py -q --runxfail -k test_t308``
-  and gets a real, selected ``2 failed``;
-* the marker cannot outlive the bug — once the defect is closed the test XPASSes, which
-  ``strict=True`` turns into a failure, forcing whoever fixed it to delete the marker.
+* (a) ``7 of 7 INFO call sites emit nothing an operator can see after 7 services were started
+  ... the root logger booted with handlers=[] at level 30 and was still handlers=[] at level
+  30 afterwards``;
+* (b) ``4 of 7 service packages emit no log line of any level from any module the running
+  service actually loads ... Dark packages: ['exchange', 'shopify_stub', 'store_agent',
+  'trust']``.
+
+**(a) then went green while the defect was still live in two services, and that is why it now
+starts one process per service.** The first repair wired ``configure_logging()`` into five of
+the seven startup paths and left ``buyer_svc`` and ``merchant_svc`` alone. (a) passed anyway,
+because its probe built all seven apps in ONE interpreter: ``logging`` is process-global, so
+``exchange.main`` calling ``configure_logging()`` installed a root handler that then delivered
+``buyer_svc``'s and ``merchant_svc``'s records too. Nothing in production shares that
+interpreter — ``proxyshop_support.asgi_server.serve`` takes exactly one ``app`` and each
+Dockerfile starts one ``uvicorn`` per service — so the reading was an artefact of the
+measurement. Re-measured one child per factory (:func:`_run_probe_per_service`), the same tree
+read::
+
+    7 of 12 INFO call sites emit nothing an operator can see when their own service is
+    started alone ... {'buyer_svc': {'handlers': [], 'level': 30}, 'exchange': {'handlers':
+    ['StreamHandler'], 'level': 20}, ... 'merchant_svc': {'handlers': [], 'level': 30}, ...}
+
+— three silent sites in ``buyer_svc`` and four in ``merchant_svc``, the two services with the
+most logging in the repo. Wiring those two startup paths the way the other five were wired is
+what closed it. A repair that leaves ONE service unwired now reads red on that service alone.
+
+Nothing else about the gates changed. They still derive the service list from ``.pkgroot``,
+still measure in fresh interpreters, and still fail the moment a new service ships dark or a
+startup path stops configuring logging — which is the whole reason they outlive the ticket.
 
 **Nothing here is allowed to skip.** A skip is not a gate, and the compose datastore stack is
 routinely down in this repo, so every assertion below is made against source text, the repo's
 own on-disk layout, or a subprocess — never against a live datastore. Measured: the seven ASGI
 factories this file drives (six ``main.create_app`` plus ``shopify_stub.app.create_app``) all
-build, and their lifespans all run, with every datastore blackholed.
+build, and their lifespans all run, each in its own child, with every datastore blackholed.
 
 **Nothing here mutates this process's logging state.** That constraint is not stylistic.
 ``logging`` is process-global, and the two obvious ways to test it are both wrong here:
@@ -26,9 +50,10 @@ build, and their lifespans all run, with every datastore blackholed.
   runs after this one in the same worker, which is the neighbour-corrupting behaviour T-247
   exists to punish.
 
-So the behavioural measurement happens in a **fresh interpreter** (the idiom
-``apps/merchant/svc/tests/test_repro_open_tickets.py`` already uses for T-247), and this
-process only ever parses source. This module never imports ``logging`` at all.
+So the behavioural measurement happens in **fresh interpreters** (the idiom
+``apps/merchant/svc/tests/test_repro_open_tickets.py`` already uses for T-247) — one per
+service for gate (a), for the reason recorded above — and this process only ever parses
+source. This module never imports ``logging`` at all.
 
 **What "observable" is taken to mean here, and why each half is necessary.** An adversarial
 review broke three earlier drafts of this file, and every rule below is the scar of one of
@@ -84,7 +109,9 @@ import uuid
 import warnings
 from typing import Any
 
-import pytest
+# No `import pytest`: these two gates take no fixture and, since T-308 closed, carry no
+# marker either. An unused import here is a ruff F401 and would redden the build before a
+# single test ran.
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PKGROOT = REPO_ROOT / ".pkgroot"
@@ -107,14 +134,18 @@ HTTP_SURFACE_NAMES = frozenset({"APIRouter", "FastAPI"})
 # measured value so that legitimately retiring one service does not produce a red for the
 # wrong reason, while a sweep collapsing toward zero is caught immediately.
 # --------------------------------------------------------------------------------------
-#: Measured today: 7 (buyer_svc, merchant_svc, exchange, trust, ingest, shopify_stub,
-#: store_agent).
+#: Measured: 7 (buyer_svc, merchant_svc, exchange, trust, ingest, shopify_stub, store_agent).
 MIN_SERVICE_PACKAGES = 6
-#: Measured today: 215 product .py files across those seven packages.
+#: Measured: 242 product .py files across those seven packages (215 when this file was
+#: written; the tree grew, and the floor deliberately did not follow it).
 MIN_FILES_INSPECTED = 150
-#: Measured today: 5 INFO call sites, in 5 distinct modules.
+#: Measured: 16 INFO call sites in 12 distinct modules — 5 in 5 when this file was written,
+#: before T-308 wired the five dark services. The floor stays at 3 rather than tracking the
+#: measurement: its job is to catch a sweep that has stopped finding anything, and a floor
+#: raised to today's count would instead go red the first time a service is legitimately
+#: retired or a redundant INFO line is deleted.
 MIN_INFO_CALL_SITES = 3
-#: Measured today: all 7 factories build and all 7 lifespans run.
+#: Measured: all 7 factories build and all 7 lifespans run.
 MIN_FACTORIES_STARTED = 4
 
 
@@ -634,23 +665,68 @@ def _emit_window(stream: str, window: int) -> str:
     return stream[start + len(opened) : end]
 
 
+def _run_probe_per_service(
+    targets: list[list[object]], factories: list[str], packages: list[str]
+) -> list[dict[str, Any]]:
+    """One probe child per service, each starting **only its own app**.
+
+    Returns one ``{"factory", "package", "payload", "stdout", "stderr"}`` record per factory.
+
+    This is the difference between measuring the product and measuring an artefact of the
+    measurement. ``logging`` is process-global: whichever service calls ``configure_logging()``
+    first installs a root handler that then delivers *every other package's* records in that
+    same interpreter. So a single child that imports all seven factories cannot tell a service
+    that configures logging apart from one that free-rides on a neighbour, and reads green for
+    both.
+
+    Nothing in production shares that interpreter. ``proxyshop_support.asgi_server.serve``
+    takes exactly one ``app``, and each service's Dockerfile starts its own ``uvicorn``
+    process, so "a started service can be watched" is a claim about *that service's* process.
+    Measured: with five of the seven services wired and ``buyer_svc``/``merchant_svc`` left
+    alone, the all-in-one child passed this gate while both of those services really booted
+    with ``root.handlers == []`` at level 30 and dropped every INFO record. One child per
+    service is what made that visible.
+
+    Each child is given only the targets belonging to its own package, and the caller is
+    handed every child separately so that delivery is scored against the stdout/stderr of the
+    process that actually emitted — never against a neighbour's.
+    """
+    by_package: dict[str, list[list[object]]] = {}
+    for target in targets:
+        by_package.setdefault(str(target[0]).split(".")[0], []).append(target)
+
+    runs: list[dict[str, Any]] = []
+    claimed: set[str] = set()
+    for factory in factories:
+        package = factory.rsplit(".", 1)[0]
+        mine = by_package.get(package, [])
+        payload, child_stdout, child_stderr = _run_probe(mine, [factory], packages)
+        claimed.update(str(target[0]) for target in mine)
+        runs.append(
+            {
+                "factory": factory,
+                "package": package,
+                "payload": payload,
+                "stdout": child_stdout,
+                "stderr": child_stderr,
+            }
+        )
+
+    # A target whose package ships no ASGI factory would be measured by nobody and would
+    # quietly leave the sweep — the "went quiet rather than red" failure this file is built
+    # around. It is reported here rather than being silently dropped.
+    orphaned = sorted({str(target[0]) for target in targets} - claimed)
+    assert not orphaned, (
+        f"{len(orphaned)} INFO call site module(s) belong to no started service and were "
+        f"therefore never measured: {orphaned} (factories: {factories}) — the sweep is "
+        "broken, not the product"
+    )
+    return runs
+
+
 # ======================================================================================
 # T-308 (a) — an INFO record emitted by a service logger is silently discarded
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-308: nothing in apps/, packages/, services/, proxyshop_support/ or scripts/ ever "
-        "configures application logging — no basicConfig, no dictConfig, no root handler, no "
-        "structlog (which is a declared dependency with zero importers) — so a freshly-started "
-        "service process has root handlers=[] at effective level 30. Every INFO call site in "
-        "the product is dropped before a record is even constructed: the lossy-pixel notice "
-        "(collector/routes.py:64), the un-minted code (codes/routes.py:133), the envelope that "
-        "stays in shadow (onboarding/routes.py:154), the webhook handed to the default sink "
-        "(install/webhooks.py:404) and the recorded feedback (feedback/submission.py:493); "
-        "remove this marker with the fix"
-    ),
-)
 def test_t308_an_info_record_from_a_service_logger_reaches_an_installed_handler() -> None:
     """An INFO call in a started service has to emit, and the record has to go somewhere.
 
@@ -713,77 +789,83 @@ def test_t308_an_info_record_from_a_service_logger_reaches_an_installed_handler(
     ]
 
     factories = _asgi_factories()
-    payload, child_stdout, child_stderr = _run_probe(targets, factories, sorted(services))
+    runs = _run_probe_per_service(targets, factories, sorted(services))
 
     # The .pth guard, applied to the STARTUP path first. This venv's site-packages puts a
     # checkout on sys.path for every process that uses it, and that has already produced one
     # false green in this repo. It is checked before the started-count control below, because a
     # factory imported out of a foreign checkout would otherwise be counted as "started" and
     # satisfy the very control meant to prove THIS tree got its chance.
-    for factory_file in payload["factory_files"]:
-        assert pathlib.Path(str(factory_file)).is_relative_to(REPO_ROOT), (
-            f"the probe started a service from {factory_file}, which is outside the tree under "
-            f"test ({REPO_ROOT}) — a .pth leak, not a measurement"
-        )
+    for run in runs:
+        for factory_file in run["payload"]["factory_files"]:
+            assert pathlib.Path(str(factory_file)).is_relative_to(REPO_ROOT), (
+                f"the probe started a service from {factory_file}, which is outside the tree "
+                f"under test ({REPO_ROOT}) — a .pth leak, not a measurement"
+            )
 
-    started = list(payload["started"])
+    started = sorted({name for run in runs for name in run["payload"]["started"]})
+    factory_errors = [error for run in runs for error in run["payload"]["factory_errors"]]
     assert len(started) >= MIN_FACTORIES_STARTED, (
         f"only {len(started)} of {len(factories)} ASGI factories built ({started}; errors: "
-        f"{payload['factory_errors']}), so the system was never given its chance to configure "
+        f"{factory_errors}), so the system was never given its chance to configure "
         "logging and this reading means nothing"
     )
 
     silent: list[str] = []
-    for entry in payload["results"]:
-        assert "error" not in entry, (
-            f"the probe could not measure {entry['module']}: {entry['error']} — a broken probe, "
-            "not a reading"
-        )
-        resolved = pathlib.Path(entry["file"])
-        assert resolved.is_relative_to(REPO_ROOT), (
-            f"the probe imported {resolved}, which is outside the tree under test ({REPO_ROOT})"
-            " — a .pth leak, not a measurement"
-        )
-        sentinel = sentinels[(entry["module"], entry["receiver"])]
-        window = entry["window"]
-        delivered = bool(entry["wrote_to_file"]) or any(
-            sentinel in _emit_window(stream, window) for stream in (child_stdout, child_stderr)
-        )
-        if not entry["emitted"] or not delivered:
-            silent.append(
-                f"{entry['module']}:{entry['lineno']} (logger {entry['logger_name']!r} via "
-                f"{entry['receiver']!r}, effective level {entry['effective_level']}, "
-                f"emitted={entry['emitted']}, delivered={delivered}, "
-                f"handlers={entry['real_handlers']})"
+    measured = 0
+    for run in runs:
+        for entry in run["payload"]["results"]:
+            measured += 1
+            assert "error" not in entry, (
+                f"the probe could not measure {entry['module']} in the {run['factory']} "
+                f"process: {entry['error']} — a broken probe, not a reading"
             )
+            resolved = pathlib.Path(entry["file"])
+            assert resolved.is_relative_to(REPO_ROOT), (
+                f"the probe imported {resolved}, which is outside the tree under test "
+                f"({REPO_ROOT}) — a .pth leak, not a measurement"
+            )
+            sentinel = sentinels[(entry["module"], entry["receiver"])]
+            window = entry["window"]
+            # Scored against the stdout/stderr of the child that emitted it, so a record
+            # delivered in a neighbour's process can never be counted here.
+            delivered = bool(entry["wrote_to_file"]) or any(
+                sentinel in _emit_window(stream, window)
+                for stream in (run["stdout"], run["stderr"])
+            )
+            if not entry["emitted"] or not delivered:
+                silent.append(
+                    f"{entry['module']}:{entry['lineno']} in the {run['factory']} process "
+                    f"(logger {entry['logger_name']!r} via {entry['receiver']!r}, effective "
+                    f"level {entry['effective_level']}, emitted={entry['emitted']}, "
+                    f"delivered={delivered}, handlers={entry['real_handlers']})"
+                )
+
+    # ---- ARM THE SCORING. Sites are distributed across children by package, and a bug in
+    # that distribution would drop sites on the floor rather than fail — the exact shape of
+    # the three quiet sweeps this file was built to prevent.
+    assert measured == len(targets), (
+        f"only {measured} of {len(targets)} INFO call sites were actually probed across "
+        f"{len(runs)} service processes — sites were lost in distribution, so this reading "
+        "means nothing"
+    )
 
     assert not silent, (
-        f"{len(silent)} of {len(payload['results'])} INFO call sites emit nothing an operator "
-        f"can see after {len(started)} services were started and their lifespans run "
-        f"({started}). The root logger booted with handlers={payload['boot']['handlers']} at "
-        f"level {payload['boot']['level']} and was still handlers={payload['after']['handlers']} "
-        f"at level {payload['after']['level']} afterwards. Each site below either never "
-        f"constructed the record at all (emitted=0 — the effective level forbids INFO, so only "
-        f"WARNING+ reaches stderr via logging.lastResort), or constructed one that reached no "
-        f"stream, file or socket (delivered=False — a handler that exists and writes nowhere). "
-        f"Silent sites: {silent}"
+        f"{len(silent)} of {measured} INFO call sites emit nothing an operator can see when "
+        f"their own service is started alone, the way it really runs — one process per app, "
+        f"lifespan run ({started}). Root logger per service process, after startup: "
+        f"{ {run['package']: run['payload']['after'] for run in runs} } (each booted "
+        f"{ {run['package']: run['payload']['boot'] for run in runs} }). Each site below "
+        f"either never constructed the record at all (emitted=0 — the effective level forbids "
+        f"INFO, so only WARNING+ reaches stderr via logging.lastResort), or constructed one "
+        f"that reached no stream, file or socket (delivered=False — a handler that exists and "
+        f"writes nowhere). Silent sites: {silent}"
     )
 
 
 # ======================================================================================
 # T-308 (b) — five of the seven service packages contain no logging call at all
 # ======================================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-308: logging exists in exactly two of the seven HTTP-serving packages. Measured "
-        "files containing a real logging call: buyer_svc 7/34, merchant_svc 5/37, and then "
-        "exchange 0/42, trust 0/33, ingest 0/37, store_agent 0/20, shopify_stub 0/12 — the "
-        "auction, the trust scores, the crawl, the bidding agent and the Shopify surface emit "
-        "nothing at any level, so an operator cannot follow a request through the system at "
-        "all; remove this marker with the fix"
-    ),
-)
 def test_t308_every_service_package_has_at_least_one_logging_call_site() -> None:
     """A service that never logs cannot be watched, whatever the root logger is set to.
 

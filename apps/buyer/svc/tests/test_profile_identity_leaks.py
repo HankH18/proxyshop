@@ -47,6 +47,8 @@ Every product import happens inside a test body, matching the rest of this suite
 from __future__ import annotations
 
 import json
+import random
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -664,3 +666,254 @@ def test_a_fragment_the_slug_punctuates_differently_is_still_found() -> None:
     assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "park-gear"}}, park) == [
         "park"
     ]
+
+
+# ======================================================================================
+# T-221 / T-363 — the k-anonymity floor has to reach the path the product actually takes
+# ======================================================================================
+# The ladder T-138 built (``buckets_at_level``, ``anonymise_cohort``) is only ever spent by
+# ``build_profiles``, and nothing in production calls ``build_profiles``. The single-account
+# entry point ``build_profile`` — which ``MagicLinkAuth.profile_for`` calls, which
+# ``GET /buyer/profile`` calls, which is the ONLY path a deployment takes — reads no floor at
+# all. So a deployment that sets ``PROXYSHOP_BUYER_K_ANONYMITY`` gets exactly the same
+# byte-identical rung-0 tuple it got before, and a rotated pseudonym republishes it.
+#
+# These three probe the *reachability*, which is what T-221 and T-363 are about. They do NOT
+# assert that the default floor is above 1: that half of the ticket is blocked on
+# ``test_profile_k_anonymity_knob.py``, which pins ``DEFAULT_K_ANONYMITY == 1`` and is outside
+# this lane's file scope. See the lane report.
+
+#: Buyers in the directory the login-path probe drives. Five is the floor those probes
+#: configure, so a class has to hold five of these to satisfy it; sixty leaves twelve such
+#: classes at most, which is enough for "the release still carries information" to be a real
+#: assertion rather than an artefact of a tiny population. Measured at this size: the
+#: unenforced release below puts every one of the sixty in a class of one.
+_FLOOR_BUYERS = 60
+
+#: The floor these probes configure. Above 1 (so the knob is doing something) and small
+#: enough that sixty buyers can satisfy it with room for several classes. It is also the
+#: value ``test_profile_k_anonymity_knob.py`` uses for the same reason.
+_FLOOR_K = 5
+
+#: Fixed so a red here is a defect and never a draw. Chosen by running the population
+#: generator until the unenforced release below was fully unique, which is the precondition
+#: the second probe arms on.
+_FLOOR_SEED = 5107
+
+#: A release comfortably above the floor, used as the contrast to a release below it.
+#:
+#: Thirty and not five, and the difference is a fact about local recoding rather than about
+#: this code: satisfying ``k`` means every buyer sits with at least four others, so a release
+#: of exactly five has to put all five in ONE class, and five independently drawn buyers only
+#: ever coincide on the fully-suppressed rung. MEASURED over this generator at ``k = 5``,
+#: records that keep at least one facet: 0 of 5, 0 of 10, 8 of 15, 22 of 30, 52 of 60. Thirty
+#: is the first size where "generalised rather than suppressed" is a comfortable majority, so
+#: it is the size at which asserting it is a real assertion rather than a coin toss.
+_SATISFIABLE_BUYERS = 30
+
+_FLOOR_CATEGORIES = (
+    "running-shoes",
+    "trail-gear",
+    "espresso",
+    "cookware",
+    "headphones",
+    "tents",
+    "skincare",
+    "outerwear",
+    "yoga-mats",
+    "dog-food",
+    "vinyl-records",
+    "board-games",
+    "hiking-boots",
+    "cold-brew",
+)
+
+_FLOOR_REGIONS = ("US-OR", "US-CA", "GB-ENG", "DE", "FR", "JP", "CA-ON", "AU-NSW", "BR", "SE")
+
+
+def _floor_directory(count: int = _FLOOR_BUYERS, seed: int = _FLOOR_SEED) -> dict[str, Any]:
+    """A buyer directory keyed by email, varied enough to leave every buyer unique at rung 0.
+
+    Spend, order count and basket are drawn independently so the population is not the
+    diagonal a single "customer value" knob would produce. No identity fields beyond the
+    email: these probes are about the floor, and the leak backstop is measured everywhere
+    else in this file.
+    """
+    rng = random.Random(seed)
+    directory: dict[str, Any] = {}
+    for index in range(count):
+        email = f"buyer{index:03d}@example.com"
+        directory[email] = {
+            "email": email,
+            "region": rng.choice(_FLOOR_REGIONS),
+            "orders": [
+                {
+                    "order_ref": f"o{index}-{n}",
+                    "total": round(rng.uniform(5.0, 1500.0), 2),
+                    "category": rng.choice(_FLOOR_CATEGORIES),
+                }
+                for n in range(rng.randint(1, 14))
+            ],
+        }
+    return directory
+
+
+def test_the_single_buyer_path_applies_the_configured_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``build_profile`` must read the floor, and withhold when it cannot be met.
+
+    Two halves, and the second is the failure *direction* the ticket names. A release of one
+    buyer cannot be 5-anonymous by any generalisation, so the only safe answers are to widen
+    until the value is meaningless or to withhold it. Publishing the fine-grained tuple
+    anyway — which is what happens today, because ``build_profile`` never looks at the knob —
+    is the one answer that is not available.
+
+    Withholding rather than raising is deliberate: a ``ValueError`` here would turn
+    ``GET /buyer/profile`` into a 500 for every buyer the moment a deployment set the knob,
+    which is a denial of service wearing a privacy guarantee.
+    """
+    from buyer_svc.profile import K_ANONYMITY_ENV, build_buckets, build_profile
+
+    account = _floor_directory(1)["buyer000@example.com"]
+
+    monkeypatch.delenv(K_ANONYMITY_ENV, raising=False)
+    unenforced = build_profile(account, PSEUDONYM).model_dump()["buckets"]
+    assert unenforced == build_buckets(account).model_dump(), (
+        "the unenforced default must still publish exactly what build_buckets publishes"
+    )
+    # ARM: a population whose rung-0 tuple is already empty could not tell the two apart.
+    assert unenforced["region"] and unenforced["category_affinity"], unenforced
+
+    monkeypatch.setenv(K_ANONYMITY_ENV, str(_FLOOR_K))
+    published = build_profile(account, PSEUDONYM).model_dump()["buckets"]
+    assert published != unenforced, (
+        f"PROXYSHOP_BUYER_K_ANONYMITY={_FLOOR_K} was set and build_profile published the "
+        f"same rung-0 tuple regardless: {published!r}. The floor never reaches the single "
+        "buyer path, so the generalisation ladder is unreachable in a deployment"
+    )
+    assert published == {
+        "budget_band": None,
+        "category_affinity": [],
+        "frequency_tier": None,
+        "region": None,
+        "first_time": None,
+    }, (
+        "a release of one buyer cannot meet a floor of five, so every facet has to be "
+        f"withheld; got {published!r}"
+    )
+
+
+def test_the_login_path_generalises_over_the_cohort_it_can_see(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor has to hold over the release ``MagicLinkAuth.profile_for`` actually makes.
+
+    This drives the production path end to end — request a link, redeem it, read the profile
+    — for every buyer in a directory of sixty, and measures the classes of what was
+    published. The arm above it records that the same population is fully unique when the
+    knob is unset, so a green here cannot come from a population that was already crowded.
+
+    The two bounds are the two ways this can be faked: a floor that is not enforced leaves
+    classes of one, and an "anonymiser" that publishes one constant profile for everybody
+    satisfies any floor while carrying nothing.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.profile import K_ANONYMITY_ENV, build_buckets, equivalence_class
+
+    directory = _floor_directory()
+
+    monkeypatch.delenv(K_ANONYMITY_ENV, raising=False)
+    unenforced = Counter(equivalence_class(build_buckets(a)) for a in directory.values())
+    # ARM: the population must start unique, or the floor below proves nothing.
+    assert max(unenforced.values()) == 1, (
+        f"the unenforced population is already crowded ({unenforced.most_common(3)}), so it "
+        "cannot show whether a floor is being enforced"
+    )
+
+    monkeypatch.setenv(K_ANONYMITY_ENV, str(_FLOOR_K))
+    tokens: dict[str, str] = {}
+    service = MagicLinkAuth(
+        accounts=InMemoryAccountDirectory(directory),
+        deliver=lambda email, token, expires_at: tokens.__setitem__(email, token),
+    )
+
+    published = []
+    for email in directory:
+        service.request_login(email)
+        session = service.redeem(tokens[email])
+        published.append(service.profile_for(session.session_id).buckets)
+
+    # ARM: a loop that short-circuited must be red here rather than quiet.
+    assert len(published) == _FLOOR_BUYERS, f"only {len(published)} buyers were served"
+
+    classes = Counter(equivalence_class(buckets) for buckets in published)
+    assert min(classes.values()) >= _FLOOR_K, (
+        f"PROXYSHOP_BUYER_K_ANONYMITY={_FLOOR_K} was set and the login path published "
+        f"{sum(1 for size in classes.values() if size < _FLOOR_K)} buyer(s) in a class "
+        f"smaller than {_FLOOR_K} — smallest class {min(classes.values())} across "
+        f"{len(classes)} classes. build_profile does not apply the floor"
+    )
+    assert len(classes) >= 2, (
+        "the release collapsed to a single constant profile, which satisfies any floor and "
+        "tells a store nothing"
+    )
+
+
+def test_a_release_too_small_for_the_floor_is_withheld_and_never_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure direction, and the contrast that proves it is a decision.
+
+    Four buyers cannot be 5-anonymous by any generalisation, so the login path must publish
+    them with every facet withheld — never fine-grained, and never as a 500, because a knob
+    that turns ``GET /buyer/profile`` into an error for every buyer is a denial of service
+    wearing a privacy guarantee.
+
+    The second half is what stops "withhold everything, always" from passing the first: a
+    release the floor CAN be met over keeps information for most of its buyers. Both halves
+    run over the same generator, the same floor and the same production entry point, so the
+    only thing that differs between them is how many buyers are in the release.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.profile import K_ANONYMITY_ENV, equivalence_class
+
+    monkeypatch.setenv(K_ANONYMITY_ENV, str(_FLOOR_K))
+    suppressed: dict[str, Any] = {
+        "budget_band": None,
+        "category_affinity": [],
+        "frequency_tier": None,
+        "region": None,
+        "first_time": None,
+    }
+
+    def _serve(size: int) -> list[dict[str, Any]]:
+        directory = _floor_directory(size)
+        tokens: dict[str, str] = {}
+        service = MagicLinkAuth(
+            accounts=InMemoryAccountDirectory(directory),
+            deliver=lambda email, token, expires_at: tokens.__setitem__(email, token),
+        )
+        served = []
+        for email in directory:
+            service.request_login(email)
+            session = service.redeem(tokens[email])
+            served.append(service.profile_for(session.session_id).buckets.model_dump())
+        assert len(served) == size, f"only {len(served)} of {size} buyers were served"
+        return served
+
+    too_small = _serve(_FLOOR_K - 1)
+    assert too_small == [suppressed] * (_FLOOR_K - 1), (
+        f"{_FLOOR_K - 1} buyers cannot satisfy a floor of {_FLOOR_K}, so every facet has to "
+        f"be withheld; got {too_small!r}"
+    )
+
+    satisfiable = _serve(_SATISFIABLE_BUYERS)
+    classes = Counter(equivalence_class(row) for row in satisfiable)
+    assert min(classes.values()) >= _FLOOR_K, classes
+    kept = sum(1 for row in satisfiable if row != suppressed)
+    assert kept > _SATISFIABLE_BUYERS // 2, (
+        f"only {kept} of {_SATISFIABLE_BUYERS} buyers kept any facet at all over a release "
+        f"the floor of {_FLOOR_K} is satisfiable over — suppression has become the answer to "
+        "every release, which satisfies any floor and tells a store nothing"
+    )

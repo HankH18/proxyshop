@@ -58,6 +58,35 @@ export const OFFER_UNIT_PRICE_SITE = "offer.unit_price";
 export const OFFER_TOTAL_PRICE_SITE = "offer.total_price";
 
 /**
+ * The OFFER ITSELF, for the refusal that names the offer rather than a field of it. A price
+ * reason has always named the priced field it is about; there was no spelling for "the thing
+ * those fields were supposed to be on is not an object", so the price walk had nothing to say
+ * about one — see `priceReasonsFor`, and T-345. The Python peer's `OFFER_SITE`.
+ */
+export const OFFER_SITE = "offer";
+
+/**
+ * The `why` for an offer this door cannot read as a record at all: a string, an array, a number, a
+ * boolean, `null`, or nothing. **Not a new name** — `apps/exchange/src/auction/collect.py` has
+ * been spelling this refusal `price_unreconcilable:offer:illegible` since it measured the boundary
+ * admitting one, and calls that "the boundary's own vocabulary". It is that now. The Python peer's
+ * `OFFER_ILLEGIBLE`.
+ */
+export const OFFER_ILLEGIBLE = "illegible";
+
+/** The minted discount code, spelled the way `discountCodeReasons` names it. */
+export const MINTED_CODE_SITE = "code";
+
+/**
+ * The longest string this door will read as a discount code, counted in CODE POINTS rather than
+ * in UTF-16 units — `"x".length` and Python's `len("x")` disagree about an astral character, and
+ * a bound the two doors measure differently is not one bound. Codes are typed as a bare `string`
+ * by `merchant.openapi.json`'s `POST /codes` 201 body, so the published contract supplies none of
+ * its own; this one is far above any code a merchant issues (D22's own are twelve characters).
+ */
+export const CODE_MAX_LENGTH = 128;
+
+/**
  * `Discount.type` spellings that mean "`value` is a percentage depth" — the only form this
  * boundary can reconcile. An amount off cannot be compared with a stated price without
  * re-deriving what the offer means, and a boundary that re-derived prices would be deciding
@@ -158,6 +187,21 @@ export const REASON_PRICE_UNDER_DECLARED_DEPTH = "price_under_declared_depth";
  * arithmetic cannot be checked at all. Fail-closed, exactly like an unavailable eligibility read.
  */
 export const REASON_PRICE_UNRECONCILABLE = "price_unreconcilable";
+/**
+ * The value handed back as a discount code is not one this boundary can read AS a code.
+ *
+ * T-345. The money path had no such reason to give, and the missing reason WAS the defect: a
+ * merchant `POST /codes` client answering `{code: <object>}` was ADMITTED, and the admitted value
+ * reached the buyer coerced to a string — a live single-use discount whose spelling was the
+ * process's own memory layout. `String(x)` never fails, so "is this a code?" was a question
+ * nothing asked; the answer was manufactured instead of demanded.
+ *
+ * The rule is the one every other wall in this file already follows and this one did not: a value
+ * the door cannot confidently interpret is REFUSED with a machine-readable reason, never coerced
+ * into the shape the caller wanted. Refusing is also the only outcome an operator can inspect — a
+ * wrongly ACCEPTED bid leaves no denial to read at all.
+ */
+export const REASON_CODE_UNUSABLE = "code_unusable";
 /**
  * The offer declares a depth deeper than the caller authorizes for that product. Distinct from
  * `price_under_declared_depth` on purpose: that one says the offer is priced under its own
@@ -1054,7 +1098,22 @@ function priceReasonsFor(
   maxDiscountPct?: number,
 ): string[] {
   const record = readRecord(offer);
-  if (record === undefined) return [];
+  if (record === undefined) {
+    // T-345. This used to `return []`, and an empty list out of this walk is not "no opinion" —
+    // it is the money door's clean bill of health, the exact answer an honest offer gets. So a
+    // bid whose `offer` was a string, a list, a number, a boolean, `null`, or absent came back
+    // RECONCILING from a wall that had not read one field of it. Measured on this door before
+    // the repair, with an honest roster in hand: `priceReasons({offer: "x"})`, `{offer: null}`,
+    // `{offer: []}` and `{offer: 5}` all answered `[]` — byte for byte what the Python peer
+    // answered, so this was not a divergence, it was the same hole twice.
+    //
+    // THE `why` IS NOT A NEW NAME. `apps/exchange/src/auction/collect.py` has been carrying this
+    // exact refusal locally — `ILLEGIBLE_OFFER_REASON`, documented there as "spelled in the
+    // boundary's own vocabulary" — because it had measured the silence this branch used to
+    // return admitting a 0.00 bid. That door was compensating for a hole in this one, so the
+    // boundary adopts the name the platform already uses rather than minting a second spelling.
+    return [`${REASON_PRICE_UNRECONCILABLE}:${OFFER_SITE}:${OFFER_ILLEGIBLE}`];
+  }
 
   const reasons: string[] = [];
   const declared = declaredDepth(record);
@@ -1208,6 +1267,78 @@ function priceReasonsFor(
 export function priceReasons(bid: unknown, options: PriceReasonOptions = {}): string[] {
   const record = readRecord(bid) ?? {};
   return priceReasonsFor(record, record["offer"], options.listPrices, options.maxDiscountPct);
+}
+
+/**
+ * C0, DEL and C1 — the code points a discount code may not contain.
+ *
+ * Spelled as ranges over the code point rather than as a `\p{Cc}` regex or a `printable` test, for
+ * the same reason `TRIMMED_CODE_POINTS` is spelled out one character at a time: ECMAScript and
+ * Python do not agree about what those classifiers cover, and a code point that is a control
+ * character to one door and an ordinary one to the other is two doors reading one merchant reply
+ * differently. The Python peer's `_is_control_code_point`.
+ */
+function isControlCodePoint(char: string): boolean {
+  const point = char.codePointAt(0) ?? 0;
+  return point < 0x20 || (point >= 0x7f && point <= 0x9f);
+}
+
+/**
+ * `value` judged AS a discount code. Empty when it is one; a reason for each way it is not.
+ *
+ * The line-for-line peer of `discount_code_reasons` in `boundary.py` — same reason strings, same
+ * order, same admitted set — and see that docstring for what each `why` means and why an honest
+ * merchant code in the merchant's own vocabulary (all-numeric, lower-case, no `PSX-` prefix) is
+ * deliberately still ADMITTED.
+ *
+ * **Refuse, never coerce**, and it is T-345 rather than a style preference: the money path used
+ * to reach for `String(value)`, which succeeds on everything, so a merchant answering with a bare
+ * object handed a buyer a live single-use discount spelled out of the process's memory layout.
+ *
+ * Iterates with `for...of`, which walks CODE POINTS: `charAt` would split an astral character
+ * into two surrogates, and neither half is a control character or a blank, so a length measured
+ * in UTF-16 units would also disagree with the Python door's. Never throws.
+ */
+export function discountCodeReasons(value: unknown, site: string = MINTED_CODE_SITE): string[] {
+  if (value === null || value === undefined) return [`${REASON_CODE_UNUSABLE}:${site}:missing`];
+  if (typeof value !== "string") return [`${REASON_CODE_UNUSABLE}:${site}:not_a_string`];
+  if (trimmed(value) === "") return [`${REASON_CODE_UNUSABLE}:${site}:blank`];
+
+  let blanks = false;
+  let controls = false;
+  let length = 0;
+  for (const char of value) {
+    length += 1;
+    // Whitespace FIRST: the trim set and the control ranges overlap (`\t`, `\n`, U+001C), and
+    // one character is one complaint.
+    if (TRIMMED_CODE_POINTS.has(char)) blanks = true;
+    else if (isControlCodePoint(char)) controls = true;
+  }
+
+  const reasons: string[] = [];
+  if (blanks) reasons.push(`${REASON_CODE_UNUSABLE}:${site}:whitespace`);
+  if (controls) reasons.push(`${REASON_CODE_UNUSABLE}:${site}:control_characters`);
+  if (length > CODE_MAX_LENGTH) reasons.push(`${REASON_CODE_UNUSABLE}:${site}:too_long`);
+  return reasons;
+}
+
+/**
+ * A merchant `POST /codes` reply judged for the code it claims to have issued. The peer of
+ * `minted_code_reasons` in `boundary.py`.
+ *
+ * The shape T-345 was measured in: the adapter holds the whole reply, not the field, and the
+ * reply is arbitrary caller-shaped JSON. `unreadable_reply` is kept apart from `missing` because
+ * they are different repairs — the merchant answered an object with no `code` on it, versus
+ * answered something with no fields at all.
+ *
+ * A refusal here is not a statement that no code exists: a merchant that minted one and then
+ * described it unreadably has a LIVE discount in its account, and the caller must treat this the
+ * way a post-mint refusal is already treated — as an orphan to record, not as a no-op.
+ */
+export function mintedCodeReasons(reply: unknown, site: string = MINTED_CODE_SITE): string[] {
+  const record = readRecord(reply);
+  if (record === undefined) return [`${REASON_CODE_UNUSABLE}:${site}:unreadable_reply`];
+  return discountCodeReasons(readOwn(record, "code"), site);
 }
 
 function expiryReasons(offer: unknown, now: Date): string[] {

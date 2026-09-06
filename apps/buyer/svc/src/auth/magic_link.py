@@ -35,12 +35,12 @@ from __future__ import annotations
 import hashlib
 import secrets
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ..profile import BuyerProfile, build_profile
+from ..profile import BuyerProfile, build_profile, k_anonymity_floor
 from ..vault import PseudonymVault, normalise_buyer_key
 from .sessions import (
     DEFAULT_SESSION_TTL,
@@ -166,6 +166,23 @@ class AccountDirectory:
     def upsert(self, email: str, account: Mapping[str, Any]) -> Mapping[str, Any]:
         raise NotImplementedError
 
+    def cohort(self) -> Sequence[Mapping[str, Any]]:
+        """Every account this directory would release together — the k-anonymity population.
+
+        A floor is a property of a *release over a population*, so
+        :func:`~buyer_svc.profile.build_profile` cannot enforce one until somebody tells it
+        who else is being released. This is that seam (T-221, T-363), and it is read by
+        :meth:`MagicLinkAuth.profile_for` only when a floor above 1 is actually configured.
+
+        The default is **nothing**, and that is the safe direction rather than an omission. A
+        directory that cannot enumerate itself hands the builder a release of one, which
+        satisfies no floor above 1, and the documented answer to a floor that cannot be met is
+        to withhold every facet — not to publish the fine-grained tuple. So a directory that
+        forgets to override this loses utility and never privacy. One that can enumerate
+        itself overrides it and gets real generalisation instead of suppression.
+        """
+        return ()
+
 
 class InMemoryAccountDirectory(AccountDirectory):
     """Process-local account records, keyed by normalised email."""
@@ -185,6 +202,15 @@ class InMemoryAccountDirectory(AccountDirectory):
         record.setdefault("orders", [])
         self._accounts[key] = record
         return record
+
+    def cohort(self) -> Sequence[Mapping[str, Any]]:
+        """The live records, not copies — :meth:`get` already hands the same objects out.
+
+        Identity matters here: ``build_profile`` drops the buyer's own record out of the
+        cohort by ``is``, and it can only do that if the record it was handed and the one in
+        this list are the same object.
+        """
+        return list(self._accounts.values())
 
 
 def _drop(email: str, token: str, expires_at: datetime) -> None:
@@ -506,13 +532,32 @@ class MagicLinkAuth:
         reads; serving the buyer a fresh profile while the store's row silently stayed stale
         is a divergence nothing downstream could detect, and a deployment that configured
         the app DSN asked for the publish to happen.
+
+        **Cost, when and only when a floor above 1 is configured.** The whole directory is
+        generalised on every profile read, because that is what makes the answer a property
+        of a real release rather than of an arbitrary sample: every request computes the same
+        deterministic release over the same population, so the profiles actually published
+        across buyers form one k-anonymous release. MEASURED on this machine, one
+        ``profile_for`` call: 10 ms at 60 accounts, 92 ms at 600, 391 ms at 2400 — linear.
+        A deployment large enough for that to hurt wants the release memoised against a
+        directory version, **not** a truncated cohort: sampling the population would trade a
+        guarantee that holds for one that merely looks like it, which is the exact shape of
+        the defect this method was fixed for.
         """
         session = self.sessions.get(session_id)
         email = self.vault.resolve(session.pseudonym)
         account: Mapping[str, Any] = {}
         if email is not None:
             account = self.accounts.get(email) or {}
-        profile = build_profile(account, session.pseudonym)
+        # T-221/T-363: this is where a configured k-anonymity floor is spent, because this is
+        # the only place production builds a profile. The floor is a property of a release
+        # over a population, so the population has to be handed over — `build_profile` cannot
+        # invent one from a single buyer. The directory is enumerated ONLY when a floor above
+        # 1 is configured; at the documented default of 1 the cohort is ignored by the builder
+        # and reading it would be work thrown away on every profile read.
+        floor = k_anonymity_floor()
+        cohort: Sequence[Mapping[str, Any]] = self.accounts.cohort() if floor > 1 else ()
+        profile = build_profile(account, session.pseudonym, k=floor, cohort=cohort)
         if self.publish is not None:
             # After build_profile, never before: build_profile is what raises IdentityLeak,
             # and a profile that failed the identity backstop must not be the thing this

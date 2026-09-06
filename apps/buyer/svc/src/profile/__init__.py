@@ -31,8 +31,8 @@ it through:
 on every profile it builds: if any identity **value** from the account survived into the
 serialized profile, the build raises :class:`IdentityLeak` instead of returning it.
 
-The k-anonymity floor, and why it is off by default
----------------------------------------------------
+The k-anonymity floor, where it is spent, and why it is still off by default
+---------------------------------------------------------------------------
 Coarsening is not anonymity. The bucket tuple is a deterministic function of the account, so
 two buyers with different histories generally land on different tuples — measured on 2,400
 generated buyers, ``build_buckets`` produces 2,142 distinct tuples and leaves 2,074 of them
@@ -57,15 +57,33 @@ This module is where the knob lives.
 * :func:`build_profiles` is the release path that pairs those buckets with pseudonyms.
 
 Enforcement is necessarily a property of a **release over a population**, never of one
-record: a release of one account is always unique, so no per-account function can promise a
-floor. That is why the knob is honoured by the cohort builder and not by
-:func:`build_profile`, which is handed a single buyer and can only publish what
-:func:`build_buckets` computes.
+record: a release of one account is always unique, so no per-account function can conjure a
+floor out of a single buyer. What :func:`build_profile` *can* do — and now does (T-221,
+T-363) — is read the floor and be told which other accounts are released beside this one:
+
+* at ``k == 1`` it publishes rung 0, value for value what it published before;
+* at ``k > 1``, given a ``cohort`` large enough to satisfy the floor, it publishes the rung
+  :func:`anonymise_cohort` would have put this record on — the two share
+  :func:`_release_levels`, so the login path and the cohort builder cannot drift apart;
+* at ``k > 1`` with a release too small for the floor, it **withholds**: every facet
+  suppressed (:data:`UNSATISFIABLE_FLOOR_LEVEL`). It does not raise, and it never falls back
+  to the fine-grained tuple. :func:`build_profile` documents why that direction.
+
+``MagicLinkAuth.profile_for`` — the only caller production has — reads the floor and hands
+over its account directory as the cohort, so ``GET /buyer/profile`` is where a configured
+floor is actually spent. Before this the ladder had no production call site at all: it was
+correct code behind a caller that never called it.
+
+The **default is still 1** (:data:`DEFAULT_K_ANONYMITY`), which is no enforcement, because
+SPEC §Non-goals pins it there and ``tests/test_profile_k_anonymity_knob.py`` asserts it. What
+changed is reachability, not the default: a deployment that sets
+``PROXYSHOP_BUYER_K_ANONYMITY`` now gets the ladder on the path it actually runs, where
+before it got rung 0 whatever it set.
 
 Usage::
 
     from apps.buyer.svc.src.profile import build_profile, build_profiles
-    profile = build_profile(account, vault.issue(account["email"]))   # one buyer, no floor
+    profile = build_profile(account, vault.issue(account["email"]))   # floor read from env
     profiles = build_profiles(accounts, pseudonyms)                   # a release, floor applied
 
 Imports are relative on purpose; see :mod:`buyer_svc.vault` for why (this tree is reachable
@@ -105,6 +123,7 @@ __all__ = [
     "K_ANONYMITY_ENV",
     "TOP_BUDGET_BAND",
     "TOP_COARSE_BUDGET_BAND",
+    "UNSATISFIABLE_FLOOR_LEVEL",
     "IdentityLeak",
     "anonymise_cohort",
     "buckets_at_level",
@@ -168,10 +187,31 @@ FREQUENCY_TIERS: tuple[tuple[int | None, str], ...] = (
 #: The environment variable a deployment sets to raise the floor above the fixture default.
 K_ANONYMITY_ENV = "PROXYSHOP_BUYER_K_ANONYMITY"
 
-#: The floor when nothing is configured. **1 by SPEC §Non-goals** — "default 1 in fixtures;
-#: production knob documented" — which is to say: no enforcement, exactly as before this knob
-#: existed. Fixture populations are far too small to satisfy a floor above 1 (SPEC A6), so
-#: raising this default would break every suite in the repo rather than protect anyone.
+#: The floor when nothing is configured. **1 by SPEC §Non-goals** (SPEC.md:56) — "default 1 in
+#: fixtures; production knob documented" — restated by SPEC A6 (SPEC.md:84). No enforcement,
+#: exactly as before this knob existed.
+#:
+#: T-221/T-363 asked whether this number should be raised. MEASURED across the buyer suite,
+#: and the answer is that raising it is a different change from wiring the ladder:
+#:
+#: * The cost is a **step at k > 1, not a curve in k.** Simulating this constant at 5 fails 47
+#:   nodes across six test files; at 2 it fails 46, and the two sets differ by a single node.
+#:   There is no cheaper floor to pick, because what a raised default engages is not the
+#:   ladder — it is :data:`UNSATISFIABLE_FLOOR_LEVEL`. Every caller in the tree except
+#:   :meth:`MagicLinkAuth.profile_for` calls :func:`build_profile` with no ``cohort``, so the
+#:   release is one record, and one record satisfies no floor above 1 by any generalisation.
+#: * 41 of those 47 are behaviour that is meant to hold: 20 are R5 identity-backstop probes
+#:   that go SILENT rather than red (a profile with nothing in it cannot leak, so the backstop
+#:   stops being observable at all), 18 are consumers that need a published coarse value —
+#:   ``region == "BEN"`` for the buyer named Ben, the truncated affinity list — and 3 require
+#:   the release to vary per buyer at all. Only 5 pin the default itself.
+#: * A floor is affordable only at population scale, and this constant cannot see the
+#:   population. MEASURED on the suite's own generator: k=10 fully suppresses 100% of a
+#:   30-buyer release and 55% of a 60-buyer one, while at 600 buyers it suppresses 3%.
+#:
+#: So the floor is spent through :data:`K_ANONYMITY_ENV`, by a deployment that knows how many
+#: buyers it has. ``tests/test_profile_identity_floor.py`` pins the step, and
+#: ``tests/test_profile_k_anonymity_knob.py`` pins this number against SPEC.
 DEFAULT_K_ANONYMITY = 1
 
 #: The generalised spend bands, each the union of two canonical ones. Only reachable when the
@@ -408,6 +448,18 @@ _TAXONOMY_TOKENS: dict[str, tuple[str, ...]] = {
 #:     5     3 coarse bands  []                  3 coarse tiers  None            bool
 #:     6     None            []                  None            None            None
 BOTTOM_LEVEL = 6
+
+#: The rung a profile is published at when the configured floor **cannot be met** — a release
+#: holding fewer than ``k`` records, which no generalisation can rescue, because an
+#: equivalence class cannot hold more buyers than the release it is drawn from.
+#:
+#: The number is :data:`BOTTOM_LEVEL` and it is not a tuning choice: it is the only rung whose
+#: class size does not depend on the population. Every record released here carries the same
+#: fully-suppressed tuple, so "this class has at least k members" is satisfied by any release
+#: that has k members at all — true for one buyer and for a million. Every finer rung would be
+#: a guess about a population the caller cannot see, and guessing in that direction publishes
+#: the fine-grained value the floor exists to withhold.
+UNSATISFIABLE_FLOOR_LEVEL = BOTTOM_LEVEL
 
 #: Account keys that carry identity. Read by :func:`identity_leaks` — never by a coarsener.
 IDENTITY_ACCOUNT_KEYS: tuple[str, ...] = (
@@ -984,6 +1036,33 @@ def anonymise_cohort(
             f"generalisation can put {floor} buyers in a class that has fewer than {floor}"
         )
 
+    levels = _release_levels(records, floor)
+    released = [
+        _buckets_at_level(account, level) for account, level in zip(records, levels, strict=True)
+    ]
+    for account, buckets in zip(records, released, strict=True):
+        _refuse_if_leaking(buckets, account)
+    return released
+
+
+def _release_levels(records: Sequence[Mapping[str, Any]], floor: int) -> list[int]:
+    """The ladder rung each of ``records`` is released at, for a release satisfying ``floor``.
+
+    Extracted so :func:`anonymise_cohort` and :func:`build_profile` cannot drift (T-221): a
+    buyer served one at a time by the login path has to land on the rung the cohort builder
+    would have put them on, or "the floor is enforced" means two different things depending on
+    which entry point was asked.
+
+    Every record starts on rung 0; every equivalence class smaller than ``floor`` has its
+    members generalised one rung; repeat. The rungs are finite and monotone
+    (:func:`_buckets_at_level`), so a class can only ever grow and this reaches a fixpoint in
+    at most :data:`BOTTOM_LEVEL` passes. Whatever is still short afterwards is folded into the
+    fully-suppressed bottom class, smallest class first, until nothing is below ``floor``.
+
+    The caller's precondition is ``len(records) >= floor``, and it is what makes the residual
+    fold terminate *satisfied* rather than merely terminate: in the worst case the bottom
+    class ends up holding every record, and that class is then as big as the release.
+    """
     ladder = [
         [_buckets_at_level(account, level) for level in range(BOTTOM_LEVEL + 1)]
         for account in records
@@ -1025,10 +1104,7 @@ def anonymise_cohort(
         for index in min(movable, key=len):
             levels[index] = BOTTOM_LEVEL
 
-    released = [ladder[index][level] for index, level in enumerate(levels)]
-    for account, buckets in zip(records, released, strict=True):
-        _refuse_if_leaking(buckets, account)
-    return released
+    return levels
 
 
 # --------------------------------------------------------------------------------------
@@ -1508,7 +1584,13 @@ def _leak_report(account: Mapping[str, Any], leaked: Sequence[str]) -> IdentityL
 # --------------------------------------------------------------------------------------
 
 
-def build_profile(account: Mapping[str, Any], pseudonym: str) -> BuyerProfile:
+def build_profile(
+    account: Mapping[str, Any],
+    pseudonym: str,
+    *,
+    k: int | None = None,
+    cohort: Sequence[Mapping[str, Any]] = (),
+) -> BuyerProfile:
     """The store-facing ``BuyerProfile`` for ``account``, under ``pseudonym``.
 
     Args:
@@ -1517,22 +1599,69 @@ def build_profile(account: Mapping[str, Any], pseudonym: str) -> BuyerProfile:
         pseudonym: the pseudonym this session issued — echoed verbatim. It is the *only*
             thing tying the profile to a buyer, and :mod:`buyer_svc.vault` is the only place
             that can undo the tie.
+        k: the k-anonymity floor. ``None`` — the default — reads :func:`k_anonymity_floor`,
+            which is what puts a deployment's ``PROXYSHOP_BUYER_K_ANONYMITY`` on this path
+            without any caller having to pass anything (T-221, T-363).
+        cohort: the other accounts released alongside this one, so that a floor which is a
+            property of a *release* has a release to be a property of. ``account`` itself may
+            appear here and is matched by object identity rather than by value, so it is not
+            counted twice — counting a buyer as their own neighbour is exactly how a class of
+            one would report as a class of two. Ignored entirely at ``k == 1``.
+
+    What is published at each floor — the failure *direction* being the whole of the ticket:
+
+    * ``k == 1`` — no enforcement, per SPEC §Non-goals. Rung 0: byte for byte what this
+      function published before the floor could reach it.
+    * ``k > 1`` and the release (``account`` plus ``cohort``) holds at least ``k`` records —
+      the rung :func:`_release_levels` assigns this record, which is precisely the rung
+      :func:`anonymise_cohort` would have chosen for the same population.
+    * ``k > 1`` and the release is smaller than ``k`` — the floor **cannot** be met by any
+      generalisation. Every facet is withheld (:data:`UNSATISFIABLE_FLOOR_LEVEL`). Nothing is
+      published fine-grained, and there is no fall-through that publishes rung 0 anyway.
+
+    **That last case returns rather than raising, and the asymmetry with**
+    :func:`anonymise_cohort` **is deliberate.** The cohort builder raises on the same input
+    because it was asked for a *release*, and answering "here is your 5-anonymous release of
+    four buyers" would be a lie about a whole population. This function is asked for one
+    buyer's profile, on the path ``GET /buyer/profile`` takes; raising there converts the
+    knob into a 500 for every buyer in the deployment, which is a denial of service wearing a
+    privacy guarantee. Withholding is the same refusal expressed as data instead of an
+    exception: the store is told nothing, which is the honest answer when the floor cannot be
+    honoured, and the buyer still gets a response.
 
     Returns:
         ``BuyerProfile(pseudonym=..., buckets=...)`` — top-level keys exactly
         ``{pseudonym, buckets}``, bucket keys exactly :data:`BUCKET_KEYS`.
 
     Raises:
-        ValueError: ``account`` is not a mapping, or ``pseudonym`` is empty.
+        ValueError: ``account`` is not a mapping, ``pseudonym`` is empty, or ``k`` is below 1.
         IdentityLeak: an identity value from ``account`` reached the profile. Never
-            swallowed — a leaking profile is not returned in a degraded form.
+            swallowed — a leaking profile is not returned in a degraded form. Only *this*
+            account is checked, never the cohort: a contaminated neighbour must not be able to
+            fail every other buyer's profile read, which is what checking the whole release
+            here would have done.
     """
     if not isinstance(account, Mapping):
         raise ValueError(f"account must be a mapping, got {type(account).__name__}")
     if not isinstance(pseudonym, str) or not pseudonym.strip():
         raise ValueError("a profile needs the pseudonym its session was issued")
 
-    profile = BuyerProfile(pseudonym=pseudonym, buckets=build_buckets(account))
+    floor = k_anonymity_floor() if k is None else k
+    if floor < 1:
+        raise ValueError(f"k must be at least 1, got {floor}")
+
+    if floor == 1:
+        buckets = build_buckets(account)
+    else:
+        release = [account, *(other for other in cohort if other is not account)]
+        level = (
+            _release_levels(release, floor)[0]
+            if len(release) >= floor
+            else UNSATISFIABLE_FLOOR_LEVEL
+        )
+        buckets = buckets_at_level(account, level)
+
+    profile = BuyerProfile(pseudonym=pseudonym, buckets=buckets)
 
     leaked = identity_leaks(profile, account)
     if leaked:

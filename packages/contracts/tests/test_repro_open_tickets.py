@@ -2368,3 +2368,333 @@ def test_t276_the_typescript_door_carries_the_same_floor_arithmetic() -> None:
             f"the two doors disagree about {name}: python has {value!r}, boundary.ts has "
             f"{declared[0]!r}"
         )
+
+
+# =============================================================================================
+# T-345 — the money path ACCEPTED malformed input instead of refusing it
+# =============================================================================================
+#
+# THE REPRODUCTION, run against this tree before the repair (`apps/exchange`'s published
+# four-positional `accept()`, no registry wired, the frozen suite's auction shape):
+#
+#     accept(auction(), "bid-a", <creator answering {"code": object()}>, "shopify")
+#       -> accepted=True   code='<object object at 0x104c51370>'
+#     accept(auction(unit_price=object()), "bid-a", <honest creator>, "shopify")
+#       -> accepted=True   denial_reason=None
+#
+# Two admissions on a path that mints real single-use discount codes: a code that is a
+# stringified heap address, and a bid whose unit price is not a number at all. Neither is a
+# leak — they are worse in kind, because an ACCEPT has no denial sink to inspect, which is
+# exactly why the denial-leak sweep that measured them had to exclude both.
+#
+# WHAT THIS SECTION GATES, and what it deliberately does not. `accept()` lives in
+# `apps/exchange` and is not this package's to change; what IS this package's is the door it
+# should be asking. The rule both halves come down to is one rule — **a value the boundary
+# cannot confidently interpret is REFUSED with a machine-readable reason, never coerced into
+# one** — and before this ticket the boundary could not state it for either half:
+#
+#   * there was no code door at all, so `str(<object>)` at the merchant adapter was the only
+#     thing standing between a heap address and a live discount; and
+#   * the price door answered `[]` — "these prices reconcile" — for an offer it could not
+#     read at all (a string, a list, a number, `null`, or nothing), which is the same
+#     accept-instead-of-refuse shape one level up. Both doors did it, identically.
+#
+# The `offer.unit_price` rows below are STANDING CONTROLS rather than new coverage: that
+# surface was already refused, and it is asserted here so a repair to the offer-shaped hole
+# cannot quietly widen or narrow it.
+
+_T345_HONEST_ROSTER: dict[str, Any] = {"prod-1": {"list_price": 100.0, "max_discount_pct": 25.0}}
+
+
+def _t345_offer(**over: Any) -> dict[str, Any]:
+    offer: dict[str, Any] = {"product_ref": "prod-1", "unit_price": 80.0, "total_price": 80.0}
+    offer.update(over)
+    return offer
+
+
+def _t345_bid(offer: Any) -> dict[str, Any]:
+    return {"bid_id": "bid-a", "store_id": "store-1", "offer": offer}
+
+
+def _t345_js(value: Any, override: str | None) -> str:
+    """The JavaScript spelling of one case's value, parenthesised so `{}` is never a block."""
+    return f"({override if override is not None else json.dumps(value)})"
+
+
+#: `(name, python value, javascript spelling, expected `why` suffix or None for "admitted")`.
+#: One table, driven through BOTH doors — a divergence here is its own defect (T-278's lesson).
+_T345_CODE_CASES: tuple[tuple[str, Any, str | None, str | None], ...] = (
+    # THE REPRODUCTION's own value, judged directly.
+    ("a bare heap object", object(), "{}", "not_a_string"),
+    ("nothing at all", None, "null", "missing"),
+    ("a boolean (an int in Python)", True, "true", "not_a_string"),
+    ("a false boolean", False, "false", "not_a_string"),
+    ("a whole number", 1234, None, "not_a_string"),
+    ("a float", 12.5, None, "not_a_string"),
+    ("NaN", float("nan"), "NaN", "not_a_string"),
+    ("positive infinity", float("inf"), "Infinity", "not_a_string"),
+    ("negative infinity", float("-inf"), "-Infinity", "not_a_string"),
+    ("a list carrying a code", ["PSX-ABCDEFGH"], None, "not_a_string"),
+    ("a mapping carrying a code", {"code": "PSX-ABCDEFGH"}, None, "not_a_string"),
+    ("the empty string", "", None, "blank"),
+    ("blanks only", " \t ", None, "blank"),
+    ("a code with a space in it", "PSX ABCDEFGH", None, "whitespace"),
+    ("a code with a trailing newline", "PSX-ABCDEFGH\n", None, "whitespace"),
+    ("a code with a NUL in it", "PSX-\x00ABCDEFG", None, "control_characters"),
+    ("a code far longer than any merchant issues", "P" * 400, None, "too_long"),
+    # POSITIVE CONTROLS — an honest string code is still admitted, whatever it spells.
+    ("the suite's own honest code", "PSX-TESTCODE", None, None),
+    ("a D22-shaped code", "PSX-9K2QWXYZ", None, None),
+    ("an all-numeric merchant code", "12345", None, None),
+    ("a lower-case merchant code", "psx-lower-case", None, None),
+)
+
+#: The exchange has been spelling "the boundary could not read this offer at all" for itself,
+#: in `apps/exchange/src/auction/collect.py::ILLEGIBLE_OFFER_REASON`, because the boundary said
+#: nothing about one and silence read as admission at `float(offer.get("unit_price", 0.0))`.
+#: Written out here rather than imported: `packages/contracts` may not depend on an app, and the
+#: whole point of pinning it is that the boundary must now answer in THAT string rather than
+#: mint a second name for one condition.
+_T345_ILLEGIBLE_OFFER = "price_unreconcilable:offer:illegible"
+
+#: The same table for the money half. `offer` replaces the whole offer; `unit_price` replaces one
+#: field of an otherwise honest one. The last column is the site the refusal must name, or None
+#: for a value that must still be ADMITTED.
+_T345_OFFER_CASES: tuple[tuple[str, str, Any, str | None, str | None], ...] = (
+    ("no offer at all", "offer", None, "null", "offer"),
+    ("an offer that is a string", "offer", "cheap", None, "offer"),
+    ("an offer that is a list", "offer", [], None, "offer"),
+    ("an offer that is a number", "offer", 5, None, "offer"),
+    ("an offer that is a boolean", "offer", True, "true", "offer"),
+    # THE REPRODUCTION's second half, and the rest of the type surface beside it. Standing
+    # controls: this door already refused every one of them, and must go on doing so.
+    ("a price that is a heap object", "unit_price", object(), "{}", "offer.unit_price"),
+    ("a price that is absent", "unit_price", None, "null", "offer.unit_price"),
+    ("a price that is a boolean", "unit_price", True, "true", "offer.unit_price"),
+    ("a price written as a string", "unit_price", "80.00", None, "offer.unit_price"),
+    ("a price in a list", "unit_price", [80.0], None, "offer.unit_price"),
+    ("a price of NaN", "unit_price", float("nan"), "NaN", "offer.unit_price"),
+    ("a price of infinity", "unit_price", float("inf"), "Infinity", "offer.unit_price"),
+    ("a price of negative infinity", "unit_price", float("-inf"), "-Infinity", "offer.unit_price"),
+    # POSITIVE CONTROLS — an honest price is still admitted, whole or fractional.
+    ("an honest float price", "unit_price", 80.0, None, None),
+    ("an honest whole-number price", "unit_price", 80, None, None),
+)
+
+
+def _t345_price_case_bid(field: str, value: Any) -> dict[str, Any]:
+    return _t345_bid(value if field == "offer" else _t345_offer(**{field: value}))
+
+
+def _t345_js_bid(field: str, value: Any, override: str | None) -> str:
+    """The JavaScript spelling of one price case's whole bid — the same bid, in the other door."""
+    if field == "offer":
+        offer = _t345_js(value, override)
+    else:
+        fields = [
+            f"{json.dumps(key)}: {json.dumps(held)}"
+            for key, held in _t345_offer().items()
+            if key != field
+        ]
+        fields.append(f"{json.dumps(field)}: {_t345_js(value, override)}")
+        offer = "{" + ", ".join(fields) + "}"
+    return f'{{"bid_id": "bid-a", "store_id": "store-1", "offer": {offer}}}'
+
+
+def test_t345_a_code_the_boundary_cannot_read_is_refused_rather_than_coerced() -> None:
+    """A merchant's `POST /codes` answer that is not a code must be REFUSED, not `str()`-ed.
+
+    The reproduction is at the top of this section: a creator answering ``{"code": object()}``
+    produced ``accepted=True`` with ``code='<object object at 0x104c51370>'`` — a live
+    single-use discount whose spelling is this process's memory layout. The coercion is the
+    defect: ``str(<anything>)`` always succeeds, so "is this a code?" was a question nothing
+    ever asked.
+
+    THIS GATE IS BEHAVIOURAL. It does not pin the reason strings' wording — it builds the
+    prefix from the door's own exported constants — and it accepts any repair under which a
+    value the door cannot read as a code comes back refused, with a reason a machine can act
+    on, while an honest string code comes back admitted.
+    """
+    from contracts import boundary  # noqa: PLC0415
+
+    prefix = f"{boundary.REASON_CODE_UNUSABLE}:{boundary.MINTED_CODE_SITE}"
+
+    for name, value, _js, why in _T345_CODE_CASES:
+        reasons = boundary.discount_code_reasons(value)
+        if why is None:
+            assert reasons == [], f"{name}: an honest code was refused with {reasons}"
+            continue
+        assert reasons, (
+            f"{name}: the code door ADMITTED {value!r} — the shape T-345 measured reaching a "
+            f"buyer as a live discount"
+        )
+        assert reasons == [f"{prefix}:{why}"], f"{name}: {reasons}"
+
+    # THE REPRODUCTION, in the shape the merchant adapter actually holds: the whole reply.
+    admitted = boundary.minted_code_reasons({"code": "PSX-TESTCODE"})
+    assert admitted == [], f"an honest merchant reply was refused with {admitted}"
+    refused = boundary.minted_code_reasons({"code": object()})
+    assert refused, (
+        "the merchant reply from T-345's own reproduction — {'code': <object>} — was admitted "
+        "by the code door"
+    )
+    assert all(reason.startswith(f"{prefix}:") for reason in refused), refused
+    # ...and a merchant that answered something with no fields to read a code off at all.
+    for reply in (None, "PSX-TESTCODE", [], 7):
+        assert boundary.minted_code_reasons(reply), f"a reply of {reply!r} was admitted"
+
+
+def test_t345_the_money_door_refuses_an_offer_it_cannot_read() -> None:
+    """`price_reasons` answered `[]` — "these prices reconcile" — for an offer with no prices.
+
+    Measured on this tree before the repair, with an honest roster in hand::
+
+        price_reasons({"offer": "cheap"},  list_prices=roster)  ->  []
+        price_reasons({"offer": None},     list_prices=roster)  ->  []
+        price_reasons({"offer": []},       list_prices=roster)  ->  []
+        price_reasons({"offer": 5},        list_prices=roster)  ->  []
+
+    An empty reason list from this function is not "no opinion", it is the money door's clean
+    bill of health, and it was being issued to bids whose offer the door could not read one
+    field of. Same accept-instead-of-refuse shape as the reproduction one level up, and — as
+    the parity node below measures — both doors did it identically.
+
+    The `offer.unit_price` rows are standing controls: that surface was already refused, and a
+    repair aimed at the offer-shaped hole must not disturb it.
+    """
+    from contracts import boundary  # noqa: PLC0415
+
+    for name, field, value, _js, site in _T345_OFFER_CASES:
+        reasons = boundary.price_reasons(
+            _t345_price_case_bid(field, value), list_prices=_T345_HONEST_ROSTER
+        )
+        if site is None:
+            assert reasons == [], f"{name}: an honest offer was refused with {reasons}"
+            continue
+        assert reasons, f"{name}: the money door reported {value!r} as reconciling"
+        assert all(
+            reason.startswith(f"{boundary.REASON_PRICE_UNRECONCILABLE}:{site}:")
+            for reason in reasons
+        ), f"{name}: {reasons} does not name {site} machine-readably"
+        if site == boundary.OFFER_SITE:
+            # ...and it names it in the string the exchange ALREADY uses for this condition, so
+            # closing the hole does not mint a second name for it. See `_T345_ILLEGIBLE_OFFER`.
+            assert reasons == [_T345_ILLEGIBLE_OFFER], (
+                f"{name}: {reasons} — an illegible offer must be refused under the one name the "
+                f"platform already spells it by, {_T345_ILLEGIBLE_OFFER!r}"
+            )
+
+
+def _t345_typescript_reasons(calls: list[str]) -> list[list[str]] | None:
+    """Evaluate `calls` against the REAL `boundary.ts`, or `None` when node is not installed.
+
+    Bundled with the repo's own esbuild rather than read as text: a parity claim about two
+    doors is worth exactly as much as the execution behind it, and `boundary.ts` imports its
+    schema and signing peers, so it cannot be run without resolving them.
+    """
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    node = shutil.which("node")
+    esbuild = _REPO_ROOT / "node_modules" / ".bin" / "esbuild"
+    if node is None or not esbuild.exists():
+        return None
+
+    door = _CONTRACTS / "src" / "ts" / "boundary.ts"
+    driver = (
+        f'import * as door from "{door.as_posix()}";\n'
+        "const out = [\n" + "".join(f"  {call},\n" for call in calls) + "];\n"
+        "console.log(JSON.stringify(out));\n"
+    )
+    with tempfile.TemporaryDirectory() as work:
+        source = pathlib.Path(work) / "t345_parity.mjs"
+        bundle = pathlib.Path(work) / "t345_bundle.mjs"
+        source.write_text(driver, encoding="utf-8")
+        built = subprocess.run(
+            [
+                str(esbuild),
+                "--bundle",
+                "--format=esm",
+                "--platform=node",
+                f"--outfile={bundle}",
+                str(source),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(_REPO_ROOT),
+        )
+        assert built.returncode == 0, built.stdout + built.stderr
+        ran = subprocess.run(
+            [node, str(bundle)], capture_output=True, text=True, cwd=str(_REPO_ROOT)
+        )
+        assert ran.returncode == 0, ran.stdout + ran.stderr
+        parsed = json.loads(ran.stdout)
+    assert isinstance(parsed, list) and len(parsed) == len(calls), parsed
+    return [list(row) for row in parsed]
+
+
+def test_t345_the_typescript_door_refuses_exactly_what_the_python_door_refuses() -> None:
+    """One rule, two doors. A repair applied to `boundary.py` alone leaves this red.
+
+    Measured before the repair, on the real `boundary.ts` (bundled and run, not read)::
+
+        priceReasons({offer: "x"},  {listPrices: roster})  ->  []
+        priceReasons({offer: null}, {listPrices: roster})  ->  []
+        priceReasons({offer: []},   {listPrices: roster})  ->  []
+        priceReasons({offer: 5},    {listPrices: roster})  ->  []
+
+    — byte for byte what the Python door answered, so the hole was not a divergence, it was
+    the same hole twice. Closing it in one language would MAKE it a divergence, which is why
+    the two are graded against one table here rather than separately.
+
+    The source-text half runs everywhere and cannot be skipped; the executed half needs node
+    and the repo's esbuild, and is the half that actually proves the verdicts agree.
+    """
+    from contracts import boundary  # noqa: PLC0415
+
+    source = (_CONTRACTS / "src" / "ts" / "boundary.ts").read_text(encoding="utf-8")
+
+    # 1. The vocabulary the two doors have to share, asserted off the Python constants.
+    for name, value in (
+        ("REASON_CODE_UNUSABLE", boundary.REASON_CODE_UNUSABLE),
+        ("MINTED_CODE_SITE", boundary.MINTED_CODE_SITE),
+        ("OFFER_SITE", boundary.OFFER_SITE),
+    ):
+        assert f'export const {name} = "{value}";' in source, (
+            f"boundary.ts does not declare {name} as {value!r}; the two doors would refuse the "
+            f"same value under different reason strings"
+        )
+    assert f"export const CODE_MAX_LENGTH = {boundary.CODE_MAX_LENGTH};" in source, (
+        "the two doors disagree about how long a discount code may be"
+    )
+    for exported in ("discountCodeReasons", "mintedCodeReasons"):
+        assert f"export function {exported}(" in source, (
+            f"boundary.ts has no {exported} — the code door exists in one language only"
+        )
+
+    # 2. The verdicts themselves, from the door as it actually runs.
+    roster = json.dumps(_T345_HONEST_ROSTER)
+    calls = [f"door.discountCodeReasons({_t345_js(v, js)})" for _n, v, js, _w in _T345_CODE_CASES]
+    calls += [
+        f"door.priceReasons({_t345_js_bid(field, value, js)}, {{listPrices: {roster}}})"
+        for _n, field, value, js, _s in _T345_OFFER_CASES
+    ]
+    typescript = _t345_typescript_reasons(calls)
+    if typescript is None:  # pragma: no cover - only on a box with no node toolchain
+        pytest.skip("node or the repo's esbuild is not installed; the source half still ran")
+
+    python = [boundary.discount_code_reasons(v) for _n, v, _j, _w in _T345_CODE_CASES]
+    python += [
+        boundary.price_reasons(_t345_price_case_bid(field, value), list_prices=_T345_HONEST_ROSTER)
+        for _n, field, value, _j, _s in _T345_OFFER_CASES
+    ]
+
+    names = [n for n, _v, _j, _w in _T345_CODE_CASES] + [
+        n for n, _f, _v, _j, _s in _T345_OFFER_CASES
+    ]
+    for name, call, py_reasons, ts_reasons in zip(names, calls, python, typescript, strict=True):
+        assert py_reasons == ts_reasons, (
+            f"the two doors disagree about {name}: python says {py_reasons}, boundary.ts says "
+            f"{ts_reasons} for {call}"
+        )

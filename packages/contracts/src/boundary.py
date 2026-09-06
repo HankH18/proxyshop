@@ -97,6 +97,29 @@ OFFER_DISCOUNT_SITE = "offer.discount"
 OFFER_UNIT_PRICE_SITE = "offer.unit_price"
 OFFER_TOTAL_PRICE_SITE = "offer.total_price"
 
+#: The OFFER ITSELF, for the refusal that names the offer rather than a field of it. A price
+#: reason has always named the priced field it is about; there was no spelling for "the thing
+#: those fields were supposed to be on is not an object", and the price walk therefore had
+#: nothing to say about one — see `_price_reasons`, and T-345.
+OFFER_SITE = "offer"
+
+#: The `why` for an offer this door cannot read as a record at all: a string, a list, a number,
+#: a boolean, or nothing. **Not a new name** — `apps/exchange/src/auction/collect.py` has been
+#: spelling this refusal `price_unreconcilable:offer:illegible` since it measured the boundary
+#: admitting one, and calls that "the boundary's own vocabulary". It is that now.
+OFFER_ILLEGIBLE = "illegible"
+
+#: The minted discount code, spelled the way `discount_code_reasons` names it.
+MINTED_CODE_SITE = "code"
+
+#: The longest string this door will read as a discount code, counted in CODE POINTS rather
+#: than in UTF-16 units so the two doors agree about an astral character. Codes are typed as a
+#: bare `string` by `merchant.openapi.json`'s `POST /codes` 201 body, so the published contract
+#: supplies no bound of its own; this one is far above any code a merchant issues (D22's own
+#: are twelve characters) and exists so a door reading an unbounded field cannot be handed a
+#: megabyte to carry into a permalink and a persisted event.
+CODE_MAX_LENGTH = 128
+
 #: `Discount.type` spellings that mean "`value` is a percentage depth". A depth is the only form
 #: this boundary can reconcile: an amount off cannot be compared with a price without re-deriving
 #: what the offer means, and a boundary that re-derived prices would be deciding rather than
@@ -220,6 +243,20 @@ REASON_PRICE_UNDER_DECLARED_DEPTH = "price_under_declared_depth"
 #: The depth, the price, or the list price is a number this boundary cannot read, so the offer's
 #: arithmetic cannot be checked at all. Fail-closed, exactly like an unavailable eligibility read.
 REASON_PRICE_UNRECONCILABLE = "price_unreconcilable"
+#: The value handed back as a discount code is not one this boundary can read AS a code.
+#:
+#: T-345. The money path had no such reason to give, and the missing reason was the defect: a
+#: merchant `POST /codes` client answering `{"code": <object>}` was ADMITTED, and the admitted
+#: value reached the buyer as `str(<object>)` — a live single-use discount whose spelling was
+#: this process's memory layout. `str()` never fails, so "is this a code?" was a question
+#: nothing asked; the answer was manufactured instead of demanded.
+#:
+#: The rule is the one every other wall in this module already follows and this one did not:
+#: **a value the door cannot confidently interpret is REFUSED with a machine-readable reason,
+#: never coerced into the shape the caller wanted.** Refusing is also the only outcome an
+#: operator can inspect — a wrongly ACCEPTED bid leaves no denial to read, which is why the
+#: denial-leak sweep that measured this could not see the class at all.
+REASON_CODE_UNUSABLE = "code_unusable"
 #: The offer declares a depth deeper than the caller authorizes for that product. Distinct from
 #: `price_under_declared_depth` on purpose: that one says the offer is priced under its own
 #: paperwork, this one says the paperwork itself was never granted. A seller reading its
@@ -1455,7 +1492,30 @@ def _price_reasons(
     """
     record = _record(offer)
     if record is None:
-        return []
+        # T-345. This used to `return []`, and an empty list out of this walk is not "no
+        # opinion" — it is the money door's clean bill of health, the exact answer an honest
+        # offer gets. So a bid whose `offer` was a string, a list, a number, a boolean, or was
+        # not there at all came back RECONCILING, from a wall that had not read one field of
+        # it. That is the same accept-instead-of-refuse shape as the reproduction one level
+        # up, where a code the exchange could not read was coerced into one rather than
+        # refused, and it is worse than a wrong refusal for the reason that ticket names: an
+        # accepted bid leaves no denial reason for anyone to inspect.
+        #
+        # `validate_bid` refused these anyway, on `schema_invalid` and `offer_expiry_missing`
+        # — but `price_reasons` is PUBLISHED on its own, precisely for the caller that ran the
+        # other gates elsewhere and holds a catalog, and that caller was being told the prices
+        # were fine.
+        #
+        # THE `why` IS NOT A NEW NAME. `apps/exchange/src/auction/collect.py` has been carrying
+        # this exact refusal locally — `ILLEGIBLE_OFFER_REASON`, spelled
+        # `price_unreconcilable:offer:illegible` and documented there as "spelled in the
+        # boundary's own vocabulary" — because it had measured the silence this branch used to
+        # return admitting a 0.00 bid at `float(offer.get("unit_price", 0.0))`. That door was
+        # compensating for a hole in this one. Emitting a second spelling of one condition is
+        # how two names for one thing get minted, so the boundary adopts the name the platform
+        # already uses, and the local copy becomes redundant rather than contradicted — exactly
+        # the shape T-250 left behind when the price floor moved in here.
+        return [f"{REASON_PRICE_UNRECONCILABLE}:{OFFER_SITE}:{OFFER_ILLEGIBLE}"]
 
     reasons: list[str] = []
     depth, depth_reasons = _declared_depth(record)
@@ -1631,6 +1691,105 @@ def price_reasons(
     authorized. It never raises.
     """
     return _price_reasons(bid, _get(bid, "offer"), list_prices, max_discount_pct)
+
+
+def _is_control_code_point(char: str) -> bool:
+    """C0, DEL and C1 — the code points a discount code may not contain.
+
+    Spelled as ranges over the code point rather than as `str.isprintable()` or a `\\p{Cc}`
+    regex, for the same reason `_TRIMMED_CODE_POINTS` is spelled out one character at a time:
+    Python and ECMAScript do not agree about what those classifiers cover, and a code point
+    that is a control character to one door and an ordinary character to the other is two
+    doors reading one merchant reply differently.
+    """
+    point = ord(char)
+    return point < 0x20 or 0x7F <= point <= 0x9F
+
+
+def discount_code_reasons(value: Any, *, site: str = MINTED_CODE_SITE) -> list[str]:
+    """`value` judged AS a discount code. Empty when it is one; a reason for each way it is not.
+
+    **The rule is refuse, never coerce**, and it is not a style preference — it is T-345. The
+    money path used to reach for `str(value)`, which succeeds on everything, so a merchant
+    answering with a bare `object()` handed a buyer a live single-use discount spelled
+    `'<object object at 0x104c51370>'`. A boundary that manufactures the shape it wanted is
+    not a boundary; it is the caller's `__str__` method with a wall painted on it.
+
+    What is refused, and why each case is its own reason rather than one `bad_code`:
+
+    * `missing` — `None`. The merchant said nothing where a code belongs.
+    * `not_a_string` — anything that is not a `str`. `merchant.openapi.json` types the
+      `POST /codes` 201 body's `code` as a bare `string`, so this is the published contract
+      being enforced rather than a house rule. It deliberately covers `bool` — `True` is an
+      `int` in Python and would otherwise have to be excluded by hand, exactly as
+      `_finite_number` excludes it — and `bytes`, an `int`, a `float`, `NaN`, `±inf`, a list
+      and a mapping. A mapping is the sharpest of them: `{"code": "PSX-…"}` is the merchant's
+      whole REPLY handed in where its `code` field belonged, and stringifying THAT would mint
+      a "code" containing braces and quotes.
+    * `blank` — a string that is empty, or is nothing but the shared trim set. Reported alone,
+      because a blank code has no characters left to have anything else wrong with them.
+    * `whitespace` — a blank anywhere inside it, leading and trailing included. Trimming it
+      here would be coercion again, and a code is carried into a `?discount=` query and into a
+      persisted ledger event, where a caller's idea of trimming and ours need not agree.
+    * `control_characters` — a C0/DEL/C1 code point. A NUL or a newline inside a code truncates
+      it in some consumer downstream, which turns one code into two different ones.
+    * `too_long` — longer than `CODE_MAX_LENGTH` code points.
+
+    What is deliberately ADMITTED, so this door refuses only what it cannot read: any non-blank
+    printable string, whatever it spells. An all-numeric code, a lower-case one, one that does
+    not carry D22's `PSX-` prefix — a merchant mints codes in its own vocabulary and this door
+    holds no list of them. Pinning D22's shape here would refuse the Shopify adapter's real
+    answers, which is the closed-rather-than-fail-closed direction.
+
+    Never raises: like every other wall in this module, an unreadable value is a refusal, not
+    an exception at the public boundary.
+    """
+    if value is None:
+        return [f"{REASON_CODE_UNUSABLE}:{site}:missing"]
+    if not isinstance(value, str):
+        return [f"{REASON_CODE_UNUSABLE}:{site}:not_a_string"]
+    if _trimmed(value) == "":
+        return [f"{REASON_CODE_UNUSABLE}:{site}:blank"]
+
+    blanks = False
+    controls = False
+    for char in value:
+        # Whitespace FIRST: the trim set and the control ranges overlap (`\t`, `\n`, `\x1c`),
+        # and one character is one complaint.
+        if char in _TRIMMED_CODE_POINTS:
+            blanks = True
+        elif _is_control_code_point(char):
+            controls = True
+
+    reasons: list[str] = []
+    if blanks:
+        reasons.append(f"{REASON_CODE_UNUSABLE}:{site}:whitespace")
+    if controls:
+        reasons.append(f"{REASON_CODE_UNUSABLE}:{site}:control_characters")
+    if len(value) > CODE_MAX_LENGTH:
+        reasons.append(f"{REASON_CODE_UNUSABLE}:{site}:too_long")
+    return reasons
+
+
+def minted_code_reasons(reply: Any, *, site: str = MINTED_CODE_SITE) -> list[str]:
+    """A merchant `POST /codes` reply judged for the code it claims to have issued.
+
+    The shape T-345 was measured in: the adapter holds the whole reply, not the field, and the
+    reply is arbitrary caller-shaped JSON. `unreadable_reply` is kept apart from `missing` for
+    the reason every split in this module is kept: they are different repairs. `missing` says
+    the merchant answered an object with no `code` on it; `unreadable_reply` says it answered
+    something with no fields at all — a bare string, a list, a number, or nothing — which is
+    not a reply to this request however it is squinted at.
+
+    A refusal here is not a statement that no code exists. A merchant that minted one and then
+    described it unreadably has a LIVE discount in its account, and the caller must treat this
+    the way `apps/exchange` already treats a post-mint refusal: as an orphan to record, not as
+    a no-op.
+    """
+    record = _record(reply)
+    if record is None:
+        return [f"{REASON_CODE_UNUSABLE}:{site}:unreadable_reply"]
+    return discount_code_reasons(_get(record, "code"), site=site)
 
 
 def _expiry_reasons(offer: Any, now: datetime) -> list[str]:

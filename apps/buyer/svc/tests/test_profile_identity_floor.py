@@ -501,3 +501,176 @@ def test_bucket_values_are_searched_one_at_a_time_and_never_concatenated() -> No
     assert identity_leaks({"pseudonym": "psn-x", "buckets": {"region": "ab cd"}}, account) == [
         "ab  cd"
     ]
+
+
+# =======================================================================================
+# T-221 / T-363 — what the floor buys on the production path, and what it costs
+# =======================================================================================
+
+#: A floor small enough that a modest directory can satisfy it without collapsing to the
+#: bottom rung, and large enough that a class of ``k`` is visibly not a class of one.
+_ROTATION_K = 4
+
+#: Buyers in the rotation directory. Three full classes at :data:`_ROTATION_K`.
+_ROTATION_BUYERS = 12
+
+
+def _rotation_directory(count: int = _ROTATION_BUYERS) -> dict[str, dict[str, Any]]:
+    """A directory whose buyers are all distinct at rung 0, built without a generator.
+
+    Spend, region and basket move independently and none of them repeats inside ``count``, so
+    every buyer is alone in their equivalence class before any floor is applied. That is the
+    arm the rotation test needs: a population that was already crowded could not show whether
+    a floor did anything.
+    """
+    regions = ("US-OR", "US-CA", "GB-ENG", "CA-ON")
+    baskets = ("running-shoes", "cookware", "board-games", "skincare", "headphones", "cold-brew")
+    directory: dict[str, dict[str, Any]] = {}
+    for index in range(count):
+        email = f"rot{index:03d}@example.com"
+        directory[email] = {
+            "email": email,
+            "region": regions[index % len(regions)],
+            "orders": [
+                {
+                    "order_ref": f"rot-{index}-{n}",
+                    "total": 12.0 + index * 97.0 + n,
+                    "category": baskets[(index + n) % len(baskets)],
+                }
+                for n in range(1 + index % 5)
+            ],
+        }
+    return directory
+
+
+def _served(directory: dict[str, dict[str, Any]]) -> tuple[Any, list[tuple[str, Any]]]:
+    """Log every buyer in ``directory`` in through the real service and keep what was served.
+
+    Returns the service (so a caller can rotate a pseudonym on it) and ``(pseudonym, buckets)``
+    per buyer, in directory order.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+
+    tokens: dict[str, str] = {}
+    service = MagicLinkAuth(
+        accounts=InMemoryAccountDirectory(directory),
+        deliver=lambda email, token, expires_at: tokens.__setitem__(email, token),
+    )
+    served: list[tuple[str, Any]] = []
+    for email in directory:
+        service.request_login(email)
+        session = service.redeem(tokens[email])
+        served.append((session.pseudonym, service.profile_for(session.session_id).buckets))
+    assert len(served) == len(directory), f"only {len(served)} of {len(directory)} logged in"
+    return service, served
+
+
+def test_a_rotated_pseudonym_is_re_linkable_only_into_a_class_of_at_least_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-363's reproduction, turned the right way round.
+
+    The ticket's observation is correct and is **not** by itself the defect: rotating a
+    pseudonym publishes a byte-identical bucket tuple, because the tuple is a deterministic
+    function of the account and rotation does not change the account. Suppressing that would
+    mean publishing a different profile to the same buyer at every login, which is noise, not
+    privacy.
+
+    What makes byte-identity a re-linkage is that at ``k = 1`` the tuple belongs to ONE buyer,
+    so whoever holds it can join the old pseudonym to the new one exactly. What a floor buys is
+    that the same join lands on at least ``k`` candidates. Both halves are measured here, over
+    the production login path, on the same population:
+
+    * ARM — with no floor configured the target buyer's tuple is unique in the release, so the
+      rotation join is exact. Without this the assertion below could pass on a population that
+      was already crowded.
+    * With the floor configured the tuple is still byte-identical across the rotation, and it
+      is now shared by at least ``k`` buyers.
+    """
+    from buyer_svc.profile import K_ANONYMITY_ENV, equivalence_class
+
+    directory = _rotation_directory()
+    target = next(iter(directory))
+
+    monkeypatch.delenv(K_ANONYMITY_ENV, raising=False)
+    _, unenforced = _served(directory)
+    unenforced_classes = [equivalence_class(buckets) for _, buckets in unenforced]
+    assert unenforced_classes.count(unenforced_classes[0]) == 1, (
+        "the unenforced population already shares the target buyer's tuple, so it cannot show "
+        f"whether the floor did anything: {unenforced_classes[0]!r}"
+    )
+
+    monkeypatch.setenv(K_ANONYMITY_ENV, str(_ROTATION_K))
+    service, enforced = _served(directory)
+    first_pseudonym, first_buckets = enforced[0]
+
+    # The rotation itself, on the same service and the same account record.
+    tokens: dict[str, str] = {}
+    service.deliver = lambda email, token, expires_at: tokens.__setitem__(email, token)
+    service.request_login(target)
+    rotated = service.redeem(tokens[target])
+    second_buckets = service.profile_for(rotated.session_id).buckets
+
+    assert rotated.pseudonym != first_pseudonym, "the pseudonym did not rotate"
+    assert equivalence_class(second_buckets) == equivalence_class(first_buckets), (
+        "the same buyer was served two different tuples across a rotation; the floor is not "
+        "supposed to randomise the profile, it is supposed to crowd it"
+    )
+
+    classes = [equivalence_class(buckets) for _, buckets in enforced]
+    candidates = classes.count(equivalence_class(second_buckets))
+    assert candidates >= _ROTATION_K, (
+        f"PROXYSHOP_BUYER_K_ANONYMITY={_ROTATION_K} was set and the rotated pseudonym's tuple "
+        f"is shared by only {candidates} buyer(s) in the release, so the join from the old "
+        "pseudonym to the new one still names a single buyer"
+    )
+    assert len(set(classes)) >= 2, (
+        "the release collapsed to one constant tuple, which satisfies any floor and tells a "
+        "store nothing"
+    )
+
+
+@pytest.mark.parametrize("k", [2, 5, 25])
+def test_no_floor_above_one_generalises_the_single_record_path_it_suppresses_it(k: int) -> None:
+    """Why raising :data:`DEFAULT_K_ANONYMITY` is not the same change as wiring the ladder.
+
+    A floor is a property of a release, and a release of one record cannot satisfy any floor
+    above 1 by any generalisation — so on the single-record call ``build_profile(account,
+    pseudonym)``, which is every caller in the tree except
+    :meth:`MagicLinkAuth.profile_for`, the answer at ``k = 2`` and at ``k = 25`` is the same
+    answer: withhold everything. The cost of raising the default is therefore a step at
+    ``k > 1`` and not a curve in ``k``. MEASURED: simulating ``DEFAULT_K_ANONYMITY = 5`` fails
+    47 nodes in this suite and ``= 2`` fails 46, and the two sets differ by one node.
+
+    The second half is the part that is easy to miss and is the reason this is a test rather
+    than a comment. R5's identity backstop is measured by publishing a hostile account and
+    requiring :class:`IdentityLeak`. A default that publishes nothing does not make that
+    backstop safer; it makes it **unobservable** — the same account that is refused at the
+    documented default reports clean here, because there is no longer a value to leak. Twenty
+    of those 47 failures are backstop probes going quiet exactly this way.
+    """
+    from buyer_svc.profile import IdentityLeak, build_profile, identity_leaks
+
+    hostile: dict[str, Any] = {
+        "last_name": "Reyes",
+        "region": "US-OR",
+        "orders": _orders("reyes gear"),
+    }
+
+    # Control: at the documented default this account is refused, so it is a real leak.
+    with pytest.raises(IdentityLeak):
+        build_profile(dict(hostile), PSEUDONYM, k=1)
+
+    withheld = build_profile(dict(hostile), PSEUDONYM, k=k).model_dump()["buckets"]
+    assert withheld == {
+        "budget_band": None,
+        "category_affinity": [],
+        "frequency_tier": None,
+        "region": None,
+        "first_time": None,
+    }, f"a release of one cannot meet a floor of {k}; every facet has to be withheld: {withheld}"
+
+    assert identity_leaks({"pseudonym": PSEUDONYM, "buckets": withheld}, hostile) == [], (
+        "the backstop still reports a leak on a fully-withheld profile, which would mean this "
+        "test is measuring something other than the suppression it claims to measure"
+    )
