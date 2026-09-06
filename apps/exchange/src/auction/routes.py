@@ -82,6 +82,7 @@ __all__ = [
     "bid_window_seconds",
     "collected_bid_records",
     "configure_auctions",
+    "merged_candidates",
     "router",
 ]
 
