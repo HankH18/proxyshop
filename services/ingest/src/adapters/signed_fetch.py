@@ -61,6 +61,7 @@ from .mapping import (
     coerce_price,
     composite_hash,
     native_product_key,
+    price_is_stated,
     product_id_for,
     safe_host,
     safe_split,
@@ -319,6 +320,16 @@ class SignedFetchAdapter:
 
         products: list[ProductRecord] = []
         for entry, page_url, entry_hash in raw:
+            if not native_product_key(entry):
+                # `product_id_for` derives the node id from the store's own identifier, and an
+                # entry naming none of `id`, `product_id` or `handle` yields the empty key —
+                # so EVERY unidentifiable entry from this store would hash to the same
+                # `prod_…` and two different products would merge into one graph node.
+                # `catalog_mcp` already skips these; the two adapters share one mapping (C6,
+                # T-023) and a divergence here is a divergence in what reaches the graph, which
+                # is the half an interface check over `inspect.signature` cannot see.
+                warnings.append(f"{page_url}: catalog entry carries no id or handle; skipped")
+                continue
             handle = str(entry.get("handle") or "").strip()
             page_hash = ""
             jsonld: dict[str, Any] = {}
@@ -381,6 +392,11 @@ class SignedFetchAdapter:
 
         ``products.json`` wins on anything it states; JSON-LD fills the gaps (brand,
         currency, availability) that the machine endpoint does not carry.
+
+        "States" is decided by :func:`~ingest.adapters.mapping.price_is_stated` for the price,
+        not by whether the value survived coercion: a variant whose ``products.json`` price is
+        hostile keeps no price, rather than inheriting the page's. Otherwise a store could
+        choose which of its surfaces prices the product by making the other unusable.
         """
         native = native_product_key(entry)
         product_id = self._product_id(store_id, entry)
@@ -402,8 +418,15 @@ class SignedFetchAdapter:
             sku = str(item.get("sku") or "").strip()
             matched = by_sku.get(sku, {})
             native_variant = str(item.get("id") or sku or item.get("title") or "").strip()
-            price = coerce_price(item.get("price"))
-            if price is None:
+            # `products.json` wins on anything it STATES, and a refused statement is still a
+            # statement. `coerce_price` answers None both for "no price here" and for
+            # "-5.00" / NaN / true / unreadable text, and reading the second as the first
+            # would hand the store the choice of which of its two surfaces prices the
+            # product: write a hostile number in the machine endpoint and the theme-authored
+            # JSON-LD takes over. So the JSON-LD offer fills a GAP only.
+            stated = item.get("price")
+            price = coerce_price(stated)
+            if price is None and not price_is_stated(stated):
                 price = coerce_price(matched.get("price"))
             available = item.get("available")
             availability = (

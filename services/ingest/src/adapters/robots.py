@@ -33,7 +33,9 @@ that was trying to shed load.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlunsplit
+
+from .netguard import safe_split
 
 __all__ = [
     "PRODUCT_TOKEN",
@@ -71,7 +73,13 @@ def robots_url(url: str) -> str:
     registrable domain: ``https://shop.example.com/`` and ``https://example.com/`` have
     separate robots files, and so do the same host on ports 80 and 443.
     """
-    split = urlsplit(str(url))
+    split = safe_split(url)
+    if split is None:
+        # `urlsplit("http://[")` raises. Both callers pre-validate today, so this is a latent
+        # trap rather than a live one — which is exactly when it is cheap to close. An origin
+        # we cannot read governs nothing, and the empty string is what `may_fetch` treats as
+        # "no robots policy stated", the conservative reading for a URL this malformed.
+        return ""
     return urlunsplit((split.scheme, split.netloc, "/robots.txt", "", ""))
 
 

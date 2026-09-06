@@ -17,6 +17,7 @@ All three require ``@pytest.mark.docker`` (they reach the compose stack) and
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterator
 from typing import Any
 
@@ -147,7 +148,16 @@ def _sample_records() -> list[dict[str, Any]]:
 
     records = []
     for spec in GRAPH_SAMPLE_PRODUCTS:
-        record = {k: v for k, v in spec.items() if k != "attributes"}
+        # `copy.deepcopy`, not a dict comprehension. The comprehension rebuilds the outer dict
+        # and SHARES every mutable value inside it — `record["ingredients"]` would be the very
+        # list object hanging off the module-level constant, so one caller mutating it in
+        # place would silently rewrite the fixture for every later test in the session.
+        # That is not hypothetical: the identical shape in `_fixtures_storefront.py` made this
+        # whole directory's result depend on collection order (2 tests, 2 files, measured).
+        # No caller mutates these today, which is precisely why fixing it costs nothing now.
+        # The `tuple[...]` annotation on GRAPH_SAMPLE_PRODUCTS reads as "safe constant" and is
+        # not one: the tuple is immutable, the dicts and lists inside it are not.
+        record = {k: copy.deepcopy(v) for k, v in spec.items() if k != "attributes"}
         record["attributes"] = [AttributeValue(key, **kwargs) for key, kwargs in spec["attributes"]]
         records.append(record)
     return records

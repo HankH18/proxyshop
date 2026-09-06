@@ -46,7 +46,7 @@ import ipaddress
 import socket
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 __all__ = [
     "BLOCKED_IPV4_NETWORKS",
@@ -65,6 +65,7 @@ __all__ = [
     "is_redirect_chain_allowed",
     "normalise_host",
     "resolve_host",
+    "safe_split",
 ]
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -383,6 +384,21 @@ def resolve_host(
 # --------------------------------------------------------------------------------------
 # The two frozen predicates
 # --------------------------------------------------------------------------------------
+
+
+def safe_split(url: object) -> SplitResult | None:
+    """``urlsplit`` that answers ``None`` instead of raising on a URL that will not parse.
+
+    ``urlsplit("http://[")`` raises ``ValueError: Invalid IPv6 URL``. Every URL this package
+    handles is either a merchant's or a caller's, and one of them — a redirect ``Location``
+    header — is chosen by the very party the guard exists to defend against. A parse that
+    raises turns a refusal into a traceback, so nothing in the fetch path may call ``urlsplit``
+    bare; call this instead and treat ``None`` as ``unparseable-url``.
+    """
+    try:
+        return urlsplit(str(url or ""))
+    except ValueError:
+        return None
 
 
 def fetch_verdict(url: str, *, policy: FetchPolicy | None = None) -> FetchVerdict:

@@ -205,15 +205,28 @@ def _adapter_constructions(
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-236: no production code constructs a CatalogAdapter — the only non-test "
-        "constructions of SignedFetchAdapter and CatalogMCPAdapter are the "
-        "_satisfies_catalog_adapter type-check helpers, so nothing the ingest app can run "
-        "reads a catalog; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-236 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-236: no production code constructs a CatalogAdapter — the only non-test "
+#         "constructions of SignedFetchAdapter and CatalogMCPAdapter are the "
+#         "_satisfies_catalog_adapter type-check helpers, so nothing the ingest app can run "
+#         "reads a catalog; remove this marker with the fix"))
+#
+# What it encoded: no module `ingest.main.create_app()` imports builds a catalog adapter, so
+# the ingestion pipeline exists as a library and as no running process. Its own reason text
+# says to remove it with the fix, and `strict=True` means leaving it would turn the repair
+# into a red build.
+#
+# Would this test still be wrong if my change were reverted? YES, and it was measured rather
+# than assumed: with `services/ingest/src/scheduler/{catalog,routes}.py` moved out of the
+# tree the test returns to `xfailed`, and with them restored it passes. The cause is
+# `ingest.scheduler.routes`, a module `create_app`'s `*/routes.py` glob mounts, importing
+# `ingest.scheduler.catalog`, which constructs `SignedFetchAdapter` and `CatalogMCPAdapter`
+# in `build_catalog_adapter` and runs one end to end through `fetch_catalog` ->
+# `to_upserts` -> `apply_upserts` behind `POST /refresh/{store_id}`.
+#
+# No assertion below is touched.
 def test_the_running_ingest_app_can_reach_a_catalog_adapter_that_is_actually_built() -> None:
     """A capability the acceptance metric counts as met, that no running process performs.
 
@@ -274,15 +287,28 @@ def test_the_running_ingest_app_can_reach_a_catalog_adapter_that_is_actually_bui
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-238: transport.py follows a redirect by calling urljoin on the server's Location "
-        "header, and urljoin parses with urlsplit, so a Location of 'http://[' raises "
-        "ValueError: Invalid IPv6 URL out of the fetch instead of the FetchRefused the guard "
-        "exists to produce; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-238 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-238: transport.py follows a redirect by calling urljoin on the server's Location "
+#         "header, and urljoin parses with urlsplit, so a Location of 'http://[' raises "
+#         "ValueError: Invalid IPv6 URL out of the fetch instead of the FetchRefused the guard "
+#         "exists to produce; remove this marker with the fix"))
+#
+# What it encoded: the one URL in a crawl the hostile party writes reaches an unguarded parse,
+# so a four-character Location header turns the guard's refusal into a traceback out of
+# SafeHTTPClient.fetch — and out of SignedFetchAdapter.fetch_catalog with it, since that
+# catches only (FetchRefused, TransportError).
+#
+# Would this test still be wrong if my change were reverted? YES, and it was measured: with
+# `git show HEAD:` copies of adapters/transport.py and adapters/netguard.py back in place the
+# test returns to `xfailed`, and with the fix restored it passes. The cause is the try/except
+# around `urljoin(current, location)` in SafeHTTPClient.fetch, which now answers
+# `FetchRefused(location, "unparseable-url:<exc>")` — the same reason vocabulary
+# `fetch_verdict` already answers for an entry URL that will not parse.
+#
+# No assertion below is touched, including the positive control that a parseable Location is
+# still followed.
 def test_a_malformed_redirect_location_is_refused_rather_than_raised(storefront: Any) -> None:
     """The redirect target is the one URL in a crawl that the hostile party writes.
 
@@ -325,15 +351,28 @@ def test_a_malformed_redirect_location_is_refused_rather_than_raised(storefront:
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-245: catalog_mcp skips an entry whose native_product_key is empty while "
-        "signed_fetch mints prod_<hash('')> for every such entry, so two unidentifiable "
-        "products from one store collapse onto ONE graph node — a divergence the "
-        "inspect.signature acceptance check cannot see; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-245 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-245: catalog_mcp skips an entry whose native_product_key is empty while "
+#         "signed_fetch mints prod_<hash('')> for every such entry, so two unidentifiable "
+#         "products from one store collapse onto ONE graph node — a divergence the "
+#         "inspect.signature acceptance check cannot see; remove this marker with the fix"))
+#
+# What it encodes: the two adapters that are supposed to share one mapping disagree on what
+# reaches the graph, and the disagreement merges a store's whole unidentified catalog onto a
+# single product node on the first real write.
+#
+# Would this test still be wrong if my change were reverted? YES, and it was isolated from the
+# lane's OTHER mapping change rather than proved jointly: with the T-245 hunks removed and
+# T-249's kept, this test returns to `xfailed` while T-249's stays fixed; with T-249's removed
+# and T-245's kept, the reverse. So this test's pass is caused by the T-245 repair
+# specifically — `signed_fetch._read_catalog` skipping an entry whose `native_product_key` is
+# empty (the warning `catalog_mcp` already emits), and `mapping.product_id_for` refusing to
+# hash the empty key at all.
+#
+# No assertion below is touched, including the positive control that asserts these fixture
+# entries are the ones naming no identifier.
 def test_catalog_entries_with_no_identifier_do_not_collapse_onto_one_product_node(
     storefront_factory: Any,
 ) -> None:
@@ -387,15 +426,28 @@ def test_catalog_entries_with_no_identifier_do_not_collapse_onto_one_product_nod
 # =============================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-249: coerce_price returns None for a negative/NaN/inf entry price, and "
-        "signed_fetch reads None as 'not stated' and falls through to the JSON-LD offer "
-        "price — so an entry price of '-5.00' beside a JSON-LD price of '12.00' puts 12.0 in "
-        "the graph where the pre-T-023 code put -5.0; remove this marker with the fix"
-    ),
-)
+# MARKER REMOVED — T-249 is fixed. The marker read, verbatim:
+#
+#     @pytest.mark.xfail(strict=True, reason=(
+#         "T-249: coerce_price returns None for a negative/NaN/inf entry price, and "
+#         "signed_fetch reads None as 'not stated' and falls through to the JSON-LD offer "
+#         "price — so an entry price of '-5.00' beside a JSON-LD price of '12.00' puts 12.0 in "
+#         "the graph where the pre-T-023 code put -5.0; remove this marker with the fix"))
+#
+# What it encodes: "the store stated a hostile price" and "the store stated no price" are the
+# same signal to the merge, so a store picks which of its two surfaces prices a product by
+# making the first one unusable.
+#
+# Would this test still be wrong if my change were reverted? YES, and it was isolated from the
+# lane's OTHER mapping change rather than proved jointly: with the T-249 hunk reverted to
+# `price = coerce_price(item.get("price")); if price is None: price = coerce_price(
+# matched.get("price"))` and T-245's kept, this test returns to `xfailed` while T-245's stays
+# fixed; with T-245's removed and T-249's kept, the reverse. So this test's pass is caused by
+# the T-249 repair specifically — `mapping.price_is_stated`, which makes the JSON-LD offer
+# fill a GAP only, so a refused statement costs the offer instead of promoting the other
+# surface's number.
+#
+# No assertion below is touched.
 def test_a_refused_entry_price_does_not_promote_the_other_surfaces_price() -> None:
     """``None`` means two different things to the price merge, and a store picks which.
 
@@ -654,4 +706,197 @@ def test_t312_ingest_serves_exactly_the_operations_its_contract_publishes() -> N
         "the ingest service's served surface diverges from its published contract — "
         f"{_operation_divergence(served, published)}; mounted routers: "
         f"{getattr(app.state, 'mounted_routers', 'unknown')}"
+    )
+
+
+# =============================================================================================
+# T-254 — the DESIGN Claim projection is defined and never produced
+# =============================================================================================
+#
+# The gate is the same shape as T-236's and for the same reason: the question is whether a
+# capability the design names is performed by anything the service runs, and that is a
+# reachability question, not a behaviour one. `ExtractedClaim.as_claim()` returns DESIGN's
+# `Claim{key, value, provenance}` — the projection T-021's objective "decompose to atomic
+# Claims" names — and nothing calls it. Its sibling `as_attribute()` IS called, from
+# `extraction/pipeline.py`, and reaches the graph. So ingestion writes AttributeValues and the
+# Claim projection exists only as a definition.
+#
+# `as_attribute` is what arms this: pointed at it, the scan finds a call in an app-reachable
+# module, so an empty result for `as_claim` means "nothing produces it" rather than "the
+# scanner can no longer see method calls".
+
+#: The projection under test, and the wired sibling that serves as the scanner's control.
+_CLAIM_PROJECTION = "as_claim"
+_ATTRIBUTE_PROJECTION = "as_attribute"
+
+
+def _method_calls(path: Path, name: str) -> list[int]:
+    """Line numbers in ``path`` at which ``.<name>(...)`` is CALLED.
+
+    A ``def`` is not a ``Call``, so the definition never counts as its own caller — which is
+    the entire distinction this ticket turns on. Attribute calls only: the projections are
+    methods, and a bare ``as_claim(...)`` would be a different function.
+    """
+    with warnings.catch_warnings():
+        # Compiling someone else's source re-emits its SyntaxWarnings against this test.
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    return sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == name
+    )
+
+
+def _app_reachable_ingest_sources() -> list[Path]:
+    """Every ``services/ingest/src`` file that building the real app pulls in.
+
+    Measured in a subprocess by :func:`_modules_imported_by_the_app` and re-checked against
+    :data:`REPO_ROOT` here, because this venv's ``site-packages/_proxyshop.pth`` puts a
+    checkout root on ``sys.path`` for every process that uses it — a probe that trusts the
+    resolution it happens to get can measure a different tree than the one under test.
+    """
+    reachable: list[Path] = []
+    for name, filename in sorted(_modules_imported_by_the_app().items()):
+        if not filename:
+            continue
+        resolved = Path(filename).resolve()
+        assert REPO_ROOT in resolved.parents, (
+            f"{name} resolved to {resolved}, which is outside the tree under test "
+            f"({REPO_ROOT}) — the probe measured the wrong checkout"
+        )
+        if INGEST_SRC in resolved.parents:
+            reachable.append(resolved)
+    return reachable
+
+
+def _an_extracted_claim() -> Any:
+    """One valid ``ExtractedClaim``, built the way extraction builds them.
+
+    Imported inside the function rather than at this file's head, the way the T-312 helpers
+    below do it, so no import has to be added to the frozen import block (E402).
+    """
+    from ingest.extraction.claims import ClaimProvenance, ExtractedClaim  # noqa: PLC0415
+
+    return ExtractedClaim(
+        key="shipping.dispatch_window_days",
+        value=2,
+        claim_type="shipping_window",
+        confidence=0.9,
+        provenance=ClaimProvenance(
+            source="scraped",
+            ref="snapshot://store-one.example.com/policies/shipping@sha256:0f1e2d3c",
+            observed_at="2026-01-01T00:00:00Z",
+        ),
+    )
+
+
+def test_t254_the_claim_projection_sweep_is_armed() -> None:
+    """Not xfail, and not optional: the T-254 gate below is worthless without this.
+
+    Four ways that gate could pass — or fail — while measuring nothing, all closed here:
+
+    * the app imports no ingest source at all, so the scan iterates zero files and an empty
+      result says nothing (three sweeps in this repo were found going QUIET rather than red);
+    * ``ingest.extraction.claims``, the module that DEFINES the projection, is not among the
+      files scanned, so "is it produced" is being asked of a service that does not have it;
+    * the scanner stops seeing method calls for structural reasons — a changed ``ast``, a
+      renamed method — so a wired projection and an unwired one look identical. Closed by
+      pointing the scanner at ``as_attribute``, which IS called from an app-reachable module;
+    * the projection is broken rather than merely unwired, which would make the gate below
+      red for a reason the ticket is not about. Closed by calling it and checking its shape.
+
+    The last check is also where DESIGN's ``Claim{key, value, provenance}`` is pinned: exactly
+    those three keys and nothing else, which is what makes it a *projection* rather than a
+    second serialisation of the whole record.
+    """
+    sources = _app_reachable_ingest_sources()
+    assert sources, "the app imported no ingest source at all; the sweep would be blind"
+
+    claims_module = INGEST_SRC / "extraction/claims.py"
+    assert claims_module in sources, (
+        f"{claims_module} is not reachable from the running app, so this sweep cannot say "
+        f"anything about whether its projection is produced; reachable: "
+        f"{[str(p.relative_to(REPO_ROOT)) for p in sources]}"
+    )
+    assert _method_calls(claims_module, _CLAIM_PROJECTION) == [], (
+        "the projection's own module calls it, which would make the gate below pass without "
+        "the projection ever leaving this file — the finding is about production, not recursion"
+    )
+
+    sibling = {
+        str(path.relative_to(REPO_ROOT)): lines
+        for path in sources
+        if (lines := _method_calls(path, _ATTRIBUTE_PROJECTION))
+    }
+    assert sibling, (
+        f"the scan cannot find a call to the wired sibling {_ATTRIBUTE_PROJECTION}() either, "
+        f"so it is broken rather than measuring anything about {_CLAIM_PROJECTION}(); "
+        f"scanned {len(sources)} app-reachable ingest module(s)"
+    )
+
+    claim = _an_extracted_claim()
+    projection = claim.as_claim()
+    assert projection == {
+        "key": "shipping.dispatch_window_days",
+        "value": 2,
+        "provenance": claim.provenance,
+    }, projection
+    assert set(projection) == {"key", "value", "provenance"}, (
+        f"DESIGN's Claim is {{key, value, provenance}} and nothing else; got {sorted(projection)}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "T-254: ExtractedClaim.as_claim() — DESIGN's Claim{key, value, provenance}, the "
+        "projection T-021's objective 'decompose to atomic Claims' names — is called by "
+        "nothing the running ingest service imports, while its sibling as_attribute() is "
+        "called from extraction/pipeline.py and reaches the graph; so ingestion writes "
+        "AttributeValues and the Claim projection is defined but never produced; remove this "
+        "marker with the fix"
+    ),
+)
+def test_t254_the_claim_projection_is_produced_by_the_running_service() -> None:
+    """An objective's wiring, not its definition. T-021 said "decompose to atomic Claims".
+
+    ``ExtractedClaim`` carries two projections of the same reading. ``as_attribute()`` becomes
+    the ``AttributeValue`` node a policy page ``STATES``, and it is wired:
+    ``extraction/pipeline.py`` calls it when building the upsert batch, so every claim that
+    clears C10's floor reaches the graph in that shape. ``as_claim()`` becomes DESIGN's
+    ``Claim{key, value, provenance}`` — the shape that crosses a wire or a function boundary,
+    the one T-021's objective names — and it is called by nothing at all.
+
+    That is not a style observation. The two shapes carry different things: an
+    ``AttributeValue`` keeps the typed value and drops the provenance into a ``SUPPORTED_BY``
+    edge, while a ``Claim`` carries the provenance *inline*, which is what lets a downstream
+    consumer hold one fact and its evidence together without a graph round trip. A service
+    that only ever produces the first has implemented half the decomposition.
+
+    Note what this does NOT require. It does not name a caller, a module, or a shape for the
+    fix: the extraction route can build its response on the projection instead of hand-rolling
+    the same three fields; the pipeline can emit Claims beside AttributeValues; a new consumer
+    can produce them. Any of those passes. What is refused is only the current state, in which
+    the projection is defined, exported through no public surface, called by nothing, and
+    therefore free to be wrong without anything noticing.
+
+    The module list is measured in a subprocess and every file in it is checked to be inside
+    this tree, so a stale ``.pth`` cannot answer the question with another checkout's code.
+    """
+    sources = _app_reachable_ingest_sources()
+    produced = {
+        str(path.relative_to(REPO_ROOT)): lines
+        for path in sources
+        if (lines := _method_calls(path, _CLAIM_PROJECTION))
+    }
+
+    assert produced, (
+        f"no module the ingest app imports calls {_CLAIM_PROJECTION}(), so the DESIGN Claim "
+        f"projection is never produced by the running service; its wired sibling "
+        f"{_ATTRIBUTE_PROJECTION}() is called from "
+        f"{sorted(str(p.relative_to(REPO_ROOT)) for p in sources if _method_calls(p, _ATTRIBUTE_PROJECTION))}"
+        f", and {len(sources)} app-reachable ingest module(s) were scanned"
     )
